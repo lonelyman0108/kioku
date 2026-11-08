@@ -15,10 +15,16 @@ import { COLOR_PREFERENCES, useColorPreference } from '../composables/useColorPr
 import { useConsoleSearch } from '../composables/useConsoleSearch'
 import { useInboxCounts } from '../composables/useInboxCounts'
 import { confirmDiscard, hasUnsavedChanges } from '../composables/unsavedChanges'
-import { ME_KEY, useSession } from '../composables/useSession'
+import { forgetSpace, ME_KEY, useSession } from '../composables/useSession'
 import { icons } from '../icons'
 import { actionableInboxCount } from '../inbox'
 import { queryClient } from '../query'
+import {
+  accountSettingsRoute,
+  instanceSettingsRoute,
+  roleName,
+  spaceSettingsRoute,
+} from '../settingsSections'
 
 const router = useRouter()
 const route = useRoute()
@@ -30,6 +36,7 @@ let loggingOut = false
 watch(
   () => me.data.value,
   (m) => {
+    if (m === null) forgetSpace()
     if (m === null && !loggingOut) {
       void router.replace({ name: 'login', query: { next: route.fullPath } })
     }
@@ -97,6 +104,8 @@ const inboxBadge = computed(() =>
 
 // 联系人详情也算在「对话」下面
 const CONVERSATION_ROUTES = ['conversations', 'contact']
+// 设置的三组是同一个页面，都点亮「设置」
+const SETTINGS_ROUTES = ['space-settings', 'account-settings', 'instance-settings']
 
 // 顶部导航按用途分组：人格与应用的记忆在「记忆」的目录里，联系人在「对话」里，不再单独成组。入口的名字按术语表
 const navGroups = computed<{ title?: string; items: NavItem[] }[]>(() => {
@@ -130,22 +139,36 @@ const navGroups = computed<{ title?: string; items: NavItem[] }[]>(() => {
       title: '空间',
       items: [
         { label: '变更记录', ...link('activity', icons.activity) },
-        // 「设置」指向空间设置，实例设置放在账号菜单里
-        { label: '设置', ...link('space-settings', icons.spaceSettings) },
+        // 「设置」进空间组，账号设置与实例设置放在账号菜单里
+        { label: '设置', ...link('space-settings', icons.settings, SETTINGS_ROUTES) },
       ],
     },
   ]
 })
-const instanceNav = computed<NavItem[]>(() =>
-  me.data.value?.isAdmin
-    ? [{ label: '实例设置', icon: icons.settings, to: { name: 'settings' }, routes: ['settings'] }]
-    : [],
-)
+// 账号菜单里的两组设置：账号设置人人都有，实例设置只给实例管理员
+const accountNav = computed<NavItem[]>(() => [
+  {
+    label: '账号设置',
+    icon: icons.account,
+    to: accountSettingsRoute(),
+    routes: ['account-settings'],
+  },
+  ...(me.data.value?.isAdmin
+    ? [
+        {
+          label: '实例设置',
+          icon: icons.instance,
+          to: instanceSettingsRoute(),
+          routes: ['instance-settings'],
+        },
+      ]
+    : []),
+])
 const isCurrent = (item: NavItem) => item.routes.includes(String(route.name))
 
 // ⌘K 里的页面与导航一致；记忆的搜索结果来自服务端
 const pages = computed<CommandPaletteItem[]>(() =>
-  [...navGroups.value.flatMap((group) => group.items), ...instanceNav.value].map((item) => ({
+  [...navGroups.value.flatMap((group) => group.items), ...accountNav.value].map((item) => ({
     label: item.label,
     icon: item.icon,
     to: item.to,
@@ -164,9 +187,7 @@ const colorPreference = useColorPreference()
 const displayName = computed(() => me.data.value?.displayName ?? '')
 const userMenu = computed<DropdownMenuItem[][]>(() => [
   [{ type: 'label', label: displayName.value, description: me.data.value?.username }],
-  ...(instanceNav.value.length
-    ? [instanceNav.value.map((item) => ({ label: item.label, icon: item.icon, to: item.to }))]
-    : []),
+  accountNav.value.map((item) => ({ label: item.label, icon: item.icon, to: item.to })),
   [
     { type: 'label', label: '主题' },
     ...COLOR_PREFERENCES.map((option): DropdownMenuItem => ({
@@ -179,13 +200,32 @@ const userMenu = computed<DropdownMenuItem[][]>(() => [
   ],
   [{ label: '退出登录', icon: icons.logout, onSelect: () => void logout() }],
 ])
+// 菜单项上额外带的角色名：组件库的插槽不知道这个字段
+const roleOf = (item: unknown) => (item as { role?: string }).role
+// 空间切换器：各空间与当前账号在里面的角色（当前空间打勾），下面是当前空间的设置
 const spaceMenu = computed<DropdownMenuItem[][]>(() => [
-  spaces.value.map((s) => ({
-    type: 'checkbox',
-    label: s.name,
-    checked: s.id === space.value?.id,
-    onSelect: () => switchSpace(s.id),
-  })),
+  [
+    { type: 'label', label: '空间' },
+    ...spaces.value.map((s): DropdownMenuItem => ({
+      type: 'checkbox',
+      slot: 'space',
+      label: s.name,
+      role: roleName(s.role),
+      checked: s.id === space.value?.id,
+      onSelect: () => switchSpace(s.id),
+    })),
+  ],
+  ...(space.value
+    ? [
+        [
+          {
+            label: '空间设置',
+            icon: icons.settings,
+            to: spaceSettingsRoute(space.value.id),
+          },
+        ],
+      ]
+    : []),
 ])
 
 async function logout() {
@@ -207,6 +247,7 @@ async function logout() {
     }
   }
   loggingOut = true
+  forgetSpace()
   // 清掉全部缓存：下一个在这个标签页登录的人不能看到上一个人的记忆
   queryClient.clear()
   queryClient.setQueryData(ME_KEY, null)
@@ -249,6 +290,7 @@ async function logout() {
             :aria-current="isCurrent(item) ? 'page' : undefined"
             class="nav-link flex items-center gap-1.5 px-1.5 whitespace-nowrap min-[1121px]:px-2"
           >
+            <UIcon :name="item.icon" class="nav-icon max-[1180px]:hidden" />
             {{ item.label }}
             <span v-if="item.count" class="nav-count">
               {{ item.count }}<span class="sr-only"> 项</span>
@@ -271,33 +313,30 @@ async function logout() {
         />
         <div class="flex min-w-0 items-center gap-1.5 max-[1024px]:hidden">
           <UDropdownMenu
-            v-if="spaces.length > 1"
+            v-if="spaces.length"
             :items="spaceMenu"
             :content="{ align: 'end' }"
-            :ui="{ content: 'max-w-80' }"
+            :ui="{ content: 'min-w-60 max-w-80' }"
             size="sm"
           >
             <UButton
               :label="space?.name ?? '选择空间'"
               :title="space?.name"
+              :icon="icons.space"
               :trailing-icon="icons.chevronDown"
               color="neutral"
               variant="ghost"
               class="max-w-48 min-w-0"
               aria-label="切换空间"
             />
+            <template #space-trailing="{ item }">
+              <span class="text-xs text-muted">{{ roleOf(item) }}</span>
+            </template>
           </UDropdownMenu>
-          <span
-            v-else-if="space"
-            class="max-w-48 min-w-0 truncate px-2.5 text-[13px] text-muted"
-            :title="space.name"
-          >
-            {{ space.name }}
-          </span>
           <UDropdownMenu
             :items="userMenu"
             :content="{ align: 'end' }"
-            :ui="{ content: 'max-w-80' }"
+            :ui="{ content: 'min-w-60 max-w-80' }"
           >
             <UButton
               ref="accountButton"
@@ -338,9 +377,10 @@ async function logout() {
                   :key="item.label"
                   :to="item.to"
                   :aria-current="isCurrent(item) ? 'page' : undefined"
-                  class="flex items-baseline gap-1.5 py-2 text-[15px]/6 aria-[current=page]:font-semibold"
+                  class="drawer-link flex items-center gap-2 py-2 text-[15px]/6 aria-[current=page]:font-semibold"
                   @click="navOpen = false"
                 >
+                  <UIcon :name="item.icon" class="nav-icon" />
                   {{ item.label }}
                   <span v-if="item.count" class="nav-count">
                     {{ item.count }}<span class="sr-only"> 项</span>
@@ -349,20 +389,30 @@ async function logout() {
               </div>
             </nav>
             <div class="space-y-3 px-5 py-4">
-              <div v-if="spaces.length > 1">
+              <div v-if="spaces.length">
                 <p class="pb-1 text-xs text-muted">空间</p>
                 <button
                   v-for="s in spaces"
                   :key="s.id"
                   type="button"
-                  class="block w-full truncate py-1.5 text-left text-sm/6"
+                  class="flex w-full items-baseline gap-2 py-1.5 text-left text-sm/6"
                   :class="s.id === space?.id ? 'font-semibold' : ''"
-                  :title="s.name"
                   :aria-current="s.id === space?.id ? 'true' : undefined"
                   @click="switchSpace(s.id)"
                 >
-                  {{ s.name }}
+                  <span class="min-w-0 truncate" :title="s.name">{{ s.name }}</span>
+                  <span class="ml-auto shrink-0 text-xs font-normal text-muted">{{
+                    roleName(s.role)
+                  }}</span>
                 </button>
+                <RouterLink
+                  v-if="space"
+                  :to="spaceSettingsRoute(space.id)"
+                  class="block py-1.5 text-sm/6"
+                  @click="navOpen = false"
+                >
+                  空间设置
+                </RouterLink>
               </div>
               <div>
                 <p class="pb-1 text-xs text-muted">主题</p>
@@ -382,7 +432,7 @@ async function logout() {
               <div class="border-t border-default pt-3">
                 <p class="truncate pb-1 text-sm" :title="displayName">{{ displayName }}</p>
                 <RouterLink
-                  v-for="item in instanceNav"
+                  v-for="item in accountNav"
                   :key="item.label"
                   :to="item.to"
                   class="block py-1.5 text-sm/6"
@@ -460,6 +510,16 @@ async function logout() {
 .nav-link[aria-current='page'] {
   font-weight: 600;
   box-shadow: inset 0 -2px 0 var(--ui-text-highlighted);
+}
+.nav-icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--ui-text-dimmed);
+}
+.nav-link[aria-current='page'] .nav-icon,
+.drawer-link[aria-current='page'] .nav-icon {
+  color: currentColor;
 }
 .nav-count {
   font-family: var(--font-mono);

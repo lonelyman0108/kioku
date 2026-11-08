@@ -1152,7 +1152,7 @@ describe('模型对话的页面', () => {
       "info.data.value?.reason === 'notAdmin'",
     )
     expect(blockOf(view.script, 'const unavailableActions = ')).toContain(
-      "to: instanceSettingsRoute('extraction')",
+      "to: instanceSettingsRoute('models')",
     )
     // 模型名、系统提示与输入区都只在用得了时才有
     const guarded = view.elements.filter((el) => directive(el, 'if') === 'available && loop')
@@ -1835,7 +1835,7 @@ describe('运行标记那一行', () => {
     const html = await renderToString(app)
     expect(html).toContain('abc12345')
     expect(html).toContain('测试应用')
-    expect(html).toContain('可读 1 类归属，可写 0 类，最高内部')
+    expect(html).toContain('读 1 类，写 0 类，至内部')
   })
 })
 
@@ -1985,8 +1985,14 @@ describe('活动与访问记录的徽章', () => {
     )
     expect(block).toBeDefined()
     const nodes = walk(block!)
-    const texts = nodes.map((n) => n.content ?? '')
-    expect(texts.some((t) => t.includes('测试台'))).toBe(true)
+    const texts = nodes.map((n) => (typeof n.content === 'string' ? n.content : ''))
+    // 状态标签传 status="bench"，文字由 flags.ts 给
+    const benchTag = nodes.some(
+      (n) =>
+        n.tag === 'FlagTag' &&
+        n.props?.some((p) => p.name === 'status' && p.value?.content === 'bench'),
+    )
+    expect(texts.some((t) => t.includes('测试台')) || benchTag).toBe(true)
     expect(texts.some((t) => t.includes('操作账号'))).toBe(true)
     expect(JSON.stringify(nodes.map((n) => n.content))).toContain(`benchAccountLabel(${field})`)
   })

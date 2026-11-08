@@ -354,6 +354,18 @@ describe('应用', () => {
     expect(handler(buttonOf(appKeys, '我已保存'), 'click')).toBe('closeIssue')
   })
 
+  // 回车的隐式提交会点表单的默认按钮：卡片、分段按钮是单选，读写是勾选框，方向键选到一半或勾完一格
+  // 按回车就会签出访问密钥、明文马上显示。所以签发弹窗不用表单，只有点「签发」才签发
+  it('签发弹窗没有表单，也没有提交按钮，只有点「签发」才签发', () => {
+    const elements = elementsOf(appKeys)
+    expect(elements.filter((el) => el.tag === 'form')).toEqual([])
+    expect(elements.filter((el) => attr(el, 'type') === 'submit')).toEqual([])
+    expect(elements.filter((el) => bound(el, 'form') !== undefined || attr(el, 'form'))).toEqual([])
+    expect(appKeys).not.toContain('@submit')
+    expect(appKeys).not.toMatch(/@key(down|up|press)\.enter/)
+    expect(handler(buttonOf(appKeys, '签发'), 'click')).toBe('issue')
+  })
+
   it('签发按钮只给能签发的，吊销不看角色', () => {
     expect(appKeys).toContain('<template v-if="canIssue" #actions>')
     expect(appDetailPage).toContain(':can-issue="canManage"')
@@ -396,13 +408,17 @@ describe('应用', () => {
   it('签发上限和当前有效上限不同时要说，Key 那一行和权限范围都说', () => {
     expect(apps).toContain('已按所有者当前角色收紧')
     expect(appKeys).toContain('effectiveNote(key)')
-    expect(appKeys).toContain('签发范围：{{ scopesSummary(key.scopes) }}')
+    // 签发范围拆成标签，不再是一句会在窄列里断开的话
+    expect(appKeys).toMatch(/<ScopeTags\s+class="key-tags"\s+:scopes="key\.scopes"/)
+    expect(appKeys).not.toContain('签发范围：{{ scopesSummary')
+    expect(appsPage).toContain('<ScopeTags')
     expect(keyMatrix).toContain('v-if="isNarrowed(keyInfo)"')
   })
 
   it('已吊销的单独列，岩芯不上色', () => {
     expect(appKeys).toContain('<StrataCore :scopes="key.scopes" revoked')
-    expect(appKeys).toContain('已吊销 {{ formatShort(key.revokedAt!) }}')
+    expect(appKeys).toContain('<FlagTag status="revoked" />')
+    expect(appKeys).toContain('{{ formatShort(key.revokedAt!) }}')
   })
 
   it('已作废的 Key 不能选，也不去查矩阵：接口返回 404', () => {

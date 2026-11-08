@@ -6,9 +6,11 @@ import { computed } from 'vue'
 import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
 import { attentionCredentialsKey } from '../inbox'
-import { attentionNotes, credentialFlags } from '../vault'
+import { attentionNotes } from '../vault'
 import Hint from './Hint.vue'
 import FlagTag from './strata/FlagTag.vue'
+import EmptyState from './strata/EmptyState.vue'
+import { credentialFlagStatuses } from './strata/flags'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 
@@ -39,7 +41,7 @@ const items = computed(() => list.data.value?.items ?? [])
       <USkeleton v-for="n in 3" :key="n" class="h-12 w-full" />
     </div>
     <template v-else-if="list.data.value">
-      <p v-if="!items.length" class="cred-empty">暂无待处理的凭据</p>
+      <EmptyState v-if="!items.length" title="暂无待处理的凭据" />
       <ul v-else>
         <li v-for="c in items" :key="c.id" class="cred-row">
           <div class="cred-name">
@@ -47,7 +49,7 @@ const items = computed(() => list.data.value?.items ?? [])
               c.name
             }}</RouterLink>
             <code class="cred-identifier">{{ c.identifier }}</code>
-            <FlagTag v-for="flag in credentialFlags(c)" :key="flag">{{ flag }}</FlagTag>
+            <FlagTag v-for="status in credentialFlagStatuses(c)" :key="status" :status="status" />
           </div>
           <p class="cred-sub">
             <span v-for="note in attentionNotes(c)" :key="note">{{ note }}</span>

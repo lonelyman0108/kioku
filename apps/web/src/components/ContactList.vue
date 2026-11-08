@@ -10,6 +10,7 @@ import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
 import { formatRelative, formatTime } from '../time'
 import Hint from './Hint.vue'
+import EmptyState from './strata/EmptyState.vue'
 import NoteLine from './strata/NoteLine.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SectionHeading from './strata/SectionHeading.vue'
@@ -93,9 +94,11 @@ function accounts(subject: SubjectInfo) {
       </div>
     </div>
 
-    <p v-if="nothing" class="nothing">
-      {{ q ? '没有匹配的结果' : '暂无联系人。接入群聊机器人后，对话过的人和群将显示在这里。' }}
-    </p>
+    <EmptyState
+      v-if="nothing"
+      :title="q ? '没有匹配的结果' : '暂无联系人'"
+      :description="q ? null : '接入群聊机器人后，对话过的人和群将显示在这里。'"
+    />
     <template v-else>
       <div class="kind-switch" role="group" aria-label="人和群">
         <button
@@ -218,10 +221,6 @@ function accounts(subject: SubjectInfo) {
   align-items: center;
   gap: 6px;
 }
-.nothing {
-  padding: 4px 32px 32px;
-  color: var(--ui-text-muted);
-}
 .kind-switch {
   display: none;
 }
@@ -328,9 +327,6 @@ function accounts(subject: SubjectInfo) {
 @media (max-width: 1023.98px) {
   .contacts-bar {
     padding: 12px 16px 14px;
-  }
-  .nothing {
-    padding: 4px 16px 24px;
   }
   .kind-switch {
     display: flex;

@@ -14,6 +14,8 @@ import VaultConnectionPanel from '../components/VaultConnectionPanel.vue'
 import VaultLoginModal from '../components/VaultLoginModal.vue'
 import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import FlagTag from '../components/strata/FlagTag.vue'
+import { credentialFlagStatuses } from '../components/strata/flags'
+import EmptyState from '../components/strata/EmptyState.vue'
 import PageHead from '../components/strata/PageHead.vue'
 import { useNow } from '../composables/useNow'
 import { useSession } from '../composables/useSession'
@@ -21,7 +23,7 @@ import { invalidateInboxCounts } from '../inbox'
 import { credentialSourceLabels, restrictedAppsLabel } from '../labels'
 import { deletionNotice, purgeAt, purgeNote } from '../retention'
 import { formatRelative, formatTime } from '../time'
-import { canManageCredentials, credentialFlags } from '../vault'
+import { canManageCredentials } from '../vault'
 
 const route = useRoute()
 const router = useRouter()
@@ -152,6 +154,11 @@ function openNaming(connectionId: string, item: VaultItemSummary) {
   naming.value = { connectionId, item }
   formOpen.value = true
 }
+// 凭据列表为空时的「连接密码库」：切到密码库分页再连，连上的连接就显示在眼前
+function connectVault() {
+  tab.value = 'vault'
+  openLogin(null)
+}
 function openLogin(connection: VaultConnection | null) {
   reconnecting.value = connection
   loginOpen.value = true
@@ -280,9 +287,12 @@ async function undelete(c: ConsoleCredential) {
                 <button type="button" class="ledger-row credential-grid" @click="selectedId = c.id">
                   <span class="row-name">
                     {{ c.name }}
-                    <FlagTag v-for="flag in credentialFlags(c)" :key="flag" class="ml-1.5">{{
-                      flag
-                    }}</FlagTag>
+                    <FlagTag
+                      v-for="status in credentialFlagStatuses(c)"
+                      :key="status"
+                      class="ml-1.5"
+                      :status="status"
+                    />
                   </span>
                   <span class="row-code">{{ c.identifier }}</span>
                   <span class="row-source" data-label="来源">{{ sourceOf(c) }}</span>
@@ -308,7 +318,16 @@ async function undelete(c: ConsoleCredential) {
               </li>
             </ul>
           </template>
-          <p v-else-if="credentials.data.value" class="empty">暂无凭据</p>
+          <EmptyState v-else-if="credentials.data.value" title="暂无凭据">
+            <template v-if="canManage" #actions>
+              <UButton size="sm" color="primary" variant="outline" @click="openCreate">
+                新建凭据
+              </UButton>
+              <UButton size="sm" color="neutral" variant="outline" @click="connectVault">
+                连接密码库
+              </UButton>
+            </template>
+          </EmptyState>
           <p v-if="credentials.data.value?.truncated" class="ledger-note">仅显示前 1000 条</p>
         </div>
 
@@ -342,7 +361,13 @@ async function undelete(c: ConsoleCredential) {
               @name-item="(item) => openNaming(conn.id, item)"
             />
           </template>
-          <p v-else-if="connections.data.value" class="empty">暂无密码库连接</p>
+          <EmptyState v-else-if="connections.data.value" title="暂无密码库连接">
+            <template v-if="canManage" #actions>
+              <UButton size="sm" color="primary" variant="outline" @click="openLogin(null)">
+                连接密码库
+              </UButton>
+            </template>
+          </EmptyState>
         </div>
 
         <div v-else class="column-body">
@@ -401,7 +426,7 @@ async function undelete(c: ConsoleCredential) {
               </li>
             </ul>
           </template>
-          <p v-else-if="deleted.data.value" class="empty">暂无已删除的凭据</p>
+          <EmptyState v-else-if="deleted.data.value" title="暂无已删除的凭据" />
         </div>
       </section>
     </div>
@@ -593,10 +618,6 @@ button.row-name::after {
 }
 .ledger-note {
   padding-top: 8px;
-  color: var(--ui-text-muted);
-}
-.empty {
-  padding: 12px 0;
   color: var(--ui-text-muted);
 }
 .deleted-note {

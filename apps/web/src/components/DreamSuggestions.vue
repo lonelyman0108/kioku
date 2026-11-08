@@ -29,6 +29,7 @@ import { memoryRoute } from '../routes'
 import { spaceSettingsRoute } from '../settingsSections'
 import { formatRelative, formatTime } from '../time'
 import Hint from './Hint.vue'
+import EmptyState from './strata/EmptyState.vue'
 import MemoryFlags from './strata/MemoryFlags.vue'
 import NoteLine from './strata/NoteLine.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
@@ -260,7 +261,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
           mine.data.value.includePrivate
             ? '当前账号的本人记忆（机密除外）也会发送给实例配置的抽取模型整理，'
             : '当前账号已关闭本人记忆的整理，目前仅整理共享内容，'
-        }}<RouterLink :to="spaceSettingsRoute(spaceId, 'dream')" class="text-primary"
+        }}<RouterLink :to="spaceSettingsRoute(spaceId, 'extraction')" class="text-primary"
           >可在空间设置中{{ mine.data.value.includePrivate ? '关闭' : '开启' }}</RouterLink
         >。
       </p>
@@ -284,7 +285,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
       <USkeleton v-for="n in 3" :key="n" class="h-32 w-full" />
     </div>
     <template v-else-if="suggestions.data.value">
-      <p v-if="!items.length" class="dream-empty">暂无整理建议</p>
+      <EmptyState v-if="!items.length" title="暂无整理建议" />
       <article v-for="item in items" :key="item.id" class="suggestion">
         <div class="suggestion-main">
           <h3>

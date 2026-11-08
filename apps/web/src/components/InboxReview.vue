@@ -10,6 +10,7 @@ import { useActivated } from '../composables/useActivated'
 import { heardFrom } from '../conversations'
 import { formatRelative, formatTime } from '../time'
 import Hint from './Hint.vue'
+import EmptyState from './strata/EmptyState.vue'
 import NoteLine from './strata/NoteLine.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SectionHeading from './strata/SectionHeading.vue'
@@ -166,7 +167,7 @@ async function act(action: 'confirm' | 'delete', items: Seen[]) {
       <USkeleton v-for="n in 6" :key="n" class="h-12 w-full" />
     </div>
     <template v-else-if="queue.data.value">
-      <p v-if="!items.length" class="review-empty">暂无待确认内容</p>
+      <EmptyState v-if="!items.length" title="暂无待确认内容" />
       <ul v-else>
         <li
           v-for="item in items"
@@ -282,10 +283,6 @@ async function act(action: 'confirm' | 'delete', items: Seen[]) {
 .note-line.review-note {
   margin: 10px 0 0;
   border-top: 0;
-}
-.review-empty {
-  padding: 22px 0;
-  color: var(--ui-text-muted);
 }
 .review-row {
   display: grid;

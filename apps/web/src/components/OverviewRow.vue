@@ -52,8 +52,8 @@ defineProps<{
 .row-value {
   grid-row: 1;
   grid-column: 2;
-  font-family: var(--font-mono);
   font-size: 26px;
+  font-variant-numeric: tabular-nums;
   font-weight: 300;
   line-height: 1.1;
   text-align: right;

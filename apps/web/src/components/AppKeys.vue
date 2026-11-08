@@ -1,13 +1,6 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import {
-  CREDENTIAL_CAPABILITIES,
-  SENSITIVITIES,
-  type CreatedKey,
-  type CredentialCapability,
-  type KeyInfo,
-  type KeyScopes,
-} from '@kioku/contracts'
+import type { CreatedKey, KeyInfo, KeyScopes } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, reactive, ref, toRef, watch } from 'vue'
 
@@ -17,20 +10,23 @@ import { effectiveNote } from '../apps'
 import { useCopy } from '../composables/useCopy'
 import { useKeyMatrices } from '../composables/useKeyMatrices'
 import { icons } from '../icons'
-import {
-  ADMIN_SCOPE_LABEL,
-  credentialCapabilityLabels,
-  layerLabels,
-  scopesSummary,
-  sensitivityLabels,
-} from '../labels'
+import { scopesSummary } from '../labels'
 import { formatRelative, formatShort, formatTime } from '../time'
 import Hint from './Hint.vue'
-import { allowedCredentialCapability, issuedCredentialCapability, keyPresets } from './keyPresets'
+import KeyScopeEditor from './KeyScopeEditor.vue'
+import {
+  allowedCredentialCapability,
+  issuedCredentialCapability,
+  keyPresets,
+  matchPreset,
+  presetScopes,
+} from './keyPresets'
+import EmptyState from './strata/EmptyState.vue'
+import FlagTag from './strata/FlagTag.vue'
 import NoteLine from './strata/NoteLine.vue'
+import ScopeTags from './strata/ScopeTags.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 import StrataCore from './strata/StrataCore.vue'
-import { STACK } from './strata/strata'
 
 const props = defineProps<{
   spaceId: string
@@ -64,66 +60,32 @@ const { rowsOf, failureOf } = useKeyMatrices(
 )
 
 const issueOpen = ref(false)
-// 签发预览里悬停的那一格的说明；没有悬停时显示整体的概括
-const previewCell = ref<string | null>(null)
 const issued = ref<CreatedKey | null>(null)
 const form = reactive({
   name: '',
-  preset: 'agent',
-  advanced: false,
-  scopes: { ...keyPresets[0]!.scopes } as KeyScopes,
+  preset: keyPresets[0]!.id,
+  scopes: presetScopes(keyPresets[0]!, props.isSpaceOwner) as KeyScopes,
 })
-// 不是空间所有者时打开表单就收紧：预设里的「取用」不能带过去
+// 不是空间所有者时打开表单就收紧：模板里的「取用」、机密级与跨人格写入都不能带过去
 watch(
   () => props.isSpaceOwner,
   (owner) => {
-    form.scopes.credentials = allowedCredentialCapability(form.scopes.credentials, owner)
+    const s = form.scopes
+    form.scopes = {
+      ...s,
+      credentials: allowedCredentialCapability(s.credentials, owner),
+      maxSensitivity: !owner && s.maxSensitivity === 'secret' ? 'private' : s.maxSensitivity,
+      admin: owner && s.admin,
+    }
+    form.preset = matchPreset(form.scopes, owner)
   },
   { immediate: true },
 )
-// 和岩芯同一个顺序：会话在上，通用在下
-const layerItems = STACK.map((l) => ({ label: layerLabels[l], value: l }))
-// 编辑者无法签发机密级和跨人格写入的 Key，选项里也不给
-const sensitivityItems = computed(() =>
-  SENSITIVITIES.filter((s) => props.isSpaceOwner || s !== 'secret').map((s) => ({
-    label: sensitivityLabels[s],
-    value: s,
-  })),
-)
+// 底部标签写实际能用到的凭据能力，和表格里的提示一致
+const actualCredentials = computed(() => issuedCredentialCapability(form.scopes))
 
-// 凭据能力只有空间所有者能选取用与管理；别的成员的选项里只有不可用可选
-const credentialItems = computed(() =>
-  CREDENTIAL_CAPABILITIES.map((c) => ({
-    label: credentialCapabilityLabels[c],
-    description: credentialHelp[c],
-    value: c,
-    disabled: allowedCredentialCapability(c, props.isSpaceOwner) !== c,
-  })),
-)
-const credentialHelp: Record<CredentialCapability, string> = {
-  none: '不能列出与取用凭据',
-  use: '列出凭据并取值',
-  manage: '另可新建、修改、删除凭据',
-}
-// 按签发范围实际能用到的凭据能力，和所选的不同时提示
-const credentialShortfall = computed(() => {
-  const actual = issuedCredentialCapability(form.scopes)
-  return actual === form.scopes.credentials ? null : actual
-})
-
-// keepCredentials：关掉「逐项调整」时只回到预设的归属与敏感级，凭据能力不在逐项调整里，留着所选的
-function pickPreset(id: string, keepCredentials = false) {
-  form.preset = id
-  const preset = keyPresets.find((p) => p.id === id)
-  if (!preset) return
-  const credentials = keepCredentials ? form.scopes.credentials : preset.scopes.credentials
-  form.scopes = {
-    ...preset.scopes,
-    readLayers: [...preset.scopes.readLayers],
-    writeLayers: [...preset.scopes.writeLayers],
-    credentials: allowedCredentialCapability(credentials, props.isSpaceOwner),
-  }
-}
+// 没填名称时用模板的名字
+const defaultName = computed(() => keyPresets.find((p) => p.id === form.preset)?.label ?? '自定义')
 
 // 签发中不接受第二次提交：连点两次会签出两个 Key，只有后一个的明文被展示
 const issuing = ref(false)
@@ -132,7 +94,7 @@ async function issue() {
   issuing.value = true
   try {
     issued.value = await api.createKey(props.spaceId, props.appId, {
-      name: form.name || form.preset,
+      name: form.name || defaultName.value,
       scopes: form.scopes,
     })
     await queryClient.invalidateQueries({ queryKey: queryKey.value })
@@ -145,21 +107,11 @@ async function issue() {
   }
 }
 
-// 关掉「逐项调整」时回到所选预设的权限，不让看不见的改动跟着签出去
-watch(
-  () => form.advanced,
-  (on) => {
-    if (!on) pickPreset(form.preset, true)
-  },
-)
-
+// 关掉时只清名称：选的模板与表格里的改动留着，下次打开接着用
 function closeIssue() {
   issueOpen.value = false
   issued.value = null
-  previewCell.value = null
   form.name = ''
-  form.advanced = false
-  pickPreset(form.preset)
 }
 
 // 剪贴板接口只在 HTTPS 或 localhost 下可用；用局域网 HTTP 地址打开时提示手动复制
@@ -195,7 +147,13 @@ async function revoke() {
         {{ readFailure(keys.error.value) }}
       </NoteLine>
       <USkeleton v-if="keys.isPending.value" class="mt-3 h-24 w-full" />
-      <p v-else-if="keys.data.value && !keys.data.value.length" class="keys-empty">暂无访问密钥</p>
+      <EmptyState v-else-if="keys.data.value && !keys.data.value.length" title="暂无访问密钥">
+        <template v-if="canIssue" #actions>
+          <UButton size="sm" color="primary" variant="outline" @click="issueOpen = true">
+            签发访问密钥
+          </UButton>
+        </template>
+      </EmptyState>
       <ul>
         <li v-for="key in live" :key="key.id" class="key-row" :class="{ on: key.id === selected }">
           <!-- 已作废的 Key 没有权限范围可看，只能吊销 -->
@@ -215,7 +173,11 @@ async function revoke() {
             <span class="key-text">
               <b>{{ key.name }}</b>
               <code>{{ key.prefix }}</code>
-              <span>签发范围：{{ scopesSummary(key.scopes) }}</span>
+              <ScopeTags
+                class="key-tags"
+                :scopes="key.scopes"
+                :title="`签发范围：${scopesSummary(key.scopes)}`"
+              />
               <span v-if="key.lastUsedAt" :title="formatTime(key.lastUsedAt)">
                 最近使用 {{ formatRelative(key.lastUsedAt) }}
               </span>
@@ -246,7 +208,8 @@ async function revoke() {
               <b>{{ key.name }}</b>
               <code>{{ key.prefix }}</code>
               <span :title="formatTime(key.revokedAt!)">
-                已吊销 {{ formatShort(key.revokedAt!) }}
+                <FlagTag status="revoked" />
+                {{ formatShort(key.revokedAt!) }}
               </span>
               <span v-if="key.lastUsedAt" :title="formatTime(key.lastUsedAt)">
                 最近使用 {{ formatShort(key.lastUsedAt) }}
@@ -263,7 +226,7 @@ async function revoke() {
       title="签发访问密钥"
       :dismissible="!issued"
       :close="!issued"
-      :ui="{ content: 'sm:max-w-2xl' }"
+      :ui="{ content: 'sm:max-w-4xl' }"
       @update:open="(v) => (v ? (issueOpen = true) : closeIssue())"
     >
       <template #body>
@@ -280,90 +243,37 @@ async function revoke() {
             />
           </div>
         </div>
+        <!--
+          不用表单元素：卡片、分段按钮是单选，读写是勾选框，在它们上面按回车会隐式提交，
+          方向键选到一半就签出访问密钥、明文马上显示。名称框里按回车同样不签发，只有点「签发」才签发
+        -->
         <div v-else class="issue">
-          <form id="issue-key" class="space-y-4" @submit.prevent="issue">
-            <UFormField label="名称" help="用于辨认访问密钥，例如「MacBook 上的 Claude Code」">
-              <UInput v-model="form.name" class="w-full" />
-            </UFormField>
-            <UFormField label="权限">
-              <div class="space-y-2">
-                <URadioGroup
-                  :model-value="form.preset"
-                  :items="
-                    keyPresets.map((p) => ({ label: p.label, description: p.help, value: p.id }))
-                  "
-                  @update:model-value="(v) => pickPreset(String(v))"
-                />
-                <USwitch v-model="form.advanced" label="逐项调整" />
-              </div>
-            </UFormField>
-            <UFormField label="凭据能力">
-              <template #help>
-                <template v-if="!isSpaceOwner">仅空间所有者的应用可以取用或管理凭据。</template>
-                <Hint>
-                  取用与管理都需要可读本人、最高敏感级不低于私密，管理还需要可写本人。带会话上下文时（群聊、私聊、定时任务）凭据一律不可用。
-                </Hint>
-              </template>
-              <URadioGroup v-model="form.scopes.credentials" :items="credentialItems" />
-            </UFormField>
-            <NoteLine v-if="credentialShortfall" tone="warning">
-              按当前签发范围，凭据能力实际为「{{
-                credentialCapabilityLabels[credentialShortfall]
-              }}」
-            </NoteLine>
-            <template v-if="form.advanced">
-              <UFormField label="可读归属">
-                <USelect
-                  v-model="form.scopes.readLayers"
-                  :items="layerItems"
-                  multiple
-                  class="w-full"
-                />
-              </UFormField>
-              <UFormField label="可写归属">
-                <USelect
-                  v-model="form.scopes.writeLayers"
-                  :items="layerItems"
-                  multiple
-                  class="w-full"
-                />
-              </UFormField>
-              <UFormField label="最高敏感级">
-                <USelect
-                  v-model="form.scopes.maxSensitivity"
-                  :items="sensitivityItems"
-                  class="w-full"
-                />
-              </UFormField>
-              <USwitch
-                v-if="isSpaceOwner"
-                v-model="form.scopes.admin"
-                :label="`${ADMIN_SCOPE_LABEL}：可写入任意人格与应用的记忆`"
-              />
-            </template>
-          </form>
-          <aside class="issue-preview">
-            <StrataCore
-              :scopes="form.scopes"
-              :width="96"
-              :height="156"
-              interactive
-              @hover="previewCell = $event"
-            />
-            <p :class="{ 'is-cell': previewCell }" aria-live="polite">
-              {{ previewCell ?? scopesSummary(form.scopes) }}
-            </p>
-            <p v-if="!previewCell" class="preview-hint">鼠标移到格子上查看说明</p>
-          </aside>
+          <UFormField label="名称" help="用于辨认，例如设备加工具">
+            <UInput v-model="form.name" class="w-full" :placeholder="defaultName" />
+          </UFormField>
+          <KeyScopeEditor
+            v-model:scopes="form.scopes"
+            v-model:preset="form.preset"
+            :is-space-owner="isSpaceOwner"
+          />
         </div>
       </template>
       <template #footer>
-        <div class="flex w-full justify-end gap-2">
-          <UButton v-if="issued" @click="closeIssue">我已保存</UButton>
-          <template v-else>
+        <div v-if="issued" class="flex w-full justify-end gap-2">
+          <UButton @click="closeIssue">我已保存</UButton>
+        </div>
+        <div v-else class="issue-foot">
+          <div class="issue-summary">
+            <span class="sr-only">签发范围</span>
+            <ScopeTags :scopes="form.scopes" :credentials="actualCredentials" />
+            <Hint label="凭据能力说明">
+              取用与管理都需要可读本人、最高敏感级不低于私密，管理还需要可写本人。带会话上下文时（群聊、私聊、定时任务）凭据一律不可用。
+            </Hint>
+          </div>
+          <div class="issue-actions">
             <UButton color="neutral" variant="ghost" @click="closeIssue">取消</UButton>
-            <UButton type="submit" form="issue-key" :loading="issuing">签发</UButton>
-          </template>
+            <UButton :loading="issuing" @click="issue">签发</UButton>
+          </div>
         </div>
       </template>
     </UModal>
@@ -484,41 +394,36 @@ button.key-main:focus-visible {
 }
 .issue {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 168px;
-  gap: 24px;
+  gap: 16px;
+  min-width: 0;
 }
-.issue-preview {
-  padding-left: 20px;
-  border-left: 1px solid var(--ui-border);
+.issue-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+  width: 100%;
 }
-.issue-preview p {
-  margin-top: 10px;
-  font-size: 14px;
-  line-height: 1.65;
-  color: var(--ui-text-muted);
+.issue-summary {
+  display: flex;
+  flex: 1 1 18rem;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
 }
-.issue-preview p.is-cell {
-  color: var(--ui-text-highlighted);
+.issue-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
 }
-.issue-preview .preview-hint {
-  margin-top: 4px;
-  font-size: 12px;
-  color: var(--ui-text-dimmed);
+.key-tags {
+  margin: 2px 0;
 }
-@media (max-width: 640px) {
-  .issue {
-    grid-template-columns: minmax(0, 1fr);
-  }
-  .issue-preview {
-    display: flex;
-    align-items: flex-start;
-    gap: 14px;
-    padding: 12px 0 0;
-    border-top: 1px solid var(--ui-border);
-    border-left: 0;
-  }
-  .issue-preview p {
-    margin-top: 0;
-  }
+.key-row.on .key-tags :deep(li) {
+  border-color: var(--strata-on-selected-muted);
+  color: var(--strata-on-selected-muted);
+}
+.key-row.on .key-tags :deep(b) {
+  color: var(--strata-on-selected);
 }
 </style>

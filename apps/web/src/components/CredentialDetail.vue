@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
 import {
-  CREDENTIAL_EXPIRY_NAMES,
   CREDENTIAL_ROTATION_NAME,
   type AppInfo,
   type ConsoleCredential,
@@ -27,7 +26,6 @@ import { formatRelative, formatTime } from '../time'
 import {
   connectionStatusText,
   credentialEventParts,
-  credentialFlags,
   itemFieldLabel,
   itemsAvailable,
 } from '../vault'
@@ -35,6 +33,7 @@ import { fetchVaultItems } from '../vaultQueries'
 import Hint from './Hint.vue'
 import ActorName from './strata/ActorName.vue'
 import FlagTag from './strata/FlagTag.vue'
+import { credentialFlagStatuses, expiryStatus } from './strata/flags'
 import MemoryRow from './strata/MemoryRow.vue'
 import NoteLine from './strata/NoteLine.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
@@ -153,8 +152,8 @@ async function reveal() {
       <p class="detail-identifier">{{ c.identifier }}</p>
       <p class="detail-source">
         {{ credentialSourceLabels[c.source] }}
-        <span v-if="c.deletedAt">已删除</span>
-        <FlagTag v-for="flag in credentialFlags(c)" :key="flag">{{ flag }}</FlagTag>
+        <FlagTag v-if="c.deletedAt" status="deleted" />
+        <FlagTag v-for="status in credentialFlagStatuses(c)" :key="status" :status="status" />
       </p>
       <p v-if="c.description" class="detail-description">{{ c.description }}</p>
       <div class="detail-actions">
@@ -244,7 +243,7 @@ async function reveal() {
         <template #expires>
           <template v-if="c.expiresAt">
             <time :datetime="c.expiresAt">{{ formatTime(c.expiresAt) }}</time>
-            <FlagTag v-if="c.expiry" class="ml-2">{{ CREDENTIAL_EXPIRY_NAMES[c.expiry] }}</FlagTag>
+            <FlagTag v-if="c.expiry" class="ml-2" :status="expiryStatus(c.expiry)" />
           </template>
           <span v-else class="text-muted">不到期</span>
         </template>
@@ -403,7 +402,7 @@ async function reveal() {
           <p v-if="describe(e) || e.bench" class="event-detail">
             <span v-if="describe(e)">{{ describe(e) }}</span>
             <template v-if="e.bench">
-              <FlagTag :title="`运行标记 ${e.bench.run}`">测试台</FlagTag>
+              <FlagTag status="bench" :title="`运行标记 ${e.bench.run}`" />
               <span>操作账号：{{ benchAccountLabel(e.bench) }}</span>
             </template>
           </p>
