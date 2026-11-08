@@ -6,6 +6,8 @@ import {
   eventLabel,
   memoryViaLabels,
   restrictedAppsLabel,
+  scopeTagText,
+  scopeTags,
   scopesSummary,
 } from '../labels'
 
@@ -44,11 +46,26 @@ describe('Key 的权限', () => {
     credentials: 'none' as const,
   }
 
-  it('一句话说完，跨人格写入才提', () => {
-    expect(scopesSummary(scopes)).toBe('可读 2 类归属，可写 1 类，最高私密')
+  it('拆成标签，凭据能力与跨人格写入有才写', () => {
+    expect(scopeTags(scopes).map(scopeTagText)).toEqual(['读 2 类', '写 1 类', '至私密'])
+    expect(scopesSummary(scopes)).toBe('读 2 类，写 1 类，至私密')
     expect(scopesSummary({ ...scopes, admin: true })).toBe(
-      '可读 2 类归属，可写 1 类，最高私密，跨人格 / 应用写入',
+      '读 2 类，写 1 类，至私密，跨人格 / 应用写入',
     )
+    expect(scopesSummary({ ...scopes, credentials: 'use' })).toBe(
+      '读 2 类，写 1 类，至私密，凭据取用',
+    )
+  })
+
+  it('传了实际的凭据能力就写它：签发弹窗底部按范围算出的实际值', () => {
+    expect(scopesSummary({ ...scopes, credentials: 'manage' }, 'use')).toBe(
+      '读 2 类，写 1 类，至私密，凭据取用',
+    )
+    expect(scopeTags({ ...scopes, credentials: 'use' }, 'none').map((t) => t.key)).toEqual([
+      'read',
+      'write',
+      'max',
+    ])
   })
 })
 

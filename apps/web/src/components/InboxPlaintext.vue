@@ -11,6 +11,7 @@ import { usePlaintextActions } from '../composables/usePlaintextActions'
 import { memoryRoute } from '../routes'
 import { formatRelative, formatTime } from '../time'
 import ConvertCredentialModal from './ConvertCredentialModal.vue'
+import EmptyState from './strata/EmptyState.vue'
 import Hint from './Hint.vue'
 import MemoryFlags from './strata/MemoryFlags.vue'
 import NoteLine from './strata/NoteLine.vue'
@@ -77,9 +78,10 @@ const convertible = (item: MemoryListItem) => placeholderAllowed(item.layer, ite
       <USkeleton v-for="n in 3" :key="n" class="h-12 w-full" />
     </div>
     <template v-else-if="list.data.value">
-      <p v-if="!items.length" class="plain-empty">
-        {{ filter === 'true' ? '暂无疑似明文凭据' : '暂无已忽略的提示' }}
-      </p>
+      <EmptyState
+        v-if="!items.length"
+        :title="filter === 'true' ? '暂无疑似明文凭据' : '暂无已忽略的提示'"
+      />
       <ul v-else>
         <li v-for="item in items" :key="item.id" class="plain-row">
           <div class="plain-uri">
@@ -172,10 +174,6 @@ const convertible = (item: MemoryListItem) => placeholderAllowed(item.layer, ite
 .note-line.plain-note {
   margin: 10px 0 0;
   border-top: 0;
-}
-.plain-empty {
-  padding: 22px 0;
-  color: var(--ui-text-muted);
 }
 .plain-row {
   display: grid;

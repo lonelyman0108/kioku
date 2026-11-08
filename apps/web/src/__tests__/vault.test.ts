@@ -2,16 +2,18 @@ import type { CredentialEvent, KeyScopes, VaultConnection } from '@kioku/contrac
 import { describe, expect, it } from 'vitest'
 
 import appKeys from '../components/AppKeys.vue?raw'
+import keyScopeEditor from '../components/KeyScopeEditor.vue?raw'
 import credentialDetail from '../components/CredentialDetail.vue?raw'
 import credentialForm from '../components/CredentialFormModal.vue?raw'
 import keyMatrix from '../components/KeyMatrix.vue?raw'
 import vaultPanel from '../components/VaultConnectionPanel.vue?raw'
 import vaultLogin from '../components/VaultLoginModal.vue?raw'
-import settingsPage from '../pages/SettingsPage.vue?raw'
+import settingsPage from '../components/MasterKeySettings.vue?raw'
 import {
   allowedCredentialCapability,
   issuedCredentialCapability,
   keyPresets,
+  presetScopes,
   sameScopes,
 } from '../components/keyPresets'
 import { scopesSummary } from '../labels'
@@ -277,11 +279,13 @@ describe('凭据能力', () => {
 
 describe('界面用上了这些规则', () => {
   it('签发访问密钥：选项与预设都按空间所有者收紧', () => {
-    expect(appKeys).toContain('disabled: allowedCredentialCapability(c, props.isSpaceOwner) !== c')
-    expect(appKeys).toContain(
-      'credentials: allowedCredentialCapability(credentials, props.isSpaceOwner)',
+    expect(keyScopeEditor).toContain(
+      'disabled: allowedCredentialCapability(c, props.isSpaceOwner) !== c',
     )
-    expect(appKeys).toContain('<URadioGroup v-model="form.scopes.credentials"')
+    expect(keyScopeEditor).toContain(':items="credentialItems"')
+    expect(keyScopeEditor).toContain('presetScopes(found, props.isSpaceOwner)')
+    expect(appKeys).toContain('credentials: allowedCredentialCapability(s.credentials, owner)')
+    expect(presetScopes(keyPresets[0]!, false).credentials).toBe('none')
   })
 
   it('权限范围按接口给的会话上下文显示凭据能力', () => {
@@ -332,6 +336,12 @@ describe('界面用上了这些规则', () => {
     const extra = { memories: 1, credentials: 0, vaultConnections: 0, settings: 0, other: 100 }
     expect(remainingTotal(extra)).toBe(1)
     expect(settingsPage.match(/remainingTotal\(/g)).toHaveLength(2)
+    // 出了错时后台任务照样重试：各行照写「轮换中」，错误在上面，照常刷新只是放慢
+    expect(settingsPage).not.toContain('已停止')
+    expect(settingsPage).toContain('<UIcon :name="icons.refresh" class="state-icon" />轮换中')
+    expect(settingsPage).toContain('<NoteLine v-if="masterKey.data.value.lastError" tone="error">')
+    expect(settingsPage).toContain('if (remainingTotal(data?.remaining) === 0) return false')
+    expect(settingsPage).toContain('return data?.lastError ? 15_000 : 5_000')
     expect(settingsPage).not.toContain('.memories +')
   })
 

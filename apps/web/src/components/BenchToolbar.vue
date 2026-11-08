@@ -8,6 +8,7 @@ import { scopesSummary } from '../labels'
 import BenchNotice from './BenchNotice.vue'
 import Hint from './Hint.vue'
 import PageHead from './strata/PageHead.vue'
+import ScopeTags from './strata/ScopeTags.vue'
 import StrataCore from './strata/StrataCore.vue'
 
 // 页头：标题在左，选应用与 Key、切模式在右。只列自己是主人的应用与还有效的 Key
@@ -93,10 +94,10 @@ const retryKeys = computed(() => retryOf(keys))
               :height="48"
               :label="`当前访问密钥的上限：${scopesSummary(key.effectiveScopes)}`"
             />
-            <p>
-              <span class="limit-label">当前访问密钥的上限</span>
-              {{ scopesSummary(key.effectiveScopes) }}
-            </p>
+            <div>
+              <p class="limit-label">当前访问密钥的上限</p>
+              <ScopeTags :scopes="key.effectiveScopes" />
+            </div>
           </div>
           <USwitch
             :model-value="real"
@@ -218,6 +219,9 @@ const retryKeys = computed(() => retryOf(keys))
 }
 .key-limit svg {
   flex: none;
+}
+.key-limit > div {
+  min-width: 0;
 }
 .key-limit p {
   font-size: 13px;

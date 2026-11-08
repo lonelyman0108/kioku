@@ -23,7 +23,7 @@ const UPSTREAM_KEYS: [file: string, names: RegExp][] = [
   ['/components/BenchAgent.vue', /API Key/g],
   ['/components/LoreImport.vue', /API Key/g],
   ['/components/BackupSettings.vue', /Access Key ID|Secret Access Key/g],
-  ['/pages/SettingsPage.vue', /API Key|Secret Access Key/g],
+  ['/components/MasterKeySettings.vue', /API Key|Secret Access Key/g],
 ]
 
 const BANNED: [RegExp, string][] = [

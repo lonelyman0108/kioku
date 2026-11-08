@@ -10,6 +10,7 @@ import ContactList from '../components/ContactList.vue'
 import ConversationDetail from '../components/ConversationDetail.vue'
 import Hint from '../components/Hint.vue'
 import { focusAfterSelect } from '../components/memoryTree'
+import EmptyState from '../components/strata/EmptyState.vue'
 import NoteLine from '../components/strata/NoteLine.vue'
 import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import { useViewport } from '../composables/useViewport'
@@ -160,11 +161,13 @@ watch(selectedId, async (id, previous) => {
               </button>
             </li>
           </ul>
-          <p v-else class="list-empty">
-            暂无会话<Hint>
-              群聊机器人与本机 Agent 的对话按群、私聊或本人分成会话，抽取后在这里列出会话摘要。
-            </Hint>
-          </p>
+          <EmptyState v-else title="暂无会话">
+            <template #hint>
+              <Hint>
+                群聊机器人与本机 Agent 的对话按群、私聊或本人分成会话，抽取后在这里列出会话摘要。
+              </Hint>
+            </template>
+          </EmptyState>
           <div v-if="list.isFetchNextPageError.value" class="list-failed">
             <NoteLine tone="error">{{ readFailure(list.error.value) }}</NoteLine>
           </div>
@@ -277,10 +280,6 @@ watch(selectedId, async (id, previous) => {
 }
 .list-failed {
   padding: 14px 14px 0;
-}
-.list-empty {
-  padding: 18px 14px;
-  color: var(--ui-text-muted);
 }
 /* 会话的颜色压在行首一条细带上：和地层柱的会话同一种颜色，文字靠第二行说明是哪一类 */
 .conv-row {
@@ -398,8 +397,7 @@ watch(selectedId, async (id, previous) => {
   .contacts-tabs {
     padding: 0 16px 0 7px;
   }
-  .list-filter,
-  .list-empty {
+  .list-filter {
     padding-left: 16px;
     padding-right: 16px;
   }
