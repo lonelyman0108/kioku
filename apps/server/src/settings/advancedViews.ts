@@ -15,7 +15,7 @@ import { withSpace, type Db } from '../db/client'
 import { apps, spaces } from '../db/schema'
 import { system as dreamSystem } from '../extraction/dreamPrompt'
 import { SUMMARY_SYSTEM, SYSTEM as EXTRACTION_SYSTEM } from '../extraction/prompt'
-import { CHAT_FAMILIES, CHAT_GUIDANCE, GUIDANCE } from '../lifecycle/lifecycle'
+import { CHAT_FAMILIES, CHAT_GUIDANCE, GUIDANCE, HOST_CONTEXT_LIMIT } from '../lifecycle/lifecycle'
 import {
   APP_ADVANCED_FIELD,
   loadAppLayers,
@@ -51,6 +51,12 @@ async function overriddenBy(db: Db): Promise<InstanceAdvancedView['overriddenBy'
   return counts
 }
 
+// 抽取与整理规则的固定部分，各有两种场景：抽取与只要摘要；记下的记忆与对话里来的记忆
+const FIXED_RULES = {
+  'prompts.extractionRules': [EXTRACTION_SYSTEM, SUMMARY_SYSTEM],
+  'prompts.dreamRules': [dreamSystem({ talk: false }), dreamSystem({ talk: true })],
+}
+
 export async function instanceAdvancedView(db: Db): Promise<InstanceAdvancedView> {
   const overrides = await loadInstanceAdvanced(db)
   return {
@@ -61,8 +67,7 @@ export async function instanceAdvancedView(db: Db): Promise<InstanceAdvancedView
     fixedPrompts: {
       'prompts.agentGuidance': [GUIDANCE],
       'prompts.chatGuidance': [CHAT_GUIDANCE],
-      'prompts.extractionRules': [EXTRACTION_SYSTEM, SUMMARY_SYSTEM],
-      'prompts.dreamRules': [dreamSystem({ talk: false }), dreamSystem({ talk: true })],
+      ...FIXED_RULES,
     },
   }
 }
@@ -100,7 +105,12 @@ export async function spaceAdvancedView(
       'prompts.extractionRules': instance['prompts.extractionRules'] ?? null,
       'prompts.dreamRules': instance['prompts.dreamRules'] ?? null,
     },
+    fixedPrompts: FIXED_RULES,
     apps: summaries,
+    hostLimits: Object.entries(HOST_CONTEXT_LIMIT).map(([runtimeFamily, chars]) => ({
+      runtimeFamily,
+      chars,
+    })),
     canEdit,
   }
 }

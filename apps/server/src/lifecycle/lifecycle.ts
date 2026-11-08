@@ -29,7 +29,7 @@ import type { RecallScope } from './scope'
 export const PROMPT_SEMANTIC_TIMEOUT_MS = 2_000
 // 宿主能完整接收的上下文长度。Claude Code 的钩子输出超过 1 万字时只给模型看开头 2KB 的预览，
 // 其余写进文件、要模型自己去读，所以留出余量，boot 按剩下的字数收，后面的附加块放不下就不放
-const HOST_CONTEXT_LIMIT: Record<string, number> = { claudecode: 9_500, codex: 9_500 }
+export const HOST_CONTEXT_LIMIT: Record<string, number> = { claudecode: 9_500, codex: 9_500 }
 // 给近期记忆、项目召回和 boot 的标题、未展开列表留的字数
 const CONTEXT_RESERVE = 2_000
 

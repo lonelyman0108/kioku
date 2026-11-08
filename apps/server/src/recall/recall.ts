@@ -105,7 +105,6 @@ export async function embedQuery(
 // 打过分的候选：调试台要看各路的得分（breakdown）、取整前的总分（rawScore）与记忆 id
 export interface ScoredCandidate extends DebugCandidate {
   id: string
-  rawScore: number
 }
 
 // 召回候选对应的记忆 id，记召回事件要用。放在 Symbol 键上：JSON 序列化时不会带出去，

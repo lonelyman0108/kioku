@@ -99,7 +99,11 @@ export async function recallDebug(
   )
   const injected = scored.filter((c) => c.rawScore >= minScore).slice(0, limit)
   const shown = new Set(injected.map((c) => c.id))
-  const toDebug = (c: ScoredCandidate) => ({ ...publicCandidate(c), breakdown: c.breakdown })
+  const toDebug = (c: ScoredCandidate) => ({
+    ...publicCandidate(c),
+    breakdown: c.breakdown,
+    rawScore: c.rawScore,
+  })
   return {
     injected: injected.map(toDebug),
     others: scored.filter((c) => !shown.has(c.id)).map(toDebug),

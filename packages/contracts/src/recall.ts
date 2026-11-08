@@ -31,7 +31,12 @@ export const RecallBreakdown = z.object({
 })
 export type RecallBreakdown = z.infer<typeof RecallBreakdown>
 
-export const DebugCandidate = RecallCandidate.extend({ breakdown: RecallBreakdown })
+// 调试台的候选（只在管理界面）：各路得分，加上未取整的总分。score 取整到两位只用于展示，
+// 和最低分比较用 rawScore，管理界面试算时在本地重算，正好卡在阈值上的和服务端判断一致
+export const DebugCandidate = RecallCandidate.extend({
+  breakdown: RecallBreakdown,
+  rawScore: z.number(),
+})
 export type DebugCandidate = z.infer<typeof DebugCandidate>
 
 // 会话上下文：由接入方（插件）上报，只能收紧权限、不能放宽。平台账号原样上报，

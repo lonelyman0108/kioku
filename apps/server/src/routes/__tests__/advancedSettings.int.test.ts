@@ -353,6 +353,11 @@ describe.skipIf(!testDatabaseUrl)('高级设置', () => {
       expect(actual).toMatchObject({ minScore: 0.25, limit: 2 })
       expect(actual.injected).toHaveLength(2)
       expect(actual.others).toHaveLength(1)
+      // 未取整的分数：取整后就是 score，注入的都不低于最低分
+      for (const c of [...actual.injected, ...actual.others]) {
+        expect(Math.round(c.rawScore * 100) / 100).toBe(c.score)
+      }
+      for (const c of actual.injected) expect(c.rawScore).toBeGreaterThanOrEqual(0.25)
 
       const strict = await debug({ minScore: 0.9, limit: 3 })
       expect(strict).toMatchObject({ minScore: 0.9, limit: 3, injected: [], block: '' })

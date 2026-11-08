@@ -536,7 +536,14 @@ export const SpaceAdvancedView = z.object({
     'prompts.extractionRules': z.string().nullable(),
     'prompts.dreamRules': z.string().nullable(),
   }),
+  // 抽取与整理规则的固定部分，按场景列出（同实例视图的 fixedPrompts）
+  fixedPrompts: z.object({
+    'prompts.extractionRules': z.array(z.string()),
+    'prompts.dreamRules': z.array(z.string()),
+  }),
   apps: z.array(AppAdvancedSummary),
+  // 客户端自身能完整接收的字数（不可调）：启动加载的字数预算取它与设置里更小的；没列出的客户端不限
+  hostLimits: z.array(z.object({ runtimeFamily: z.string(), chars: z.number().int() })),
   canEdit: z.boolean(),
 })
 export type SpaceAdvancedView = z.infer<typeof SpaceAdvancedView>
