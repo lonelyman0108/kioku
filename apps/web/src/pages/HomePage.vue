@@ -1,10 +1,9 @@
 <script setup lang="ts">
-import { computed, watchEffect } from 'vue'
+import { watchEffect } from 'vue'
 import { useRouter } from 'vue-router'
 
-import CreateSpaceModal from '../components/CreateSpaceModal.vue'
 import EmptyState from '../components/strata/EmptyState.vue'
-import { useCreateSpace } from '../composables/useCreateSpace'
+import { useNewSpaceEntry } from '../composables/useCreateSpace'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
 
@@ -14,7 +13,8 @@ const { me, space } = useSession()
 watchEffect(() => {
   if (space.value) void router.replace({ name: 'overview', params: { spaceId: space.value.id } })
 })
-const newSpace = useCreateSpace(computed(() => Boolean(me.data.value)))
+// 外壳里的那一份入口与弹窗
+const newSpace = useNewSpaceEntry()
 </script>
 
 <template>
@@ -32,12 +32,6 @@ const newSpace = useCreateSpace(computed(() => Boolean(me.data.value)))
           <UButton :icon="icons.add" @click="newSpace.open.value = true">新建空间</UButton>
         </template>
       </EmptyState>
-      <CreateSpaceModal
-        :open="newSpace.open.value"
-        :current-account-id="me.data.value.id"
-        @close="newSpace.open.value = false"
-        @created="newSpace.created"
-      />
     </template>
     <p v-else>正在打开空间……</p>
   </div>

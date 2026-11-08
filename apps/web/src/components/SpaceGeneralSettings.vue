@@ -7,6 +7,7 @@ import { useRoute } from 'vue-router'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { useAfterSpaceGone, useLeaveSpace } from '../composables/useLeaveSpace'
+import { fieldProblems } from '../composables/useSavedField'
 import { useSession } from '../composables/useSession'
 import { roleName } from '../settingsSections'
 import {
@@ -15,6 +16,8 @@ import {
   LEAVE_CONSEQUENCES,
   LEAVE_NOTE,
   refreshSpaces,
+  SPACE_NAME_RANGE,
+  spaceNameIssue,
   TRANSFER_CONSEQUENCES,
   transferTargets,
 } from '../spaces'
@@ -59,12 +62,8 @@ watch(savedName, (next) => {
   baseline.value = next
 })
 const changed = computed(() => baseline.value !== undefined && name.value.trim() !== baseline.value)
-const problem = computed(() => {
-  if (!changed.value) return null
-  const v = name.value.trim()
-  if (!v) return '名称：未填写'
-  return v.length > 64 ? '名称：超出长度' : null
-})
+const nameIssue = computed(() => (changed.value ? spaceNameIssue(name.value) : null))
+const problem = computed(() => fieldProblems([{ label: '名称', issue: nameIssue.value }]))
 watch(changed, (d) => (dirtyModel.value = d), { immediate: true })
 const saving = ref(false)
 async function save() {
@@ -141,7 +140,7 @@ async function deleted() {
         <form v-if="isOwner" @submit.prevent="save">
           <SettingsRow label="名称" description="空间切换器与成员看到的名字" for="space-name">
             <UInput id="space-name" v-model="name" class="w-full max-w-xs" autocomplete="off" />
-            <p v-if="problem" class="w-full text-xs text-error">请填写 1 到 64 个字符。</p>
+            <p v-if="nameIssue" class="w-full text-xs text-error">{{ SPACE_NAME_RANGE }}</p>
           </SettingsRow>
           <SaveBar
             :count="changed ? 1 : 0"
@@ -225,7 +224,7 @@ async function deleted() {
       :open="deleteOpen"
       :space-id="spaceId"
       :space-name="detail.data.value?.name ?? ''"
-      can-export
+      :can-export="isOwner"
       @close="deleteOpen = false"
       @deleted="deleted"
     />

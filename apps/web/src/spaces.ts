@@ -1,7 +1,14 @@
-import { DEPARTURE_RETENTION_DAYS, type MemberRole, type SpaceSummary } from '@kioku/contracts'
-
-import { ME_KEY } from './query'
+import {
+  DEPARTURE_RETENTION_DAYS,
+  SPACE_NAME_MAX,
+  SpaceName,
+  type MemberRole,
+  type SpaceSummary,
+} from '@kioku/contracts'
 import type { QueryClient } from '@tanstack/vue-query'
+
+import type { FieldIssue } from './composables/useSavedField'
+import { ME_KEY } from './query'
 
 // 空间与成员页面共用的判断与文案。服务端同样检查，这里只决定按钮给不给、旁边写什么
 
@@ -9,6 +16,13 @@ export interface MemberLike {
   accountId: string
   role: MemberRole
 }
+
+// 空间名填得对不对：和服务端同一个 schema（去掉首尾空白、按码点数长度），不对时给出问题的种类
+export function spaceNameIssue(input: string): FieldIssue | null {
+  if (!input.trim()) return 'empty'
+  return SpaceName.safeParse(input).success ? null : 'range'
+}
+export const SPACE_NAME_RANGE = `请填写 1 到 ${SPACE_NAME_MAX} 个字符。`
 
 // 删除空间要输入现在的空间名，逐字一致才能删（和服务端一样，不去空白、不忽略大小写）
 export const confirmsName = (input: string, name: string): boolean =>
@@ -72,11 +86,17 @@ export const TRANSFER_CONSEQUENCES = [
   '之后成员、空间设置与导出由所有者管理。',
 ]
 
-// 空间的名字、成员与角色变了：会话里的空间列表（切换器、角色）、成员表、实例的空间列表一起刷新
-export async function refreshSpaces(client: QueryClient, spaceId?: string): Promise<void> {
+// 空间的名字、成员与角色变了：会话里的空间列表（切换器、角色）、成员表、实例的空间列表与账号列表（所在空间、
+// 唯一可用的所有者）一起刷新。me 为 false 时不刷新会话，由调用方自己取一次
+export async function refreshSpaces(
+  client: QueryClient,
+  spaceId?: string,
+  options: { me?: boolean } = {},
+): Promise<void> {
   await Promise.all([
-    client.invalidateQueries({ queryKey: ME_KEY }),
+    ...(options.me === false ? [] : [client.invalidateQueries({ queryKey: ME_KEY })]),
     client.invalidateQueries({ queryKey: ['instance-spaces'] }),
+    client.invalidateQueries({ queryKey: ['instance-accounts'] }),
     ...(spaceId
       ? [
           client.invalidateQueries({ queryKey: ['members', spaceId] }),
@@ -84,4 +104,9 @@ export async function refreshSpaces(client: QueryClient, spaceId?: string): Prom
         ]
       : []),
   ])
+}
+
+// 已经不在的空间的查询（成员、概况、应用……）直接丢掉，不让它们失效重取：空间不在了，重取只会拿到 403
+export function dropSpaceQueries(client: QueryClient, spaceId: string): void {
+  client.removeQueries({ predicate: (query) => query.queryKey.includes(spaceId) })
 }

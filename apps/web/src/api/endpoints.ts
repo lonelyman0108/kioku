@@ -196,8 +196,6 @@ export const api = {
       body: { membersCanCreate },
       schema: SpaceCreationView,
     }),
-  // 新建空间时选所有者用
-
   apps: (spaceId: string) =>
     request('GET', `/spaces/${spaceId}/apps`, { schema: z.array(AppInfo) }),
   createApp: (

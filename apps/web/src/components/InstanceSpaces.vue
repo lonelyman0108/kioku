@@ -7,6 +7,7 @@ import { useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import { useAfterSpaceGone } from '../composables/useLeaveSpace'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
 import { refreshSpaces } from '../spaces'
@@ -29,6 +30,10 @@ const queryClient = useQueryClient()
 const { me } = useSession()
 const myId = computed(() => me.data.value?.id ?? '')
 const memberOf = (spaceId: string) => (me.data.value?.spaces ?? []).some((s) => s.id === spaceId)
+// 导出只给空间所有者：不是所有者的实例管理员删除前要请所有者导出
+const ownerOf = (spaceId: string) =>
+  (me.data.value?.spaces ?? []).some((s) => s.id === spaceId && s.role === 'owner')
+const afterGone = useAfterSpaceGone()
 
 const spaces = useQuery({ queryKey: ['instance-spaces'], queryFn: api.instanceSpaces })
 const policy = useQuery({ queryKey: ['space-creation'], queryFn: api.spaceCreation })
@@ -75,7 +80,7 @@ const deleting = ref<InstanceSpace | null>(null)
 async function deleted() {
   const gone = deleting.value
   deleting.value = null
-  await refreshSpaces(queryClient, gone?.id)
+  if (gone) await afterGone(gone.id)
   toast.add({ title: `已删除空间「${gone?.name ?? ''}」`, color: 'success' })
 }
 const owners = (space: InstanceSpace) => space.owners.map((o) => o.displayName).join('、') || '—'
@@ -152,7 +157,7 @@ const open = (space: InstanceSpace) =>
       :open="deleting !== null"
       :space-id="deleting?.id ?? ''"
       :space-name="deleting?.name ?? ''"
-      :can-export="deleting ? memberOf(deleting.id) : false"
+      :can-export="deleting ? ownerOf(deleting.id) : false"
       @close="deleting = null"
       @deleted="deleted"
     />

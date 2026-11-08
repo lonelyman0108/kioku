@@ -5,6 +5,8 @@ import { computed, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import { FIELD_ISSUES } from '../composables/useSavedField'
+import { SPACE_NAME_RANGE, spaceNameIssue } from '../spaces'
 
 // 新建空间：名称，实例管理员另外选所有者（默认当前账号，停用的账号不列）。建好后由调用方决定去哪
 const props = withDefaults(
@@ -38,8 +40,9 @@ watch(
   },
 )
 const trimmed = computed(() => name.value.trim())
-const tooLong = computed(() => trimmed.value.length > 64)
-const ready = computed(() => trimmed.value.length > 0 && !tooLong.value && !busy.value)
+// 空着时不提示，只是不能点新建；超出长度时写出范围
+const issue = computed(() => spaceNameIssue(name.value))
+const ready = computed(() => issue.value === null && !busy.value)
 
 async function create() {
   if (!ready.value) return
@@ -70,7 +73,10 @@ async function create() {
   >
     <template #body>
       <div class="grid gap-4">
-        <UFormField label="名称" :error="tooLong ? '空间名不超过 64 个字符' : undefined">
+        <UFormField
+          label="名称"
+          :error="issue === 'range' ? `${FIELD_ISSUES.range}。${SPACE_NAME_RANGE}` : undefined"
+        >
           <UInput
             v-model="name"
             class="w-full"

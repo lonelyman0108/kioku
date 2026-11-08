@@ -14,7 +14,7 @@ import StrataPatterns from '../components/strata/StrataPatterns.vue'
 import NoteLine from '../components/strata/NoteLine.vue'
 import { COLOR_PREFERENCES, useColorPreference } from '../composables/useColorPreference'
 import { useConsoleSearch } from '../composables/useConsoleSearch'
-import { useCreateSpace } from '../composables/useCreateSpace'
+import { NEW_SPACE, useCreateSpace } from '../composables/useCreateSpace'
 import { useInboxCounts } from '../composables/useInboxCounts'
 import { confirmDiscard, hasUnsavedChanges } from '../composables/unsavedChanges'
 import { LOGOUT } from '../composables/useLogout'
@@ -49,6 +49,7 @@ watch(
 const spaces = computed(() => me.data.value?.spaces ?? [])
 // 新建空间：实例管理员，或实例允许成员自建空间时才有
 const newSpace = useCreateSpace(computed(() => Boolean(me.data.value)))
+provide(NEW_SPACE, newSpace)
 
 // 窄屏的导航收进抽屉，换页就关上
 const navOpen = ref(false)

@@ -1,15 +1,19 @@
 import type { Me } from '@kioku/contracts'
+import { QueryClient } from '@tanstack/vue-query'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createSSRApp, defineComponent, h } from 'vue'
 import { renderToString } from 'vue/server-renderer'
 import { createMemoryHistory, createRouter } from 'vue-router'
 
+import endpoints from '../api/endpoints.ts?raw'
 import createSpaceModal from '../components/CreateSpaceModal.vue?raw'
 import deleteSpaceModal from '../components/DeleteSpaceModal.vue?raw'
 import instanceSpaces from '../components/InstanceSpaces.vue?raw'
 import spaceGeneral from '../components/SpaceGeneralSettings.vue?raw'
 import spaceMembers from '../components/SpaceMembers.vue?raw'
 import { useAfterSpaceGone } from '../composables/useLeaveSpace'
+import leaveSource from '../composables/useLeaveSpace.ts?raw'
+import consoleLayout from '../layouts/ConsoleLayout.vue?raw'
 import homePage from '../pages/HomePage.vue?raw'
 import { ME_KEY, queryClient } from '../query'
 import {
@@ -21,8 +25,10 @@ import {
   LEAVE_CONSEQUENCES,
   memberAction,
   nextSpace,
+  refreshSpaces,
   REMOVE_CONSEQUENCES,
   roleEditable,
+  spaceNameIssue,
   transferTargets,
 } from '../spaces'
 
@@ -130,19 +136,22 @@ describe('离开后跳转', () => {
     spaces,
   })
 
-  async function leaveFrom(spaces: Me['spaces']) {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => new Response(JSON.stringify(me(spaces)), { status: 200 })),
-    )
+  const GONE = '00000000-0000-4000-8000-0000000000c0'
+
+  async function leaveFrom(spaces: Me['spaces'], from = `/spaces/${GONE}`) {
+    const fetched = vi.fn(async () => new Response(JSON.stringify(me(spaces)), { status: 200 }))
+    vi.stubGlobal('fetch', fetched)
+    // 那个空间的查询还在缓存里：离开之后丢掉，不失效重取
+    queryClient.setQueryData(['members', GONE], [])
     const router = createRouter({
       history: createMemoryHistory(),
       routes: [
         { path: '/', name: 'home', component: { render: () => null } },
         { path: '/spaces/:spaceId', name: 'overview', component: { render: () => null } },
+        { path: '/settings/instance', name: 'instance', component: { render: () => null } },
       ],
     })
-    await router.push('/spaces/00000000-0000-4000-8000-0000000000c0')
+    await router.push(from)
     let afterGone!: (id: string) => Promise<void>
     const app = createSSRApp(
       defineComponent({
@@ -154,8 +163,13 @@ describe('离开后跳转', () => {
     )
     app.use(router)
     await renderToString(app)
-    await afterGone('00000000-0000-4000-8000-0000000000c0')
-    return { route: router.currentRoute.value, cached: queryClient.getQueryData<Me>(ME_KEY) }
+    await afterGone(GONE)
+    return {
+      route: router.currentRoute.value,
+      cached: queryClient.getQueryData<Me>(ME_KEY),
+      meRequests: fetched.mock.calls.length,
+      membersLeft: queryClient.getQueryState(['members', GONE]),
+    }
   }
 
   it('还有别的空间时去它的概览，会话里的空间列表是新读的', async () => {
@@ -165,6 +179,20 @@ describe('离开后跳转', () => {
     expect(route.name).toBe('overview')
     expect(route.params.spaceId).toBe('00000000-0000-4000-8000-0000000000b0')
     expect(cached?.spaces.map((s) => s.id)).toEqual(['00000000-0000-4000-8000-0000000000b0'])
+  })
+
+  it('会话只重取一次，那个空间的查询丢掉', async () => {
+    const { meRequests, membersLeft } = await leaveFrom([])
+    expect(meRequests).toBe(1)
+    expect(membersLeft).toBeUndefined()
+  })
+
+  it('在实例 › 空间删掉别的空间：留在原页，记住的空间正是它时忘掉', async () => {
+    const { route } = await leaveFrom([], '/settings/instance')
+    expect(route.name).toBe('instance')
+    expect(leaveSource).toContain('forgetSpace(spaceId)')
+    expect(leaveSource).toContain('if (route.params.spaceId !== spaceId) return')
+    expect(instanceSpaces).toContain('await afterGone(gone.id)')
   })
 
   it('没有空间了回首页', async () => {
@@ -193,5 +221,48 @@ describe('新建空间的入口', () => {
     expect(instanceSpaces).toContain('choose-owner')
     expect(createSpaceModal).toContain('.filter((a) => !a.disabledAt)')
     expect(createSpaceModal).toContain('owner.value = props.currentAccountId')
+  })
+})
+
+describe('审查修复', () => {
+  it('空间名按码点数长度，和服务端同一个 schema；问题文字走 fieldProblems', () => {
+    expect(spaceNameIssue('😀'.repeat(40))).toBeNull()
+    expect(spaceNameIssue('😀'.repeat(64))).toBeNull()
+    expect(spaceNameIssue('家'.repeat(65))).toBe('range')
+    expect(spaceNameIssue('   ')).toBe('empty')
+    expect(spaceNameIssue('  家  ')).toBeNull()
+    for (const source of [createSpaceModal, spaceGeneral]) {
+      expect(source).not.toMatch(/\.length > 64/)
+      expect(source).toContain('spaceNameIssue(name.value)')
+    }
+    expect(spaceGeneral).toContain("fieldProblems([{ label: '名称', issue: nameIssue.value }])")
+    expect(spaceGeneral).not.toContain('超出长度')
+  })
+
+  it('空间变了，实例的账号列表（所在空间、唯一可用的所有者）也失效', async () => {
+    const client = new QueryClient()
+    client.setQueryData(['instance-accounts'], { accounts: [] })
+    client.setQueryData(['instance-spaces'], [])
+    await refreshSpaces(client)
+    expect(client.getQueryState(['instance-accounts'])?.isInvalidated).toBe(true)
+    expect(client.getQueryState(['instance-spaces'])?.isInvalidated).toBe(true)
+  })
+
+  it('删除前的导出只链给空间所有者，别人写由所有者导出', () => {
+    expect(spaceGeneral).toContain(':can-export="isOwner"')
+    expect(instanceSpaces).toContain(':can-export="deleting ? ownerOf(deleting.id) : false"')
+    expect(instanceSpaces).toContain("s.id === spaceId && s.role === 'owner'")
+    expect(deleteSpaceModal).toContain('删除前先由空间所有者导出。')
+  })
+
+  it('新建空间的入口与弹窗只在外壳里一份，首页经 inject 用它', () => {
+    expect(consoleLayout).toContain('provide(NEW_SPACE, newSpace)')
+    expect(homePage).toContain('useNewSpaceEntry()')
+    expect(homePage).not.toContain('<CreateSpaceModal')
+    expect(homePage).not.toContain('useCreateSpace(')
+  })
+
+  it('接口清单里没有悬空的注释', () => {
+    expect(endpoints).not.toContain('新建空间时选所有者用')
   })
 })
