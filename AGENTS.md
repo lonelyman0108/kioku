@@ -85,7 +85,7 @@
 - tsdown 产物是 `dist/index.mjs`，不是 `.js`。
 - 管理界面用到新图标时必须加进 `apps/web/src/icons.ts`：构建时只打包这份清单里的图标，没列进来的会在运行时向公共 Iconify 接口请求。原因：自托管服务不应向第三方发请求。
 - 管理界面的 tsconfig 关掉了 `exactOptionalPropertyTypes`（组件库的 props 类型不兼容），服务端保持开启。
-- 页面和组件的 scoped 样式不在 layer 里，压过 Tailwind 的工具类（工具类都在 layer 里）：元素上 scoped 写了 `display` 时，`max-lg:hidden` 这类类名不生效，窄屏的显隐写在 scoped 的媒体查询里。
+- 页面和组件的 scoped 样式不在 layer 里，压过 Tailwind 的工具类（工具类都在 layer 里）：元素上 scoped 写了 `display` 时，`max-lg:hidden` 这类类名不生效，窄屏的显隐写在 scoped 的媒体查询里。反过来，组件里不要用和工具类同名的类名（`fixed`、`hidden` 等）：Tailwind 会把它当成工具类生效。flex 容器里的图标要写 `display: inline-block`（preflight 把 svg 设成 block，图标会自己占一行）。
 - 记忆目录用 `UTree` 的虚拟滚动，只渲染看得见的行：行高固定，`MemoriesPage` 的 `rowHeight` 同时给样式和 `estimateSize`，改一边要改另一边。组件库把 `data-index` 放在外层的 `li` 上，又把 `textContent` 多解了一层，它自带的打字跳转会报错、也无法获得焦点，左键也只在渲染出来的行里找上一级，所以这两个键在页面里自己做（`typeaheadMatch`、`parentRow`）。目录从隐藏变成显示时设 `scrollTop` 不发 scroll 事件，虚拟滚动不知道位置变了，`scrollToRow` 替它发一个。升级 Nuxt UI 时复查。
 - 记忆页的统计（窄柱、列表上方的总数）来自概览接口，它要把整个概览算一遍：写入时 `refetchType: 'none'` 只标记过期，只在 `statsChanged` 认为动了统计时取一次。统计新用到别的字段时要加进 `statsChanged`。
 - 记忆的新建、移动弹窗不用 `<form>`：单选在表单里时回车会隐式提交，尚未看到「可见范围将改变」就移动了。只有点按钮才提交，`memoryPages.test.ts` 核对。
@@ -129,6 +129,7 @@
 - 按长度截断文字要防切开代理对：落单的代理项写进 text 不报错，被悄悄换成 U+FFFD，之后和原文比永远不等（同步每次都算要更新）；写进 jsonb 才报错。
 - zod 4 的字符串 `min`、`max` 按码点算，按契约上限截断也按码点算（`Array.from`）；HTML 的 `maxlength` 按 UTF-16 码元算，带 emoji 时前后端的上限对不上，以服务端为准。
 - `BOOT_ELIGIBLE` 有 JS 版，在 contracts：`bootEligible` 只看层与优先级，导入计划标「进入启动加载」用它（导入写的都是目录里、来源受信的记忆）；`isBootCandidate` 是完整的一份，目录里的（`form` 为 curated）、来源受信、不是机密、层与优先级够格，对应 SQL 的 `BOOT_CANDIDATE`（`memory/filter.ts`，`BOOT_ELIGIBLE` 加上不是机密）。概览的「未设触发场景」与列表的同名筛选（`NEEDS_DISCLOSURE`）不算 `BOOT_CANDIDATE` 的；管理界面的 `isBootNode` 是 `isBootCandidate` 再除去已过期的（视图里没有 `form`，列表与详情只有目录里的记忆），`statsChanged` 照它判断要不要重取统计。改一边必须改另一边，`loreImport.int.test.ts` 用写进去的行比对 `bootEligible`，`browse.int.test.ts` 逐行比对 `BOOT_CANDIDATE` 与 `isBootCandidate`（含抽取的记忆）。
+- 高级设置（召回、启动加载、抽取、整理的参数与提示词补充）：Key 鉴权路径上只经 `scope.settings()`（`settings/advanced.ts`）读，新的接入点不要另读一份：预览、调试与客户端收到的必须是同一份。应用的覆盖在 `apps.config.advanced`，不进 `AppConfig` 契约（否则随 whoami 交给访问密钥、改动 SDK），改应用配置的路径要保留它。新增可调参数时，各级的键、`TUNING_DEFAULTS` 与上下限只在 contracts 里改。补充只叠加不覆盖，固定部分原样在前。试算与服务端一样按 `rawScore` 排序、和最低分比较，`score` 只用于显示。原样写的 sql 片段选 jsonb 时不经过列的解码，回来是文本，要 `.mapWith(列)`。
 - 测试台的回滚模式靠换掉 `Deps.db` 实现（`bench/rollback.ts`），所以 Key 鉴权的路径（工具、生命周期事件、`/recall`）有几条约束。数据库访问都经过传入的 `deps` 或基于它建的服务：绕开 `deps` 的写入不会回滚。语句放进 `withSpace`：直接写在 `deps.db` 上的语句落在根事务上，出错（包括等锁超时）会中止整个运行，后面的步骤记为没有执行；现在只有 `bufferTurn` 读抽取设置这一句是例外。不在事务回调里发外部请求（嵌入、模型）：事务开着时前面步骤的行锁和 URI 咨询锁都没放；这些路径新增要查向量的步骤时加进 `bench/inProcess.ts` 的 `literalQueries`，否则这一步只走全文与关键词。事务回调里不要并行开子事务：代理只让顶层事务排队，同一条连接上并行的 savepoint 会交错。
 - `set_config(..., true)` 与 `set local` 不随 savepoint 成功结束复原，只有 `rollback to` 才复原。`RollbackRun.clearSpace` 只清 `app.space_id`：`recall.ts` 的 `hnsw.*` 也留到回滚为止，它每次向量查询之前都设，所以没有影响；Key 鉴权的路径上新的向量查询或别的事务级设置不能依赖默认值，否则回滚模式和真实不一样。
 - 日志不要整个打可能是数据库错误的 `err`，记进运行记录、最近错误的文字也不要直接用 `err.message`：`DrizzleQueryError` 带 SQL 与全部参数（也就是记忆正文、提示语），驱动的 `PostgresError` 的 `detail` 带数据的值，连接错误的 `message` 是数据库的地址。日志用 `logInternalError` 或 `loggableError(err)`，文字用 `errorText(err)`。
