@@ -1,4 +1,5 @@
 import {
+  ACTIVITY_ACTOR_PATTERN,
   ACTIVITY_FIELDS,
   ACTIVITY_MAX_SPAN_DAYS,
   ACTIVITY_TYPES,
@@ -76,13 +77,14 @@ export interface ActivityState {
   // 每一组取消勾选的值
   off: Record<FilterGroup, string[]>
   q: string
-  // 选中的事件，和它所在的记忆（详情要按记忆取历史）
+  // 选中的事件
   event: number | null
-  memory: string | null
 }
 
+// 地址里最多留这么多个取消勾选的操作者，和接口的上限一致
+export const MAX_ACTOR_FILTER = 50
+
 const DAY = /^\d{4}-\d{2}-\d{2}$/
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const one = (v: LocationQuery[string] | undefined) => (typeof v === 'string' ? v : null)
 const list = (v: LocationQuery[string] | undefined) => {
   const s = one(v)
@@ -109,11 +111,14 @@ export function parseState(query: LocationQuery, today: string): ActivityState {
   const off = {} as Record<FilterGroup, string[]>
   for (const g of FILTER_GROUPS) {
     const values = list(query[OFF_PARAMS[g]])
-    off[g] = g === 'actor' ? values : values.filter((v) => FIXED_OPTIONS[g].includes(v))
+    // 写法不对的操作者、超出上限的丢掉：接口遇到一个就整个请求 400
+    off[g] =
+      g === 'actor'
+        ? values.filter((v) => ACTIVITY_ACTOR_PATTERN.test(v)).slice(0, MAX_ACTOR_FILTER)
+        : values.filter((v) => FIXED_OPTIONS[g].includes(v))
   }
   const event = one(query.event)
-  const memory = one(query.memory)
-  const selected = !!event && /^\d{1,15}$/.test(event) && !!memory && UUID.test(memory)
+  const selected = !!event && /^\d{1,15}$/.test(event) && Number(event) > 0
   return {
     range: from ? null : (range ?? DEFAULT_RANGE),
     from,
@@ -121,7 +126,6 @@ export function parseState(query: LocationQuery, today: string): ActivityState {
     off,
     q: (one(query.q) ?? '').trim().slice(0, 100),
     event: selected ? Number(event) : null,
-    memory: selected ? memory : null,
   }
 }
 
@@ -138,10 +142,7 @@ export function stateQuery(state: ActivityState): LocationQueryRaw {
     if (state.off[g].length) query[OFF_PARAMS[g]] = state.off[g].join(',')
   }
   if (state.q) query.q = state.q
-  if (state.event !== null && state.memory) {
-    query.event = String(state.event)
-    query.memory = state.memory
-  }
+  if (state.event !== null) query.event = String(state.event)
   return query
 }
 
@@ -260,8 +261,8 @@ export function monthGrid(
   for (let i = 0; i < 42; i++) {
     const d = new Date(first.getFullYear(), first.getMonth(), 1 - lead + i)
     const inMonth = d.getMonth() === first.getMonth()
-    // 第六行从下个月开始时整行不要
-    if (i === 35 && !inMonth) break
+    // 一行从下个月开始时，这一行与后面的都不要（2027 年 2 月从周一开始、只有 28 天，第五行就是下个月）
+    if (i % 7 === 0 && !inMonth && d > first) break
     const key = localDate(d)
     const count = counts.get(key) ?? 0
     cells.push({
@@ -306,17 +307,22 @@ export function pickDay(
   return { from, to }
 }
 
-// 每天的柱条：范围内每一天一根，没有改动的是 0。全部时从最早有改动的那天算起
+// 柱条最多这么多根：全部时历史很长，只留最近的
+const MAX_SPARK_DAYS = ACTIVITY_MAX_SPAN_DAYS * 2
+
+// 每天的柱条：范围内每一天一根，没有改动的是 0。全部时从最早有改动的那天算起，最多留最近的 MAX_SPARK_DAYS 天
 export function sparkDays(
   days: { from: string; to: string } | null,
   counts: readonly { day: string; count: number }[],
   today: string,
 ): { day: string; count: number }[] {
-  const first = days?.from ?? counts[0]?.day ?? today
   const last = days?.to ?? today
+  const earliest = addDays(last, -(MAX_SPARK_DAYS - 1))
+  const start = days?.from ?? counts[0]?.day ?? today
+  const first = start < earliest ? earliest : start
   const byDay = new Map(counts.map((c) => [c.day, c.count]))
   const out: { day: string; count: number }[] = []
-  for (let d = first; d <= last && out.length < ACTIVITY_MAX_SPAN_DAYS * 2; d = addDays(d, 1)) {
+  for (let d = first; d <= last; d = addDays(d, 1)) {
     out.push({ day: d, count: byDay.get(d) ?? 0 })
   }
   return out
@@ -350,6 +356,21 @@ export function facetOptions(
     layer: CURATED_LAYERS.map((key) => ({ key, count: layer.get(key) ?? 0 })),
     field: ACTIVITY_FIELDS.map((key) => ({ key, count: field.get(key) ?? 0 })),
   }
+}
+
+// 勾选或取消一项之后这一组取消勾选的值。会把当前列出来的选项全部取消时不改，返回 null：
+// 操作只列出现过的，把看得到的几项全取消，列表注定是空的（归属、字段、操作者同理）
+export function toggleOff(
+  listed: readonly FacetOption[],
+  off: readonly string[],
+  key: string,
+  on: boolean,
+): string[] | null {
+  const next = new Set(off)
+  if (on) next.delete(key)
+  else next.add(key)
+  if (!on && listed.length && listed.every((o) => next.has(o.key))) return null
+  return [...next]
 }
 
 // ---- 改动的标签 ----
