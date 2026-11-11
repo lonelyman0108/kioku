@@ -29,7 +29,12 @@ import {
 } from '../authorize'
 import Hint from '../components/Hint.vue'
 import KeyScopeEditor from '../components/KeyScopeEditor.vue'
-import { issuedCredentialCapability, matchPreset, tightenScopes } from '../components/keyPresets'
+import {
+  CREDENTIAL_CAPABILITY_HINT,
+  issuedCredentialCapability,
+  matchPreset,
+  tightenScopes,
+} from '../components/keyPresets'
 import EntryFrame from '../components/strata/EntryFrame.vue'
 import NoteLine from '../components/strata/NoteLine.vue'
 import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
@@ -163,10 +168,13 @@ const keyName = computed({
   get: () => typed.keyName ?? (info.value ? defaultKeyName(info.value) : ''),
   set: (value: string) => (typed.keyName = value),
 })
-// 服务端说被占用的那个标识（列表里可能还没有它）
-const slugRejected = ref<string | null>(null)
-const slugProblem = computed(
-  () => slugRejected.value ?? appSlugProblem(slug.value, takenSlugs.value),
+// 服务端说被占用的那个标识（列表里可能还没有它）与它给的说明。只在输入框里还是这个标识时显示：
+// 重取列表之后默认值换成了下一个，旧的说明不该压着新的标识
+const slugRejected = ref<{ slug: string; text: string } | null>(null)
+const slugProblem = computed(() =>
+  slugRejected.value?.slug === slug.value
+    ? slugRejected.value.text
+    : appSlugProblem(slug.value, takenSlugs.value),
 )
 const appNameProblem = computed(() => nameProblem(appName.value))
 const keyNameProblem = computed(() => nameProblem(keyName.value))
@@ -247,9 +255,14 @@ async function approve() {
     void refreshAppCaches(queryClient, body.spaceId)
   } catch (err) {
     const failure = grantFailure(err, '确认失败')
-    if (failure.kind === 'slug') {
-      slugRejected.value = failure.text
+    if (failure.kind === 'slug' && 'slug' in body.app) {
+      // 409 且是新建应用：标识被占用，写在标识那一栏
+      slugRejected.value = { slug: body.app.slug, text: failure.text }
       picked.value = NEW_APP
+      void apps.refetch()
+    } else if (failure.kind === 'slug') {
+      // 409 且选的是已有的应用：它的运行时与申请的不一致（列表过时了），显示说明并重取列表
+      error.value = failure.text
       void apps.refetch()
     } else if (failure.kind === 'gone') {
       // 404 可能是申请没了，也可能是选的应用没了：按确认码再查一次才分得清
@@ -418,9 +431,7 @@ async function deny() {
         <div v-if="spaces.length" class="summary">
           <span class="sr-only">签发范围</span>
           <ScopeTags :scopes="form.scopes" :credentials="actualCredentials" />
-          <Hint label="凭据能力说明">
-            取用与管理都需要可读本人、最高敏感级不低于私密，管理还需要可写本人。带会话上下文时（群聊、私聊、定时任务）凭据一律不可用。
-          </Hint>
+          <Hint label="凭据能力说明">{{ CREDENTIAL_CAPABILITY_HINT }}</Hint>
         </div>
         <div class="actions">
           <UButton color="neutral" variant="outline" :loading="busy === 'deny'" @click="deny">

@@ -15,6 +15,7 @@ import { formatRelative, formatShort, formatTime } from '../time'
 import Hint from './Hint.vue'
 import KeyScopeEditor from './KeyScopeEditor.vue'
 import {
+  CREDENTIAL_CAPABILITY_HINT,
   issuedCredentialCapability,
   keyPresets,
   matchPreset,
@@ -260,9 +261,7 @@ async function revoke() {
           <div class="issue-summary">
             <span class="sr-only">签发范围</span>
             <ScopeTags :scopes="form.scopes" :credentials="actualCredentials" />
-            <Hint label="凭据能力说明">
-              取用与管理都需要可读本人、最高敏感级不低于私密，管理还需要可写本人。带会话上下文时（群聊、私聊、定时任务）凭据一律不可用。
-            </Hint>
+            <Hint label="凭据能力说明">{{ CREDENTIAL_CAPABILITY_HINT }}</Hint>
           </div>
           <div class="issue-actions">
             <UButton color="neutral" variant="ghost" @click="closeIssue">取消</UButton>

@@ -24,9 +24,13 @@ export function issueDenial(role: MemberRole | null, scopes: KeyScopes): string 
 // 应用的所有者；lock 为 true 时锁住应用这一行直到事务结束：签发 Key 与转移所有权都先拿这把锁，
 // 保证「检查所有者 → 写 Key」与「吊销 Key → 换所有者」不会交错，转移之后不会冒出前任所有者的新 Key
 export async function appOwnerOf(tx: Tx, appId: string, lock = false): Promise<string | null> {
-  const query = tx.select({ owner: apps.ownerAccountId }).from(apps).where(eq(apps.id, appId))
+  return (await appRow(tx, appId, lock))?.ownerAccountId ?? null
+}
+
+async function appRow(tx: Tx, appId: string, lock: boolean) {
+  const query = tx.select().from(apps).where(eq(apps.id, appId))
   const [row] = lock ? await query.for('update') : await query
-  return row?.owner ?? null
+  return row ?? null
 }
 
 // 账号现在在空间里的角色、加入时间与停用时间；不在空间里时为 undefined。Key 的当前有效上限按它算
@@ -45,7 +49,12 @@ export async function membershipOf(tx: Tx, spaceId: string, accountId: string) {
 }
 
 export type IssuedKey =
-  | { ok: true; row: typeof apiKeys.$inferSelect; plaintext: string }
+  | {
+      ok: true
+      row: typeof apiKeys.$inferSelect
+      app: typeof apps.$inferSelect
+      plaintext: string
+    }
   | { ok: false; reason: 'missing' | 'not-owner' }
 
 // 在 withSpace 的事务里给应用签发一个 Key：只有应用的所有者能签。明文只在返回值里，库里只有哈希
@@ -53,9 +62,9 @@ export async function issueAppKey(
   tx: Tx,
   input: { spaceId: string; appId: string; accountId: string; name: string; scopes: KeyScopes },
 ): Promise<IssuedKey> {
-  const owner = await appOwnerOf(tx, input.appId, true)
-  if (!owner) return { ok: false, reason: 'missing' }
-  if (owner !== input.accountId) return { ok: false, reason: 'not-owner' }
+  const app = await appRow(tx, input.appId, true)
+  if (!app) return { ok: false, reason: 'missing' }
+  if (app.ownerAccountId !== input.accountId) return { ok: false, reason: 'not-owner' }
   const generated = generateApiKey()
   const [row] = await tx
     .insert(apiKeys)
@@ -68,5 +77,5 @@ export async function issueAppKey(
       scopes: input.scopes,
     })
     .returning()
-  return { ok: true, row: row!, plaintext: generated.plaintext }
+  return { ok: true, row: row!, app, plaintext: generated.plaintext }
 }

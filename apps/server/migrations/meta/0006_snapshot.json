@@ -1,5 +1,5 @@
 {
-  "id": "9d29e4aa-1cda-4399-ac5e-720e0e50c77b",
+  "id": "e72e3adf-df3c-491d-aa4d-8dcee51c766f",
   "prevId": "d4fe5e95-0a4d-4206-a12f-c8d8f8e8f907",
   "version": "7",
   "dialect": "postgresql",
@@ -1378,6 +1378,12 @@
         "approved_by": {
           "name": "approved_by",
           "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "approved_at": {
+          "name": "approved_at",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },

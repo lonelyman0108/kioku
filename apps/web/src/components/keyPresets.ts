@@ -102,6 +102,10 @@ export function presetScopes(preset: KeyPreset, isSpaceOwner: boolean): KeyScope
   }
 }
 
+// 凭据能力的适用条件，签发弹窗与浏览器授权的确认页共用这一句
+export const CREDENTIAL_CAPABILITY_HINT =
+  '取用与管理都需要可读本人、最高敏感级不低于私密，管理还需要可写本人。带会话上下文时（群聊、私聊、定时任务）凭据一律不可用。'
+
 // 签发范围按签发人收紧：不是空间所有者时，凭据能力、机密级与跨人格写入都不能带着（服务端按角色同样拒绝）
 export function tightenScopes(scopes: KeyScopes, isSpaceOwner: boolean): KeyScopes {
   return {

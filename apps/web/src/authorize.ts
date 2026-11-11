@@ -131,7 +131,7 @@ export function approveBody(choice: GrantChoice): DeviceGrantApprove {
 // 确认、拒绝失败之后怎么办：
 // - gone：404。拒绝时就是确认码不对或已过期，回第一步；确认时还可能是应用不存在，
 //   页面按确认码再查一次，查不到才回第一步，查得到就留在这一步显示服务端的说明
-// - slug：409，新应用的标识被占用，写在标识那一栏
+// - slug：409。新建应用时是标识被占用，写在标识那一栏；选已有应用时是它的运行时与申请的不一致，显示说明
 // - message：403 与其余的失败，原样显示服务端给的文字
 export interface GrantFailure {
   kind: 'gone' | 'slug' | 'message'

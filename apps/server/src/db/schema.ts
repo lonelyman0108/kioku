@@ -199,6 +199,8 @@ export const deviceGrants = pgTable(
       .notNull()
       .default('pending'),
     approvedBy: uuid().references(() => accounts.id, { onDelete: 'cascade' }),
+    // 取走时和确认人现在的成员关系比：确认之后离开过空间的不签发
+    approvedAt: timestamp({ withTimezone: true }),
     spaceId: uuid().references(() => spaces.id, { onDelete: 'cascade' }),
     appId: uuid(),
     keyName: text(),

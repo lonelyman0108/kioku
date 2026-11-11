@@ -355,17 +355,87 @@ describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
     })
   })
 
-  it('同一个客户端待确认的申请有上限；取走、拒绝、过期的不占名额', async () => {
-    const first = await request()
-    for (let i = 1; i < 10; i++) await request()
-    expect((await cli('/v1/device/authorize', { runtimeFamily: 'codex' })).status).toBe(429)
-    await web('/v1/device/grants/deny', ws.cookie, { userCode: first.userCode })
-    const next = await request()
-    expect((await cli('/v1/device/authorize', { runtimeFamily: 'codex' })).status).toBe(429)
-    await approve(next.userCode)
-    await request()
+  it('同一个客户端待确认的申请有上限；取走、拒绝、过期的不占名额；认不出客户端时不按客户端数', async () => {
+    // 认得出客户端：经一层受信代理，地址取自转发头
+    const proxied = createApp({ ...deps, trustedProxies: 1 })
+    const from = (address: string) =>
+      proxied.request('/v1/device/authorize', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-forwarded-for': address },
+        body: JSON.stringify({ runtimeFamily: 'codex' }),
+      })
+    const codes: DeviceAuthorization[] = []
+    for (let i = 0; i < 10; i++) {
+      const res = await from('203.0.113.7')
+      expect(res.status).toBe(201)
+      codes.push((await res.json()) as DeviceAuthorization)
+    }
+    expect((await from('203.0.113.7')).status).toBe(429)
+    // 别的客户端不受影响
+    expect((await from('203.0.113.8')).status).toBe(201)
+    // 拒绝、确认过的不占名额
+    await web('/v1/device/grants/deny', ws.cookie, { userCode: codes[0]!.userCode })
+    expect((await from('203.0.113.7')).status).toBe(201)
+    expect((await from('203.0.113.7')).status).toBe(429)
+    await approve(codes[1]!.userCode)
+    expect((await from('203.0.113.7')).status).toBe(201)
+    // 过期的不占名额
     await database.db.update(deviceGrants).set({ expiresAt: sql`now() - interval '1 second'` })
-    await request()
+    expect((await from('203.0.113.7')).status).toBe(201)
+
+    // 取不到地址的请求不按客户端数：否则所有人共用一个名额，几条申请就挤得别人都申请不了
+    for (let i = 0; i < 12; i++) await request()
+  })
+
+  it('确认之后离开过空间的确认人，重新加入也取不到：离开前确认的申请不能留下一个访问密钥', async () => {
+    const bob = await addMember(database.db, ws.spaceId, 'bob', 'owner')
+    const grant = await request()
+    expect((await approve(grant.userCode, {}, bob.cookie)).status).toBe(200)
+    await database.db.delete(spaceMembers).where(eq(spaceMembers.accountId, bob.accountId))
+    await database.db
+      .insert(spaceMembers)
+      .values({ spaceId: ws.spaceId, accountId: bob.accountId, role: 'owner' })
+    expect(await poll(grant.deviceCode)).toEqual({ status: 'denied' })
+    expect(await keys()).toHaveLength(0)
+  })
+
+  it('已有的应用要和申请的运行时一致', async () => {
+    const bot = await ws.createApp('bot', { runtimeFamily: 'astrbot' })
+    const grant = await request('codex')
+    const res = await approve(grant.userCode, { app: { id: bot.id } })
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toContain('运行时')
+    // 申请还在
+    expect((await approve(grant.userCode)).status).toBe(200)
+  })
+
+  it('快到期时确认的留出取走的时间', async () => {
+    const grant = await request()
+    await database.db.update(deviceGrants).set({ expiresAt: sql`now() + interval '2 seconds'` })
+    expect((await approve(grant.userCode)).status).toBe(200)
+    const [row] = await database.db
+      .select({ left: sql<number>`extract(epoch from ${deviceGrants.expiresAt} - now())::float` })
+      .from(deviceGrants)
+    expect(row!.left).toBeGreaterThan(50)
+    expect((await poll(grant.deviceCode)).status).toBe('approved')
+  })
+
+  it('取走与删除应用同时进行不会互相卡死', async () => {
+    for (let round = 0; round < 5; round++) {
+      const grant = await request()
+      await approve(grant.userCode, { app: { slug: `race-${round}`, name: 'x' } })
+      const [target] = (await spaceApps()).filter((a) => a.slug === `race-${round}`)
+      const [taken, removed] = await Promise.all([
+        cli('/v1/device/token', { deviceCode: grant.deviceCode }),
+        app.request(`/v1/spaces/${ws.spaceId}/apps/${target!.id}`, {
+          method: 'DELETE',
+          headers: { cookie: ws.cookie, 'sec-fetch-site': 'same-origin' },
+        }),
+      ])
+      // 谁先谁后都行，但都不能是 500
+      expect(taken.status, `第 ${round} 轮取走`).toBe(200)
+      expect(removed.status, `第 ${round} 轮删除`).toBeLessThan(500)
+    }
   })
 
   it('轮询得太勤回 429，不影响之后取走', async () => {

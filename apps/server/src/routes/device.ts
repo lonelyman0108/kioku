@@ -2,7 +2,6 @@ import { createHash, randomBytes, randomInt } from 'node:crypto'
 
 import { createRoute } from '@hono/zod-openapi'
 import {
-  AppConfig,
   DEVICE_GRANT_TTL_SECONDS,
   DEVICE_POLL_INTERVAL_SECONDS,
   DEVICE_USER_CODE_ALPHABET,
@@ -24,6 +23,7 @@ import { and, count, eq, gt, sql } from 'drizzle-orm'
 
 import { appOwnerOf, issueAppKey, issueDenial, membershipOf } from '../access/issue'
 import { requireConsole } from '../auth/middleware'
+import { toAppInfo } from './apps'
 import { withSpace, type Tx } from '../db/client'
 import { apps, deviceGrants } from '../db/schema'
 import { clientAddress, clientIdentity } from '../http/clientIp'
@@ -39,6 +39,8 @@ import { jsonBody, jsonResponse, router } from '../http/openapi'
 // 同时待确认的申请上限：整个实例，以及每个客户端。申请不用登录，不设上限的话可以拿它塞满这张表
 const MAX_PENDING = 500
 const MAX_PENDING_PER_CLIENT = 10
+// 确认之后至少留这么久给命令行取走（秒）
+const DEVICE_TAKE_WINDOW_SECONDS = 60
 // 设备码的随机字节数
 const DEVICE_CODE_BYTES = 32
 
@@ -95,7 +97,7 @@ const approve = createRoute({
     200: jsonResponse('已确认', DeviceGrantApproved),
     403: forbidden,
     404: notFound,
-    409: jsonResponse('应用的标识已被占用', ErrorResponse),
+    409: jsonResponse('应用的标识已被占用，或者运行时与申请的不一致', ErrorResponse),
   },
 })
 
@@ -128,16 +130,27 @@ export function deviceRoutes(deps: Deps) {
     .openapi(authorize, async (c) => {
       const body = c.req.valid('json')
       const identity = clientIdentity(c, deps.trustedProxies ?? 0)
+      // 待确认的申请有没有到上限。认不出客户端时（取不到地址）不按客户端数：
+      // 那样所有人共用一个名额，几条申请就能让别人都申请不了，只看全实例的上限
+      const full = async (db: Pick<Tx, 'select'>) => {
+        const [n] = await db
+          .select({
+            all: count(),
+            mine: sql<number>`count(*) filter (where ${deviceGrants.clientKey} = ${identity.key})::int`,
+          })
+          .from(deviceGrants)
+          .where(and(eq(deviceGrants.status, 'pending'), unexpired))
+        return (
+          (n?.all ?? 0) >= MAX_PENDING ||
+          (identity.identified && (n?.mine ?? 0) >= MAX_PENDING_PER_CLIENT)
+        )
+      }
+      // 先不加锁看一眼：已经满了的请求不去排那把锁，不占着连接等
+      if (await full(deps.db)) return c.json({ error: '待确认的申请太多，稍后再试' }, 429)
       const created = await deps.db.transaction(async (tx) => {
         // 数待确认的申请要和插入串行，否则并发的申请都看到「还没满」
         await tx.execute(sql`select pg_advisory_xact_lock(hashtext('kioku:device-grants'))`)
-        const pending = and(eq(deviceGrants.status, 'pending'), unexpired)
-        const [all] = await tx.select({ n: count() }).from(deviceGrants).where(pending)
-        const [mine] = await tx
-          .select({ n: count() })
-          .from(deviceGrants)
-          .where(and(pending, eq(deviceGrants.clientKey, identity.key)))
-        if ((all?.n ?? 0) >= MAX_PENDING || (mine?.n ?? 0) >= MAX_PENDING_PER_CLIENT) return null
+        if (await full(tx)) return null
         const deviceCode = randomBytes(DEVICE_CODE_BYTES).toString('base64url')
         // 确认码撞上了还在的申请就换一个
         for (let attempt = 0; attempt < 5; attempt++) {
@@ -173,16 +186,27 @@ export function deviceRoutes(deps: Deps) {
     })
     .openapi(token, async (c) => {
       const deviceHash = hash(c.req.valid('json').deviceCode)
+      // 过期与轮询间隔都按数据库的时钟比：这些时间是数据库写的，应用进程的时钟和它差几秒就会判错
+      const timing = {
+        expired: sql<boolean>`${deviceGrants.expiresAt} <= now()`,
+        polledRecently: sql<boolean>`coalesce(${deviceGrants.lastPolledAt} > now() - interval '1 second', false)`,
+      }
       // 先不带空间看一眼：待确认、拒绝、过期都在这里答掉
       const first = await deps.db.transaction(async (tx) => {
         const [row] = await tx
-          .select()
+          .select({
+            id: deviceGrants.id,
+            status: deviceGrants.status,
+            spaceId: deviceGrants.spaceId,
+            appId: deviceGrants.appId,
+            ...timing,
+          })
           .from(deviceGrants)
           .where(eq(deviceGrants.deviceHash, deviceHash))
           .for('update')
         // 设备码不对和过期、已经取走答得一样
         if (!row) return { status: 'expired' as const }
-        if (row.expiresAt.getTime() <= Date.now()) {
+        if (row.expired) {
           await tx.delete(deviceGrants).where(eq(deviceGrants.id, row.id))
           return { status: 'expired' as const }
         }
@@ -192,35 +216,45 @@ export function deviceRoutes(deps: Deps) {
         }
         if (row.status === 'pending') {
           // 轮询得太勤的让它慢一点；不更新时间，免得一直被挡
-          const last = row.lastPolledAt?.getTime() ?? 0
-          if (Date.now() - last < 1000) return { status: 'slow' as const }
+          if (row.polledRecently) return { status: 'slow' as const }
           await tx
             .update(deviceGrants)
             .set({ lastPolledAt: sql`now()` })
             .where(eq(deviceGrants.id, row.id))
           return { status: 'pending' as const }
         }
-        return { status: 'approved' as const, spaceId: row.spaceId }
+        return { status: 'approved' as const, spaceId: row.spaceId, appId: row.appId }
       })
       if (first.status === 'slow') return c.json({ error: '轮询太频繁' }, 429)
       if (first.status !== 'approved') return c.json({ status: first.status }, 200)
-      if (!first.spaceId) return c.json({ status: 'expired' as const }, 200)
+      if (!first.spaceId || !first.appId) return c.json({ status: 'expired' as const }, 200)
 
-      // 确认过的：在空间的事务里再锁一次这一行（同时来的两次轮询只有一次拿得到），
-      // 照签发的规则核对确认人现在的角色与应用的所有者，过了才生成访问密钥；不管成不成，这条申请都删掉
-      const spaceId = first.spaceId
+      // 确认过的：在空间的事务里先锁应用、再锁这条申请（同时来的两次轮询只有一次拿得到），
+      // 照签发的规则核对确认人现在的成员关系与应用的所有者，过了才生成访问密钥；不管成不成，这条申请都删掉。
+      // 锁的顺序和删除应用一致（应用 → 级联到申请），反过来会互相等成死锁
+      const { spaceId, appId } = first
       const result = await withSpace(deps.db, spaceId, async (tx) => {
+        await appOwnerOf(tx, appId, true)
         const [row] = await tx
-          .select()
+          .select({ grant: deviceGrants, expired: timing.expired })
           .from(deviceGrants)
           .where(and(eq(deviceGrants.deviceHash, deviceHash), eq(deviceGrants.status, 'approved')))
           .for('update')
-        if (!row || row.expiresAt.getTime() <= Date.now()) return { status: 'expired' as const }
-        await tx.delete(deviceGrants).where(eq(deviceGrants.id, row.id))
-        const { approvedBy, appId, keyName, scopes } = row
-        if (!approvedBy || !appId || !keyName || !scopes) return { status: 'denied' as const }
+        if (!row || row.expired) return { status: 'expired' as const }
+        const { grant } = row
+        await tx.delete(deviceGrants).where(eq(deviceGrants.id, grant.id))
+        const { approvedBy, approvedAt, keyName, scopes } = grant
+        if (!approvedBy || !approvedAt || !keyName || !scopes || grant.appId !== appId) {
+          return { status: 'denied' as const }
+        }
         const member = await membershipOf(tx, spaceId, approvedBy)
-        if (!member || member.disabledAt || issueDenial(member.role, scopes)) {
+        // 确认之后离开过空间的（现在的成员关系比确认晚）不算：离开时他的 Key 都作废了，不能借没取走的申请留一个
+        if (
+          !member ||
+          member.disabledAt ||
+          member.memberSince > approvedAt ||
+          issueDenial(member.role, scopes)
+        ) {
           return { status: 'denied' as const }
         }
         const issued = await issueAppKey(tx, {
@@ -231,14 +265,13 @@ export function deviceRoutes(deps: Deps) {
           scopes,
         })
         if (!issued.ok) return { status: 'denied' as const }
-        const [target] = await tx.select().from(apps).where(eq(apps.id, appId))
         return {
           status: 'approved' as const,
           key: issued.plaintext,
           app: {
-            slug: target!.slug,
-            name: target!.name,
-            runtimeFamily: target!.runtimeFamily,
+            slug: issued.app.slug,
+            name: issued.app.name,
+            runtimeFamily: issued.app.runtimeFamily,
           },
         }
       })
@@ -281,15 +314,18 @@ export function deviceRoutes(deps: Deps) {
         const grant = await pendingGrant(tx, body.userCode)
         if (!grant) return { error: '确认码不对或已过期', status: 404 as const }
 
-        let appId: string
+        let target: typeof apps.$inferSelect
         if ('id' in body.app) {
-          // 已有的应用：要是确认人自己的。签发时还会再核对一次
-          const owner = await appOwnerOf(tx, body.app.id, true)
-          if (!owner) return { error: '应用不存在', status: 404 as const }
-          if (owner !== accountId) {
+          // 已有的应用：要是确认人自己的、运行时和申请一致的。签发时还会再核对一次所有者
+          const [found] = await tx.select().from(apps).where(eq(apps.id, body.app.id)).for('update')
+          if (!found) return { error: '应用不存在', status: 404 as const }
+          if (found.ownerAccountId !== accountId) {
             return { error: '仅应用所有者可签发此应用的访问密钥', status: 403 as const }
           }
-          appId = body.app.id
+          if (found.runtimeFamily !== grant.runtimeFamily) {
+            return { error: '应用的运行时与申请的不一致', status: 409 as const }
+          }
+          target = found
         } else {
           const [created] = await tx
             .insert(apps)
@@ -301,40 +337,28 @@ export function deviceRoutes(deps: Deps) {
               ownerAccountId: accountId,
             })
             .onConflictDoNothing()
-            .returning({ id: apps.id })
+            .returning()
           if (!created) return { error: `标识 ${body.app.slug} 已被占用`, status: 409 as const }
-          appId = created.id
+          target = created
         }
         await tx
           .update(deviceGrants)
           .set({
             status: 'approved',
             approvedBy: accountId,
+            approvedAt: sql`now()`,
             spaceId,
-            appId,
+            appId: target.id,
             keyName: body.keyName,
             scopes: body.scopes,
+            // 快到期时确认的也留出取走的时间：否则应用建了、页面说已确认，命令行却取到过期
+            expiresAt: sql`greatest(${deviceGrants.expiresAt}, now() + make_interval(secs => ${DEVICE_TAKE_WINDOW_SECONDS}))`,
           })
           .where(eq(deviceGrants.id, grant.id))
-        const [target] = await tx.select().from(apps).where(eq(apps.id, appId))
-        return { app: target! }
+        return { app: target }
       })
       if ('error' in result) return c.json({ error: result.error }, result.status)
-      const row = result.app
-      return c.json(
-        {
-          app: {
-            id: row.id,
-            slug: row.slug,
-            name: row.name,
-            runtimeFamily: row.runtimeFamily,
-            ownerAccountId: row.ownerAccountId,
-            defaultPersonaId: row.defaultPersonaId,
-            config: AppConfig.parse(row.config),
-          },
-        },
-        200,
-      )
+      return c.json({ app: toAppInfo(result.app) }, 200)
     })
     .openapi(deny, async (c) => {
       const { userCode } = c.req.valid('json')

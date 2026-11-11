@@ -8,6 +8,7 @@ CREATE TABLE "device_grants" (
 	"client_key" text NOT NULL,
 	"status" text DEFAULT 'pending' NOT NULL,
 	"approved_by" uuid,
+	"approved_at" timestamp with time zone,
 	"space_id" uuid,
 	"app_id" uuid,
 	"key_name" text,

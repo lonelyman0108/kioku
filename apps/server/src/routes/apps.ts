@@ -42,7 +42,7 @@ const KeyParams = AppParams.extend({ keyId: z.uuid() })
 const forbidden = jsonResponse('没有权限', ErrorResponse)
 const notFound = jsonResponse('不存在', ErrorResponse)
 
-const toAppInfo = (row: typeof apps.$inferSelect) => ({
+export const toAppInfo = (row: typeof apps.$inferSelect) => ({
   id: row.id,
   slug: row.slug,
   name: row.name,
