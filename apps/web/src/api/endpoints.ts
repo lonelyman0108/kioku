@@ -139,10 +139,13 @@ import {
   AdminAccount,
   AdminAccountList,
   CreatedAccount,
+  DeviceGrantApproved,
+  DeviceGrantInfo,
   LoginSessionList,
   PasswordLinkInfo,
   type ChangePasswordRequest,
   type CreateAccountRequest,
+  type DeviceGrantApprove,
   type UpdateAccountRequest,
 } from '@kioku/contracts'
 import { z } from 'zod'
@@ -600,4 +603,12 @@ export const api = {
     request('POST', `/instance/accounts/${accountId}/link`, { schema: AccountLink }),
   updateAccount: (accountId: string, body: UpdateAccountRequest) =>
     request('PATCH', `/instance/accounts/${accountId}`, { body, schema: AdminAccount }),
+
+  // 浏览器授权的确认页：都是点了才发的 POST，确认码在请求体里，不进地址，也不进 useQuery 的缓存
+  lookupDeviceGrant: (userCode: string) =>
+    request('POST', '/device/grants/lookup', { body: { userCode }, schema: DeviceGrantInfo }),
+  approveDeviceGrant: (body: DeviceGrantApprove) =>
+    request('POST', '/device/grants/approve', { body, schema: DeviceGrantApproved }),
+  denyDeviceGrant: (userCode: string) =>
+    request('POST', '/device/grants/deny', { body: { userCode } }),
 }

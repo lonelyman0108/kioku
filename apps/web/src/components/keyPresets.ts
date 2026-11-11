@@ -102,6 +102,17 @@ export function presetScopes(preset: KeyPreset, isSpaceOwner: boolean): KeyScope
   }
 }
 
+// 签发范围按签发人收紧：不是空间所有者时，凭据能力、机密级与跨人格写入都不能带着（服务端按角色同样拒绝）
+export function tightenScopes(scopes: KeyScopes, isSpaceOwner: boolean): KeyScopes {
+  return {
+    ...scopes,
+    credentials: allowedCredentialCapability(scopes.credentials, isSpaceOwner),
+    maxSensitivity:
+      !isSpaceOwner && scopes.maxSensitivity === 'secret' ? 'private' : scopes.maxSensitivity,
+    admin: isSpaceOwner && scopes.admin,
+  }
+}
+
 // 当前的签发范围和哪个模板完全一样（按签发人收紧之后比），都不一样时是自定义
 export function matchPreset(scopes: KeyScopes, isSpaceOwner: boolean): string {
   return (

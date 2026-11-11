@@ -14,6 +14,7 @@ import {
   issuedCredentialCapability,
   keyPresets,
   presetScopes,
+  tightenScopes,
   sameScopes,
 } from '../components/keyPresets'
 import { scopesSummary } from '../labels'
@@ -284,7 +285,8 @@ describe('界面用上了这些规则', () => {
     )
     expect(keyScopeEditor).toContain(':items="credentialItems"')
     expect(keyScopeEditor).toContain('presetScopes(found, props.isSpaceOwner)')
-    expect(appKeys).toContain('credentials: allowedCredentialCapability(s.credentials, owner)')
+    expect(appKeys).toContain('form.scopes = tightenScopes(form.scopes, owner)')
+    expect(tightenScopes(presetScopes(keyPresets[0]!, true), false).credentials).toBe('none')
     expect(presetScopes(keyPresets[0]!, false).credentials).toBe('none')
   })
 

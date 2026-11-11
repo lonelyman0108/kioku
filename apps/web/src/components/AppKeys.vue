@@ -15,11 +15,11 @@ import { formatRelative, formatShort, formatTime } from '../time'
 import Hint from './Hint.vue'
 import KeyScopeEditor from './KeyScopeEditor.vue'
 import {
-  allowedCredentialCapability,
   issuedCredentialCapability,
   keyPresets,
   matchPreset,
   presetScopes,
+  tightenScopes,
 } from './keyPresets'
 import EmptyState from './strata/EmptyState.vue'
 import FlagTag from './strata/FlagTag.vue'
@@ -70,13 +70,7 @@ const form = reactive({
 watch(
   () => props.isSpaceOwner,
   (owner) => {
-    const s = form.scopes
-    form.scopes = {
-      ...s,
-      credentials: allowedCredentialCapability(s.credentials, owner),
-      maxSensitivity: !owner && s.maxSensitivity === 'secret' ? 'private' : s.maxSensitivity,
-      admin: owner && s.admin,
-    }
+    form.scopes = tightenScopes(form.scopes, owner)
     form.preset = matchPreset(form.scopes, owner)
   },
   { immediate: true },
