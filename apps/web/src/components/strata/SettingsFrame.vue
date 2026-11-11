@@ -18,14 +18,18 @@ export interface SettingsFrameGroup {
   key: string
   label: string
   icon: string
-  // 组标题右边的一句：当前账号、空间与角色、仅管理员
+  // 换到这一组时去哪：组里第一个看得到的小节
+  to: RouteLocationRaw
+  // 分页上组名后面的一句：当前账号、空间与角色、仅管理员
   aside?: string
   // 右边面包屑里组的名字，默认是 label
   crumb?: string
   sections: SettingsFrameSection[]
 }
 
-// 设置页的骨架：左栏按组列出小节，右边是当前小节，窄屏时左栏是顶上横向滚动的一行。
+// 设置页的骨架：标题下面一行分页换组，左栏只列当前这一组的小节，右边是当前小节；
+// 窄屏时顶上是两行，分页一行、小节一行（放不下时横向滚动），标题只留给读屏。
+// 标题、分页与左栏都不随内容滚动：滚的只有右边这一栏，切小节时导航不会在指针下面挪位置，也没有东西盖在表单上。
 // 只有当前这一组的小节挂在页面上，内容由页面放进默认插槽（按小节的 key 调用）；组里的小节一直挂着，只切换显示：
 // 切走再回来，填了一半的表单、选好的文件都还在。别的组是别的页面，离开时由页面确认未保存的改动
 const props = defineProps<{
@@ -38,11 +42,11 @@ const active = computed(() => props.groups.find((g) => g.key === props.group))
 const panes = computed(() => active.value?.sections ?? [])
 const currentPane = computed(() => panes.value.find((s) => s.key === props.current))
 
-// 各小节共用一个滚动区：切走时记下位置，切回来时回到原处，没看过的从顶上开始
+// 各小节共用一个滚动区（右边那一栏）：切走时记下位置，切回来时回到原处，没看过的从顶上开始
 const scroller = ref<HTMLElement | null>(null)
 const nav = ref<HTMLElement | null>(null)
 const positions = new Map<string, number>()
-// 窄屏的左栏横向滚动，当前小节要在屏幕里；宽屏时本来就在，不会动
+// 窄屏的小节那一行横向滚动，当前小节要在屏幕里；宽屏时本来就在，不会动
 function revealCurrent() {
   nav.value
     ?.querySelector('[aria-current="page"]')
@@ -64,49 +68,58 @@ onMounted(revealCurrent)
 </script>
 
 <template>
-  <div ref="scroller" class="settings">
+  <div class="settings">
+    <h1 class="settings-title">设置</h1>
+    <!-- 换组是换页面，照常留历史记录；当前这一组的分页就是现在这一页，点了不动 -->
+    <nav class="settings-groups" aria-label="设置的分组">
+      <RouterLink
+        v-for="g in groups"
+        :key="g.key"
+        :to="g.key === group && currentPane ? currentPane.to : g.to"
+        class="group-tab"
+        :aria-current="g.key === group ? 'page' : undefined"
+      >
+        <UIcon :name="g.icon" class="group-icon" />
+        <span class="group-label">{{ g.label }}</span>
+        <span v-if="g.aside" class="group-aside" :title="g.aside">{{ g.aside }}</span>
+      </RouterLink>
+    </nav>
     <div class="settings-grid">
       <div class="settings-side">
-        <h1 class="settings-title">设置</h1>
+        <!-- 组内切小节不留历史记录，返回键直接离开设置页 -->
         <nav ref="nav" class="settings-nav" aria-label="设置的小节">
-          <div v-for="g in groups" :key="g.key" class="settings-group">
-            <div class="group-head">
-              <UIcon :name="g.icon" class="group-icon" />
-              <span class="group-label">{{ g.label }}</span>
-              <span v-if="g.aside" class="group-aside" :title="g.aside">{{ g.aside }}</span>
-            </div>
-            <!-- 组内切小节不留历史记录，返回键直接离开设置页；换组是换页面，照常留 -->
-            <RouterLink
-              v-for="section in g.sections"
-              :key="section.key"
-              :to="section.to"
-              :replace="g.key === group"
-              class="settings-tab"
-              :aria-current="g.key === group && section.key === current ? 'page' : undefined"
-            >
-              <UIcon :name="section.icon" class="tab-icon" />
-              <span class="tab-label">{{ section.label }}</span>
-              <span v-if="section.unsaved" class="tab-unsaved">未保存</span>
-              <span v-else-if="section.count" class="tab-count">{{ section.count }}</span>
-            </RouterLink>
-          </div>
+          <RouterLink
+            v-for="section in panes"
+            :key="section.key"
+            :to="section.to"
+            replace
+            class="settings-tab"
+            :aria-current="section.key === current ? 'page' : undefined"
+          >
+            <UIcon :name="section.icon" class="tab-icon" />
+            <span class="tab-label">{{ section.label }}</span>
+            <span v-if="section.unsaved" class="tab-unsaved">未保存</span>
+            <span v-else-if="section.count" class="tab-count">{{ section.count }}</span>
+          </RouterLink>
         </nav>
       </div>
-      <div class="settings-main">
-        <p v-if="active && currentPane" class="settings-crumb">
-          <span>{{ active.crumb ?? active.label }}</span>
-          <UIcon :name="icons.chevronRight" class="crumb-icon" />
-          <span>{{ currentPane.label }}</span>
-        </p>
-        <section
-          v-for="section in panes"
-          v-show="section.key === current"
-          :key="section.key"
-          :aria-label="section.label"
-        >
-          <h2 class="settings-heading">{{ section.label }}</h2>
-          <slot :section="section.key" />
-        </section>
+      <div ref="scroller" class="settings-main">
+        <div class="settings-body">
+          <p v-if="active && currentPane" class="settings-crumb">
+            <span>{{ active.crumb ?? active.label }}</span>
+            <UIcon :name="icons.chevronRight" class="crumb-icon" />
+            <span>{{ currentPane.label }}</span>
+          </p>
+          <section
+            v-for="section in panes"
+            v-show="section.key === current"
+            :key="section.key"
+            :aria-label="section.label"
+          >
+            <h2 class="settings-heading">{{ section.label }}</h2>
+            <slot :section="section.key" />
+          </section>
+        </div>
       </div>
     </div>
   </div>
@@ -114,61 +127,81 @@ onMounted(revealCurrent)
 
 <style scoped>
 .settings {
+  display: flex;
   flex: 1;
+  flex-direction: column;
   min-width: 0;
   min-height: 0;
-  overflow-y: auto;
-}
-.settings-grid {
-  display: grid;
-  grid-template-columns: 264px minmax(0, 1fr);
-  min-height: 100%;
-}
-/* 内容很长时左栏还在屏幕里；视口很矮放不下时它自己能滚 */
-.settings-side {
-  position: sticky;
-  top: 0;
-  align-self: start;
-  max-height: calc(100svh - 52px);
-  padding: 20px 0 40px;
-  overflow-y: auto;
 }
 .settings-title {
-  padding: 0 24px 4px;
+  flex: none;
+  padding: 20px 24px 6px;
   font-size: 24px;
   font-weight: 500;
   line-height: 1.3;
 }
-.settings-group {
-  margin-top: 16px;
-}
-.group-head {
+/* 分页：一条墨线托着，当前组是粗的墨线加粗体；小节用反白，两级分得开 */
+.settings-groups {
   display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  padding: 4px 24px 6px;
+  flex: none;
+  min-height: 45px;
+  padding: 0 8px;
   border-bottom: 1px solid var(--strata-rule);
-  font-size: 12px;
+}
+.group-tab {
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 3px 16px 0;
+  border-bottom: 3px solid transparent;
+  line-height: 1.4;
+  white-space: nowrap;
   color: var(--ui-text-muted);
 }
+.group-tab:hover {
+  background: var(--ui-bg-muted);
+  color: var(--ui-text);
+}
+.group-tab[aria-current='page'] {
+  border-bottom-color: var(--strata-rule);
+  font-weight: 600;
+  color: var(--ui-text);
+}
+.group-tab:focus-visible {
+  outline-offset: -2px;
+}
 .group-icon {
+  display: inline-block;
   flex: none;
   width: 16px;
   height: 16px;
 }
 .group-label {
   flex: none;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--ui-text);
 }
 .group-aside {
   min-width: 0;
-  margin-left: auto;
+  max-width: 18em;
   overflow: hidden;
+  font-size: 12px;
+  font-weight: 400;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  color: var(--ui-text-muted);
+}
+.settings-grid {
+  display: grid;
+  flex: 1;
+  grid-template-rows: minmax(0, 1fr);
+  grid-template-columns: 264px minmax(0, 1fr);
+  min-height: 0;
+}
+/* 左栏不跟着内容滚；视口很矮放不下时它自己能滚 */
+.settings-side {
+  min-height: 0;
+  padding-bottom: 40px;
+  overflow-y: auto;
 }
 .settings-tab {
   display: flex;
@@ -181,6 +214,7 @@ onMounted(revealCurrent)
   color: var(--ui-text-toned);
 }
 .tab-icon {
+  display: inline-block;
   flex: none;
   width: 16px;
   height: 16px;
@@ -228,9 +262,13 @@ onMounted(revealCurrent)
 }
 .settings-main {
   min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  border-left: 1px solid var(--strata-rule);
+}
+.settings-body {
   max-width: 1180px;
   padding: 22px 40px 56px;
-  border-left: 1px solid var(--strata-rule);
 }
 .settings-crumb {
   display: flex;
@@ -250,53 +288,49 @@ onMounted(revealCurrent)
   line-height: 1.3;
 }
 
-/* 窄屏：左栏换成贴在顶上的一行，放不下时横向滚动；组之间一条竖线，组名打头 */
+/* 窄屏：顶上两行，第一行分页，第二行当前组的小节，放不下时横向滚动；标题只留给读屏，把高度让给内容 */
 @media (max-width: 1023.98px) {
+  .settings-title {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .settings-groups {
+    padding: 0 4px;
+  }
+  .group-tab {
+    flex: none;
+    gap: 6px;
+    padding: 3px 12px 0;
+  }
+  /* 三个分页要排进一行：只有当前组显示后面那一句，放不下时省略；别的组那一句只留给读屏 */
+  .group-tab[aria-current='page'] {
+    flex: 0 1 auto;
+  }
+  .group-tab:not([aria-current='page']) .group-aside {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    clip-path: inset(50%);
+  }
   .settings-grid {
-    display: block;
-    min-height: 0;
+    display: flex;
+    flex-direction: column;
   }
   .settings-side {
-    display: contents;
-  }
-  .settings-title {
-    padding: 16px 16px 10px;
-    font-size: 23px;
+    flex: none;
+    padding-bottom: 0;
+    overflow: visible;
   }
   .settings-nav {
-    position: sticky;
-    top: 0;
-    z-index: 1;
     display: flex;
     overflow-x: auto;
-    border-top: 1px solid var(--strata-rule);
     border-bottom: 1px solid var(--strata-rule);
-    background: var(--ui-bg);
     scrollbar-width: none;
-  }
-  .settings-group {
-    display: flex;
-    flex: none;
-    margin-top: 0;
-  }
-  .settings-group + .settings-group {
-    border-left: 1px solid var(--ui-border-accented);
-  }
-  .group-head {
-    flex: none;
-    padding: 0 6px 0 12px;
-    border-bottom: 0;
-  }
-  .settings-group:first-child .group-head {
-    padding-left: 16px;
-  }
-  .group-icon,
-  .group-aside {
-    display: none;
-  }
-  .group-label {
-    font-size: 12px;
-    color: var(--ui-text-muted);
   }
   .settings-tab {
     flex: none;
@@ -306,12 +340,18 @@ onMounted(revealCurrent)
     border-bottom: 0;
     white-space: nowrap;
   }
+  .settings-tab:first-child {
+    padding-left: 16px;
+  }
   .settings-tab[aria-current='page'] {
     border-bottom: 0;
   }
   .settings-main {
-    padding: 14px 16px 40px;
+    flex: 1;
     border-left: 0;
+  }
+  .settings-body {
+    padding: 14px 16px 40px;
   }
 }
 </style>

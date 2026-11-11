@@ -156,7 +156,7 @@ const admin = { isAdmin: true, role: 'owner' as const }
 const member = { isAdmin: false, role: 'viewer' as const }
 
 describe('小节的注册', () => {
-  it('三组按左栏的顺序，组内顺序和 demo 一致', () => {
+  it('三组按分页的顺序，组内顺序和 demo 一致', () => {
     expect(SETTINGS_GROUPS.map((g) => [g.key, g.label])).toEqual([
       ['account', '个人'],
       ['space', '空间'],
@@ -439,6 +439,7 @@ describe('设置页的骨架', () => {
       key: 'account',
       label: '个人',
       icon: 'i-lucide-user',
+      to: '/a',
       aside: '审阅者',
       sections: [{ key: 'appearance', label: '外观', icon: 'i-lucide-sun-moon', to: '/a' }],
     },
@@ -446,6 +447,7 @@ describe('设置页的骨架', () => {
       key: 'instance',
       label: '实例',
       icon: 'i-lucide-server',
+      to: '/i/models',
       aside: '仅管理员',
       sections: [
         { key: 'models', label: '模型', icon: 'i-lucide-cpu', to: '/i/models' },
@@ -471,11 +473,65 @@ describe('设置页的骨架', () => {
     new RegExp(`<section[^>]*aria-label="${label}"[^>]*>`).exec(html)![0]
   const currentLinks = (html: string) => [...html.matchAll(/<a[^>]*aria-current="page"[^>]*>/g)]
 
-  it('左栏列出所有组和组标题右边的一句', async () => {
-    const html = await frame('data')
-    for (const text of ['个人', '审阅者', '外观', '实例', '仅管理员', '模型', '数据与保留']) {
-      expect(html).toContain(text)
-    }
+  // 渲染结果里一个 nav 的内容
+  const navOf = (html: string, label: string) =>
+    new RegExp(`<nav[^>]*aria-label="${label}"[^>]*>.*?</nav>`).exec(html)![0]
+  const linksOf = (html: string) => [...html.matchAll(/<a[^>]*>.*?<\/a>/g)].map((m) => m[0])
+  const styleOf = (source: string) => parse(source).descriptor.styles[0]!.content
+  const rule = (css: string, selector: string) =>
+    new RegExp(`\\${selector} \\{[^}]*\\}`).exec(css)![0]
+
+  it('标题下面一行分页列出所有组，组名后面带那一句，悬停里是完整的', async () => {
+    const tabs = linksOf(navOf(await frame('data'), '设置的分组'))
+    expect(tabs).toHaveLength(2)
+    expect(tabs[0]).toContain('href="/a"')
+    expect(tabs[0]).toContain('个人')
+    expect(tabs[0]).toContain('审阅者')
+    expect(tabs[0]).toMatch(/<span[^>]*title="审阅者"[^>]*>审阅者</)
+    expect(tabs[0]).not.toContain('aria-current')
+    expect(tabs[1]).toContain('href="/i/data"')
+    expect(tabs[1]).toMatch(/<span[^>]*title="仅管理员"[^>]*>仅管理员</)
+    expect(tabs[1]).toContain('aria-current="page"')
+    // 图标旁一定有文字
+    for (const tab of tabs) expect(tab).toMatch(/class="[^"]*group-label[^"]*"/)
+  })
+
+  it('只有一组时分页还在：这一组是谁的写在上面', async () => {
+    const html = await render(SettingsFrame, {
+      group: 'account',
+      current: 'appearance',
+      groups: groups.slice(0, 1),
+    })
+    const tabs = linksOf(navOf(html, '设置的分组'))
+    expect(tabs).toHaveLength(1)
+    expect(tabs[0]).toContain('审阅者')
+  })
+
+  it('左栏只列当前这一组的小节', async () => {
+    const side = navOf(await frame('data'), '设置的小节')
+    expect(linksOf(side).map((a) => /href="([^"]*)"/.exec(a)![1])).toEqual(['/i/models', '/i/data'])
+    expect(side).not.toContain('外观')
+    expect(side).not.toContain('仅管理员')
+  })
+
+  it('两个导航的名字不一样', () => {
+    const navs = elementsOf(template(settingsFrame)).filter((el) => el.tag === 'nav')
+    expect(
+      navs.map((el) => el.props?.find((p) => p.name === 'aria-label')?.value?.content),
+    ).toEqual(['设置的分组', '设置的小节'])
+  })
+
+  it('只有右边那一栏滚动：标题、分页与左栏不跟着滚，也没有贴顶的行盖在内容上', () => {
+    const css = styleOf(settingsFrame)
+    expect(css).not.toContain('position: sticky')
+    const [wide, narrow] = css.split('@media (max-width: 1023.98px)')
+    expect(rule(wide!, '.settings-main')).toContain('overflow-y: auto;')
+    expect(rule(wide!, '.settings')).not.toContain('overflow')
+    const scroller = elementsOf(template(settingsFrame)).find((el) =>
+      el.props?.some((p) => p.name === 'ref' && p.value?.content === 'scroller'),
+    )!
+    expect(scroller.props?.find((p) => p.name === 'class')?.value?.content).toBe('settings-main')
+    expect(rule(narrow!, '.settings-tab')).toContain('min-height: 44px;')
   })
 
   it('当前这一组的小节一直挂着，只显示当前这一节；别的组不挂', async () => {
@@ -493,16 +549,21 @@ describe('设置页的骨架', () => {
     expect(directive(section, 'if')).toBeUndefined()
   })
 
-  it('只标出当前组里的当前小节', async () => {
-    const current = currentLinks(await frame('data'))
+  it('分页标出当前组，左栏标出当前小节', async () => {
+    const html = await frame('data')
+    expect(currentLinks(html)).toHaveLength(2)
+    const current = currentLinks(navOf(html, '设置的小节'))
     expect(current).toHaveLength(1)
     expect(current[0]![0]).toContain('href="/i/data"')
   })
 
   it('组内切小节不留历史记录，换组照常留', () => {
-    const link = elementsOf(template(settingsFrame)).find((el) => el.tag === 'RouterLink')!
-    expect(bound(link, 'replace')).toBe('g.key === group')
-    expect(bound(link, 'to')).toBe('section.to')
+    const [tab, link] = elementsOf(template(settingsFrame)).filter((el) => el.tag === 'RouterLink')
+    // 当前组的分页就是现在这一页（aria-current 说的是实话），别的组去它的第一节
+    expect(bound(tab!, 'to')).toBe('g.key === group && currentPane ? currentPane.to : g.to')
+    expect(tab!.props?.some((p) => p.name === 'replace')).toBe(false)
+    expect(bound(link!, 'to')).toBe('section.to')
+    expect(link!.props?.some((p) => p.name === 'replace' && p.exp === undefined)).toBe(true)
   })
 
   it('有未保存改动的小节在左栏标出来', async () => {
@@ -771,9 +832,9 @@ describe('设置页', () => {
     const component = elementsOf(template(settingsPage)).find((el) => el.tag === 'component')!
     expect(directive(component, 'model')?.arg?.content).toBe('dirty')
     expect(directive(component, 'model')?.exp?.content).toBe('dirty[section]')
-    expect(scriptOf(settingsPage)).toContain(
-      'unsaved: key === group.value && Boolean(dirty[section.key])',
-    )
+    expect(scriptOf(settingsPage)).toContain('unsaved: Boolean(dirty[section.key])')
+    // 分页链到组里第一个看得到的小节
+    expect(scriptOf(settingsPage)).toContain('to: linkTo(key, list[0]!.key),')
   })
 
   it('敏感级不再用彩色徽章', () => {
