@@ -56,7 +56,6 @@ import {
   LoreImportPlan,
   LoreImportResult,
   Me,
-  MemberInfo,
   MemoryHistory,
   MemoryList,
   MemoryRecallStat,
@@ -125,6 +124,26 @@ import {
   type UpdateAppAdvanced,
   type UpdateInstanceAdvanced,
   type UpdateSpaceAdvanced,
+  CreatedSpace,
+  InstanceSpace,
+  SpaceCreationView,
+  SpaceDetail,
+  SpaceInfo,
+  SpaceMember,
+  type AddMemberRequest,
+  type CreateSpaceRequest,
+  type MemberRole,
+} from '@kioku/contracts'
+import {
+  AccountLink,
+  AdminAccount,
+  AdminAccountList,
+  CreatedAccount,
+  LoginSessionList,
+  PasswordLinkInfo,
+  type ChangePasswordRequest,
+  type CreateAccountRequest,
+  type UpdateAccountRequest,
 } from '@kioku/contracts'
 import { z } from 'zod'
 
@@ -153,8 +172,36 @@ export const api = {
   deletePersona: (spaceId: string, personaId: string) =>
     request('DELETE', `/spaces/${spaceId}/personas/${personaId}`),
   members: (spaceId: string) =>
-    request('GET', `/spaces/${spaceId}/members`, { schema: z.array(MemberInfo) }),
-
+    request('GET', `/spaces/${spaceId}/members`, { schema: z.array(SpaceMember) }),
+  // 空间与成员
+  space: (spaceId: string) => request('GET', `/spaces/${spaceId}`, { schema: SpaceDetail }),
+  renameSpace: (spaceId: string, name: string) =>
+    request('PATCH', `/spaces/${spaceId}`, { body: { name }, schema: SpaceInfo }),
+  deleteSpace: (spaceId: string, confirmName: string) =>
+    request('DELETE', `/spaces/${spaceId}`, { body: { confirmName } }),
+  createSpace: (body: CreateSpaceRequest) =>
+    request('POST', '/spaces', { body, schema: CreatedSpace }),
+  addMember: (spaceId: string, body: AddMemberRequest) =>
+    request('POST', `/spaces/${spaceId}/members`, { body, schema: SpaceMember }),
+  updateMember: (spaceId: string, accountId: string, role: MemberRole) =>
+    request('PATCH', `/spaces/${spaceId}/members/${accountId}`, {
+      body: { role },
+      schema: SpaceMember,
+    }),
+  removeMember: (spaceId: string, accountId: string) =>
+    request('DELETE', `/spaces/${spaceId}/members/${accountId}`),
+  transferOwnership: (spaceId: string, accountId: string) =>
+    request('POST', `/spaces/${spaceId}/transfer-ownership`, {
+      body: { accountId },
+      schema: z.array(SpaceMember),
+    }),
+  instanceSpaces: () => request('GET', '/instance/spaces', { schema: z.array(InstanceSpace) }),
+  spaceCreation: () => request('GET', '/instance/space-creation', { schema: SpaceCreationView }),
+  saveSpaceCreation: (membersCanCreate: boolean) =>
+    request('PUT', '/instance/space-creation', {
+      body: { membersCanCreate },
+      schema: SpaceCreationView,
+    }),
   apps: (spaceId: string) =>
     request('GET', `/spaces/${spaceId}/apps`, { schema: z.array(AppInfo) }),
   createApp: (
@@ -537,4 +584,23 @@ export const api = {
   backupRun: (runId: string) =>
     request('GET', `/settings/backup/runs/${runId}`, { schema: BackupRunStatus }),
   backupObjects: () => request('GET', '/settings/backup/objects', { schema: BackupObjectList }),
+
+  // 账号：个人的资料、密码与登录设备；设置密码链接（不用登录）；实例管理员管理账号
+  updateProfile: (displayName: string) =>
+    request('PATCH', '/auth/profile', { body: { displayName }, schema: Me }),
+  changePassword: (body: ChangePasswordRequest) => request('POST', '/auth/password', { body }),
+  loginSessions: () => request('GET', '/auth/sessions', { schema: LoginSessionList }),
+  signOutSession: (sessionId: string) => request('DELETE', `/auth/sessions/${sessionId}`),
+  signOutOtherSessions: () => request('POST', '/auth/sessions/sign-out-others'),
+  inspectPasswordLink: (token: string) =>
+    request('POST', '/auth/password-link/inspect', { body: { token }, schema: PasswordLinkInfo }),
+  usePasswordLink: (token: string, password: string) =>
+    request('POST', '/auth/password-link', { body: { token, password }, schema: Me }),
+  accounts: () => request('GET', '/instance/accounts', { schema: AdminAccountList }),
+  createAccount: (body: CreateAccountRequest) =>
+    request('POST', '/instance/accounts', { body, schema: CreatedAccount }),
+  regenerateAccountLink: (accountId: string) =>
+    request('POST', `/instance/accounts/${accountId}/link`, { schema: AccountLink }),
+  updateAccount: (accountId: string, body: UpdateAccountRequest) =>
+    request('PATCH', `/instance/accounts/${accountId}`, { body, schema: AdminAccount }),
 }

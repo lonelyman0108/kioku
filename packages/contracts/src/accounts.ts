@@ -81,8 +81,15 @@ export type SetPasswordRequest = z.infer<typeof SetPasswordRequest>
 export const UpdateProfileRequest = z.object({ displayName: DisplayName })
 export type UpdateProfileRequest = z.infer<typeof UpdateProfileRequest>
 
+// 改密码时当前密码不对：400 的错误体带 code，界面按 code 和请求校验没过分开说，不比对文字
+export const WrongCurrentPassword = z.object({
+  error: z.string(),
+  code: z.literal('wrong_current_password'),
+})
+export type WrongCurrentPassword = z.infer<typeof WrongCurrentPassword>
+
 export const ChangePasswordRequest = z.object({
-  currentPassword: z.string().max(256),
+  currentPassword: z.string().max(256, '当前密码最多 256 个字符'),
   newPassword: Password,
 })
 export type ChangePasswordRequest = z.infer<typeof ChangePasswordRequest>

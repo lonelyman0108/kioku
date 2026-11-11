@@ -33,6 +33,8 @@ const flag = computed(() => (props.status ? FLAGS[props.status] : null))
   color: var(--ui-warning);
 }
 .flag-icon {
+  /* 预检样式把 svg 设成 block，在标签里会把文字挤到下一行 */
+  display: inline-block;
   width: 12px;
   height: 12px;
   margin-right: 3px;

@@ -9,6 +9,12 @@ import { legacySettingsRedirect, legacySpaceSettingsRedirect } from './settingsS
 export const routes: RouteRecordRaw[] = [
   { path: '/setup', name: 'setup', component: () => import('./pages/SetupPage.vue') },
   { path: '/login', name: 'login', component: () => import('./pages/LoginPage.vue') },
+  // 设置密码链接：不需要登录，已登录时也照样打开
+  {
+    path: '/password/:token',
+    name: 'password',
+    component: () => import('./pages/PasswordPage.vue'),
+  },
   // 静态引入：后端连不上时，按需加载的页面文件也拿不到
   { path: '/unavailable', name: 'unavailable', component: UnavailablePage },
   {
@@ -165,6 +171,7 @@ export function installGuards(router: Router): void {
         if (!setupDone) return to.name === 'setup' ? true : { name: 'setup' }
       }
       if (to.name === 'setup') return { name: 'home' }
+      if (to.name === 'password') return true
       const me = await loadMe()
       if (!me) return to.name === 'login' ? true : { name: 'login', query: { next: to.fullPath } }
       if (to.name === 'login') return { name: 'home' }

@@ -162,14 +162,25 @@ describe('小节的注册', () => {
       ['space', '空间'],
       ['instance', '实例'],
     ])
-    expect(keysOf('account')).toEqual(['appearance'])
-    expect(keysOf('space')).toEqual(['recall', 'extraction', 'transfer'])
-    expect(keysOf('instance')).toEqual(['spaces', 'models', 'security', 'data', 'prompts'])
+    expect(keysOf('account')).toEqual(['account', 'appearance'])
+    expect(keysOf('space')).toEqual(['general', 'members', 'recall', 'extraction', 'transfer'])
+    expect(keysOf('instance')).toEqual([
+      'accounts',
+      'spaces',
+      'models',
+      'security',
+      'data',
+      'prompts',
+    ])
     expect(SETTINGS_SECTIONS.map((s) => s.label)).toEqual([
+      '账号与登录',
       '外观',
+      '概况',
+      '成员',
       '召回与启动加载',
       '抽取与整理',
       '导入与导出',
+      '账号',
       '空间',
       '模型',
       '安全',
@@ -199,6 +210,8 @@ describe('小节的注册', () => {
     expect(visibleGroups({ ...member, hasSpace: true })).toEqual(['account', 'space'])
     expect(visibleGroups({ ...member, hasSpace: false })).toEqual(['account'])
     expect(visibleSections('space', member).map((s) => s.key)).toEqual([
+      'general',
+      'members',
       'recall',
       'extraction',
       'transfer',
@@ -208,9 +221,9 @@ describe('小节的注册', () => {
   it('地址里的小节不存在或看不到时看第一个看得到的', () => {
     const sections = visibleSections('instance', admin)
     expect(currentSection(sections, 'data')?.key).toBe('data')
-    expect(currentSection(sections, undefined)?.key).toBe('spaces')
-    expect(currentSection(sections, 'nonsense')?.key).toBe('spaces')
-    expect(currentSection(sections, ['data'])?.key).toBe('spaces')
+    expect(currentSection(sections, undefined)?.key).toBe('accounts')
+    expect(currentSection(sections, 'nonsense')?.key).toBe('accounts')
+    expect(currentSection(sections, ['data'])?.key).toBe('accounts')
     expect(currentSection([], 'data')).toBeUndefined()
   })
 })

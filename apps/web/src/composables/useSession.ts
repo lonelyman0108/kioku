@@ -49,8 +49,10 @@ export function rememberSpace(id: string): void {
   }
 }
 
-// 退出登录、会话失效时清掉：同一个标签页里换人登录，不沿用上一个人的空间
-export function forgetSpace(): void {
+// 退出登录、会话失效时清掉：同一个标签页里换人登录，不沿用上一个人的空间。
+// 给了 id 时只在记住的正是它（离开或删掉了这个空间）时清掉
+export function forgetSpace(id?: string): void {
+  if (id !== undefined && lastSpaceId.value !== id) return
   lastSpaceId.value = null
   try {
     sessionStorage.removeItem(LAST_SPACE_KEY)
