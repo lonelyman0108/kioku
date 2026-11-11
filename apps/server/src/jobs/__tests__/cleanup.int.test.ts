@@ -62,6 +62,7 @@ describe.skipIf(!testDatabaseUrl)('定时清理', () => {
     expect(await cleanupExpired(database.db)).toEqual({
       sessions: 1,
       links: 0,
+      deviceGrants: 0,
       attempts: 1,
       recallEvents: 0,
       turns: 0,

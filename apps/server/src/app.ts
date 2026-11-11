@@ -15,6 +15,7 @@ import { authRoutes } from './routes/auth'
 import { benchRoutes } from './routes/bench'
 import { bindingRoutes } from './routes/binding'
 import { credentialRoutes } from './routes/credentials'
+import { deviceRoutes } from './routes/device'
 import { dreamRoutes } from './routes/dream'
 import { health } from './routes/health'
 import { loreImportRoutes } from './routes/loreImport'
@@ -108,6 +109,8 @@ export function createApp(deps: Deps) {
   app.route('/v1', advancedSettingsRoutes(deps))
   // 放在接入方的路由后面：OpenAPI 的组件按第一次用到的顺序排，Python SDK 的比对对顺序敏感，
   // 测试台的响应用到了 TurnEndEvent 这些接入方的组件
+  // 浏览器授权的响应引用了 AppInfo：挂在 Key 鉴权的接口后面，不改变 OpenAPI 里组件的顺序
+  app.route('/v1', deviceRoutes(deps))
   app.route('/v1', benchRoutes(deps))
   // 业务规则错误带着自己的状态码；请求本身的问题（依赖库抛出的 4xx）是调用方的错，不打堆栈（见 requestError）；
   // 其余错误不把内部信息透给调用方，日志也不带 SQL 与参数（参数可能就是记忆正文，见 logInternalError）

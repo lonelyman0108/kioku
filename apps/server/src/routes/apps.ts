@@ -17,7 +17,7 @@ import {
 import { and, asc, count, desc, eq, inArray, isNull, notInArray, sql } from 'drizzle-orm'
 
 import { accessMatrix, keyEffectiveScopes } from '../access/access'
-import { generateApiKey } from '../auth/keys'
+import { appOwnerOf, issueAppKey, issueDenial } from '../access/issue'
 import { memberRole } from '../auth/middleware'
 import { withSpace } from '../db/client'
 import {
@@ -228,16 +228,9 @@ function groupPersonaRules(tx: Tx, appId: string) {
 
 // 应用的权限按「主人」算：Key 读到的 owner / private 层就是应用主人的。
 // 所以只有应用主人能改配置、签发和查看 Key；空间 owner 可以吊销任何 Key（止损），但不能签发
-// lock 为 true 时锁住应用这一行直到事务结束：签发 Key 与转移所有权都先拿这把锁，
-// 保证「检查主人 → 写 Key」与「吊销 Key → 换主人」不会交错，转移之后不会冒出前任主人的新 Key
+// 签发的规则与锁在 access/issue.ts
 const keepAdvanced = (config: AppConfig) =>
   sql`${JSON.stringify(config)}::jsonb || jsonb_strip_nulls(jsonb_build_object(${APP_ADVANCED_FIELD}::text, ${apps.config} -> ${APP_ADVANCED_FIELD}::text))`
-
-async function appOwnerOf(tx: Tx, appId: string, lock = false): Promise<string | null> {
-  const query = tx.select({ owner: apps.ownerAccountId }).from(apps).where(eq(apps.id, appId))
-  const [row] = lock ? await query.for('update') : await query
-  return row?.owner ?? null
-}
 
 export function appRoutes(deps: Deps) {
   const app = router()
@@ -472,47 +465,19 @@ export function appRoutes(deps: Deps) {
       const body = c.req.valid('json')
       const accountId = c.get('console').accountId
       const role = await roleOf(spaceId, accountId)
-      // viewer 不能签发 Key；admin Key 能越过人格与应用命名空间的写入限制，只有空间 owner 能签发
-      if (role !== 'owner' && role !== 'editor') {
-        return c.json({ error: '需要空间所有者或编辑者角色' }, 403)
-      }
-      // Key 的上限不能超过签发人的角色：admin、secret 级与凭据能力只有空间 owner 能给。
-      // editor 签发的 Key 仍能读写应用所有者（也就是 editor 自己）的本人记忆，以及 secret 以下的共享内容
-      if (
-        role !== 'owner' &&
-        (body.scopes.admin ||
-          body.scopes.maxSensitivity === 'secret' ||
-          body.scopes.credentials !== 'none')
-      ) {
-        return c.json(
-          { error: '仅空间所有者可签发「跨人格 / 应用写入」、机密级或可使用凭据的访问密钥' },
-          403,
-        )
-      }
-      const generated = generateApiKey()
-      const result = await withSpace(deps.db, spaceId, async (tx) => {
-        const owner = await appOwnerOf(tx, appId, true)
-        if (!owner) return 'missing' as const
-        if (owner !== accountId) return 'not-owner' as const
-        const [row] = await tx
-          .insert(apiKeys)
-          .values({
-            spaceId,
-            appId,
-            name: body.name,
-            prefix: generated.prefix,
-            secretHash: generated.secretHash,
-            scopes: body.scopes,
-          })
-          .returning()
-        return row!
-      })
-      if (result === 'missing') return c.json({ error: '应用不存在' }, 404)
-      if (result === 'not-owner') {
-        return c.json({ error: '仅应用所有者可签发此应用的访问密钥' }, 403)
+      // 签发的规则与浏览器授权共用（access/issue.ts）
+      const denial = issueDenial(role, body.scopes)
+      if (denial) return c.json({ error: denial }, 403)
+      const result = await withSpace(deps.db, spaceId, (tx) =>
+        issueAppKey(tx, { spaceId, appId, accountId, name: body.name, scopes: body.scopes }),
+      )
+      if (!result.ok) {
+        return result.reason === 'missing'
+          ? c.json({ error: '应用不存在' }, 404)
+          : c.json({ error: '仅应用所有者可签发此应用的访问密钥' }, 403)
       }
       const membership = await ownerMembership(deps, spaceId, accountId)
-      return c.json({ ...toKeyInfo(result, membership), key: generated.plaintext }, 201)
+      return c.json({ ...toKeyInfo(result.row, membership), key: result.plaintext }, 201)
     })
     .openapi(keyMatrix, async (c) => {
       const { spaceId, appId, keyId } = c.req.valid('param')

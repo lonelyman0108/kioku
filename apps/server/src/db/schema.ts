@@ -179,6 +179,44 @@ export const accountLinks = pgTable(
   (t) => [index().on(t.accountId), index().on(t.expiresAt)],
 )
 
+// 浏览器授权的申请（routes/device.ts）：命令行申请，成员在管理界面的确认页确认，命令行凭设备码取走一次访问密钥。
+// 设备码与确认码都只存 SHA-256；访问密钥在取走的那一刻才生成，这里不存明文。
+// 确认时记下确认人、空间、应用、名称与权限范围，取走时照签发的规则再核对一遍。
+// 取走、拒绝之后这一行就删掉，过期的由定时任务清理（jobs/cleanup.ts）
+export const deviceGrants = pgTable(
+  'device_grants',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    deviceHash: text().notNull().unique(),
+    userHash: text().notNull().unique(),
+    runtimeFamily: text().notNull(),
+    // 命令行自报的名字，只在确认页显示
+    clientName: text(),
+    clientAddress: text(),
+    // 按客户端限制同时有多少条待确认的申请（http/clientIp.ts 的 clientKey）
+    clientKey: text().notNull(),
+    status: text({ enum: ['pending', 'approved', 'denied'] })
+      .notNull()
+      .default('pending'),
+    approvedBy: uuid().references(() => accounts.id, { onDelete: 'cascade' }),
+    spaceId: uuid().references(() => spaces.id, { onDelete: 'cascade' }),
+    appId: uuid(),
+    keyName: text(),
+    scopes: jsonb().$type<KeyScopes>(),
+    createdAt: createdAt(),
+    expiresAt: timestamp({ withTimezone: true }).notNull(),
+    lastPolledAt: timestamp({ withTimezone: true }),
+  },
+  (t) => [
+    index().on(t.expiresAt),
+    index().on(t.clientKey),
+    // 应用删掉时，确认过、还没取走的申请一起删
+    foreignKey({ columns: [t.spaceId, t.appId], foreignColumns: [apps.spaceId, apps.id] }).onDelete(
+      'cascade',
+    ),
+  ],
+)
+
 // 登录失败计数，一个计数键一行（「用户名」或「用户名 + 客户端」，见 auth/rateLimit.ts）；放在数据库里而不是进程内存：
 // 并发请求用原子加一计数，不需要淘汰策略，也就不会被随机用户名挤掉或塞满
 export const loginAttempts = pgTable(
