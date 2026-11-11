@@ -15,11 +15,12 @@ import { formatRelative, formatShort, formatTime } from '../time'
 import Hint from './Hint.vue'
 import KeyScopeEditor from './KeyScopeEditor.vue'
 import {
-  allowedCredentialCapability,
+  CREDENTIAL_CAPABILITY_HINT,
   issuedCredentialCapability,
   keyPresets,
   matchPreset,
   presetScopes,
+  tightenScopes,
 } from './keyPresets'
 import EmptyState from './strata/EmptyState.vue'
 import FlagTag from './strata/FlagTag.vue'
@@ -70,13 +71,7 @@ const form = reactive({
 watch(
   () => props.isSpaceOwner,
   (owner) => {
-    const s = form.scopes
-    form.scopes = {
-      ...s,
-      credentials: allowedCredentialCapability(s.credentials, owner),
-      maxSensitivity: !owner && s.maxSensitivity === 'secret' ? 'private' : s.maxSensitivity,
-      admin: owner && s.admin,
-    }
+    form.scopes = tightenScopes(form.scopes, owner)
     form.preset = matchPreset(form.scopes, owner)
   },
   { immediate: true },
@@ -266,9 +261,7 @@ async function revoke() {
           <div class="issue-summary">
             <span class="sr-only">签发范围</span>
             <ScopeTags :scopes="form.scopes" :credentials="actualCredentials" />
-            <Hint label="凭据能力说明">
-              取用与管理都需要可读本人、最高敏感级不低于私密，管理还需要可写本人。带会话上下文时（群聊、私聊、定时任务）凭据一律不可用。
-            </Hint>
+            <Hint label="凭据能力说明">{{ CREDENTIAL_CAPABILITY_HINT }}</Hint>
           </div>
           <div class="issue-actions">
             <UButton color="neutral" variant="ghost" @click="closeIssue">取消</UButton>

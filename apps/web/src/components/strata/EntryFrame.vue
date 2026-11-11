@@ -8,6 +8,9 @@ import { isConversationLayer, STACK } from './strata'
 // 只铺归属色，不铺纹理：纹理表示敏感级，这里没有数据。
 // 连接失败页是静态引入的（后端连不上时按需加载的文件也拿不到），这里也不能依赖按需加载的东西
 
+// wide：内容是一张表单（浏览器授权的确认页）时放宽，默认是登录框的宽度
+defineProps<{ wide?: boolean }>()
+
 // 每类归属占多高（百分比），只为好看，不代表任何数据
 const HEIGHTS: Record<Layer, number> = {
   episode: 9,
@@ -30,7 +33,7 @@ const bands = STACK.map((layer, index) => ({
   <div class="entry">
     <main class="entry-main">
       <KiokuMark :height="84" class="entry-mark" />
-      <div class="entry-body"><slot /></div>
+      <div class="entry-body" :class="{ wide }"><slot /></div>
     </main>
     <div class="entry-strata" aria-hidden="true">
       <i
@@ -65,6 +68,9 @@ const bands = STACK.map((layer, index) => ({
   width: 100%;
   max-width: 22rem;
   margin-top: 36px;
+}
+.entry-body.wide {
+  max-width: 54rem;
 }
 /* 跟着内容走，不固定在视口上：窗口很矮或键盘弹出时不会盖住表单 */
 .entry-strata {

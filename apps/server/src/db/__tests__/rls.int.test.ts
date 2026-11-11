@@ -96,7 +96,8 @@ describe.skipIf(!testDatabaseUrl)('数据层与空间隔离', () => {
     const withSpaceId = await database.db.execute<{ table_name: string }>(sql`
       select table_name from information_schema.columns
       where table_schema = 'public' and column_name = 'space_id'`)
-    const identityTables = ['api_keys', 'space_members', 'space_departures']
+    // device_grants：浏览器授权的申请，确认之前还不属于任何空间，命令行不带空间来取
+    const identityTables = ['api_keys', 'space_members', 'space_departures', 'device_grants']
     expect(
       withSpaceId
         .map((r) => r.table_name)

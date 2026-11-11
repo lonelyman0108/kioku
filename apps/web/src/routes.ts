@@ -15,6 +15,12 @@ export const routes: RouteRecordRaw[] = [
     name: 'password',
     component: () => import('./pages/PasswordPage.vue'),
   },
+  // 浏览器授权的确认页：要登录，不在外壳里（不带空间）。确认码在页面里输入，地址里不带
+  {
+    path: '/authorize',
+    name: 'authorize',
+    component: () => import('./pages/AuthorizePage.vue'),
+  },
   // 静态引入：后端连不上时，按需加载的页面文件也拿不到
   { path: '/unavailable', name: 'unavailable', component: UnavailablePage },
   {
