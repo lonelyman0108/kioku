@@ -71,6 +71,7 @@ const groups = computed<SettingsFrameGroup[]>(() =>
         key,
         label: meta.label,
         icon: meta.icon,
+        to: linkTo(key, list[0]!.key),
         aside: asideOf(key),
         crumb: key === 'space' && space.value ? `${meta.label} · ${space.value.name}` : meta.label,
         sections: list.map((section) => ({

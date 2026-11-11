@@ -5,7 +5,7 @@ import type { RouteLocationNormalized } from 'vue-router'
 import { icons } from './icons'
 
 // 设置分三组：个人（当前账号）、空间（地址里的空间，个人与实例页面上是会话里当前的空间）、实例（只给实例管理员）。
-// 三组共用一个骨架，左栏列出看得到的组，右边是当前小节。加小节只在 SETTINGS_SECTIONS 里加一项、写一个组件
+// 三组共用一个骨架，标题下面的分页列出看得到的组，左栏是当前组的小节，右边是当前小节。加小节只在 SETTINGS_SECTIONS 里加一项、写一个组件
 
 export const SETTINGS_GROUPS = [
   { key: 'account', label: '个人', icon: icons.account, route: 'account-settings' },
@@ -147,7 +147,7 @@ export function visibleSections(
   )
 }
 
-// 左栏列哪几组：个人一直有；空间组要有空间；实例组只给实例管理员
+// 分页列哪几组：个人一直有；空间组要有空间；实例组只给实例管理员
 export function visibleGroups(viewer: SettingsViewer & { hasSpace: boolean }): SettingsGroupKey[] {
   return SETTINGS_GROUPS.filter(
     (group) =>
