@@ -7,6 +7,7 @@ import { computed, reactive, ref } from 'vue'
 import {
   accountStates,
   accountStateText,
+  droppedLinkNotice,
   latestRequest,
   SELF_LOCKED_REASON,
   SOLE_OWNER_TEXT,
@@ -101,6 +102,9 @@ async function create() {
     })
     if (createRequest.isCurrent(ticket)) {
       created.value = { link: result.link, displayName: result.account.displayName }
+    } else {
+      // 弹窗已经关了：账号建好了，链接却没人看到，说明结果与下一步
+      toast.add({ title: droppedLinkNotice('create', result.account.displayName), color: 'info' })
     }
     await refresh()
   } catch (err) {
@@ -137,8 +141,12 @@ async function regenerate() {
   regenerating.value = true
   try {
     const link = await api.regenerateAccountLink(target.id)
-    if (linkRequest.isCurrent(ticket) && linkTarget.value?.id === target.id) {
+    // 关掉弹窗、换了账号都会作废序号（openLink、closeLink），序号对得上就是同一个账号
+    if (linkRequest.isCurrent(ticket)) {
       regenerated.value = { link, displayName: target.displayName }
+    } else {
+      // 旧链接已经作废、新链接没人看到，说明结果与下一步
+      toast.add({ title: droppedLinkNotice('regenerate', target.displayName), color: 'info' })
     }
     await refresh()
   } catch (err) {

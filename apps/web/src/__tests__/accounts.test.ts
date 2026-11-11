@@ -1,4 +1,4 @@
-import { Password, WRONG_CURRENT_PASSWORD, type AdminAccount } from '@kioku/contracts'
+import { Password, type AdminAccount } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 import { parse } from 'vue/compiler-sfc'
 
@@ -7,6 +7,7 @@ import {
   accountStateText,
   changePasswordError,
   deviceName,
+  droppedLinkNotice,
   expiresIn,
   latestRequest,
   linkLoadState,
@@ -109,9 +110,9 @@ describe('设置密码链接只显示一次', () => {
       /function openLink\(account: AdminAccount\) \{\s*linkRequest\.reset\(\)[^}]*regenerated\.value = null/,
     )
     expect(instanceAccounts).toMatch(/function closeLink\(\) \{\s*linkRequest\.reset\(\)/)
-    expect(instanceAccounts).toContain(
-      'if (linkRequest.isCurrent(ticket) && linkTarget.value?.id === target.id) {',
-    )
+    // 只靠序号：打开、关掉都作废序号，不另外比对账号 id
+    expect(instanceAccounts).toContain('if (linkRequest.isCurrent(ticket)) {')
+    expect(instanceAccounts).not.toContain('linkTarget.value?.id === target.id')
     expect(instanceAccounts).toContain(
       'regenerated.value = { link, displayName: target.displayName }',
     )
@@ -200,6 +201,21 @@ describe('账号列表', () => {
     expect(soleOwnerSpaces(account({ spaces: [space('工作', 3, false)] }))).toEqual([])
   })
 
+  it('请求成功、弹窗却已经关掉时提示结果与下一步', () => {
+    expect(droppedLinkNotice('create', 'Bob')).toBe(
+      '已新建 Bob，设置密码链接未显示，请在列表里重新生成',
+    )
+    expect(droppedLinkNotice('regenerate', 'Bob')).toBe(
+      '已为 Bob 重新生成链接，之前的链接失效；新链接未显示，请再生成一次',
+    )
+    expect(instanceAccounts).toMatch(
+      /created\.value = \{[^}]*\}\s*\} else \{[\s\S]*?droppedLinkNotice\('create', result\.account\.displayName\)/,
+    )
+    expect(instanceAccounts).toMatch(
+      /regenerated\.value = \{[^}]*\}\s*\} else \{[\s\S]*?droppedLinkNotice\('regenerate', target\.displayName\)/,
+    )
+  })
+
   it('新建账号后实例的空间列表一起刷新', () => {
     expect(instanceAccounts).toContain(
       "queryClient.invalidateQueries({ queryKey: ['instance-spaces'] })",
@@ -222,11 +238,24 @@ describe('账号列表', () => {
 
 describe('账号与登录', () => {
   it('改密码的错误分开说明', () => {
-    expect(changePasswordError(new ApiError(400, WRONG_CURRENT_PASSWORD))).toBe('当前密码错误')
-    // 新密码不合规也是 400，照服务端的说明，不说成当前密码错误
-    expect(changePasswordError(new ApiError(400, 'newPassword：密码至少 10 位'))).toBe(
-      'newPassword：密码至少 10 位',
+    // 按错误体的 code 判断，不比对文字
+    expect(
+      changePasswordError(
+        new ApiError(400, '当前密码错误', {
+          error: '当前密码错误',
+          code: 'wrong_current_password',
+        }),
+      ),
+    ).toBe('当前密码错误')
+    expect(changePasswordError(new ApiError(400, '当前密码错误', { error: '当前密码错误' }))).toBe(
+      '新密码不符合要求',
     )
+    // 请求校验没过也是 400：服务端的说明开头是英文字段名，换成产品用语
+    for (const message of ['newPassword：密码最多 256 位', 'currentPassword：Too big']) {
+      expect(changePasswordError(new ApiError(400, message, { error: message }))).toBe(
+        '新密码不符合要求',
+      )
+    }
     expect(changePasswordError(new ApiError(429, '失败次数过多，请稍后重试'))).toBe(
       '尝试次数过多，请稍后重试',
     )
