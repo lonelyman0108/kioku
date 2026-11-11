@@ -499,9 +499,7 @@ async function writeSpace(
         runtimeFamily: a.runtimeFamily,
         ownerAccountId: accountId,
         defaultPersonaId: mapped(personaIds, a.defaultPersonaId),
-        config: Object.keys(a.advanced).length
-          ? { ...a.config, [APP_ADVANCED_FIELD]: a.advanced }
-          : a.config,
+        config: importedAppConfig(a),
         createdAt: time(a.createdAt),
         updatedAt: time(a.updatedAt),
       })),
@@ -722,4 +720,12 @@ async function writeSpace(
       })),
     )
   }
+}
+
+// 导入的应用的配置。应用都归了导入人：导出人写的使用指引补充不带过来，它会作为指令级上下文注入导入人的 agent
+// （和转移应用时一样，见 settings/advanced.ts 的 withoutAppGuidance）；数值覆盖留着
+function importedAppConfig(a: AppRecord): Record<string, unknown> {
+  const tuning: Record<string, unknown> = { ...a.advanced }
+  delete tuning['prompts.guidance']
+  return Object.keys(tuning).length ? { ...a.config, [APP_ADVANCED_FIELD]: tuning } : a.config
 }

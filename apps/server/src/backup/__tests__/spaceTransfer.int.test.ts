@@ -1075,7 +1075,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     })
   })
 
-  it('空间与应用的高级设置随文件带过去', async () => {
+  it('空间与应用的高级设置随文件带过去，应用的使用指引补充导入时去掉', async () => {
     const alice = await bootstrap(source, 'alice')
     const appId = (await alice.createApp('codex')).id
     await saveSpaceAdvanced(database.db, alice.spaceId, {
@@ -1101,9 +1101,12 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     const [imported] = await withSpace(database.db, result.spaceId, (tx) =>
       tx.select({ config: apps.config }).from(apps),
     )
-    expect(imported!.config).toEqual({
-      advanced: { 'boot.charBudget': 3000, 'prompts.guidance': '只回中文' },
+    // 应用归了导入人：导出人写的使用指引补充不带过来，数值覆盖留着
+    expect(parsed.apps[0]!.advanced).toEqual({
+      'boot.charBudget': 3000,
+      'prompts.guidance': '只回中文',
     })
+    expect(imported!.config).toEqual({ advanced: { 'boot.charBudget': 3000 } })
   })
 
   it('导出带走的 secret 记忆留访问事件：经由 export，只进这条记忆的历史；没导出的不记', async () => {

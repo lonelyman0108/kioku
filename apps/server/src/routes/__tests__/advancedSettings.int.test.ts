@@ -13,14 +13,14 @@ import type {
   SpaceAdvancedView,
 } from '@kioku/contracts'
 import { TUNING_DEFAULTS } from '@kioku/contracts'
-import { eq } from 'drizzle-orm'
+import { eq, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
 import { principalForKeyId } from '../../auth/middleware'
 import { inProcessExecutor } from '../../bench/inProcess'
 import { inRollback } from '../../bench/rollback'
-import { withSpace, type Database } from '../../db/client'
+import { withSpace, type Database, type Tx } from '../../db/client'
 import { apps, settings, spaceMembers, spaces } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import type { Deps } from '../../http/env'
@@ -475,6 +475,33 @@ describe.skipIf(!testDatabaseUrl)('高级设置', () => {
       await fresh.settings()
       await fresh.settings()
       expect(transactions).toBe(3)
+    })
+
+    it('在一个出了错的事务里读设置失败，不连累之后别的事务', async () => {
+      const keyId = await keyIdOf(appId)
+      const principal = (await principalForKeyId(database.db, keyId))!
+      let first = true
+      // 第一个事务一开始就出错（之后的语句都失败），别的事务照常
+      const db = new Proxy(database.db, {
+        get(target, prop) {
+          if (prop !== 'transaction') return Reflect.get(target, prop)
+          return (fn: (tx: Tx) => Promise<unknown>, ...rest: unknown[]) => {
+            const broken = first
+            first = false
+            return (target.transaction as (...args: unknown[]) => Promise<unknown>)(
+              async (tx: Tx) => {
+                if (broken) await tx.execute(sql`select 1 / 0`).catch(() => {})
+                return fn(tx)
+              },
+              ...rest,
+            )
+          }
+        },
+      })
+      const scope = recallScopeForKey({ ...deps, db }, principal)
+      await expect(scope.boot()).rejects.toThrow()
+      expect(await scope.recall('怎么回复', {})).toHaveLength(3)
+      expect((await scope.settings()).values['recall.limit']).toBe(8)
     })
 
     it('测试台的回滚模式下读的是同一个事务里的设置，回滚之后不留下', async () => {

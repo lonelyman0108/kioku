@@ -204,6 +204,66 @@ describe('来源与恢复', () => {
     expect(t.patch()).toEqual({ 'recall.minScore': 0.25 })
   })
 
+  it('恢复之后上一级的值变了：表单值跟上，照样发 null', async () => {
+    const effective = ref<TuningValues | undefined>({ ...TUNING_DEFAULTS, 'recall.limit': 3 })
+    const instance = ref<TuningValues | undefined>({ ...TUNING_DEFAULTS })
+    const t = useTuningFields(
+      ['recall.limit'] as const,
+      () => effective.value,
+      () => instance.value,
+      () => new Set<TuningKey>(['recall.limit']),
+    )
+    t.restore('recall.limit')
+    instance.value = { ...TUNING_DEFAULTS, 'recall.limit': 6 }
+    await nextTick()
+    expect(t.fields['recall.limit'].value.value).toBe(6)
+    expect(t.sourceOf('recall.limit')).toBe('inherited')
+    expect(t.patch()).toEqual({ 'recall.limit': null })
+  })
+
+  it('恢复之后又编辑过：不再算恢复，特意填回和上一级相同的值是覆盖，发值不发 null', () => {
+    const t = useTuningFields(
+      ['recall.limit'] as const,
+      () => ({ ...TUNING_DEFAULTS, 'recall.limit': 3 }),
+      () => ({ ...TUNING_DEFAULTS }),
+      () => new Set<TuningKey>(['recall.limit']),
+    )
+    t.restore('recall.limit')
+    t.fields['recall.limit'].value.value = 5
+    t.fields['recall.limit'].value.value = 8
+    expect(t.sourceOf('recall.limit')).toBe('overridden')
+    expect(t.patch()).toEqual({ 'recall.limit': 8 })
+    // 经子组件改的（set）也一样
+    t.restore('recall.limit')
+    t.set('recall.limit', 8)
+    expect(t.patch()).toEqual({ 'recall.limit': 8 })
+  })
+
+  it('保存期间才点的恢复不随这次保存清掉，下一次保存发 null', () => {
+    const own = ref(new Set<TuningKey>(['recall.limit', 'recall.minScore']))
+    const effective = ref<TuningValues>({
+      ...TUNING_DEFAULTS,
+      'recall.limit': 3,
+      'recall.minScore': 0.3,
+    })
+    const t = useTuningFields(
+      ['recall.limit', 'recall.minScore'] as const,
+      () => effective.value,
+      () => ({ ...TUNING_DEFAULTS }),
+      () => own.value,
+    )
+    t.restore('recall.limit')
+    const submitted = t.snapshot()
+    // 请求还没回来时又恢复了另一项
+    t.restore('recall.minScore')
+    own.value = new Set(['recall.minScore'])
+    effective.value = { ...TUNING_DEFAULTS, 'recall.minScore': 0.3 }
+    t.commit(submitted, effective.value)
+    expect(t.sourceOf('recall.limit')).toBe('inherited')
+    expect(t.sourceOf('recall.minScore')).toBe('inherited')
+    expect(t.patch()).toEqual({ 'recall.minScore': null })
+  })
+
   it('一级的几项：基准是生效值，恢复回到上一级的值，保存后跟着服务端返回的值', async () => {
     const effective = ref<TuningValues | undefined>({ ...TUNING_DEFAULTS, 'recall.limit': 3 })
     const instance = ref<TuningValues | undefined>({ ...TUNING_DEFAULTS })

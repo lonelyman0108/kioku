@@ -208,10 +208,16 @@ export function recallScopeForKey(
   // 经 deps 在 withSpace 里读：测试台的回滚模式下读的是同一个事务。第一次用到时读，之后用同一份。
   // 召回、启动加载与对象直连在自己本来就开的事务里先读（settingsIn），不为设置多开一个串行的事务；
   // 别处（会话开始的附加块、指引、调试）在那之后取，用的是已经读到的那份
-  let loaded: Promise<EffectiveSettings> | undefined
+  // 只记读成了的结果：在别人的事务里读、那个事务又出了错（连接断开）时，不能连累这边健康的事务，
+  // 各自在自己的事务里重读。并行的两个事务可能各读一次，用先读到的那份
+  let loaded: EffectiveSettings | undefined
   const chat = CHAT_FAMILIES.has(key.app.runtimeFamily)
-  const settingsIn = (tx: Tx) => (loaded ??= loadAppSettings(tx, key.spaceId, key.app.id, chat))
-  const settings = () => loaded ?? withSpace(deps.db, key.spaceId, (tx) => settingsIn(tx))
+  const settingsIn = async (tx: Tx) => {
+    if (loaded) return loaded
+    const read = await loadAppSettings(tx, key.spaceId, key.app.id, chat)
+    return (loaded ??= read)
+  }
+  const settings = async () => loaded ?? withSpace(deps.db, key.spaceId, (tx) => settingsIn(tx))
   return {
     settings,
     async recall(rawQuery, { semantic: useSemantic = true, semanticTimeoutMs, ...options }) {
