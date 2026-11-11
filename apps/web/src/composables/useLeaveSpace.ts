@@ -1,6 +1,6 @@
 import type { Me } from '@kioku/contracts'
 import { useToast } from '@nuxt/ui/composables'
-import { ref, type Ref } from 'vue'
+import { nextTick, ref, type Ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
@@ -8,25 +8,34 @@ import { api } from '../api/endpoints'
 import { ME_KEY, queryClient } from '../query'
 import { hasUnsavedChanges } from './unsavedChanges'
 import { fetchMe, forgetSpace } from './useSession'
-import { dropSpaceQueries, nextSpace, refreshSpaces } from '../spaces'
+import { dropSpaceQueries, nextSpace, refreshSpaces, stopSpaceQueries } from '../spaces'
 
-// 离开或删除空间之后：丢掉这个空间的查询，刷新空间与账号列表，会话只重取一次；记住的空间正是它时忘掉。
-// 当前页面属于这个空间时去别的空间的概览，没有空间时回首页；这时未保存的改动随之作废，不再确认。
-// 在别处（实例 › 空间）删掉别的空间时留在原页
+// 离开或删除空间之后，按这个顺序：
+// 1. 停下这个空间正在取的查询，记住的空间正是它时忘掉；
+// 2. 当前页面属于这个空间时先离开：去别的空间的概览（按缓存里的空间列表挑），没有空间时回首页；
+//    未保存的改动随之作废，不再确认。在别处（实例 › 空间）删掉别的空间时留在原页；
+// 3. 会话只重取一次，空间与账号列表一起刷新；
+// 4. 等页面换完，丢掉这个空间的查询（只丢没有观察者的）。先丢再跳的话，还挂着的页面会为删掉的键重新请求
 export function useAfterSpaceGone() {
   const router = useRouter()
   const route = useRoute()
   return async (spaceId: string) => {
-    dropSpaceQueries(queryClient, spaceId)
+    await stopSpaceQueries(queryClient, spaceId)
     forgetSpace(spaceId)
-    const [me] = await Promise.all([
+    if (route.params.spaceId === spaceId) {
+      const cached = queryClient.getQueryData<Me | null>(ME_KEY)
+      const next = nextSpace(cached?.spaces ?? [], spaceId)
+      hasUnsavedChanges.value = false
+      await router.replace(
+        next ? { name: 'overview', params: { spaceId: next } } : { name: 'home' },
+      )
+    }
+    await Promise.all([
       queryClient.fetchQuery<Me | null>({ queryKey: ME_KEY, queryFn: fetchMe, staleTime: 0 }),
-      refreshSpaces(queryClient, undefined, { me: false }),
+      refreshSpaces(queryClient, undefined, { me: false, accounts: true }),
     ])
-    if (route.params.spaceId !== spaceId) return
-    const next = nextSpace(me?.spaces ?? [], spaceId)
-    hasUnsavedChanges.value = false
-    await router.replace(next ? { name: 'overview', params: { spaceId: next } } : { name: 'home' })
+    await nextTick()
+    dropSpaceQueries(queryClient, spaceId)
   }
 }
 

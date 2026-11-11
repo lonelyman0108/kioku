@@ -23,13 +23,15 @@ const newSpace = useNewSpaceEntry()
       <EmptyState
         title="暂无空间"
         :description="
-          newSpace.canCreate.value
+          newSpace?.canCreate.value
             ? '新建一个空间，或请空间所有者将当前账号加为成员。'
             : '请空间所有者将当前账号加为成员，加入后刷新页面。'
         "
       >
-        <template v-if="newSpace.canCreate.value" #actions>
-          <UButton :icon="icons.add" @click="newSpace.open.value = true">新建空间</UButton>
+        <template v-if="newSpace?.canCreate.value" #actions>
+          <UButton :icon="icons.add" @click="newSpace && (newSpace.open.value = true)"
+            >新建空间</UButton
+          >
         </template>
       </EmptyState>
     </template>

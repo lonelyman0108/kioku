@@ -86,17 +86,18 @@ export const TRANSFER_CONSEQUENCES = [
   '之后成员、空间设置与导出由所有者管理。',
 ]
 
-// 空间的名字、成员与角色变了：会话里的空间列表（切换器、角色）、成员表、实例的空间列表与账号列表（所在空间、
-// 唯一可用的所有者）一起刷新。me 为 false 时不刷新会话，由调用方自己取一次
+// 空间的名字、成员与角色变了：会话里的空间列表（切换器、角色）、成员表与实例的空间列表一起刷新。
+// me 为 false 时不刷新会话，由调用方自己取一次。accounts 为 true 时实例的账号列表（所在空间与角色、
+// 唯一可用的所有者）一起刷新：新建、删除、转让、加入、移除、离开与改角色时传，改名不用
 export async function refreshSpaces(
   client: QueryClient,
   spaceId?: string,
-  options: { me?: boolean } = {},
+  options: { me?: boolean; accounts?: boolean } = {},
 ): Promise<void> {
   await Promise.all([
     ...(options.me === false ? [] : [client.invalidateQueries({ queryKey: ME_KEY })]),
     client.invalidateQueries({ queryKey: ['instance-spaces'] }),
-    client.invalidateQueries({ queryKey: ['instance-accounts'] }),
+    ...(options.accounts ? [client.invalidateQueries({ queryKey: ['instance-accounts'] })] : []),
     ...(spaceId
       ? [
           client.invalidateQueries({ queryKey: ['members', spaceId] }),
@@ -106,7 +107,18 @@ export async function refreshSpaces(
   ])
 }
 
-// 已经不在的空间的查询（成员、概况、应用……）直接丢掉，不让它们失效重取：空间不在了，重取只会拿到 403
+const ofSpace = (spaceId: string) => (query: { queryKey: readonly unknown[] }) =>
+  query.queryKey.includes(spaceId)
+
+// 已经不在的空间的查询（成员、概况、应用……）：先停下正在取的，不让它们失效重取（空间不在了，重取只会拿到 403）
+export async function stopSpaceQueries(client: QueryClient, spaceId: string): Promise<void> {
+  await client.cancelQueries({ predicate: ofSpace(spaceId) })
+}
+
+// 再丢掉它们。只丢没有观察者的：还挂着的组件会为删掉的键新建查询并请求，403 在页面上闪一下。
+// 调用方先离开那个空间的页面（或确认没有页面挂着它）再丢
 export function dropSpaceQueries(client: QueryClient, spaceId: string): void {
-  client.removeQueries({ predicate: (query) => query.queryKey.includes(spaceId) })
+  client.removeQueries({
+    predicate: (query) => ofSpace(spaceId)(query) && query.getObserversCount() === 0,
+  })
 }

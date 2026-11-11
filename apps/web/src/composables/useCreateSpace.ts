@@ -10,13 +10,12 @@ import { refreshSpaces } from '../spaces'
 
 export type NewSpaceEntry = ReturnType<typeof useCreateSpace>
 
-// 新建空间的入口与弹窗只在外壳里有一份，由外壳 provide；首页没有空间时经 useNewSpaceEntry 打开同一个弹窗
+// 新建空间的入口与弹窗只在外壳里有一份，由外壳 provide；首页没有空间时经 useNewSpaceEntry 打开同一个弹窗。
+// 不在外壳里（组件测试、以后别的路由）时为 null，调用方不显示按钮
 export const NEW_SPACE: InjectionKey<NewSpaceEntry> = Symbol('new-space')
 
-export function useNewSpaceEntry(): NewSpaceEntry {
-  const entry = inject(NEW_SPACE)
-  if (!entry) throw new Error('useNewSpaceEntry 只能在管理界面的外壳里用')
-  return entry
+export function useNewSpaceEntry(): NewSpaceEntry | null {
+  return inject(NEW_SPACE, null)
 }
 
 // 空间切换器与首页的「新建空间」：实例管理员，或实例允许成员自建空间时才给（服务端的 canCreate）。
@@ -33,7 +32,7 @@ export function useCreateSpace(signedIn: Ref<boolean>) {
   const open = ref(false)
   async function created(space: CreatedSpace) {
     open.value = false
-    await refreshSpaces(queryClient)
+    await refreshSpaces(queryClient, undefined, { accounts: true })
     toast.add({ title: `已新建空间「${space.name}」`, color: 'success' })
     await router.push({ name: 'overview', params: { spaceId: space.id } })
   }

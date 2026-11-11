@@ -110,7 +110,7 @@ async function transfer() {
   try {
     await api.transferOwnership(spaceId.value, transferTo.value)
     transferOpen.value = false
-    await refreshSpaces(queryClient, spaceId.value)
+    await refreshSpaces(queryClient, spaceId.value, { accounts: true })
     toast.add({ title: '已转让所有者', color: 'success' })
   } catch (err) {
     transferError.value = err instanceof ApiError ? err.message : '转让失败'

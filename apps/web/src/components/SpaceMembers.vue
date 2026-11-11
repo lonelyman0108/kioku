@@ -66,7 +66,7 @@ async function add() {
   try {
     const added = await api.addMember(spaceId.value, { username: name, role: newRole.value })
     username.value = ''
-    await refreshSpaces(queryClient, spaceId.value)
+    await refreshSpaces(queryClient, spaceId.value, { accounts: true })
     toast.add({ title: `已添加 ${added.displayName}`, color: 'success' })
   } catch (err) {
     addError.value = err instanceof ApiError ? err.message : '添加失败'
@@ -87,7 +87,7 @@ async function changeRole(row: SpaceMember, role: MemberRole) {
     toast.add({ title: err instanceof ApiError ? err.message : '修改失败', color: 'error' })
   } finally {
     changing.value = null
-    await refreshSpaces(queryClient, spaceId.value)
+    await refreshSpaces(queryClient, spaceId.value, { accounts: true })
   }
 }
 
@@ -107,7 +107,7 @@ async function remove() {
   try {
     await api.removeMember(spaceId.value, row.accountId)
     removing.value = null
-    await refreshSpaces(queryClient, spaceId.value)
+    await refreshSpaces(queryClient, spaceId.value, { accounts: true })
     toast.add({ title: `已移除 ${row.displayName}`, color: 'success' })
   } catch (err) {
     removeError.value = err instanceof ApiError ? err.message : '移除失败'

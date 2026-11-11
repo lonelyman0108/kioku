@@ -72,7 +72,7 @@ const discard = () => (allow.value = baseline.value ?? false)
 const creating = ref(false)
 async function created(space: CreatedSpace) {
   creating.value = false
-  await refreshSpaces(queryClient)
+  await refreshSpaces(queryClient, undefined, { accounts: true })
   toast.add({ title: `已新建空间「${space.name}」`, color: 'success' })
 }
 
