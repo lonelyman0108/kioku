@@ -6,6 +6,7 @@ import { setCookie } from 'hono/cookie'
 import { hashPassword } from '../auth/password'
 import { createSession, SESSION_COOKIE, SESSION_TTL_MS } from '../auth/session'
 import { accounts, spaceMembers, spaces } from '../db/schema'
+import { sessionClient } from './auth'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 
@@ -60,7 +61,7 @@ export function setupRoutes(deps: Deps) {
       })
       if (!result) return c.json({ error: '已完成初始化' }, 409)
 
-      const token = await createSession(deps.db, result.account.id)
+      const token = await createSession(deps.db, result.account.id, sessionClient(c, deps))
       setCookie(c, SESSION_COOKIE, token, {
         httpOnly: true,
         sameSite: 'Strict',

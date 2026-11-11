@@ -11,6 +11,7 @@ import {
   PasswordLinkRequest,
   SetPasswordRequest,
   UpdateProfileRequest,
+  WrongCurrentPassword,
 } from '@kioku/contracts'
 import { and, desc, eq, gt, isNull, ne } from 'drizzle-orm'
 import type { Context } from 'hono'
@@ -208,7 +209,10 @@ const changePassword = createRoute({
   request: { body: jsonBody(ChangePasswordRequest) },
   responses: {
     204: { description: '已修改' },
-    400: jsonResponse('当前密码错误', ErrorResponse),
+    400: jsonResponse(
+      '当前密码错误（带 code）或请求校验没过',
+      z.union([WrongCurrentPassword, ErrorResponse]),
+    ),
     401: jsonResponse('未登录', ErrorResponse),
     409: jsonResponse('密码刚在别处改过', ErrorResponse),
     429: jsonResponse('失败次数过多', ErrorResponse),
@@ -350,7 +354,9 @@ export function authRoutes(deps: Deps) {
         async (verified) => ({ verified, next: await hashPassword(newPassword) }),
       )
       if (result.kind === 'limited') return c.json({ error: result.message }, 429)
-      if (result.kind === 'wrong') return c.json({ error: '当前密码错误' }, 400)
+      if (result.kind === 'wrong') {
+        return c.json({ error: '当前密码错误', code: 'wrong_current_password' as const }, 400)
+      }
       const { verified, next } = result.value
       const changed = await deps.db.transaction(async (tx) => {
         // 加锁的顺序和用链接设置密码、管理员停用一致：先链接、再账号
