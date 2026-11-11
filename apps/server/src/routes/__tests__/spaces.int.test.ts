@@ -4,14 +4,15 @@ import type {
   CreatedSpace,
   InstanceSpace,
   MemoryView,
-  SpaceCreationView,
   SpaceDetail,
+  SpaceLimitView,
   SpaceMember,
 } from '@kioku/contracts'
 import { and, eq, inArray, sql } from 'drizzle-orm'
 import postgres from 'postgres'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
+import { createSpace } from '../../access/spaces'
 import { createApp } from '../../app'
 import { withSpace, type Database } from '../../db/client'
 import {
@@ -53,12 +54,12 @@ describe.skipIf(!testDatabaseUrl)('空间与成员', () => {
   })
   afterAll(async () => {
     if (!database) return
-    await database.db.delete(settings).where(eq(settings.key, 'space-creation'))
+    await database.db.delete(settings).where(eq(settings.key, 'space-limit'))
     await database.close()
   })
   beforeEach(async () => {
     await resetDatabase(database)
-    await database.db.delete(settings).where(eq(settings.key, 'space-creation'))
+    await database.db.delete(settings).where(eq(settings.key, 'space-limit'))
     ws = await bootstrap(app)
   })
 
@@ -92,90 +93,175 @@ describe.skipIf(!testDatabaseUrl)('空间与成员', () => {
     }
   }
 
-  describe('新建空间与实例开关', () => {
-    it('实例管理员随时可以新建，并且可以指定所有者；管理员自己不加进别人的空间', async () => {
+  describe('新建空间与空间数量上限', () => {
+    const limitOf = async (cookie: string) =>
+      ok<SpaceLimitView>(await send('GET', '/instance/space-limit', cookie))
+    const setLimit = async (maxOwnedSpaces: number) =>
+      ok<SpaceLimitView>(await send('PUT', '/instance/space-limit', ws.cookie, { maxOwnedSpaces }))
+    const create = (cookie: string, name = '新的') => send('POST', '/spaces', cookie, { name })
+    const ownedBy = async (accountId: string) =>
+      (
+        await database.db
+          .select({ id: spaceMembers.spaceId })
+          .from(spaceMembers)
+          .where(and(eq(spaceMembers.accountId, accountId), eq(spaceMembers.role, 'owner')))
+      ).length
+
+    it('登录的账号都能新建，所有者是自己；实例管理员不能替别的账号建', async () => {
       const bob = await loner('bob')
       const mine = await ok<CreatedSpace>(
         await send('POST', '/spaces', ws.cookie, { name: '  工作  ' }),
         201,
       )
       expect(mine).toMatchObject({ name: '工作', ownerAccountId: ws.accountId })
-      const forBob = await ok<CreatedSpace>(
-        await send('POST', '/spaces', ws.cookie, { name: 'bob 的', ownerAccountId: bob.accountId }),
-        201,
-      )
-      expect(forBob.ownerAccountId).toBe(bob.accountId)
-      expect(await roles(forBob.id).catch(() => null)).toBeNull()
-      expect((await membersOf(forBob.id, bob.cookie)).map((m) => [m.username, m.role])).toEqual([
+      const bobs = await ok<CreatedSpace>(await create(bob.cookie, 'bob 的'), 201)
+      expect(bobs.ownerAccountId).toBe(bob.accountId)
+      expect((await membersOf(bobs.id, bob.cookie)).map((m) => [m.username, m.role])).toEqual([
         ['bob', 'owner'],
       ])
-      // 账号不存在
-      const missing = await send('POST', '/spaces', ws.cookie, {
-        name: 'x',
-        ownerAccountId: randomUUID(),
-      })
-      expect(missing.status).toBe(404)
-      expect(await errorOf(missing)).toBe('账号不存在')
+      // 请求里写别的账号不起作用：这个字段不在契约里，建出来的归当前账号
+      const carol = await loner('carol')
+      const forCarol = await ok<CreatedSpace>(
+        await send('POST', '/spaces', ws.cookie, {
+          name: '给 carol',
+          ownerAccountId: carol.accountId,
+        }),
+        201,
+      )
+      expect(forCarol.ownerAccountId).toBe(ws.accountId)
+      expect(await ownedBy(carol.accountId)).toBe(0)
       for (const name of ['', '   ', 'a'.repeat(65)]) {
         expect((await send('POST', '/spaces', ws.cookie, { name })).status).toBe(400)
       }
+      expect((await app.request('/v1/spaces', jsonRequest('POST', { name: 'x' }))).status).toBe(401)
     })
 
-    it('别的账号只在开关打开时能新建，所有者只能是自己；开关只有实例管理员能改，默认关', async () => {
-      const bob = await addMember(database.db, ws.spaceId, 'bob', 'owner')
-      const view = await ok<SpaceCreationView>(
-        await send('GET', '/instance/space-creation', bob.cookie),
-      )
-      expect(view).toEqual({ membersCanCreate: false, canCreate: false })
+    it('上限登录的账号都能读，只有实例管理员能改；默认 5 个，范围 1 到 100', async () => {
+      const bob = await loner('bob')
+      expect(await limitOf(bob.cookie)).toEqual({
+        maxOwnedSpaces: 5,
+        ownedSpaces: 0,
+        canCreate: true,
+      })
+      expect(await limitOf(ws.cookie)).toEqual({
+        maxOwnedSpaces: 5,
+        ownedSpaces: 1,
+        canCreate: true,
+      })
       expect(
-        await ok<SpaceCreationView>(await send('GET', '/instance/space-creation', ws.cookie)),
-      ).toEqual({ membersCanCreate: false, canCreate: true })
-      const denied = await send('POST', '/spaces', bob.cookie, { name: 'bob 的' })
-      expect(denied.status).toBe(403)
-      expect(await errorOf(denied)).toBe('实例未允许成员自建空间')
-      expect(
-        (await send('PUT', '/instance/space-creation', bob.cookie, { membersCanCreate: true }))
-          .status,
+        (await send('PUT', '/instance/space-limit', bob.cookie, { maxOwnedSpaces: 9 })).status,
       ).toBe(403)
-      expect(
-        await ok<SpaceCreationView>(
-          await send('PUT', '/instance/space-creation', ws.cookie, { membersCanCreate: true }),
-        ),
-      ).toEqual({ membersCanCreate: true, canCreate: true })
-      expect(
-        await ok<SpaceCreationView>(await send('GET', '/instance/space-creation', bob.cookie)),
-      ).toEqual({ membersCanCreate: true, canCreate: true })
-      const created = await ok<CreatedSpace>(
-        await send('POST', '/spaces', bob.cookie, { name: 'bob 的' }),
+      for (const bad of [0, 101, 1.5, '3', null]) {
+        expect(
+          (await send('PUT', '/instance/space-limit', ws.cookie, { maxOwnedSpaces: bad })).status,
+        ).toBe(400)
+      }
+      expect(await setLimit(1)).toEqual({ maxOwnedSpaces: 1, ownedSpaces: 1, canCreate: false })
+      expect(await limitOf(bob.cookie)).toMatchObject({ maxOwnedSpaces: 1, canCreate: true })
+      expect((await app.request('/v1/instance/space-limit')).status).toBe(401)
+    })
+
+    it('达到上限后不能再建，实例管理员自己也受限；调低之后已有的空间不动', async () => {
+      const bob = await loner('bob')
+      await setLimit(2)
+      await ok(await create(bob.cookie, '一'), 201)
+      await ok(await create(bob.cookie, '二'), 201)
+      const third = await create(bob.cookie, '三')
+      expect(third.status).toBe(409)
+      expect(await errorOf(third)).toBe('已达空间数量上限：每个账号最多拥有 2 个空间')
+      expect(await limitOf(bob.cookie)).toEqual({
+        maxOwnedSpaces: 2,
+        ownedSpaces: 2,
+        canCreate: false,
+      })
+      // 管理员：自带的「家」算一个
+      await ok(await create(ws.cookie, '管理员的第二个'), 201)
+      expect((await create(ws.cookie, '管理员的第三个')).status).toBe(409)
+      // 调低：已经超出的不动，只是不能再建
+      await setLimit(1)
+      expect(await ownedBy(bob.accountId)).toBe(2)
+      expect((await create(bob.cookie, '三')).status).toBe(409)
+      // 只算所有者：做别人空间的编辑者不占名额
+      const carol = await loner('carol')
+      await ok(
+        await send('POST', inSpace('/members'), ws.cookie, { username: 'carol', role: 'editor' }),
         201,
       )
-      expect(created.ownerAccountId).toBe(bob.accountId)
-      // 给别人建只有实例管理员能做
-      expect(
-        (
-          await send('POST', '/spaces', bob.cookie, {
-            name: '给 alice',
-            ownerAccountId: ws.accountId,
-          })
-        ).status,
-      ).toBe(403)
-      // 自己写自己也行
-      expect(
-        (
-          await send('POST', '/spaces', bob.cookie, {
-            name: '又一个',
-            ownerAccountId: bob.accountId,
-          })
-        ).status,
-      ).toBe(201)
-      // 关掉之后又不行了
-      await ok(
-        await send('PUT', '/instance/space-creation', ws.cookie, { membersCanCreate: false }),
+      await ok(await create(carol.cookie, 'carol 的'), 201)
+    })
+
+    it('同一个账号并发新建不会一起超限', async () => {
+      const bob = await loner('bob')
+      await setLimit(3)
+      const results = await Promise.all(
+        Array.from({ length: 8 }, (_, i) => create(bob.cookie, `并发 ${i}`)),
       )
-      expect((await send('POST', '/spaces', bob.cookie, { name: '再来' })).status).toBe(403)
-      // 没登录
-      expect((await app.request('/v1/instance/space-creation')).status).toBe(401)
-      expect((await app.request('/v1/spaces', jsonRequest('POST', { name: 'x' }))).status).toBe(401)
+      const statuses = results.map((r) => r.status).sort()
+      expect(statuses).toEqual([201, 201, 201, 409, 409, 409, 409, 409])
+      expect(await ownedBy(bob.accountId)).toBe(3)
+    })
+
+    it('接受转让、被加为或升为所有者也占名额，对方已达上限时 409，什么都不变', async () => {
+      const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+      await setLimit(1)
+      await ok(await create(bob.cookie, 'bob 的'), 201)
+      const text = '对方拥有的空间已达上限（每个账号最多 1 个），不能再成为所有者'
+      const promoted = await send('PATCH', inSpace(`/members/${bob.accountId}`), ws.cookie, {
+        role: 'owner',
+      })
+      expect(promoted.status).toBe(409)
+      expect(await errorOf(promoted)).toBe(text)
+      const transferred = await send('POST', inSpace('/transfer-ownership'), ws.cookie, {
+        accountId: bob.accountId,
+      })
+      expect(transferred.status).toBe(409)
+      expect(await errorOf(transferred)).toBe(text)
+      expect(await roles()).toEqual({ alice: 'owner', bob: 'editor' })
+      // 直接加为所有者
+      const carol = await loner('carol')
+      await ok(await create(carol.cookie, 'carol 的'), 201)
+      const added = await send('POST', inSpace('/members'), ws.cookie, {
+        username: 'carol',
+        role: 'owner',
+      })
+      expect(added.status).toBe(409)
+      expect(await errorOf(added)).toBe(text)
+      expect(await roles()).toEqual({ alice: 'owner', bob: 'editor' })
+      // 名额够了就行；已经是所有者的再转让给他不多占
+      await setLimit(2)
+      await ok(
+        await send('PATCH', inSpace(`/members/${bob.accountId}`), ws.cookie, { role: 'owner' }),
+      )
+      await ok(
+        await send('POST', inSpace('/transfer-ownership'), ws.cookie, { accountId: bob.accountId }),
+      )
+      expect(await roles()).toEqual({ alice: 'editor', bob: 'owner' })
+      expect(await ownedBy(bob.accountId)).toBe(2)
+    })
+
+    it('并发地新建与被升为所有者不会一起超限', async () => {
+      const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+      await setLimit(1)
+      const [created, promoted] = await Promise.all([
+        create(bob.cookie, 'bob 的'),
+        send('PATCH', inSpace(`/members/${bob.accountId}`), ws.cookie, { role: 'owner' }),
+      ])
+      expect([
+        [201, 409],
+        [409, 200],
+      ]).toContainEqual([created.status, promoted.status])
+      expect(await ownedBy(bob.accountId)).toBe(1)
+    })
+
+    it('管理员新建账号时自带的个人空间不受上限约束，但算一个名额', async () => {
+      await setLimit(1)
+      const res = await send('POST', '/instance/accounts', ws.cookie, {
+        username: 'frank',
+        displayName: 'Frank',
+        isAdmin: false,
+      })
+      const created = await ok<{ account: { id: string } }>(res, 201)
+      expect(await ownedBy(created.account.id)).toBe(1)
     })
 
     it('实例的空间列表只给实例管理员：名字、建立时间、所有者与成员数，没有内容数据', async () => {
@@ -227,10 +313,7 @@ describe.skipIf(!testDatabaseUrl)('空间与成员', () => {
       ).toMatchObject({ name: '新家' })
       // 实例管理员不是成员时也不能改别人的空间名
       const other = await ok<CreatedSpace>(
-        await send('POST', '/spaces', ws.cookie, {
-          name: 'eve 的',
-          ownerAccountId: outsider.accountId,
-        }),
+        await send('POST', '/spaces', outsider.cookie, { name: 'eve 的' }),
         201,
       )
       expect((await send('PATCH', `/spaces/${other.id}`, ws.cookie, { name: '改' })).status).toBe(
@@ -255,10 +338,7 @@ describe.skipIf(!testDatabaseUrl)('空间与成员', () => {
       expect((await remove(ws.cookie, '家', randomUUID())).status).toBe(404)
       // 实例管理员不是成员也能删
       const eveSpace = await ok<CreatedSpace>(
-        await send('POST', '/spaces', ws.cookie, {
-          name: 'eve 的',
-          ownerAccountId: outsider.accountId,
-        }),
+        await send('POST', '/spaces', outsider.cookie, { name: 'eve 的' }),
         201,
       )
       await ok(await remove(ws.cookie, 'eve 的', eveSpace.id), 204)
@@ -490,12 +570,9 @@ describe.skipIf(!testDatabaseUrl)('空间与成员', () => {
       })
       expect(added.status).toBe(409)
       expect(await errorOf(added)).toBe('账号已停用')
-      const created = await send('POST', '/spaces', ws.cookie, {
-        name: '给停用的账号',
-        ownerAccountId: dave.accountId,
-      })
-      expect(created.status).toBe(409)
-      expect(await errorOf(created)).toBe('账号已停用')
+      expect(
+        await createSpace(database.db, { name: '给停用的账号', ownerAccountId: dave.accountId }),
+      ).toEqual({ ok: false, reason: 'disabled' })
       const promoted = await send('PATCH', inSpace(`/members/${bob.accountId}`), ws.cookie, {
         role: 'owner',
       })

@@ -126,9 +126,9 @@ import {
   type UpdateSpaceAdvanced,
   CreatedSpace,
   InstanceSpace,
-  SpaceCreationView,
   SpaceDetail,
   SpaceInfo,
+  SpaceLimitView,
   SpaceMember,
   type AddMemberRequest,
   type CreateSpaceRequest,
@@ -196,12 +196,9 @@ export const api = {
       schema: z.array(SpaceMember),
     }),
   instanceSpaces: () => request('GET', '/instance/spaces', { schema: z.array(InstanceSpace) }),
-  spaceCreation: () => request('GET', '/instance/space-creation', { schema: SpaceCreationView }),
-  saveSpaceCreation: (membersCanCreate: boolean) =>
-    request('PUT', '/instance/space-creation', {
-      body: { membersCanCreate },
-      schema: SpaceCreationView,
-    }),
+  spaceLimit: () => request('GET', '/instance/space-limit', { schema: SpaceLimitView }),
+  saveSpaceLimit: (maxOwnedSpaces: number) =>
+    request('PUT', '/instance/space-limit', { body: { maxOwnedSpaces }, schema: SpaceLimitView }),
   apps: (spaceId: string) =>
     request('GET', `/spaces/${spaceId}/apps`, { schema: z.array(AppInfo) }),
   createApp: (

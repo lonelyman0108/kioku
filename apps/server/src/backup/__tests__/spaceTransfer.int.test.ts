@@ -43,10 +43,12 @@ import {
   memories,
   memoryEvents,
   settings,
+  spaceMembers,
   spaces,
   subjects,
   vaultConnections,
 } from '../../db/schema'
+import { saveSpaceLimit } from '../../access/spaces'
 import { staticEmbedderSource } from '../../embedding/source'
 import type { Jobs } from '../../jobs/queue'
 import { settleRecallEvents } from '../../recall/events'
@@ -60,8 +62,8 @@ import {
 import { addMember, bearer, bootstrap, FULL_SCOPES, jsonRequest } from '../../testing/fixtures'
 import { exportableMemories } from '../spaceExport'
 import { deriveExportKey, openSpaceExport, sealSpaceExport, type KdfParams } from '../spaceFormat'
-import { parseSpaceExport, type ParsedSpaceExport } from '../spaceImport'
-import { acquireTransferSlot, queuedTransfers } from '../transferGate'
+import { importSpace, parseSpaceExport, type ParsedSpaceExport } from '../spaceImport'
+import { acquireTransferSlot, acquireUploadSlot, queuedTransfers } from '../transferGate'
 import {
   SPACE_EXPORT_FORMAT,
   SPACE_EXPORT_MAX_PLAIN_BYTES,
@@ -124,11 +126,14 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     if (!database) return
     await resetDatabase(database)
     await database.db.delete(settings).where(eq(settings.key, 'recall-started'))
+    await database.db.delete(settings).where(eq(settings.key, 'space-limit'))
     if (recallStarted.length) await database.db.insert(settings).values(recallStarted)
     await database.close()
   })
   beforeEach(async () => {
     await resetDatabase(database)
+    // 这里的用例一个账号会连着导入好几次：上限放到最大，测上限的用例自己改
+    await saveSpaceLimit(database.db, { maxOwnedSpaces: 100 })
     backfills = 0
   })
 
@@ -1325,11 +1330,11 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     },
   )
 
-  it('只有空间 owner 能导出，只有实例管理员能导入', async () => {
+  it('只有空间 owner 能导出；登录的账号都能检查与导入，导入人是新空间的 owner', async () => {
     const alice = await bootstrap(source, 'alice')
     const bob = await addMember(database.db, alice.spaceId, 'bob', 'editor')
     const stranger = await addMember(database.db, alice.spaceId, 'dave', 'owner')
-    // dave 是 owner，但不是实例管理员；另建一个他不在的空间
+    // 另建一个 alice 不在的空间
     const [other] = await database.db.insert(spaces).values({ name: '别人的' }).returning()
     expect((await exportRequest(source, alice.spaceId, bob.cookie)).status).toBe(403)
     expect((await exportRequest(source, other!.id, alice.cookie)).status).toBe(403)
@@ -1339,12 +1344,94 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     )
     const file = await exportSpace(source, alice.spaceId, stranger.cookie)
     const before = await spaceCount()
-    const denied = await importRequest(source, stranger.cookie, file)
-    expect(denied.status).toBe(403)
-    expect(((await denied.json()) as { error: string }).error).toBe('仅实例管理员可导入空间')
-    expect((await importRequest(source, bob.cookie, file)).status).toBe(403)
-    expect((await inspectRequest(source, stranger.cookie, file)).status).toBe(403)
+    // 没登录的不行
+    expect((await importRequest(source, 'kioku_session=nope', file)).status).toBe(401)
+    expect((await inspectRequest(source, 'kioku_session=nope', file)).status).toBe(401)
     expect(await spaceCount()).toBe(before)
+    // bob 不是实例管理员，在原空间里只是编辑者：照样能检查、导入，新空间只有他一个成员
+    await ok(inspectRequest(source, bob.cookie, file))
+    const imported = await ok<SpaceImportResult>(importRequest(source, bob.cookie, file), 201)
+    expect(await spaceCount()).toBe(before + 1)
+    expect(
+      await database.db
+        .select({ accountId: spaceMembers.accountId, role: spaceMembers.role })
+        .from(spaceMembers)
+        .where(eq(spaceMembers.spaceId, imported.spaceId)),
+    ).toEqual([{ accountId: bob.accountId, role: 'owner' }])
+    // 原来的空间不动：成员还是那几个
+    expect(
+      (
+        await database.db
+          .select({ accountId: spaceMembers.accountId })
+          .from(spaceMembers)
+          .where(eq(spaceMembers.spaceId, alice.spaceId))
+      ).length,
+    ).toBe(3)
+  })
+
+  it('导入占导入人的一个空间名额：达到上限时 409，什么都不留下；并发导入不会一起超限', async () => {
+    const alice = await bootstrap(source, 'alice')
+    const bob = await addMember(database.db, alice.spaceId, 'bob', 'viewer')
+    const file = await exportSpace(source, alice.spaceId, alice.cookie)
+    await saveSpaceLimit(database.db, { maxOwnedSpaces: 1 })
+    const before = await spaceCount()
+    // alice 已经拥有一个
+    const denied = await importRequest(source, alice.cookie, file)
+    expect(denied.status).toBe(409)
+    expect(((await denied.json()) as { error: string }).error).toBe(
+      '已达空间数量上限：每个账号最多拥有 1 个空间',
+    )
+    expect(await spaceCount()).toBe(before)
+    // 检查不占名额
+    await ok(inspectRequest(source, alice.cookie, file))
+    // bob 还没有拥有的空间：导入一个之后也到了上限
+    await ok(importRequest(source, bob.cookie, file), 201)
+    expect((await importRequest(source, bob.cookie, file)).status).toBe(409)
+    expect(await spaceCount()).toBe(before + 1)
+    // 路由先看的那一次只是粗看，准的在写入的事务里：绕过路由并发地导入两次，只成一个
+    const carol = await addMember(database.db, alice.spaceId, 'carol', 'viewer')
+    const results = await Promise.allSettled(
+      [0, 1].map(() =>
+        importSpace(database.db, sourceKey, {
+          accountId: carol.accountId,
+          file,
+          passphrase: PASSPHRASE,
+        }),
+      ),
+    )
+    expect(results.map((r) => r.status).sort()).toEqual(['fulfilled', 'rejected'])
+    const rejected = results.find((r) => r.status === 'rejected') as PromiseRejectedResult
+    expect(rejected.reason).toMatchObject({ status: 409 })
+    expect(await spaceCount()).toBe(before + 2)
+  })
+
+  it('同一个账号同时只收一个上传，整个实例同时最多 4 个：多的直接 429，不读表单', async () => {
+    const alice = await bootstrap(source, 'alice')
+    const release = acquireUploadSlot(alice.accountId)
+    try {
+      const big = new Blob([new Uint8Array(1024)])
+      const busy = await inspectRequest(source, alice.cookie, big)
+      expect(busy.status).toBe(429)
+      expect((await importRequest(source, alice.cookie, big)).status).toBe(429)
+    } finally {
+      release()
+    }
+    // 放开之后照常（文件不对是 400，不是 429）
+    expect((await inspectRequest(source, alice.cookie, new Blob([new Uint8Array(8)]))).status).toBe(
+      400,
+    )
+    // 别的账号占满整个实例的名额
+    const others = [1, 2, 3, 4].map((i) => acquireUploadSlot(`other-${i}`))
+    try {
+      expect(
+        (await inspectRequest(source, alice.cookie, new Blob([new Uint8Array(8)]))).status,
+      ).toBe(429)
+    } finally {
+      for (const free of others) free()
+    }
+    expect((await inspectRequest(source, alice.cookie, new Blob([new Uint8Array(8)]))).status).toBe(
+      400,
+    )
   })
 
   it('口令不对、文件被改过、不是导出文件时拒绝，什么都不留下', { timeout: 30_000 }, async () => {

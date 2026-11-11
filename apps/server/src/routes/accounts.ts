@@ -31,7 +31,7 @@ const ADMIN_LOCK = 'kioku.instance-admins'
 
 // 取 ADMIN_LOCK，拿到锁之后确认操作者仍是没停用的管理员。中间件在事务之前查过一次，
 // 但等锁期间他可能被别的管理员停用或降级了：新建账号、发链接与改账号都要先过这一步
-async function lockAsAdmin(tx: Tx, actor: string): Promise<boolean> {
+export async function lockAsAdmin(tx: Tx, actor: string): Promise<boolean> {
   await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${ADMIN_LOCK}))`)
   const [self] = await tx
     .select({ isAdmin: accounts.isAdmin, disabledAt: accounts.disabledAt })

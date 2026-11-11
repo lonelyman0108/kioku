@@ -8,9 +8,13 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import endpoints from '../api/endpoints.ts?raw'
 import createSpaceModal from '../components/CreateSpaceModal.vue?raw'
 import deleteSpaceModal from '../components/DeleteSpaceModal.vue?raw'
+import importSpaceModal from '../components/ImportSpaceModal.vue?raw'
 import instanceSpaces from '../components/InstanceSpaces.vue?raw'
 import spaceGeneral from '../components/SpaceGeneralSettings.vue?raw'
+import spaceImport from '../components/SpaceImport.vue?raw'
 import spaceMembers from '../components/SpaceMembers.vue?raw'
+import spaceTransferSettings from '../components/SpaceTransferSettings.vue?raw'
+import useCreateSpace from '../composables/useCreateSpace.ts?raw'
 import { useAfterSpaceGone } from '../composables/useLeaveSpace'
 import leaveSource from '../composables/useLeaveSpace.ts?raw'
 import consoleLayout from '../layouts/ConsoleLayout.vue?raw'
@@ -29,6 +33,8 @@ import {
   refreshSpaces,
   REMOVE_CONSEQUENCES,
   roleEditable,
+  SPACE_LIMIT_KEY,
+  spaceLimitNote,
   spaceNameIssue,
   transferTargets,
 } from '../spaces'
@@ -249,16 +255,63 @@ describe('离开后跳转', () => {
 })
 
 describe('新建空间的入口', () => {
-  it('首页没有空间时：能新建才给按钮，否则写下一步', () => {
-    expect(homePage).toContain('<template v-if="newSpace?.canCreate.value" #actions>')
+  it('首页没有空间时给新建与导入；名额用完时按钮还在、不可用，下面写原因', () => {
+    expect(homePage).toContain('<template v-if="newSpace" #actions>')
+    expect(homePage.match(/:disabled="Boolean\(newSpace\.blocked\.value\)"/g)).toHaveLength(2)
+    expect(homePage).toContain('@click="newSpace.importing.value = true"')
+    expect(homePage).toContain('{{ newSpace.blocked.value }}')
     expect(homePage).toContain('请空间所有者将当前账号加为成员')
     expect(homePage).toContain('<EmptyState')
   })
 
-  it('实例管理员新建时选所有者，默认当前账号，停用的账号不列', () => {
-    expect(instanceSpaces).toContain('choose-owner')
-    expect(createSpaceModal).toContain('.filter((a) => !a.disabledAt)')
-    expect(createSpaceModal).toContain('owner.value = props.currentAccountId')
+  it('新建空间只填名称：不选所有者，也不读账号列表', () => {
+    expect(createSpaceModal).toContain('api.createSpace({ name: trimmed.value })')
+    expect(createSpaceModal).not.toContain('ownerAccountId')
+    expect(createSpaceModal).not.toContain('api.accounts')
+    expect(instanceSpaces).not.toContain('CreateSpaceModal')
+    expect(instanceSpaces).not.toContain('SpaceImport')
+  })
+
+  it('名额的说明：用完才有，写出上限是几个；没读到时不拦', () => {
+    expect(spaceLimitNote(undefined)).toBeNull()
+    expect(spaceLimitNote({ maxOwnedSpaces: 5, ownedSpaces: 4, canCreate: true })).toBeNull()
+    expect(spaceLimitNote({ maxOwnedSpaces: 5, ownedSpaces: 5, canCreate: false })).toBe(
+      '已达空间数量上限（5 个）',
+    )
+  })
+
+  it('空间与成员变了，名额跟着重取：新建、导入、删除、离开、转让都经 refreshSpaces', async () => {
+    const client = new QueryClient()
+    client.setQueryData(SPACE_LIMIT_KEY, { maxOwnedSpaces: 5, ownedSpaces: 1, canCreate: true })
+    await refreshSpaces(client)
+    expect(client.getQueryState(SPACE_LIMIT_KEY)?.isInvalidated).toBe(true)
+    expect(spaceImport).toContain('await refreshSpaces(queryClient, undefined, { accounts: true })')
+    expect(useCreateSpace).toContain(
+      'await refreshSpaces(queryClient, undefined, { accounts: true })',
+    )
+    expect(leaveSource).toContain(
+      'refreshSpaces(queryClient, undefined, { me: false, accounts: true })',
+    )
+  })
+
+  it('实例 › 空间：上限是一项数值设置，放在表单里，范围取契约的常量；列表只读、只能删除', () => {
+    expect(instanceSpaces).toContain('<form v-else-if="limit.data.value" @submit.prevent="save">')
+    expect(instanceSpaces).toContain('schema: MaxOwnedSpaces')
+    expect(instanceSpaces).toContain(
+      '请填写 {{ SPACE_LIMIT_MIN }} 到 {{ SPACE_LIMIT_MAX }} 之间的整数。',
+    )
+    expect(instanceSpaces).toContain('<SaveBar')
+    expect(instanceSpaces).toContain('queryClient.setQueryData(SPACE_LIMIT_KEY, view)')
+    expect(instanceSpaces).not.toContain('USwitch')
+    expect(instanceSpaces).not.toContain('icons.add')
+  })
+
+  it('导入空间的弹窗：检查、导入期间不能关；导入的表单在设置里与弹窗里是同一个组件', () => {
+    expect(importSpaceModal).toContain(':dismissible="!busy"')
+    expect(importSpaceModal).toContain('<SpaceImport v-model:busy="busy" bare')
+    expect(spaceTransferSettings).toContain('<SpaceImport />')
+    // 主密钥的状态只有实例管理员读得到，别的账号不发这个请求
+    expect(spaceImport).toContain('enabled: computed(() => me.data.value?.isAdmin ?? false)')
   })
 })
 

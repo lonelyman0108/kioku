@@ -9,6 +9,7 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { ownedApps } from '../benchSession'
 import CreateSpaceModal from '../components/CreateSpaceModal.vue'
+import ImportSpaceModal from '../components/ImportSpaceModal.vue'
 import KiokuMark from '../components/KiokuMark.vue'
 import StrataPatterns from '../components/strata/StrataPatterns.vue'
 import NoteLine from '../components/strata/NoteLine.vue'
@@ -47,7 +48,7 @@ watch(
 )
 
 const spaces = computed(() => me.data.value?.spaces ?? [])
-// 新建空间：实例管理员，或实例允许成员自建空间时才有
+// 新建与导入空间：登录的账号都有，名额用完时入口不可用、旁边写原因
 const newSpace = useCreateSpace(computed(() => Boolean(me.data.value)))
 provide(NEW_SPACE, newSpace)
 
@@ -231,8 +232,23 @@ const spaceMenu = computed<DropdownMenuItem[][]>(() => [
           },
         ]
       : []),
-    ...(newSpace.canCreate.value
-      ? [{ label: '新建空间', icon: icons.add, onSelect: () => (newSpace.open.value = true) }]
+  ],
+  [
+    {
+      label: '新建空间',
+      icon: icons.add,
+      disabled: Boolean(newSpace.blocked.value),
+      onSelect: () => (newSpace.open.value = true),
+    },
+    {
+      label: '导入空间',
+      icon: icons.importSpace,
+      disabled: Boolean(newSpace.blocked.value),
+      onSelect: () => (newSpace.importing.value = true),
+    },
+    // 不可用时原因写成文字，不只靠禁用的样子
+    ...(newSpace.blocked.value
+      ? [{ type: 'label' as const, label: newSpace.blocked.value, class: 'font-normal text-muted' }]
       : []),
   ],
 ])
@@ -323,7 +339,6 @@ provide(LOGOUT, logout)
         />
         <div class="flex min-w-0 items-center gap-1.5 max-[1024px]:hidden">
           <UDropdownMenu
-            v-if="spaces.length || newSpace.canCreate.value"
             :items="spaceMenu"
             :content="{ align: 'end' }"
             :ui="{ content: 'min-w-60 max-w-80' }"
@@ -424,14 +439,29 @@ provide(LOGOUT, logout)
                   成员与设置
                 </RouterLink>
               </div>
-              <button
-                v-if="newSpace.canCreate.value"
-                type="button"
-                class="block py-1.5 text-left text-sm/6"
-                @click="((navOpen = false), (newSpace.open.value = true))"
-              >
-                新建空间
-              </button>
+              <div>
+                <button
+                  type="button"
+                  class="block py-1.5 text-left text-sm/6 disabled:cursor-not-allowed disabled:text-muted"
+                  :disabled="Boolean(newSpace.blocked.value)"
+                  :aria-describedby="newSpace.blocked.value ? 'space-limit-note' : undefined"
+                  @click="((navOpen = false), (newSpace.open.value = true))"
+                >
+                  新建空间
+                </button>
+                <button
+                  type="button"
+                  class="block py-1.5 text-left text-sm/6 disabled:cursor-not-allowed disabled:text-muted"
+                  :disabled="Boolean(newSpace.blocked.value)"
+                  :aria-describedby="newSpace.blocked.value ? 'space-limit-note' : undefined"
+                  @click="((navOpen = false), (newSpace.importing.value = true))"
+                >
+                  导入空间
+                </button>
+                <p v-if="newSpace.blocked.value" id="space-limit-note" class="text-xs text-muted">
+                  {{ newSpace.blocked.value }}
+                </p>
+              </div>
               <div>
                 <p class="pb-1 text-xs text-muted">主题</p>
                 <div class="flex gap-1">
@@ -498,10 +528,10 @@ provide(LOGOUT, logout)
     </main>
     <CreateSpaceModal
       :open="newSpace.open.value"
-      :current-account-id="me.data.value?.id ?? ''"
       @close="newSpace.open.value = false"
       @created="newSpace.created"
     />
+    <ImportSpaceModal :open="newSpace.importing.value" @close="newSpace.importing.value = false" />
   </UDashboardGroup>
 </template>
 
