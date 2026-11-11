@@ -37,6 +37,7 @@ import { keyIdOf } from '../../crypto/keyring'
 import { connect, withSpace, type Database } from '../../db/client'
 import { sealVaultSecrets } from '../../credential/vault'
 import {
+  accounts,
   apps,
   credentialEvents,
   credentials,
@@ -1403,6 +1404,25 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     const rejected = results.find((r) => r.status === 'rejected') as PromiseRejectedResult
     expect(rejected.reason).toMatchObject({ status: 409 })
     expect(await spaceCount()).toBe(before + 2)
+  })
+
+  it('上传、排队期间被停用的账号导入不了：写入的事务里再看一次', async () => {
+    const alice = await bootstrap(source, 'alice')
+    const bob = await addMember(database.db, alice.spaceId, 'bob', 'viewer')
+    const file = await exportSpace(source, alice.spaceId, alice.cookie)
+    const before = await spaceCount()
+    await database.db
+      .update(accounts)
+      .set({ disabledAt: new Date() })
+      .where(eq(accounts.id, bob.accountId))
+    await expect(
+      importSpace(database.db, sourceKey, {
+        accountId: bob.accountId,
+        file,
+        passphrase: PASSPHRASE,
+      }),
+    ).rejects.toMatchObject({ status: 409 })
+    expect(await spaceCount()).toBe(before)
   })
 
   it('同一个账号同时只收一个上传，整个实例同时最多 4 个：多的直接 429，不读表单', async () => {

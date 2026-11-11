@@ -253,6 +253,31 @@ describe.skipIf(!testDatabaseUrl)('空间与成员', () => {
       expect(await ownedBy(bob.accountId)).toBe(1)
     })
 
+    it('对方正在新建或导入空间时，升为所有者不等名额的锁：直接 409，不占着空间那一行', async () => {
+      const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+      const side = postgres(testDatabaseUrl!, { max: 1, onnotice: () => {} })
+      try {
+        await side.begin(async (tx) => {
+          await tx`select pg_advisory_xact_lock(hashtext(${`kioku.space-owner:${bob.accountId}`}))`
+          const promoted = await send('PATCH', inSpace(`/members/${bob.accountId}`), ws.cookie, {
+            role: 'owner',
+          })
+          expect(promoted.status).toBe(409)
+          expect(await errorOf(promoted)).toBe('对方正在新建或导入空间，稍后再试')
+          const transferred = await send('POST', inSpace('/transfer-ownership'), ws.cookie, {
+            accountId: bob.accountId,
+          })
+          expect(transferred.status).toBe(409)
+        })
+      } finally {
+        await side.end()
+      }
+      expect(await roles()).toEqual({ alice: 'owner', bob: 'editor' })
+      await ok(
+        await send('PATCH', inSpace(`/members/${bob.accountId}`), ws.cookie, { role: 'owner' }),
+      )
+    })
+
     it('管理员新建账号时自带的个人空间不受上限约束，但算一个名额', async () => {
       await setLimit(1)
       const res = await send('POST', '/instance/accounts', ws.cookie, {

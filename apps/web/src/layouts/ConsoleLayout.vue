@@ -222,17 +222,18 @@ const spaceMenu = computed<DropdownMenuItem[][]>(() => [
       onSelect: () => switchSpace(s.id),
     })),
   ],
-  [
-    ...(space.value
-      ? [
+  // 没有空间时没有这一组，不留一个空的
+  ...(space.value
+    ? [
+        [
           {
             label: '成员与设置',
             icon: icons.settings,
             to: spaceSettingsRoute(space.value.id),
           },
-        ]
-      : []),
-  ],
+        ],
+      ]
+    : []),
   [
     {
       label: '新建空间',

@@ -91,9 +91,9 @@ export async function withTransferSlot<T>(
   }
 }
 
-// 检查与导入的上传：表单（文件最大 32 MiB）整个读进内存，再排队等上面的名额。从开始读表单到请求结束占一个上传名额，
+// 检查与导入的上传：表单（文件最大 32 MiB）整个读进内存，再排队等上面的名额。读表单的这一段占一个上传名额，读完就放，
 // 每个账号同时一个、整个实例同时 UPLOADS 个，满了直接拒绝（429），不排队：登录的账号都能上传，
-// 不限的话几个并发的上传就能把内存占满。慢的上传占着上传名额，最长到 node 收完一个请求的时限
+// 不限的话几个并发的上传就能把内存占满。读表单有时限（见 routes/spaces.ts 的 uploadMiddleware），慢的上传占不住名额
 const UPLOADS = 4
 let uploading = 0
 const uploadingBy = new Set<string>()

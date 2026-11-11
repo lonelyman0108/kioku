@@ -6,6 +6,7 @@ import {
   type SpaceImportPreview,
   type SpaceImportResult,
 } from '@kioku/contracts'
+import { eq } from 'drizzle-orm'
 import type { z } from 'zod'
 
 import { placeholderIdentifiers } from '../credential/placeholders'
@@ -22,6 +23,7 @@ import {
   type Tx,
 } from '../db/client'
 import {
+  accounts,
   appGroupPersonas,
   apps,
   credentialEvents,
@@ -451,6 +453,13 @@ async function writeSpace(
   // 导入占导入人的一个名额：和新建空间同一份判断，在写入的事务里、拿到锁之后数
   derived('空间数量上限')
   const limit = await claimOwnerSeat(tx, accountId)
+  // 和新建空间一样锁住账号那一行再看：上传、排队与派生期间被停用的账号不能成为新空间的所有者
+  const [importer] = await tx
+    .select({ disabledAt: accounts.disabledAt })
+    .from(accounts)
+    .where(eq(accounts.id, accountId))
+    .for('share')
+  if (!importer || importer.disabledAt) throw new MemoryError(409, '账号已停用')
   if (limit !== null) throw new MemoryError(409, spaceLimitReached(limit))
   progress.step = '空间的设置'
   progress.fromFile = true

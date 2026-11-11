@@ -271,7 +271,8 @@ describe('设置的地址', () => {
     for (const section of ['backup', 'retention', 'recall']) {
       expect(go({ section })).toEqual(to('data'))
     }
-    expect(go({ section: 'import' })).toEqual(to('spaces'))
+    // 导入空间搬到了空间组，实例组里没有对应的小节了
+    expect(go({ section: 'import' })).toEqual(accountSettingsRoute())
     expect(go({})).toEqual({ name: 'account-settings', params: {}, query: {} })
     expect(go({ section: 'constructor' })).toEqual(accountSettingsRoute())
     expect(legacySettingsRedirect({ section: ['backup'] })).toEqual(accountSettingsRoute())

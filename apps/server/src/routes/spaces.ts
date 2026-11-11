@@ -48,6 +48,7 @@ import {
   isInstanceAdmin,
   memberRole,
   requireConsole,
+  lockAsAdmin,
   requireInstanceAdmin,
 } from '../auth/middleware'
 import { exportSpace, type SpaceExport } from '../backup/spaceExport'
@@ -56,7 +57,6 @@ import { acquireTransferSlot, acquireUploadSlot, withTransferSlot } from '../bac
 import { extractionUsage, saveExtractionBudget } from '../extraction/budget'
 import type { AppEnv, Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
-import { lockAsAdmin } from './accounts'
 
 const params = z.object({ spaceId: z.uuid() })
 const forbidden = jsonResponse('没有权限', ErrorResponse)
@@ -261,36 +261,55 @@ const exportRoute = createRoute({
   },
 })
 
+// 读上传的表单的时限：到点还没收完就断开连接、放掉上传名额。文件最大 32 MiB，一分钟收完要每秒 560 KB 左右
+const UPLOAD_READ_MS = 60_000
+
 // 上传导出文件的两个接口共用，登录的账号都能用（会话鉴权在 /spaces/* 上，先于这里）。顺序：
-// 导入先粗看一次名额（已达上限的直接 409，不必上传；准的那次在写入的事务里）→ 拿上传名额（每个账号同时一个、
-// 整个实例有上限，见 transferGate.ts，占到请求结束）→ 看大小 → 最后才读表单，太大的文件不读进内存。
-// 上限按文件算，表单里的口令、名字与分隔行另外留一点余量。导出导入的名额等表单读完才在处理函数里拿：
-// 太大的上传在这之前就是 413，不排队、不占那个名额，慢的上传也不占着它
+// 导入先粗看一次名额（已达上限的直接 409，不必上传；准的那次在写入的事务里）→ 看大小（太大的文件不读进内存）→
+// 拿上传名额（每个账号同时一个、整个实例有上限，见 transferGate.ts）读表单，读完就放。
+// 上传名额只管「正在收」的这一段，而且有时限：登录的账号都能用，慢慢发的几个上传不能把名额一直占着。
+// 读完之后表单在内存里排队等导出导入的名额，那边每个账号一个、排队有上限，占的内存也就有上限。
+// 上限按文件算，表单里的口令、名字与分隔行另外留一点余量。读到的内容留在请求的缓存里，后面的校验直接用
 function uploadMiddleware(deps: Deps, seat: boolean): MiddlewareHandler<AppEnv>[] {
   return [
     async (c, next) => {
-      const accountId = c.get('console').accountId
       if (seat) {
-        const view = await spaceLimitView(deps.db, accountId)
+        const view = await spaceLimitView(deps.db, c.get('console').accountId)
         if (!view.canCreate) return c.json({ error: spaceLimitReached(view.maxOwnedSpaces) }, 409)
       }
-      const release = acquireUploadSlot(accountId)
-      try {
-        await next()
-      } finally {
-        release()
-      }
+      await next()
     },
     bodyLimit({
       maxSize: SPACE_EXPORT_MAX_BYTES + 64 * 1024,
       onError: (c) =>
         c.json({ error: `文件超过 ${SPACE_EXPORT_MAX_BYTES / 1024 / 1024} MB 的上限` }, 413),
     }),
+    async (c, next) => {
+      const release = acquireUploadSlot(c.get('console').accountId)
+      let timer: NodeJS.Timeout | undefined
+      try {
+        const late = new Promise<'late'>((resolve) => {
+          timer = setTimeout(() => resolve('late'), UPLOAD_READ_MS).unref()
+        })
+        const read = c.req.arrayBuffer().then(() => 'read' as const)
+        if ((await Promise.race([read, late])) === 'late') {
+          // 还在收的请求体没人要了：断开连接，不让它继续往内存里读
+          read.catch(() => undefined)
+          ;(c.env as Partial<HttpBindings> | undefined)?.outgoing?.destroy()
+          return c.json({ error: '上传超时' }, 408)
+        }
+      } finally {
+        clearTimeout(timer)
+        release()
+      }
+      await next()
+    },
   ]
 }
 const uploadErrors = {
   400: jsonResponse('导入不了（口令不对、文件被改过、内容对不上、没配主密钥等）', ErrorResponse),
   403: forbidden,
+  408: jsonResponse('上传超时', ErrorResponse),
   413: jsonResponse('文件太大', ErrorResponse),
   429: busy,
 }
@@ -475,6 +494,8 @@ function memberError(c: Context<AppEnv>, rejection: MemberRejection, ownerOnly: 
       return c.json({ error: '账号已停用' }, 409)
     case 'departure-purging':
       return c.json({ error: '离开后的本人记忆与凭据已开始清除，清除完成后才能重新加入' }, 409)
+    case 'owner-busy':
+      return c.json({ error: '对方正在新建或导入空间，稍后再试' }, 409)
     case 'owner-limit':
       return c.json(
         { error: `对方拥有的空间已达上限（每个账号最多 ${rejection.limit} 个），不能再成为所有者` },
@@ -633,7 +654,7 @@ export function spaceRoutes(deps: Deps) {
       })
       if (!space.ok) {
         if (space.reason === 'owner-limit') {
-          return c.json({ error: spaceLimitReached(space.limit!) }, 409)
+          return c.json({ error: spaceLimitReached(space.limit) }, 409)
         }
         return space.reason === 'disabled'
           ? c.json({ error: '账号已停用' }, 409)

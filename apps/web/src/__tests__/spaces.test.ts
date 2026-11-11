@@ -255,11 +255,10 @@ describe('离开后跳转', () => {
 })
 
 describe('新建空间的入口', () => {
-  it('首页没有空间时给新建与导入；名额用完时按钮还在、不可用，下面写原因', () => {
+  it('首页没有空间时给新建与导入：一个空间都没拥有，不用判断名额', () => {
     expect(homePage).toContain('<template v-if="newSpace" #actions>')
-    expect(homePage.match(/:disabled="Boolean\(newSpace\.blocked\.value\)"/g)).toHaveLength(2)
+    expect(homePage).not.toContain('blocked')
     expect(homePage).toContain('@click="newSpace.importing.value = true"')
-    expect(homePage).toContain('{{ newSpace.blocked.value }}')
     expect(homePage).toContain('请空间所有者将当前账号加为成员')
     expect(homePage).toContain('<EmptyState')
   })

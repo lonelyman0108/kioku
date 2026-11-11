@@ -7,7 +7,7 @@ import { useNewSpaceEntry } from '../composables/useCreateSpace'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
 
-// 根路径跳到最近访问（或第一个）空间的概览。没有任何空间时给「新建空间」「导入空间」；名额用完时按钮还在、不可用，下面写原因
+// 根路径跳到最近访问（或第一个）空间的概览。没有任何空间时给「新建空间」「导入空间」：这时一个空间都没拥有，名额一定够，超限由服务端兜底
 const router = useRouter()
 const { me, space } = useSession()
 watchEffect(() => {
@@ -29,23 +29,14 @@ const newSpace = useNewSpaceEntry()
         "
       >
         <template v-if="newSpace" #actions>
-          <UButton
-            :icon="icons.add"
-            :disabled="Boolean(newSpace.blocked.value)"
-            @click="newSpace.open.value = true"
-            >新建空间</UButton
-          >
+          <UButton :icon="icons.add" @click="newSpace.open.value = true">新建空间</UButton>
           <UButton
             :icon="icons.importSpace"
             color="neutral"
             variant="outline"
-            :disabled="Boolean(newSpace.blocked.value)"
             @click="newSpace.importing.value = true"
             >导入空间</UButton
           >
-          <p v-if="newSpace.blocked.value" class="w-full text-sm text-muted">
-            {{ newSpace.blocked.value }}
-          </p>
         </template>
       </EmptyState>
     </template>
