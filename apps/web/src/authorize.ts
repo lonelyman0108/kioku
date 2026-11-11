@@ -59,6 +59,7 @@ export const runtimeNames: Record<RuntimeFamily, string> = {
   hermes: 'Hermes',
   opencode: 'OpenCode',
   pi: 'Pi',
+  dsh: 'DeepSeek Harness',
   astrbot: 'AstrBot',
   mcp: 'MCP',
   other: '其他客户端',

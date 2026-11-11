@@ -14,6 +14,7 @@ const EXPECTED: Record<RuntimeFamily, BenchAgentLoop> = {
   hermes: 'approximate',
   opencode: 'approximate',
   pi: 'approximate',
+  dsh: 'approximate',
   other: 'approximate',
 }
 
