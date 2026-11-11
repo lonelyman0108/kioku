@@ -13,7 +13,7 @@ import {
 } from '@kioku/contracts'
 import { and, asc, count, eq, gt, inArray, isNull, max, ne, sql } from 'drizzle-orm'
 
-import { requireConsole, requireInstanceAdmin } from '../auth/middleware'
+import { lockAsAdmin, requireConsole, requireInstanceAdmin } from '../auth/middleware'
 import { hashToken, newToken } from '../auth/session'
 import type { Db, Tx } from '../db/client'
 import { accountLinks, accounts, sessions, spaceMembers, spaces } from '../db/schema'
@@ -23,22 +23,6 @@ import { jsonBody, jsonResponse, router } from '../http/openapi'
 const AccountParams = z.object({ accountId: z.uuid() })
 const forbidden = jsonResponse('需要实例管理员', ErrorResponse)
 const notFound = jsonResponse('账号不存在', ErrorResponse)
-
-// 改管理员身份与停用状态的事务都先拿这把锁，再数还剩几个可用的管理员：
-// 两个请求同时降掉最后两个管理员时，后一个看得到前一个的结果。新建账号与发链接也拿它，
-// 和停用、降级操作者的事务排成先后
-const ADMIN_LOCK = 'kioku.instance-admins'
-
-// 取 ADMIN_LOCK，拿到锁之后确认操作者仍是没停用的管理员。中间件在事务之前查过一次，
-// 但等锁期间他可能被别的管理员停用或降级了：新建账号、发链接与改账号都要先过这一步
-async function lockAsAdmin(tx: Tx, actor: string): Promise<boolean> {
-  await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${ADMIN_LOCK}))`)
-  const [self] = await tx
-    .select({ isAdmin: accounts.isAdmin, disabledAt: accounts.disabledAt })
-    .from(accounts)
-    .where(eq(accounts.id, actor))
-  return Boolean(self?.isAdmin && !self.disabledAt)
-}
 
 // 新账号的个人空间叫「<显示名>的空间」，显示名截到放得下后缀。按码点截：zod 的长度上限按码点算
 // （SpaceName 的 max），也不会切开代理对

@@ -271,7 +271,8 @@ describe('设置的地址', () => {
     for (const section of ['backup', 'retention', 'recall']) {
       expect(go({ section })).toEqual(to('data'))
     }
-    expect(go({ section: 'import' })).toEqual(to('spaces'))
+    // 导入空间搬到了空间组，实例组里没有对应的小节了
+    expect(go({ section: 'import' })).toEqual(accountSettingsRoute())
     expect(go({})).toEqual({ name: 'account-settings', params: {}, query: {} })
     expect(go({ section: 'constructor' })).toEqual(accountSettingsRoute())
     expect(legacySettingsRedirect({ section: ['backup'] })).toEqual(accountSettingsRoute())
@@ -1309,12 +1310,13 @@ describe('带后果的文字整句留着', () => {
       '开启后，当前账号的本人记忆（机密除外）将发送给抽取模型整理，已发送的内容无法撤回。',
     ],
     ['导出口令', spaceExport, 'Kioku不保存口令，丢失后无法打开文件。'],
-    ['导出的文件去哪导入', spaceExport, '实例管理员可在「设置 › 实例 › 空间」中将它导入为新空间'],
+    ['导出的文件去哪导入', spaceExport, '可在下方「导入空间」将它导入为新空间'],
     [
-      '空间文件不在这里导入',
+      '空间文件在哪导入',
       spaceTransferSettings,
-      'Kioku 导出的空间文件由实例管理员在「设置 › 实例 › 空间」中导入为新空间。',
+      'Kioku 导出的空间文件在下方「导入空间」导入为新空间。',
     ],
+    ['导入空间名额用完', spaceImport, '{{ blocked }}，删除或转让一个空间后再导入。'],
     ['导出的口令提示', spaceExport, '请另行保存口令。Kioku不保存口令，丢失后无法打开此文件。'],
     ['导入空间', spaceImport, '仅导入本人导出、或导出人同意移交的文件。'],
     [

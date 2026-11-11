@@ -3,6 +3,7 @@ import {
   SPACE_NAME_MAX,
   SpaceName,
   type MemberRole,
+  type SpaceLimitView,
   type SpaceSummary,
 } from '@kioku/contracts'
 import type { QueryClient } from '@tanstack/vue-query'
@@ -86,7 +87,15 @@ export const TRANSFER_CONSEQUENCES = [
   '之后成员、空间设置与导出由所有者管理。',
 ]
 
-// 空间的名字、成员与角色变了：会话里的空间列表（切换器、角色）、成员表与实例的空间列表一起刷新。
+// 空间数量上限与当前账号的名额：新建、导入的入口与实例 › 空间共用这一个查询
+export const SPACE_LIMIT_KEY = ['space-limit'] as const
+
+// 名额用完时入口旁写的原因；还有名额、或者还没读到时为 null（服务端照样检查）
+export const spaceLimitNote = (view: SpaceLimitView | undefined): string | null =>
+  view && !view.canCreate ? `已达空间数量上限（${view.maxOwnedSpaces} 个）` : null
+
+// 空间的名字、成员与角色变了：会话里的空间列表（切换器、角色）、成员表与实例的空间列表一起刷新，
+// 当前账号拥有几个空间也可能变了，名额一起重取。
 // me 为 false 时不刷新会话，由调用方自己取一次。accounts 为 true 时实例的账号列表（所在空间与角色、
 // 唯一可用的所有者）一起刷新：新建、删除、转让、加入、移除、离开与改角色时传，改名不用
 export async function refreshSpaces(
@@ -97,6 +106,7 @@ export async function refreshSpaces(
   await Promise.all([
     ...(options.me === false ? [] : [client.invalidateQueries({ queryKey: ME_KEY })]),
     client.invalidateQueries({ queryKey: ['instance-spaces'] }),
+    client.invalidateQueries({ queryKey: SPACE_LIMIT_KEY }),
     ...(options.accounts ? [client.invalidateQueries({ queryKey: ['instance-accounts'] })] : []),
     ...(spaceId
       ? [

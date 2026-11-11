@@ -6,10 +6,12 @@ import {
   type SpaceImportPreview,
   type SpaceImportResult,
 } from '@kioku/contracts'
+import { eq } from 'drizzle-orm'
 import type { z } from 'zod'
 
 import { placeholderIdentifiers } from '../credential/placeholders'
 import { sealCredentialValues } from '../credential/service'
+import { claimOwnerSeat, spaceLimitReached } from '../access/spaces'
 import type { MasterKey } from '../crypto/keyring'
 import {
   pgCauseCode,
@@ -21,6 +23,7 @@ import {
   type Tx,
 } from '../db/client'
 import {
+  accounts,
   appGroupPersonas,
   apps,
   credentialEvents,
@@ -363,7 +366,7 @@ export async function inspectSpaceImport(
 }
 
 export interface ImportSpaceOptions extends InspectSpaceOptions {
-  // 导入人：实例管理员（路由检查），成为新空间的 owner
+  // 导入人：成为新空间的 owner，占他的一个名额
   accountId: string
   // 新空间的名字；不填时用导出时的空间名
   name?: string | undefined
@@ -447,6 +450,17 @@ async function writeSpace(
     else progress.step = what
     progress.fromFile = false
   }
+  // 导入占导入人的一个名额：和新建空间同一份判断，在写入的事务里、拿到锁之后数
+  derived('空间数量上限')
+  const limit = await claimOwnerSeat(tx, accountId)
+  // 和新建空间一样锁住账号那一行再看：上传、排队与派生期间被停用的账号不能成为新空间的所有者
+  const [importer] = await tx
+    .select({ disabledAt: accounts.disabledAt })
+    .from(accounts)
+    .where(eq(accounts.id, accountId))
+    .for('share')
+  if (!importer || importer.disabledAt) throw new MemoryError(409, '账号已停用')
+  if (limit !== null) throw new MemoryError(409, spaceLimitReached(limit))
   progress.step = '空间的设置'
   progress.fromFile = true
   await tx.insert(spaces).values({

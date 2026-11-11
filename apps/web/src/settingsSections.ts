@@ -196,7 +196,6 @@ const LEGACY_INSTANCE: Record<string, InstanceSectionKey> = {
   backup: 'data',
   retention: 'data',
   recall: 'data',
-  import: 'spaces',
 }
 const LEGACY_SPACE: Record<string, SpaceSectionKey> = {
   budget: 'extraction',

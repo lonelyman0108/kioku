@@ -4,8 +4,8 @@ import { MemoryError } from '../memory/service'
 // 解密与解压最多 128 MiB 再逐行解析、导出的文件攒在内存里直到发完），又是很少用的管理操作：
 // 同时只做一个，其余排队；排队的有上限，每个账号同时最多占一个名额（排着或正在做）。满了直接拒绝（429）：
 // 排队不设上限的话，任何一个空间 owner 连着点导出，就能让所有人的导出、导入都卡住。
-// 检查与导入读完上传的表单才来拿名额：太大的上传在那之前就按大小挡下（413），慢的上传也不占着名额；
-// 这两个只有实例管理员能用，同时上传的个数不另外限制。
+// 检查与导入读完上传的表单才来拿名额：太大的上传在那之前就按大小挡下（413），慢的上传也不占着名额。
+// 这两个接口登录的账号都能用，读进内存的表单另有上传的名额（acquireUploadSlot）。
 // 从 Lore 导入（routes/loreImport.ts）也借这个名额，只为让两次执行不交错：只有 /apply 的「算基准计划、比指纹、写入」
 // 这一段占着。看计划、读上传的 JSON、向 Lore 拉取都不占：它们内存有上限（请求体或拉取的上限），Lore 慢的时候也不该挡住别人；
 // 这些接口空间 owner 就能用，同时上传的个数现在没有限制（账号只有一个，成员管理上线时一起加）。
@@ -88,5 +88,25 @@ export async function withTransferSlot<T>(
     return await fn()
   } finally {
     release()
+  }
+}
+
+// 检查与导入的上传：表单（文件最大 32 MiB）整个读进内存，再排队等上面的名额。读表单的这一段占一个上传名额，读完就放，
+// 每个账号同时一个、整个实例同时 UPLOADS 个，满了直接拒绝（429），不排队：登录的账号都能上传，
+// 不限的话几个并发的上传就能把内存占满。读表单有时限（见 routes/spaces.ts 的 uploadMiddleware），慢的上传占不住名额
+const UPLOADS = 4
+let uploading = 0
+const uploadingBy = new Set<string>()
+
+export function acquireUploadSlot(account: string): () => void {
+  if (uploadingBy.has(account) || uploading >= UPLOADS) throw new MemoryError(429, TRANSFER_BUSY)
+  uploading++
+  uploadingBy.add(account)
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    uploading--
+    uploadingBy.delete(account)
   }
 }

@@ -12,23 +12,39 @@ import { useRouter } from 'vue-router'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { formatBytes } from '../backup'
-import { ME_KEY } from '../composables/useSession'
+import { useSpaceLimit } from '../composables/useCreateSpace'
+import { useSession } from '../composables/useSession'
+import { refreshSpaces } from '../spaces'
 import { formatTime } from '../time'
 import Hint from './Hint.vue'
+import BareBlock from './strata/BareBlock.vue'
 import NoteLine from './strata/NoteLine.vue'
 import SettingsBlock from './strata/SettingsBlock.vue'
+
+// 导入空间：空间 › 导入与导出里是一块设置；外壳的弹窗里（bare）不带标题，标题由弹窗写。
+// busy 报给弹窗：检查、导入期间不让关。导入成功后自己刷新、跳到新空间，再报 imported
+const props = withDefaults(defineProps<{ bare?: boolean }>(), { bare: false })
+const emit = defineEmits<{ imported: [] }>()
+const busy = defineModel<boolean>('busy', { default: false })
 
 const toast = useToast()
 const router = useRouter()
 const queryClient = useQueryClient()
+const { me } = useSession()
+// 导入占一个名额：用完时写出原因，不让检查与导入
+const { blocked } = useSpaceLimit()
 
-// 和实例设置的主密钥卡片同一份数据：没配主密钥时先提醒，含 secret 或托管凭据的文件导入不了
-const masterKey = useQuery({ queryKey: ['settings', 'master-key'], queryFn: api.masterKeyStatus })
+// 和实例设置的主密钥卡片同一份数据：没配主密钥时先提醒，含 secret 或托管凭据的文件导入不了。
+// 这个接口只给实例管理员，别的账号不问，导入时由服务端说明
+const masterKey = useQuery({
+  queryKey: ['settings', 'master-key'],
+  queryFn: api.masterKeyStatus,
+  enabled: computed(() => me.data.value?.isAdmin ?? false),
+})
 
 const file = ref<File | null>(null)
 const passphrase = ref('')
 const name = ref('')
-const busy = ref(false)
 // 检查或导入失败的原因（口令不对、文件被改过、没配主密钥等）留在卡片上，改了再试
 const error = ref<string | null>(null)
 // 检查过的文件：是谁导出的、有多少。换了文件或口令就要重新检查，导入之前先让人看清哪些会归自己
@@ -40,7 +56,12 @@ watch([file, passphrase], () => {
 
 const tooLarge = computed(() => (file.value ? file.value.size > SPACE_EXPORT_MAX_BYTES : false))
 const ready = computed(
-  () => Boolean(file.value) && !tooLarge.value && Boolean(passphrase.value) && !busy.value,
+  () =>
+    Boolean(file.value) &&
+    !tooLarge.value &&
+    Boolean(passphrase.value) &&
+    !busy.value &&
+    !blocked.value,
 )
 // 文件里写的导出人：是文件自带的，谁都能填，界面上不当成核实过的事实
 const exporter = computed(() => preview.value?.exporter.displayName || '（未填写）')
@@ -80,15 +101,16 @@ async function importSpace() {
     description: `共导入 ${c.memories} 条记忆。导出人的本人记忆 ${c.userMemories} 条与 ${c.credentials} 条凭据归当前账号所有。请为应用重新签发访问密钥；向量在后台重新生成。`,
     color: 'success',
   })
-  // 新空间要先出现在自己的空间列表里，跳过去才不会被当成不是成员
-  await queryClient.invalidateQueries({ queryKey: ME_KEY }).catch(() => {})
+  // 新空间要先出现在自己的空间列表里，跳过去才不会被当成不是成员；名额与实例的列表一起刷新
+  await refreshSpaces(queryClient, undefined, { accounts: true }).catch(() => {})
   busy.value = false
+  emit('imported')
   await router.push({ name: 'overview', params: { spaceId: result.spaceId } })
 }
 </script>
 
 <template>
-  <SettingsBlock title="导入空间">
+  <component :is="props.bare ? BareBlock : SettingsBlock" title="导入空间">
     <template #note>
       将空间导出文件导入为新空间。仅导入本人导出、或导出人同意移交的文件。
       <Hint>
@@ -104,6 +126,7 @@ async function importSpace() {
     <NoteLine v-if="masterKey.data.value && !masterKey.data.value.configured" tone="warning">
       当前实例未配置主密钥：文件包含机密记忆或托管的凭据时无法导入。请先配置 KIOKU_MASTER_KEY。
     </NoteLine>
+    <NoteLine v-if="blocked" tone="warning">{{ blocked }}，删除或转让一个空间后再导入。</NoteLine>
     <form class="space-y-4" @submit.prevent="preview ? importSpace() : inspect()">
       <UFormField
         label="导出文件"
@@ -182,5 +205,5 @@ async function importSpace() {
       </UButton>
       <UButton v-else type="submit" :loading="busy" :disabled="!ready">确认导入</UButton>
     </form>
-  </SettingsBlock>
+  </component>
 </template>

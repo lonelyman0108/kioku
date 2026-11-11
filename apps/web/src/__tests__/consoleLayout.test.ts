@@ -83,18 +83,34 @@ describe('顶部导航', () => {
     expect(script).not.toMatch(/\{ label: '实例设置', \.\.\.link\(/)
   })
 
-  it('空间切换器一直显示：各空间与角色，当前空间打勾，下面是成员与设置；能新建空间时给新建空间', () => {
+  it('空间切换器一直显示：各空间与角色，当前空间打勾，下面是成员与设置，再下面是新建与导入空间', () => {
     const switcher = elements.find(
       (el) => el.tag === 'UDropdownMenu' && bound(el, 'items') === 'spaceMenu',
     )!
-    expect(condition(switcher)).toBe('spaces.length || newSpace.canCreate.value')
+    expect(condition(switcher)).toBeUndefined()
     expect(script).toContain('role: roleName(s.role)')
     expect(script).toContain('checked: s.id === space.value?.id')
     expect(script).toContain("label: '成员与设置'")
     expect(script).not.toContain("label: '空间设置'")
-    expect(script).toContain('...(newSpace.canCreate.value')
     expect(script).toContain("label: '新建空间'")
+    expect(script).toContain("label: '导入空间'")
+    expect(script).toContain('icon: icons.importSpace')
     expect(template).toContain('<CreateSpaceModal')
+    expect(template).toContain('<ImportSpaceModal')
+  })
+
+  it('名额用完时新建与导入的入口还在、不可用，原因写成文字', () => {
+    // 两个菜单项与窄屏抽屉里的两个按钮
+    expect(script.match(/disabled: Boolean\(newSpace\.blocked\.value\)/g)).toHaveLength(2)
+    expect(script).toContain("type: 'label' as const, label: newSpace.blocked.value")
+    expect(template.match(/:disabled="Boolean\(newSpace\.blocked\.value\)"/g)).toHaveLength(2)
+    expect(template).toContain('id="space-limit-note"')
+    expect(
+      template.match(
+        /:aria-describedby="newSpace\.blocked\.value \? 'space-limit-note' : undefined"/g,
+      ),
+    ).toHaveLength(2)
+    expect(script).not.toContain('canCreate')
     expect(script).toContain('to: spaceSettingsRoute(space.value.id)')
     expect(template).toContain('#space-trailing="{ item }"')
   })

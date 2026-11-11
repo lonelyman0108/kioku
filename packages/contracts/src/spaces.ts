@@ -28,11 +28,8 @@ export const SpaceDetail = SpaceInfo.extend({
 })
 export type SpaceDetail = z.infer<typeof SpaceDetail>
 
-// 新建空间：不给所有者时是当前账号；给别的账号只有实例管理员能做
-export const CreateSpaceRequest = z.object({
-  name: SpaceName,
-  ownerAccountId: z.uuid().optional(),
-})
+// 新建空间：所有者是当前账号
+export const CreateSpaceRequest = z.object({ name: SpaceName })
 export type CreateSpaceRequest = z.infer<typeof CreateSpaceRequest>
 
 export const CreatedSpace = SpaceInfo.extend({ ownerAccountId: z.uuid() })
@@ -45,11 +42,21 @@ export type RenameSpaceRequest = z.infer<typeof RenameSpaceRequest>
 export const DeleteSpaceRequest = z.object({ confirmName: z.string().max(256) })
 export type DeleteSpaceRequest = z.infer<typeof DeleteSpaceRequest>
 
-// 实例开关：成员能不能自己新建空间（实例管理员随时可以）。canCreate 是当前账号现在能不能新建
-export const SpaceCreationPolicy = z.object({ membersCanCreate: z.boolean() })
-export type SpaceCreationPolicy = z.infer<typeof SpaceCreationPolicy>
-export const SpaceCreationView = SpaceCreationPolicy.extend({ canCreate: z.boolean() })
-export type SpaceCreationView = z.infer<typeof SpaceCreationView>
+// 空间数量上限：每个账号作为所有者的空间最多几个，整个实例一个数，实例管理员自己也受限。
+// 新建、导入、接受转让、被加为或升为所有者都占名额；新账号自带的个人空间算一个。
+// 调低之后已经超出的账号不受影响，只是不能再多拥有。默认值与上下限只写在这里
+export const SPACE_LIMIT_DEFAULT = 5
+export const SPACE_LIMIT_MIN = 1
+export const SPACE_LIMIT_MAX = 100
+export const MaxOwnedSpaces = z.number().int().min(SPACE_LIMIT_MIN).max(SPACE_LIMIT_MAX)
+export const SpaceLimitPolicy = z.object({ maxOwnedSpaces: MaxOwnedSpaces })
+export type SpaceLimitPolicy = z.infer<typeof SpaceLimitPolicy>
+// ownedSpaces 是当前账号现在拥有几个，canCreate 是还能不能新建或导入
+export const SpaceLimitView = SpaceLimitPolicy.extend({
+  ownedSpaces: z.number().int(),
+  canCreate: z.boolean(),
+})
+export type SpaceLimitView = z.infer<typeof SpaceLimitView>
 
 export const AccountRef = z.object({
   accountId: z.uuid(),

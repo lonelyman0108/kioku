@@ -7,7 +7,7 @@ import { useNewSpaceEntry } from '../composables/useCreateSpace'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
 
-// 根路径跳到最近访问（或第一个）空间的概览。没有任何空间时：能新建就给「新建空间」，否则写下一步
+// 根路径跳到最近访问（或第一个）空间的概览。没有任何空间时给「新建空间」「导入空间」：这时一个空间都没拥有，名额一定够，超限由服务端兜底
 const router = useRouter()
 const { me, space } = useSession()
 watchEffect(() => {
@@ -23,14 +23,19 @@ const newSpace = useNewSpaceEntry()
       <EmptyState
         title="暂无空间"
         :description="
-          newSpace?.canCreate.value
-            ? '新建一个空间，或请空间所有者将当前账号加为成员。'
+          newSpace
+            ? '新建或导入一个空间，或请空间所有者将当前账号加为成员。'
             : '请空间所有者将当前账号加为成员，加入后刷新页面。'
         "
       >
-        <template v-if="newSpace?.canCreate.value" #actions>
-          <UButton :icon="icons.add" @click="newSpace && (newSpace.open.value = true)"
-            >新建空间</UButton
+        <template v-if="newSpace" #actions>
+          <UButton :icon="icons.add" @click="newSpace.open.value = true">新建空间</UButton>
+          <UButton
+            :icon="icons.importSpace"
+            color="neutral"
+            variant="outline"
+            @click="newSpace.importing.value = true"
+            >导入空间</UButton
           >
         </template>
       </EmptyState>

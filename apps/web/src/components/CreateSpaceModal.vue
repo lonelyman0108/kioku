@@ -1,32 +1,16 @@
 <script setup lang="ts">
 import type { CreatedSpace } from '@kioku/contracts'
-import { useQuery } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { SPACE_NAME_RANGE, spaceNameIssue } from '../spaces'
 
-// 新建空间：名称，实例管理员另外选所有者（默认当前账号，停用的账号不列）。建好后由调用方决定去哪
-const props = withDefaults(
-  defineProps<{ open: boolean; currentAccountId: string; chooseOwner?: boolean }>(),
-  { chooseOwner: false },
-)
+// 新建空间：只填名称，所有者是当前账号。建好后由调用方决定去哪
+const props = defineProps<{ open: boolean }>()
 const emit = defineEmits<{ close: []; created: [space: CreatedSpace] }>()
 
-const accounts = useQuery({
-  queryKey: ['instance-accounts'],
-  queryFn: api.accounts,
-  enabled: computed(() => props.open && props.chooseOwner),
-})
-const ownerItems = computed(() =>
-  (accounts.data.value?.accounts ?? [])
-    .filter((a) => !a.disabledAt)
-    .map((a) => ({ label: `${a.displayName}（${a.username}）`, value: a.id })),
-)
-
 const name = ref('')
-const owner = ref(props.currentAccountId)
 const busy = ref(false)
 const error = ref<string | null>(null)
 watch(
@@ -34,7 +18,6 @@ watch(
   (open) => {
     if (!open) return
     name.value = ''
-    owner.value = props.currentAccountId
     error.value = null
   },
 )
@@ -48,12 +31,7 @@ async function create() {
   busy.value = true
   error.value = null
   try {
-    const space = await api.createSpace({
-      name: trimmed.value,
-      ...(props.chooseOwner && owner.value !== props.currentAccountId
-        ? { ownerAccountId: owner.value }
-        : {}),
-    })
+    const space = await api.createSpace({ name: trimmed.value })
     emit('created', space)
   } catch (err) {
     error.value = err instanceof ApiError ? err.message : '新建失败'
@@ -79,15 +57,6 @@ async function create() {
             autocomplete="off"
             :disabled="busy"
             @keydown.enter.prevent="create"
-          />
-        </UFormField>
-        <UFormField v-if="chooseOwner" label="所有者" help="新空间的唯一成员">
-          <USelect
-            v-model="owner"
-            :items="ownerItems"
-            :loading="accounts.isPending.value"
-            class="w-full"
-            :disabled="busy"
           />
         </UFormField>
         <p v-if="error" class="text-sm text-error" role="alert">{{ error }}</p>

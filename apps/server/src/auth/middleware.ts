@@ -1,10 +1,10 @@
 import { AppConfig, KeyScopes } from '@kioku/contracts'
-import { and, eq, isNull } from 'drizzle-orm'
+import { and, eq, isNull, sql } from 'drizzle-orm'
 import { getCookie } from 'hono/cookie'
 import { createMiddleware } from 'hono/factory'
 
 import { keyEffectiveScopes } from '../access/access'
-import { withSpace, type Db } from '../db/client'
+import { withSpace, type Db, type Tx } from '../db/client'
 import { accounts, apiKeys, apps, spaceMembers } from '../db/schema'
 import type { AppEnv, Deps, KeyPrincipal } from '../http/env'
 import { parseApiKey, verifyApiKey } from './keys'
@@ -128,13 +128,29 @@ export async function isInstanceAdmin(db: Db, accountId: string): Promise<boolea
 }
 
 // 只给实例管理员的接口，放在 requireConsole 之后
-export function requireInstanceAdmin(deps: Deps, message = '需要实例管理员') {
+export function requireInstanceAdmin(deps: Deps) {
   return createMiddleware<AppEnv>(async (c, next) => {
     if (!(await isInstanceAdmin(deps.db, c.get('console').accountId))) {
-      return c.json({ error: message }, 403)
+      return c.json({ error: '需要实例管理员' }, 403)
     }
     await next()
   })
+}
+
+// 改管理员身份与停用状态的事务都先拿这把锁，再数还剩几个可用的管理员：
+// 两个请求同时降掉最后两个管理员时，后一个看得到前一个的结果。新建账号与发链接也拿它，
+// 和停用、降级操作者的事务排成先后
+const ADMIN_LOCK = 'kioku.instance-admins'
+
+// 取 ADMIN_LOCK，拿到锁之后确认操作者仍是没停用的管理员。中间件在事务之前查过一次，
+// 但等锁期间他可能被别的管理员停用或降级了：管理员的写操作（新建账号、发链接、改账号、改实例的空间数量上限）都要先过这一步
+export async function lockAsAdmin(tx: Tx, actor: string): Promise<boolean> {
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${ADMIN_LOCK}))`)
+  const [self] = await tx
+    .select({ isAdmin: accounts.isAdmin, disabledAt: accounts.disabledAt })
+    .from(accounts)
+    .where(eq(accounts.id, actor))
+  return Boolean(self?.isAdmin && !self.disabledAt)
 }
 
 export async function memberRole(deps: Deps, spaceId: string, accountId: string) {

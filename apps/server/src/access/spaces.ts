@@ -1,10 +1,12 @@
-import type {
-  InstanceSpace,
-  MemberRole,
-  SpaceCreationPolicy,
-  SpaceDetail,
-  SpaceInfo,
-  SpaceMember,
+import {
+  SPACE_LIMIT_DEFAULT,
+  SpaceLimitPolicy,
+  type InstanceSpace,
+  type MemberRole,
+  type SpaceDetail,
+  type SpaceInfo,
+  type SpaceLimitView,
+  type SpaceMember,
 } from '@kioku/contracts'
 import { and, asc, count, eq, inArray, isNull, ne, sql } from 'drizzle-orm'
 
@@ -24,7 +26,7 @@ import {
 // 「至少一个所有者」在锁里检查，并发的改角色、移除、离开与转让不会一起把所有者都去掉。
 // 吊销 Key 要查应用（内容表），所以也要在 withSpace 里
 
-const POLICY_KEY = 'space-creation'
+const LIMIT_KEY = 'space-limit'
 
 export type MemberFailure =
   | 'no-space'
@@ -39,9 +41,17 @@ export type MemberFailure =
   | 'disabled'
   // 离开后的数据已经开始清理：清理完成、离开记录删掉之前不能重新加入
   | 'departure-purging'
+  // 要成为所有者的账号拥有的空间已达上限
+  | 'owner-limit'
+  // 要成为所有者的账号正在新建或导入空间，名额一时数不准
+  | 'owner-busy'
 
-export type MemberResult<T> = { ok: true; value: T } | { ok: false; reason: MemberFailure }
-const fail = (reason: MemberFailure): { ok: false; reason: MemberFailure } => ({
+// 超限时带上上限是几个
+export type MemberRejection =
+  | { ok: false; reason: Exclude<MemberFailure, 'owner-limit'> }
+  | { ok: false; reason: 'owner-limit'; limit: number }
+export type MemberResult<T> = { ok: true; value: T } | MemberRejection
+const fail = (reason: Exclude<MemberFailure, 'owner-limit'>): MemberRejection => ({
   ok: false,
   reason,
 })
@@ -53,30 +63,85 @@ const toInfo = (row: { id: string; name: string; createdAt: Date }): SpaceInfo =
   createdAt: iso(row.createdAt),
 })
 
-// ---- 实例开关 ----
+// ---- 空间数量上限 ----
 
-export async function loadSpaceCreationPolicy(db: Db): Promise<SpaceCreationPolicy> {
-  const [row] = await db.select().from(settings).where(eq(settings.key, POLICY_KEY))
-  const value = (row?.value ?? {}) as { membersCanCreate?: unknown }
-  return { membersCanCreate: value.membersCanCreate === true }
+export async function loadSpaceLimit(db: Db | Tx): Promise<SpaceLimitPolicy> {
+  const [row] = await db.select().from(settings).where(eq(settings.key, LIMIT_KEY))
+  const parsed = SpaceLimitPolicy.safeParse(row?.value)
+  return parsed.success ? parsed.data : { maxOwnedSpaces: SPACE_LIMIT_DEFAULT }
 }
 
-export async function saveSpaceCreationPolicy(db: Db, value: SpaceCreationPolicy): Promise<void> {
-  const stored = { membersCanCreate: value.membersCanCreate }
+export async function saveSpaceLimit(db: Db | Tx, value: SpaceLimitPolicy): Promise<void> {
+  const stored = { maxOwnedSpaces: value.maxOwnedSpaces }
   await db
     .insert(settings)
-    .values({ key: POLICY_KEY, value: stored })
+    .values({ key: LIMIT_KEY, value: stored })
     .onConflictDoUpdate({ target: settings.key, set: { value: stored, updatedAt: new Date() } })
 }
 
+async function ownedSpaces(db: Db | Tx, accountId: string): Promise<number> {
+  const [row] = await db
+    .select({ n: count() })
+    .from(spaceMembers)
+    .where(and(eq(spaceMembers.accountId, accountId), eq(spaceMembers.role, 'owner')))
+  return row?.n ?? 0
+}
+
+// 上限与当前账号的名额：界面据此决定新建、导入的入口能不能用，写入时仍以 claimOwnerSeat 为准
+export async function spaceLimitView(db: Db, accountId: string): Promise<SpaceLimitView> {
+  const { maxOwnedSpaces } = await loadSpaceLimit(db)
+  const owned = await ownedSpaces(db, accountId)
+  return { maxOwnedSpaces, ownedSpaces: owned, canCreate: hasSeat(owned, maxOwnedSpaces) }
+}
+
+// 还能不能多拥有一个：界面的预览与写入时的判断共用
+const hasSeat = (owned: number, max: number) => owned < max
+const seatLock = (accountId: string) => sql`hashtext(${`kioku.space-owner:${accountId}`})`
+
+// 拿到名额的锁之后数：够了返回 null，否则返回上限
+async function seatLimit(tx: Tx, accountId: string): Promise<number | null> {
+  const { maxOwnedSpaces } = await loadSpaceLimit(tx)
+  return hasSeat(await ownedSpaces(tx, accountId), maxOwnedSpaces) ? null : maxOwnedSpaces
+}
+
+// 账号要多拥有一个空间之前调，规则只有这一份（seatLimit）：自己新建、导入用 claimOwnerSeat，
+// 别人让他成为所有者（接受转让、被加为或升为所有者）用 offerOwnerSeat。
+// 先拿这个账号的咨询锁，再数他是所有者的空间：同一个账号并发的几次排成先后，后一个看得到前一个提交的成员关系
+// （事务是读已提交，每条语句看得到已提交的数据），不会一起超限。够了返回 null，否则返回上限。
+// 用咨询锁、不锁账号那一行：导入的事务很长，行上的 for update 会挡住期间所有引用这个账号的写入（外键检查要它的 key share 锁）。
+// 新建与导入的空间是新的一行，手里没有别的锁，可以等
+export async function claimOwnerSeat(tx: Tx, accountId: string): Promise<number | null> {
+  await tx.execute(sql`select pg_advisory_xact_lock(${seatLock(accountId)})`)
+  return seatLimit(tx, accountId)
+}
+
+const overLimit = (limit: number): MemberRejection => ({ ok: false, reason: 'owner-limit', limit })
+
+// 成员变动里让 accountId 成为所有者：这时已经锁着 spaces 那一行，不能等名额的锁。对方正在导入时这把锁要占到导入写完，
+// 等它的话这个空间的写入（外键检查要空间行的 key share 锁）会一起卡住。拿不到就回 owner-busy，让操作者稍后再试。
+// 锁的顺序：先 spaces 行、再试这把锁、之后才是账号行的共享锁；一个事务只拿一个账号的这把锁
+async function offerOwnerSeat(tx: Tx, accountId: string): Promise<MemberRejection | null> {
+  const [row] = await tx.execute<{ ok: boolean }>(
+    sql`select pg_try_advisory_xact_lock(${seatLock(accountId)}) as ok`,
+  )
+  if (row?.ok !== true) return fail('owner-busy')
+  const limit = await seatLimit(tx, accountId)
+  return limit === null ? null : overLimit(limit)
+}
+
+// 当前账号自己新建、导入时超限的说明
+export const spaceLimitReached = (limit: number) =>
+  `已达空间数量上限：每个账号最多拥有 ${limit} 个空间`
+
 // ---- 空间 ----
 
-// 新建空间，owner 成为唯一的所有者。账号不存在、已停用时不建
+// 新建空间，owner 成为唯一的所有者。账号不存在、已停用、拥有的空间已达上限时不建
 export async function createSpace(
   db: Db,
   input: { name: string; ownerAccountId: string },
 ): Promise<MemberResult<SpaceInfo>> {
   return db.transaction(async (tx) => {
+    const limit = await claimOwnerSeat(tx, input.ownerAccountId)
     // 锁住账号那一行再建，建的同时账号不会被删掉、停用
     const [owner] = await tx
       .select({ id: accounts.id, disabledAt: accounts.disabledAt })
@@ -85,6 +150,7 @@ export async function createSpace(
       .for('share')
     if (!owner) return fail('no-account')
     if (owner.disabledAt) return fail('disabled')
+    if (limit !== null) return overLimit(limit)
     const [space] = await tx.insert(spaces).values({ name: input.name }).returning()
     await tx.insert(spaceMembers).values({ spaceId: space!.id, accountId: owner.id, role: 'owner' })
     return { ok: true, value: toInfo(space!) }
@@ -276,7 +342,11 @@ async function memberRow(tx: Tx, spaceId: string, accountId: string): Promise<Sp
 }
 
 // 锁住空间、确认 actor 是空间所有者
-async function asOwner(tx: Tx, spaceId: string, actor: string): Promise<MemberFailure | null> {
+async function asOwner(
+  tx: Tx,
+  spaceId: string,
+  actor: string,
+): Promise<'no-space' | 'not-member' | 'forbidden' | null> {
   if (!(await lockSpace(tx, spaceId))) return 'no-space'
   const role = await roleIn(tx, spaceId, actor)
   if (!role) return 'not-member'
@@ -293,14 +363,22 @@ export async function addMember(
   return withSpace(db, input.spaceId, async (tx) => {
     const denied = await asOwner(tx, input.spaceId, input.actor)
     if (denied) return fail(denied)
+    // 账号 id 不变，先不加锁查出来：名额的锁要在账号行的锁之前拿
+    const [found] = await tx
+      .select({ id: accounts.id })
+      .from(accounts)
+      .where(eq(accounts.username, input.username))
+    if (!found) return fail('no-account')
+    const noSeat = input.role === 'owner' ? await offerOwnerSeat(tx, found.id) : null
     const [account] = await tx
       .select({ id: accounts.id, disabledAt: accounts.disabledAt })
       .from(accounts)
-      .where(eq(accounts.username, input.username))
+      .where(eq(accounts.id, found.id))
       .for('share')
     if (!account) return fail('no-account')
     if (await roleIn(tx, input.spaceId, account.id)) return fail('already-member')
     if (account.disabledAt) return fail('disabled')
+    if (noSeat) return noSeat
     // 锁住离开记录再看：清理的每一批也锁它，正在删时等那一批提交；清理开始的时间由第一批写上
     const ofDeparture = and(
       eq(spaceDepartures.spaceId, input.spaceId),
@@ -327,7 +405,7 @@ export async function addMember(
   })
 }
 
-// 改角色：只有空间所有者；改完之后至少还有一个没停用的所有者
+// 改角色：只有空间所有者；改完之后至少还有一个没停用的所有者。升为所有者占对方的一个名额
 export async function updateMemberRole(
   db: Db,
   input: { spaceId: string; actor: string; target: string; role: MemberRole },
@@ -337,8 +415,10 @@ export async function updateMemberRole(
     if (denied) return fail(denied)
     const current = await roleIn(tx, input.spaceId, input.target)
     if (!current) return fail('no-target')
-    if (input.role === 'owner' && current !== 'owner' && (await disabled(tx, input.target))) {
-      return fail('disabled')
+    if (input.role === 'owner' && current !== 'owner') {
+      const noSeat = await offerOwnerSeat(tx, input.target)
+      if (await disabled(tx, input.target)) return fail('disabled')
+      if (noSeat) return noSeat
     }
     if (
       current === 'owner' &&
@@ -407,7 +487,7 @@ export async function removeMember(
   })
 }
 
-// 转让所有者：对方成为所有者，当前账号改为编辑者，同一个事务里做完。对方必须是别的成员
+// 转让所有者：对方成为所有者，当前账号改为编辑者，同一个事务里做完。对方必须是别的成员，占对方的一个名额
 export async function transferOwnership(
   db: Db,
   input: { spaceId: string; actor: string; target: string },
@@ -416,8 +496,12 @@ export async function transferOwnership(
     const denied = await asOwner(tx, input.spaceId, input.actor)
     if (denied) return fail(denied)
     if (input.target === input.actor) return fail('self')
-    if (!(await roleIn(tx, input.spaceId, input.target))) return fail('no-target')
+    const targetRole = await roleIn(tx, input.spaceId, input.target)
+    if (!targetRole) return fail('no-target')
+    // 对方本来就是所有者时不多占名额
+    const noSeat = targetRole === 'owner' ? null : await offerOwnerSeat(tx, input.target)
     if (await disabled(tx, input.target)) return fail('disabled')
+    if (noSeat) return noSeat
     const set = (accountId: string, role: MemberRole) =>
       tx
         .update(spaceMembers)

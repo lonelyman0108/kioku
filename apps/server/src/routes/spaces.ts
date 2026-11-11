@@ -12,10 +12,10 @@ import {
   InstanceSpace,
   RenameSpaceRequest,
   SPACE_EXPORT_MAX_BYTES,
-  SpaceCreationPolicy,
-  SpaceCreationView,
   SpaceDetail,
   SpaceInfo,
+  SpaceLimitPolicy,
+  SpaceLimitView,
   SpaceMember,
   TransferOwnershipRequest,
   UpdateMemberRequest,
@@ -34,24 +34,26 @@ import {
   deleteSpace,
   instanceSpaces,
   listMembers,
-  loadSpaceCreationPolicy,
   removeMember,
   renameSpace,
-  saveSpaceCreationPolicy,
+  saveSpaceLimit,
   spaceDetail,
+  spaceLimitReached,
+  spaceLimitView,
   transferOwnership,
   updateMemberRole,
-  type MemberFailure,
+  type MemberRejection,
 } from '../access/spaces'
 import {
   isInstanceAdmin,
   memberRole,
   requireConsole,
+  lockAsAdmin,
   requireInstanceAdmin,
 } from '../auth/middleware'
 import { exportSpace, type SpaceExport } from '../backup/spaceExport'
 import { importSpace, inspectSpaceImport } from '../backup/spaceImport'
-import { acquireTransferSlot, withTransferSlot } from '../backup/transferGate'
+import { acquireTransferSlot, acquireUploadSlot, withTransferSlot } from '../backup/transferGate'
 import { extractionUsage, saveExtractionBudget } from '../extraction/budget'
 import type { AppEnv, Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
@@ -85,7 +87,10 @@ const saveBudget = createRoute({
 
 const notMember = { error: '无权访问此空间' }
 const badRequest = jsonResponse('请求不合法', ErrorResponse)
-const conflict = jsonResponse('冲突（已是成员、空间至少要有一个所有者）', ErrorResponse)
+const conflict = jsonResponse(
+  '冲突（已是成员、空间至少要有一个所有者、对方拥有的空间已达上限）',
+  ErrorResponse,
+)
 const memberParams = z.object({ spaceId: z.uuid(), accountId: z.uuid() })
 // memberError 会给出的几种回应
 const memberErrors = {
@@ -100,14 +105,14 @@ const createSpaceRoute = createRoute({
   path: '/spaces',
   tags: ['console'],
   summary:
-    '新建空间：实例管理员随时可以，并且可以指定所有者；别的账号只在实例开关打开时可以，所有者是自己',
+    '新建空间：登录的账号都可以，所有者是当前账号；拥有的空间达到实例的空间数量上限时不能再建',
   request: { body: jsonBody(CreateSpaceRequest) },
   responses: {
     201: jsonResponse('已新建', CreatedSpace),
     400: badRequest,
     403: forbidden,
     404: jsonResponse('账号不存在', ErrorResponse),
-    409: jsonResponse('账号已停用', ErrorResponse),
+    409: jsonResponse('账号已停用，或拥有的空间已达上限', ErrorResponse),
   },
 })
 
@@ -151,26 +156,26 @@ function instanceListRoute(deps: Deps) {
   })
 }
 
-function creationViewRoute(deps: Deps) {
+function limitViewRoute(deps: Deps) {
   return createRoute({
     method: 'get',
-    path: '/instance/space-creation',
+    path: '/instance/space-limit',
     tags: ['settings'],
-    summary: '实例开关「允许成员自建空间」，以及当前账号能不能新建空间',
+    summary: '空间数量上限（每个账号最多拥有几个空间），以及当前账号拥有几个、还能不能新建或导入',
     middleware: [requireConsole(deps)],
-    responses: { 200: jsonResponse('开关', SpaceCreationView) },
+    responses: { 200: jsonResponse('上限', SpaceLimitView) },
   })
 }
 
-function creationUpdateRoute(deps: Deps) {
+function limitUpdateRoute(deps: Deps) {
   return createRoute({
     method: 'put',
-    path: '/instance/space-creation',
+    path: '/instance/space-limit',
     tags: ['settings'],
-    summary: '修改「允许成员自建空间」（只有实例管理员，默认关）',
+    summary: '修改空间数量上限（只有实例管理员）：调低之后已经超出的账号不受影响，只是不能再多拥有',
     middleware: [requireConsole(deps), requireInstanceAdmin(deps)],
-    request: { body: jsonBody(SpaceCreationPolicy) },
-    responses: { 200: jsonResponse('开关', SpaceCreationView), 400: badRequest, 403: forbidden },
+    request: { body: jsonBody(SpaceLimitPolicy) },
+    responses: { 200: jsonResponse('上限', SpaceLimitView), 400: badRequest, 403: forbidden },
   })
 }
 
@@ -200,7 +205,7 @@ const updateMemberRoute = createRoute({
   method: 'patch',
   path: '/spaces/{spaceId}/members/{accountId}',
   tags: ['console'],
-  summary: '改成员的角色（只有空间所有者）：空间至少要有一个所有者',
+  summary: '改成员的角色（只有空间所有者）：空间至少要有一个所有者；升为所有者占对方的一个空间名额',
   request: { params: memberParams, body: jsonBody(UpdateMemberRequest) },
   responses: {
     200: jsonResponse('成员', SpaceMember),
@@ -224,7 +229,8 @@ const transferRoute = createRoute({
   method: 'post',
   path: '/spaces/{spaceId}/transfer-ownership',
   tags: ['console'],
-  summary: '转让所有者（只有空间所有者）：对方成为所有者，当前账号改为编辑者',
+  summary:
+    '转让所有者（只有空间所有者）：对方成为所有者，当前账号改为编辑者。占对方的一个空间名额，对方已达上限时不能转让',
   request: { params, body: jsonBody(TransferOwnershipRequest) },
   responses: {
     200: jsonResponse('对方与当前账号转让之后的成员信息', z.array(SpaceMember)),
@@ -255,23 +261,55 @@ const exportRoute = createRoute({
   },
 })
 
-// 上传导出文件的两个接口共用：先确认是实例管理员、再看大小，最后才读表单，别人上传的大文件不读进内存。
-// 上限按文件算，表单里的口令、名字与分隔行另外留一点余量。名额等表单读完才在处理函数里拿（见 transferGate.ts）：
-// 太大的上传在这之前就是 413，不排队、不占名额，慢的上传也不占着名额。这两个接口只有实例管理员能用，
-// 同时上传的个数不另外限制
-function uploadMiddleware(deps: Deps): MiddlewareHandler<AppEnv>[] {
+// 读上传的表单的时限：到点还没收完就断开连接、放掉上传名额。文件最大 32 MiB，一分钟收完要每秒 560 KB 左右
+const UPLOAD_READ_MS = 60_000
+
+// 上传导出文件的两个接口共用，登录的账号都能用（会话鉴权在 /spaces/* 上，先于这里）。顺序：
+// 导入先粗看一次名额（已达上限的直接 409，不必上传；准的那次在写入的事务里）→ 看大小（太大的文件不读进内存）→
+// 拿上传名额（每个账号同时一个、整个实例有上限，见 transferGate.ts）读表单，读完就放。
+// 上传名额只管「正在收」的这一段，而且有时限：登录的账号都能用，慢慢发的几个上传不能把名额一直占着。
+// 读完之后表单在内存里排队等导出导入的名额，那边每个账号一个、排队有上限，占的内存也就有上限。
+// 上限按文件算，表单里的口令、名字与分隔行另外留一点余量。读到的内容留在请求的缓存里，后面的校验直接用
+function uploadMiddleware(deps: Deps, seat: boolean): MiddlewareHandler<AppEnv>[] {
   return [
-    requireInstanceAdmin(deps, '仅实例管理员可导入空间'),
+    async (c, next) => {
+      if (seat) {
+        const view = await spaceLimitView(deps.db, c.get('console').accountId)
+        if (!view.canCreate) return c.json({ error: spaceLimitReached(view.maxOwnedSpaces) }, 409)
+      }
+      await next()
+    },
     bodyLimit({
       maxSize: SPACE_EXPORT_MAX_BYTES + 64 * 1024,
       onError: (c) =>
         c.json({ error: `文件超过 ${SPACE_EXPORT_MAX_BYTES / 1024 / 1024} MB 的上限` }, 413),
     }),
+    async (c, next) => {
+      const release = acquireUploadSlot(c.get('console').accountId)
+      let timer: NodeJS.Timeout | undefined
+      try {
+        const late = new Promise<'late'>((resolve) => {
+          timer = setTimeout(() => resolve('late'), UPLOAD_READ_MS).unref()
+        })
+        const read = c.req.arrayBuffer().then(() => 'read' as const)
+        if ((await Promise.race([read, late])) === 'late') {
+          // 还在收的请求体没人要了：断开连接，不让它继续往内存里读
+          read.catch(() => undefined)
+          ;(c.env as Partial<HttpBindings> | undefined)?.outgoing?.destroy()
+          return c.json({ error: '上传超时' }, 408)
+        }
+      } finally {
+        clearTimeout(timer)
+        release()
+      }
+      await next()
+    },
   ]
 }
 const uploadErrors = {
   400: jsonResponse('导入不了（口令不对、文件被改过、内容对不上、没配主密钥等）', ErrorResponse),
   403: forbidden,
+  408: jsonResponse('上传超时', ErrorResponse),
   413: jsonResponse('文件太大', ErrorResponse),
   429: busy,
 }
@@ -282,8 +320,8 @@ function inspectRoute(deps: Deps) {
     path: '/spaces/import/inspect',
     tags: ['console'],
     summary:
-      '导入之前先检查导出文件（只有实例管理员）：是谁导出的、有多少，导入后哪些归你；导入会遇到的问题这一步就报出来，不写库',
-    middleware: uploadMiddleware(deps),
+      '导入之前先检查导出文件：是谁导出的、有多少，导入后哪些归导入人；导入会遇到的问题这一步就报出来，不写库',
+    middleware: uploadMiddleware(deps, false),
     request: {
       body: {
         required: true,
@@ -300,12 +338,16 @@ function importRoute(deps: Deps) {
     path: '/spaces/import',
     tags: ['console'],
     summary:
-      '把导出文件导入成一个新空间（只有实例管理员），导入人是新空间的 owner，导出人的本人记忆与凭据都归导入人；Key 不在文件里，要重新签发',
-    middleware: uploadMiddleware(deps),
+      '把导出文件导入成一个新空间：导入人是新空间的 owner、占一个空间名额，导出人的本人记忆与凭据都归导入人；Key 不在文件里，要重新签发',
+    middleware: uploadMiddleware(deps, true),
     request: {
       body: { required: true, content: { 'multipart/form-data': { schema: SpaceImportForm } } },
     },
-    responses: { 201: jsonResponse('已导入', SpaceImportResult), ...uploadErrors },
+    responses: {
+      201: jsonResponse('已导入', SpaceImportResult),
+      ...uploadErrors,
+      409: jsonResponse('拥有的空间已达上限', ErrorResponse),
+    },
   })
 }
 
@@ -425,8 +467,8 @@ function attachment(spaceName: string, createdAt: string): string {
 }
 
 // 成员与空间操作被拒的回应。不是成员（包括空间不存在）一律和别的空间接口一样回 403；ownerOnly 是不是所有者时的说明
-function memberError(c: Context<AppEnv>, reason: MemberFailure, ownerOnly: string) {
-  switch (reason) {
+function memberError(c: Context<AppEnv>, rejection: MemberRejection, ownerOnly: string) {
+  switch (rejection.reason) {
     case 'no-space':
     case 'not-member':
       return c.json(notMember, 403)
@@ -452,24 +494,33 @@ function memberError(c: Context<AppEnv>, reason: MemberFailure, ownerOnly: strin
       return c.json({ error: '账号已停用' }, 409)
     case 'departure-purging':
       return c.json({ error: '离开后的本人记忆与凭据已开始清除，清除完成后才能重新加入' }, 409)
+    case 'owner-busy':
+      return c.json({ error: '对方正在新建或导入空间，稍后再试' }, 409)
+    case 'owner-limit':
+      return c.json(
+        { error: `对方拥有的空间已达上限（每个账号最多 ${rejection.limit} 个），不能再成为所有者` },
+        409,
+      )
   }
 }
 
-// 实例级的空间管理：空间列表与「允许成员自建空间」
+// 实例级的空间管理：空间列表与空间数量上限
 export function instanceSpaceRoutes(deps: Deps) {
-  const view = async (accountId: string) => {
-    const policy = await loadSpaceCreationPolicy(deps.db)
-    const admin = await isInstanceAdmin(deps.db, accountId)
-    return { ...policy, canCreate: admin || policy.membersCanCreate }
-  }
   return router()
     .openapi(instanceListRoute(deps), async (c) => c.json(await instanceSpaces(deps.db), 200))
-    .openapi(creationViewRoute(deps), async (c) =>
-      c.json(await view(c.get('console').accountId), 200),
+    .openapi(limitViewRoute(deps), async (c) =>
+      c.json(await spaceLimitView(deps.db, c.get('console').accountId), 200),
     )
-    .openapi(creationUpdateRoute(deps), async (c) => {
-      await saveSpaceCreationPolicy(deps.db, c.req.valid('json'))
-      return c.json(await view(c.get('console').accountId), 200)
+    .openapi(limitUpdateRoute(deps), async (c) => {
+      const actor = c.get('console').accountId
+      // 和别的管理员写操作一样先过 lockAsAdmin：中间件查过之后才被停用、降级的管理员改不了
+      const saved = await deps.db.transaction(async (tx) => {
+        if (!(await lockAsAdmin(tx, actor))) return false
+        await saveSpaceLimit(tx, c.req.valid('json'))
+        return true
+      })
+      if (!saved) return c.json({ error: '需要实例管理员' }, 403)
+      return c.json(await spaceLimitView(deps.db, actor), 200)
     })
 }
 
@@ -561,7 +612,7 @@ export function spaceRoutes(deps: Deps) {
         username: body.username,
         role: body.role,
       })
-      if (!result.ok) return memberError(c, result.reason, '仅空间所有者可添加成员')
+      if (!result.ok) return memberError(c, result, '仅空间所有者可添加成员')
       return c.json(result.value, 201)
     })
     .openapi(updateMemberRoute, async (c) => {
@@ -572,7 +623,7 @@ export function spaceRoutes(deps: Deps) {
         target: accountId,
         role: c.req.valid('json').role,
       })
-      if (!result.ok) return memberError(c, result.reason, '仅空间所有者可修改成员角色')
+      if (!result.ok) return memberError(c, result, '仅空间所有者可修改成员角色')
       return c.json(result.value, 200)
     })
     .openapi(removeMemberRoute, async (c) => {
@@ -582,7 +633,7 @@ export function spaceRoutes(deps: Deps) {
         actor: c.get('console').accountId,
         target: accountId,
       })
-      if (!result.ok) return memberError(c, result.reason, '仅空间所有者可移除其他成员')
+      if (!result.ok) return memberError(c, result, '仅空间所有者可移除其他成员')
       return c.body(null, 204)
     })
     .openapi(transferRoute, async (c) => {
@@ -592,27 +643,24 @@ export function spaceRoutes(deps: Deps) {
         actor: c.get('console').accountId,
         target: c.req.valid('json').accountId,
       })
-      if (!result.ok) return memberError(c, result.reason, '仅空间所有者可转让所有者')
+      if (!result.ok) return memberError(c, result, '仅空间所有者可转让所有者')
       return c.json(result.value, 200)
     })
     .openapi(createSpaceRoute, async (c) => {
       const accountId = c.get('console').accountId
-      const body = c.req.valid('json')
-      const admin = await isInstanceAdmin(deps.db, accountId)
-      const owner = body.ownerAccountId ?? accountId
-      if (!admin) {
-        if (owner !== accountId) return c.json({ error: '仅实例管理员可为其他账号新建空间' }, 403)
-        if (!(await loadSpaceCreationPolicy(deps.db)).membersCanCreate) {
-          return c.json({ error: '实例未允许成员自建空间' }, 403)
-        }
-      }
-      const space = await createSpace(deps.db, { name: body.name, ownerAccountId: owner })
+      const space = await createSpace(deps.db, {
+        name: c.req.valid('json').name,
+        ownerAccountId: accountId,
+      })
       if (!space.ok) {
+        if (space.reason === 'owner-limit') {
+          return c.json({ error: spaceLimitReached(space.limit) }, 409)
+        }
         return space.reason === 'disabled'
           ? c.json({ error: '账号已停用' }, 409)
           : c.json({ error: '账号不存在' }, 404)
       }
-      return c.json({ ...space.value, ownerAccountId: owner }, 201)
+      return c.json({ ...space.value, ownerAccountId: accountId }, 201)
     })
     .openapi(spaceView, async (c) => {
       const { spaceId } = c.req.valid('param')
@@ -627,7 +675,7 @@ export function spaceRoutes(deps: Deps) {
         actor: c.get('console').accountId,
         name: c.req.valid('json').name,
       })
-      if (!result.ok) return memberError(c, result.reason, '仅空间所有者可修改空间名')
+      if (!result.ok) return memberError(c, result, '仅空间所有者可修改空间名')
       return c.json(result.value, 200)
     })
     .openapi(deleteRoute, async (c) => {
@@ -644,7 +692,7 @@ export function spaceRoutes(deps: Deps) {
         if (result.reason === 'name-mismatch') return c.json({ error: '空间名不一致' }, 400)
         // 别人探不出空间在不在：不存在与不是成员一样回 403，只有实例管理员看得到 404
         if (result.reason === 'no-space' && admin) return c.json({ error: '空间不存在' }, 404)
-        return memberError(c, result.reason, '仅空间所有者或实例管理员可删除空间')
+        return memberError(c, result, '仅空间所有者或实例管理员可删除空间')
       }
       return c.body(null, 204)
     })
