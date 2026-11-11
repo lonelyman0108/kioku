@@ -1,6 +1,7 @@
 import { z } from 'zod'
 
 import { Layer, Sensitivity } from './memory'
+import { MinScoreSetting, RecallLimitSetting } from './settings'
 
 export const RECALL_VIAS = ['semantic', 'fulltext', 'glossary'] as const
 export const RecallVia = z.enum(RECALL_VIAS).meta({ id: 'RecallVia' })
@@ -30,7 +31,12 @@ export const RecallBreakdown = z.object({
 })
 export type RecallBreakdown = z.infer<typeof RecallBreakdown>
 
-export const DebugCandidate = RecallCandidate.extend({ breakdown: RecallBreakdown })
+// 调试台的候选（只在管理界面）：各路得分，加上未取整的总分。score 取整到两位只用于展示，
+// 和最低分比较用 rawScore，管理界面试算时在本地重算，正好卡在阈值上的和服务端判断一致
+export const DebugCandidate = RecallCandidate.extend({
+  breakdown: RecallBreakdown,
+  rawScore: z.number(),
+})
 export type DebugCandidate = z.infer<typeof DebugCandidate>
 
 // 会话上下文：由接入方（插件）上报，只能收紧权限、不能放宽。平台账号原样上报，
@@ -79,7 +85,8 @@ export type SessionContextInput = z.infer<typeof SessionContextInput>
 export const RecallRequest = z
   .object({
     query: z.string().min(1).max(4000),
-    limit: z.number().int().min(1).max(50).default(8),
+    // 不填时用设置里每轮召回的条数（应用、空间、实例逐级沿用，内置为 8）
+    limit: z.number().int().min(1).max(50).optional(),
     context: SessionContextInput.optional(),
   })
   .meta({ id: 'RecallRequest' })
@@ -233,7 +240,12 @@ export const READ_DENIALS = [
 export const ReadDenial = z.enum(READ_DENIALS)
 export type ReadDenial = z.infer<typeof ReadDenial>
 
-export const RecallDebugRequest = z.object({ query: z.string().trim().min(1).max(4000) })
+// minScore 与 limit 只用来试算：不填时用这把 Key 的应用实际生效的设置
+export const RecallDebugRequest = z.object({
+  query: z.string().trim().min(1).max(4000),
+  minScore: MinScoreSetting.optional(),
+  limit: RecallLimitSetting.optional(),
+})
 export type RecallDebugRequest = z.infer<typeof RecallDebugRequest>
 
 // 召回调试台：按一把 Key 模拟每轮输入时的召回
@@ -242,7 +254,9 @@ export const RecallDebug = z.object({
   injected: z.array(DebugCandidate),
   // 没注入的：没过阈值或排在后面的
   others: z.array(DebugCandidate),
+  // 这次用的最低分与条数：请求里给了就是给的，否则是生效的设置
   minScore: z.number(),
+  limit: z.number().int(),
   // 注入的 <recall> 块，原样就是宿主收到的文字
   block: z.string(),
   // 这次有没有走向量这一路（嵌入接口没配、出错或超时时没有）

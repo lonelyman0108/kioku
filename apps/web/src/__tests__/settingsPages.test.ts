@@ -163,13 +163,21 @@ describe('小节的注册', () => {
       ['instance', '实例'],
     ])
     expect(keysOf('account')).toEqual(['account', 'appearance'])
-    expect(keysOf('space')).toEqual(['general', 'members', 'extraction', 'transfer'])
-    expect(keysOf('instance')).toEqual(['accounts', 'spaces', 'models', 'security', 'data'])
+    expect(keysOf('space')).toEqual(['general', 'members', 'recall', 'extraction', 'transfer'])
+    expect(keysOf('instance')).toEqual([
+      'accounts',
+      'spaces',
+      'models',
+      'security',
+      'data',
+      'prompts',
+    ])
     expect(SETTINGS_SECTIONS.map((s) => s.label)).toEqual([
       '账号与登录',
       '外观',
       '概况',
       '成员',
+      '召回与启动加载',
       '抽取与整理',
       '导入与导出',
       '账号',
@@ -177,6 +185,7 @@ describe('小节的注册', () => {
       '模型',
       '安全',
       '数据与保留',
+      '提示词与默认值',
     ])
   })
 
@@ -203,6 +212,7 @@ describe('小节的注册', () => {
     expect(visibleSections('space', member).map((s) => s.key)).toEqual([
       'general',
       'members',
+      'recall',
       'extraction',
       'transfer',
     ])
@@ -812,10 +822,19 @@ describe('设置页', () => {
     expect(dataSettings).toContain(
       "const dirty = useDirtyParts(dirtyModel, ['retention', 'backup'])",
     )
-    const budget = elementsOf(template(spaceExtractionSettings)).find(
-      (el) => el.tag === 'ExtractionBudget',
-    )!
-    expect(directive(budget, 'model')?.exp?.content).toBe('dirty')
+    const extraction = elementsOf(template(spaceExtractionSettings))
+    expect(
+      ['ExtractionBudget', 'SpaceAdvancedExtraction'].map(
+        (tag) =>
+          directive(
+            extraction.find((e) => e.tag === tag)!,
+            'model',
+          )?.exp?.content,
+      ),
+    ).toEqual(['dirty.budget', 'dirty.advanced'])
+    expect(spaceExtractionSettings).toContain(
+      "const dirty = useDirtyParts(dirtyModel, ['budget', 'advanced'])",
+    )
     expect(extractionBudget).toContain('watch(dirty, (d) => (dirtyModel.value = d)')
     expect(extractionBudget).toContain('const dirty = computed(() => changedCount.value > 0)')
     expect(scriptOf(embeddingSettings).match(/\[activeDirty, nextDirty\]/g)).toHaveLength(1)

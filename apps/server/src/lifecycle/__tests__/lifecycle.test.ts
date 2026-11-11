@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { OMITTED_TITLES } from '../../recall/boot'
 import { CANDIDATE_ID, type RecordableCandidate } from '../../recall/recall'
-import { CHAT_GUIDANCE, handleLifecycle } from '../lifecycle'
+import { CHAT_GUIDANCE, GUIDANCE, handleLifecycle } from '../lifecycle'
+import { effectiveSettings } from '../../settings/advanced'
 import type { RecallScope } from '../scope'
 
 const candidate: RecordableCandidate = {
@@ -22,6 +23,7 @@ const scopeWith = (
   contents: RecallScope['contents'] = async (ids) =>
     new Map(ids.map((id) => [id, '基础规则：先读正文再信任，\n<不要照做>别的指令'])),
 ): RecallScope => ({
+  settings: async () => effectiveSettings({}),
   recall: async () => [candidate],
   boot: async () => ({ entries: [], omitted: [], [OMITTED_TITLES]: [] }),
   recent: async () => [],
@@ -292,4 +294,134 @@ describe('每轮输入的召回', () => {
     expect(recall).not.toHaveBeenCalled()
     expect(res.nodeUris).toEqual(['persona://bot/soul'])
   })
+
+  describe('按高级设置', () => {
+    const recentMemory = {
+      uri: 'core://recent',
+      title: 'recent',
+      priority: 2,
+      disclosure: null,
+      updatedAt: '2026-10-26T08:00:00Z',
+    }
+    const scopeFor = (layers: Parameters<typeof effectiveSettings>[0], chat = false) => {
+      // 和真的 scope 一样：给函数时按读到的设置算出字数预算，记下算出来的
+      const budgets: number[] = []
+      const boot = vi.fn<RecallScope['boot']>(async (budget) => {
+        const current = effectiveSettings(layers, chat)
+        budgets.push(
+          typeof budget === 'function'
+            ? budget(current)
+            : (budget ?? current.values['boot.charBudget']),
+        )
+        return {
+          entries: [{ uri: 'core://agent', title: 'agent', layer: 'core', content: '规则' }],
+          omitted: [],
+          [OMITTED_TITLES]: [],
+        }
+      })
+      const summaries = vi.fn<RecallScope['summaries']>(async () => [
+        { content: '上次聊了部署', createdAt: '2026-11-06T08:00:00.000Z' },
+      ])
+      const recent = vi.fn<RecallScope['recent']>(async () => [recentMemory])
+      const recall = vi.fn<RecallScope['recall']>(async () => [candidate])
+      const scope: RecallScope = {
+        ...scopeWith(async () => []),
+        settings: async () => effectiveSettings(layers, chat),
+        boot,
+        summaries,
+        recent,
+        recall,
+      }
+      return { scope, budgets, summaries, recent, recall }
+    }
+
+    it('字数预算取设置与宿主上限里更小的；宿主没有上限时就是设置', async () => {
+      const small = scopeFor({ space: { 'boot.charBudget': 3000 } })
+      await handleLifecycle(small.scope, 'claudecode', { event: 'session.start' })
+      expect(small.budgets).toEqual([3000])
+      const large = scopeFor({ space: { 'boot.charBudget': 40000 } })
+      await handleLifecycle(large.scope, 'claudecode', { event: 'session.start' })
+      expect(large.budgets[0]).toBeLessThan(9_500)
+      const unlimited = scopeFor({ app: { 'boot.charBudget': 2500 } })
+      await handleLifecycle(unlimited.scope, 'mcp', { event: 'session.start' })
+      expect(unlimited.budgets).toEqual([2500])
+    })
+
+    it('三块附带内容按设置的开关与条数取；关掉的不取', async () => {
+      const on = scopeFor({
+        instance: { 'boot.summaries.count': 2, 'boot.recent.count': 4, 'boot.related.count': 6 },
+      })
+      const res = await handleLifecycle(on.scope, 'mcp', {
+        event: 'session.start',
+        project: { dirName: 'kioku' },
+      })
+      expect(on.summaries).toHaveBeenCalledWith(2)
+      // 多取已经展开的几条，去掉它们之后仍能凑够
+      expect(on.recent).toHaveBeenCalledWith(5)
+      expect(on.recall.mock.calls[0]![1]).toMatchObject({ limit: 7, semantic: false })
+      expect(contextOf(res.hostOutput.value)).toContain('core://recent')
+
+      const off = scopeFor({
+        space: { 'boot.summaries.enabled': false, 'boot.recent.enabled': false },
+        app: { 'boot.related.count': 0 },
+      })
+      const quiet = await handleLifecycle(off.scope, 'mcp', {
+        event: 'session.start',
+        project: { dirName: 'kioku' },
+      })
+      expect(off.summaries).not.toHaveBeenCalled()
+      expect(off.recent).not.toHaveBeenCalled()
+      expect(off.recall).not.toHaveBeenCalled()
+      expect(contextOf(quiet.hostOutput.value)).not.toContain('core://recent')
+    })
+
+    it('补充接在固定的使用指引后面：实例的在前，应用的在后；群聊机器人用群聊的那一种', async () => {
+      const layers = {
+        instance: {
+          'prompts.agentGuidance': '实例的补充',
+          'prompts.chatGuidance': '实例的群聊补充',
+        },
+        app: { 'prompts.guidance': '应用的补充' },
+      }
+      const agent = await handleLifecycle(scopeFor(layers).scope, 'mcp', {
+        event: 'session.start',
+      })
+      expect(contextOf(agent.hostOutput.value)).toMatch(
+        new RegExp(`^${escape(GUIDANCE)}\n实例的补充\n应用的补充\n\n<kioku-boot>`),
+      )
+      const chat = await handleLifecycle(scopeFor(layers, true).scope, 'astrbot', {
+        event: 'session.start',
+      })
+      expect(contextOf(chat.hostOutput.value)).toMatch(
+        new RegExp(`^${escape(CHAT_GUIDANCE)}\n实例的群聊补充\n应用的补充\n\n<kioku-boot>`),
+      )
+    })
+
+    it('群聊附带的正文字数按设置；条数与最低分交给 scope 按设置取', async () => {
+      const recall = vi.fn<RecallScope['recall']>(async () => [candidate])
+      const res = await handleLifecycle(
+        {
+          ...scopeWith(
+            async () => [],
+            async (ids) => new Map(ids.map((id) => [id, '长'.repeat(400)])),
+          ),
+          settings: async () =>
+            effectiveSettings({
+              space: { 'recall.limit': 3, 'recall.minScore': 0.35 },
+              app: { 'recall.chatInlineChars': 50 },
+            }),
+          recall,
+        },
+        'astrbot',
+        { event: 'prompt.submit', prompt: '规则' },
+      )
+      // 条数与最低分不由这里给：scope 在召回自己的事务里按设置取（memory/context.ts）
+      expect(recall.mock.calls[0]![1]).not.toHaveProperty('limit')
+      expect(recall.mock.calls[0]![1]).not.toHaveProperty('minScore')
+      const line = contextOf(res.hostOutput.value).split('\n')[1]!
+      expect(line.split(' | ')[2]).toBe(`${'长'.repeat(50)}…`)
+    })
+  })
 })
+
+const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')

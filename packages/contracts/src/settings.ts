@@ -316,3 +316,252 @@ export const BackupRunStatus = z.object({
   outcome: z.enum(['done', 'failed', 'skipped']).nullable(),
 })
 export type BackupRunStatus = z.infer<typeof BackupRunStatus>
+
+// 高级设置：召回、启动加载、抽取与整理的参数，以及提示词的补充。
+// 数值按「内置 → 实例 → 空间 → 应用」逐级覆盖，每一级只存覆盖了的项，缺省沿用上一级；
+// 召回与启动加载三级都能覆盖，抽取与整理只到空间，召回权重只在实例。
+// 提示词的补充不覆盖、只叠加：代码里的固定部分在前，然后是实例的补充，再然后是空间或应用的补充。
+// 设置项用带点的扁平键（「recall.limit」），存储、接口与界面都用同一套键
+const intIn = (min: number, max: number) => z.number().int().min(min).max(max)
+// 0 到 1，最多两位小数
+const unit = z
+  .number()
+  .min(0)
+  .max(1)
+  .refine((n) => Math.abs(Math.round(n * 100) - n * 100) < 1e-6, '最多两位小数')
+
+export const RecallLimitSetting = intIn(1, 20)
+export const MinScoreSetting = unit
+
+const TUNING_SHAPE = {
+  // 每轮召回：过了最低分之后最多注入几条
+  'recall.limit': RecallLimitSetting,
+  'recall.minScore': MinScoreSetting,
+  // 联系人直连：每个联系人最多附几条事实；0 为不附
+  'recall.subjectFacts': intIn(0, 20),
+  // 读不了正文的宿主（群聊机器人）的召回块每条附多少字正文
+  'recall.chatInlineChars': intIn(50, 1000),
+  // 各路加到总分上的权重
+  'recallWeights.semantic': unit,
+  'recallWeights.fulltext': unit,
+  'recallWeights.glossaryFirst': unit,
+  'recallWeights.glossaryMore': unit,
+  'recallWeights.priority': unit,
+  // 启动加载展开节点的字数预算；宿主自身有上限时取两者中较小的
+  'boot.charBudget': intIn(2000, 40000),
+  // 会话开始时附带的三块内容：同一会话的会话摘要、近期更新的记忆、与当前项目相关的记忆
+  'boot.summaries.enabled': z.boolean(),
+  'boot.summaries.count': intIn(0, 20),
+  'boot.recent.enabled': z.boolean(),
+  'boot.recent.count': intIn(0, 20),
+  'boot.related.enabled': z.boolean(),
+  'boot.related.count': intIn(0, 20),
+  // 攒满几轮马上抽取；不满时空闲几分钟后抽取；会话摘要留几天
+  'extraction.batchTurns': intIn(1, 50),
+  'extraction.idleMinutes': intIn(1, 120),
+  'extraction.episodeTtlDays': intIn(1, 365),
+  // 每次整理最多请求模型几次（其中固定留 2 次给本人的记忆，所以至少 3 次）；每次请求最多收几条建议
+  'dream.maxCalls': intIn(3, 30),
+  'dream.maxSuggestions': intIn(1, 50),
+}
+export type TuningKey = keyof typeof TUNING_SHAPE
+
+export const TuningValues = z.object(TUNING_SHAPE)
+export type TuningValues = z.infer<typeof TuningValues>
+
+export const TUNING_DEFAULTS: TuningValues = {
+  'recall.limit': 8,
+  'recall.minScore': 0.2,
+  'recall.subjectFacts': 8,
+  'recall.chatInlineChars': 300,
+  'recallWeights.semantic': 0.6,
+  'recallWeights.fulltext': 0.35,
+  'recallWeights.glossaryFirst': 0.3,
+  'recallWeights.glossaryMore': 0.1,
+  'recallWeights.priority': 0.06,
+  'boot.charBudget': 16000,
+  'boot.summaries.enabled': true,
+  'boot.summaries.count': 3,
+  'boot.recent.enabled': true,
+  'boot.recent.count': 5,
+  'boot.related.enabled': true,
+  'boot.related.count': 5,
+  'extraction.batchTurns': 10,
+  'extraction.idleMinutes': 10,
+  'extraction.episodeTtlDays': 30,
+  'dream.maxCalls': 8,
+  'dream.maxSuggestions': 20,
+}
+
+export const RECALL_KEYS = [
+  'recall.limit',
+  'recall.minScore',
+  'recall.subjectFacts',
+  'recall.chatInlineChars',
+] as const
+export const WEIGHT_KEYS = [
+  'recallWeights.semantic',
+  'recallWeights.fulltext',
+  'recallWeights.glossaryFirst',
+  'recallWeights.glossaryMore',
+  'recallWeights.priority',
+] as const
+export const BOOT_KEYS = [
+  'boot.charBudget',
+  'boot.summaries.enabled',
+  'boot.summaries.count',
+  'boot.recent.enabled',
+  'boot.recent.count',
+  'boot.related.enabled',
+  'boot.related.count',
+] as const
+export const EXTRACTION_KEYS = [
+  'extraction.batchTurns',
+  'extraction.idleMinutes',
+  'extraction.episodeTtlDays',
+] as const
+export const DREAM_KEYS = ['dream.maxCalls', 'dream.maxSuggestions'] as const
+
+// 各级能覆盖的数值项
+export const APP_TUNING_KEYS = [...RECALL_KEYS, ...BOOT_KEYS] as const
+export const SPACE_TUNING_KEYS = [...APP_TUNING_KEYS, ...EXTRACTION_KEYS, ...DREAM_KEYS] as const
+export const TUNING_KEYS = [
+  ...RECALL_KEYS,
+  ...WEIGHT_KEYS,
+  ...BOOT_KEYS,
+  ...EXTRACTION_KEYS,
+  ...DREAM_KEYS,
+] as const satisfies readonly TuningKey[]
+export const TuningKeyEnum = z.enum(TUNING_KEYS)
+
+export const PROMPT_SUPPLEMENT_MAX_CHARS = 2000
+// 提示词的补充：至多 2,000 字（按字符数），换行与制表符以外的控制字符不收，存不进数据库的落单代理项也不收
+export const PromptSupplement = z
+  .string()
+  .refine(
+    (s) => [...s].length <= PROMPT_SUPPLEMENT_MAX_CHARS,
+    `补充至多 ${PROMPT_SUPPLEMENT_MAX_CHARS} 字`,
+  )
+  // eslint-disable-next-line no-control-regex
+  .refine((s) => !/[\x00-\x08\x0b-\x1f\x7f]/.test(s), '补充不能包含换行与制表符以外的控制字符')
+  .refine((s) => !/\p{Cs}/u.test(s), '补充含无法存入数据库的字符')
+
+// 补充的键。实例四段都有；空间只有抽取与整理的规则；应用只有一段使用指引，
+// 按应用的运行时接在编码 Agent 或群聊机器人的指引后面
+export const INSTANCE_PROMPT_KEYS = [
+  'prompts.agentGuidance',
+  'prompts.chatGuidance',
+  'prompts.extractionRules',
+  'prompts.dreamRules',
+] as const
+export const SPACE_PROMPT_KEYS = ['prompts.extractionRules', 'prompts.dreamRules'] as const
+export const APP_PROMPT_KEYS = ['prompts.guidance'] as const
+export type InstancePromptKey = (typeof INSTANCE_PROMPT_KEYS)[number]
+
+type Shape = Record<string, z.ZodType>
+const pickTuning = <K extends TuningKey>(keys: readonly K[]) =>
+  Object.fromEntries(keys.map((k) => [k, TUNING_SHAPE[k]])) as Pick<typeof TUNING_SHAPE, K>
+const promptShape = <K extends string>(keys: readonly K[]) =>
+  Object.fromEntries(keys.map((k) => [k, PromptSupplement])) as Record<K, typeof PromptSupplement>
+const optionalShape = <S extends Shape>(shape: S) =>
+  Object.fromEntries(Object.entries(shape).map(([k, v]) => [k, v.optional()])) as {
+    [K in keyof S]: z.ZodOptional<S[K]>
+  }
+// 修改时只带要改的项，null 为恢复（去掉这一级的覆盖）；不认识的键拒收，不悄悄忽略
+const patchOf = <S extends Shape>(shape: S) =>
+  z.strictObject(
+    Object.fromEntries(Object.entries(shape).map(([k, v]) => [k, v.nullable().optional()])) as {
+      [K in keyof S]: z.ZodOptional<z.ZodNullable<S[K]>>
+    },
+  )
+
+const INSTANCE_SHAPE = { ...pickTuning(TUNING_KEYS), ...promptShape(INSTANCE_PROMPT_KEYS) }
+const SPACE_SHAPE = { ...pickTuning(SPACE_TUNING_KEYS), ...promptShape(SPACE_PROMPT_KEYS) }
+const APP_SHAPE = { ...pickTuning(APP_TUNING_KEYS), ...promptShape(APP_PROMPT_KEYS) }
+
+// 各级存下的覆盖：只有覆盖了的项
+export const InstanceAdvanced = z.object(optionalShape(INSTANCE_SHAPE))
+export type InstanceAdvanced = z.infer<typeof InstanceAdvanced>
+export const SpaceAdvanced = z.object(optionalShape(SPACE_SHAPE))
+export type SpaceAdvanced = z.infer<typeof SpaceAdvanced>
+export const AppAdvanced = z.object(optionalShape(APP_SHAPE))
+export type AppAdvanced = z.infer<typeof AppAdvanced>
+
+export const UpdateInstanceAdvanced = patchOf(INSTANCE_SHAPE)
+export type UpdateInstanceAdvanced = z.infer<typeof UpdateInstanceAdvanced>
+export const UpdateSpaceAdvanced = patchOf(SPACE_SHAPE)
+export type UpdateSpaceAdvanced = z.infer<typeof UpdateSpaceAdvanced>
+export const UpdateAppAdvanced = patchOf(APP_SHAPE)
+export type UpdateAppAdvanced = z.infer<typeof UpdateAppAdvanced>
+
+// 生效值来自哪一级
+export const SettingSource = z.enum(['builtin', 'instance', 'space', 'app'])
+export type SettingSource = z.infer<typeof SettingSource>
+export const TuningSources = z.record(TuningKeyEnum, SettingSource)
+export type TuningSources = z.infer<typeof TuningSources>
+
+const Count = z.number().int().min(0)
+
+// 实例：内置值、实例的覆盖、生效值，每项被几个空间、几个应用覆盖，以及四段提示词的固定部分
+// （抽取与整理各有两种场景，固定部分按场景列出，补充接在每一种后面）
+export const InstanceAdvancedView = z.object({
+  builtin: TuningValues,
+  overrides: InstanceAdvanced,
+  effective: TuningValues,
+  overriddenBy: z.record(TuningKeyEnum, z.object({ spaces: Count, apps: Count })),
+  fixedPrompts: z.object(
+    Object.fromEntries(INSTANCE_PROMPT_KEYS.map((k) => [k, z.array(z.string())])) as Record<
+      InstancePromptKey,
+      z.ZodArray<z.ZodString>
+    >,
+  ),
+})
+export type InstanceAdvancedView = z.infer<typeof InstanceAdvancedView>
+
+// 空间里覆盖了设置的应用：覆盖的数值项与值；使用指引的补充只说有没有，内容在应用的设置里看
+export const AppAdvancedSummary = z.object({
+  id: z.uuid(),
+  name: z.string(),
+  overrides: AppAdvanced.omit({ 'prompts.guidance': true }),
+  hasGuidance: z.boolean(),
+})
+export type AppAdvancedSummary = z.infer<typeof AppAdvancedSummary>
+
+// 空间：空间的覆盖，按「内置 → 实例 → 空间」的生效值与来源，实例级的生效值（「沿用实例」显示它），
+// 实例的抽取与整理规则的补充（预览全文用），以及有覆盖的应用。canEdit：当前账号是空间所有者
+export const SpaceAdvancedView = z.object({
+  overrides: SpaceAdvanced,
+  effective: TuningValues,
+  sources: TuningSources,
+  instance: TuningValues,
+  instancePrompts: z.object({
+    'prompts.extractionRules': z.string().nullable(),
+    'prompts.dreamRules': z.string().nullable(),
+  }),
+  // 抽取与整理规则的固定部分，按场景列出（同实例视图的 fixedPrompts）
+  fixedPrompts: z.object({
+    'prompts.extractionRules': z.array(z.string()),
+    'prompts.dreamRules': z.array(z.string()),
+  }),
+  apps: z.array(AppAdvancedSummary),
+  // 客户端自身能完整接收的字数（不可调）：启动加载的字数预算取它与设置里更小的；没列出的客户端不限
+  hostLimits: z.array(z.object({ runtimeFamily: z.string(), chars: z.number().int() })),
+  canEdit: z.boolean(),
+})
+export type SpaceAdvancedView = z.infer<typeof SpaceAdvancedView>
+
+// 应用：应用的覆盖，按四级的生效值与来源，不算应用这一级时的生效值（「沿用空间」显示它），
+// 以及使用指引：按应用的运行时是编码 Agent 还是群聊机器人，固定部分与实例的补充。canEdit：当前账号是应用所有者
+export const AppAdvancedView = z.object({
+  overrides: AppAdvanced,
+  effective: TuningValues,
+  sources: TuningSources,
+  inherited: TuningValues,
+  guidance: z.object({
+    kind: z.enum(['agent', 'chat']),
+    fixed: z.string(),
+    instance: z.string().nullable(),
+  }),
+  canEdit: z.boolean(),
+})
+export type AppAdvancedView = z.infer<typeof AppAdvancedView>

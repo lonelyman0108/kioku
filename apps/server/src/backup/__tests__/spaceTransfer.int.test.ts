@@ -37,6 +37,7 @@ import { keyIdOf } from '../../crypto/keyring'
 import { connect, withSpace, type Database } from '../../db/client'
 import { sealVaultSecrets } from '../../credential/vault'
 import {
+  apps,
   credentialEvents,
   credentials,
   memories,
@@ -49,6 +50,7 @@ import {
 import { staticEmbedderSource } from '../../embedding/source'
 import type { Jobs } from '../../jobs/queue'
 import { settleRecallEvents } from '../../recall/events'
+import { loadSpaceAdvanced, saveAppAdvanced, saveSpaceAdvanced } from '../../settings/advanced'
 import {
   openTestDatabase,
   resetDatabase,
@@ -198,7 +200,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     createdAt: new Date().toISOString(),
     kioku: 'test',
     exporter: { displayName: '拼文件的人', dreamPrivate: true },
-    space: { name, extractionMonthlyTokens: 1000, extractionDailyWrites: 5 },
+    space: { name, extractionMonthlyTokens: 1000, extractionDailyWrites: 5, advanced: {} },
   })
   // 文件头按原样写出，测别的格式版本、缺字段时传别的样子
   async function craft(records: SpaceExportRecord[], head: object = header()): Promise<Buffer> {
@@ -539,6 +541,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         name: '家',
         extractionMonthlyTokens: 123_456,
         extractionDailyWrites: 7,
+        advanced: {},
       })
       const uris = parsed.memories.map((m) => m.uri).filter(Boolean)
       expect(uris.sort()).toEqual(
@@ -1072,6 +1075,40 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     })
   })
 
+  it('空间与应用的高级设置随文件带过去，应用的使用指引补充导入时去掉', async () => {
+    const alice = await bootstrap(source, 'alice')
+    const appId = (await alice.createApp('codex')).id
+    await saveSpaceAdvanced(database.db, alice.spaceId, {
+      'recall.minScore': 0.3,
+      'prompts.dreamRules': '整理时保留原话',
+    })
+    await withSpace(database.db, alice.spaceId, (tx) =>
+      saveAppAdvanced(tx, appId, { 'boot.charBudget': 3000, 'prompts.guidance': '只回中文' }),
+    )
+    const file = await exportSpace(source, alice.spaceId, alice.cookie)
+    const parsed = await contents(file)
+    expect(parsed.header.space.advanced).toEqual({
+      'recall.minScore': 0.3,
+      'prompts.dreamRules': '整理时保留原话',
+    })
+    const result = await ok<SpaceImportResult>(
+      importRequest(source, alice.cookie, file, PASSPHRASE, '导入的'),
+      201,
+    )
+    expect(await loadSpaceAdvanced(database.db, result.spaceId)).toEqual(
+      parsed.header.space.advanced,
+    )
+    const [imported] = await withSpace(database.db, result.spaceId, (tx) =>
+      tx.select({ config: apps.config }).from(apps),
+    )
+    // 应用归了导入人：导出人写的使用指引补充不带过来，数值覆盖留着
+    expect(parsed.apps[0]!.advanced).toEqual({
+      'boot.charBudget': 3000,
+      'prompts.guidance': '只回中文',
+    })
+    expect(imported!.config).toEqual({ advanced: { 'boot.charBudget': 3000 } })
+  })
+
   it('导出带走的 secret 记忆留访问事件：经由 export，只进这条记忆的历史；没导出的不记', async () => {
     const alice = await bootstrap(source, 'alice')
     const bob = await addMember(database.db, alice.spaceId, 'bob', 'owner')
@@ -1203,7 +1240,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
   })
 
   it(
-    '导出人关掉的整理本人记忆跟着文件走：导入人在新空间里也关着；文件格式是 5，之前的 1 到 4 与更新的格式都拒收',
+    '导出人关掉的整理本人记忆跟着文件走：导入人在新空间里也关着；文件格式是 6，之前的 1 到 5 与更新的格式都拒收',
     { timeout: 30_000 },
     async () => {
       const alice = await bootstrap(source, 'alice')
@@ -1259,7 +1296,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       expect(await mine(again.spaceId)).toEqual({ includePrivate: true })
 
       // 文件里必须有这一项
-      expect((await contents(file)).header.version).toBe(5)
+      expect((await contents(file)).header.version).toBe(6)
       const missing = await importRequest(
         source,
         alice.cookie,
@@ -1273,7 +1310,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       // 记忆架构改版之前的格式（层、坐标与本人都不一样）、凭据改版之前的（凭据源）和认不得的更新的格式都拒收，
       // 不悄悄丢掉或猜测内容
       const before = await spaceCount()
-      for (const version of [1, 2, 3, 4, 6]) {
+      for (const version of [1, 2, 3, 4, 5, 7]) {
         const res = await inspectRequest(
           source,
           alice.cookie,
@@ -1281,7 +1318,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         )
         expect(res.status).toBe(400)
         expect(((await res.json()) as { error: string }).error).toBe(
-          `导出文件的格式版本是 ${version}，当前 Kioku 只支持 5。版本 1、2 是记忆架构改版之前的格式，版本 3 带着凭据改版之前的凭据源，版本 4 没有凭据的到期与去处，都无法导入；更新的版本请升级 Kioku 后再导入。`,
+          `导出文件的格式版本是 ${version}，当前 Kioku 只支持 6。版本 1、2 是记忆架构改版之前的格式，版本 3 带着凭据改版之前的凭据源，版本 4 没有凭据的到期与去处，版本 5 没有高级设置，都无法导入；更新的版本请升级 Kioku 后再导入。`,
         )
       }
       expect(await spaceCount()).toBe(before)

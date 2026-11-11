@@ -1,4 +1,5 @@
 import {
+  AppAdvanced,
   AppConfig,
   CredentialIdentifier,
   ExtractionBudget,
@@ -11,6 +12,7 @@ import {
   RuntimeFamily,
   Sensitivity,
   Slug,
+  SpaceAdvanced,
   SubjectKind,
   VaultCredentialFields,
   VaultEmail,
@@ -27,10 +29,11 @@ import { z } from 'zod'
 // 会话与会话摘要不导出，联系人的事实不带听到它的会话。
 // 导出时每条记录先按这里的定义检查一遍，写得出来的就一定导入得了
 export const SPACE_EXPORT_FORMAT = 'kioku-space-export'
-// 文件格式的版本，导出时写这个，导入也只认它。5 在 4 之上加了凭据的到期与需要轮换、密码库连接的去处；
+// 文件格式的版本，导出时写这个，导入也只认它。6 在 5 之上加了空间与应用的高级设置；
+// 5 在 4 之上加了凭据的到期与需要轮换、密码库连接的去处；
 // 4 是凭据改版之后的格式（密码库连接，凭据来源只剩托管与密码库），3 带着旧的凭据源，1、2 是记忆架构改版之前按七层写的，
-// 都不再能导入；更新的版本同样拒收，旧版本遇到 5 也拒收，不会悄悄丢掉不认识的内容
-export const SPACE_EXPORT_VERSION = 5
+// 都不再能导入；更新的版本同样拒收，旧版本遇到 6 也拒收，不会悄悄丢掉不认识的内容
+export const SPACE_EXPORT_VERSION = 6
 
 // 压缩前的正文最多这么大：导出时超出就拒绝，导入时解压超出就停下（挡住压缩炸弹）
 export const SPACE_EXPORT_MAX_PLAIN_BYTES = 128 * 1024 * 1024
@@ -81,11 +84,12 @@ export const SpaceExportHeader = z.object({
   kioku: Text,
   // dreamPrivate：导出人让不让 Dream 整理他的本人记忆，导入后照样用在导入人身上（本人的记忆归了导入人）
   exporter: Exporter.extend({ dreamPrivate: z.boolean() }),
-  // 空间级的设置：名字（导入时没填名字就用它）与抽取预算
+  // 空间级的设置：名字（导入时没填名字就用它）、抽取预算与高级设置的覆盖
   space: z.object({
     name: Text.min(1).max(64),
     extractionMonthlyTokens: ExtractionBudget.shape.monthlyTokens,
     extractionDailyWrites: ExtractionBudget.shape.dailyWritesPerSubject,
+    advanced: SpaceAdvanced,
   }),
 })
 export type SpaceExportHeader = z.infer<typeof SpaceExportHeader>
@@ -109,6 +113,8 @@ export const AppRecord = z.object({
   runtimeFamily: RuntimeFamily,
   defaultPersonaId: Id.nullable(),
   config: AppConfig,
+  // 高级设置里应用这一级的覆盖
+  advanced: AppAdvanced,
   createdAt: Time,
   updatedAt: Time,
 })

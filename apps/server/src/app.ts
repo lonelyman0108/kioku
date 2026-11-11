@@ -9,6 +9,7 @@ import type { Deps } from './http/env'
 import { router } from './http/openapi'
 import { isApiPath, mountWeb } from './http/web'
 import { accountRoutes } from './routes/accounts'
+import { advancedSettingsRoutes } from './routes/advancedSettings'
 import { appRoutes } from './routes/apps'
 import { authRoutes } from './routes/auth'
 import { benchRoutes } from './routes/bench'
@@ -104,6 +105,7 @@ export function createApp(deps: Deps) {
   app.route('/v1', mcpRoutes(deps))
   app.route('/v1', settingsRoutes(deps))
   app.route('/v1', instanceSpaceRoutes(deps))
+  app.route('/v1', advancedSettingsRoutes(deps))
   // 放在接入方的路由后面：OpenAPI 的组件按第一次用到的顺序排，Python SDK 的比对对顺序敏感，
   // 测试台的响应用到了 TurnEndEvent 这些接入方的组件
   app.route('/v1', benchRoutes(deps))

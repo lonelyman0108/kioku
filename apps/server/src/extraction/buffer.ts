@@ -1,4 +1,10 @@
-import type { Layer, Sensitivity, TurnEndEvent } from '@kioku/contracts'
+import {
+  TUNING_DEFAULTS,
+  type Layer,
+  type Sensitivity,
+  type TuningValues,
+  type TurnEndEvent,
+} from '@kioku/contracts'
 import { and, count, eq, sql } from 'drizzle-orm'
 
 import { sensitivityRank } from '../access/access'
@@ -6,11 +12,12 @@ import type { KeySession } from '../access/session'
 import { withSpace, type Db, type Tx } from '../db/client'
 import { conversationTurns, spaces } from '../db/schema'
 import type { Deps, KeyPrincipal } from '../http/env'
+import { loadSpaceSettings } from '../settings/advanced'
 import { extractionSettingsView } from './settings'
 
-// 攒满这么多轮就马上排一次抽取；不满时等这一批空闲这么久再抽取
-export const BATCH_TURNS = 10
-export const IDLE_SECONDS = 600
+// 内置值：攒满这么多轮就马上排一次抽取；不满时等这一批空闲这么久再抽取。按空间的高级设置算（extractionDelay）
+export const BATCH_TURNS = TUNING_DEFAULTS['extraction.batchTurns']
+export const IDLE_SECONDS = TUNING_DEFAULTS['extraction.idleMinutes'] * 60
 // 每一批最多留这么多轮：抽取一直失败（例如模型出错）时丢掉最早的，缓冲不会无限长
 export const MAX_BUFFERED_TURNS = 100
 // 一批空闲这么久就整批删掉：正常情况下早就抽取完了，留下的是抽取不了的
@@ -61,7 +68,7 @@ export async function bufferTurn(
       ? `group:${context.groupSubjectId}`
       : `direct:${context.senderSubjectId!}`
   const target: BufferedSession = { spaceId: key.spaceId, appId: key.app.id, scope }
-  const buffered = await withSpace(deps.db, key.spaceId, async (tx) => {
+  const { buffered, values } = await withSpace(deps.db, key.spaceId, async (tx) => {
     await tx.insert(conversationTurns).values({
       spaceId: key.spaceId,
       appId: key.app.id,
@@ -76,11 +83,12 @@ export async function bufferTurn(
       userText: input.user,
       replyText: input.reply,
     })
-    return trimBatch(tx, key.app.id, scope)
+    const buffered = await trimBatch(tx, key.app.id, scope)
+    return { buffered, values: (await loadSpaceSettings(tx, key.spaceId)).values }
   })
   // 两轮同时进来时，后入队的可能把「马上」改回「等空闲」，这一批最多晚一个空闲时长：
   // 下一轮进来或空闲到点时照样处理，不丢对话
-  void deps.jobs?.enqueueExtraction(target, extractionDelay(buffered))
+  void deps.jobs?.enqueueExtraction(target, extractionDelay(buffered, values))
 }
 
 // 一批最多留 MAX_BUFFERED_TURNS 轮，多出的删掉最早的；返回剩下几轮
@@ -96,9 +104,12 @@ export async function trimBatch(tx: Tx, appId: string, scope: string): Promise<n
   return row!.n
 }
 
-// 攒满一批马上抽取，不满时等空闲
-export function extractionDelay(buffered: number): number {
-  return buffered >= BATCH_TURNS ? 0 : IDLE_SECONDS
+// 攒满一批马上抽取，不满时等空闲；返回等几秒。轮数与空闲时长按空间的高级设置
+export function extractionDelay(
+  buffered: number,
+  values: Pick<TuningValues, 'extraction.batchTurns' | 'extraction.idleMinutes'> = TUNING_DEFAULTS,
+): number {
+  return buffered >= values['extraction.batchTurns'] ? 0 : values['extraction.idleMinutes'] * 60
 }
 
 // 丢掉一批缓冲，返回删了几轮

@@ -9,6 +9,7 @@ import { loggableError, withSpace, type Tx } from '../db/client'
 import { apps, memories } from '../db/schema'
 import type { Embedder } from '../embedding/provider'
 import type { Deps, KeyPrincipal } from '../http/env'
+import { CHAT_FAMILIES } from '../lifecycle/lifecycle'
 import type { RecallScope } from '../lifecycle/scope'
 import { boot, recentMemories } from '../recall/boot'
 import { recordRecall } from '../recall/events'
@@ -21,6 +22,12 @@ import {
   scoreRecall,
   type QueryVector,
 } from '../recall/recall'
+import {
+  loadAppSettings,
+  loadInstanceSettings,
+  weightsOf,
+  type EffectiveSettings,
+} from '../settings/advanced'
 import { readableConditions } from './filter'
 import { runInSpace } from './personas'
 import { MemoryError, MemoryService, type MemoryContext } from './service'
@@ -180,9 +187,13 @@ export async function recallForConsole(
 ): Promise<RecallCandidate[]> {
   const query = normalizeQuery(rawQuery)
   if (!query) return []
-  const semantic = await semanticFor(deps, query, CONSOLE_SEMANTIC_TIMEOUT_MS)
+  const [semantic, settings] = await Promise.all([
+    semanticFor(deps, query, CONSOLE_SEMANTIC_TIMEOUT_MS),
+    loadInstanceSettings(deps.db),
+  ])
+  const weights = weightsOf(settings.values)
   return runInSpace(deps.db, spaceId, 'all', (tx, personaIds) =>
-    recall(tx, access, semantic, query, { limit, minScore: 0, personaIds }),
+    recall(tx, access, semantic, query, { limit, minScore: 0, personaIds, weights }),
   )
 }
 
@@ -194,19 +205,48 @@ export function recallScopeForKey(
   const access = accessForKey(key, session)
   const run = <T>(fn: (tx: Tx, personaIds: string[]) => Promise<T>) =>
     runInSpace(deps.db, key.spaceId, session.personaId, fn)
+  // 经 deps 在 withSpace 里读：测试台的回滚模式下读的是同一个事务。第一次用到时读，之后用同一份。
+  // 召回、启动加载与对象直连在自己本来就开的事务里先读（settingsIn），不为设置多开一个串行的事务；
+  // 别处（会话开始的附加块、指引、调试）在那之后取，用的是已经读到的那份
+  // 只记读成了的结果：在别人的事务里读、那个事务又出了错（连接断开）时，不能连累这边健康的事务，
+  // 各自在自己的事务里重读。并行的两个事务可能各读一次，用先读到的那份
+  let loaded: EffectiveSettings | undefined
+  const chat = CHAT_FAMILIES.has(key.app.runtimeFamily)
+  const settingsIn = async (tx: Tx) => {
+    if (loaded) return loaded
+    const read = await loadAppSettings(tx, key.spaceId, key.app.id, chat)
+    return (loaded ??= read)
+  }
+  const settings = async () => loaded ?? withSpace(deps.db, key.spaceId, (tx) => settingsIn(tx))
   return {
+    settings,
     async recall(rawQuery, { semantic: useSemantic = true, semanticTimeoutMs, ...options }) {
       const query = normalizeQuery(rawQuery)
       if (!query) return []
       // 嵌入接口慢时不拖住整个召回：到时间就放弃向量这一路
       const semantic = useSemantic ? await semanticFor(deps, query, semanticTimeoutMs) : null
-      const scored = await run((tx, personaIds) =>
-        scoreRecall(tx, access, semantic, query, { ...options, personaIds, inheritance: true }),
-      )
+      const scored = await run(async (tx, personaIds) => {
+        const { values } = await settingsIn(tx)
+        return scoreRecall(tx, access, semantic, query, {
+          ...options,
+          limit: options.limit ?? values['recall.limit'],
+          minScore: options.minScore ?? values['recall.minScore'],
+          weights: weightsOf(values),
+          personaIds,
+          inheritance: true,
+        })
+      })
       return scored.map(publicCandidate)
     },
     boot: (budget) =>
-      run((tx, personaIds) => boot(tx, access, { personaIds, inheritance: true }, budget)),
+      run(async (tx, personaIds) => {
+        const current = await settingsIn(tx)
+        const charBudget =
+          typeof budget === 'function'
+            ? budget(current)
+            : (budget ?? current.values['boot.charBudget'])
+        return boot(tx, access, { personaIds, inheritance: true }, charBudget)
+      }),
     recent: (limit) =>
       run((tx, personaIds) => recentMemories(tx, access, { personaIds, inheritance: true }, limit)),
     summaries: async (limit) => {
@@ -220,9 +260,10 @@ export function recallScopeForKey(
     subjects: async () => {
       if (!session.subjects.length) return []
       try {
-        return await withSpace(deps.db, key.spaceId, (tx) =>
-          subjectFacts(tx, access, session.subjects),
-        )
+        return await withSpace(deps.db, key.spaceId, async (tx) => {
+          const perSubject = (await settingsIn(tx)).values['recall.subjectFacts']
+          return perSubject ? subjectFacts(tx, access, session.subjects, perSubject) : []
+        })
       } catch (err) {
         console.warn('读取对象直连的事实失败', loggableError(err))
         return []

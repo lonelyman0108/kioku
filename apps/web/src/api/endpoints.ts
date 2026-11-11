@@ -3,6 +3,7 @@ import {
   ActivityEvent,
   ActivityFacets,
   ActivityList,
+  AppAdvancedView,
   AppInfo,
   BackupObjectList,
   BackupQueued,
@@ -118,6 +119,11 @@ import {
   type ConsoleUpdateMemoryRequest,
   type UpdatePersonaRequest,
   type UpdateSubjectRequest,
+  InstanceAdvancedView,
+  SpaceAdvancedView,
+  type UpdateAppAdvanced,
+  type UpdateInstanceAdvanced,
+  type UpdateSpaceAdvanced,
   CreatedSpace,
   InstanceSpace,
   SpaceCreationView,
@@ -495,6 +501,23 @@ export const api = {
     }),
   activityEvent: (spaceId: string, eventId: number) =>
     request('GET', `/spaces/${spaceId}/activity/${eventId}`, { schema: ActivityEvent }),
+  // 高级设置：实例默认（实例管理员）、空间的覆盖（成员可看，所有者可改）、应用的覆盖（应用所有者可改）
+  instanceAdvanced: () => request('GET', '/settings/advanced', { schema: InstanceAdvancedView }),
+  saveInstanceAdvanced: (body: UpdateInstanceAdvanced) =>
+    request('PUT', '/settings/advanced', { body, schema: InstanceAdvancedView }),
+  spaceAdvanced: (spaceId: string) =>
+    request('GET', `/spaces/${spaceId}/settings/advanced`, { schema: SpaceAdvancedView }),
+  saveSpaceAdvanced: (spaceId: string, body: UpdateSpaceAdvanced) =>
+    request('PUT', `/spaces/${spaceId}/settings/advanced`, { body, schema: SpaceAdvancedView }),
+  appAdvanced: (spaceId: string, appId: string) =>
+    request('GET', `/spaces/${spaceId}/apps/${appId}/settings/advanced`, {
+      schema: AppAdvancedView,
+    }),
+  saveAppAdvanced: (spaceId: string, appId: string, body: UpdateAppAdvanced) =>
+    request('PUT', `/spaces/${spaceId}/apps/${appId}/settings/advanced`, {
+      body,
+      schema: AppAdvancedView,
+    }),
   extractionBudget: (spaceId: string) =>
     request('GET', `/spaces/${spaceId}/extraction-budget`, { schema: ExtractionUsage }),
   saveExtractionBudget: (spaceId: string, body: ExtractionBudget) =>

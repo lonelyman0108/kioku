@@ -1,6 +1,7 @@
 import { z } from 'zod'
 
 import { clipChars, oneLine } from '../recall/recall'
+import { withSupplements } from '../settings/advanced'
 import type { ChatMessage } from './provider'
 
 // 给模型看的内容各留多少字：太长的输入又慢又贵，模型也容易漏看。聊天记录从最近的往前取，放不下的更早几轮不给
@@ -24,7 +25,8 @@ export interface PromptTurn {
   reply: string
 }
 
-const SYSTEM = [
+// 抽取与只要摘要时的固定部分：高级设置的「抽取规则」补充接在它们后面
+export const SYSTEM = [
   '你从一段聊天记录里整理关于聊天对象的长期事实，供一个聊天机器人以后和这些人聊天时参考。',
   '只输出一个 JSON 对象，不要输出别的文字：',
   '{"facts":[{"subject":"M1","op":"add","content":"在学日语"}],"summary":"……"}',
@@ -39,9 +41,11 @@ const SYSTEM = [
   '- summary 用一两句话概括这段对话，没有值得记的内容时为空字符串。',
 ].join('\n')
 
+// rules 是实例与空间的抽取规则的补充，接在固定的规则后面；固定的输出格式与防注入的规则不变
 export function extractionMessages(
   subjects: readonly PromptSubject[],
   turns: readonly PromptTurn[],
+  rules: readonly string[] = [],
 ): ChatMessage[] {
   const subjectLines = subjects.flatMap((s) => [
     `${s.handle}：${s.name ? oneLine(s.name) : '（不知道名字）'}（${s.role === 'sender' ? '发言人' : '本群'}）`,
@@ -50,7 +54,7 @@ export function extractionMessages(
       : ['  （还没有记下的事实）']),
   ])
   return [
-    { role: 'system', content: SYSTEM },
+    { role: 'system', content: withSupplements(SYSTEM, rules) },
     {
       role: 'user',
       content: ['## 对象', ...subjectLines, '', '## 聊天记录', ...transcript(turns)].join('\n'),
@@ -58,7 +62,7 @@ export function extractionMessages(
   ]
 }
 
-const SUMMARY_SYSTEM = [
+export const SUMMARY_SYSTEM = [
   '你用一两句话概括一段聊天记录，供一个聊天机器人以后回顾。',
   '只输出一个 JSON 对象，不要输出别的文字：{"summary":"……"}',
   '- 用聊天记录里的语言；不写密码、Token、验证码、手机号、证件号、住址这类敏感信息。',
@@ -67,9 +71,12 @@ const SUMMARY_SYSTEM = [
 ].join('\n')
 
 // 本月的抽取预算用完时只要会话摘要：不给已有的事实，输入与输出都短得多
-export function summaryMessages(turns: readonly PromptTurn[]): ChatMessage[] {
+export function summaryMessages(
+  turns: readonly PromptTurn[],
+  rules: readonly string[] = [],
+): ChatMessage[] {
   return [
-    { role: 'system', content: SUMMARY_SYSTEM },
+    { role: 'system', content: withSupplements(SUMMARY_SYSTEM, rules) },
     { role: 'user', content: ['## 聊天记录', ...transcript(turns)].join('\n') },
   ]
 }

@@ -21,7 +21,7 @@ import { looksLikePlaintextCredential, placeholderIdentifiers } from '../credent
 import type { CredentialService } from '../credential/service'
 import { logInternalError } from '../db/client'
 import type { RecallScope } from '../lifecycle/scope'
-import { GUIDANCE } from '../lifecycle/lifecycle'
+import { guidanceFor } from '../lifecycle/lifecycle'
 import { hasUntouchedPlaintext, MemoryError, type MemoryService } from '../memory/service'
 import { formatBootBlock } from '../recall/boot'
 import { formatRecallBlock } from '../recall/recall'
@@ -107,7 +107,12 @@ export function buildMcpServer(
         '读取启动基线：使用指引与 priority 0 的核心记忆。没有启动钩子的客户端在会话开始时调用一次。',
       annotations: { readOnlyHint: true },
     },
-    () => tool(async () => formatBootBlock(await scope.boot(), GUIDANCE)),
+    () =>
+      tool(async () => {
+        // 调这个工具的是能调工具的客户端，用编码 Agent 的指引；设置在 boot 的事务里读，之后取的是同一份
+        const result = await scope.boot()
+        return formatBootBlock(result, guidanceFor(false, await scope.settings()))
+      }),
   )
 
   server.registerTool(

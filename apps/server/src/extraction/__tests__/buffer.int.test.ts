@@ -10,6 +10,7 @@ import { conversationTurns, settings, subjectIdentities } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import type { Jobs } from '../../jobs/queue'
 import { startJobs } from '../../jobs/queue'
+import { saveSpaceAdvanced } from '../../settings/advanced'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { bearer, bootstrap, FULL_SCOPES, jsonRequest, type Workspace } from '../../testing/fixtures'
 import {
@@ -176,6 +177,17 @@ describe.skipIf(!testDatabaseUrl)('会话缓冲', () => {
       ...Array<number>(BATCH_TURNS - 1).fill(IDLE_SECONDS),
       0,
     ])
+  })
+
+  it('每批的轮数与空闲时长按空间的设置', async () => {
+    await saveSpaceAdvanced(database.db, ws.spaceId, {
+      'extraction.batchTurns': 3,
+      'extraction.idleMinutes': 2,
+    })
+    for (let i = 1; i <= 3; i++) {
+      await turnEnd({ sessionId: 's', context: direct(), user: `第 ${i} 句`, reply: '嗯' })
+    }
+    expect(queued.map(([, delay]) => delay)).toEqual([120, 120, 0])
   })
 
   it('没配抽取模型时不缓冲，也不排任务', async () => {

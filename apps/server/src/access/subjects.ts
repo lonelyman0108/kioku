@@ -1,3 +1,4 @@
+import type { TuningValues } from '@kioku/contracts'
 import { and, arrayContains, asc, count, eq, exists, gt, inArray, or, sql } from 'drizzle-orm'
 
 import { loggableError, pgErrorCode, type Tx } from '../db/client'
@@ -14,6 +15,7 @@ import {
 } from '../db/schema'
 import { extractionDelay, trimBatch } from '../extraction/buffer'
 import type { Deps } from '../http/env'
+import { loadSpaceSettings } from '../settings/advanced'
 import { subjectScope, TALK_LAYERS } from '../memory/scopes'
 
 // 合并对象：管理界面里成员手动合并，与用绑定码合并（见 binding.ts）共用这里的规则与步骤
@@ -240,11 +242,15 @@ export async function enqueueMerged(
   spaceId: string,
   outcome: MergeOutcome,
 ): Promise<void> {
+  if (!deps.jobs || !outcome.batches.length) return
+  let values: TuningValues | undefined
   for (const { appId, turns } of outcome.batches) {
     try {
-      await deps.jobs?.enqueueExtraction(
+      // 空间与实例设置不是内容表，不用 withSpace
+      values ??= (await loadSpaceSettings(deps.db, spaceId)).values
+      await deps.jobs.enqueueExtraction(
         { spaceId, appId, scope: outcome.scope },
-        extractionDelay(turns),
+        extractionDelay(turns, values),
       )
     } catch (err) {
       console.error('合并之后排抽取失败，这一批等下一轮对话时再排', loggableError(err))

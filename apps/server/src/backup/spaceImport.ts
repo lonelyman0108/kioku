@@ -44,6 +44,7 @@ import {
   snapshot as memorySnapshot,
 } from '../memory/service'
 import { APP_DOMAIN, PERSONA_DOMAIN, parseUri } from '../memory/uri'
+import { APP_ADVANCED_FIELD } from '../settings/advanced'
 import { openSpaceExport } from './spaceFormat'
 import {
   describeIssue,
@@ -120,7 +121,7 @@ export function parseSpaceExport(plain: Buffer): ParsedSpaceExport {
   if (!header) {
     throw new MemoryError(
       400,
-      `导出文件的格式版本是 ${String(first.version)}，当前 Kioku 只支持 ${SPACE_EXPORT_VERSION}。版本 1、2 是记忆架构改版之前的格式，版本 3 带着凭据改版之前的凭据源，版本 4 没有凭据的到期与去处，都无法导入；更新的版本请升级 Kioku 后再导入。`,
+      `导出文件的格式版本是 ${String(first.version)}，当前 Kioku 只支持 ${SPACE_EXPORT_VERSION}。版本 1、2 是记忆架构改版之前的格式，版本 3 带着凭据改版之前的凭据源，版本 4 没有凭据的到期与去处，版本 5 没有高级设置，都无法导入；更新的版本请升级 Kioku 后再导入。`,
     )
   }
   const result: ParsedSpaceExport = {
@@ -453,6 +454,7 @@ async function writeSpace(
     name: ctx.name,
     extractionMonthlyTokens: x.header.space.extractionMonthlyTokens,
     extractionDailyWrites: x.header.space.extractionDailyWrites,
+    advanced: x.header.space.advanced,
   })
   derived('新空间的成员')
   // 导出人的本人记忆归了导入人，导出人关掉的 Dream 整理在导入人身上也关着，由导入人决定要不要打开
@@ -497,7 +499,7 @@ async function writeSpace(
         runtimeFamily: a.runtimeFamily,
         ownerAccountId: accountId,
         defaultPersonaId: mapped(personaIds, a.defaultPersonaId),
-        config: a.config,
+        config: importedAppConfig(a),
         createdAt: time(a.createdAt),
         updatedAt: time(a.updatedAt),
       })),
@@ -718,4 +720,12 @@ async function writeSpace(
       })),
     )
   }
+}
+
+// 导入的应用的配置。应用都归了导入人：导出人写的使用指引补充不带过来，它会作为指令级上下文注入导入人的 agent
+// （和转移应用时一样，见 settings/advanced.ts 的 withoutAppGuidance）；数值覆盖留着
+function importedAppConfig(a: AppRecord): Record<string, unknown> {
+  const tuning: Record<string, unknown> = { ...a.advanced }
+  delete tuning['prompts.guidance']
+  return Object.keys(tuning).length ? { ...a.config, [APP_ADVANCED_FIELD]: tuning } : a.config
 }

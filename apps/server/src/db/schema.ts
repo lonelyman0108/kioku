@@ -95,6 +95,8 @@ export const spaces = pgTable('spaces', {
   // 抽取预算：每月最多用多少 token（UTC 自然月），每个对象每天最多写几条事实
   extractionMonthlyTokens: integer().notNull().default(DEFAULT_EXTRACTION_MONTHLY_TOKENS),
   extractionDailyWrites: integer().notNull().default(DEFAULT_EXTRACTION_DAILY_WRITES),
+  // 高级设置里空间这一级的覆盖（contracts 的 SpaceAdvanced）：只存覆盖了的项，缺省沿用实例
+  advanced: jsonb().$type<Record<string, unknown>>().notNull().default({}),
   createdAt: createdAt(),
 })
 

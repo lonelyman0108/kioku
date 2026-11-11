@@ -1,4 +1,10 @@
-import type { DebugCandidate, Layer, RecallCandidate, RecallVia } from '@kioku/contracts'
+import {
+  TUNING_DEFAULTS,
+  type DebugCandidate,
+  type Layer,
+  type RecallCandidate,
+  type RecallVia,
+} from '@kioku/contracts'
 import { and, desc, eq, inArray, ne, sql } from 'drizzle-orm'
 
 import type { Access } from '../access/access'
@@ -8,22 +14,18 @@ import type { Embedder } from '../embedding/provider'
 import { readableConditions } from '../memory/filter'
 import { personaOverride, type PersonaSelection } from '../memory/personas'
 import { formatUri } from '../memory/uri'
+import { weightsOf, type RecallWeights } from '../settings/advanced'
 import { clipChars, inlineText, titleSuffix } from './text'
 
 export { clipChars, inlineText, oneLine, titleSuffix } from './text'
 
 // 多路召回：向量相似度、中文全文检索、glossary 关键词命中。三路都先套同一套读权限过滤，
-// 再按加权分数合并。权重是经验值，召回分析做出来之后再调。
-// 单独一路命中就应当能过阈值：一个 glossary 关键词 0.3、全文命中查询里最具体的那个词约 0.21、相似度 0.4 以上的向量命中。
-const WEIGHTS = {
-  semantic: 0.6,
-  fulltext: 0.35,
-  glossaryFirst: 0.3,
-  glossaryMore: 0.1,
-  priority: 0.06,
-}
+// 再按加权分数合并。权重是经验值，实例的高级设置里可以改（见 settings/advanced.ts）。
+// 内置的权重下单独一路命中就应当能过内置的阈值：一个 glossary 关键词 0.3、全文命中查询里最具体的那个词约 0.21、
+// 相似度 0.4 以上的向量命中
+const DEFAULT_WEIGHTS = weightsOf(TUNING_DEFAULTS)
 const PER_PATH_LIMIT = 24
-export const DEFAULT_MIN_SCORE = 0.2
+export const DEFAULT_MIN_SCORE = TUNING_DEFAULTS['recall.minScore']
 // 全文按 BM25 打分：k1 让同一个词出现多次的加分逐渐饱和，b 让长正文不因为词多而占便宜（长度按不同词的个数算）。
 // 库里记忆太少时每个词都显得常见、idf 分不出高低，可读记忆不到 minDocs 条时按 minDocs 条算
 const BM25 = { k1: 1.2, b: 0.75, minDocs: 20 }
@@ -45,6 +47,8 @@ export interface RecallOptions extends PersonaSelection {
   trustedOnly?: boolean
   // 只收这些归属
   layers?: Layer[]
+  // 不给时用内置的权重
+  weights?: RecallWeights
 }
 
 interface Hit {
@@ -101,7 +105,6 @@ export async function embedQuery(
 // 打过分的候选：调试台要看各路的得分（breakdown）、取整前的总分（rawScore）与记忆 id
 export interface ScoredCandidate extends DebugCandidate {
   id: string
-  rawScore: number
 }
 
 // 召回候选对应的记忆 id，记召回事件要用。放在 Symbol 键上：JSON 序列化时不会带出去，
@@ -265,17 +268,18 @@ export async function scoreRecall(
   }
 
   const minScore = options.minScore ?? DEFAULT_MIN_SCORE
+  const weights = options.weights ?? DEFAULT_WEIGHTS
   return (
     [...hits.values()]
       .map((h) => {
         // 各路加到总分上的分数，四项相加就是总分
         const parts = {
-          semantic: WEIGHTS.semantic * h.semantic,
-          fulltext: WEIGHTS.fulltext * h.fulltext,
+          semantic: weights.semantic * h.semantic,
+          fulltext: weights.fulltext * h.fulltext,
           glossary: h.cues.size
-            ? WEIGHTS.glossaryFirst + (h.cues.size > 1 ? WEIGHTS.glossaryMore : 0)
+            ? weights.glossaryFirst + (h.cues.size > 1 ? weights.glossaryMore : 0)
             : 0,
-          priority: (WEIGHTS.priority * Math.max(0, 3 - h.row.priority)) / 3,
+          priority: (weights.priority * Math.max(0, 3 - h.row.priority)) / 3,
         }
         return {
           h,
@@ -310,24 +314,25 @@ export async function scoreRecall(
 
 const round = (n: number) => Math.round(n * 100) / 100
 
-// 带正文时每条最多这么多字
-const INLINE_CONTENT_CHARS = 300
+// 带正文时每条默认最多这么多字
+const INLINE_CONTENT_CHARS = TUNING_DEFAULTS['recall.chatInlineChars']
 
 // 正文的开头，压成单行、去掉尖括号。正文可能很长，先粗截一段再处理；截掉了内容就接上省略号。
 // 处理完是空的返回空串，由调用方退回线索
-function contentHead(content: string): string {
-  const head = clipChars(content, INLINE_CONTENT_CHARS * 4)
-  const text = clipChars(inlineText(head), INLINE_CONTENT_CHARS, '…')
+function contentHead(content: string, chars: number): string {
+  const head = clipChars(content, chars * 4)
+  const text = clipChars(inlineText(head), chars, '…')
   if (!text) return ''
   return head !== content && !text.endsWith('…') ? `${text}…` : text
 }
 
-// 与 Lore 的 <recall> 块格式一致：每行「分数 | URI | 线索」。contents（URI → 正文）给了时第三栏换成正文的开头：
-// 给读不了正文的宿主（例如不能调记忆工具的群聊 bot）用；正文处理完是空的就仍给线索
+// 与 Lore 的 <recall> 块格式一致：每行「分数 | URI | 线索」。contents（URI → 正文）给了时第三栏换成正文的开头，
+// 每条最多 inlineChars 字：给读不了正文的宿主（例如不能调记忆工具的群聊 bot）用；正文处理完是空的就仍给线索
 export function formatRecallBlock(
   candidates: RecallCandidate[],
   sessionId?: string,
   contents?: ReadonlyMap<string, string>,
+  inlineChars = INLINE_CONTENT_CHARS,
 ): string {
   if (!candidates.length) return ''
   const safeSession = sessionId?.replace(/[^A-Za-z0-9._:-]/g, '').slice(0, 128)
@@ -335,7 +340,7 @@ export function formatRecallBlock(
   const lines = candidates.map((c) => {
     const content = contents?.get(c.uri)
     const cues =
-      (content && contentHead(content)) ||
+      (content && contentHead(content, inlineChars)) ||
       inlineText(c.cues.length ? c.cues.join(' · ') : (c.disclosure ?? ''))
     return `${c.score.toFixed(2)} | ${c.uri}${titleSuffix(c.uri, c.title)}${cues ? ` | ${cues}` : ''}`
   })

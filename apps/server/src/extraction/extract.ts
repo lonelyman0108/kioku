@@ -1,3 +1,4 @@
+import { TUNING_DEFAULTS } from '@kioku/contracts'
 import { and, asc, eq, inArray, sql } from 'drizzle-orm'
 
 import type { Access, SessionContext } from '../access/access'
@@ -24,6 +25,7 @@ import { readableConditions } from '../memory/filter'
 import { MemoryService, type ExtractedWrite } from '../memory/service'
 import { oneLine } from '../recall/recall'
 import { readableSubjectFacts } from '../recall/subjects'
+import { loadSpaceSettings } from '../settings/advanced'
 import { canWriteTurns, type BufferedSession } from './buffer'
 import { extractionUsage, writesToday } from './budget'
 import { extractionMessages, parseExtraction, summaryMessages, type PromptSubject } from './prompt'
@@ -58,8 +60,8 @@ export function plainRunError(stored: string): string | null {
   return RUN_ERROR_WORDINGS.find((wordings) => wordings.includes(stored))?.[0] ?? null
 }
 
-// 会话摘要留这么多天
-export const EPISODE_TTL_DAYS = 30
+// 会话摘要默认留这么多天；按空间的高级设置
+export const EPISODE_TTL_DAYS = TUNING_DEFAULTS['extraction.episodeTtlDays']
 // 每个对象给模型看最近这么多条已有事实，用来判断是新的、更新还是已经记过
 const EXISTING_FACTS_PER_SUBJECT = 30
 // 一条事实、一段摘要最多这么多字：更长的不像一条事实，多半是模型把原话抄了进来
@@ -285,9 +287,12 @@ export async function extractBatch(
     user: t.userText,
     reply: t.replyText,
   }))
+  // 会话摘要的有效天数与抽取规则的补充按空间的设置（实例与空间两级）
+  const settings = await loadSpaceSettings(db, target.spaceId)
+  const rules = settings.prompts.extractionRules
   const messages = summaryOnly
-    ? summaryMessages(transcript)
-    : extractionMessages(subjects, transcript)
+    ? summaryMessages(transcript, rules)
+    : extractionMessages(subjects, transcript, rules)
 
   let completion
   try {
@@ -389,7 +394,7 @@ export async function extractBatch(
     writes.push({
       layer: 'episode',
       content: summary,
-      expiresAt: new Date(Date.now() + EPISODE_TTL_DAYS * 86_400_000),
+      expiresAt: new Date(Date.now() + settings.values['extraction.episodeTtlDays'] * 86_400_000),
       ownerAccountId: owner,
     })
   }

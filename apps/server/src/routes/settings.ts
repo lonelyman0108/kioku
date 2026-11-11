@@ -7,6 +7,7 @@ import {
   ErrorResponse,
   ExtractionSettingsView,
   ExtractionTestResult,
+  InstanceAdvancedView,
   MasterKeyStatus,
   RecallSettings,
   RetentionResumed,
@@ -14,6 +15,7 @@ import {
   RetentionView,
   UpdateEmbeddingSettings,
   UpdateExtractionSettings,
+  UpdateInstanceAdvanced,
 } from '@kioku/contracts'
 import { requireConsole, requireInstanceAdmin } from '../auth/middleware'
 import { masterKeyStatus } from '../crypto/rotation'
@@ -43,6 +45,8 @@ import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { endPause, retentionView, saveRetentionDays } from '../jobs/retention'
 import { loadRecallSettings, saveRecallSettings } from '../recall/retention'
+import { saveInstanceAdvanced } from '../settings/advanced'
+import { instanceAdvancedView } from '../settings/advancedViews'
 import { SettingsInputError, unlocked } from '../settings/endpoint'
 import { backupRoutes } from './backup'
 
@@ -245,6 +249,29 @@ const extractionTest = createRoute({
   responses: { 200: jsonResponse('测试结果', ExtractionTestResult), 403: forbidden },
 })
 
+const advancedView = createRoute({
+  method: 'get',
+  path: '/settings/advanced',
+  tags: ['settings'],
+  summary:
+    '高级设置的实例默认：内置值、实例的覆盖、生效值、每项被几个空间与应用覆盖，以及提示词的固定部分',
+  responses: { 200: jsonResponse('高级设置', InstanceAdvancedView), 403: forbidden },
+})
+
+const advancedUpdate = createRoute({
+  method: 'put',
+  path: '/settings/advanced',
+  tags: ['settings'],
+  summary:
+    '修改高级设置的实例默认：只带要改的项，某项为 null 时恢复成内置值（补充为 null 或空白时去掉）',
+  request: { body: jsonBody(UpdateInstanceAdvanced) },
+  responses: {
+    200: jsonResponse('高级设置', InstanceAdvancedView),
+    400: jsonResponse('取值不对', ErrorResponse),
+    403: forbidden,
+  },
+})
+
 export function settingsRoutes(deps: Deps) {
   const app = router()
   app.use('/settings/*', requireConsole(deps), requireInstanceAdmin(deps))
@@ -370,6 +397,11 @@ export function settingsRoutes(deps: Deps) {
       const value = c.req.valid('json')
       await saveRecallSettings(deps.db, value)
       return c.json(value, 200)
+    })
+    .openapi(advancedView, async (c) => c.json(await instanceAdvancedView(deps.db), 200))
+    .openapi(advancedUpdate, async (c) => {
+      await saveInstanceAdvanced(deps.db, c.req.valid('json'))
+      return c.json(await instanceAdvancedView(deps.db), 200)
     })
     .openapi(retentionGet, async (c) => c.json(await retentionView(deps.db), 200))
     .openapi(retentionUpdate, async (c) => {
