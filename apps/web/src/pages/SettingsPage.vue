@@ -58,8 +58,10 @@ function linkTo(key: SettingsGroupKey, section: string) {
     : { name, params: { section } }
 }
 
-// 小节后面的条数（成员数）
-const counts = useSectionCounts(computed(() => space.value?.id ?? null))
+// 小节后面的条数（成员数）：只有空间组的左栏用得上，别的组不读
+const counts = useSectionCounts(
+  computed(() => (group.value === 'space' ? (space.value?.id ?? null) : null)),
+)
 
 const groups = computed<SettingsFrameGroup[]>(() =>
   visibleGroups({ ...viewer.value, hasSpace: Boolean(space.value) }).flatMap((key) => {
@@ -71,16 +73,21 @@ const groups = computed<SettingsFrameGroup[]>(() =>
         key,
         label: meta.label,
         icon: meta.icon,
+        to: linkTo(key, list[0]!.key),
         aside: asideOf(key),
         crumb: key === 'space' && space.value ? `${meta.label} · ${space.value.name}` : meta.label,
-        sections: list.map((section) => ({
-          key: section.key,
-          label: section.label,
-          icon: section.icon,
-          to: linkTo(key, section.key),
-          unsaved: key === group.value && Boolean(dirty[section.key]),
-          count: counts.value[`${key}:${section.key}`],
-        })),
+        // 左栏只列当前这一组的小节，别的组只用得上分页那几项
+        sections:
+          key === group.value
+            ? list.map((section) => ({
+                key: section.key,
+                label: section.label,
+                icon: section.icon,
+                to: linkTo(key, section.key),
+                unsaved: Boolean(dirty[section.key]),
+                count: counts.value[`${key}:${section.key}`],
+              }))
+            : [],
       },
     ]
   }),
