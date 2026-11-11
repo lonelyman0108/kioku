@@ -28,7 +28,8 @@ export interface SettingsFrameGroup {
 }
 
 // 设置页的骨架：标题下面一行分页换组，左栏只列当前这一组的小节，右边是当前小节；
-// 窄屏时是贴在顶上的两行，分页一行、小节一行（放不下时横向滚动）。
+// 窄屏时顶上是两行，分页一行、小节一行（放不下时横向滚动），标题只留给读屏。
+// 标题、分页与左栏都不随内容滚动：滚的只有右边这一栏，切小节时导航不会在指针下面挪位置，也没有东西盖在表单上。
 // 只有当前这一组的小节挂在页面上，内容由页面放进默认插槽（按小节的 key 调用）；组里的小节一直挂着，只切换显示：
 // 切走再回来，填了一半的表单、选好的文件都还在。别的组是别的页面，离开时由页面确认未保存的改动
 const props = defineProps<{
@@ -41,7 +42,7 @@ const active = computed(() => props.groups.find((g) => g.key === props.group))
 const panes = computed(() => active.value?.sections ?? [])
 const currentPane = computed(() => panes.value.find((s) => s.key === props.current))
 
-// 各小节共用一个滚动区：切走时记下位置，切回来时回到原处，没看过的从顶上开始
+// 各小节共用一个滚动区（右边那一栏）：切走时记下位置，切回来时回到原处，没看过的从顶上开始
 const scroller = ref<HTMLElement | null>(null)
 const nav = ref<HTMLElement | null>(null)
 const positions = new Map<string, number>()
@@ -67,15 +68,14 @@ onMounted(revealCurrent)
 </script>
 
 <template>
-  <div ref="scroller" class="settings">
+  <div class="settings">
     <h1 class="settings-title">设置</h1>
-    <!-- 换组是换页面，照常留历史记录；点当前这一组回到它的第一节，和组内切小节一样不留 -->
+    <!-- 换组是换页面，照常留历史记录；当前这一组的分页就是现在这一页，点了不动 -->
     <nav class="settings-groups" aria-label="设置的分组">
       <RouterLink
         v-for="g in groups"
         :key="g.key"
-        :to="g.to"
-        :replace="g.key === group"
+        :to="g.key === group && currentPane ? currentPane.to : g.to"
         class="group-tab"
         :aria-current="g.key === group ? 'page' : undefined"
       >
@@ -103,21 +103,23 @@ onMounted(revealCurrent)
           </RouterLink>
         </nav>
       </div>
-      <div class="settings-main">
-        <p v-if="active && currentPane" class="settings-crumb">
-          <span>{{ active.crumb ?? active.label }}</span>
-          <UIcon :name="icons.chevronRight" class="crumb-icon" />
-          <span>{{ currentPane.label }}</span>
-        </p>
-        <section
-          v-for="section in panes"
-          v-show="section.key === current"
-          :key="section.key"
-          :aria-label="section.label"
-        >
-          <h2 class="settings-heading">{{ section.label }}</h2>
-          <slot :section="section.key" />
-        </section>
+      <div ref="scroller" class="settings-main">
+        <div class="settings-body">
+          <p v-if="active && currentPane" class="settings-crumb">
+            <span>{{ active.crumb ?? active.label }}</span>
+            <UIcon :name="icons.chevronRight" class="crumb-icon" />
+            <span>{{ currentPane.label }}</span>
+          </p>
+          <section
+            v-for="section in panes"
+            v-show="section.key === current"
+            :key="section.key"
+            :aria-label="section.label"
+          >
+            <h2 class="settings-heading">{{ section.label }}</h2>
+            <slot :section="section.key" />
+          </section>
+        </div>
       </div>
     </div>
   </div>
@@ -125,14 +127,14 @@ onMounted(revealCurrent)
 
 <style scoped>
 .settings {
-  /* 分页那一行的高度（分页 44px 加底下的墨线）：它贴在顶上，左栏（窄屏时是小节那一行）贴在它下面 */
-  --settings-groups-height: 45px;
+  display: flex;
   flex: 1;
+  flex-direction: column;
   min-width: 0;
   min-height: 0;
-  overflow-y: auto;
 }
 .settings-title {
+  flex: none;
   padding: 20px 24px 6px;
   font-size: 24px;
   font-weight: 500;
@@ -140,14 +142,11 @@ onMounted(revealCurrent)
 }
 /* 分页：一条墨线托着，当前组是粗的墨线加粗体；小节用反白，两级分得开 */
 .settings-groups {
-  position: sticky;
-  top: 0;
-  z-index: 2;
   display: flex;
-  height: var(--settings-groups-height);
+  flex: none;
+  min-height: 45px;
   padding: 0 8px;
   border-bottom: 1px solid var(--strata-rule);
-  background: var(--ui-bg);
 }
 .group-tab {
   display: flex;
@@ -193,15 +192,14 @@ onMounted(revealCurrent)
 }
 .settings-grid {
   display: grid;
+  flex: 1;
+  grid-template-rows: minmax(0, 1fr);
   grid-template-columns: 264px minmax(0, 1fr);
-  min-height: calc(100% - var(--settings-groups-height));
+  min-height: 0;
 }
-/* 内容很长时左栏还在屏幕里；视口很矮放不下时它自己能滚 */
+/* 左栏不跟着内容滚；视口很矮放不下时它自己能滚 */
 .settings-side {
-  position: sticky;
-  top: var(--settings-groups-height);
-  align-self: start;
-  max-height: calc(100svh - 52px - var(--settings-groups-height));
+  min-height: 0;
   padding-bottom: 40px;
   overflow-y: auto;
 }
@@ -264,9 +262,13 @@ onMounted(revealCurrent)
 }
 .settings-main {
   min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  border-left: 1px solid var(--strata-rule);
+}
+.settings-body {
   max-width: 1180px;
   padding: 22px 40px 56px;
-  border-left: 1px solid var(--strata-rule);
 }
 .settings-crumb {
   display: flex;
@@ -286,11 +288,16 @@ onMounted(revealCurrent)
   line-height: 1.3;
 }
 
-/* 窄屏：贴在顶上的两行，第一行分页，第二行当前组的小节，放不下时横向滚动 */
+/* 窄屏：顶上两行，第一行分页，第二行当前组的小节，放不下时横向滚动；标题只留给读屏，把高度让给内容 */
 @media (max-width: 1023.98px) {
   .settings-title {
-    padding: 16px 16px 6px;
-    font-size: 23px;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
   .settings-groups {
     padding: 0 4px;
@@ -311,20 +318,18 @@ onMounted(revealCurrent)
     clip-path: inset(50%);
   }
   .settings-grid {
-    display: block;
-    min-height: 0;
+    display: flex;
+    flex-direction: column;
   }
   .settings-side {
-    display: contents;
+    flex: none;
+    padding-bottom: 0;
+    overflow: visible;
   }
   .settings-nav {
-    position: sticky;
-    top: var(--settings-groups-height);
-    z-index: 1;
     display: flex;
     overflow-x: auto;
     border-bottom: 1px solid var(--strata-rule);
-    background: var(--ui-bg);
     scrollbar-width: none;
   }
   .settings-tab {
@@ -342,8 +347,11 @@ onMounted(revealCurrent)
     border-bottom: 0;
   }
   .settings-main {
-    padding: 14px 16px 40px;
+    flex: 1;
     border-left: 0;
+  }
+  .settings-body {
+    padding: 14px 16px 40px;
   }
 }
 </style>

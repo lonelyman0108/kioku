@@ -156,7 +156,7 @@ const admin = { isAdmin: true, role: 'owner' as const }
 const member = { isAdmin: false, role: 'viewer' as const }
 
 describe('小节的注册', () => {
-  it('三组按左栏的顺序，组内顺序和 demo 一致', () => {
+  it('三组按分页的顺序，组内顺序和 demo 一致', () => {
     expect(SETTINGS_GROUPS.map((g) => [g.key, g.label])).toEqual([
       ['account', '个人'],
       ['space', '空间'],
@@ -488,7 +488,7 @@ describe('设置页的骨架', () => {
     expect(tabs[0]).toContain('审阅者')
     expect(tabs[0]).toMatch(/<span[^>]*title="审阅者"[^>]*>审阅者</)
     expect(tabs[0]).not.toContain('aria-current')
-    expect(tabs[1]).toContain('href="/i/models"')
+    expect(tabs[1]).toContain('href="/i/data"')
     expect(tabs[1]).toMatch(/<span[^>]*title="仅管理员"[^>]*>仅管理员</)
     expect(tabs[1]).toContain('aria-current="page"')
     // 图标旁一定有文字
@@ -520,17 +520,16 @@ describe('设置页的骨架', () => {
     ).toEqual(['设置的分组', '设置的小节'])
   })
 
-  it('分页贴在顶上，左栏与窄屏的小节那一行贴在它下面；窄屏的触控高度够', () => {
-    const [wide, narrow] = styleOf(settingsFrame).split('@media (max-width: 1023.98px)')
-    // 分页 44px 加底下 1px 的线
-    expect(wide).toContain('--settings-groups-height: 45px;')
-    expect(rule(wide!, '.settings-groups')).toMatch(
-      /position: sticky;\s*top: 0;[^}]*height: var\(--settings-groups-height\)/,
-    )
-    expect(rule(wide!, '.settings-side')).toContain('top: var(--settings-groups-height);')
-    expect(rule(narrow!, '.settings-nav')).toMatch(
-      /position: sticky;\s*top: var\(--settings-groups-height\);[^}]*overflow-x: auto;/,
-    )
+  it('只有右边那一栏滚动：标题、分页与左栏不跟着滚，也没有贴顶的行盖在内容上', () => {
+    const css = styleOf(settingsFrame)
+    expect(css).not.toContain('position: sticky')
+    const [wide, narrow] = css.split('@media (max-width: 1023.98px)')
+    expect(rule(wide!, '.settings-main')).toContain('overflow-y: auto;')
+    expect(rule(wide!, '.settings')).not.toContain('overflow')
+    const scroller = elementsOf(template(settingsFrame)).find((el) =>
+      el.props?.some((p) => p.name === 'ref' && p.value?.content === 'scroller'),
+    )!
+    expect(scroller.props?.find((p) => p.name === 'class')?.value?.content).toBe('settings-main')
     expect(rule(narrow!, '.settings-tab')).toContain('min-height: 44px;')
   })
 
@@ -559,8 +558,9 @@ describe('设置页的骨架', () => {
 
   it('组内切小节不留历史记录，换组照常留', () => {
     const [tab, link] = elementsOf(template(settingsFrame)).filter((el) => el.tag === 'RouterLink')
-    expect(bound(tab!, 'to')).toBe('g.to')
-    expect(bound(tab!, 'replace')).toBe('g.key === group')
+    // 当前组的分页就是现在这一页（aria-current 说的是实话），别的组去它的第一节
+    expect(bound(tab!, 'to')).toBe('g.key === group && currentPane ? currentPane.to : g.to')
+    expect(tab!.props?.some((p) => p.name === 'replace')).toBe(false)
     expect(bound(link!, 'to')).toBe('section.to')
     expect(link!.props?.some((p) => p.name === 'replace' && p.exp === undefined)).toBe(true)
   })
@@ -831,9 +831,7 @@ describe('设置页', () => {
     const component = elementsOf(template(settingsPage)).find((el) => el.tag === 'component')!
     expect(directive(component, 'model')?.arg?.content).toBe('dirty')
     expect(directive(component, 'model')?.exp?.content).toBe('dirty[section]')
-    expect(scriptOf(settingsPage)).toContain(
-      'unsaved: key === group.value && Boolean(dirty[section.key])',
-    )
+    expect(scriptOf(settingsPage)).toContain('unsaved: Boolean(dirty[section.key])')
     // 分页链到组里第一个看得到的小节
     expect(scriptOf(settingsPage)).toContain('to: linkTo(key, list[0]!.key),')
   })
