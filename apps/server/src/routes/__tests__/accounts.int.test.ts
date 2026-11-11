@@ -600,6 +600,8 @@ describe.skipIf(!testDatabaseUrl)('账号、一次性链接与登录设备', () 
           as(ws.cookie),
         )
         expect(res.status).toBe(400)
+        // 界面按 code 认出当前密码不对，和请求校验没过分开
+        expect(await res.json()).toEqual({ error: '当前密码错误', code: 'wrong_current_password' })
       }
       expect((await login('alice', PASSWORD)).status).toBe(429)
       const blocked = await send(

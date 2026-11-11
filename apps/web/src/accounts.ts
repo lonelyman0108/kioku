@@ -1,4 +1,4 @@
-import { Password, WRONG_CURRENT_PASSWORD, type AdminAccount } from '@kioku/contracts'
+import { Password, WrongCurrentPassword, type AdminAccount } from '@kioku/contracts'
 
 import { ApiError } from './api/client'
 import { FLAGS, type FlagStatus } from './components/strata/flags'
@@ -73,10 +73,12 @@ export const accountStateText = (state: AccountState) =>
 export const SELF_LOCKED_REASON = '无法修改当前账号的停用状态与管理员身份'
 
 // 改密码失败的说明：当前密码不对、新密码不合规、尝试太多、别处刚改过分开说。
-// 400 有两种：当前密码不对（WRONG_CURRENT_PASSWORD），其余是请求校验没过，照服务端的说明
+// 400 有两种：错误体带 code 的是当前密码不对；其余是请求校验没过，服务端的说明开头是字段名，不直接显示
 export function changePasswordError(err: unknown): string {
   if (!(err instanceof ApiError)) return '修改失败'
-  if (err.status === 400 && err.message === WRONG_CURRENT_PASSWORD) return WRONG_CURRENT_PASSWORD
+  if (err.status === 400) {
+    return WrongCurrentPassword.safeParse(err.payload).success ? '当前密码错误' : '新密码不符合要求'
+  }
   if (err.status === 429) return '尝试次数过多，请稍后重试'
   if (err.status === 409) return '密码刚在别处修改过，请刷新页面后重试'
   return err.message
@@ -114,6 +116,13 @@ export function soleOwnerSpaces(account: AdminAccount): string[] {
 }
 export const SOLE_OWNER_TEXT =
   '停用后这些空间没有可用的所有者，无法管理成员与设置；重新启用后恢复。'
+
+// 请求成功了、弹窗却已经关掉时的说明：结果与下一步。链接只显示一次，丢掉之后只能重新生成
+export function droppedLinkNotice(kind: 'create' | 'regenerate', displayName: string): string {
+  return kind === 'create'
+    ? `已新建 ${displayName}，设置密码链接未显示，请在列表里重新生成`
+    : `已为 ${displayName} 重新生成链接，之前的链接失效；新链接未显示，请再生成一次`
+}
 
 // 只认最近一次请求的结果：弹窗关掉、重新打开或换了目标之后，之前发出的请求回来时丢弃。
 // 设置密码链接靠它：取消之后才回来的令牌不能留到下一次、显示在别的账号名下
