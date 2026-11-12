@@ -101,9 +101,10 @@ export const EXTENSION_STATES = ['installed', 'available', 'missing'] as const
 export const ExtensionState = z.enum(EXTENSION_STATES)
 export type ExtensionState = z.infer<typeof ExtensionState>
 
-// 库里已有的东西：empty 是没有 Kioku 的表；kioku 是这个版本认得的结构；
+// 库里已有的东西：empty 是没有 Kioku 的表；migrated 是这个版本认得的结构、只执行过迁移，
+// 没有账号也没有空间（数据库来自环境变量时，服务启动就把迁移执行完了）；kioku 是这个版本认得的结构、已有账号或空间；
 // pre_baseline 是记忆架构改版之前的结构；newer 是更新的版本迁移过的
-export const EXISTING_DATA = ['empty', 'kioku', 'pre_baseline', 'newer'] as const
+export const EXISTING_DATA = ['empty', 'migrated', 'kioku', 'pre_baseline', 'newer'] as const
 export const ExistingData = z.enum(EXISTING_DATA)
 export type ExistingData = z.infer<typeof ExistingData>
 

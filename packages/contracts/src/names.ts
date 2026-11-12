@@ -163,6 +163,7 @@ export const EXTENSION_STATE_NAMES: Record<ExtensionState, string> = {
 
 export const EXISTING_DATA_NAMES: Record<ExistingData, string> = {
   empty: '空库',
+  migrated: '空的 Kioku 库',
   kioku: '已有 Kioku 的数据',
   pre_baseline: '记忆架构改版之前的结构',
   newer: '更新的版本迁移过的结构',

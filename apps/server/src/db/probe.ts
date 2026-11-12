@@ -225,16 +225,14 @@ async function gatherFacts(
     return { name, state }
   })
   const migrations = await migrationState(client, migrationsFolder)
-  const existing: ExistingData =
+  let existing: ExistingData =
     migrations === 'none' ? 'empty' : migrations === 'known' ? 'kioku' : migrations
   let accounts: number | null = null
   if (existing === 'kioku') {
-    const [table] = await client<{ exists: boolean }[]>`
-      select to_regclass('public.accounts') is not null as exists`
-    if (table?.exists) {
-      const [row] = await client<{ n: number }[]>`select count(*)::int as n from public.accounts`
-      accounts = row?.n ?? 0
-    }
+    const content = await contentOf(client)
+    accounts = content.accounts
+    // 只执行过迁移、没有账号也没有空间：数据库来自环境变量时服务启动就迁移完了，这仍是要初始化的空库
+    if (!content.accounts && !content.spaces) existing = 'migrated'
   }
   // 普通的表、视图与分区表的父表；扩展自己建的（zhparser 的自定义词表）不算
   const tables = await client<{ schema: string; name: string }[]>`
@@ -251,6 +249,26 @@ async function gatherFacts(
     (t) => !(t.schema === 'public' && OWN_TABLES.has(t.name)),
   ).length
   return { role, extensions, existing, accounts, unrelatedTables }
+}
+
+// 账号与空间各有几个。空间不在行级安全的表里，不设空间也数得到；表不在时（结构不完整）按 0 算
+async function contentOf(
+  client: postgres.TransactionSql,
+): Promise<{ accounts: number; spaces: number }> {
+  const [tables] = await client<{ accounts: boolean; spaces: boolean }[]>`
+    select to_regclass('public.accounts') is not null as accounts,
+      to_regclass('public.spaces') is not null as spaces`
+  let accounts = 0
+  let spaces = 0
+  if (tables?.accounts) {
+    const [row] = await client<{ n: number }[]>`select count(*)::int as n from public.accounts`
+    accounts = row?.n ?? 0
+  }
+  if (tables?.spaces) {
+    const [row] = await client<{ n: number }[]>`select count(*)::int as n from public.spaces`
+    spaces = row?.n ?? 0
+  }
+  return { accounts, spaces }
 }
 
 const EXTENSION_MISSING_CODES = new Set(['0A000', '58P01'])

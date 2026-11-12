@@ -87,6 +87,23 @@ describe('初始化的数据库检查', () => {
     expect(existing!.detail).toContain('将接入已有实例')
   })
 
+  it('只执行过迁移、没有账号的库是空的 Kioku 库，照常初始化，不提醒接入已有实例', () => {
+    const existing = checkRows({ ...ok, existing: 'migrated', accounts: 0 }).find(
+      (r) => r.key === 'existing',
+    )
+    expect(existing).toEqual({
+      key: 'existing',
+      label: '已有数据',
+      value: '空的 Kioku 库',
+      verdict: 'passed',
+    })
+    // 有空间、没有账号：仍是已有的数据，不写账号数
+    const orphan = checkRows({ ...ok, existing: 'kioku', accounts: 0 }).find(
+      (r) => r.key === 'existing',
+    )
+    expect(orphan).toMatchObject({ value: '已有 Kioku 的数据', verdict: 'passed' })
+  })
+
   it('连接信息只说密码填没填，来源写在最前', () => {
     const facts = summaryFacts(
       {
