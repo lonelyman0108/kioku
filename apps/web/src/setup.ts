@@ -71,6 +71,9 @@ const PROBLEM_HINTS: Record<
     '需要 Kioku 的 PostgreSQL 镜像，或者在服务器上自行安装 pgvector 与 zhparser。',
   pre_baseline: () => '这个版本不兼容旧数据：清空数据库重建后再接入，然后从 Lore 重新导入。',
   newer: () => '用做这个库的版本启动。',
+  insufficient_privilege: () =>
+    '库里已有别的角色建的表，当前角色无权读取。改用这些表的所有者连接，或者换一个专用的库。',
+  inspect_failed: () => '原因见服务日志。',
 }
 
 // 检查结果逐项列出。哪一项拦住接入只看服务端给的 problems（规则只在服务端的 assess 里），这里只决定怎么列：
@@ -130,6 +133,16 @@ export function checkRows(check: DatabaseCheck): CheckRow[] {
         : withAccounts
           ? { verdict: 'notice' as const, detail: '将接入已有实例，接入后用已有账号登录。' }
           : { verdict: 'passed' as const }),
+    })
+  }
+  // 连上之后读库的结构失败（权限不足等）：其余各项都没读到，单独一行说明
+  const access = problem((p) => p.code === 'insufficient_privilege' || p.code === 'inspect_failed')
+  if (access) {
+    rows.push({
+      key: 'access',
+      label: '读取库',
+      value: DATABASE_PROBLEM_NAMES[access.code],
+      ...verdictOf(access),
     })
   }
   if (check.unrelatedTables > 0) {

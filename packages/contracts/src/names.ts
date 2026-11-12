@@ -171,6 +171,8 @@ export const DATABASE_PROBLEM_NAMES: Record<DatabaseProblemCode, string> = {
   extension_missing: '服务器上缺少扩展',
   pre_baseline: '库里是记忆架构改版之前的结构',
   newer: '库里有这个版本不认识的迁移',
+  insufficient_privilege: '角色对库里已有的表没有权限',
+  inspect_failed: '读取库的结构失败',
 }
 
 // 一条问题的完整说法：扩展两类带上扩展名，连不上带上类别

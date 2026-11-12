@@ -1505,6 +1505,9 @@ describe('初始化', () => {
     // 没配主密钥时提醒一句；代建的规则收进提示层，正文只留一句
     expect(flat(setupPage)).toContain('配置KIOKU_MASTER_KEY后重启服务')
     expect(flat(setupPage)).toContain('新建应用角色与库，只保存应用角色的连接。<Hint')
+    // 代建时超级用户先连的库可以改，默认 postgres
+    expect(setupPage).toContain('label="维护库"')
+    expect(setupPage).toContain("maintenance: 'postgres',")
   })
 
   it('数据库暂时连不上不进初始化页：守卫带到数据库不可用页，那一页不给初始化码', () => {

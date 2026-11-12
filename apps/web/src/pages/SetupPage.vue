@@ -65,6 +65,7 @@ const provision = reactive({
   ssl: 'disable' as DatabaseSslMode,
   username: 'postgres',
   password: '',
+  maintenance: 'postgres',
   role: 'kioku',
   database: 'kioku',
 })
@@ -179,10 +180,10 @@ const createAndConnect = () =>
   run(
     'provision',
     async () => {
-      const { role, database, ...superuser } = provision
+      const { role, database, maintenance, ...superuser } = provision
       const result = await api.provisionDatabase({
         setupCode: admin.setupCode,
-        superuser: { ...superuser, database: 'postgres' },
+        superuser: { ...superuser, database: maintenance },
         role,
         database,
       })
@@ -332,6 +333,13 @@ async function submitAdmin() {
                   v-model="provision.password"
                   type="password"
                   class="w-full"
+                  autocomplete="off"
+                />
+              </UFormField>
+              <UFormField label="维护库" help="超级用户先连上的库">
+                <UInput
+                  v-model="provision.maintenance"
+                  class="w-full font-mono"
                   autocomplete="off"
                 />
               </UFormField>

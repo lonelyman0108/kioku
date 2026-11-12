@@ -296,5 +296,80 @@ describe.skipIf(!testDatabaseUrl)(
       expect(runtime.state()).toBe('missing')
       await expect(stat(join(dataDir, 'kioku.json'))).rejects.toMatchObject({ code: 'ENOENT' })
     })
+
+    it('起服务时某一步因为连接断开失败：按暂时故障重试，不拒绝启动', async () => {
+      let calls = 0
+      const start: typeof startService = async (...args) => {
+        calls++
+        // 迁移这一步库被重启（57P01）：暂时的
+        if (calls === 1) {
+          throw new StartupError('migrate', Object.assign(new Error('x'), { code: '57P01' }))
+        }
+        return startService(...args)
+      }
+      runtime = await startRuntime(configFor({ DATABASE_URL: testDatabaseUrl! }), {
+        log: () => {},
+        start,
+        retryMs: 20,
+      })
+      expect(runtime.state()).toBe('unavailable')
+      expect((await status()).database.failure).toBe('unreachable')
+      await vi.waitFor(() => expect(runtime!.state()).toBe('ready'), {
+        timeout: 30_000,
+        interval: 50,
+      })
+    })
+
+    it('读不出账号数时不可用页的原因跟着更新，不是「未知」', async () => {
+      const start: typeof startService = async (...args) => {
+        const svc = await startService(...args)
+        return {
+          ...svc,
+          accounts: () => Promise.reject(Object.assign(new Error('x'), { code: 'ECONNRESET' })),
+        }
+      }
+      runtime = await startRuntime(configFor({ DATABASE_URL: testDatabaseUrl! }), {
+        log: () => {},
+        start,
+        retryMs: 60_000,
+      })
+      expect(runtime.state()).toBe('unavailable')
+      expect((await status()).database.failure).toBe('unreachable')
+    })
+
+    it('接入进行中收到停止：stop 等它结束，刚起的服务关掉，不写 kioku.json', async () => {
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => (release = resolve))
+      let closed = false
+      const start: typeof startService = async (...args) => {
+        const svc = await startService(...args)
+        await gate
+        const close = svc.database.close
+        return {
+          ...svc,
+          database: {
+            ...svc.database,
+            close: async () => {
+              closed = true
+              await close()
+            },
+          },
+        }
+      }
+      runtime = await startRuntime(configFor(), { log: () => {}, start })
+      const pending = call('/setup/database', { setupCode: CODE, connection: testConnection() })
+      // 等接入走到起服务那一步
+      await vi.waitFor(() => expect(closed).toBe(false), { timeout: 5_000 })
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      const stopping = runtime.stop()
+      release()
+      await stopping
+      const res = await pending
+      expect(res.status).toBe(500)
+      expect(closed).toBe(true)
+      expect(runtime.state()).toBe('missing')
+      await expect(stat(join(dataDir, 'kioku.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+      runtime = null
+    })
   },
 )

@@ -137,3 +137,20 @@ describe('哪一项拦住只看服务端给的问题', () => {
     expect(rows.find((r) => r.key === 'extension-vector')).toMatchObject({ verdict: 'passed' })
   })
 })
+
+describe('连上之后读库的结构失败', () => {
+  it('权限不足单独一行，不说成连不上', () => {
+    const rows = checkRows({
+      ...ok,
+      role: null,
+      extensions: [],
+      existing: null,
+      problems: [{ code: 'insufficient_privilege' }],
+      ready: false,
+    })
+    expect(rows.map((r) => [r.label, r.value, r.verdict])).toEqual([
+      ['连接', '成功', 'passed'],
+      ['读取库', '角色对库里已有的表没有权限', 'blocked'],
+    ])
+  })
+})

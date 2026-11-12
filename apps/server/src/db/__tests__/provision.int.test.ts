@@ -14,7 +14,7 @@ import type { SetupHost } from '../../http/env'
 import { setupDatabaseRoutes } from '../../routes/setup'
 import { FatalStartupError, startRuntime, type Runtime } from '../../runtime'
 import { ActivationError } from '../../setupErrors'
-import { connectionUrl, probeDatabase, summarize } from '../probe'
+import { connectionUrl, isFatal, probeDatabase, summarize } from '../probe'
 
 // 要超级用户才测得了：拒绝超级用户与 BYPASSRLS、缺扩展、代建。本地设 KIOKU_TEST_SUPERUSER_URL
 // （例如 postgres://postgres:postgres@localhost:55432/postgres）；CI 不设时跳过。
@@ -71,6 +71,39 @@ describe.skipIf(!superuserUrl)('数据库检查与超级用户代建', { timeout
     )
     expect(asBypass.role).toEqual({ name: role, superuser: false, bypassRls: true })
     expect(asBypass.ready).toBe(false)
+  })
+
+  it('连上之后对已有的表没有权限：单独的问题码、致命，不说成连不上', async () => {
+    const role = name('noperm')
+    const db = name('noperm')
+    roles.push(role)
+    databases.push(db)
+    await admin.unsafe(`CREATE ROLE "${role}" LOGIN PASSWORD 'noperm-pass'`)
+    await admin.unsafe(`CREATE DATABASE "${db}"`)
+    const inside = postgres(connectionUrl({ ...superuser(), database: db }), {
+      max: 1,
+      onnotice: () => {},
+    })
+    try {
+      // 超级用户建的迁移记录表：别的角色没有这个 schema 的使用权
+      await inside.unsafe('CREATE SCHEMA drizzle')
+      await inside.unsafe(
+        'CREATE TABLE drizzle.__drizzle_migrations (id serial, hash text, created_at bigint)',
+      )
+      await inside.unsafe('REVOKE ALL ON SCHEMA drizzle FROM PUBLIC')
+    } finally {
+      await inside.end()
+    }
+    const check = await probeDatabase(
+      connectionUrl({ ...superuser(), username: role, password: 'noperm-pass', database: db }),
+      migrationsFolder,
+    )
+    expect(check).toMatchObject({
+      failure: null,
+      problems: [{ code: 'insufficient_privilege' }],
+      ready: false,
+    })
+    expect(isFatal(check)).toBe(true)
   })
 
   it('库里没装扩展时拦住，说明服务器上有', async () => {

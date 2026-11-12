@@ -1,6 +1,7 @@
 import { join } from 'node:path'
 
 import {
+  DATABASE_FAILURE_NAMES,
   DATABASE_SOURCE_NAMES,
   databaseProblemText,
   type DatabaseCheck,
@@ -15,7 +16,7 @@ import { createVaultClient } from './credential/bitwarden/client'
 import type { VaultClient } from './credential/bitwarden/types'
 import { assertWritable, DATA_FILE, writeDataFile } from './dataDir'
 import { logInternalError } from './db/client'
-import { failedCheck, failureOf, isFatal, probeDatabase } from './db/probe'
+import { failedCheck, isFatal, probeDatabase, transientFailure } from './db/probe'
 import type { SetupHost } from './http/env'
 import { settleRecallEvents } from './recall/events'
 import { startService, startupText, StartupError, type Service } from './service'
@@ -133,7 +134,21 @@ export async function startRuntime(config: Config, options: RuntimeOptions = {})
 
   // 初始化页填的库。准备阶段：确认数据目录写得进去、起服务、数账号、写 kioku.json，任何一步失败都关掉已经起来的、
   // 不写文件、状态不变，抛 ActivationError；准备完才切换
-  async function activate(url: string): Promise<'switched'> {
+  // 进行中的接入与重试：stop() 等它们结束，不留下停止之后才起来的服务
+  const inflight = new Set<Promise<unknown>>()
+  const track = <T>(work: Promise<T>): Promise<T> => {
+    inflight.add(work)
+    void work.then(
+      () => inflight.delete(work),
+      () => inflight.delete(work),
+    )
+    return work
+  }
+
+  const activate = (url: string) => track(activateNow(url))
+
+  async function activateNow(url: string): Promise<'switched'> {
+    if (stopped) throw new ActivationError('服务正在停止')
     if (status.state !== 'missing') throw new ActivationError('数据库已配置')
     const file = join(config.dataDir, DATA_FILE)
     try {
@@ -158,12 +173,24 @@ export async function startRuntime(config: Config, options: RuntimeOptions = {})
     let accounts: number
     try {
       accounts = await svc.accounts()
+    } catch (err) {
+      logInternalError('读取账号数失败', err)
+      await stopService(svc)
+      throw new ActivationError('无法完成接入：读取账号数失败，没有接入')
+    }
+    // 起服务期间收到了停止：关掉刚起的服务，不写文件、不切换（回滚代建的库也安全）
+    if (stopped) {
+      await stopService(svc)
+      throw new ActivationError('服务正在停止，没有接入')
+    }
+    try {
       await writeDataFile(config.dataDir, { databaseUrl: url })
     } catch (err) {
-      logInternalError('保存数据库连接失败', err)
+      console.error('写入数据库连接失败', { code: (err as { code?: unknown }).code })
       await stopService(svc)
-      throw new ActivationError(`无法完成接入：读取账号或写入 ${file} 失败，没有接入`)
+      throw new ActivationError(`无法写入 ${file}，没有接入`)
     }
+    // 写完文件到切换之间没有 await：stop() 插不进来，切换只有同步的赋值
     switchTo(svc, 'file', url, accounts)
     log(`已接入数据库，连接保存在 ${file}`)
     return 'switched'
@@ -211,10 +238,12 @@ export async function startRuntime(config: Config, options: RuntimeOptions = {})
     } catch (err) {
       if (!(err instanceof StartupError)) throw err
       logInternalError(`启动失败（${err.step}）`, err.cause)
-      // 检查过了才起，只有连接这一步会是暂时的（检查之后库又断了）
-      if (err.step !== 'connect') throw new FatalStartupError(startupText(err))
-      status = { state: 'unavailable', source, url, check: failedCheck(failureOf(err.cause)) }
-      report(startupText(err))
+      // 不管哪一步，原因是连接出了问题（断开、超时、库重启）就是暂时的，接着重试；
+      // 别的（角色、迁移对不上、主密钥）才拒绝启动
+      const kind = transientFailure(err.cause)
+      if (!kind) throw new FatalStartupError(startupText(err))
+      status = { state: 'unavailable', source, url, check: failedCheck(kind) }
+      report(DATABASE_FAILURE_NAMES[kind])
       return false
     }
     let accounts: number
@@ -223,7 +252,10 @@ export async function startRuntime(config: Config, options: RuntimeOptions = {})
     } catch (err) {
       logInternalError('读取账号数失败', err)
       await stopService(svc)
-      report('读取账号数失败')
+      // 不可用页显示的原因跟着更新，不留「未知」
+      const kind = transientFailure(err) ?? 'unknown'
+      status = { state: 'unavailable', source, url, check: failedCheck(kind) }
+      report(`读取账号数失败：${DATABASE_FAILURE_NAMES[kind]}`)
       return false
     }
     if (stopped) {
@@ -237,7 +269,7 @@ export async function startRuntime(config: Config, options: RuntimeOptions = {})
   async function retry(): Promise<void> {
     if (stopped || status.state !== 'unavailable' || !status.url || !status.source) return
     try {
-      if (await attempt(status.url, status.source)) {
+      if (await track(attempt(status.url, status.source))) {
         log('已接上数据库')
         return
       }
@@ -263,6 +295,8 @@ export async function startRuntime(config: Config, options: RuntimeOptions = {})
     stop: async (drained = Promise.resolve()) => {
       stopped = true
       if (retryTimer) clearTimeout(retryTimer)
+      // 等进行中的接入与重试结束：它们看到 stopped 会关掉自己刚起的服务
+      await Promise.allSettled([...inflight])
       const svc = service
       await Promise.all([svc?.jobs.stop(), drained.then(settleRecallEvents)])
       await svc?.database.close()

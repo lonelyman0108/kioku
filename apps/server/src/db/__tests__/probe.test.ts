@@ -1,5 +1,6 @@
 import { createHash, createHmac, pbkdf2Sync } from 'node:crypto'
 
+import { DrizzleQueryError } from 'drizzle-orm'
 import { describe, expect, it } from 'vitest'
 
 import {
@@ -9,6 +10,7 @@ import {
   isFatal,
   failureOf,
   scramVerifier,
+  transientFailure,
   summarize,
   type DatabaseFacts,
 } from '../probe'
@@ -110,5 +112,23 @@ describe('数据库检查', () => {
     expect(createHash('sha256').update(clientKey).digest('base64')).toBe(m![2])
     expect(createHmac('sha256', salted).update('Server Key').digest('base64')).toBe(m![3])
     expect(verifier).not.toContain('secret-password')
+  })
+
+  it('只有连接出了问题才算暂时的：断开、超时、连不上；权限不足与认不出的不算', () => {
+    const coded = (code: string) => Object.assign(new Error('x'), { code })
+    expect(transientFailure(coded('57P01'))).toBe('unreachable')
+    expect(transientFailure(coded('ECONNRESET'))).toBe('unreachable')
+    expect(transientFailure(coded('CONNECT_TIMEOUT'))).toBe('timeout')
+    // drizzle 包着的驱动错误
+    expect(transientFailure(new DrizzleQueryError('select 1', [], coded('57P01')))).toBe(
+      'unreachable',
+    )
+    // 驱动的连接错误带着 cause
+    expect(
+      transientFailure(Object.assign(coded('CONNECTION_CLOSED'), { cause: coded('ECONNRESET') })),
+    ).toBe('unreachable')
+    expect(transientFailure(coded('42501'))).toBeNull()
+    expect(transientFailure(coded('42P01'))).toBeNull()
+    expect(transientFailure(new Error('x'))).toBeNull()
   })
 })

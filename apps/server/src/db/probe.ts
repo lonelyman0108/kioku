@@ -12,7 +12,7 @@ import {
   type ExtensionState,
   type ProvisionProblem,
 } from '@kioku/contracts'
-import { getTableName, is } from 'drizzle-orm'
+import { DrizzleQueryError, getTableName, is } from 'drizzle-orm'
 import { PgTable } from 'drizzle-orm/pg-core'
 import postgres from 'postgres'
 
@@ -92,7 +92,27 @@ export function failureOf(err: unknown): DatabaseFailure {
   if (/^ERR_(TLS|SSL)_|CERT|SELF_SIGNED|UNABLE_TO_/.test(code)) return 'ssl_failed'
   // 53300：连接数满了；57P03：数据库正在启动或关闭
   if (code === '53300' || code === '57P03') return 'busy'
+  // 57P01、57P02：数据库被关停或崩溃，连接被断开；08 类：连接异常
+  if (code === '57P01' || code === '57P02' || code.startsWith('08')) return 'unreachable'
   return 'unknown'
+}
+
+// 不是连接问题的类别：权限不足（42501）与认不出的错误。这两类重试也不会好
+const NOT_TRANSIENT = new Set<DatabaseFailure>(['permission_denied', 'unknown'])
+
+// 错误是不是「连接出了问题」（断开、超时、连不上、认证失败、库不见了等，可能自己好），是的话给出类别。
+// 依次看错误本身、drizzle 包着的驱动错误、驱动连接错误的 cause：驱动直接抛的连接错误不解开（见 db/client.ts）
+export function transientFailure(err: unknown): DatabaseFailure | null {
+  const candidates = [err, pgErrorOf(err), (pgErrorOf(err) as { cause?: unknown } | null)?.cause]
+  for (const candidate of candidates) {
+    const kind = failureOf(candidate)
+    if (!NOT_TRANSIENT.has(kind)) return kind
+  }
+  return null
+}
+
+function pgErrorOf(err: unknown): unknown {
+  return err instanceof DrizzleQueryError ? err.cause : err
 }
 
 function errorCode(err: unknown): string {
@@ -149,7 +169,17 @@ export function failedCheck(failure: DatabaseFailure): DatabaseCheck {
   }
 }
 
-// 连不上之外的问题：角色、扩展、库的结构。这些不会自己好，服务启动时遇到就拒绝启动
+// 连上了，读库的结构时出错：权限不足单独说明（例如角色对已有的表没有权限），别的只说读取失败。都不会自己好
+function inspectFailedCheck(err: unknown): DatabaseCheck {
+  const code = errorCode(pgErrorOf(err))
+  return {
+    ...failedCheck('unknown'),
+    failure: null,
+    problems: [{ code: code === '42501' ? 'insufficient_privilege' : 'inspect_failed' }],
+  }
+}
+
+// 连不上之外的问题：角色、扩展、库的结构、权限。这些不会自己好，服务启动时遇到就拒绝启动
 export function isFatal(check: DatabaseCheck): boolean {
   return check.problems.some((p) => p.code !== 'connection')
 }
@@ -157,16 +187,21 @@ export function isFatal(check: DatabaseCheck): boolean {
 // 检查一个库能不能给 Kioku 用（只读，不改库）
 export async function probeDatabase(url: string, migrationsFolder: string): Promise<DatabaseCheck> {
   const client = open(url)
+  // 连上了没有：连上之后的语句错误（权限不足等）不是连接问题，不能报成连不上
+  let connected = false
   try {
     // 只读的事务：语句时限用 set local，事务结束就失效，经连接池复用的连接上不留设置
     const facts = await client.begin('read only', async (tx) => {
       await tx.unsafe(`set local statement_timeout = ${STATEMENT_TIMEOUT_MS}`)
+      connected = true
       return gatherFacts(tx, migrationsFolder)
     })
     return assess(facts)
   } catch (err) {
     console.warn('数据库检查失败', { code: errorCode(err) })
-    return failedCheck(failureOf(err))
+    if (!connected) return failedCheck(failureOf(err))
+    const kind = transientFailure(err)
+    return kind ? failedCheck(kind) : inspectFailedCheck(err)
   } finally {
     await client.end({ timeout: 1 }).catch(() => {})
   }
@@ -217,6 +252,8 @@ async function gatherFacts(
   ).length
   return { role, extensions, existing, accounts, unrelatedTables }
 }
+
+const EXTENSION_MISSING_CODES = new Set(['0A000', '58P01'])
 
 // 超级用户代建失败
 export class ProvisionError extends Error {
@@ -304,8 +341,12 @@ export async function provisionDatabase(request: {
       }
     } catch (err) {
       console.warn('安装扩展失败', { code: errorCode(err) })
-      // 0A000、58P01：服务器上有控制文件、没有库文件这类装不上的情况
-      throw new ProvisionError('extension_missing', { extensions: [...DATABASE_EXTENSIONS] })
+      // 只有扩展本身装不上才说缺扩展：0A000（不支持）、58P01（控制文件或库文件不在）。
+      // 连不上新库、权限不够这类按连接的类别报
+      if (EXTENSION_MISSING_CODES.has(errorCode(err))) {
+        throw new ProvisionError('extension_missing', { extensions: [...DATABASE_EXTENSIONS] })
+      }
+      throw new ProvisionError('failed', { failure: failureOf(err) })
     } finally {
       await inside.end({ timeout: 1 }).catch(() => {})
     }
