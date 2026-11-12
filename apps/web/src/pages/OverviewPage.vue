@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { versionLabel } from '@kioku/contracts'
 import { useQuery } from '@tanstack/vue-query'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -289,7 +290,23 @@ const canAdjustBudget = computed(() => space.value?.role === 'owner')
               >
             </p>
           </div>
-          <p v-if="!budget && !backup" class="empty">暂无提醒</p>
+          <!-- 新版本只给实例管理员提醒（别人拿到的是 null） -->
+          <div v-if="data.update" class="notice">
+            <p class="notice-title">有新版本 {{ versionLabel(data.update.version) }}</p>
+            <p class="notice-body">
+              <a
+                :href="data.update.url"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="notice-link"
+                >查看发布说明</a
+              >
+              <RouterLink :to="instanceSettingsRoute('system')" class="notice-link"
+                >系统信息</RouterLink
+              >
+            </p>
+          </div>
+          <p v-if="!budget && !backup && !data.update" class="empty">暂无提醒</p>
         </section>
 
         <section>

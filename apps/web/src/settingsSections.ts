@@ -127,6 +127,13 @@ export const SETTINGS_SECTIONS = [
     icon: icons.prompts,
     component: lazy(() => import('./components/InstancePromptSettings.vue')),
   },
+  {
+    group: 'instance',
+    key: 'system',
+    label: '系统信息',
+    icon: icons.system,
+    component: lazy(() => import('./components/SystemInfoSettings.vue')),
+  },
 ] as const satisfies readonly SettingsSection[]
 
 type SectionOf<G extends SettingsGroupKey> = Extract<

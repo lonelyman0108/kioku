@@ -6,6 +6,7 @@ import type { MasterKey } from '../crypto/keyring'
 import type { Db } from '../db/client'
 import type { EmbedderSource } from '../embedding/source'
 import type { Jobs } from '../jobs/queue'
+import type { UpdateCheckOptions } from '../settings/updateCheck'
 
 export interface Deps {
   db: Db
@@ -26,6 +27,9 @@ export interface Deps {
   exportSendLimits?: { idleMs: number; totalMs: number }
   // 测试台回滚模式的时限与同时运行数，不设时见 bench/rollback.ts；测试里调小
   benchLimits?: Partial<BenchLimits>
+  // 检查新版本时请求 GitHub 用的 fetch、当作当前版本的版本号与请求的时限。不设时用全局的 fetch、构建时写进产物的版本
+  // 与 10 秒；测试里换掉
+  updateCheck?: UpdateCheckOptions
 }
 
 export interface ConsolePrincipal {
