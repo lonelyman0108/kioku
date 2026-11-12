@@ -43,7 +43,7 @@ sdks/python/generate.sh
 ```
 
 它从服务端导出 OpenAPI，经 `filter_openapi.py` 挑出应用调用的接口（访问密钥鉴权的生命周期、召回、记忆、绑定码与 whoami），
-再用写死版本的 openapi-python-client 生成，最后用这里写死的 ruff 整理格式。生成的代码与 `openapi.json` 一起提交。
+再用写死版本的 openapi-python-client 生成，经 `dedupe_imports.py` 去掉生成器重复写的顶层导入，最后用这里写死的 ruff 整理格式。生成的代码与 `openapi.json` 一起提交。
 
 门禁运行 `generate.sh --check`：生成到临时目录、和提交的比对，不一致时失败，不改工作区。
 

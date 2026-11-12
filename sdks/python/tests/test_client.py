@@ -5,6 +5,7 @@ import json
 import httpx
 
 from kioku_client import AuthenticatedClient
+from kioku_client.api.auth import get_v1_whoami
 from kioku_client.api.lifecycle import post_v1_lifecycle_event
 from kioku_client.api.recall import post_v1_recall
 from kioku_client.models import (
@@ -19,7 +20,9 @@ from kioku_client.models import (
     SessionContext,
     TurnEndEvent,
     TurnEndEventEvent,
+    WhoAmI,
 )
+from kioku_client.types import UNSET
 
 
 def client_with(handler) -> AuthenticatedClient:
@@ -139,3 +142,42 @@ def test_recall_parses_candidates_and_subject_facts():
     assert result.candidates[0].title == "群里的规则"
     assert result.subjects[0].name is None
     assert result.subjects[0].facts[0].content == "在学日语"
+
+
+def whoami_body(**names) -> dict:
+    return {
+        "spaceId": "00000000-0000-4000-8000-000000000001",
+        **names,
+        "app": {
+            "id": "00000000-0000-4000-8000-000000000002",
+            "slug": "codex",
+            "name": "Codex",
+            "runtimeFamily": "codex",
+            "ownerAccountId": "00000000-0000-4000-8000-000000000003",
+            "defaultPersonaId": None,
+            "config": {},
+        },
+        "scopes": {
+            "readLayers": ["core"],
+            "writeLayers": [],
+            "maxSensitivity": "private",
+            "admin": False,
+            "credentials": "none",
+        },
+    }
+
+
+def test_whoami_carries_names():
+    body = whoami_body(spaceName="家", accountName="Alice")
+    result = get_v1_whoami.sync(client=client_with(lambda _: httpx.Response(200, json=body)))
+    assert isinstance(result, WhoAmI)
+    assert result.space_name == "家"
+    assert result.account_name == "Alice"
+
+
+def test_whoami_without_names_from_older_server():
+    body = whoami_body()
+    result = get_v1_whoami.sync(client=client_with(lambda _: httpx.Response(200, json=body)))
+    assert isinstance(result, WhoAmI)
+    assert result.space_name is UNSET
+    assert result.account_name is UNSET

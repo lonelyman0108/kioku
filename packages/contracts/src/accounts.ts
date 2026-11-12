@@ -1,8 +1,12 @@
 import { z } from 'zod'
 
-import { Password, SpaceSummary, Username } from './auth'
+import { DISPLAY_NAME_MAX, Password, SpaceSummary, Username } from './auth'
 
-const DisplayName = z.string().trim().min(1, '请填写显示名').max(64, '显示名不超过 64 个字符')
+const DisplayName = z
+  .string()
+  .trim()
+  .min(1, '请填写显示名')
+  .max(DISPLAY_NAME_MAX, `显示名不超过 ${DISPLAY_NAME_MAX} 个字符`)
 
 // 一次性链接的用途：新账号设置密码，或者管理员给已有账号重置密码。用法相同，只是说法不同
 export const ACCOUNT_LINK_PURPOSES = ['setup', 'reset'] as const

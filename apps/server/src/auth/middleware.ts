@@ -5,7 +5,7 @@ import { createMiddleware } from 'hono/factory'
 
 import { keyEffectiveScopes } from '../access/access'
 import { withSpace, type Db, type Tx } from '../db/client'
-import { accounts, apiKeys, apps, spaceMembers } from '../db/schema'
+import { accounts, apiKeys, apps, spaceMembers, spaces } from '../db/schema'
 import type { AppEnv, Deps, KeyPrincipal } from '../http/env'
 import { parseApiKey, verifyApiKey } from './keys'
 import { resolveSession, SESSION_COOKIE } from './session'
@@ -55,7 +55,7 @@ export function requireKey(deps: Deps) {
 // 一把 Key 现在的身份：所属应用与有效上限。Key 的权限按应用主人计算：主人已经不在空间里
 // （或离开后又被重新加入、Key 签发在那之前）、主人的账号被停用，Key 作废，返回 null；主人被降级，Key 的上限随之收紧
 async function principalOf(db: Db, key: typeof apiKeys.$inferSelect): Promise<KeyPrincipal | null> {
-  // 应用与主人当前的角色一次查出来
+  // 应用、主人当前的角色与 whoami 显示的名字一次查出来
   const [found] = await withSpace(db, key.spaceId, (tx) =>
     tx
       .select({
@@ -63,6 +63,8 @@ async function principalOf(db: Db, key: typeof apiKeys.$inferSelect): Promise<Ke
         ownerRole: spaceMembers.role,
         memberSince: spaceMembers.createdAt,
         disabledAt: accounts.disabledAt,
+        accountName: accounts.displayName,
+        spaceName: spaces.name,
       })
       .from(apps)
       .leftJoin(
@@ -73,6 +75,7 @@ async function principalOf(db: Db, key: typeof apiKeys.$inferSelect): Promise<Ke
         ),
       )
       .leftJoin(accounts, eq(accounts.id, apps.ownerAccountId))
+      .leftJoin(spaces, eq(spaces.id, apps.spaceId))
       .where(eq(apps.id, key.appId))
       .limit(1),
   )
@@ -82,7 +85,12 @@ async function principalOf(db: Db, key: typeof apiKeys.$inferSelect): Promise<Ke
         { role: found.ownerRole, memberSince: found.memberSince, disabledAt: found.disabledAt },
       )
     : null
-  return found && scopes ? keyPrincipal(key, found.app, scopes) : null
+  return found && scopes
+    ? keyPrincipal(key, found.app, scopes, {
+        spaceName: found.spaceName,
+        accountName: found.accountName,
+      })
+    : null
 }
 
 // 后台任务按记下的 Key 重新确认身份（例如抽取缓冲里的对话）：吊销了、作废了都返回 null
@@ -100,12 +108,14 @@ export function keyPrincipal(
   key: { id: string; spaceId: string },
   app: typeof apps.$inferSelect,
   scopes: KeyScopes,
+  labels?: KeyPrincipal['labels'],
 ): KeyPrincipal {
   return {
     kind: 'key',
     keyId: key.id,
     spaceId: key.spaceId,
     scopes,
+    ...(labels ? { labels } : {}),
     app: {
       id: app.id,
       slug: app.slug,

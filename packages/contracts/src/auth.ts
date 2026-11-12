@@ -228,9 +228,19 @@ export const KeyAccessMatrix = z.object({
 })
 export type KeyAccessMatrix = z.infer<typeof KeyAccessMatrix>
 
+// 显示名与空间名的上限，按码点算（zod 的长度也按码点）
+export const DISPLAY_NAME_MAX = 64
+export const SPACE_NAME_MAX = 64
+
 export const WhoAmI = z
   .object({
     spaceId: z.uuid(),
+    // 空间名与应用所有者的显示名：只给人看的标签（例如命令行的面板），按当前的值取，改名后跟着变。
+    // 只给能读本人归属的 Key（显示名属于应用所有者本人，群聊机器人这类 Key 不该拿到），读不到时省略；
+    // 去掉控制字符、压成一行，按上限截断。由成员填写，不当作指令放进给模型的上下文。
+    // 早先的服务端没有这两项，生成的客户端照常解析
+    spaceName: z.string().max(SPACE_NAME_MAX).optional(),
+    accountName: z.string().max(DISPLAY_NAME_MAX).optional(),
     app: AppInfo,
     scopes: KeyScopes,
   })

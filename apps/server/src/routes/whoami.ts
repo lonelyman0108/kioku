@@ -10,7 +10,8 @@ const whoami = createRoute({
   method: 'get',
   path: '/whoami',
   tags: ['auth'],
-  summary: '当前 API Key 对应的空间、应用与授权上限',
+  summary:
+    '当前 API Key 对应的空间、应用与授权上限；能读本人归属的 Key 还带空间名与应用所有者的显示名',
   security: [{ bearer: [] }],
   responses: {
     200: jsonResponse('Key 信息', WhoAmI),
