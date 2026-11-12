@@ -123,7 +123,8 @@ jobs:
           touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
       - uses: actions/upload-artifact@v4
         with:
-          name: digests-${{ matrix.image }}-${{ matrix.arch }}
+          # 镜像名与架构之间用两个连字符：kioku 的匹配模式不能把 kioku-postgres 的摘要也取进来
+          name: digests-${{ matrix.image }}--${{ matrix.arch }}
           path: ${{ runner.temp }}/digests/*
           if-no-files-found: error
           retention-days: 1
@@ -146,7 +147,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          pattern: digests-${{ matrix.image }}-*
+          pattern: digests-${{ matrix.image }}--*
           merge-multiple: true
           path: ${{ runner.temp }}/digests
       - uses: docker/setup-buildx-action@v4
