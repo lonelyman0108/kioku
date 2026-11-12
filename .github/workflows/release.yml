@@ -1,5 +1,7 @@
-# 推送 vX.Y.Z tag 后：跑完整门禁，再建或更新 GitHub Release，正文取 CHANGELOG.md 里对应版本的一节。
-# tag 只由维护者打；不写 concurrency（避免误取消排队中的 job）。
+# 推送 vX.Y.Z tag 后：跑完整门禁，再建或更新 GitHub Release，正文取 CHANGELOG.md 里对应版本的一节；
+# 门禁通过后构建并推送服务端与数据库镜像（images.yml），标签是 X.Y.Z，比已有的都新时再打 X.Y 与 latest，预发布版只打 X.Y.Z。
+# tag 只由维护者打；workflow 不写 concurrency（避免误取消排队中的 job）。只有推镜像的 job 进 images-release 组：
+# 两次发布的镜像排队推，不并行改同一批标签，也不取消正在推的那次。
 name: Release
 on:
   push:
@@ -40,3 +42,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: scripts/ci/release-page.sh "$GITHUB_REF_NAME"
+
+  images:
+    needs: release
+    # fork 里没有推这些镜像仓库的权限，不跑
+    if: github.repository == 'lonelyman0108/kioku'
+    concurrency:
+      group: images-release
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/images.yml
+    with:
+      ref: ${{ github.ref_name }}
+    secrets:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}

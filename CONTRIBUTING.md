@@ -55,4 +55,16 @@
 
 版本号与 tag 只由维护者决定和打；CHANGELOG 定稿放在发布 PR（`🔖 release: vX.Y.Z`）里。
 推送 `vX.Y.Z` tag 后，`release.yml` 跑完整门禁，再用 CHANGELOG 对应一节建立或更新 GitHub Release。
-<!-- 镜像构建与推送在有 Dockerfile 后补充 -->
+门禁通过后，`release.yml` 调 `images.yml` 构建并推送两个镜像，`linux/amd64` 与 `linux/arm64` 各在原生的 runner 上构建，再合并成一个多架构清单：
+
+| 镜像 | GHCR | Docker Hub |
+|---|---|---|
+| 服务端（根目录 `Dockerfile`） | `ghcr.io/lonelyman0108/kioku` | `docker.io/lonelyman0108/kioku` |
+| 数据库（`docker/postgres/Dockerfile`） | `ghcr.io/lonelyman0108/kioku-postgres` | `docker.io/lonelyman0108/kioku-postgres` |
+
+- 标签：正式版总是打 `X.Y.Z`；比同一 `X.Y` 里已有的正式版都新时打 `X.Y`，比仓库里所有已有的正式版都新时打 `latest`（`v0.2.0` 之后补发 `v0.1.5` 只动 `0.1`，不动 `latest`）。带预发布后缀的（如 `v0.1.0-rc.1`）只打 `X.Y.Z` 本身。规则与自测在 `scripts/ci/image-meta.sh`，推镜像的 job 在 `images-release` 组里排队，两次发布不并行。
+- 服务端镜像构建时传 `KIOKU_VERSION`（tag 去掉 `v`）、`KIOKU_COMMIT`（完整的提交 sha）、`KIOKU_BUILD_TIME`（ISO 8601 的 UTC 时间）；两个镜像都带 OCI 标签（source、revision、version、created、licenses）。
+- main 每次合并后，`edge.yml` 用同一份 `images.yml` 推两个镜像的 `edge` 与不变的 `sha-<短提交>` 标签（版本写 `edge`），不经过 PR 的门禁；连着合并时排队，不取消正在推的那次。
+- 两个 workflow 推镜像的 job 都限定 `github.repository == 'lonelyman0108/kioku'`，fork 里不跑。
+- secrets：GHCR 用 workflow 的 `GITHUB_TOKEN`（job 声明了 `packages: write`），不用另配。Docker Hub 可选：`DOCKERHUB_USERNAME`、`DOCKERHUB_TOKEN`（用户名与有读写权限的访问令牌）都配了才推 Docker Hub，缺一个就只推 GHCR，job summary 里写「未配置 Docker Hub，已跳过」。
+- GHCR 的新包第一次推上去时默认是私有的：在包的 Package settings 里把可见性改成 Public，`compose.yaml` 才能不登录直接拉。两个包各改一次。

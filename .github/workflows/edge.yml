@@ -1,0 +1,26 @@
+# main 每次合并后构建并推送服务端与数据库镜像的 edge 与 sha-<短提交> 标签（images.yml），版本写 edge。
+# 单独一个 workflow，不拖慢 PR 的门禁；合并进来的提交已经过了 PR 的门禁，这里不再跑。
+name: Edge
+on:
+  push:
+    branches: [main]
+# 连着合并几次时排队推，不取消正在推的那次：中途取消会让两个镜像仓库的 edge 指向不同的提交。
+# 排队里只留最新的一次，更早的待跑 run 由 GitHub 替换掉
+concurrency:
+  group: edge-${{ github.ref }}
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  images:
+    # fork 里没有推这些镜像仓库的权限，不跑
+    if: github.repository == 'lonelyman0108/kioku'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/images.yml
+    with:
+      ref: edge
+    secrets:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}

@@ -1,8 +1,10 @@
-# 单机部署示例：PostgreSQL（pgvector + 中文分词）与 Kioku 两个容器。在仓库根目录运行：
+# 从源码构建的单机部署：PostgreSQL（pgvector + 中文分词）与 Kioku 两个容器，镜像在本机构建。
+# 不改代码的话用 compose.yaml 直接拉发布好的镜像更省事。在仓库根目录运行：
 #   cp .env.example .env            # 填好密码与主密钥
-#   docker compose -f docker-compose.example.yml up -d --build
-# 管理界面与接口都在 http://<主机>:18920，首次打开会进入初始化页，初始化码见 docker compose logs kioku。
-# 对外提供服务时在前面加 HTTPS 反向代理，并按 README 设置 KIOKU_TRUSTED_PROXIES
+#   docker compose -f docker-compose.build.yml up -d --build
+# 管理界面与接口都在 http://<主机>:18920，首次打开会进入初始化页，初始化码在 docker compose -f docker-compose.build.yml logs kioku 里。
+# 对外提供服务时在前面加 HTTPS 反向代理，并按 docs/deploy.md 设置 KIOKU_TRUSTED_PROXIES。
+# 项目名与卷名和 compose.yaml 相同，两种方式之间切换时数据照旧
 name: kioku
 services:
   db:
@@ -32,6 +34,8 @@ services:
       KIOKU_MASTER_KEY: ${KIOKU_MASTER_KEY:?在 .env 里设置 KIOKU_MASTER_KEY}
       # 只在轮换主密钥期间、或恢复轮换之前做的备份时配：旧的那把主密钥
       KIOKU_MASTER_KEY_PREVIOUS: ${KIOKU_MASTER_KEY_PREVIOUS:-}
+      # 固定的初始化码（至少 16 个字符，例如 openssl rand -hex 16）；不设时每次启动随机生成一个，打印在日志里
+      KIOKU_SETUP_CODE: ${KIOKU_SETUP_CODE:-}
       KIOKU_COOKIE_SECURE: ${KIOKU_COOKIE_SECURE:-true}
       KIOKU_TRUSTED_PROXIES: ${KIOKU_TRUSTED_PROXIES:-0}
     # 数据目录：不设 DATABASE_URL、在初始化页填数据库时，连接保存在这里的 kioku.json

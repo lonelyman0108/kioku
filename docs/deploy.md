@@ -4,16 +4,47 @@
 
 ## 启动
 
-在仓库根目录：
+### 用发布的镜像
+
+不用克隆仓库，找一个目录放 `compose.yaml` 与 `.env`：
 
 ```bash
-cp .env.example .env      # 按注释生成密码与主密钥
-docker compose -f docker-compose.example.yml up -d --build
+mkdir kioku && cd kioku
+curl -fsSLO https://raw.githubusercontent.com/lonelyman0108/kioku/main/compose.yaml
+curl -fsSL -o .env https://raw.githubusercontent.com/lonelyman0108/kioku/main/.env.example
+# 按 .env 里的注释生成密码与主密钥
+docker compose up -d
 ```
+
+镜像发布在 GHCR（`ghcr.io/lonelyman0108/kioku`、`ghcr.io/lonelyman0108/kioku-postgres`），Docker Hub 上同名（`lonelyman0108/kioku`、`lonelyman0108/kioku-postgres`）：拉 GHCR 慢时把 `compose.yaml` 里两处 `ghcr.io/` 去掉即可。版本由 `.env` 的 `KIOKU_TAG` 决定，两个镜像用同一个标签：
+
+| 标签 | 内容 |
+|---|---|
+| `latest` | 最新的正式版（默认） |
+| `X.Y.Z` | 某个版本，固定不变；生产环境建议写成它，升级时自己改 |
+| `X.Y` | 这个小版本里最新的正式版 |
+| `edge` | main 上最新的提交，不保证稳定 |
+| `sha-<短提交>` | main 上的某个提交，固定不变；跟着 `edge` 部署时用它回滚 |
+
+`latest` 只跟最高的正式版：补发旧系列的修复版（例如 `0.2.0` 之后的 `0.1.5`）只更新 `0.1`。预发布版（如 `0.1.0-rc.1`）只有它本身这一个标签，不会变成 `latest`。第一个正式版发布之前还没有 `latest`，先在 `.env` 里写 `KIOKU_TAG=edge`。两个镜像都有 `linux/amd64` 与 `linux/arm64`。
+
+### 从源码构建
+
+改了代码、或者想自己构建镜像时，在仓库根目录用 `docker-compose.build.yml`：
+
+```bash
+git clone https://github.com/lonelyman0108/kioku && cd kioku
+cp .env.example .env      # 按注释生成密码与主密钥
+docker compose -f docker-compose.build.yml up -d --build
+```
+
+两个 compose 文件的项目名与卷名相同，在仓库根目录换用另一个时数据照旧。本文下面的命令按 `compose.yaml` 写；从源码构建的在 `docker compose` 后面加 `-f docker-compose.build.yml`，`pull` 换成 `build`。
+
+### 访问与初始化
 
 启动前在 `.env` 里定下 `KIOKU_COOKIE_SECURE`：经 HTTPS 访问时保持 `true`；只在局域网用 `http://` 地址访问时改成 `false`，否则浏览器不保存登录 Cookie，登录后会一直回到登录页（`http://localhost` 例外，浏览器把它当安全地址）。
 
-打开 `http://<主机>:18920`，首次进入初始化页。初始化要填初始化码：服务启动时打印在日志里（`docker compose -f docker-compose.example.yml logs kioku` 里「Kioku 初始化码」那一行），先确认数据库，再建第一个账号和空间，详见下面的「初始化与数据库」。之后在「应用」里为每个客户端建应用、签发访问密钥：
+打开 `http://<主机>:18920`，首次进入初始化页。初始化要填初始化码：服务启动时打印在日志里（`docker compose logs kioku` 里「Kioku 初始化码」那一行；也可以在 `.env` 里用 `KIOKU_SETUP_CODE` 自己指定），先确认数据库，再建第一个账号和空间，详见下面的「初始化与数据库」。之后在「应用」里为每个客户端建应用、签发访问密钥：
 
 - MCP：`http://<主机>:18920/v1/mcp`（Streamable HTTP，`Authorization: Bearer <访问密钥>`）
 - 生命周期钩子：`POST /v1/lifecycle/event`；其他接口见 `/v1/openapi.json`
@@ -22,14 +53,14 @@ docker compose -f docker-compose.example.yml up -d --build
 
 数据库有两种给法：
 
-- **预先配好**：设环境变量 `DATABASE_URL`（compose 示例就是这样，`db` 容器首次启动时建好应用角色、库和扩展）。初始化页的第一步只显示这个连接（密码只显示已填）和检查结果，标明来自环境变量、不能修改，确认后建管理员。
+- **预先配好**：设环境变量 `DATABASE_URL`（两个 compose 文件都是这样，`db` 容器首次启动时建好应用角色、库和扩展）。初始化页的第一步只显示这个连接（密码只显示已填）和检查结果，标明来自环境变量、不能修改，确认后建管理员。
 - **在初始化页填**：不设 `DATABASE_URL`，服务照样启动，只提供初始化页（其余接口回 503）。第一步填主机、端口、库名、用户名、密码与 SSL 模式，先「检查」再「保存并接入」：服务当场接上（迁移、启动后台任务），不用重启。连接保存在数据目录的 `kioku.json`（权限 600），之后在界面上不能再改，要改就编辑这个文件或改设环境变量再重启；环境变量优先于文件。
 
 检查的内容：能否连上（失败时只给类别：无法连接、认证失败、超时、库不存在等）；角色不能是超级用户或带 `BYPASSRLS`（否则行级安全不生效，空间之间不隔离）；库里要有 `vector` 与 `zhparser` 两个扩展；库里已有 Kioku 的数据时说明将接入已有实例（是记忆架构改版之前的结构时拒绝）；有不是 Kioku 建的表时提醒。
 
 手上只有超级用户时，选「用超级用户创建」：填超级用户的账号密码、要建的应用角色名和库名，Kioku 建一个 `NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE` 的应用角色（随机密码）、建库（所有者是应用角色），在新库里装好两个扩展，然后只保存应用角色的连接；超级用户的密码不保存、不进日志。服务器上没有这两个扩展时用 Kioku 的 PostgreSQL 镜像（`docker/postgres`），或者自己装 pgvector 与 zhparser。
 
-数据目录由 `KIOKU_DATA_DIR` 指定，镜像里是 `/data`。在初始化页填数据库时要把它挂成持久的卷（compose 示例里的 `kioku-data`），否则重建容器后连接丢失、又回到初始化页。
+数据目录由 `KIOKU_DATA_DIR` 指定，镜像里是 `/data`。在初始化页填数据库时要把它挂成持久的卷（两个 compose 文件里的 `kioku-data`），否则重建容器后连接丢失、又回到初始化页。
 
 配好的数据库（环境变量或 `kioku.json`）启动时连不上：连不上、超时、认证失败、库不存在这类可能自己恢复的问题，服务照样启动，按退避自动重试（5 秒起，最多隔 60 秒），接上后自动换成完整的服务。这期间 `/v1/health` 回 503，管理界面显示「数据库不可用」和原因，不进初始化页，也不生成初始化码。不会自己恢复的问题照旧拒绝启动，日志里写明原因：角色是超级用户或带 `BYPASSRLS`、库里缺扩展、记忆架构改版之前的结构、库里有这个版本不认识的迁移、主密钥对不上。
 
@@ -56,7 +87,7 @@ curl -fsS -X POST http://127.0.0.1:18920/v1/setup \
 管理界面的「测试台」不接任何客户端，按一个访问密钥模拟应用的调用：调工具、发生命周期事件（可选私聊、群聊上下文）、回放场景与断言，配了抽取模型时还能接真实模型跑一段对话，看它会不会按指引调工具。默认放进事务、结束时回滚，并列出真实执行时的改动；切到真实执行要确认。只给应用所有者，模型对话还要实例管理员。同一份场景也能用真实 HTTP 与真实访问密钥跑（这是真实调用，写操作要加 `--allow-writes`，会记召回事件）：
 
 ```bash
-docker compose -f docker-compose.example.yml exec -e KIOKU_BENCH_KEY=<访问密钥> kioku \
+docker compose exec -e KIOKU_BENCH_KEY=<访问密钥> kioku \
   node server/dist/bench.mjs --url http://localhost:18920
 ```
 
@@ -66,7 +97,7 @@ docker compose -f docker-compose.example.yml exec -e KIOKU_BENCH_KEY=<访问密�
 
 ```bash
 mkdir -p ~/kioku-backup
-docker compose -f docker-compose.example.yml exec -T kioku node server/dist/backup.mjs --out - > ~/kioku-backup/kioku-$(date +%F-%H%M%S).backup
+docker compose exec -T kioku node server/dist/backup.mjs --out - > ~/kioku-backup/kioku-$(date +%F-%H%M%S).backup
 ```
 
 ## 恢复到新实例
@@ -74,15 +105,15 @@ docker compose -f docker-compose.example.yml exec -T kioku node server/dist/back
 新实例的 `.env` 里配做备份时的 `KIOKU_MASTER_KEY`（备份之后轮换过的话，新的主密钥配在 `KIOKU_MASTER_KEY`，做备份时的配在 `KIOKU_MASTER_KEY_PREVIOUS`），数据库是新建的空库，恢复之前不要启动服务。恢复先核对格式、主密钥与迁移，把迁移执行到做备份时的位置，再按原来的 id 写回并执行这个版本新增的迁移（较早版本做的备份也能用新版本恢复，记忆架构改版之前做的除外：改版不兼容旧数据，要从 Lore 重新导入）；写回与新增的迁移在一个事务里，失败时数据一条也不留下，可以直接重试；库里已经有账号或空间时拒绝。恢复先把整份备份解开、核对过才写库，内存要放得下解压后的备份（通常是备份文件的几倍大）。恢复之后所有人重新登录，访问密钥照常可用，向量在后台重新生成。
 
 ```bash
-docker compose -f docker-compose.example.yml build
-docker compose -f docker-compose.example.yml run --rm -T kioku node server/dist/restore.mjs --file - < ~/kioku-backup/<备份>.backup
-docker compose -f docker-compose.example.yml up -d
+docker compose pull
+docker compose run --rm -T kioku node server/dist/restore.mjs --file - < ~/kioku-backup/<备份>.backup
+docker compose up -d
 ```
 
 定时备份传到了 S3 兼容存储时，也可以直接从存储桶取最新的一份恢复：先在当前终端里 `export AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=…`（区域不是 `us-east-1` 时再加 `AWS_REGION`，临时凭据再加 `AWS_SESSION_TOKEN`），再把上面的 `restore.mjs --file -` 一行换成：
 
 ```bash
-docker compose -f docker-compose.example.yml run --rm -T -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN -e AWS_REGION kioku \
+docker compose run --rm -T -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN -e AWS_REGION kioku \
   node server/dist/restore.mjs --s3-endpoint https://s3.example.com --s3-bucket <存储桶> --s3-prefix <前缀>
 ```
 
@@ -100,21 +131,34 @@ docker compose -f docker-compose.example.yml run --rm -T -e AWS_ACCESS_KEY_ID -e
 
 ## 升级
 
-先做一份整库快照（回滚时用），再拉取新代码、重新执行 `up -d --build`，启动时自动迁移数据库。迁移只向前：旧版本的镜像连不上升级过的库（库里有它不认识的迁移时拒绝启动），回滚用下面的快照恢复。快照要用数据库超级用户：应用角色受行级安全约束，用它导出会报错。
+先做一份整库快照（回滚时用），再换新版本的镜像，启动时自动迁移数据库。迁移只向前：旧版本的镜像连不上升级过的库（库里有它不认识的迁移时拒绝启动），回滚用下面的快照恢复。快照要用数据库超级用户：应用角色受行级安全约束，用它导出会报错。用 `latest` 这类会变的标签时，先在 `http://<主机>:18920/v1/health` 记下现在的版本号，回滚时要用；跟着 `edge` 部署的版本号都是 `edge`，记下 `sha-<短提交>` 标签（见「回滚」）。
 
 ```bash
-docker compose -f docker-compose.example.yml exec db pg_dump -U postgres -Fc kioku > ~/kioku-backup/kioku-$(date +%F-%H%M%S).dump
+docker compose exec db pg_dump -U postgres -Fc kioku > ~/kioku-backup/kioku-$(date +%F-%H%M%S).dump
 ```
+
+`KIOKU_TAG` 写的是版本号时先改成新的版本号；是 `latest`、`X.Y` 这类标签时不用改。然后拉取新镜像并重新创建容器：
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+从源码构建的拉取新代码后执行 `docker compose -f docker-compose.build.yml up -d --build`。
 
 ## 回滚
 
-停掉服务，把已经迁移到新版本的库改名留着，建一个空库，把升级前的快照恢复进去，然后换回旧版本的代码启动。不能直接往旧库里 `pg_restore --clean`：新版本建的表和函数不在快照里，会残留下来，下次升级时迁移会因为它们已存在而失败。
+停掉服务，把已经迁移到新版本的库改名留着，建一个空库，把升级前的快照恢复进去，然后把 `.env` 的 `KIOKU_TAG` 改回升级前的版本号，执行 `docker compose up -d`（从源码构建的换回旧版本的代码，`up -d --build`）。跟着 `edge` 部署时没有版本号可改回，升级前记下现在跑的提交（镜像的 `org.opencontainers.image.revision` 标签，下面的命令打印它），回滚时把 `KIOKU_TAG` 写成 `sha-` 加它的前 7 位。
 
 ```bash
-docker compose -f docker-compose.example.yml stop kioku
-docker compose -f docker-compose.example.yml exec db psql -U postgres -c 'ALTER DATABASE kioku RENAME TO kioku_upgraded'
-docker compose -f docker-compose.example.yml exec db createdb -U postgres -O kioku kioku
-docker compose -f docker-compose.example.yml exec -T db pg_restore -U postgres --exit-on-error -d kioku < ~/kioku-backup/<升级前的快照>.dump
+docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$(docker compose images -q kioku)"
+```不能直接往旧库里 `pg_restore --clean`：新版本建的表和函数不在快照里，会残留下来，下次升级时迁移会因为它们已存在而失败。
+
+```bash
+docker compose stop kioku
+docker compose exec db psql -U postgres -c 'ALTER DATABASE kioku RENAME TO kioku_upgraded'
+docker compose exec db createdb -U postgres -O kioku kioku
+docker compose exec -T db pg_restore -U postgres --exit-on-error -d kioku < ~/kioku-backup/<升级前的快照>.dump
 ```
 
 恢复失败时（例如快照文件不完整）删掉新建的 `kioku`，再把 `kioku_upgraded` 改回 `kioku`，回到升级后的状态。旧版本确认正常之后再删掉 `kioku_upgraded`（`exec db dropdb -U postgres kioku_upgraded`）。
@@ -134,7 +178,8 @@ docker compose -f docker-compose.example.yml exec -T db pg_restore -U postgres -
 | `KIOKU_MASTER_KEY_PREVIOUS` | 空 | 只在轮换主密钥期间配：旧的主密钥，见上面的「轮换主密钥」 |
 | `KIOKU_COOKIE_SECURE` | `true` | 登录 Cookie 是否只走 HTTPS。浏览器在 localhost 上也接受；用局域网 HTTP 地址访问时设为 `false` |
 | `KIOKU_TRUSTED_PROXIES` | `0` | 前面有几层受信任的反向代理。按层数从 `X-Forwarded-For` 右边取客户端地址；没有代理时保持 `0`，否则地址可以伪造 |
-| `KIOKU_BIND` | `0.0.0.0` | 只用于 compose 示例：端口发布到哪个地址。放在反向代理后面时设为 `127.0.0.1` |
+| `KIOKU_BIND` | `0.0.0.0` | 只用于 compose 文件：端口发布到哪个地址。放在反向代理后面时设为 `127.0.0.1` |
+| `KIOKU_TAG` | `latest` | 只用于 `compose.yaml`：两个镜像的标签，见上面的「用发布的镜像」 |
 | `PORT` | `18920` | 监听端口 |
 | `KIOKU_WEB_DIR` | `apps/web/dist` | 管理界面构建产物的目录；目录不存在时只提供 API |
 | `KIOKU_MIGRATIONS_DIR` | `apps/server/migrations` | 数据库迁移目录 |

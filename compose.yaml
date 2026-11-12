@@ -1,0 +1,49 @@
+# Kioku 单机部署：拉发布好的镜像，PostgreSQL（pgvector + 中文分词）与 Kioku 两个容器。不用克隆仓库：
+#   curl -fsSLO https://raw.githubusercontent.com/lonelyman0108/kioku/main/compose.yaml
+#   curl -fsSL -o .env https://raw.githubusercontent.com/lonelyman0108/kioku/main/.env.example   # 按注释填好密码与主密钥
+#   docker compose up -d
+# 管理界面与接口都在 http://<主机>:18920，首次打开会进入初始化页，初始化码在 docker compose logs kioku 里。
+# 镜像版本由 .env 的 KIOKU_TAG 决定（默认 latest）。也发布在 Docker Hub：把下面两处 ghcr.io/ 去掉即可。
+# 对外提供服务时在前面加 HTTPS 反向代理，并按 docs/deploy.md 设置 KIOKU_TRUSTED_PROXIES。
+# 要从源码构建，用仓库里的 docker-compose.build.yml
+name: kioku
+services:
+  db:
+    image: ghcr.io/lonelyman0108/kioku-postgres:${KIOKU_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?在 .env 里设置 POSTGRES_PASSWORD}
+      KIOKU_DB_PASSWORD: ${KIOKU_DB_PASSWORD:?在 .env 里设置 KIOKU_DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -h 127.0.0.1 -U kioku -d kioku']
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  kioku:
+    image: ghcr.io/lonelyman0108/kioku:${KIOKU_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://kioku:${KIOKU_DB_PASSWORD}@db:5432/kioku
+      KIOKU_MASTER_KEY: ${KIOKU_MASTER_KEY:?在 .env 里设置 KIOKU_MASTER_KEY}
+      # 只在轮换主密钥期间、或恢复轮换之前做的备份时配：旧的那把主密钥
+      KIOKU_MASTER_KEY_PREVIOUS: ${KIOKU_MASTER_KEY_PREVIOUS:-}
+      # 固定的初始化码（至少 16 个字符，例如 openssl rand -hex 16）；不设时每次启动随机生成一个，打印在日志里
+      KIOKU_SETUP_CODE: ${KIOKU_SETUP_CODE:-}
+      KIOKU_COOKIE_SECURE: ${KIOKU_COOKIE_SECURE:-true}
+      KIOKU_TRUSTED_PROXIES: ${KIOKU_TRUSTED_PROXIES:-0}
+    # 数据目录：不设 DATABASE_URL、在初始化页填数据库时，连接保存在这里的 kioku.json
+    volumes:
+      - kioku-data:/data
+    # 放在反向代理后面时在 .env 里设 KIOKU_BIND=127.0.0.1，端口只给本机的代理访问
+    ports:
+      - '${KIOKU_BIND:-0.0.0.0}:18920:18920'
+
+volumes:
+  pgdata:
+  kioku-data:

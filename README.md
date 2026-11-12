@@ -80,12 +80,12 @@
 ## 快速开始
 
 ```bash
-git clone https://github.com/lonelyman0108/kioku && cd kioku
-cp .env.example .env          # 按注释生成密码与主密钥
-docker compose -f docker-compose.example.yml up -d --build
+curl -fsSLO https://raw.githubusercontent.com/lonelyman0108/kioku/main/compose.yaml
+curl -fsSL -o .env https://raw.githubusercontent.com/lonelyman0108/kioku/main/.env.example   # 按注释生成密码与主密钥
+docker compose up -d
 ```
 
-打开 `http://127.0.0.1:18920`，初始化第一个账号与空间。用局域网的 `http://` 地址访问、或要经 HTTPS 对外时，先看 [部署与运维](docs/deploy.md)。
+打开 `http://127.0.0.1:18920`，输入日志里的初始化码（`docker compose logs kioku`），建第一个账号与空间。用局域网的 `http://` 地址访问、要经 HTTPS 对外、或想从源码构建时，先看 [部署与运维](docs/deploy.md)。
 
 ## 接入
 

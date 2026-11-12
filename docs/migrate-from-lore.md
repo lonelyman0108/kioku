@@ -61,10 +61,10 @@ Lore 里常有直接写在正文里的密码与令牌。Kioku 里推荐把值放
    node apps/server/dist/import-lore.mjs --account <用户名> --secret infra://office_network/credentials
    ```
 
-   用 Docker 部署时在服务容器里执行，Lore 的库要能从容器里访问（例如 `docker network connect` 把服务容器接到 Lore 所在的网络）：
+   用 Docker 部署时在服务容器里执行（从源码构建的在 `docker compose` 后面加 `-f docker-compose.build.yml`），Lore 的库要能从容器里访问（例如 `docker network connect` 把服务容器接到 Lore 所在的网络）：
 
    ```bash
-   docker compose -f docker-compose.example.yml exec -e LORE_DATABASE_URL=<Lore 的连接串> \
+   docker compose exec -e LORE_DATABASE_URL=<Lore 的连接串> \
      kioku node server/dist/import-lore.mjs --account <用户名>
    ```
 
