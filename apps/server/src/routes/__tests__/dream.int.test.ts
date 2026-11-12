@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto'
 
 import type {
   BootResponse,
+  DeletedMemoryList,
   DreamApplied,
   DreamMemberSettings,
   DreamRunList,
@@ -136,6 +137,14 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
     )
     return run(model)
   }
+  // 按正文挑出这次请求里有的记忆，各给一条设为过时的建议：几条记忆可能在同一次请求里，
+  // 也可能分在共享的与联系人的几次请求里
+  const staleOf =
+    (reasons: Record<string, string>) =>
+    (messages: ChatMessage[], h: (content: string) => string) =>
+      Object.entries(reasons)
+        .filter(([content]) => handleOf(messages, content) !== undefined)
+        .map(([content, reason]) => ({ kind: 'stale', memories: [h(content)], reason }))
   let lastRunId = ''
   const run = async (model: ChatModel) => {
     const runId = randomUUID()
@@ -593,11 +602,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
     const report = await remember({ uri: 'core://report', content: '周五交周报' })
     const { fact, personId } = await group()
     const f1 = await fact('在准备考试')
-    await dream((_, h) => [
-      h('周五交周报') !== 'M0'
-        ? { kind: 'stale', memories: [h('周五交周报')], reason: '期限过了' }
-        : { kind: 'stale', memories: [h('在准备考试')], reason: '考完了' },
-    ])
+    await dream(staleOf({ 周五交周报: '期限过了', 在准备考试: '考完了' }))
     const { items } = await list()
     expect(items).toHaveLength(2)
     for (const item of items) await ok(await apply(item.id))
@@ -632,21 +637,17 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
     expect(history.events.map((e) => e.type)).toEqual(['create', 'update', 'reactivate'])
   })
 
-  // 有效期有两种判断：列表、按坐标读取与对象页的事实按应用的钟，已过期列表与对象页的已推翻按数据库的钟。
-  // 只假造应用的 Date，冻结在快或慢两分钟的那一刻：设为过时的在两边都要马上算过期，不能一时两边都不在
+  // 有效期与更新时间只按数据库的钟。只假造应用的 Date，冻结在快或慢两分钟的那一刻：执行之后，
+  // 列表、按坐标读取、已过期、已删除与对象页的事实、已推翻都马上前后一致
   for (const [name, skew] of [
     ['快', 120_000],
     ['慢', -120_000],
   ] as const) {
-    it(`过时：应用的时钟比数据库${name}时，设为过时的记忆与事实在两种判断里都马上算过期`, async () => {
+    it(`过时：应用的时钟比数据库${name}两分钟时，设为过时的记忆与事实在各处都马上算过期`, async () => {
       const report = await remember({ uri: 'core://report', content: '周五交周报' })
       const { fact, personId } = await group()
       const f1 = await fact('在准备考试')
-      await dream((_, h) => [
-        h('周五交周报') !== 'M0'
-          ? { kind: 'stale', memories: [h('周五交周报')], reason: '期限过了' }
-          : { kind: 'stale', memories: [h('在准备考试')], reason: '考完了' },
-      ])
+      await dream(staleOf({ 周五交周报: '期限过了', 在准备考试: '考完了' }))
       const { items } = await list()
       expect(items).toHaveLength(2)
       vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + skew })
@@ -662,6 +663,37 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
         const detail = await ok<SubjectDetail>(await send('GET', `/subjects/${personId}`))
         expect(detail.facts).toEqual([])
         expect(detail.supersededFacts.map((f) => f.id)).toEqual([f1.id])
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it(`合并：应用的时钟比数据库${name}两分钟时，保留的那条排在按更新时间的最前，删掉的马上在已删除里`, async () => {
+      const keep = await remember({ uri: 'core://lang', content: '回答用中文' })
+      const other = await remember({ uri: 'core://lang-more', content: '用中文回答' })
+      const later = await remember({ uri: 'core://later', content: '后来新建的笔记' })
+      await dream((_, h) => [
+        {
+          kind: 'merge',
+          memories: [h('用中文回答'), h('回答用中文')],
+          keep: h('回答用中文'),
+          content: '回答一律用中文',
+          reason: '重复',
+        },
+      ])
+      const suggestion = await only()
+      vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + skew })
+      try {
+        await ok(await apply(suggestion.id))
+        const listed = await ok<MemoryList>(await send('GET', '/memories/list?sort=updated'))
+        expect(listed.items.map((i) => i.id)).toEqual([keep.id, later.id])
+        expect((await send('GET', `/memories?uri=${encodeURIComponent(other.uri)}`)).status).toBe(
+          404,
+        )
+        const deleted = await ok<DeletedMemoryList>(await send('GET', '/memories/deleted'))
+        expect(deleted.items.map((i) => i.id)).toEqual([other.id])
+        const expired = await ok<ExpiredMemoryList>(await send('GET', '/memories/expired'))
+        expect(expired.items).toEqual([])
       } finally {
         vi.useRealTimers()
       }

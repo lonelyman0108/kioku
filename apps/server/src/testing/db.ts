@@ -30,6 +30,15 @@ export async function openTestDatabase(): Promise<Database> {
   return database
 }
 
+// 数据库现在的时间（截到毫秒）。服务端判断有效期只用数据库的钟，测试里要算「现在之后多久」的时间
+// （写进库的有效到、请求里的有效到）也从它算，不用应用的 Date.now()：两个钟会差，拨应用的钟测偏差时尤其如此
+export async function databaseNow(db: Db): Promise<Date> {
+  const [row] = await db.execute<{ ms: string }>(
+    sql`select floor(extract(epoch from statement_timestamp()) * 1000)::bigint::text as ms`,
+  )
+  return new Date(Number(row!.ms))
+}
+
 // 清空所有数据；内容表都挂在 spaces 或 accounts 下，级联即可。先等上一个用例还没写完的召回事件
 export async function resetDatabase(database: Database): Promise<void> {
   await Promise.all([settleRecallEvents(), settleUpdateChecks()])

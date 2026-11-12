@@ -361,7 +361,11 @@ describe('读不到的原因', () => {
   it('按 canRead 的顺序给出第一个原因，读得到时为 null', () => {
     expect(readDenial(access, privateFact, opts)).toBeNull()
     expect(readDenial(access, memory({ deletedAt: new Date() }), opts)).toBe('deleted')
-    expect(readDenial(access, memory({ validTo: new Date(0) }), opts)).toBe('expired')
+    expect(
+      readDenial(access, memory({ validTo: new Date(0) }), { ...opts, now: new Date(1) }),
+    ).toBe('expired')
+    // 有有效期又没给时刻：不拿应用的钟顶替
+    expect(() => readDenial(access, memory({ validTo: new Date(0) }), opts)).toThrow('数据库的时刻')
     expect(readDenial(resolveAccess({ ...fullKey, readLayers: [] }, app), memory(), opts)).toBe(
       'layer',
     )

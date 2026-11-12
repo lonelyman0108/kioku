@@ -216,21 +216,19 @@ describe.skipIf(!testDatabaseUrl)('SQL 过滤与 canRead 一致', () => {
     for (const [suffix, mode] of modes) {
       it(`${name}${suffix}`, async () => {
         const access = makeAccess()
-        const options = { personaIds: [personaId], ...mode }
-        const all = await withSpace(database.db, spaceId, (tx) => tx.select().from(memories))
+        // 两边拿同一个时刻比：事务开头取的数据库时间
+        const { all, actual, options } = await withSpace(database.db, spaceId, async (tx, now) => {
+          const options = { personaIds: [personaId], ...mode, now }
+          const all = await tx.select().from(memories)
+          const actual = await tx
+            .select({ id: memories.id })
+            .from(memories)
+            .where(readableConditions(access, options))
+          return { all, actual: actual.map((r) => r.id).sort(), options }
+        })
         const expected = all
           .filter((m) => canRead(access, m, options))
           .map((m) => m.id)
-          .sort()
-        const actual = (
-          await withSpace(database.db, spaceId, (tx) =>
-            tx
-              .select({ id: memories.id })
-              .from(memories)
-              .where(readableConditions(access, options)),
-          )
-        )
-          .map((r) => r.id)
           .sort()
         expect(all.length).toBeGreaterThan(400)
         expect(actual).toEqual(expected)
@@ -238,24 +236,25 @@ describe.skipIf(!testDatabaseUrl)('SQL 过滤与 canRead 一致', () => {
 
       it(`${name}${suffix} · 事件快照`, async () => {
         const access = makeAccess()
-        const options = { personaIds: [personaId], ...mode }
-        const events = await withSpace(database.db, spaceId, (tx) => tx.select().from(memoryEvents))
+        const { events, actual, options } = await withSpace(
+          database.db,
+          spaceId,
+          async (tx, now) => {
+            const options = { personaIds: [personaId], ...mode, now }
+            const events = await tx.select().from(memoryEvents)
+            const actual = await tx
+              .select({ id: memoryEvents.id })
+              .from(memoryEvents)
+              .where(readableConditions(access, options, snapshotColumns(memoryEvents.after)))
+            return { events, actual: actual.map((r) => r.id).sort((a, b) => a - b), options }
+          },
+        )
         const expected = events
           .filter((e) => {
             const facts = snapshotFacts(e.after as Record<string, unknown>)
             return facts !== null && canRead(access, facts, options)
           })
           .map((e) => e.id)
-          .sort((a, b) => a - b)
-        const actual = (
-          await withSpace(database.db, spaceId, (tx) =>
-            tx
-              .select({ id: memoryEvents.id })
-              .from(memoryEvents)
-              .where(readableConditions(access, options, snapshotColumns(memoryEvents.after))),
-          )
-        )
-          .map((r) => r.id)
           .sort((a, b) => a - b)
         expect(events.length).toBeGreaterThan(400)
         expect(actual).toEqual(expected)

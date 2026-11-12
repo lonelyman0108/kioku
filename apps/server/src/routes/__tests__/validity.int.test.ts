@@ -12,7 +12,7 @@ import type {
   RecallResponse,
   SubjectDetail,
 } from '@kioku/contracts'
-import { and, asc, eq } from 'drizzle-orm'
+import { and, asc, eq, sql } from 'drizzle-orm'
 import postgres from 'postgres'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -34,6 +34,7 @@ import { processSession } from '../../extraction/worker'
 import type { Jobs } from '../../jobs/queue'
 import { uriConflicts } from '../../memory/service'
 import {
+  databaseNow,
   openTestDatabase,
   resetDatabase,
   summaryConversation,
@@ -137,21 +138,24 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
     )
   const undelete = (memoryId: string, cookie = ws.cookie) =>
     app.request(`${space()}/memories/undelete`, jsonRequest('POST', { memoryId }, { cookie }))
+  // 数据库现在的时间：服务端判断有效期只用数据库的钟，这里算的时间也从它算
+  const dbNow = async () => (await databaseNow(database.db)).getTime()
   // 让一条记忆过期：把有效到改到一分钟之前（不经过接口，接口不收已经过去的时间）
   const expire = (id: string) =>
     withSpace(database.db, ws.spaceId, (tx) =>
       tx
         .update(memories)
-        .set({ validTo: new Date(Date.now() - 60_000) })
+        .set({ validTo: sql`statement_timestamp() - interval '1 minute'` })
         .where(eq(memories.id, id)),
     )
   // 删掉的记忆之后又到期了：两分钟前删掉、一分钟前到期，删除时还有效。返回有效到
   const deletedThenExpired = async (id: string) => {
-    const validTo = new Date(Date.now() - 60_000)
+    const now = await dbNow()
+    const validTo = new Date(now - 60_000)
     await withSpace(database.db, ws.spaceId, (tx) =>
       tx
         .update(memories)
-        .set({ deletedAt: new Date(Date.now() - 120_000), validTo })
+        .set({ deletedAt: new Date(now - 120_000), validTo })
         .where(eq(memories.id, id)),
     )
     return validTo.toISOString()
@@ -236,7 +240,7 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
         201,
       )
       // 只剩半分钟（接口不收这么近的时间，直接改库）
-      const soon = new Date(Date.now() + 30_000)
+      const soon = new Date((await dbNow()) + 30_000)
       await withSpace(database.db, ws.spaceId, (tx) =>
         tx.update(memories).set({ validTo: soon }).where(eq(memories.id, m.id)),
       )
@@ -254,8 +258,9 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
     })
 
     it('有效到要比现在晚至少一分钟：过去的、正好现在的、半分钟之后的、不带时区的都拒绝，原来的有效期不变', async () => {
-      const past = new Date(Date.now() - 60_000).toISOString()
-      const soon = new Date(Date.now() + 30_000).toISOString()
+      const now = await dbNow()
+      const past = new Date(now - 60_000).toISOString()
+      const soon = new Date(now + 30_000).toISOString()
       for (const validTo of [past, soon]) {
         expect(
           await errorOf(await keyCreate({ uri: 'user://a/b', content: 'x', validTo }), 400),
@@ -271,7 +276,7 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       ).toBe(400)
       expect((await keyGet('user://a/b')).status).toBe(404)
       // 两分钟之后的可以
-      const later = new Date(Date.now() + 120_000).toISOString()
+      const later = new Date((await dbNow()) + 120_000).toISOString()
       expect(
         (
           await ok<MemoryView>(
@@ -291,7 +296,13 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       )
       expect((await keyPatch({ uri: m.uri, validTo: soon })).status).toBe(400)
       expect(
-        (await keyPatch({ uri: m.uri, validTo: new Date().toISOString(), content: '新的' })).status,
+        (
+          await keyPatch({
+            uri: m.uri,
+            validTo: new Date(await dbNow()).toISOString(),
+            content: '新的',
+          })
+        ).status,
       ).toBe(400)
       expect(await ok<MemoryView>(await keyGet(m.uri))).toMatchObject({
         validTo: until,
@@ -336,8 +347,11 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
         await side.end()
       }
     }
-    const sleepUntil = (at: Date) =>
-      new Promise((resolve) => setTimeout(resolve, Math.max(0, at.getTime() - Date.now())))
+    // 等到数据库的时间过了 at
+    const sleepPast = async (at: Date) => {
+      const wait = at.getTime() - (await dbNow()) + 200
+      await new Promise((resolve) => setTimeout(resolve, Math.max(0, wait)))
+    }
 
     it('让出 URI 时，读到之后被别的事务重新生效的记录不会被软删除', async () => {
       const old = await ok<MemoryView>(
@@ -519,16 +533,16 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       expect((await rowOf(next.id)).deletedAt).not.toBeNull()
     })
 
-    it('删除时刚好到期：和读不到一样返回 404，删除标记不写，免得被当成过期之后让出的', async () => {
-      // 删对象页上的事实时先锁住那一行再删：锁住时它还有效，等锁的这段时间里到期。
-      // 按 URI 删的路径在删之前紧挨着又按当时的时间判断一次能不能读，中间没有能等住的地方
+    it('等锁期间到期的事实：按事务开头的时刻判断，那时还有效就照样删掉，删除时间早于有效到，算用户删掉的', async () => {
+      // 删对象页上的事实时先锁住那一行再删，等锁的这段时间里到期。有效期只按事务开头取的那一刻判断，
+      // 删除时间也写那一刻：早于有效到，和过期之后被让出的（删除时间不早于过期时间）分得开
       const [subject] = await withSpace(database.db, ws.spaceId, (tx) =>
         tx
           .insert(subjects)
           .values({ spaceId: ws.spaceId, kind: 'person', displayName: '小明' })
           .returning(),
       )
-      const until = new Date(Date.now() + 3_000)
+      const until = new Date((await dbNow()) + 3_000)
       const [fact] = await withSpace(database.db, ws.spaceId, (tx) =>
         tx
           .insert(memories)
@@ -552,15 +566,17 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
             `${space()}/subjects/${subject!.id}/facts/${fact!.id}?version=${fact!.version}`,
             { method: 'DELETE', headers: { cookie: ws.cookie, 'sec-fetch-site': 'same-origin' } },
           ),
-        // 过了有效到再放开：删除读出它时还有效，到写删除标记的那一刻已经过期了
-        () => sleepUntil(new Date(until.getTime() + 200)),
+        // 过了有效到再放开
+        () => sleepPast(until),
       )
-      expect(await errorOf(res, 404)).toContain('事实不存在')
-      expect((await rowOf(fact!.id)).deletedAt).toBeNull()
+      expect(res.status).toBe(204)
+      const row = await rowOf(fact!.id)
+      expect(row.deletedAt).not.toBeNull()
+      expect(row.deletedAt!.getTime()).toBeLessThan(until.getTime())
     })
 
-    it('待审里删除时刚好到期：跳过，不写删除标记', async () => {
-      const until = new Date(Date.now() + 3_000)
+    it('待审里等锁期间到期：按事务开头的时刻判断，照样删掉，删除时间早于到期时间', async () => {
+      const until = new Date((await dbNow()) + 3_000)
       const [item] = await withSpace(database.db, ws.spaceId, async (tx) =>
         tx
           .insert(memories)
@@ -588,10 +604,35 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
               { cookie: ws.cookie },
             ),
           ),
-        () => sleepUntil(new Date(until.getTime() + 200)),
+        () => sleepPast(until),
       )
-      expect(await ok<{ done: number; skipped: number }>(res)).toEqual({ done: 0, skipped: 1 })
-      expect((await rowOf(item!.id)).deletedAt).toBeNull()
+      expect(await ok<{ done: number; skipped: number }>(res)).toEqual({ done: 1, skipped: 0 })
+      const row = await rowOf(item!.id)
+      expect(row.deletedAt).not.toBeNull()
+      expect(row.deletedAt!.getTime()).toBeLessThan(until.getTime())
+    })
+
+    it('等锁期间别人提交了修改：等完再写，更新时间不早于那次修改', async () => {
+      const m = await ok<MemoryView>(
+        await keyCreate({ uri: 'user://notes/wait', content: '旧的' }),
+        201,
+      )
+      let theirs: Date | undefined
+      const res = await whileBlocking(
+        (tx) => tx`select id from memories where id = ${m.id} for update`,
+        () => keyPatch({ uri: m.uri, content: '新的' }),
+        // 别人的修改在请求的事务开头之后提交，更新时间晚于请求取的那一刻
+        async (tx) => {
+          const [row] = (await tx`
+            update memories set updated_at = statement_timestamp() where id = ${m.id}
+            returning updated_at`) as unknown as [{ updated_at: Date }]
+          theirs = row.updated_at
+        },
+      )
+      const saved = await ok<MemoryView>(res)
+      expect(saved.content).toBe('新的')
+      expect(new Date(saved.updatedAt).getTime()).toBeGreaterThanOrEqual(theirs!.getTime())
+      expect((await rowOf(m.id)).updatedAt.getTime()).toBeGreaterThanOrEqual(theirs!.getTime())
     })
   })
 
@@ -650,6 +691,38 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       ])
       expect((await deleted()).items).toEqual([])
     })
+
+    // 有效到落在应用的钟与数据库的钟之间：只假造应用的 Date（冻结在快或慢两分钟的那一刻），
+    // 按坐标读取、列表、已过期、召回都按数据库的时间判断，前后一致
+    for (const [name, skew] of [
+      ['快', 120_000],
+      ['慢', -120_000],
+    ] as const) {
+      it(`应用的时钟比数据库${name}两分钟、有效到落在两个钟之间时，各处都按数据库的时间判断`, async () => {
+        const m = await ok<MemoryView>(
+          await keyCreate({ uri: 'core://deadline', content: '截止日期之前每天提醒一次进度' }),
+          201,
+        )
+        const now = await dbNow()
+        // 应用快时有效到还没到（按数据库），应用慢时已经过了
+        const validTo = new Date(now + skew / 2)
+        await withSpace(database.db, ws.spaceId, (tx) =>
+          tx.update(memories).set({ validTo }).where(eq(memories.id, m.id)),
+        )
+        const alive = skew > 0
+        vi.useFakeTimers({ toFake: ['Date'], now: now + skew })
+        try {
+          expect((await keyGet(m.uri)).status).toBe(alive ? 200 : 404)
+          expect((await get(m.uri)).status).toBe(alive ? 200 : 404)
+          const listed = (await ok<MemoryList>(await list('/memories/list'))).items
+          expect(listed.map((i) => i.id)).toEqual(alive ? [m.id] : [])
+          expect((await expired()).items.map((i) => i.id)).toEqual(alive ? [] : [m.id])
+          expect(await recallUris('每天提醒进度')).toEqual(alive ? [m.uri] : [])
+        } finally {
+          vi.useRealTimers()
+        }
+      })
+    }
   })
 
   describe('重新生效', () => {
@@ -858,7 +931,7 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
         await withSpace(database.db, ws.spaceId, (tx) =>
           tx
             .update(memories)
-            .set({ validTo: new Date(Date.now() - (3 - i) * 60_000) })
+            .set({ validTo: sql`statement_timestamp() - make_interval(mins => ${3 - i}::int)` })
             .where(eq(memories.id, m.id)),
         )
         ids.push(m.id)
@@ -949,21 +1022,30 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       expect(await matchesUndelete(slot.id)).toBe(true)
     })
 
-    it('应用的时钟比数据库快：撤销时 claimUri 按应用的时间先让出占着的那条，标记照着判断', async () => {
-      // 占着的那条在一分半之后到期（有效到至少要晚一分钟）：按数据库的时间还有效，
-      // 按快了两分半的应用时间已经过期，alice 让得出
-      const soon = new Date(Date.now() + 90_000).toISOString()
-      const same = await shared('core://kb/skew')
-      await remove(same)
-      await shared('core://kb/skew', { validTo: soon })
-      vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 150_000 })
-      try {
-        // 同一归属的唯一索引碰不上：claimUri 先让出了占着的那条
-        expect(await matchesUndelete(same.id)).toBe(false)
-      } finally {
-        vi.useRealTimers()
-      }
-    })
+    // 只假造应用的 Date：claimUri 与标记都按事务开头取的数据库时间判断，和应用的钟差多少都一样
+    for (const [name, skew] of [
+      ['快', 150_000],
+      ['慢', -150_000],
+    ] as const) {
+      it(`应用的时钟比数据库${name}两分半：撤销时 claimUri 按数据库的时间判断占着的那条过没过期，标记照着判断`, async () => {
+        // 按数据库的时间一分半之后才到期：还有效，挡着
+        const soon = new Date((await dbNow()) + 90_000).toISOString()
+        const live = await shared('core://kb/skew')
+        await remove(live)
+        await shared('core://kb/skew', { validTo: soon })
+        // 按数据库的时间一分钟之前已经过期：撤销时先让出
+        const gone = await shared('core://kb/gone')
+        await remove(gone)
+        await expire((await shared('core://kb/gone')).id)
+        vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + skew })
+        try {
+          expect(await matchesUndelete(live.id)).toBe(true)
+          expect(await matchesUndelete(gone.id)).toBe(false)
+        } finally {
+          vi.useRealTimers()
+        }
+      })
+    }
 
     it('同一批里有抽取的记忆（没有坐标）和普通记录：抽取的那条不和真在 core://null 的记录撞上', async () => {
       // 已删除列表只列目录里的记忆，这里直接按抽取的记忆会给出的样子调用
@@ -1097,6 +1179,31 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       )
     })
 
+    // 只假造应用的 Date：推翻时写下的有效到与对象页、召回的判断都按数据库的时间，推翻之后马上前后一致
+    for (const [name, skew] of [
+      ['快', 120_000],
+      ['慢', -120_000],
+    ] as const) {
+      it(`应用的时钟比数据库${name}两分钟时推翻：旧的马上在已推翻里，不在现在的事实里，也不召回`, async () => {
+        await say('我又改学法语了')
+        vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + skew })
+        try {
+          await extract({
+            facts: [{ subject: 'M1', op: 'update', replaces: 'F1', content: '在学法语' }],
+          })
+          const after = await detail(await subjectId())
+          expect(after.facts.map((f) => f.content)).toEqual(['在学法语'])
+          expect(after.supersededFacts.map((f) => f.content).sort()).toEqual([
+            '在学日语',
+            '在学韩语',
+          ])
+          expect(await recalled()).toEqual(['在学法语'])
+        } finally {
+          vi.useRealTimers()
+        }
+      })
+    }
+
     it('事实的重新生效只看推翻时设的 valid_to：因为到期时间失效的返回 409，不会报成功却还是失效的', async () => {
       const id = await subjectId()
       const insertFact = async (values: { validTo?: Date; expiresAt?: Date }) =>
@@ -1118,7 +1225,7 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
               .returning(),
           )
         )[0]!
-      const past = new Date(Date.now() - 60_000)
+      const past = new Date((await dbNow()) - 60_000)
       const lapsed = await insertFact({ expiresAt: past })
       expect(await errorOf(await reactivateFact(id, lapsed.id, lapsed.version), 409)).toContain(
         '未被取代',
@@ -1151,7 +1258,7 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
             originScope: 'global',
             conversationId: await summaryConversation(tx, ws.spaceId),
             content: '昨天聊了读书会的安排',
-            expiresAt: new Date(Date.now() - 60_000),
+            expiresAt: new Date((await dbNow()) - 60_000),
           })
           .returning(),
       )

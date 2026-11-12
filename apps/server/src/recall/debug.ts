@@ -4,7 +4,7 @@ import type { BootPreview, BootPreviewRequest, RecallDebug } from '@kioku/contra
 import { and, inArray, not } from 'drizzle-orm'
 
 import { readDenial, type Access } from '../access/access'
-import type { Tx } from '../db/client'
+import { nowOf, type Tx } from '../db/client'
 import { memories } from '../db/schema'
 import type { Deps, KeyPrincipal } from '../http/env'
 import { PROMPT_SEMANTIC_TIMEOUT_MS, recallBlock, sessionStart } from '../lifecycle/lifecycle'
@@ -142,7 +142,7 @@ async function explainHidden(
     const row = byId.get(id)
     if (!row) return []
     const reason =
-      readDenial(keyAccess, row, { personaIds: chain }) ??
+      readDenial(keyAccess, row, { personaIds: chain, now: nowOf(tx) }) ??
       (overridden.has(id) ? ('override' as const) : null)
     return reason
       ? [

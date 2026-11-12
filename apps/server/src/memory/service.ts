@@ -81,14 +81,12 @@ import {
   eq,
   exists,
   getTableColumns,
-  gt,
   ilike,
   inArray,
   isNotNull,
   isNull,
   like,
   lt,
-  lte,
   ne,
   notInArray,
   or,
@@ -117,7 +115,7 @@ import {
   replaceOutsidePlaceholders,
   scanPlaceholders,
 } from '../credential/placeholders'
-import { isUniqueViolation, pgConstraint, pgErrorCode, type Db, type Tx } from '../db/client'
+import { isUniqueViolation, nowOf, pgConstraint, pgErrorCode, type Db, type Tx } from '../db/client'
 import {
   decodeTimeCursor,
   encodeTimeCursor,
@@ -150,10 +148,11 @@ import { countEmbeddable } from '../embedding/coverage'
 import {
   BOOT_CANDIDATE,
   BOOT_ELIGIBLE,
+  momentSql,
   pendingReview,
   readableConditions,
   snapshotColumns,
-  STILL_VALID,
+  stillValid,
   type MemoryColumns,
 } from './filter'
 import {
@@ -384,7 +383,7 @@ export function ownerFor(access: Access, layer: Layer): string | null {
 }
 
 // 这几条要在各自的坐标上生效（撤销删除、新建）会不会撞上冲突，返回会撞上的那些。照写入的几步判断：
-// 先由 claimUri 让出调用方能让出的过期记录（按应用的时间判断过期），剩下的交给唯一索引 memories_uri_live_idx：
+// 先由 claimUri 让出调用方能让出的过期记录（按事务开头取的数据库时间判断过期），剩下的交给唯一索引 memories_uri_live_idx：
 // 同一归属里（共享的、或同一个成员的本人）没删除的，已过期的也算。共享与本人的开头不同，不会互相挡。
 // 它不看调用方读不读得到占着的那条，只说占不占，和写入撞上时的 409 一样多。只给两处用：已删除列表的标记
 // （只算调用方恢复得了的，见 undeleteConflicts），和 Lore 导入的计划（导入者是空间所有者，只查这次要新建的目标，
@@ -395,7 +394,7 @@ export async function uriConflicts<T extends UriClaim>(
   claims: readonly T[],
 ): Promise<Set<T>> {
   const taken = new Set<T>()
-  const now = new Date()
+  const now = nowOf(tx)
   // 没有 URI 的（抽取的记忆）不占也不挡别的 URI：不进查询，也不按 URI 归类，免得空值拼成的键撞上真有这个 URI 的记录
   const withUri = claims.filter(
     (c): c is T & { domain: string; path: string } => c.domain !== null && c.path !== null,
@@ -443,7 +442,7 @@ export async function uriConflicts<T extends UriClaim>(
           m.id !== claim.id &&
           // 两个成员各自的本人不冲突
           m.ownerAccountId === claim.ownerAccountId &&
-          // claimUri 先让出的不挡：按应用的时间已经过期、调用方让得出
+          // claimUri 先让出的不挡：按数据库的时间已经过期、调用方让得出
           !(!isValidAt(m, now) && canRelease(access, m)),
       )
       if (blocked) taken.add(claim)
@@ -506,7 +505,8 @@ async function assertAppOwner(tx: Tx, appId: string, owner: string): Promise<voi
 // 会话摘要带 ownerAccountId 时（不带会话上下文的会话）归这个成员、私密，别的都是公开、不归成员
 export type ExtractedWrite =
   | { layer: 'subject'; subjectId: string; content: string; replaces?: string | undefined }
-  | { layer: 'episode'; content: string; expiresAt: Date; ownerAccountId: string | null }
+  // 会话摘要保留几天：到期时间在写入的事务里按数据库的时间算
+  | { layer: 'episode'; content: string; ttlDays: number; ownerAccountId: string | null }
 
 export type ExtractedOutcome = 'added' | 'updated' | 'skipped'
 
@@ -668,7 +668,7 @@ export class MemoryService {
           eq(memories.domain, parsed.domain),
           eq(memories.path, parsed.path),
           isNull(memories.deletedAt),
-          validAt(new Date()),
+          validAt(nowOf(tx)),
           or(
             isNull(memories.ownerAccountId),
             eq(memories.ownerAccountId, this.ctx.access.ownerAccountId),
@@ -694,7 +694,7 @@ export class MemoryService {
     released: string[],
     reviving?: { except: string },
   ): Promise<void> {
-    const now = new Date()
+    const now = nowOf(tx)
     // 锁住候选行再判断，快照用锁到的那一版；按 id 排序，几次写入同时让出几行时加锁的顺序一样。
     // 等到锁时已经被别的事务让出、重新生效或延长了有效期的，条件不再成立，不会返回
     const candidates = tx
@@ -722,7 +722,7 @@ export class MemoryService {
       // 只让出这一刻仍然过期的，删除时间就是这一刻（不早于过期时间，见 isReleased）。行已经锁住，这里只是复查
       const [gone] = await tx
         .update(memories)
-        .set({ deletedAt: now, updatedAt: now })
+        .set({ deletedAt: now, updatedAt: updatedAtFor(now) })
         .where(and(eq(memories.id, row.id), isNull(memories.deletedAt), endedAt(now)))
         .returning()
       if (!gone) continue
@@ -753,7 +753,9 @@ export class MemoryService {
     personaIds: string[],
   ): Promise<MemoryRow | null> {
     const row = await this.findLive(tx, parsed)
-    return row && canRead(this.ctx.access, row, { personaIds, explicit: true }) ? row : null
+    return row && canRead(this.ctx.access, row, { personaIds, explicit: true, now: nowOf(tx) })
+      ? row
+      : null
   }
 
   // 读不到和不存在对调用方一样：都是 404，不泄露「这里有一条你看不见的记忆」
@@ -777,17 +779,17 @@ export class MemoryService {
   // 事件里的「删除前」快照也就是真正被删掉的那一版。只删这一刻还有效的，删除时间就写这一刻：
   // 用户删掉的删除时间总早于过期时间，和过期之后被让出的（不早于过期时间，见 isReleased）分得开。
   // 读到之后刚好到期的抛 ended() 给出的错误（按调用方的约定：按 URI 删除时和读不到一样是 404）。
-  // now 由调用方给时，判断有效与写下删除时间用的是调用方先前核对时的同一刻
+  // 「这一刻」是事务开头取的数据库时间（nowOf），调用方先前的核对用的也是它
   private async softDelete(
     tx: Tx,
     before: MemoryRow,
     ended: () => MemoryError,
     eventContext?: Record<string, unknown>,
-    now = new Date(),
   ): Promise<void> {
+    const now = nowOf(tx)
     const [row] = await tx
       .update(memories)
-      .set({ deletedAt: now, updatedAt: now })
+      .set({ deletedAt: now, updatedAt: updatedAtFor(now) })
       .where(
         and(
           eq(memories.id, before.id),
@@ -1178,8 +1180,9 @@ export class MemoryService {
     released: string[],
   ): Promise<MemoryView> {
     const parsed = parse(input.uri)
-    const validFrom = meta.createdAt ?? new Date()
-    const validTo = input.validTo === undefined ? null : checkValidTo(input.validTo, validFrom)
+    const now = nowOf(tx)
+    const validFrom = meta.createdAt ?? now
+    const validTo = input.validTo === undefined ? null : checkValidTo(input.validTo, validFrom, now)
     const ownership = await this.resolveOwnership(tx, parsed)
     const sensitivity = input.sensitivity ?? DEFAULT_SENSITIVITY[layerOf(parsed)]
     checkSensitivity(ownership.layer, sensitivity)
@@ -1231,8 +1234,10 @@ export class MemoryService {
         priority: input.priority,
         disclosure: input.disclosure ?? null,
         validTo,
-        ...(meta.createdAt ? { createdAt: meta.createdAt, validFrom: meta.createdAt } : {}),
-        ...(meta.updatedAt ? { updatedAt: meta.updatedAt } : {}),
+        // 新建、生效与更新时间都是这一刻（事务开头取的数据库时间），从别的系统导入时沿用那边的
+        createdAt: validFrom,
+        validFrom,
+        updatedAt: meta.updatedAt ?? now,
       })
       .returning()
     const glossary = [...new Set(input.glossary)].sort()
@@ -1284,6 +1289,8 @@ export class MemoryService {
     conversationId: string | null,
     eventContext: Record<string, unknown>,
   ): Promise<ExtractedOutcome> {
+    // 判断读得到、写下的时间与推翻旧事实都用事务开头取的数据库时间
+    const now = nowOf(tx)
     const owner = item.layer === 'episode' ? item.ownerAccountId : null
     const sensitivity = owner ? ('private' as const) : ('public' as const)
     try {
@@ -1311,7 +1318,7 @@ export class MemoryService {
                 eq(memories.form, 'extracted'),
                 eq(memories.layer, 'subject'),
                 eq(memories.subjectId, item.subjectId),
-                readableConditions(this.ctx.access, { personaIds: [] }),
+                readableConditions(this.ctx.access, { personaIds: [], now }),
                 // 不可信的写入方改不了受信的行（canModify），也就不去锁它
                 this.ctx.access.writeProvenance === 'untrusted'
                   ? eq(memories.provenance, 'untrusted')
@@ -1328,6 +1335,9 @@ export class MemoryService {
       .values({
         id: randomUUID(),
         spaceId: this.ctx.spaceId,
+        createdAt: now,
+        validFrom: now,
+        updatedAt: now,
         form: 'extracted',
         layer: item.layer,
         sensitivity,
@@ -1337,7 +1347,8 @@ export class MemoryService {
         subjectId: item.layer === 'subject' ? item.subjectId : null,
         conversationId,
         content: item.content,
-        expiresAt: item.layer === 'episode' ? item.expiresAt : null,
+        expiresAt:
+          item.layer === 'episode' ? new Date(now.getTime() + item.ttlDays * DAY_MS) : null,
       })
       .returning()
     if (!before) {
@@ -1346,7 +1357,7 @@ export class MemoryService {
     }
     const [after] = await tx
       .update(memories)
-      .set({ validTo: sql`now()`, version: before.version + 1, updatedAt: sql`now()` })
+      .set({ validTo: validToFor(now), version: before.version + 1, updatedAt: updatedAtFor(now) })
       .where(eq(memories.id, before.id))
       .returning()
     await this.event(tx, before.id, 'update', snapshot(before, []), snapshot(after!, []), {
@@ -1432,7 +1443,7 @@ export class MemoryService {
         ? undefined
         : input.validTo === null
           ? null
-          : checkValidTo(input.validTo, before.validFrom)
+          : checkValidTo(input.validTo, before.validFrom, nowOf(tx))
 
     // 归属不在这里改：换归属就是换坐标的开头，走移动
     const { layer, ownerAccountId } = before
@@ -1516,7 +1527,7 @@ export class MemoryService {
         disclosure: input.disclosure === undefined ? before.disclosure : input.disclosure,
         ...(validTo !== undefined ? { validTo } : {}),
         version: sql`${memories.version} + 1`,
-        updatedAt: UPDATED_NOW,
+        updatedAt: updatedAtFor(nowOf(tx)),
       })
       // 读完之后被别的请求改过或删掉了，都不写：不能把修改写进一条已经删除的记忆
       .where(
@@ -1911,7 +1922,7 @@ export class MemoryService {
 
   // 对象页上的一条事实（从对话里抽取、挂在这个联系人上的记忆），锁住这一行。删除与重新生效只是读得到的条件不同。
   // state 时一起算出它是不是被推翻了（推翻时设的 valid_to 已过）、是不是已经到期（expires_at 已过），
-  // 都按数据库的时间，和已过期列表同一个时钟；删除不要，不算。找不到和读不到一样是 404
+  // 都按事务开头取的数据库时间；删除不要，不算。找不到和读不到一样是 404
   private async lockFact(
     tx: Tx,
     subjectId: string,
@@ -1923,8 +1934,8 @@ export class MemoryService {
     const [found] = await tx
       .select({
         row: memories,
-        superseded: options.state ? SUPERSEDED : unknown,
-        lapsed: options.state ? LAPSED : unknown,
+        superseded: options.state ? supersededAt(nowOf(tx)) : unknown,
+        lapsed: options.state ? lapsedAt(nowOf(tx)) : unknown,
       })
       .from(memories)
       .where(
@@ -1977,7 +1988,7 @@ export class MemoryService {
       this.assertModifiable(row, `无权修改${LAYER_NAMES[row.layer]}的记忆`)
       const [after] = await tx
         .update(memories)
-        .set({ validTo: null, version: row.version + 1, updatedAt: UPDATED_NOW })
+        .set({ validTo: null, version: row.version + 1, updatedAt: updatedAtFor(nowOf(tx)) })
         .where(eq(memories.id, row.id))
         .returning()
       await this.event(tx, row.id, 'reactivate', snapshot(row, []), snapshot(after!, []))
@@ -1998,7 +2009,10 @@ export class MemoryService {
         .select()
         .from(memories)
         .where(
-          and(inArray(memories.id, [...seen.keys()]), pendingReview(this.ctx.access, personaIds)),
+          and(
+            inArray(memories.id, [...seen.keys()]),
+            pendingReview(this.ctx.access, personaIds, nowOf(tx)),
+          ),
         )
         .orderBy(asc(memories.id))
         .for('no key update', { skipLocked: true })
@@ -2006,30 +2020,33 @@ export class MemoryService {
       if (!targets.length) return []
       for (const row of targets)
         this.assertModifiable(row, `无权处理${LAYER_NAMES[row.layer]}的记忆`)
-      const handled = await this.settleReview(tx, targets, input.action, new Date())
+      const handled = await this.settleReview(tx, targets, input.action)
       return handled.map((r) => r.id)
     })
     if (input.action === 'delete') this.changed(done)
     return { done: done.length, skipped: seen.size - done.length }
   }
 
-  // 待审的处理，待审队列与 Dream 的审核建议共用：确认（来源改成主人，版本加一）或删除（删除时间与更新时间写 now；
-  // 确认的更新时间见 UPDATED_NOW）。
-  // 调用方已经锁住这几行、核对过版本与权限；只改 now 这一刻还有效的（读到之后刚好到期的不改，和 softDelete 一样），
-  // 各记一条事件，返回改到的那几行
+  // 待审的处理，待审队列与 Dream 的审核建议共用：确认（来源改成主人，版本加一）或删除（删除时间写这一刻）。
+  // 调用方已经锁住这几行、核对过版本与权限；只改这一刻还有效的（和 softDelete 一样）。「这一刻」是事务开头取的
+  // 数据库时间（nowOf），调用方锁行时的条件用的也是它。各记一条事件，返回改到的那几行
   private async settleReview(
     tx: Tx,
     rows: MemoryRow[],
     action: 'confirm' | 'delete',
-    now: Date,
     eventContext?: Record<string, unknown>,
   ): Promise<MemoryRow[]> {
+    const now = nowOf(tx)
     const updated = await tx
       .update(memories)
       .set(
         action === 'confirm'
-          ? { provenance: 'owner', version: sql`${memories.version} + 1`, updatedAt: UPDATED_NOW }
-          : { deletedAt: now, updatedAt: now },
+          ? {
+              provenance: 'owner',
+              version: sql`${memories.version} + 1`,
+              updatedAt: updatedAtFor(now),
+            }
+          : { deletedAt: now, updatedAt: updatedAtFor(now) },
       )
       .where(
         and(
@@ -2084,9 +2101,9 @@ export class MemoryService {
     const changed: string[] = []
     const created = await this.run(async (tx) => {
       const suggestion = await this.openSuggestion(tx, lock)
-      // 核对与之后的写入用同一刻：核对时还有效的，删除、确认与设为过时都按这一刻算，不会在两步之间到期。
-      // 设为过时的有效到要在两个钟上都已经过去，所以取两个钟里早的那一刻（见 earlierNow）
-      const now = await earlierNow(tx)
+      // 核对与之后的写入用同一刻（事务开头取的数据库时间）：核对时还有效的，删除、确认与设为过时都按这一刻算，
+      // 不会在两步之间到期
+      const now = nowOf(tx)
       const rows = await this.lockSuggested(tx, suggestion, now)
       for (const row of rows) this.assertModifiable(row, `无权修改${LAYER_NAMES[row.layer]}的记忆`)
       const action = suggestion.action(rows)
@@ -2121,17 +2138,10 @@ export class MemoryService {
               keep,
               { content: action.content, provenance: SUGGESTION_PROVENANCE },
               keepContext,
-              UPDATED_NOW,
             )
           }
           for (const other of others) {
-            await this.softDelete(
-              tx,
-              other,
-              suggestionStale,
-              { ...context, mergedInto: keep.id },
-              now,
-            )
+            await this.softDelete(tx, other, suggestionStale, { ...context, mergedInto: keep.id })
           }
           changed.push(...rows.map((r) => r.id))
           break
@@ -2157,15 +2167,16 @@ export class MemoryService {
           break
         }
         case 'stale':
-          // 有效到设为现在：策展记忆之后在「已过期」里能重新生效，抽取的事实等于被推翻（对象页上能重新生效）。
-          // 服务端写入，不受接口「至少晚一分钟」的限制
-          for (const row of rows) await this.rewriteRow(tx, row, { validTo: now }, context, now)
+          // 有效到设为现在（不早于生效时间）：策展记忆之后在「已过期」里能重新生效，抽取的事实等于被推翻
+          // （对象页上能重新生效）。服务端写入，不受接口「至少晚一分钟」的限制
+          for (const row of rows)
+            await this.rewriteRow(tx, row, { validTo: validToFor(now) }, context)
           changed.push(...rows.map((r) => r.id))
           break
         case 'review':
           if (rows.some((r) => r.provenance !== 'untrusted')) throw suggestionStale()
           // 行已经锁住、按 now 核对过有效，这里每一行都会改到
-          await this.settleReview(tx, rows, action.verdict, now, context)
+          await this.settleReview(tx, rows, action.verdict, context)
           changed.push(...rows.map((r) => r.id))
           break
       }
@@ -2256,14 +2267,13 @@ export class MemoryService {
     })
   }
 
-  // 改一条已经锁住、核对过的记录：写上 fields，版本加一，写上更新时间，记一条 update 事件（Dream 的过时、事实的合并）。
-  // 更新时间的规则见 UPDATED_NOW：设为过时的是有效到的那一刻，合并的是数据库的现在
+  // 改一条已经锁住、核对过的记录：写上 fields，版本加一，更新时间写这一刻（见 updatedAtFor），
+  // 记一条 update 事件（Dream 的过时、事实的合并）
   private async rewriteRow(
     tx: Tx,
     row: MemoryRow,
     fields: PgUpdateSetSource<typeof memories>,
     eventContext: Record<string, unknown>,
-    updatedAt: Date | SQL,
   ): Promise<void> {
     const [after] = await tx
       .update(memories)
@@ -2272,7 +2282,7 @@ export class MemoryService {
         // 和 applyUpdate 一样：正文变了，忽略时记下的哈希不留着
         ...(fields.content !== undefined ? { plaintextIgnoredHash: null } : {}),
         version: sql`${memories.version} + 1`,
-        updatedAt,
+        updatedAt: updatedAtFor(nowOf(tx)),
       })
       .where(
         and(eq(memories.id, row.id), eq(memories.version, row.version), isNull(memories.deletedAt)),
@@ -2332,7 +2342,7 @@ export class MemoryService {
           path: to.path,
           title,
           version: sql`${memories.version} + 1`,
-          updatedAt: UPDATED_NOW,
+          updatedAt: updatedAtFor(nowOf(tx)),
         })
         .where(
           and(
@@ -2887,7 +2897,7 @@ export class MemoryService {
 
   // 按 id 找一条管理读取读得到的记忆，已删除的也算；读不到和不存在一样是 404。默认只找策展记忆，
   // anyForm 时抽取的也找出来（由调用方说明为什么不能对它这样做）；lock 时锁住这一行；
-  // ended 时一起算出它现在是不是已经失效或过期（按数据库的时间，和已过期列表一致），不要的时候不算
+  // ended 时一起算出它现在是不是已经失效或过期（按事务开头取的数据库时间，和已过期列表一致），不要的时候不算
   private async findManageable(
     tx: Tx,
     memoryId: string,
@@ -2897,7 +2907,7 @@ export class MemoryService {
       .select({
         row: memories,
         ended: options.ended
-          ? sql<boolean | null>`(not ${STILL_VALID})`
+          ? sql<boolean | null>`(not ${stillValid(nowOf(tx))})`
           : sql<boolean | null>`null::boolean`,
       })
       .from(memories)
@@ -2940,7 +2950,7 @@ export class MemoryService {
         path: memories.path,
         title: memories.title,
         memoryDeleted: sql<boolean>`(${memories.deletedAt} is not null)`,
-        memoryExpired: sql<boolean>`(not ${STILL_VALID})`,
+        memoryExpired: sql<boolean>`(not ${stillValid(nowOf(tx))})`,
         accountName: accounts.displayName,
         keyName: sql<string | null>`case when ${keyVisible} then ${apiKeys.name} end`,
         appName: apps.name,
@@ -3073,7 +3083,7 @@ export class MemoryService {
         .where(
           and(
             eq(memories.form, 'curated'),
-            sql`not ${STILL_VALID}`,
+            sql`not ${stillValid(nowOf(tx))}`,
             or(isNull(memories.deletedAt), RELEASED),
             this.manageable(),
             after
@@ -3140,7 +3150,7 @@ export class MemoryService {
         memLayer: sql<Layer>`${memories.layer}`.as('mem_layer'),
         memSensitivity: sql<Sensitivity>`${memories.sensitivity}`.as('mem_sensitivity'),
         memoryDeleted: sql<boolean>`(${memories.deletedAt} is not null)`.as('memory_deleted'),
-        memoryExpired: sql<boolean>`(not ${STILL_VALID})`.as('memory_expired'),
+        memoryExpired: sql<boolean>`(not ${stillValid(nowOf(tx))})`.as('memory_expired'),
         actorKey: sql<string>`${ACTOR_KEY}`.as('actor_key'),
         accountName: sql<string | null>`${accounts.displayName}`.as('account_name'),
         keyName: sql<string | null>`case when ${keyVisible} then ${apiKeys.name} end`.as(
@@ -3498,7 +3508,11 @@ export class MemoryService {
       await this.claimUri(tx, parse(formatUri(row.domain!, row.path!)), row, released)
       const [restored] = await tx
         .update(memories)
-        .set({ deletedAt: null, version: sql`${memories.version} + 1`, updatedAt: UPDATED_NOW })
+        .set({
+          deletedAt: null,
+          version: sql`${memories.version} + 1`,
+          updatedAt: updatedAtFor(nowOf(tx)),
+        })
         .where(
           and(
             eq(memories.id, row.id),
@@ -3563,7 +3577,7 @@ export class MemoryService {
           expiresAt: null,
           ...(row.deletedAt ? { deletedAt: null } : {}),
           version: sql`${memories.version} + 1`,
-          updatedAt: UPDATED_NOW,
+          updatedAt: updatedAtFor(nowOf(tx)),
         })
         // 让出 URI 不改版本号：读到之后它可能刚被让出，条件里还要带上读到时的删除状态（和撤销删除一样）
         .where(
@@ -3704,13 +3718,25 @@ function actorKind(key: string): ActivityFacets['actors'][number]['kind'] {
   return key === 'bench' ? 'bench' : 'unknown'
 }
 
-// 事实被推翻了：推翻时设的 valid_to 已经过去；已经到期：expires_at 已经过去。都按数据库的时间（见 lockFact）
-const SUPERSEDED = sql<
-  boolean | null
->`(${memories.validTo} is not null and ${memories.validTo} <= now())`
-const LAPSED = sql<
-  boolean | null
->`(${memories.expiresAt} is not null and ${memories.expiresAt} <= now())`
+// 事实被推翻了：推翻时设的 valid_to 在 at 这一刻已经过去；已经到期：expires_at 已经过去（见 lockFact）
+const supersededAt = (at: Date) =>
+  sql<boolean | null>`(${memories.validTo} is not null and ${memories.validTo} <= ${momentSql(at)})`
+const lapsedAt = (at: Date) =>
+  sql<
+    boolean | null
+  >`(${memories.expiresAt} is not null and ${memories.expiresAt} <= ${momentSql(at)})`
+
+const DAY_MS = 86_400_000
+
+// 有效期与更新时间只用数据库的钟：at 是事务开头取的数据库时间（nowOf）。更新时间取 at 与原来的里晚的：
+// 事务开头之后、等锁的时候别人提交的修改可能更晚，不能倒退。新建时直接写 at（见 insertCurated）
+function updatedAtFor(at: Date): SQL {
+  return sql`greatest(${momentSql(at)}, ${memories.updatedAt})`
+}
+// 把有效到设为现在（设为过时、抽取推翻旧事实）：at，但不早于生效时间
+function validToFor(at: Date): SQL {
+  return sql`greatest(${momentSql(at)}, ${memories.validFrom})`
+}
 
 // 有效期到什么时候为止：有效到与到期时间里早的那个，都没有时为 null（一直有效）
 function endOf(row: Pick<MemoryRow, 'validTo' | 'expiresAt'>): Date | null {
@@ -3718,44 +3744,25 @@ function endOf(row: Pick<MemoryRow, 'validTo' | 'expiresAt'>): Date | null {
   return times.length ? new Date(Math.min(...times.map((t) => t.getTime()))) : null
 }
 
-// 在 at 这一刻还有效 / 已经失效或过期。和 STILL_VALID 是同一条规则，只是时间由调用方给定：
-// 条件里判断的时间与写下的删除时间要是同一个时刻（见 softDelete、claimUri）
-function validAt(at: Date): SQL {
-  return and(
-    or(isNull(memories.validTo), gt(memories.validTo, at)),
-    or(isNull(memories.expiresAt), gt(memories.expiresAt, at)),
-  )!
-}
-function endedAt(at: Date): SQL {
-  return or(lte(memories.validTo, at), lte(memories.expiresAt, at))!
-}
+// 在 at 这一刻还有效 / 已经失效或过期，就是 stillValid：条件里判断的时间与写下的删除时间要是同一个时刻
+// （见 softDelete、claimUri）
+const validAt = (at: Date): SQL => stillValid(at)
+const endedAt = (at: Date): SQL => sql`not ${stillValid(at)}`
 // validAt 的 JS 版本，判断读到的那一版
 function isValidAt(row: Pick<MemoryRow, 'validTo' | 'expiresAt'>, at: Date): boolean {
   const ended = endOf(row)
   return ended === null || ended.getTime() > at.getTime()
 }
 
-// 应用与数据库两个钟里早的那一刻（数据库的截到毫秒，不晚于它自己的钟）。有效期有两种判断：读权限与按坐标读取
-// （列表、对象页的事实；readableConditions、findLive）用应用的钟，已过期列表、恢复生效与对象页的已推翻
-// （STILL_VALID）用数据库的钟。两个钟可能差几十毫秒（数据库在虚拟机里时常见），有效到写成其中一个钟的现在，
-// 在另一个钟慢的那一边还没到，两种判断一时对不上。取早的那一刻，两边都马上算它过期
-async function earlierNow(tx: Tx): Promise<Date> {
-  const app = Date.now()
-  const [row] = await tx.execute<{ ms: string }>(
-    sql`select floor(extract(epoch from clock_timestamp()) * 1000)::bigint::text as ms`,
-  )
-  return new Date(Math.min(app, Number(row!.ms)))
-}
-
 // Dream 的建议还作不作数：涉及的每条记忆都还是生成建议时的那一版、没删除、在那一刻有效。规则只在这里写：
 // SQL 版本给建议列表与保留期的清理（ids 与 versions 是建议表上按下标对应的两列，extra 是对每条记忆另加的条件，
-// 例如管理读取；不给 at 时按数据库的现在），JS 版本给执行前锁到行之后的核对
+// 例如管理读取；不给 at 时按这条语句开始时数据库的时间），JS 版本给执行前锁到行之后的核对
 export function suggestionCurrent(
   ids: SQLWrapper,
   versions: SQLWrapper,
   options: { at?: Date; extra?: SQL } = {},
 ): SQL {
-  const valid = options.at ? validAt(options.at) : STILL_VALID
+  const valid = stillValid(options.at)
   return sql`not exists (
     select 1 from unnest(${ids}, ${versions}) as item(id, version)
     where not exists (
@@ -3791,7 +3798,7 @@ const REACTIVATE_CONFLICT = 'URI 已被占用。移走或删除占用它的记�
 const UNDELETE_CONFLICT = 'URI 已被占用。移走或删除占用它的记忆后可恢复。'
 
 // 写入的有效到至少要比现在晚这么久：已经过去或马上就到的时间写进去，记忆马上就读不到了，多半是算错了
-// （时区、日期）；留出一段也避开到期的边界与应用、数据库之间的时钟差
+// （时区、日期）；留出一段也避开到期的边界与请求方、数据库之间的时钟差
 const MIN_VALIDITY_MS = 60_000
 
 // 请求里的有效到（null 是一直有效）和存着的是不是同一个时刻
@@ -3800,11 +3807,11 @@ function sameTime(value: string | null, stored: Date | null): boolean {
   return new Date(value).getTime() === stored.getTime()
 }
 
-// 有效到至少比现在晚一分钟（见 MIN_VALIDITY_MS）。要它现在就不再生效就删掉它（之后能撤销删除）。
+// 有效到至少比现在（事务开头取的数据库时间）晚一分钟（见 MIN_VALIDITY_MS）。要它现在就不再生效就删掉它（之后能撤销删除）。
 // 也要晚于生效时间，生效时间不会晚于现在，这一条一般自然满足
-function checkValidTo(value: string, validFrom: Date): Date {
+function checkValidTo(value: string, validFrom: Date, now: Date): Date {
   const at = new Date(value)
-  if (at.getTime() < Date.now() + MIN_VALIDITY_MS || at.getTime() <= validFrom.getTime()) {
+  if (at.getTime() < now.getTime() + MIN_VALIDITY_MS || at.getTime() <= validFrom.getTime()) {
     throw new MemoryError(
       400,
       '有效期（valid_to）须晚于当前时间至少一分钟。如需让这条记忆立即失效，请删除它（之后可恢复）。',
@@ -4018,12 +4025,6 @@ function plaintextIgnored(row: Pick<MemoryRow, 'content' | 'plaintextIgnoredHash
 }
 
 const UPDATED_MICROS = microsOf(memories.updatedAt)
-
-// 改完仍然有效的写入（修改、移动、恢复、恢复生效、确认待审、合并事实）更新时间按数据库的钟写，
-// 和新建时的默认值（defaultNow）一样：列表、对象页与召回按更新时间排序，混着写应用的钟时，两个钟差几十毫秒
-// （数据库在虚拟机里时常见）就会把刚改过的排到更早新建的后面。让记录离开有效范围的写入（softDelete、claimUri、
-// 待审里的删除、设为过时）更新时间就是写下删除时间或有效到的那一刻，不用它
-const UPDATED_NOW = sql`now()`
 
 // 各种排序的排序键，最后都加上 id，保证顺序确定
 const LIST_ORDER: Record<MemoryListSort, SQL[]> = {

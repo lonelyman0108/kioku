@@ -394,7 +394,7 @@ export async function extractBatch(
     writes.push({
       layer: 'episode',
       content: summary,
-      expiresAt: new Date(Date.now() + settings.values['extraction.episodeTtlDays'] * 86_400_000),
+      ttlDays: settings.values['extraction.episodeTtlDays'],
       ownerAccountId: owner,
     })
   }
