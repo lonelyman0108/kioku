@@ -63,12 +63,13 @@ export function reviewRoutes(deps: Deps) {
       const { service } = await consoleMemberFor(deps, spaceId, c.get('console').accountId)
       const after = decodeTimeCursor(query.cursor, UUID)
       if (after === 'invalid') return c.json({ error: INVALID_CURSOR }, 400)
-      // 联系人的事实与会话摘要不分人格，读权限里的人格限制用不上
-      const pending = and(
-        pendingReview(service.access, []),
-        query.layer ? eq(memories.layer, query.layer) : undefined,
-      )
-      const page = await withSpace(deps.db, spaceId, async (tx) => {
+      const page = await withSpace(deps.db, spaceId, async (tx, now) => {
+        // 联系人的事实与会话摘要不分人格，读权限里的人格限制用不上。列表与总数两条语句拿同一个时刻
+        // （事务开头取的数据库时间）判断有效期，所以在事务里拼
+        const pending = and(
+          pendingReview(service.access, [], now),
+          query.layer ? eq(memories.layer, query.layer) : undefined,
+        )
         const rows = await tx
           .select({
             row: memories,

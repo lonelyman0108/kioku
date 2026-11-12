@@ -504,7 +504,13 @@ async function assertAppOwner(tx: Tx, appId: string, owner: string): Promise<voi
 // 抽取写下的记忆：联系人的事实挂在联系人上，可以推翻同一个联系人的一条旧事实；会话摘要带到期时间
 // 会话摘要带 ownerAccountId 时（不带会话上下文的会话）归这个成员、私密，别的都是公开、不归成员
 export type ExtractedWrite =
-  | { layer: 'subject'; subjectId: string; content: string; replaces?: string | undefined }
+  | {
+      layer: 'subject'
+      subjectId: string
+      content: string
+      // 要推翻的事实与模型看到的那一版
+      replaces?: { id: string; version: number } | undefined
+    }
   // 会话摘要保留几天：到期时间在写入的事务里按数据库的时间算
   | { layer: 'episode'; content: string; ttlDays: number; ownerAccountId: string | null }
 
@@ -539,7 +545,8 @@ const suggestionStale = () => new MemoryError(409, SUGGESTION_STALE)
 const SUGGESTION_URI_CONFLICT = '坐标（URI）已被其他记忆占用。请更换坐标后再执行。'
 const SUGGESTION_CONSOLE_ONLY = '整理建议只能在管理界面处理'
 
-// 从别的系统导入时用：事件记成 import 并带上出处，时间沿用来源系统里的
+// 从别的系统导入时用：事件记成 import 并带上出处；建立、更新时间沿用来源系统里的，但不晚于事务开头取的
+// 数据库时间（晚于它的夹到它，原来的记在导入事件里，见 notAfter）
 export interface CreateMeta {
   eventType?: 'create' | 'import'
   eventContext?: Record<string, unknown>
@@ -1276,8 +1283,8 @@ export class MemoryService {
   // 写下一批抽取的结果（联系人的事实与会话摘要，没有 URI、不建向量），连同调用方的收尾
   // （记抽取记录、删掉用过的缓冲）在同一个事务里：中途失败整批回滚，后台任务重试时不会重复写入。
   // 敏感级 public，来源与来源作用域按这次的会话上下文；逐条检查权限与凭据占位符（对话来的内容不能新增引用），
-  // 写不进去的那条跳过。replaces 指向这次读得到、写得了、还有效的同一个对象的事实时推翻它：旧的设 valid_to
-  // 保留历史，再写一条新的；找不到或写不了时当作新的事实
+  // 写不进去的那条跳过。replaces 指向这次读得到、写得了、还有效、还是模型看到的那一版的同一个对象的事实时推翻它：
+  // 旧的设 valid_to 保留历史，再写一条新的；找不到、写不了或版本变了时当作新的事实
   async writeExtraction(
     items: readonly ExtractedWrite[],
     eventContext: Record<string, unknown>,
@@ -1287,13 +1294,46 @@ export class MemoryService {
   ): Promise<ExtractedOutcome[]> {
     return this.run(async (tx) => {
       const conversationId = await start(tx)
+      const replaced = await this.lockReplaced(tx, items)
       const outcomes: ExtractedOutcome[] = []
       for (const item of items) {
-        outcomes.push(await this.writeExtracted(tx, item, conversationId, eventContext))
+        outcomes.push(await this.writeExtracted(tx, item, conversationId, eventContext, replaced))
       }
       await finish(tx, outcomes)
       return outcomes
     })
+  }
+
+  // 这一批要推翻的事实先一次锁全，按 id 的顺序：和待审处理、执行整理建议一样按 id 加锁，别的抽取批次同时推翻
+  // 几条相同的事实时不会互相等成死锁。只锁这次读得到、还有效的（按事务开头取的时刻）；不可信的写入方改不了受信的行
+  // （canModify），也就不去锁它
+  private async lockReplaced(
+    tx: Tx,
+    items: readonly ExtractedWrite[],
+  ): Promise<Map<string, MemoryRow>> {
+    const ids = [
+      ...new Set(
+        items.flatMap((i) => (i.layer === 'subject' && i.replaces ? [i.replaces.id] : [])),
+      ),
+    ]
+    if (!ids.length) return new Map()
+    const rows = await tx
+      .select()
+      .from(memories)
+      .where(
+        and(
+          inArray(memories.id, ids),
+          eq(memories.form, 'extracted'),
+          eq(memories.layer, 'subject'),
+          readableConditions(this.ctx.access, { personaIds: [], now: nowOf(tx) }),
+          this.ctx.access.writeProvenance === 'untrusted'
+            ? eq(memories.provenance, 'untrusted')
+            : undefined,
+        ),
+      )
+      .orderBy(asc(memories.id))
+      .for('update')
+    return new Map(rows.map((r) => [r.id, r]))
   }
 
   private async writeExtracted(
@@ -1301,6 +1341,7 @@ export class MemoryService {
     item: ExtractedWrite,
     conversationId: string | null,
     eventContext: Record<string, unknown>,
+    replaced: Map<string, MemoryRow>,
   ): Promise<ExtractedOutcome> {
     // 判断读得到、写下的时间与推翻旧事实都用事务开头取的数据库时间
     const now = nowOf(tx)
@@ -1320,31 +1361,18 @@ export class MemoryService {
       if (err instanceof MemoryError) return 'skipped'
       throw err
     }
-    const [found] =
-      item.layer === 'subject' && item.replaces
-        ? await tx
-            .select()
-            .from(memories)
-            .where(
-              and(
-                eq(memories.id, item.replaces),
-                eq(memories.form, 'extracted'),
-                eq(memories.layer, 'subject'),
-                eq(memories.subjectId, item.subjectId),
-                readableConditions(this.ctx.access, { personaIds: [], now }),
-                // 不可信的写入方改不了受信的行（canModify），也就不去锁它
-                this.ctx.access.writeProvenance === 'untrusted'
-                  ? eq(memories.provenance, 'untrusted')
-                  : undefined,
-              ),
-            )
-            .for('update')
-        : []
-    // 推翻也是改那一条：读得到但改不了时（写不了这一层，或它是受信的而这一批来自不可信来源）
-    // 不动它，当作新的事实。锁到的是这一行最新的版本，再按它现在的状态判断一次：事务开头之后、等锁的时候，
-    // 开始得更晚的事务可能已经推翻了它或把它设为过时，有效到晚于这个事务的「现在」，按这一刻看还有效。
-    // 按这一刻与它自己的更新时间里晚的那个判断，已经被处理过的不重复推翻，当作新的事实
-    const current = found && isValidAt(found, laterOf(now, found.updatedAt)) ? found : undefined
+    // 推翻也是改那一条：读得到但改不了时（写不了这一层，或它是受信的而这一批来自不可信来源）不动它，当作新的事实。
+    // 只推翻模型看到的那一版：模型读到之后这条事实被改过（版本变了：改了正文、被别的事务推翻或设为过时），
+    // 它是按旧内容判断的，不推翻，当作新的事实。锁到的是这一行最新的版本（见 lockReplaced）
+    const found =
+      item.layer === 'subject' && item.replaces ? replaced.get(item.replaces.id) : undefined
+    const current =
+      found &&
+      item.layer === 'subject' &&
+      found.subjectId === item.subjectId &&
+      found.version === item.replaces?.version
+        ? found
+        : undefined
     const before = current && canModify(this.ctx.access, current) ? current : undefined
     const [row] = await tx
       .insert(memories)
@@ -1376,6 +1404,8 @@ export class MemoryService {
       .set({ validTo: now, version: before.version + 1, updatedAt: updatedAtFor(now) })
       .where(eq(memories.id, before.id))
       .returning()
+    // 同一批里后面要推翻它的不再推翻：它已经不是模型看到的那一版了
+    replaced.delete(before.id)
     await this.event(tx, before.id, 'update', snapshot(before, []), snapshot(after!, []), {
       ...eventContext,
       supersededBy: row!.id,
@@ -3752,10 +3782,9 @@ function updatedAtFor(at: Date): SQL {
   return sql`greatest(${momentSql(at)}, ${memories.updatedAt})`
 }
 
-const laterOf = (a: Date, b: Date) => (a.getTime() >= b.getTime() ? a : b)
-
-// 从别的系统带来的时间（Lore 导入的建立、更新时间）不晚于 now：来源的钟可能比数据库快（Lore 文件允许晚一天以内），
-// 晚于现在的生效、更新时间会让设为过时等到那时才算过期、按更新时间排序一直排在最前。没给时就是 now
+// 从别的系统带来的时间（Lore 导入、按空间导入的建立、生效、更新时间）不晚于 now：来源的钟可能比数据库快
+// （Lore 文件允许晚一天以内）。晚于现在的更新时间会一直停在将来：导入的记忆按更新时间排序一直排在最前，
+// 之后的修改也写不过它（更新时间不倒退）；生效时间晚于现在时，设为过时写下的有效到会早于生效时间。没给时就是 now
 export function notAfter(at: Date | undefined, now: Date): Date {
   return at && at.getTime() <= now.getTime() ? at : now
 }

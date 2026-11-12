@@ -55,6 +55,7 @@ import type { Jobs } from '../../jobs/queue'
 import { settleRecallEvents } from '../../recall/events'
 import { loadSpaceAdvanced, saveAppAdvanced, saveSpaceAdvanced } from '../../settings/advanced'
 import {
+  databaseNow,
   openTestDatabase,
   resetDatabase,
   summaryConversation,
@@ -1079,6 +1080,54 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         vaultConnections: 0,
       },
     })
+  })
+
+  it('记忆的建立、生效与更新时间晚于导入时刻的夹到导入时刻，原来的记在导入事件里；早于它的原样', async () => {
+    const alice = await bootstrap(source, 'alice')
+    // 导出那边的钟快了一天
+    const base = await databaseNow(database.db)
+    const later = new Date(base.getTime() + 86_400_000).toISOString()
+    const earlier = new Date(base.getTime() - 86_400_000).toISOString()
+    const result = await ok<SpaceImportResult>(
+      importRequest(
+        source,
+        alice.cookie,
+        await craft([
+          curated('user://notes/ahead', { validFrom: later, createdAt: later, updatedAt: later }),
+          curated('user://notes/behind', {
+            validFrom: earlier,
+            createdAt: earlier,
+            updatedAt: earlier,
+          }),
+        ]),
+      ),
+      201,
+    )
+    const { rows, events } = await withSpace(database.db, result.spaceId, async (tx) => ({
+      rows: await tx.select().from(memories),
+      events: await tx.select().from(memoryEvents),
+    }))
+    const byPath = new Map(rows.map((r) => [r.path, r]))
+    const ahead = byPath.get('notes/ahead')!
+    const after = await databaseNow(database.db)
+    for (const time of [ahead.validFrom, ahead.createdAt, ahead.updatedAt]) {
+      expect(time.getTime()).toBeGreaterThanOrEqual(base.getTime())
+      expect(time.getTime()).toBeLessThanOrEqual(after.getTime())
+    }
+    const behind = byPath.get('notes/behind')!
+    expect(
+      [behind.validFrom, behind.createdAt, behind.updatedAt].map((t) => t.toISOString()),
+    ).toEqual([earlier, earlier, earlier])
+    const contextOf = (id: string) => events.find((e) => e.memoryId === id)!.context
+    expect(contextOf(ahead.id)).toMatchObject({
+      sourceValidFrom: later,
+      sourceCreatedAt: later,
+      sourceUpdatedAt: later,
+    })
+    const plain = contextOf(behind.id)
+    expect(plain).not.toHaveProperty('sourceValidFrom')
+    expect(plain).not.toHaveProperty('sourceCreatedAt')
+    expect(plain).not.toHaveProperty('sourceUpdatedAt')
   })
 
   it('空间与应用的高级设置随文件带过去，应用的使用指引补充导入时去掉', async () => {

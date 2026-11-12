@@ -126,8 +126,9 @@ export function activePause(
   return until > now ? { ...state.pause, until } : null
 }
 
-export async function retentionView(db: Db, now = new Date()): Promise<RetentionView> {
-  const state = await loadRetention(db)
+// 暂停的开始、结束与「现在」都按数据库的时间（见 retentionJob），测试可以传入别的时刻
+export async function retentionView(db: Db, at?: Date): Promise<RetentionView> {
+  const [state, now] = await Promise.all([loadRetention(db), at ?? databaseNow(db)])
   const pause = activePause(state, now)
   return {
     days: state.days,
@@ -204,8 +205,9 @@ async function changeSettings(
 export async function saveRetentionDays(
   db: Db,
   value: RetentionSettings,
-  now = new Date(),
+  at?: Date,
 ): Promise<void> {
+  const now = at ?? (await databaseNow(db))
   await changeSettings(db, (state) => {
     const ongoing = activePause(state, now) ? state.pause : null
     return storedValue(value.days, firstPause(state, now) ?? ongoing)
@@ -233,7 +235,8 @@ async function startIfFirst(db: Db, now: Date): Promise<void> {
 // 从备份恢复时在恢复的事务里调用：记下恢复的时间，按天数的清理暂停到它加上保留天数。上一个实例最近一次清理的结果清掉：
 // 结果说的是那个实例做过什么，留着的话卡片上会显示这里没做过的一次，「今天做过没有」也会按那边的时间算。
 // 返回暂停到什么时候
-export async function markRestored(tx: Tx, now = new Date()): Promise<Date> {
+export async function markRestored(tx: Tx, at?: Date): Promise<Date> {
+  const now = at ?? (await databaseNow(tx))
   const state = await changeSettings(tx, (s) =>
     storedValue(s.storedDays, { reason: 'restored', since: now }),
   )
@@ -659,12 +662,12 @@ export async function purgeExpired(
   return { counts, errors, complete: errors.length === 0 }
 }
 
-const errorRecord = (messages: string[]) => ({
+const errorRecord = (messages: string[], at: Date) => ({
   message: (messages.length > 1
     ? `${messages[0]}（另有 ${messages.length - 1} 处出错）`
     : messages[0]!
   ).slice(0, MAX_MESSAGE),
-  at: new Date().toISOString(),
+  at: at.toISOString(),
 })
 
 const utcDay = (iso: string) => iso.slice(0, 10)
@@ -725,7 +728,7 @@ export async function retentionJob(
       tries: tries + 1,
     },
     lastError: result.errors.length
-      ? errorRecord(result.errors)
+      ? errorRecord(result.errors, now)
       : result.complete
         ? null
         : state.status.lastError,

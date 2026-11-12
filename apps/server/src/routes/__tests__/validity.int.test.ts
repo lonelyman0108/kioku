@@ -230,14 +230,15 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       ['快', 120_000],
       ['慢', -120_000],
     ] as const) {
-      it(`应用的时钟比数据库${name}两分钟时，有效到按数据库的时间比：晚 30 秒的拒绝、晚 61 秒的可以`, async () => {
+      it(`应用的时钟比数据库${name}两分钟时，有效到按数据库的时间比：晚 30 秒的拒绝、晚 90 秒的可以`, async () => {
         vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + skew })
         try {
           const soon = new Date((await dbNow()) + 30_000).toISOString()
           expect(
             await errorOf(await keyCreate({ uri: 'user://a/b', content: 'x', validTo: soon }), 400),
           ).toContain('晚于当前时间至少一分钟')
-          const later = new Date((await dbNow()) + 61_000).toISOString()
+          // 留半分钟的余量：取时刻与建记忆的事务之间隔多久都不影响结果（拨的是两分钟，方向照样分得开）
+          const later = new Date((await dbNow()) + 90_000).toISOString()
           const m = await ok<MemoryView>(
             await keyCreate({ uri: 'user://a/c', content: 'y', validTo: later }),
             201,
@@ -1258,6 +1259,49 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       expect(events.map((e) => e.eventType)).toEqual(['create'])
       // 新的那条照样记下
       expect((await detail(id)).facts.map((f) => f.content)).toEqual(['在学法语'])
+    })
+
+    it('模型读到之后旧事实的正文被改过：按版本核对，不推翻，新的那条当作新的事实', async () => {
+      const id = await subjectId()
+      const [current] = (await detail(id)).facts
+      expect(current!.content).toBe('在学韩语')
+      await say('我又改学法语了')
+      const [turn] = await withSpace(database.db, ws.spaceId, (tx) =>
+        tx.select().from(conversationTurns).orderBy(asc(conversationTurns.id)).limit(1),
+      )
+      // 模型看到的是改之前的那一版；它回复之前，这条事实的正文被改了（版本加一）
+      const model: ChatModel = {
+        model: 'fake-model',
+        async complete() {
+          await withSpace(database.db, ws.spaceId, (tx) =>
+            tx
+              .update(memories)
+              .set({ content: '在学韩语和日语', version: sql`${memories.version} + 1` })
+              .where(eq(memories.id, current!.id)),
+          )
+          return {
+            content: JSON.stringify({
+              facts: [{ subject: 'M1', op: 'update', replaces: 'F1', content: '在学法语' }],
+            }),
+            usage: { promptTokens: 40, completionTokens: 10 },
+          }
+        },
+      }
+      await processSession(
+        database.db,
+        masterKey,
+        { spaceId: ws.spaceId, appId: turn!.appId, scope: turn!.scope },
+        () => model,
+      )
+      expect(await rowOf(current!.id)).toMatchObject({
+        content: '在学韩语和日语',
+        version: current!.version + 1,
+        validTo: null,
+      })
+      expect((await detail(id)).facts.map((f) => f.content).sort()).toEqual([
+        '在学法语',
+        '在学韩语和日语',
+      ])
     })
 
     it('事实的重新生效只看推翻时设的 valid_to：因为到期时间失效的返回 409，不会报成功却还是失效的', async () => {

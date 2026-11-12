@@ -20,13 +20,14 @@ export async function readableSubjectFacts(
   access: Access,
   subjectIds: readonly string[],
   perSubject?: number,
-): Promise<{ id: string; subjectId: string; content: string; updatedAt: Date }[]> {
+): Promise<{ id: string; subjectId: string; content: string; version: number; updatedAt: Date }[]> {
   if (!subjectIds.length) return []
   const ranked = tx
     .select({
       id: memories.id,
       subjectId: memories.subjectId,
       content: memories.content,
+      version: memories.version,
       updatedAt: memories.updatedAt,
       rank: sql<number>`row_number() over (partition by ${memories.subjectId} order by ${memories.priority}, ${memories.updatedAt} desc, ${memories.id})`.as(
         'rank',
@@ -52,6 +53,7 @@ export async function readableSubjectFacts(
     id: r.id,
     subjectId: r.subjectId!,
     content: r.content ?? '',
+    version: r.version,
     updatedAt: r.updatedAt,
   }))
 }

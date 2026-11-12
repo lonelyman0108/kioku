@@ -271,11 +271,12 @@ export async function extractBatch(
       ? [{ id: groupId, handle: 'G', role: 'group' as const, name: groupName, facts: [] }]
       : []),
   ]
-  const shown = new Map<string, { id: string; subjectId: string }>()
+  // 给模型看的事实：句柄对应哪一条、模型看到的是哪一版（推翻时按版本核对，见 writeExtraction）
+  const shown = new Map<string, { id: string; subjectId: string; version: number }>()
   for (const subject of subjects) {
     for (const fact of facts.filter((f) => f.subjectId === subject.id)) {
       const handle = `F${shown.size + 1}`
-      shown.set(handle, { id: fact.id, subjectId: subject.id })
+      shown.set(handle, { id: fact.id, subjectId: subject.id, version: fact.version })
       subject.facts.push({ handle, content: fact.content })
     }
   }
@@ -362,7 +363,8 @@ export async function extractBatch(
       layer: 'subject',
       subjectId: subject.id,
       content,
-      replaces: old && old.subjectId === subject.id ? old.id : undefined,
+      replaces:
+        old && old.subjectId === subject.id ? { id: old.id, version: old.version } : undefined,
     })
   }
   // 和这个对象已有的有效事实一字不差的（不只是给模型看的那些）也算已经记过：按正文去库里查，不必把全部事实读出来
