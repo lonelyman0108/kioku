@@ -9,7 +9,7 @@
 | 托管 | GitHub，公开仓库，Apache-2.0 |
 | 合并方式 | 只允许 squash，默认标题取 PR 标题、正文取 PR 描述；合并后自动删除分支 |
 | Auto-merge | 开启（`scripts/pr.sh` 用 `gh pr merge --auto`） |
-| Actions 令牌权限 | 默认只读；`release.yml` 自行声明 `contents: write` |
+| Actions 令牌权限 | 默认只读；`release.yml` 自行声明 `contents: write`，推镜像的 job（`images.yml`）声明 `packages: write` |
 
 `main` 的规则集，重建时用一条命令设好（`gate` 是 `ci.yml` 里唯一 job 的检查名）：
 
@@ -50,20 +50,30 @@ gh api -X PATCH repos/{owner}/{repo} -F allow_squash_merge=true -F allow_merge_c
 
 | 名字 | 级别 | 用途 | 使用位置 |
 |---|---|---|---|
-| — | — | 目前不需要额外 secret，`release.yml` 只用 `github.token` | — |
+| `DOCKERHUB_USERNAME` | 仓库 secret | Docker Hub 的用户名，推 `docker.io/lonelyman0108/*` 镜像时登录 | `images.yml`（经 `release.yml`、`edge.yml` 传入） |
+| `DOCKERHUB_TOKEN` | 仓库 secret | Docker Hub 的访问令牌（Read & Write），和上面的用户名一起登录 | 同上 |
 
-<!-- 推镜像时加 REGISTRY_USER、REGISTRY_TOKEN，或改用 GHCR + github.token（packages: write） -->
+GHCR 不需要额外 secret，用 workflow 的 `GITHUB_TOKEN`（`packages: write`）。`release-page.sh` 只用 `github.token`。
 
 ## Runner
 
 | workflow | runs-on | 说明 |
 |---|---|---|
 | `ci.yml` | `ubuntu-24.04` | 必需检查 `gate` |
-| `release.yml` | `ubuntu-24.04` | 推送 `v*` tag 触发 |
+| `release.yml` | `ubuntu-24.04` | 推送 `v*` tag 触发；门禁之后调 `images.yml` |
+| `edge.yml` | — | push 到 main 触发，只调 `images.yml` 推 `edge` |
+| `images.yml` | `ubuntu-24.04`、`ubuntu-24.04-arm` | 只被调用；amd64 与 arm64 各在原生 runner 上构建（公开仓库免费），合并清单在 `ubuntu-24.04` |
 
 ## 部署位置
 
-<!-- 镜像名、compose 示例；版本号写死的位置 -->
+| 镜像 | GHCR | Docker Hub |
+|---|---|---|
+| 服务端 | `ghcr.io/lonelyman0108/kioku` | `docker.io/lonelyman0108/kioku` |
+| 数据库 | `ghcr.io/lonelyman0108/kioku-postgres` | `docker.io/lonelyman0108/kioku-postgres` |
+
+- GHCR 包的可见性：两个包第一次推上去后，在 Package settings 里改成 Public（默认私有，`compose.yaml` 不登录拉不到）；包页面的仓库关联靠清单里的 `org.opencontainers.image.source` 注解。
+- 拉镜像的 compose：根目录 `compose.yaml`（镜像标签由 `.env` 的 `KIOKU_TAG` 决定）；从源码构建的是 `docker-compose.build.yml`。
+- 镜像仓库的命名空间写死在 `images.yml` 的 `env`（`GHCR`、`DOCKERHUB`）与 `compose.yaml`。
 
 ## 本机凭据
 

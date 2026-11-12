@@ -1,0 +1,153 @@
+# 构建并推送服务端（kioku）与数据库（kioku-postgres）两个镜像，同时推到 GHCR 与 Docker Hub。
+# amd64 与 arm64 各在原生的 runner 上构建（数据库镜像要编译 zhparser，QEMU 模拟太慢），按摘要推上去，再合并成一个多架构清单打标签。
+# 只被 release.yml（版本 tag）与 edge.yml（main 合并后）调用；标签规则见 scripts/ci/image-meta.sh。
+name: Images
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: edge，或版本 tag（vX.Y.Z）
+        type: string
+        required: true
+    secrets:
+      DOCKERHUB_USERNAME:
+        required: true
+      DOCKERHUB_TOKEN:
+        required: true
+# run 一律用 bash（-eo pipefail），不依赖 runner 镜像的默认 shell
+defaults:
+  run:
+    shell: bash
+env:
+  GHCR: ghcr.io/lonelyman0108
+  DOCKERHUB: docker.io/lonelyman0108
+jobs:
+  meta:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tags: ${{ steps.meta.outputs.tags }}
+      created: ${{ steps.meta.outputs.created }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: meta
+        env:
+          REF: ${{ inputs.ref }}
+        run: scripts/ci/image-meta.sh "$REF" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: meta
+    strategy:
+      matrix:
+        image: [kioku, kioku-postgres]
+        arch: [amd64, arm64]
+        include:
+          - image: kioku
+            context: .
+            title: Kioku
+            description: Kioku 长期记忆服务，同时托管管理界面
+          - image: kioku-postgres
+            context: docker/postgres
+            title: Kioku PostgreSQL
+            description: Kioku 用的 PostgreSQL：pgvector 加 zhparser 中文分词
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # 只推摘要不打标签：两个架构都推完之后由 manifest 合并再打
+      - id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          platforms: linux/${{ matrix.arch }}
+          # 版本、提交与构建时间只给服务端镜像，数据库镜像的 Dockerfile 不读它们
+          build-args: |
+            ${{ matrix.image == 'kioku' && format('KIOKU_VERSION={0}', needs.meta.outputs.version) || '' }}
+            ${{ matrix.image == 'kioku' && format('KIOKU_COMMIT={0}', github.sha) || '' }}
+            ${{ matrix.image == 'kioku' && format('KIOKU_BUILD_TIME={0}', needs.meta.outputs.created) || '' }}
+          labels: |
+            org.opencontainers.image.title=${{ matrix.title }}
+            org.opencontainers.image.description=${{ matrix.description }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.meta.outputs.version }}
+            org.opencontainers.image.created=${{ needs.meta.outputs.created }}
+            org.opencontainers.image.licenses=Apache-2.0
+          outputs: type=image,"name=${{ env.GHCR }}/${{ matrix.image }},${{ env.DOCKERHUB }}/${{ matrix.image }}",push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}-${{ matrix.arch }}
+      - name: 记下摘要
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.image }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  manifest:
+    needs: [meta, build]
+    strategy:
+      matrix:
+        include:
+          - image: kioku
+            description: Kioku 长期记忆服务，同时托管管理界面
+          - image: kioku-postgres
+            description: Kioku 用的 PostgreSQL：pgvector 加 zhparser 中文分词
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digests-${{ matrix.image }}-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/digests
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: 合并清单并打标签
+        env:
+          IMAGE: ${{ matrix.image }}
+          REGISTRIES: ${{ env.GHCR }} ${{ env.DOCKERHUB }}
+          TAGS: ${{ needs.meta.outputs.tags }}
+          VERSION: ${{ needs.meta.outputs.version }}
+          CREATED: ${{ needs.meta.outputs.created }}
+          REVISION: ${{ github.sha }}
+          SOURCE: ${{ github.server_url }}/${{ github.repository }}
+          DESCRIPTION: ${{ matrix.description }}
+        run: scripts/ci/image-manifest.sh "$IMAGE" "$RUNNER_TEMP/digests"

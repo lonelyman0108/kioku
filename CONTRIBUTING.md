@@ -55,4 +55,15 @@
 
 版本号与 tag 只由维护者决定和打；CHANGELOG 定稿放在发布 PR（`🔖 release: vX.Y.Z`）里。
 推送 `vX.Y.Z` tag 后，`release.yml` 跑完整门禁，再用 CHANGELOG 对应一节建立或更新 GitHub Release。
-<!-- 镜像构建与推送在有 Dockerfile 后补充 -->
+门禁通过后，`release.yml` 调 `images.yml` 构建并推送两个镜像，`linux/amd64` 与 `linux/arm64` 各在原生的 runner 上构建，再合并成一个多架构清单：
+
+| 镜像 | GHCR | Docker Hub |
+|---|---|---|
+| 服务端（根目录 `Dockerfile`） | `ghcr.io/lonelyman0108/kioku` | `docker.io/lonelyman0108/kioku` |
+| 数据库（`docker/postgres/Dockerfile`） | `ghcr.io/lonelyman0108/kioku-postgres` | `docker.io/lonelyman0108/kioku-postgres` |
+
+- 标签：正式版打 `X.Y.Z`、`X.Y`、`latest`；带预发布后缀的（如 `v0.1.0-rc.1`）只打 `X.Y.Z` 本身，不动 `X.Y` 与 `latest`。规则在 `scripts/ci/image-meta.sh`。
+- 服务端镜像构建时传 `KIOKU_VERSION`（tag 去掉 `v`）、`KIOKU_COMMIT`（完整的提交 sha）、`KIOKU_BUILD_TIME`（ISO 8601 的 UTC 时间）；两个镜像都带 OCI 标签（source、revision、version、created、licenses）。
+- main 每次合并后，`edge.yml` 用同一份 `images.yml` 推两个镜像的 `edge` 标签（版本写 `edge`），不经过 PR 的门禁；连着合并时旧的 run 被取消。
+- 需要的 secrets：`DOCKERHUB_USERNAME`、`DOCKERHUB_TOKEN`（Docker Hub 的用户名与有读写权限的访问令牌）；GHCR 用 workflow 的 `GITHUB_TOKEN`（job 声明了 `packages: write`）。没配这两个 secret 时 edge 与发布的镜像步骤都会失败。
+- GHCR 的新包第一次推上去时默认是私有的：在包的 Package settings 里把可见性改成 Public，`compose.yaml` 才能不登录直接拉。两个包各改一次。
