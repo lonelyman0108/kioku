@@ -1,26 +1,32 @@
-# main 每次合并后构建并推送服务端与数据库镜像的 edge 与 sha-<短提交> 标签（images.yml），版本写 edge。
-# 单独一个 workflow，不拖慢 PR 的门禁；合并进来的提交已经过了 PR 的门禁，这里不再跑。
+# main 上的 CI 通过之后，构建并推送服务端与数据库镜像的 edge 与 sha-<短提交> 标签（images.yml），版本写 edge。
+# 用 workflow_run 等 CI：CI 失败的提交不出镜像，构建的是 CI 测过的那个提交（head_sha），不是 main 的最新提交。
 name: Edge
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
 # 连着合并几次时排队推，不取消正在推的那次：中途取消会让两个镜像仓库的 edge 指向不同的提交。
 # 排队里只留最新的一次，更早的待跑 run 由 GitHub 替换掉
 concurrency:
-  group: edge-${{ github.ref }}
+  group: edge-main
   cancel-in-progress: false
 permissions:
   contents: read
 jobs:
   images:
-    # fork 里没有推这些镜像仓库的权限，不跑
-    if: github.repository == 'lonelyman0108/kioku'
+    # 只接 main 上 push 触发、跑成功的 CI；fork 里没有推这些镜像仓库的权限，不跑
+    if: >-
+      github.repository == 'lonelyman0108/kioku' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push'
     permissions:
       contents: read
       packages: write
     uses: ./.github/workflows/images.yml
     with:
       ref: edge
+      commit: ${{ github.event.workflow_run.head_sha }}
     secrets:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}

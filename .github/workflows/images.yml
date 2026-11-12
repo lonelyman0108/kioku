@@ -10,6 +10,11 @@ on:
         description: edge，或版本 tag（vX.Y.Z）
         type: string
         required: true
+      commit:
+        description: 要构建的提交；不填时是触发这次运行的提交（github.sha）
+        type: string
+        required: false
+        default: ''
     secrets:
       DOCKERHUB_USERNAME:
         required: false
@@ -37,13 +42,14 @@ jobs:
       # 版本 tag 要和仓库里已有的 tag 比，决定打不打 X.Y 与 latest，所以取全部 tag
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.commit || github.sha }}
           fetch-depth: 0
       - name: 标签规则自测
         run: scripts/ci/image-meta.sh --self-test
       - id: meta
         env:
           REF: ${{ inputs.ref }}
-          COMMIT: ${{ github.sha }}
+          COMMIT: ${{ inputs.commit || github.sha }}
         run: scripts/ci/image-meta.sh "$REF" "$COMMIT" >> "$GITHUB_OUTPUT"
       # secrets 不能直接写在 step 的 if 里：在这里算一次，作为 output 给后面的 job
       - id: dockerhub
@@ -68,7 +74,7 @@ jobs:
             description: Kioku 长期记忆服务，同时托管管理界面
             build-args: |
               KIOKU_VERSION=${{ needs.meta.outputs.version }}
-              KIOKU_COMMIT=${{ github.sha }}
+              KIOKU_COMMIT=${{ inputs.commit || github.sha }}
               KIOKU_BUILD_TIME=${{ needs.meta.outputs.created }}
           - image: kioku-postgres
             context: docker/postgres
@@ -86,6 +92,8 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit || github.sha }}
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with:
@@ -108,7 +116,7 @@ jobs:
             org.opencontainers.image.title=${{ matrix.title }}
             org.opencontainers.image.description=${{ matrix.description }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ inputs.commit || github.sha }}
             org.opencontainers.image.version=${{ needs.meta.outputs.version }}
             org.opencontainers.image.created=${{ needs.meta.outputs.created }}
             org.opencontainers.image.licenses=Apache-2.0
@@ -145,6 +153,8 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit || github.sha }}
       - uses: actions/download-artifact@v4
         with:
           pattern: digests-${{ matrix.image }}--*
@@ -168,7 +178,7 @@ jobs:
           TAGS: ${{ needs.meta.outputs.tags }}
           VERSION: ${{ needs.meta.outputs.version }}
           CREATED: ${{ needs.meta.outputs.created }}
-          REVISION: ${{ github.sha }}
+          REVISION: ${{ inputs.commit || github.sha }}
           SOURCE: ${{ github.server_url }}/${{ github.repository }}
           DESCRIPTION: ${{ matrix.description }}
         run: scripts/ci/image-manifest.sh "$IMAGE" "$RUNNER_TEMP/digests"
