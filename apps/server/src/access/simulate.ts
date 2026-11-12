@@ -3,7 +3,7 @@ import { and, eq } from 'drizzle-orm'
 
 import { keyPrincipal, memberRole } from '../auth/middleware'
 import { withSpace } from '../db/client'
-import { accounts, apiKeys, apps, spaceMembers } from '../db/schema'
+import { accounts, apiKeys, apps, spaceMembers, spaces } from '../db/schema'
 import type { Deps, KeyPrincipal } from '../http/env'
 import { keyEffectiveScopes } from './access'
 
@@ -38,11 +38,19 @@ export async function keyToSimulate(
       role: spaceMembers.role,
       memberSince: spaceMembers.createdAt,
       disabledAt: accounts.disabledAt,
+      accountName: accounts.displayName,
+      spaceName: spaces.name,
     })
     .from(spaceMembers)
     .innerJoin(accounts, eq(accounts.id, spaceMembers.accountId))
+    .innerJoin(spaces, eq(spaces.id, spaceMembers.spaceId))
     .where(and(eq(spaceMembers.spaceId, spaceId), eq(spaceMembers.accountId, accountId)))
   const scopes = keyEffectiveScopes({ ...key, scopes: KeyScopes.parse(key.scopes) }, owner)
   if (!scopes) return { error: '访问密钥已作废', status: 404 }
-  return { key: keyPrincipal(key, app, scopes) }
+  return {
+    key: keyPrincipal(key, app, scopes, {
+      spaceName: owner?.spaceName ?? null,
+      accountName: owner?.accountName ?? null,
+    }),
+  }
 }

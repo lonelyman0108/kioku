@@ -1,13 +1,19 @@
-import type { LifecycleEvent, RecallRequest, RecallResponse, WhoAmI } from '@kioku/contracts'
-import { eq } from 'drizzle-orm'
+import {
+  DISPLAY_NAME_MAX,
+  SPACE_NAME_MAX,
+  type LifecycleEvent,
+  type RecallRequest,
+  type RecallResponse,
+  type WhoAmI,
+} from '@kioku/contracts'
 
 import { conversationRefOf, touchConversation } from '../access/conversations'
 import { defaultSession, resolveKeySession, type KeySession } from '../access/session'
 import { loggableError, withSpace } from '../db/client'
-import { accounts, spaces } from '../db/schema'
 import { bufferTurn, canWriteTurns } from '../extraction/buffer'
 import type { Deps, KeyPrincipal } from '../http/env'
 import { handleLifecycle, type LifecycleResult } from './lifecycle'
+import { clipChars, oneLine } from '../recall/text'
 import type { RecallScope } from './scope'
 
 // 接入方接口的处理，路由与测试台共用。scope 由调用方按解析出的会话给出，这里不新建：
@@ -67,18 +73,20 @@ export async function recallRequest(
   return { candidates, subjects }
 }
 
-// 名字每次现取，不放进 Key 的身份里：改名之后立刻跟着变。放在 withSpace 里读，测试台的回滚模式下也落在它的事务里
-export async function whoamiOf(deps: Pick<Deps, 'db'>, key: KeyPrincipal): Promise<WhoAmI> {
-  const names = await withSpace(deps.db, key.spaceId, async (tx) => {
-    const [space] = await tx
-      .select({ name: spaces.name })
-      .from(spaces)
-      .where(eq(spaces.id, key.spaceId))
-    const [owner] = await tx
-      .select({ name: accounts.displayName })
-      .from(accounts)
-      .where(eq(accounts.id, key.app.ownerAccountId))
-    return { spaceName: space?.name ?? '', accountName: owner?.name ?? '' }
-  })
-  return { spaceId: key.spaceId, ...names, app: key.app, scopes: key.scopes }
+// 给人看的名字：去掉控制字符、压成一行，按契约的上限截断（按字符，不切开代理对）；没有或压完是空的时省略
+const label = (text: string | null | undefined, max: number): string | undefined =>
+  (text && clipChars(oneLine(text), max)) || undefined
+
+// 空间名与应用所有者的显示名每次鉴权时随应用一起查出来，改名之后下一个请求就是新的，这里不再查库。
+// 只给能读本人归属的 Key：显示名属于应用所有者本人，读不到本人记忆的 Key（群聊机器人这类）也拿不到
+export function whoamiOf(key: KeyPrincipal): WhoAmI {
+  const base = { spaceId: key.spaceId, app: key.app, scopes: key.scopes }
+  if (!key.scopes.readLayers.includes('user')) return base
+  const spaceName = label(key.labels?.spaceName, SPACE_NAME_MAX)
+  const accountName = label(key.labels?.accountName, DISPLAY_NAME_MAX)
+  return {
+    ...base,
+    ...(spaceName === undefined ? {} : { spaceName }),
+    ...(accountName === undefined ? {} : { accountName }),
+  }
 }

@@ -83,6 +83,8 @@ export interface KeyPrincipal {
     defaultPersonaId: string | null
     config: AppConfig
   }
+  // 空间名与应用所有者的显示名，鉴权时和应用一起查出来，只给 whoami 显示；没查到时为 null
+  labels?: { spaceName: string | null; accountName: string | null }
 }
 
 export interface AppEnv {

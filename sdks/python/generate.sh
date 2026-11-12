@@ -30,6 +30,7 @@ uvx --exclude-newer "$exclude_newer" --from "$generator" openapi-python-client g
   --meta none \
   --output-path "$out/kioku_client" \
   --overwrite
+python3 "$here/dedupe_imports.py" "$out/kioku_client"
 # 显式给配置：--check 时生成的代码在临时目录里，按路径找不到 SDK 的配置
 uv run --locked --only-group dev --project "$here" \
   ruff format --quiet --config "$here/pyproject.toml" "$out/kioku_client"

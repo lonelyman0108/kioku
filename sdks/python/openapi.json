@@ -86,10 +86,12 @@
             "format": "uuid"
           },
           "spaceName": {
-            "type": "string"
+            "type": "string",
+            "maxLength": 64
           },
           "accountName": {
-            "type": "string"
+            "type": "string",
+            "maxLength": 64
           },
           "app": {
             "$ref": "#/components/schemas/AppInfo"
@@ -1092,7 +1094,7 @@
         "tags": [
           "auth"
         ],
-        "summary": "当前 API Key 对应的空间、应用与授权上限，以及空间名与应用所有者的显示名",
+        "summary": "当前 API Key 对应的空间、应用与授权上限；能读本人归属的 Key 还带空间名与应用所有者的显示名",
         "security": [
           {
             "bearer": []
