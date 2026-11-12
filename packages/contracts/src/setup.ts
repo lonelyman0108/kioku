@@ -136,8 +136,10 @@ export const DatabaseCheck = z.object({
   role: z.object({ name: z.string(), superuser: z.boolean(), bypassRls: z.boolean() }).nullable(),
   extensions: z.array(z.object({ name: DatabaseExtension, state: ExtensionState })),
   existing: ExistingData.nullable(),
-  // 已有 Kioku 的数据时的账号数：大于 0 时接入的是已有实例
+  // 这个版本认得的结构里的账号数与空间数（其余为 null）：有账号时接入的是已有实例；
+  // 有空间、没有账号时这些空间没有成员，新建的管理员看不到
   accounts: z.number().int().nullable(),
+  spaces: z.number().int().nullable(),
   // 不是 Kioku 建的表，只提醒，不拦
   unrelatedTables: z.number().int(),
   problems: z.array(DatabaseProblem),

@@ -78,6 +78,26 @@ const PROBLEM_HINTS: Record<
 
 // 检查结果逐项列出。哪一项拦住接入只看服务端给的 problems（规则只在服务端的 assess 里），这里只决定怎么列：
 // 连不上时只有连接一项
+// 「已有数据」一行：有账号时接入已有实例；有空间、没有账号时这些空间没有成员，照样能继续，但要写明后果
+function existingRow(check: DatabaseCheck): Pick<CheckRow, 'value' | 'verdict' | 'detail'> {
+  const { accounts, spaces } = check
+  if (check.existing === 'kioku' && accounts) {
+    return {
+      value: `${EXISTING_DATA_NAMES.kioku}（${accounts} 个账号）`,
+      verdict: 'notice',
+      detail: '将接入已有实例，接入后用已有账号登录。',
+    }
+  }
+  if (check.existing === 'kioku' && spaces) {
+    return {
+      value: `${EXISTING_DATA_NAMES.kioku}（${spaces} 个空间，没有账号）`,
+      verdict: 'notice',
+      detail: '这些空间没有成员，新建的管理员无法查看；之后也无法把备份恢复到这个实例。',
+    }
+  }
+  return { value: EXISTING_DATA_NAMES[check.existing!], verdict: 'passed' }
+}
+
 export function checkRows(check: DatabaseCheck): CheckRow[] {
   if (check.failure) {
     return [
@@ -121,18 +141,12 @@ export function checkRows(check: DatabaseCheck): CheckRow[] {
   }
   if (check.existing) {
     const found = problem((p) => p.code === 'pre_baseline' || p.code === 'newer')
-    const withAccounts = check.existing === 'kioku' && Boolean(check.accounts)
     rows.push({
       key: 'existing',
       label: '已有数据',
-      value: withAccounts
-        ? `${EXISTING_DATA_NAMES.kioku}（${check.accounts} 个账号）`
-        : EXISTING_DATA_NAMES[check.existing],
       ...(found
-        ? verdictOf(found)
-        : withAccounts
-          ? { verdict: 'notice' as const, detail: '将接入已有实例，接入后用已有账号登录。' }
-          : { verdict: 'passed' as const }),
+        ? { value: EXISTING_DATA_NAMES[check.existing], ...verdictOf(found) }
+        : existingRow(check)),
     })
   }
   // 连上之后读库的结构失败（权限不足等）：其余各项都没读到，单独一行说明
