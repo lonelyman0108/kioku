@@ -14,6 +14,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 
 import { loadConfig, type Config } from '../config'
 import type { Database } from '../db/client'
+import { accounts, spaces } from '../db/schema'
 import { summarize } from '../db/probe'
 import { FatalStartupError, startRuntime, type Runtime } from '../runtime'
 import { StartupError, startService } from '../service'
@@ -147,15 +148,38 @@ describe.skipIf(!testDatabaseUrl)(
         'database_missing',
       )
       const ok = await check(conn)
+      // 测试库执行过迁移、没有账号也没有空间：是空的 Kioku 库，不是已有的数据
       expect(ok).toMatchObject({
         failure: null,
         role: { superuser: false, bypassRls: false },
-        existing: 'kioku',
+        existing: 'migrated',
         accounts: 0,
+        spaces: 0,
         unrelatedTables: 0,
         ready: true,
       })
       expect(ok.extensions.every((e) => e.state === 'installed')).toBe(true)
+      // 有空间、没有账号：已有的数据
+      await database.db.insert(spaces).values({ name: '孤立的空间' })
+      expect(await check(conn)).toMatchObject({
+        existing: 'kioku',
+        accounts: 0,
+        spaces: 1,
+        ready: true,
+      })
+      // 有账号：已有的数据，带上账号数
+      await database.db.delete(spaces)
+      await database.db
+        .insert(accounts)
+        .values({ username: 'bob', displayName: 'Bob', passwordHash: 'x' })
+      expect(await check(conn)).toMatchObject({ existing: 'kioku', accounts: 1, spaces: 0 })
+      // 账号与空间都有
+      await database.db.insert(spaces).values({ name: '家' })
+      expect(await check(conn)).toMatchObject({ existing: 'kioku', accounts: 1, spaces: 1 })
+      // 清空之后回到空的 Kioku 库
+      await database.db.delete(spaces)
+      await database.db.delete(accounts)
+      expect(await check(conn)).toMatchObject({ existing: 'migrated', accounts: 0, spaces: 0 })
     })
 
     it('保存后当场接上：写 kioku.json（600），能建管理员，之后初始化码作废；重启后从文件接上', async () => {
@@ -209,7 +233,12 @@ describe.skipIf(!testDatabaseUrl)(
       const inspected = (await (
         await call('/setup/database/inspect', { setupCode: CODE })
       ).json()) as DatabaseInspection
-      expect(inspected).toMatchObject({ source: 'env', state: 'ready', check: { ready: true } })
+      // 服务启动时已经执行完迁移，还没有账号：是空的 Kioku 库，不说成已有的数据
+      expect(inspected).toMatchObject({
+        source: 'env',
+        state: 'ready',
+        check: { ready: true, existing: 'migrated', accounts: 0, spaces: 0 },
+      })
       expect(inspected.summary).toMatchObject({
         database: testConnection().database,
         passwordSet: true,

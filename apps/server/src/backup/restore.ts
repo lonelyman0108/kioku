@@ -4,6 +4,7 @@ import { z } from 'zod'
 
 import type { MasterKey } from '../crypto/keyring'
 import type { Database, Db, Tx } from '../db/client'
+import { instanceContent, isInitialized } from '../db/instance'
 import { applyMigrations, lastMigration, lockMigrations } from '../db/migrate'
 import { markRestored } from '../jobs/retention'
 import { BACKUP_FORMAT, BACKUP_VERSION } from './export'
@@ -112,12 +113,8 @@ const initializedError = (accounts: number, spaces: number) =>
 
 // 实例初始化过（有账号或空间）时报错：恢复只能写到新实例
 async function assertNoAccounts(db: Db | Tx): Promise<void> {
-  const [existing] = await db.execute<{ accounts: number; spaces: number }>(sql`
-    select (select count(*) from public.accounts)::int as accounts,
-      (select count(*) from public.spaces)::int as spaces`)
-  if (existing!.accounts || existing!.spaces) {
-    throw initializedError(existing!.accounts, existing!.spaces)
-  }
+  const content = await instanceContent((query) => db.execute(sql.raw(query)))
+  if (isInitialized(content)) throw initializedError(content.accounts, content.spaces)
 }
 
 // 恢复之前先看一眼：库还没建表、或者没有账号和空间才能恢复。写回时在事务里锁住表再查一遍

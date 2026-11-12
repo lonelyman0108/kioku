@@ -13,6 +13,7 @@ const ok: DatabaseCheck = {
   ],
   existing: 'empty',
   accounts: null,
+  spaces: null,
   unrelatedTables: 0,
   problems: [],
   ready: true,
@@ -85,6 +86,33 @@ describe('初始化的数据库检查', () => {
     )
     expect(existing).toMatchObject({ value: '已有 Kioku 的数据（3 个账号）', verdict: 'notice' })
     expect(existing!.detail).toContain('将接入已有实例')
+  })
+
+  it('只执行过迁移、没有账号的库是空的 Kioku 库，照常初始化，不提醒接入已有实例', () => {
+    const existing = checkRows({ ...ok, existing: 'migrated', accounts: 0, spaces: 0 }).find(
+      (r) => r.key === 'existing',
+    )
+    expect(existing).toEqual({
+      key: 'existing',
+      label: '已有数据',
+      value: '空的 Kioku 库',
+      verdict: 'passed',
+    })
+    // 有空间、没有账号：不静默通过，写明空间数与后果，但不拦
+    const orphan = checkRows({ ...ok, existing: 'kioku', accounts: 0, spaces: 2 }).find(
+      (r) => r.key === 'existing',
+    )
+    expect(orphan).toMatchObject({
+      value: '已有 Kioku 的数据（2 个空间，没有账号）',
+      verdict: 'notice',
+    })
+    expect(orphan!.detail).toContain('新建的管理员无法查看')
+    expect(orphan!.detail).toContain('无法把备份恢复到这个实例')
+    // 账号与空间都有：按账号写，接入已有实例
+    const both = checkRows({ ...ok, existing: 'kioku', accounts: 1, spaces: 3 }).find(
+      (r) => r.key === 'existing',
+    )
+    expect(both).toMatchObject({ value: '已有 Kioku 的数据（1 个账号）', verdict: 'notice' })
   })
 
   it('连接信息只说密码填没填，来源写在最前', () => {
