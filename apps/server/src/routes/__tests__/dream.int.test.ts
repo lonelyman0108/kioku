@@ -9,6 +9,7 @@ import type {
   DreamSuggestionList,
   ExpiredMemoryList,
   MemoryHistory,
+  MemoryList,
   MemoryView,
   RecallResponse,
   SessionContextInput,
@@ -16,7 +17,7 @@ import type {
 } from '@kioku/contracts'
 import { asc, eq, sql } from 'drizzle-orm'
 import postgres from 'postgres'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../../app'
 import { withSpace, type Database, type Tx } from '../../db/client'
@@ -630,6 +631,42 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
     const history = await ok<MemoryHistory>(await send('GET', `/memories/history?id=${report.id}`))
     expect(history.events.map((e) => e.type)).toEqual(['create', 'update', 'reactivate'])
   })
+
+  // 有效期有两种判断：列表、按坐标读取与对象页的事实按应用的钟，已过期列表与对象页的已推翻按数据库的钟。
+  // 只假造应用的 Date，冻结在快或慢两分钟的那一刻：设为过时的在两边都要马上算过期，不能一时两边都不在
+  for (const [name, skew] of [
+    ['快', 120_000],
+    ['慢', -120_000],
+  ] as const) {
+    it(`过时：应用的时钟比数据库${name}时，设为过时的记忆与事实在两种判断里都马上算过期`, async () => {
+      const report = await remember({ uri: 'core://report', content: '周五交周报' })
+      const { fact, personId } = await group()
+      const f1 = await fact('在准备考试')
+      await dream((_, h) => [
+        h('周五交周报') !== 'M0'
+          ? { kind: 'stale', memories: [h('周五交周报')], reason: '期限过了' }
+          : { kind: 'stale', memories: [h('在准备考试')], reason: '考完了' },
+      ])
+      const { items } = await list()
+      expect(items).toHaveLength(2)
+      vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + skew })
+      try {
+        for (const item of items) await ok(await apply(item.id))
+        expect((await send('GET', `/memories?uri=${encodeURIComponent(report.uri)}`)).status).toBe(
+          404,
+        )
+        const listed = await ok<MemoryList>(await send('GET', '/memories/list'))
+        expect(listed.items.map((i) => i.id)).not.toContain(report.id)
+        const expired = await ok<ExpiredMemoryList>(await send('GET', '/memories/expired'))
+        expect(expired.items.map((i) => i.id)).toEqual([report.id])
+        const detail = await ok<SubjectDetail>(await send('GET', `/subjects/${personId}`))
+        expect(detail.facts).toEqual([])
+        expect(detail.supersededFacts.map((f) => f.id)).toEqual([f1.id])
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+  }
 
   it('审核：按建议确认（来源改成成员）或删除', async () => {
     const { fact } = await group()

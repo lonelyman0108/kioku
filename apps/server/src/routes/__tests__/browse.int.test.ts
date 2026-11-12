@@ -13,7 +13,7 @@ import {
 import { and, eq, inArray, sql } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/postgres-js'
 import postgres from 'postgres'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../../app'
 import { withSpace, type Database } from '../../db/client'
@@ -233,6 +233,37 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
       'user://notes/n2',
       'user://notes/n5',
       'user://notes/n0',
+    ])
+  })
+
+  it('应用的时钟比数据库慢：刚改过、刚移动的照样排在按更新时间的最前', async () => {
+    // 新建时的更新时间是数据库的默认值，修改与移动也按数据库的钟写。只假造应用的 Date，冻结在慢两分钟的那一刻
+    for (const name of ['a', 'b', 'c']) {
+      await create(ws.cookie, { uri: `user://notes/${name}`, content: name })
+    }
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() - 120_000 })
+    try {
+      const patched = await app.request(
+        `${space()}/memories`,
+        jsonRequest('PATCH', { uri: 'user://notes/a', content: '改过' }, { cookie: ws.cookie }),
+      )
+      expect(patched.status).toBe(200)
+      const moved = await app.request(
+        `${space()}/memories/move`,
+        jsonRequest(
+          'POST',
+          { from: 'user://notes/b', to: 'user://notes/moved' },
+          { cookie: ws.cookie },
+        ),
+      )
+      expect(moved.status).toBe(200)
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(uris(await list(ws.cookie, 'sort=updated'))).toEqual([
+      'user://notes/moved',
+      'user://notes/a',
+      'user://notes/c',
     ])
   })
 
