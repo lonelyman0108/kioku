@@ -1,11 +1,38 @@
-import type { AppConfig, KeyScopes } from '@kioku/contracts'
+import type {
+  AppConfig,
+  DatabaseCheck,
+  DatabaseSource,
+  DatabaseState,
+  KeyScopes,
+} from '@kioku/contracts'
 
+import type { SetupGate } from '../auth/setupCode'
 import type { BenchLimits } from '../bench/rollback'
 import type { VaultClient } from '../credential/bitwarden/types'
 import type { MasterKey } from '../crypto/keyring'
 import type { Db } from '../db/client'
 import type { EmbedderSource } from '../embedding/source'
 import type { Jobs } from '../jobs/queue'
+
+// 初始化用到的服务状态：初始化码、数据库从哪里来、接上了没有。没接上数据库时只有初始化的接口用它，
+// 接上之后完整的服务也带着它（环境变量来源的库要在初始化页上先显示一遍）
+export interface SetupHost {
+  gate: SetupGate
+  migrationsFolder: string
+  // 是否配了主密钥
+  masterKey: boolean
+  database(): {
+    state: DatabaseState
+    source: DatabaseSource | null
+    url: string | null
+    // 连不上时最近一次检查的结果
+    check: DatabaseCheck | null
+  }
+  // 同一时刻只做一件改数据库的事（检查之后的代建、接入）；已经在做时抛 SetupBusyError
+  exclusive<T>(fn: () => Promise<T>): Promise<T>
+  // 保存连接并当场接上：起完整的服务、写 kioku.json、换上完整的接口。失败时抛 ActivationError，状态不变
+  activate(url: string): Promise<void>
+}
 
 export interface Deps {
   db: Db
@@ -26,6 +53,8 @@ export interface Deps {
   exportSendLimits?: { idleMs: number; totalMs: number }
   // 测试台回滚模式的时限与同时运行数，不设时见 bench/rollback.ts；测试里调小
   benchLimits?: Partial<BenchLimits>
+  // 初始化码与数据库状态。不设时（测试）不核对初始化码，状态按已接上的库算
+  setup?: SetupHost
 }
 
 export interface ConsolePrincipal {

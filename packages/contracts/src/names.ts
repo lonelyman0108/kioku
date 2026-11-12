@@ -8,6 +8,13 @@ import type {
   VaultErrorKind,
 } from './credentials'
 import type { CredentialCapability, Layer, Sensitivity } from './memory'
+import type {
+  DatabaseFailure,
+  DatabaseSource,
+  ExistingData,
+  ExtensionState,
+  ProvisionProblem,
+} from './setup'
 
 // 归属、敏感级、凭据能力、密码库连接状态与错误、凭据的到期与轮换、疑似明文类别的中文名，管理界面和服务端的错误信息共用一份，用词才不会分叉。
 // 契约只放 zod schema，这里是例外，和 bench.ts 的 isReplayStep、mayWrite 一样
@@ -109,4 +116,46 @@ export const PLAINTEXT_KIND_NAMES: Record<PlaintextKind, string> = {
   jwt: 'JWT',
   private_key: '私钥',
   kioku: 'Kioku 访问密钥',
+}
+
+// 初始化页与服务端日志共用：连不上数据库的原因只写类别
+export const DATABASE_FAILURE_NAMES: Record<DatabaseFailure, string> = {
+  unreachable: '无法连接',
+  host_not_found: '找不到主机',
+  timeout: '连接超时',
+  auth_failed: '认证失败',
+  not_allowed: '服务器拒绝了此连接',
+  database_missing: '库不存在',
+  permission_denied: '无权连接此库',
+  ssl_unsupported: '服务器不支持 SSL',
+  ssl_failed: 'SSL 握手或证书校验失败',
+  busy: '服务器繁忙或正在启动',
+  unknown: '连接失败',
+}
+
+export const DATABASE_SOURCE_NAMES: Record<DatabaseSource, string> = {
+  env: '环境变量 DATABASE_URL',
+  file: '数据目录的 kioku.json',
+}
+
+export const EXTENSION_STATE_NAMES: Record<ExtensionState, string> = {
+  installed: '已安装',
+  available: '尚未安装',
+  missing: '服务器上缺少',
+}
+
+export const EXISTING_DATA_NAMES: Record<ExistingData, string> = {
+  empty: '空库',
+  kioku: '已有 Kioku 的数据',
+  pre_baseline: '记忆架构改版之前的结构',
+  newer: '更新的版本迁移过的结构',
+}
+
+export const PROVISION_PROBLEM_NAMES: Record<ProvisionProblem, string> = {
+  connection: '超级用户无法连接',
+  not_superuser: '该账号不是超级用户',
+  role_exists: '角色已存在',
+  database_exists: '库已存在',
+  extension_missing: '服务器上缺少扩展',
+  failed: '创建失败',
 }

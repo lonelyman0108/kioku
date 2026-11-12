@@ -26,28 +26,60 @@ export async function runMigrations(database: Database, migrationsFolder: string
   }
 }
 
+// 库里执行过的迁移和这个版本对不上：库是改版之前的结构，或者来自更新的版本。说明文字是写给运维的，可以原样给人看
+export class MigrationStateError extends Error {
+  constructor(
+    readonly state: 'pre_baseline' | 'newer',
+    unknown = 0,
+  ) {
+    super(
+      state === 'pre_baseline'
+        ? PRE_BASELINE_DATABASE
+        : `数据库里有这个版本没有的迁移（${unknown} 个）：库来自更新的版本，或者迁移文件在合并之后改过。用做这个库的版本启动`,
+    )
+  }
+}
+
+type MigrationState =
+  { state: 'none' | 'known' } | { state: 'pre_baseline' | 'newer'; unknown: number }
+
+// 库里的迁移和这个版本的比：none 是还没迁移过，known 是都认得，另两种见 MigrationStateError。
+// 启动时的迁移与初始化页的检查共用这一份判断
+export async function migrationState(
+  client: postgres.Sql,
+  migrationsFolder: string,
+): Promise<MigrationState['state']> {
+  return (await classifyMigrations(client, readMigrationFiles({ migrationsFolder }))).state
+}
+
 // 库里执行过的迁移都要在这个版本的迁移目录里（按哈希，drizzle 记的是迁移文件内容的 sha256）。drizzle 只看最后一个
 // 迁移的时间戳：改版之前的库按时间戳还差着基线，它会从头建表，在已有的表上报「已存在」，看不出是怎么回事
-async function assertKnownMigrations(
+async function classifyMigrations(
   client: postgres.Sql,
   local: readonly MigrationMeta[],
-): Promise<void> {
+): Promise<MigrationState> {
   const [table] = await client<{ exists: boolean }[]>`
     select to_regclass('drizzle.__drizzle_migrations') is not null as exists`
-  if (!table?.exists) return
+  if (!table?.exists) return { state: 'none' }
   const hashes = new Set(local.map((m) => m.hash))
   const unknown = (
     await client<{ hash: string; at: string }[]>`
       select hash, created_at::text as at from drizzle.__drizzle_migrations`
   ).filter((m) => !hashes.has(m.hash))
-  if (!unknown.length) return
+  if (!unknown.length) return { state: 'known' }
   const baseline = local[0]?.folderMillis ?? 0
-  if (unknown.some((m) => Number(m.at) < baseline)) {
-    throw new Error(PRE_BASELINE_DATABASE)
+  const state = unknown.some((m) => Number(m.at) < baseline) ? 'pre_baseline' : 'newer'
+  return { state, unknown: unknown.length }
+}
+
+async function assertKnownMigrations(
+  client: postgres.Sql,
+  local: readonly MigrationMeta[],
+): Promise<void> {
+  const result = await classifyMigrations(client, local)
+  if (result.state === 'pre_baseline' || result.state === 'newer') {
+    throw new MigrationStateError(result.state, result.unknown)
   }
-  throw new Error(
-    `数据库里有这个版本没有的迁移（${unknown.length} 个）：库来自更新的版本，或者迁移文件在合并之后改过。用做这个库的版本启动`,
-  )
 }
 
 // 在调用方的事务里拿住迁移的锁：到事务结束前，别的连接（例如正在启动的服务）都执行不了迁移

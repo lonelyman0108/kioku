@@ -52,6 +52,17 @@ const BACKUP_CRON = '7 * * * *'
 // 切换或放弃之后等一会儿再清向量：写向量时会锁住设置、按当时的设置决定写不写，这里只是多留一点余量
 const PRUNE_AFTER_SECONDS = 30
 
+// pg-boss 用的驱动（node-postgres）把 sslmode=require 当成 verify-full，服务用的 postgres.js 是加密但不校验证书：
+// 换成它的 no-verify，两边一致，自签证书的库不会只有后台任务连不上。别的写法原样
+export function forNodePostgres(url: string): string {
+  const query = url.indexOf('?')
+  if (query < 0) return url
+  const params = new URLSearchParams(url.slice(query + 1))
+  if (params.get('sslmode') !== 'require') return url
+  params.set('sslmode', 'no-verify')
+  return `${url.slice(0, query)}?${params.toString()}`
+}
+
 export interface Jobs {
   enqueueEmbed(spaceId: string, memoryId: string): void
   // 排一批缓冲的抽取，delaySeconds 秒之后开始。同一批只排一个：已经排着的就把开始时间改成这次的，
@@ -93,7 +104,10 @@ export async function startJobs(options: {
   // 写入之后的向量任务一批最多处理多久，不设时 EMBED_BUDGET_MS；测试里调小
   embedBudgetMs?: number
 }): Promise<Jobs & { stop: () => Promise<void> }> {
-  const boss = new PgBoss({ connectionString: options.connectionString, schema: 'pgboss' })
+  const boss = new PgBoss({
+    connectionString: forNodePostgres(options.connectionString),
+    schema: 'pgboss',
+  })
   boss.on('error', (err) => console.error('后台任务出错', err))
   await boss.start()
   // 队列已经存在时建队列不改选项，所以再更新一遍
@@ -332,7 +346,7 @@ export async function startJobs(options: {
 export async function requestBackfill(connectionString: string): Promise<void> {
   // 不做 pg-boss 自己的迁移：工具与服务版本不一致时，不能让工具替服务升级任务表
   const boss = new PgBoss({
-    connectionString,
+    connectionString: forNodePostgres(connectionString),
     schema: 'pgboss',
     supervise: false,
     schedule: false,

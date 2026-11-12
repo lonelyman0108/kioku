@@ -50,8 +50,10 @@ sql -d kioku_smoke -c 'CREATE EXTENSION vector' -c 'CREATE EXTENSION zhparser'
 
 docker rm -f "$name" > /dev/null 2>&1 || true
 trap 'docker rm -f "$name" > /dev/null 2>&1 || true' EXIT
+# 初始化码固定下来，建第一个管理员时要带它
+setup_code=SMOKE-SETUP-CODE
 docker run -d --name "$name" --network host -e PORT="$port" \
-  -e DATABASE_URL="$db_url" \
+  -e DATABASE_URL="$db_url" -e KIOKU_SETUP_CODE="$setup_code" \
   -e KIOKU_MASTER_KEY="$(openssl rand -base64 32)" "$image" > /dev/null
 
 fail() {
@@ -63,8 +65,8 @@ for _ in $(seq 1 60); do
   if curl -fsS "$base/v1/health" > /dev/null 2>&1; then
     curl -fsS "$base/" | grep -q '<title>Kioku</title>' || fail "首页不是管理界面"
     status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$base/v1/setup" \
-      -H 'content-type: application/json' \
-      -d '{"username":"smoke","displayName":"Smoke","password":"correct horse battery","spaceName":"smoke"}')
+      -H 'content-type: application/json' -H 'sec-fetch-site: same-origin' \
+      -d '{"setupCode":"'"$setup_code"'","username":"smoke","displayName":"Smoke","password":"correct horse battery","spaceName":"smoke"}')
     [ "$status" = 201 ] || fail "初始化接口返回 $status"
     echo "镜像冒烟测试通过"
     exit 0

@@ -8,17 +8,6 @@ export const Username = z
 export const Password = z.string().min(10, '密码至少 10 位').max(256, '密码最多 256 位')
 export const Slug = z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/, '只能包含小写字母、数字和连字符')
 
-export const SetupStatus = z.object({ needsSetup: z.boolean() })
-export type SetupStatus = z.infer<typeof SetupStatus>
-
-export const SetupRequest = z.object({
-  username: Username,
-  displayName: z.string().min(1, '请填写显示名').max(64, '显示名不超过 64 个字符'),
-  password: Password,
-  spaceName: z.string().min(1, '请填写空间名').max(64, '空间名不超过 64 个字符'),
-})
-export type SetupRequest = z.infer<typeof SetupRequest>
-
 // 长度上限挡住超长输入：用户名会作为失败计数表的主键写入
 export const LoginRequest = z.object({
   // 用户名只有小写（Username）：先去首尾空白、转小写，计数与匹配都用这个值
