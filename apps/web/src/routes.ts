@@ -161,8 +161,13 @@ export const memoryNodeRoute = (spaceId: string, node: string) => ({
   query: { node },
 })
 
-// 初始化状态只会从「需要」变成「不需要」，确认过一次就不再请求
+// 初始化状态只会从「需要」变成「不需要」，确认过一次就不再请求；
+// 服务回报没接上数据库时（重启后连不上库）由 setupLost 清掉，下次导航重新确认
 let setupDone = false
+
+export function setupLost(): void {
+  setupDone = false
+}
 
 export function installGuards(router: Router): void {
   // 记下最近访问的空间：个人与实例设置这些不带空间的页面沿用它

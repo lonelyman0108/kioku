@@ -70,6 +70,11 @@ import {
   ReviewList,
   ReviewResult,
   SetupStatus,
+  DatabaseCheck,
+  DatabaseConnected,
+  DatabaseInspection,
+  type DatabaseCheckRequest,
+  type DatabaseProvisionRequest,
   SpaceImportPreview,
   SpaceImportResult,
   SpaceOverview,
@@ -157,6 +162,18 @@ export const api = {
 
   setupStatus: () => request('GET', '/setup/status', { schema: SetupStatus }),
   setup: (body: SetupRequest) => request('POST', '/setup', { body, schema: Me }),
+  // 初始化的数据库这一步：都带初始化码，放在请求体里
+  inspectDatabase: (setupCode: string) =>
+    request('POST', '/setup/database/inspect', {
+      body: { setupCode },
+      schema: DatabaseInspection,
+    }),
+  checkDatabase: (body: DatabaseCheckRequest) =>
+    request('POST', '/setup/database/check', { body, schema: DatabaseCheck }),
+  connectDatabase: (body: DatabaseCheckRequest) =>
+    request('POST', '/setup/database', { body, schema: DatabaseConnected }),
+  provisionDatabase: (body: DatabaseProvisionRequest) =>
+    request('POST', '/setup/database/provision', { body, schema: DatabaseConnected }),
   login: (username: string, password: string) =>
     request('POST', '/auth/login', { body: { username, password }, schema: Me }),
   logout: () => request('POST', '/auth/logout'),
