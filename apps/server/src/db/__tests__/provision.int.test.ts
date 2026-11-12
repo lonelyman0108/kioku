@@ -35,7 +35,8 @@ function connectionOf(url: string): DatabaseConnection {
   }
 }
 
-describe.skipIf(!superuserUrl)('数据库检查与超级用户代建', () => {
+// 建库、装扩展、删库在负载高时要好几秒
+describe.skipIf(!superuserUrl)('数据库检查与超级用户代建', { timeout: 60_000 }, () => {
   let admin: postgres.Sql
   const suffix = randomBytes(4).toString('hex')
   const roles: string[] = []
