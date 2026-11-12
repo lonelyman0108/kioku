@@ -50,6 +50,8 @@ export async function bootstrap(app: App, username = 'alice'): Promise<Workspace
   const res = await app.request(
     '/v1/setup',
     jsonRequest('POST', {
+      // 测试里的应用不带初始化码的核对（Deps.setup 不设），码随便填
+      setupCode: 'test-setup-code',
       username,
       displayName: username,
       password: 'correct horse battery',

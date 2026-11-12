@@ -38,6 +38,7 @@ import loginPage from '../pages/LoginPage.vue?raw'
 import overviewPage from '../pages/OverviewPage.vue?raw'
 import settingsPage from '../pages/SettingsPage.vue?raw'
 import setupPage from '../pages/SetupPage.vue?raw'
+import databaseUnavailablePage from '../pages/DatabaseUnavailablePage.vue?raw'
 import unavailablePage from '../pages/UnavailablePage.vue?raw'
 import { routes } from '../routes'
 import useSessionSource from '../composables/useSession.ts?raw'
@@ -1474,32 +1475,65 @@ describe('登录', () => {
 describe('初始化', () => {
   const elements = elementsOf(template(setupPage))
 
-  it('按服务端同一个规则校验，字段的提示都在', () => {
+  it('建管理员按服务端同一个规则校验，字段的提示都在', () => {
     const form = elements.find((el) => el.tag === 'UForm')!
     expect(bound(form, 'schema')).toBe('SetupRequest')
-    expect(handler(form, 'submit')).toBe('submit')
-    expect(elements.filter((el) => el.tag === 'UFormField').map((el) => attr(el, 'name'))).toEqual([
-      'username',
-      'displayName',
-      'password',
-      'spaceName',
-    ])
+    expect(handler(form, 'submit')).toBe('submitAdmin')
+    expect(
+      elementsOf(form)
+        .filter((el) => el.tag === 'UFormField')
+        .map((el) => attr(el, 'name')),
+    ).toEqual(['setupCode', 'username', 'displayName', 'password', 'spaceName'])
     expect(elements.filter((el) => attr(el, 'type') === 'submit').map(textOf)).toEqual([
+      '检查',
       '创建并登录',
     ])
     expect(flat(setupPage)).toContain('创建首个账号及其空间，该账号为实例管理员。')
   })
 
+  it('数据库这一步：回车只做检查，保存、代建与下一步都要点按钮', () => {
+    const buttons = elements.filter((el) => el.tag === 'UButton')
+    const byText = (text: string) => buttons.find((el) => textOf(el) === text)!
+    expect(attr(byText('保存并接入'), 'type')).toBe('button')
+    expect(handler(byText('保存并接入'), 'click')).toBe('connect')
+    expect(attr(byText('创建并接入'), 'type')).toBe('button')
+    expect(attr(byText('下一步'), 'type')).toBe('button')
+    // 代建的表单不放在 <form> 里：输入框里回车不会建库
+    const forms = elements.filter((el) => el.tag === 'form')
+    expect(forms).toHaveLength(1)
+    expect(handler(forms[0]!, 'submit')).toBe('runCheck')
+    // 没配主密钥时提醒一句；代建的规则收进提示层，正文只留一句
+    expect(flat(setupPage)).toContain('配置KIOKU_MASTER_KEY后重启服务')
+    expect(flat(setupPage)).toContain('新建应用角色与库，只保存应用角色的连接。<Hint')
+    // 代建时超级用户先连的库可以改，默认 postgres
+    expect(setupPage).toContain('label="维护库"')
+    expect(setupPage).toContain("maintenance: 'postgres',")
+  })
+
+  it('数据库暂时连不上不进初始化页：守卫带到数据库不可用页，那一页不给初始化码', () => {
+    expect(routesSource).toContain("if (status.database.state === 'unavailable') {")
+    expect(routesSource).toContain("name: 'database-unavailable'")
+    expect(setupPage).toContain("await router.replace({ name: 'database-unavailable' })")
+    expect(databaseUnavailablePage).not.toContain('setupCode')
+    expect(flat(databaseUnavailablePage)).toContain('正在自动重试')
+  })
+
   it('校验的提示是中文：这是装好之后看到的第一屏', () => {
     const issues = SetupRequest.safeParse({
+      setupCode: '',
       username: 'lin',
       displayName: '',
       password: 'long-enough-password',
       spaceName: '',
     }).error!.issues
-    expect(issues.map((issue) => issue.message)).toEqual(['请填写显示名', '请填写空间名'])
+    expect(issues.map((issue) => issue.message)).toEqual([
+      '请填写初始化码',
+      '请填写显示名',
+      '请填写空间名',
+    ])
     const tooLong = 'x'.repeat(65)
     const long = SetupRequest.safeParse({
+      setupCode: 'abcd',
       username: 'lin',
       displayName: tooLong,
       password: 'long-enough-password',

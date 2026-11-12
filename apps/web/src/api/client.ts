@@ -1,4 +1,4 @@
-import { URI_FORMAT_MESSAGE } from '@kioku/contracts'
+import { DATABASE_UNAVAILABLE_CODE, URI_FORMAT_MESSAGE } from '@kioku/contracts'
 import type { z } from 'zod'
 
 import { URI_FORMAT_HINT } from '../labels'
@@ -68,6 +68,12 @@ export function setUnauthorizedHandler(handler: () => void): void {
 }
 const SESSION_PATHS = ['/auth/login', '/auth/me', '/auth/logout']
 
+// 服务没接上数据库（503，带 DATABASE_UNAVAILABLE_CODE）时的处理，由入口注册：回到初始化页
+let onDatabaseUnavailable: (() => void) | null = null
+export function setDatabaseUnavailableHandler(handler: () => void): void {
+  onDatabaseUnavailable = handler
+}
+
 // 管理界面与后端同源，用浏览器的会话 Cookie 鉴权；浏览器会自动带上 Sec-Fetch-Site，后端据此做同源检查。
 // body 是 FormData 时按表单上传（分隔行由浏览器写进 content-type），其余的按 JSON 发
 async function send(method: string, path: string, options: RequestOptions<unknown>) {
@@ -101,7 +107,8 @@ async function send(method: string, path: string, options: RequestOptions<unknow
   }
   if (!res.ok) {
     if (res.status === 401 && !SESSION_PATHS.includes(path)) onUnauthorized?.()
-    const payload = (await res.json().catch(() => null)) as { error?: string } | null
+    const payload = (await res.json().catch(() => null)) as { error?: string; code?: string } | null
+    if (res.status === 503 && payload?.code === DATABASE_UNAVAILABLE_CODE) onDatabaseUnavailable?.()
     throw new ApiError(
       res.status,
       consoleMessage(payload?.error ?? `请求失败：HTTP ${res.status}`),

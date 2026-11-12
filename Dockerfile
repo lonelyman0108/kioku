@@ -26,6 +26,9 @@ WORKDIR /app
 # 目录布局与仓库一致：服务端默认从 ../migrations 读迁移、从 ../../web/dist 读管理界面
 COPY --from=build /out ./server
 COPY --from=build /src/apps/web/dist ./web/dist
+# 数据目录：初始化页保存的数据库连接（kioku.json）放在这里，部署时挂成持久的卷
+ENV KIOKU_DATA_DIR=/data
+RUN mkdir -p /data && chown node:node /data && chmod 700 /data
 USER node
 EXPOSE 18920
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \

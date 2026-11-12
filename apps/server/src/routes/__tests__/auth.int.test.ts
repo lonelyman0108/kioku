@@ -8,6 +8,7 @@ import { loginAttempts } from '../../db/schema'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 
 const setupBody = {
+  setupCode: 'test-setup-code',
   username: 'alice',
   displayName: 'Alice',
   password: 'correct horse battery',
@@ -51,9 +52,15 @@ describe.skipIf(!testDatabaseUrl)('初始化、登录与 API Key', () => {
   }
 
   it('首次初始化只能做一次', async () => {
-    expect(await (await app.request('/v1/setup/status')).json()).toEqual({ needsSetup: true })
+    expect(await (await app.request('/v1/setup/status')).json()).toEqual({
+      needsSetup: true,
+      database: { state: 'ready', source: null, failure: null },
+      masterKey: false,
+    })
     await setup()
-    expect(await (await app.request('/v1/setup/status')).json()).toEqual({ needsSetup: false })
+    expect(await (await app.request('/v1/setup/status')).json()).toMatchObject({
+      needsSetup: false,
+    })
     const again = await app.request('/v1/setup', json('POST', { ...setupBody, username: 'bob' }))
     expect(again.status).toBe(409)
   })

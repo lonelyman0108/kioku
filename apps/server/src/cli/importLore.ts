@@ -42,7 +42,7 @@ import {
 } from '../importer/lore'
 import { requestBackfill } from '../jobs/queue'
 import { MemoryError } from '../memory/service'
-import { runCli, UsageError } from './common'
+import { DATABASE_ENV_HELP, databaseUrlOf, runCli, UsageError } from './common'
 
 const HELP = `从 Lore 导入记忆。
 
@@ -71,9 +71,9 @@ Lore 的 URI 映射到这些坐标（括号里是归属，下级路径照搬）�
   --apply                 执行导入（与同步）；不加时只打印计划
 
 环境变量：
-  DATABASE_URL       Kioku 的数据库，与服务相同
-  LORE_DATABASE_URL  Lore 的数据库，只读访问
-  KIOKU_MASTER_KEY   导入或同步机密记忆时需要，与服务相同`
+${DATABASE_ENV_HELP}
+  LORE_DATABASE_URL          Lore 的数据库，只读访问
+  KIOKU_MASTER_KEY           导入或同步机密记忆时需要，与服务相同`
 
 async function main(): Promise<void> {
   const { values } = parseArgs({
@@ -101,7 +101,7 @@ async function main(): Promise<void> {
   if (!loreUrl) throw new UsageError('缺少环境变量 LORE_DATABASE_URL')
 
   const config = loadConfig()
-  const database = connect(config.databaseUrl, { max: 2 })
+  const database = connect(databaseUrlOf(config), { max: 2 })
   try {
     await assertRuntimeRole(database.db)
     if ((await pendingMigrations(database.db, config.migrationsFolder)) !== 0) {
@@ -176,7 +176,7 @@ async function main(): Promise<void> {
     if (synced) printSyncResult(synced)
     if (result.created.length || synced?.updated.length) {
       // 向量由服务的后台任务生成；服务没在运行时，下次启动也会补齐
-      await requestBackfill(config.databaseUrl).catch((err: unknown) =>
+      await requestBackfill(databaseUrlOf(config)).catch((err: unknown) =>
         console.warn('没能安排向量补齐，服务下次启动时会补上', err),
       )
     }

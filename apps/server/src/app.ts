@@ -1,3 +1,4 @@
+import { DATABASE_UNAVAILABLE_CODE } from '@kioku/contracts'
 import type { Context } from 'hono'
 import { HTTPException } from 'hono/http-exception'
 import { secureHeaders } from 'hono/secure-headers'
@@ -5,7 +6,7 @@ import { secureHeaders } from 'hono/secure-headers'
 import { sameOriginForCookies } from './auth/csrf'
 import { requireConsole } from './auth/middleware'
 import { logInternalError } from './db/client'
-import type { Deps } from './http/env'
+import type { Deps, SetupHost } from './http/env'
 import { router } from './http/openapi'
 import { isApiPath, mountWeb } from './http/web'
 import { accountRoutes } from './routes/accounts'
@@ -29,7 +30,7 @@ import { recallRoutes } from './routes/recall'
 import { reviewRoutes } from './routes/review'
 import { MemoryError } from './memory/service'
 import { settingsRoutes } from './routes/settings'
-import { setupRoutes } from './routes/setup'
+import { setupDatabaseRoutes, setupRoutes, setupStatusRoutes } from './routes/setup'
 import { instanceSpaceRoutes, spaceRoutes } from './routes/spaces'
 import { subjectRoutes } from './routes/subjects'
 import { systemRoutes } from './routes/system'
@@ -59,8 +60,10 @@ function requestError(c: Context, err: HTTPException): Response {
   )
 }
 
-// 应用本身与监听端口分开，测试直接调 app.request，不用起服务
-export function createApp(deps: Deps) {
+type App = ReturnType<typeof router>
+
+// 完整服务与只做初始化的应用共用的外层：安全响应头与同源检查
+function shell(): App {
   const app = router({ collapseSlashes: true })
   // 安全响应头。界面没有内联脚本；Nuxt UI 会写内联样式，所以 style-src 放开 unsafe-inline。
   // 不发 HSTS：服务自己不知道前面有没有 HTTPS，而 HSTS 会作用到整个主机名的所有端口和子域名，
@@ -82,6 +85,43 @@ export function createApp(deps: Deps) {
     }),
   )
   app.use('/v1/*', sameOriginForCookies)
+  return app
+}
+
+// 两者共用的收尾：错误处理、未知路径、管理界面
+function finish(app: App, webDir: string | undefined): void {
+  // 业务规则错误带着自己的状态码；请求本身的问题（依赖库抛出的 4xx）是调用方的错，不打堆栈（见 requestError）；
+  // 其余错误不把内部信息透给调用方，日志也不带 SQL 与参数（参数可能就是记忆正文，见 logInternalError）
+  app.onError((err, c) => {
+    if (err instanceof MemoryError) {
+      // 新增的疑似明文被拒时带上每一处的行号与类别（MemoryWriteError）；凭据写入失败时带上原因，
+      // 写进了密码库、凭据却没建成时带上留下的条目（CredentialWriteError）
+      const body = {
+        error: err.message,
+        ...(err.plaintext ? { plaintext: err.plaintext } : {}),
+        ...(err.write?.reason ? { reason: err.write.reason } : {}),
+        ...(err.write?.vaultItem ? { vaultItem: err.write.vaultItem } : {}),
+      }
+      return c.json(body, err.status)
+    }
+    if (err instanceof HTTPException && err.status < 500) return requestError(c, err)
+    logInternalError('接口内部错误', err)
+    return c.json({ error: '服务内部错误' }, 500)
+  })
+  // /v1 下没有匹配的路由（路径不存在，或者路径对、方法不对）时和别的错误一样回 { error }；
+  // 别的路径照旧是纯文本的 404，管理界面的页面路由由 mountWeb 回 index.html，走不到这里
+  app.notFound((c) =>
+    isApiPath(c.req.path) ? c.json({ error: '接口不存在' }, 404) : c.text('404 Not Found', 404),
+  )
+  // 管理界面放在 API 之后挂载，未知的 /v1 路径仍是上面 JSON 的 404 而不是界面
+  if (webDir && !mountWeb(app, webDir)) {
+    console.warn(`没有找到管理界面的构建产物：${webDir}，只提供 API`)
+  }
+}
+
+// 应用本身与监听端口分开，测试直接调 app.request，不用起服务
+export function createApp(deps: Deps) {
+  const app = shell()
   app.route('/v1', health)
   app.route('/v1', setupRoutes(deps))
   app.route('/v1', authRoutes(deps))
@@ -114,40 +154,46 @@ export function createApp(deps: Deps) {
   // 浏览器授权的响应引用了 AppInfo：挂在 Key 鉴权的接口后面，不改变 OpenAPI 里组件的顺序
   app.route('/v1', deviceRoutes(deps))
   app.route('/v1', benchRoutes(deps))
-  // 业务规则错误带着自己的状态码；请求本身的问题（依赖库抛出的 4xx）是调用方的错，不打堆栈（见 requestError）；
-  // 其余错误不把内部信息透给调用方，日志也不带 SQL 与参数（参数可能就是记忆正文，见 logInternalError）
-  app.onError((err, c) => {
-    if (err instanceof MemoryError) {
-      // 新增的疑似明文被拒时带上每一处的行号与类别（MemoryWriteError）；凭据写入失败时带上原因，
-      // 写进了密码库、凭据却没建成时带上留下的条目（CredentialWriteError）
-      const body = {
-        error: err.message,
-        ...(err.plaintext ? { plaintext: err.plaintext } : {}),
-        ...(err.write?.reason ? { reason: err.write.reason } : {}),
-        ...(err.write?.vaultItem ? { vaultItem: err.write.vaultItem } : {}),
-      }
-      return c.json(body, err.status)
-    }
-    if (err instanceof HTTPException && err.status < 500) return requestError(c, err)
-    logInternalError('接口内部错误', err)
-    return c.json({ error: '服务内部错误' }, 500)
-  })
-  // /v1 下没有匹配的路由（路径不存在，或者路径对、方法不对）时和别的错误一样回 { error }；
-  // 别的路径照旧是纯文本的 404，管理界面的页面路由由 mountWeb 回 index.html，走不到这里
-  app.notFound((c) =>
-    isApiPath(c.req.path) ? c.json({ error: '接口不存在' }, 404) : c.text('404 Not Found', 404),
-  )
+  finish(app, deps.webDir)
   app.openAPIRegistry.registerComponent('securitySchemes', 'bearer', {
     type: 'http',
     scheme: 'bearer',
   })
-  // 管理界面放在 API 之后挂载，未知的 /v1 路径仍是上面 JSON 的 404 而不是界面
-  if (deps.webDir && !mountWeb(app, deps.webDir)) {
-    console.warn(`没有找到管理界面的构建产物：${deps.webDir}，只提供 API`)
-  }
   app.doc31('/v1/openapi.json', {
     openapi: '3.1.0',
     info: { title: 'Kioku API', version: VERSION },
   })
+  return app
+}
+
+// 没接上数据库时的应用：只有健康检查、初始化的状态与数据库这一步，加上管理界面；
+// 别的接口回 503 并带 DATABASE_UNAVAILABLE_CODE，管理界面据此回到初始化页
+export function createSetupApp(options: {
+  host: SetupHost
+  trustedProxies: number
+  webDir?: string
+}) {
+  const { host, trustedProxies } = options
+  const app = shell()
+  // 没接上数据库：等人填库（missing）时要初始化；暂时连不上（unavailable）时不知道，按不要算
+  const needsSetup = () => Promise.resolve(host.database().state === 'missing')
+  // 等人初始化时服务是好的，健康检查照常 200；配了的库暂时连不上时回 503，容器的健康检查与编排看得到
+  app.get('/v1/health', (c) =>
+    host.database().state === 'unavailable'
+      ? c.json({ status: 'unavailable', version: VERSION, database: 'unavailable' }, 503)
+      : c.json({ status: 'ok', version: VERSION }, 200),
+  )
+  app.route('/v1', setupStatusRoutes(host, needsSetup))
+  app.route('/v1', setupDatabaseRoutes(host, trustedProxies, needsSetup))
+  app.all('/v1/*', (c) =>
+    c.json(
+      {
+        error: host.database().state === 'missing' ? '数据库尚未配置' : '数据库暂时无法连接',
+        code: DATABASE_UNAVAILABLE_CODE,
+      },
+      503,
+    ),
+  )
+  finish(app, options.webDir)
   return app
 }

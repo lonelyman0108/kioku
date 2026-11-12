@@ -23,3 +23,7 @@ coverage/
 # Nuxt UI 的 Vite 插件在构建时生成的类型声明
 apps/web/auto-imports.d.ts
 apps/web/components.d.ts
+
+# ---- server ----
+# 本地运行时的数据目录（KIOKU_DATA_DIR 的默认值）：初始化页保存的数据库连接
+apps/server/.data/

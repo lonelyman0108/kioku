@@ -1,45 +1,18 @@
 import { serve } from '@hono/node-server'
 
-import { createApp } from './app'
 import { loadConfig } from './config'
-import { createVaultClient } from './credential/bitwarden/client'
-import { prepareMasterKey } from './crypto/rotation'
-import { assertRuntimeRole, connect } from './db/client'
-import { runMigrations } from './db/migrate'
-import { settingsEmbedderSource } from './embedding/source'
-import { startJobs } from './jobs/queue'
-import { settleRecallEvents } from './recall/events'
+import { logInternalError } from './db/client'
+import { FatalStartupError, startRuntime } from './runtime'
 
 const config = loadConfig()
-const database = connect(config.databaseUrl)
-await assertRuntimeRole(database.db)
-await runMigrations(database, config.migrationsFolder)
-// 给加密的数据补上主密钥的标识，主密钥对不上时拒绝启动
-await prepareMasterKey(database.db, config.masterKey)
-
-const embedder = settingsEmbedderSource(database.db, config.masterKey)
-const jobs = await startJobs({
-  connectionString: config.databaseUrl,
-  db: database.db,
-  embedder,
-  masterKey: config.masterKey,
-})
-// 启动时补齐一次：处理上次停机期间没来得及生成的向量；换模型换到一半的接着换
-void jobs.enqueueBackfill()
-void jobs.enqueueSwitch()
-
-const app = createApp({
-  db: database.db,
-  cookieSecure: config.cookieSecure,
-  masterKey: config.masterKey,
-  embedder,
-  trustedProxies: config.trustedProxies,
-  webDir: config.webDir,
-  jobs,
-  vault: createVaultClient(),
+// 不会自己好的问题（角色绕过行级安全、库的结构用不了、主密钥对不上等）拒绝启动；别的意外也退出，日志不带错误原文
+const runtime = await startRuntime(config).catch((err: unknown) => {
+  if (err instanceof FatalStartupError) console.error(`拒绝启动：${err.message}`)
+  else logInternalError('启动失败', err)
+  process.exit(1)
 })
 
-const server = serve({ fetch: app.fetch, port: config.port }, (info) => {
+const server = serve({ fetch: runtime.fetch, port: config.port }, (info) => {
   console.log(`Kioku 已启动：http://localhost:${info.port}`)
 })
 
@@ -54,8 +27,6 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
       new Promise<void>((resolve) => server.close(() => resolve())),
       new Promise<void>((resolve) => setTimeout(resolve, SHUTDOWN_GRACE_MS).unref()),
     ])
-    void Promise.all([jobs.stop(), drained.then(settleRecallEvents)]).finally(() =>
-      database.close().finally(() => process.exit(0)),
-    )
+    void runtime.stop(drained).finally(() => process.exit(0))
   })
 }
