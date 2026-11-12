@@ -85,6 +85,8 @@
 
 - typescript-eslint 8 只支持 TypeScript 6.0 以下，所以 TypeScript 固定在 6.0，不升到 7。
 - tsdown 产物是 `dist/index.mjs`，不是 `.js`。
+- 版本、提交与构建时间在打包时写进产物（`tsdown.config.ts` 的 define，规则在 `src/buildInfo.ts`）：镜像取 Dockerfile 的构建参数 `KIOKU_VERSION`、`KIOKU_COMMIT`、`KIOKU_BUILD_TIME`，本地取 git；直接跑源码（`pnpm dev`、测试）时现取 git。运行时不读这几个环境变量。OpenAPI 的 `info.version` 跟着变，`filter_openapi.py` 把 SDK 里的固定成 `dev`。原因：版本不能靠部署的人手填。
+- 检查新版本（`settings/updateCheck.ts`）请求的是写死的第三方地址（GitHub），不是管理员配置的服务：默认关闭，打开后每天最多请求一次（在库里占位，几个进程也只请求一次），当前不是正式版时不请求，失败只记日志。原因：自托管服务默认不向第三方发请求；再加这类请求照这个做，开关旁写明发往哪里。
 - 管理界面用到新图标时必须加进 `apps/web/src/icons.ts`：构建时只打包这份清单里的图标，没列进来的会在运行时向公共 Iconify 接口请求。原因：自托管服务不应向第三方发请求。
 - 管理界面的 tsconfig 关掉了 `exactOptionalPropertyTypes`（组件库的 props 类型不兼容），服务端保持开启。
 - 页面和组件的 scoped 样式不在 layer 里，压过 Tailwind 的工具类（工具类都在 layer 里）：元素上 scoped 写了 `display` 时，`max-lg:hidden` 这类类名不生效，窄屏的显隐写在 scoped 的媒体查询里。反过来，组件里不要用和工具类同名的类名（`fixed`、`hidden` 等）：Tailwind 会把它当成工具类生效。flex 容器里的图标要写 `display: inline-block`（preflight 把 svg 设成 block，图标会自己占一行）。

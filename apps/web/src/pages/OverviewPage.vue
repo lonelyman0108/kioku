@@ -17,6 +17,7 @@ import { useViewport } from '../composables/useViewport'
 import { actionableInboxCount, inboxTabActionable, inboxTabLabels } from '../inbox'
 import { bindingNote, budgetWarning, splitNote, strataTarget } from '../overview'
 import { instanceSettingsRoute, spaceSettingsRoute } from '../settingsSections'
+import { versionLabel } from '../systemInfo'
 import { formatRelative, formatTime } from '../time'
 
 const route = useRoute()
@@ -289,7 +290,23 @@ const canAdjustBudget = computed(() => space.value?.role === 'owner')
               >
             </p>
           </div>
-          <p v-if="!budget && !backup" class="empty">暂无提醒</p>
+          <!-- 新版本只给实例管理员提醒（别人拿到的是 null） -->
+          <div v-if="data.update" class="notice">
+            <p class="notice-title">有新版本 {{ versionLabel(data.update.version) }}</p>
+            <p class="notice-body">
+              <a
+                :href="data.update.url"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="notice-link"
+                >查看发布说明</a
+              >
+              <RouterLink :to="instanceSettingsRoute('system')" class="notice-link"
+                >系统信息</RouterLink
+              >
+            </p>
+          </div>
+          <p v-if="!budget && !backup && !data.update" class="empty">暂无提醒</p>
         </section>
 
         <section>

@@ -4,6 +4,7 @@ import { UriPrefix } from './memories'
 import { LAYERS, Layer, Provenance, Sensitivity } from './memory'
 import { RecallCandidate } from './recall'
 import { SubjectBinding } from './subjects'
+import { UpdateNotice } from './system'
 
 // 管理界面专用的接口：记忆列表、搜索与空间概览。只按成员本人的权限返回，Key 用不了
 
@@ -572,6 +573,8 @@ export const SpaceOverview = z.object({
   recent: z.array(ActivityItem),
   // 不是实例管理员时为 null
   backup: OverviewBackup.nullable(),
+  // 打开了检查新版本、有新的正式版时给出；不是实例管理员时为 null
+  update: UpdateNotice.nullable(),
   // 等查看者本人确认的绑定：别的平台账号想并进标记成他的对象
   pendingBindings: z.array(SubjectBinding),
   inbox: InboxCounts,
