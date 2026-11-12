@@ -33,6 +33,7 @@ import { settingsRoutes } from './routes/settings'
 import { setupDatabaseRoutes, setupRoutes, setupStatusRoutes } from './routes/setup'
 import { instanceSpaceRoutes, spaceRoutes } from './routes/spaces'
 import { subjectRoutes } from './routes/subjects'
+import { systemRoutes } from './routes/system'
 import { conversationRoutes } from './routes/conversations'
 import { whoamiRoutes } from './routes/whoami'
 import { VERSION } from './version'
@@ -146,6 +147,7 @@ export function createApp(deps: Deps) {
   app.route('/v1', mcpRoutes(deps))
   app.route('/v1', settingsRoutes(deps))
   app.route('/v1', instanceSpaceRoutes(deps))
+  app.route('/v1', systemRoutes(deps))
   app.route('/v1', advancedSettingsRoutes(deps))
   // 放在接入方的路由后面：OpenAPI 的组件按第一次用到的顺序排，Python SDK 的比对对顺序敏感，
   // 测试台的响应用到了 TurnEndEvent 这些接入方的组件

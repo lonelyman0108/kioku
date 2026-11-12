@@ -138,4 +138,3 @@ docker compose -f docker-compose.example.yml exec -T db pg_restore -U postgres -
 | `PORT` | `18920` | 监听端口 |
 | `KIOKU_WEB_DIR` | `apps/web/dist` | 管理界面构建产物的目录；目录不存在时只提供 API |
 | `KIOKU_MIGRATIONS_DIR` | `apps/server/migrations` | 数据库迁移目录 |
-| `KIOKU_VERSION` | `dev` | `/v1/health` 显示的版本号 |

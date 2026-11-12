@@ -172,6 +172,7 @@ describe('小节的注册', () => {
       'security',
       'data',
       'prompts',
+      'system',
     ])
     expect(SETTINGS_SECTIONS.map((s) => s.label)).toEqual([
       '账号与登录',
@@ -187,6 +188,7 @@ describe('小节的注册', () => {
       '安全',
       '数据与保留',
       '提示词与默认值',
+      '系统信息',
     ])
   })
 

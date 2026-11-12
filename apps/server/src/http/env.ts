@@ -13,6 +13,7 @@ import type { MasterKey } from '../crypto/keyring'
 import type { Db } from '../db/client'
 import type { EmbedderSource } from '../embedding/source'
 import type { Jobs } from '../jobs/queue'
+import type { UpdateCheckOptions } from '../settings/updateCheck'
 
 // 初始化用到的服务状态：初始化码、数据库从哪里来、接上了没有。没接上数据库时只有初始化的接口用它，
 // 接上之后完整的服务也带着它（环境变量来源的库要在初始化页上先显示一遍）
@@ -57,6 +58,9 @@ export interface Deps {
   benchLimits?: Partial<BenchLimits>
   // 初始化码与数据库状态。不设时（测试）不核对初始化码，状态按已接上的库算
   setup?: SetupHost
+  // 检查新版本时请求 GitHub 用的 fetch、当作当前版本的版本号与请求的时限。不设时用全局的 fetch、构建时写进产物的版本
+  // 与 10 秒；测试里换掉
+  updateCheck?: UpdateCheckOptions
 }
 
 export interface ConsolePrincipal {

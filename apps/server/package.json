@@ -11,7 +11,7 @@
     "start": "node dist/index.mjs",
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
-    "build": "tsdown"
+    "build": "tsdown --config-loader tsx"
   },
   "dependencies": {
     "@hono/node-server": "2.1.5",

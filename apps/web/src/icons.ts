@@ -84,6 +84,7 @@ export const icons = {
   spaces: 'i-lucide-boxes',
   members: 'i-lucide-users',
   general: 'i-lucide-info',
+  system: 'i-lucide-activity',
   // 高级设置：召回与启动加载、提示词与默认值
   tuning: 'i-lucide-sliders-horizontal',
   prompts: 'i-lucide-file-pen-line',
