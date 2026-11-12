@@ -8,7 +8,7 @@ import {
 import { and, desc, eq, inArray, ne, sql } from 'drizzle-orm'
 
 import type { Access } from '../access/access'
-import type { Tx } from '../db/client'
+import { nowOf, type Tx } from '../db/client'
 import { memories, memoryEmbeddings, memoryGlossary } from '../db/schema'
 import type { Embedder } from '../embedding/provider'
 import { readableConditions } from '../memory/filter'
@@ -146,10 +146,12 @@ export async function scoreRecall(
 ): Promise<ScoredCandidate[]> {
   const query = normalizeQuery(rawQuery)
   if (!query) return []
-  // 召回只面向有坐标的记忆（目录里的四类）；来自对话的记忆另有展示方式，不能在各路里占掉名额
+  // 召回只面向有坐标的记忆（目录里的四类）；来自对话的记忆另有展示方式，不能在各路里占掉名额。
+  // 各路都按事务开头取的数据库时间判断有效期，召回调试说明为什么读不到时也用它
+  const now = nowOf(tx)
   const readable = and(
-    readableConditions(access, { personaIds: options.personaIds }),
-    personaOverride(access, options),
+    readableConditions(access, { personaIds: options.personaIds, now }),
+    personaOverride(access, options, now),
     eq(memories.form, 'curated'),
     options.trustedOnly ? ne(memories.provenance, 'untrusted') : undefined,
     options.layers ? inArray(memories.layer, options.layers) : undefined,

@@ -23,10 +23,27 @@ import {
 
 import type { Access, MemoryFacts, ReadOptions } from '../access/access'
 import { sensitivityRank } from '../access/access'
+import { currentMoment } from '../db/moment'
 import { memories } from '../db/schema'
 
-// 还没有失效或过期，按数据库的时间
-export const STILL_VALID = sql`((${memories.validTo} is null or ${memories.validTo} > now()) and (${memories.expiresAt} is null or ${memories.expiresAt} > now()))`
+// 判断有效期用的「现在」，只用数据库的钟：给了 at 就是它；不给时是所在的 withSpace 事务开头取的数据库时间
+// （见 db/moment.ts），同一个事务里几条语句、SQL 条件与 JS 判断（canRead 等）都拿它比；不在事务里构造的
+// （模块级的常量）才是这条语句开始的时刻（statement_timestamp()）。写成显式转换的参数：快照里的时间是表达式，
+// 不像列那样能替 Date 选好参数类型
+export function momentSql(at?: Date): SQL {
+  const now = at ?? currentMoment()
+  return now ? sql`${now.toISOString()}::timestamptz` : sql`statement_timestamp()`
+}
+
+// 在 at 这一刻还没有失效或过期（不给 at 时见 momentSql）
+export function stillValid(at?: Date): SQL {
+  const now = momentSql(at)
+  return sql`((${memories.validTo} is null or ${memories.validTo} > ${now}) and (${memories.expiresAt} is null or ${memories.expiresAt} > ${now}))`
+}
+
+// 现在还没有失效或过期，按这条语句开始时数据库的时间。模块级的常量，构造时不在事务里，
+// 只给单独一条、不和 JS 一起判断的条件用（向量、整理的候选、凭据的引用）
+export const STILL_VALID = stillValid()
 
 // 启动加载只收受信来源写下的、记下的四类（理由见 recall/boot.ts）。JS 版的判断在 contracts，管理界面也要用
 export { BOOT_LAYERS, bootEligible }
@@ -125,8 +142,8 @@ export function readableConditions(
   options: ReadOptions,
   cols: MemoryColumns = MEMORY_COLUMNS,
 ): SQL {
-  // 当前时间写成显式转换的参数：快照里的时间是表达式，不像列那样能替 Date 选好参数类型
-  const now = sql`${(options.now ?? new Date()).toISOString()}::timestamptz`
+  // 有效期按数据库的时间：和 canRead 一起判断时两边传同一个 options.now（见 momentSql）
+  const now = momentSql(options.now)
   const conditions: (SQL | undefined)[] = options.management
     ? []
     : [
@@ -159,11 +176,12 @@ export function readableConditions(
   return and(...conditions)!
 }
 
-// 待审队列里的：不可信来源写下的联系人事实与会话摘要中，现在有效、读得到的。列表与处理都按它
-export function pendingReview(access: Access, personaIds: readonly string[]): SQL {
+// 待审队列里的：不可信来源写下的联系人事实与会话摘要中，现在有效、读得到的。列表与处理都按它。
+// 处理时传事务开头的时刻，和之后写下删除时间的那一刻相同
+export function pendingReview(access: Access, personaIds: readonly string[], now?: Date): SQL {
   return and(
     eq(memories.provenance, 'untrusted'),
     inArray(memories.layer, REVIEW_LAYERS),
-    readableConditions(access, { personaIds }),
+    readableConditions(access, { personaIds, ...(now ? { now } : {}) }),
   )!
 }

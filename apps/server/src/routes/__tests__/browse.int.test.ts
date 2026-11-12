@@ -13,7 +13,7 @@ import {
 import { and, eq, inArray, sql } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/postgres-js'
 import postgres from 'postgres'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../../app'
 import { withSpace, type Database } from '../../db/client'
@@ -236,6 +236,44 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
     ])
   })
 
+  // 更新时间只按数据库的钟写：新建、修改与移动都是。只假造应用的 Date，冻结在快或慢两分钟的那一刻
+  for (const [name, skew] of [
+    ['快', 120_000],
+    ['慢', -120_000],
+  ] as const) {
+    it(`应用的时钟比数据库${name}两分钟：按更新时间排序就是按改动的先后`, async () => {
+      for (const path of ['a', 'b', 'c']) {
+        await create(ws.cookie, { uri: `user://notes/${path}`, content: path })
+      }
+      vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + skew })
+      try {
+        const patched = await app.request(
+          `${space()}/memories`,
+          jsonRequest('PATCH', { uri: 'user://notes/a', content: '改过' }, { cookie: ws.cookie }),
+        )
+        expect(patched.status).toBe(200)
+        const moved = await app.request(
+          `${space()}/memories/move`,
+          jsonRequest(
+            'POST',
+            { from: 'user://notes/b', to: 'user://notes/moved' },
+            { cookie: ws.cookie },
+          ),
+        )
+        expect(moved.status).toBe(200)
+        await create(ws.cookie, { uri: 'user://notes/d', content: '最后新建的' })
+      } finally {
+        vi.useRealTimers()
+      }
+      expect(uris(await list(ws.cookie, 'sort=updated'))).toEqual([
+        'user://notes/d',
+        'user://notes/moved',
+        'user://notes/a',
+        'user://notes/c',
+      ])
+    })
+  }
+
   it('路径很长的记忆排在一页末尾时，游标照样能翻到下一页', async () => {
     // 坐标允许的最长路径：开头之后 16 段，每段 64 个字符
     const long = Array.from({ length: 16 }, (_, i) => String(i % 10).repeat(64)).join('/')
@@ -419,7 +457,7 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
     await withSpace(database.db, ws.spaceId, (tx) =>
       tx
         .update(memories)
-        .set({ validTo: new Date(Date.now() - 60_000) })
+        .set({ validTo: sql`statement_timestamp() - interval '1 minute'` })
         .where(eq(memories.id, lapsed.id)),
     )
     await create(editor.cookie, { uri: 'user://home/diary', content: '日记' })
@@ -487,7 +525,7 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
     await withSpace(database.db, ws.spaceId, (tx) =>
       tx
         .update(memories)
-        .set({ validTo: new Date(Date.now() - 60_000) })
+        .set({ validTo: sql`statement_timestamp() - interval '1 minute'` })
         .where(eq(memories.id, lapsed.id)),
     )
 

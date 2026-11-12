@@ -36,7 +36,7 @@ import type { Jobs } from '../../jobs/queue'
 import { BOOT_ELIGIBLE } from '../../memory/filter'
 import { MemoryService } from '../../memory/service'
 import { consoleAccess } from '../../access/access'
-import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
+import { databaseNow, openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { addMember, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 import {
   exportLore,
@@ -762,7 +762,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
         withSpace(database.db, ws.spaceId, (tx) =>
           tx
             .update(memories)
-            .set({ validTo: new Date(Date.now() - 60_000) })
+            .set({ validTo: sql`statement_timestamp() - interval '1 minute'` })
             .where(eq(memories.id, id)),
         )
 
@@ -871,17 +871,26 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
           expect(await matchesWrite('core://agent/bot/tools')).toBe(true)
         })
 
-        it('应用的时钟比数据库快：按应用的时间已经过期的，写入时 claimUri 先释放，计划照着判断', async () => {
-          // 有效到至少要晚一分钟：一分半之后到期，按数据库的时间还有效，按快了两分半的应用时间已经过期
-          const soon = new Date(Date.now() + 90_000).toISOString()
-          await occupy({ uri: 'core://skew', content: '快到期的', validTo: soon })
-          vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 150_000 })
-          try {
-            expect(await matchesWrite('core://skew')).toBe(false)
-          } finally {
-            vi.useRealTimers()
-          }
-        })
+        // 只假造应用的 Date：claimUri 与计划都按事务开头取的数据库时间判断，和应用的钟差多少都一样
+        for (const [name, skew] of [
+          ['快', 150_000],
+          ['慢', -150_000],
+        ] as const) {
+          it(`应用的时钟比数据库${name}两分半：按数据库的时间判断占着的那条过没过期，计划照着判断`, async () => {
+            // 按数据库的时间一分半之后才到期：还有效，挡着
+            const soon = new Date((await databaseNow(database.db)).getTime() + 90_000).toISOString()
+            await occupy({ uri: 'core://skew', content: '快到期的', validTo: soon })
+            // 按数据库的时间一分钟之前已经过期：写入时先释放
+            await expire((await occupy({ uri: 'core://gone', content: '过期的' })).id)
+            vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + skew })
+            try {
+              expect(await matchesWrite('core://skew')).toBe(true)
+              expect(await matchesWrite('core://gone')).toBe(false)
+            } finally {
+              vi.useRealTimers()
+            }
+          })
+        }
       })
 
       it('一条旧记录对应几个被跳过的目标时，原因只写一句', async () => {
@@ -986,7 +995,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
         await withSpace(database.db, ws.spaceId, (tx) =>
           tx
             .update(memories)
-            .set({ validTo: new Date(Date.now() - 60_000) })
+            .set({ validTo: sql`statement_timestamp() - interval '1 minute'` })
             .where(eq(memories.id, lapsed.id)),
         )
 

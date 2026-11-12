@@ -155,9 +155,8 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
       const system = calls[0]![0]!.content
       expect(system).toBe(`${SYSTEM}\n实例的抽取规则\n空间的抽取规则`)
       const episode = (await extracted()).find((r) => r.layer === 'episode')!
-      const days = (episode.expiresAt!.getTime() - Date.now()) / 86_400_000
-      expect(days).toBeGreaterThan(2)
-      expect(days).toBeLessThanOrEqual(3)
+      // 到期时间按写入时数据库的时间算，和创建时间正好差这么多天
+      expect(episode.expiresAt!.getTime() - episode.createdAt.getTime()).toBe(3 * 86_400_000)
     } finally {
       await database.db.delete(settings).where(eq(settings.key, 'advanced'))
     }
@@ -210,9 +209,9 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
       })
     }
     const episode = rows.find((r) => r.layer === 'episode')!
-    const days = (episode.expiresAt!.getTime() - Date.now()) / 86_400_000
-    expect(days).toBeGreaterThan(EPISODE_TTL_DAYS - 1)
-    expect(days).toBeLessThanOrEqual(EPISODE_TTL_DAYS)
+    expect(episode.expiresAt!.getTime() - episode.createdAt.getTime()).toBe(
+      EPISODE_TTL_DAYS * 86_400_000,
+    )
 
     expect(await runs()).toMatchObject([
       {

@@ -17,6 +17,7 @@ import {
   pgCauseCode,
   pgConstraint,
   pgErrorCode,
+  nowOf,
   pgMessage,
   withSpace,
   type Db,
@@ -42,6 +43,7 @@ import {
 import { MAX_PERSONA_DEPTH } from '../memory/personas'
 import {
   MemoryError,
+  notAfter,
   SNAPSHOT_COLUMNS,
   sealMemoryContent,
   snapshot as memorySnapshot,
@@ -72,7 +74,8 @@ import {
 // （本人的记忆会进导入人的 agent 的启动加载，所以导入之前先用 inspectSpaceImport 告诉他文件是谁导出的、有多少）。
 // secret 记忆与托管的凭据值用这个实例的主密钥重新加密（新的数据密钥，aad 绑新的 id）；
 // 没配主密钥而文件里有这两样时拒绝导入，不悄悄丢掉。
-// 记忆按导出时的样子写回（来源、来源作用域、有效期、时间都不变；不可信来源的仍是不可信，照样进待审），
+// 记忆按导出时的样子写回（来源、来源作用域、有效到与到期时间都不变；不可信来源的仍是不可信，照样进待审；
+// 建立、生效、更新时间不晚于导入事务开头取的数据库时间，晚于它的夹到它，原来的记在导入事件里，见 notAfter），
 // 版本从 1 开始，每条记一条 import 事件；写入时已经通过了导出实例的检查，这里只核对影响数据库约束与读权限的部分
 
 // 记录带上它在正文里是第几行，出错时说得出是哪一行
@@ -416,6 +419,19 @@ function* chunks<T>(items: T[], size = BATCH): Generator<T[]> {
 }
 
 const time = (value: string) => new Date(value)
+
+// 被夹到现在的那几个时间原来是多少，没夹的不记（见 writeSpace）
+function sourceTimes(
+  m: { validFrom: string; createdAt: string; updatedAt: string },
+  now: Date,
+): Record<string, string> {
+  const later = (value: string) => time(value).getTime() > now.getTime()
+  return {
+    ...(later(m.validFrom) ? { sourceValidFrom: m.validFrom } : {}),
+    ...(later(m.createdAt) ? { sourceCreatedAt: m.createdAt } : {}),
+    ...(later(m.updatedAt) ? { sourceUpdatedAt: m.updatedAt } : {}),
+  }
+}
 const optionalTime = (value: string | null) => (value === null ? null : new Date(value))
 
 // 正在写哪一步：哪几行的什么，写的是不是文件里来的值（服务端自己派生的不算）
@@ -654,6 +670,9 @@ async function writeSpace(
     if (!orphans.has(id)) orphans.set(id, randomUUID())
     return `${kind}:${orphans.get(id)!}`
   }
+  // 记忆的建立、生效与更新时间不晚于这一刻（事务开头取的数据库时间）：导出那边的钟可能快，原因见 notAfter。
+  // 原来的时间记在导入事件里
+  const now = nowOf(tx)
   for (const batch of chunks(x.memories)) {
     step('记忆', batch)
     const prepared = batch.map((m) => {
@@ -684,11 +703,11 @@ async function writeSpace(
             : { content: m.content, ciphertext: null, wrappedKey: null, keyId: null }),
           priority: m.priority,
           disclosure: m.disclosure,
-          validFrom: time(m.validFrom),
+          validFrom: notAfter(time(m.validFrom), now),
           validTo: optionalTime(m.validTo),
           expiresAt: optionalTime(m.expiresAt),
-          createdAt: time(m.createdAt),
-          updatedAt: time(m.updatedAt),
+          createdAt: notAfter(time(m.createdAt), now),
+          updatedAt: notAfter(time(m.updatedAt), now),
         },
       }
     })
@@ -730,7 +749,11 @@ async function writeSpace(
         provenance: 'system' as const,
         before: null,
         after: memorySnapshot(written.get(p.id)!, p.glossary),
-        context: { ...context, previousVersions: p.record.version - 1 },
+        context: {
+          ...context,
+          previousVersions: p.record.version - 1,
+          ...sourceTimes(p.record, now),
+        },
       })),
     )
   }

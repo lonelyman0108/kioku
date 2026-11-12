@@ -109,7 +109,8 @@ describe.skipIf(!testDatabaseUrl)('会话', () => {
     })
   })
 
-  const inSpace = <T>(fn: (tx: Tx) => Promise<T>) => withSpace(database.db, ws.spaceId, fn)
+  const inSpace = <T>(fn: (tx: Tx, now: Date) => Promise<T>) =>
+    withSpace(database.db, ws.spaceId, fn)
   const event = async (body: object, key: string) => {
     const res = await app.request('/v1/lifecycle/event', jsonRequest('POST', body, bearer(key)))
     expect(res.status, await res.clone().text()).toBe(200)
@@ -435,16 +436,18 @@ describe.skipIf(!testDatabaseUrl)('会话', () => {
     }
 
     // 读权限本身：只有所属成员不带会话上下文的 Key 读得到；本人私聊开启后读本人的内部及以下，这段私密的照样读不到
-    const [row] = await inSpace((tx) =>
-      tx.select().from(memories).where(eq(memories.content, '第 1 段摘要')),
-    )
+    // 有效期按数据库的时间判断：读这一行的事务开头取的时刻
+    const { row, now } = await inSpace(async (tx, now) => {
+      const [row] = await tx.select().from(memories).where(eq(memories.content, '第 1 段摘要'))
+      return { row, now }
+    })
     const subjects = (await get<SubjectList>('/subjects')).items
     const person = subjects.find((s) => s.displayName === '小红')!
     const room = subjects.find((s) => s.displayName === '读书会')!
     const readsWith = async (keyId: string, context: SessionContext) => {
       const principal = (await principalForKeyId(database.db, keyId))!
       const access = accessForKey(principal, { context, personaId: null, subjects: [] })
-      return canRead(access, row!, { personaIds: [] })
+      return canRead(access, row!, { personaIds: [], now })
     }
     expect(await readsWith(ccKey.id, {})).toBe(true)
     expect(await readsWith(bobKey.id, {})).toBe(false)

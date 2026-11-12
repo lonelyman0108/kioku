@@ -66,30 +66,39 @@ export interface PersonaSelection {
   inheritance?: boolean
 }
 
-export function personaOverride(access: Access, selection: PersonaSelection): SQL | undefined {
+// now 是判断「读得到」时有效期用的时刻，和外层查询传同一个（见 momentSql）
+export function personaOverride(
+  access: Access,
+  selection: PersonaSelection,
+  now?: Date,
+): SQL | undefined {
   const chain = selection.personaIds
   if (!selection.inheritance || chain.length < 2) return undefined
   return or(
     ne(memories.layer, 'persona'),
     // 别名表在 sql 模板里只渲染出别名本身，FROM 要自己写全
-    sql`not exists (select 1 from ${memories} as ${sql.identifier(NEARER)} where ${overrides(access, chain)})`,
+    sql`not exists (select 1 from ${memories} as ${sql.identifier(NEARER)} where ${overrides(access, chain, now)})`,
   )
 }
 
 // 覆盖这一行的节点的 URI（继承链上最近的人格的那条），没被覆盖时为 null。人格详情用，规则与 personaOverride 相同
-export function overriddenBy(access: Access, chain: readonly string[]): SQL<string | null> {
+export function overriddenBy(
+  access: Access,
+  chain: readonly string[],
+  now?: Date,
+): SQL<string | null> {
   return sql<string | null>`(select ${nearer.domain} || '://' || ${nearer.path}
-    from ${memories} as ${sql.identifier(NEARER)} where ${overrides(access, chain)}
+    from ${memories} as ${sql.identifier(NEARER)} where ${overrides(access, chain, now)}
     order by array_position(${chainArray(chain)}, ${nearer.personaId}) limit 1)`
 }
 
 // nearer 覆盖 memories 的这一行：同一相对路径、继承链上更近的人格、这次请求读得到
-function overrides(access: Access, chain: readonly string[]): SQL {
+function overrides(access: Access, chain: readonly string[], now?: Date): SQL {
   const ids = chainArray(chain)
   const relative = (path: SQLWrapper) => sql`regexp_replace(${path}, '^[^/]+', '')`
   return and(
     eq(nearer.layer, 'persona'),
-    readableConditions(access, { personaIds: chain }, nearer),
+    readableConditions(access, { personaIds: chain, ...(now ? { now } : {}) }, nearer),
     sql`array_position(${ids}, ${nearer.personaId}) < array_position(${ids}, ${memories.personaId})`,
     sql`${relative(nearer.path)} = ${relative(memories.path)}`,
   )!

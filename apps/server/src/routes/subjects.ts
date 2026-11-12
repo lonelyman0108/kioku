@@ -40,7 +40,7 @@ import {
   mergeSubjects,
 } from '../access/subjects'
 import { isInstanceAdmin } from '../auth/middleware'
-import { withSpace, type Tx } from '../db/client'
+import { nowOf, withSpace, type Tx } from '../db/client'
 import {
   decodeTimeCursor,
   encodeTimeCursor,
@@ -63,7 +63,7 @@ import { plainRunError } from '../extraction/extract'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { consoleMemberFor, consoleRoleFor } from '../memory/context'
-import { readableConditions } from '../memory/filter'
+import { momentSql, readableConditions } from '../memory/filter'
 import { scopeNames } from '../memory/scopes'
 
 const SpaceParams = z.object({ spaceId: z.uuid() })
@@ -199,20 +199,22 @@ const reactivateFact = createRoute({
   },
 })
 
-// 联系人的事实与会话摘要不分人格，读权限里的人格限制用不上
-const readable = (access: Access) => readableConditions(access, { personaIds: [] })
+// 联系人的事实与会话摘要不分人格，读权限里的人格限制用不上。有效期按 now 判断（事务开头取的数据库时间），
+// 同一页上现在有效的与被推翻的拿同一个时刻比，一条事实不会两边都在或都不在
+const readable = (access: Access, now?: Date) =>
+  readableConditions(access, { personaIds: [], ...(now ? { now } : {}) })
 
 // 现在有效、查看者读得到的抽取事实
-const factsOf = (access: Access) =>
-  and(eq(memories.form, 'extracted'), eq(memories.layer, 'subject'), readable(access))!
+const factsOf = (access: Access, now?: Date) =>
+  and(eq(memories.form, 'extracted'), eq(memories.layer, 'subject'), readable(access, now))!
 
 // 被推翻的事实：推翻时设了 valid_to、还没删除、按管理读取（不看有效期）看得到的
-const supersededOf = (access: Access) =>
+const supersededOf = (access: Access, now?: Date) =>
   and(
     eq(memories.form, 'extracted'),
     eq(memories.layer, 'subject'),
     isNull(memories.deletedAt),
-    lte(memories.validTo, sql`now()`),
+    lte(memories.validTo, momentSql(now)),
     readableConditions(access, { personaIds: [], management: true }),
   )!
 
@@ -279,7 +281,7 @@ async function subjectInfos(
       updatedAt: subjects.updatedAt,
       createdMicros: sql<string>`${microsOf(subjects.createdAt)}::text`,
       factCount: sql<number>`(select count(*)::int from ${memories}
-        where ${memories.subjectId} = ${subjects.id} and ${factsOf(access)})`,
+        where ${memories.subjectId} = ${subjects.id} and ${factsOf(access, nowOf(tx))})`,
     })
     .from(subjects)
     .leftJoin(accounts, eq(accounts.id, subjects.accountId))
@@ -380,13 +382,13 @@ export function subjectRoutes(deps: Deps) {
           tx
             .select()
             .from(memories)
-            .where(and(eq(memories.subjectId, subjectId), factsOf(access)))
+            .where(and(eq(memories.subjectId, subjectId), factsOf(access, nowOf(tx))))
             .orderBy(desc(memories.updatedAt), desc(memories.id))
             .limit(DETAIL_FACTS),
           tx
             .select()
             .from(memories)
-            .where(and(eq(memories.subjectId, subjectId), supersededOf(access)))
+            .where(and(eq(memories.subjectId, subjectId), supersededOf(access, nowOf(tx))))
             .orderBy(desc(memories.validTo), desc(memories.id))
             .limit(DETAIL_SUPERSEDED),
           participatedConversations(tx, access, subjectId),

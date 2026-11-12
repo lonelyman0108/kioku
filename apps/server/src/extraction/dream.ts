@@ -26,7 +26,7 @@ import {
   subjects,
 } from '../db/schema'
 import { loadEmbeddingModels } from '../embedding/settings'
-import { STILL_VALID } from '../memory/filter'
+import { stillValid } from '../memory/filter'
 import {
   DREAM_SCOPE_KEY,
   dreamScopeCondition,
@@ -103,17 +103,18 @@ type MemoryRow = typeof memories.$inferSelect
 
 // 能提建议的记忆：没删除、现在有效、不是 secret（Dream 读不到 secret，连 URI 都不给模型看），并且至少有一种建议用得上：
 // 记下的记忆（合并、过时）；联系人的事实（合并、提炼、过时、审核）；不可信来源写下的联系人事实与会话摘要（审核）。
-// 归某个成员的还要这个成员允许，见 candidate
-const CANDIDATE = and(
-  isNull(memories.deletedAt),
-  STILL_VALID,
-  ne(memories.sensitivity, 'secret'),
-  or(
-    and(eq(memories.form, 'curated'), notInArray(memories.layer, [...TALK_LAYERS])),
-    and(eq(memories.form, 'extracted'), eq(memories.layer, 'subject')),
-    and(eq(memories.provenance, 'untrusted'), inArray(memories.layer, REVIEW_LAYERS)),
-  ),
-)!
+// 归某个成员的还要这个成员允许，见 candidate。有效期按所在事务开头取的数据库时间（见 momentSql），用到时再构造
+const candidateBase = () =>
+  and(
+    isNull(memories.deletedAt),
+    stillValid(),
+    ne(memories.sensitivity, 'secret'),
+    or(
+      and(eq(memories.form, 'curated'), notInArray(memories.layer, [...TALK_LAYERS])),
+      and(eq(memories.form, 'extracted'), eq(memories.layer, 'subject')),
+      and(eq(memories.provenance, 'untrusted'), inArray(memories.layer, REVIEW_LAYERS)),
+    ),
+  )!
 
 // 让 Dream 整理自己本人记忆的成员：现在还是成员，开关（space_members.dream_private，默认开）开着。
 // 离开了空间的成员看不到建议，整理了也白花 token；关掉了的不发给模型，也就不记整理标记，再打开时接着看。
@@ -144,10 +145,10 @@ async function lockedSwitch(tx: Tx, spaceId: string, owner: string): Promise<boo
 }
 
 // 能提建议的记忆里，归某个成员的（本人）只收名单里的成员的（名单见 allowedOwners）。不带会话上下文的会话摘要也归成员，
-// 但它来源受信，CANDIDATE 本来就不收，也没有范围（见 memory/scopes.ts 的 DREAM_SCOPE_KEY）
+// 但它来源受信，candidateBase 本来就不收，也没有范围（见 memory/scopes.ts 的 DREAM_SCOPE_KEY）
 const candidate = (owners: readonly string[]) =>
   and(
-    CANDIDATE,
+    candidateBase(),
     sql`(${memories.ownerAccountId} is null or ${memories.ownerAccountId} = any(${sql.param(owners)}::uuid[]))`,
   )!
 

@@ -15,6 +15,8 @@ import {
   type Sensitivity,
 } from '@kioku/contracts'
 
+import { currentMoment } from '../db/moment'
+
 // 有效权限 = API Key 的上限 ∩ 会话上下文规则 ∩ 应用配置。
 // 会话上下文由插件上报，不可信，所以每条规则都只能在 Key 上限之内收紧，不能放宽。
 
@@ -270,6 +272,8 @@ export interface ReadOptions {
   // 管理读取：管理界面看历史、恢复时用。不看有效期与删除状态（历史就是给过期、被推翻和删掉的版本看的），
   // 按显式读取算，人格也不限（管理界面本来看得到全部人格，删掉的人格的旧快照照样看得到）
   management?: boolean
+  // 判断有效期的「现在」，只用数据库的钟：事务开头取的时刻（nowOf）。不给时用所在的 withSpace 事务开头的时刻
+  // （见 db/moment.ts），和同一个事务里的 SQL（readableConditions）一样；不在事务里又遇到有有效期的记忆时抛错
   now?: Date
 }
 
@@ -291,10 +295,14 @@ export function readDenial(
   memory: MemoryFacts,
   options: ReadOptions,
 ): Exclude<ReadDenial, 'override'> | null {
-  const now = options.now ?? new Date()
   if (!options.management) {
     if (memory.deletedAt) return 'deleted'
-    if (lapsed(memory, now)) return 'expired'
+    if (memory.validTo !== null || memory.expiresAt !== null) {
+      // 不用应用的钟顶替：两个钟会差几十毫秒，和 SQL 一侧的判断就对不上了
+      const now = options.now ?? currentMoment()
+      if (!now) throw new Error('判断有效期要传入数据库的时刻（ReadOptions.now）')
+      if (lapsed(memory, now)) return 'expired'
+    }
   }
   if (!access.readLayers.has(memory.layer)) return 'layer'
 

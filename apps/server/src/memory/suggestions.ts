@@ -54,11 +54,12 @@ interface Involved {
   subjectKind: (typeof subjects.$inferSelect)['kind'] | null
 }
 
-// 查看者看得到、还没处理、还作数的建议：列表与总数都按它
-function openSuggestions(access: Access) {
+// 查看者看得到、还没处理、还作数的建议：列表与总数都按它。在事务里拼：还作不作数按所在事务开头取的时刻判断
+function openSuggestions(access: Access, now?: Date) {
   return and(
     eq(dreamSuggestions.status, 'pending'),
     suggestionCurrent(dreamSuggestions.memoryIds, dreamSuggestions.versions, {
+      ...(now ? { at: now } : {}),
       extra: readableConditions(access, { personaIds: [], management: true }),
     }),
   )
@@ -83,8 +84,8 @@ export async function listSuggestions(
   const after = decodeTimeCursor(query.cursor, UUID)
   if (after === 'invalid') throw new MemoryError(400, INVALID_CURSOR)
   const access = service.access
-  const open = openSuggestions(access)
-  return withSpace(db, spaceId, async (tx) => {
+  return withSpace(db, spaceId, async (tx, now) => {
+    const open = openSuggestions(access, now)
     // 这一页的建议、它们涉及的记忆与总数在同一条查询里取：哪些建议还作数、列出来的记忆是哪一版、总数，
     // 都按同一个快照与同一个时钟（数据库的）判断，列出的与总数对得上，取到的记忆也就是判断时的那一版
     const page = tx.$with('page').as(
