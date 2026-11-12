@@ -8,6 +8,7 @@ import { runMigrations } from '../db/migrate'
 import { ensureConversation } from '../access/conversations'
 import { accounts, apps, settings, subjects } from '../db/schema'
 import { settleRecallEvents } from '../recall/events'
+import { settleUpdateChecks } from '../settings/updateCheck'
 import { testWorkers, workerDatabaseUrl } from './workers'
 
 // 集成测试共用：需要真实 PostgreSQL。本地用 docker-compose.dev.yml 起库后设置 KIOKU_TEST_DATABASE_URL；
@@ -31,7 +32,7 @@ export async function openTestDatabase(): Promise<Database> {
 
 // 清空所有数据；内容表都挂在 spaces 或 accounts 下，级联即可。先等上一个用例还没写完的召回事件
 export async function resetDatabase(database: Database): Promise<void> {
-  await settleRecallEvents()
+  await Promise.all([settleRecallEvents(), settleUpdateChecks()])
   await database.db.execute(sql`truncate spaces, accounts, login_attempts cascade`)
 }
 

@@ -1,5 +1,7 @@
 import { execFileSync } from 'node:child_process'
 
+import { COMMIT_SHA } from '@kioku/contracts'
+
 // 构建信息：版本、提交、构建时间。打包时由 tsdown.config.ts 算好写进产物（见 version.ts），运行时的环境变量改不了它们
 export interface BuildInfo {
   version: string
@@ -16,7 +18,6 @@ export interface GitInfo {
 
 // 版本里只收这些字符：它会进响应、诊断信息与 MCP 的握手
 const VERSION_TEXT = /^[\w.+-]{1,64}$/
-const COMMIT = /^[0-9a-f]{7,40}$/i
 
 const versionOf = (value: string | undefined) => {
   const text = value?.trim()
@@ -24,7 +25,7 @@ const versionOf = (value: string | undefined) => {
 }
 const commitOf = (value: string | undefined) => {
   const text = value?.trim()
-  return text && COMMIT.test(text) ? text.toLowerCase() : null
+  return text && COMMIT_SHA.test(text) ? text.toLowerCase() : null
 }
 const timeOf = (value: string | undefined) => {
   const time = value?.trim() ? new Date(value.trim()) : null

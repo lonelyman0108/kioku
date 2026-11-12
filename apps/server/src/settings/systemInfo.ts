@@ -2,7 +2,21 @@ import { existsSync, readFileSync } from 'node:fs'
 import { arch, platform, release } from 'node:os'
 import { join } from 'node:path'
 
-import type { DatabaseInfo, SystemInfo } from '@kioku/contracts'
+import {
+  CONTAINER_NAMES,
+  configuredText,
+  cookieText,
+  extensionText,
+  jobsText,
+  masterKeyText,
+  systemText,
+  trustedProxiesText,
+  uptimeText,
+  WEB_UI_NAMES,
+  type ContainerState,
+  type DatabaseInfo,
+  type SystemInfo,
+} from '@kioku/contracts'
 import { sql } from 'drizzle-orm'
 
 import journal from '../../migrations/meta/_journal.json'
@@ -13,23 +27,48 @@ import { embeddingSettingsView } from '../embedding/settings'
 import { extractionSettingsView } from '../extraction/settings'
 import type { Deps } from '../http/env'
 import { BUILD } from '../version'
-import { updateCheckView } from './updateCheck'
+import { loadUpdateStatus, updateCheckView } from './updateCheck'
 
 // 系统信息（设置 › 实例 › 系统信息）：排查问题、贴 issue 时要的构建、运行环境、数据库与配置
 
-// 在不在容器里：Docker 留下 /.dockerenv，Podman 留下 /run/.containerenv，别的看 1 号进程的 cgroup。只看一次
-let inContainer: boolean | undefined
-function detectContainer(): boolean {
-  if (inContainer !== undefined) return inContainer
-  if (existsSync('/.dockerenv') || existsSync('/run/.containerenv')) return (inContainer = true)
+// 服务启动的时间：模块加载时记一次
+const STARTED_AT = new Date()
+
+const readText = (path: string) => {
   try {
-    const cgroup = readFileSync('/proc/1/cgroup', 'utf8')
-    inContainer = /docker|kubepods|containerd|libpod|lxc/.test(cgroup)
+    return readFileSync(path, 'utf8')
   } catch {
-    inContainer = false
+    return null
   }
-  return inContainer
 }
+
+// 在不在容器里，按能看到的痕迹判断，一条都对不上时说判断不了，不说「否」：
+// Docker 留下 /.dockerenv，Podman 留下 /run/.containerenv，Kubernetes 给每个容器设 KUBERNETES_SERVICE_HOST；
+// 旧版 cgroup 下 1 号进程的 cgroup 路径带着容器运行时的名字（统一层级的 cgroup 下只有 0::/，看不出来）；
+// 根目录挂的是 overlay 的多半是容器。1 号进程是 systemd 或 init 时是宿主机。只看一次
+let container: ContainerState | undefined
+export function detectContainer(
+  probe: {
+    exists: (path: string) => boolean
+    read: (path: string) => string | null
+    env: NodeJS.ProcessEnv
+    platform: string
+  } = { exists: existsSync, read: readText, env: process.env, platform: platform() },
+): ContainerState {
+  if (probe.platform !== 'linux') return 'no'
+  if (probe.exists('/.dockerenv') || probe.exists('/run/.containerenv')) return 'yes'
+  if (probe.env.KUBERNETES_SERVICE_HOST) return 'yes'
+  if (/docker|kubepods|containerd|libpod|lxc/.test(probe.read('/proc/1/cgroup') ?? '')) return 'yes'
+  // mountinfo 每行第 5 项是挂载点，「 - 」之后第一项是文件系统类型
+  const root = (probe.read('/proc/self/mountinfo') ?? '')
+    .split('\n')
+    .find((line) => line.split(' ')[4] === '/')
+  if (root && /\s-\soverlay\s/.test(root)) return 'yes'
+  const init = (probe.read('/proc/1/sched') ?? '').split('\n')[0] ?? ''
+  if (/^(systemd|init) \(/.test(init)) return 'no'
+  return 'unknown'
+}
+const containerState = () => (container ??= detectContainer())
 
 // 迁移的名字：drizzle 只记哈希与时间戳，按打包进来的迁移清单对回名字。对不上（库来自更新的版本）时给时间戳
 const MIGRATION_TAGS = new Map(journal.entries.map((e) => [e.when, e.tag]))
@@ -80,13 +119,13 @@ function webUiState(webDir: string | undefined): SystemInfo['config']['webUi'] {
 }
 
 export async function systemInfo(deps: Deps, now: Date = new Date()): Promise<SystemInfo> {
-  const [database, embedding, extraction, updates] = await Promise.all([
+  const [database, embedding, extraction, update] = await Promise.all([
     databaseInfo(deps.db),
     embeddingSettingsView(deps.db),
     extractionSettingsView(deps.db),
-    updateCheckView(deps.db, deps.updateCheck?.current),
+    loadUpdateStatus(deps.db),
   ])
-  const uptimeSeconds = Math.floor(process.uptime())
+  const uptimeSeconds = Math.max(0, Math.floor((now.getTime() - STARTED_AT.getTime()) / 1000))
   const ring = deps.masterKey ? keyringOf(deps.masterKey) : null
   const info: Omit<SystemInfo, 'diagnostics'> = {
     build: BUILD,
@@ -95,8 +134,8 @@ export async function systemInfo(deps: Deps, now: Date = new Date()): Promise<Sy
       platform: platform(),
       arch: arch(),
       osRelease: release(),
-      container: detectContainer(),
-      startedAt: new Date(now.getTime() - uptimeSeconds * 1000).toISOString(),
+      container: containerState(),
+      startedAt: STARTED_AT.toISOString(),
       uptimeSeconds,
     },
     database,
@@ -113,54 +152,60 @@ export async function systemInfo(deps: Deps, now: Date = new Date()): Promise<Sy
       embedding: embedding.active !== null,
       extraction: extraction.configured,
     },
-    updates,
+    updates: updateCheckView(update, deps.updateCheck?.current),
   }
   return { ...info, diagnostics: diagnosticsText(info) }
 }
 
-// 已运行多久：天、小时、分钟，最多两级
-export function durationText(seconds: number): string {
-  const minutes = Math.floor(seconds / 60)
-  const hours = Math.floor(minutes / 60)
-  const days = Math.floor(hours / 24)
-  if (days) return hours % 24 ? `${days} 天 ${hours % 24} 小时` : `${days} 天`
-  if (hours) return minutes % 60 ? `${hours} 小时 ${minutes % 60} 分钟` : `${hours} 小时`
-  return minutes ? `${minutes} 分钟` : '不到 1 分钟'
-}
-
-const yesNo = (value: boolean, yes: string, no: string) => (value ? yes : no)
-const WEB_UI_TEXT = { served: '已找到构建产物', missing: '未找到构建产物', off: '未配置目录' }
-
-// 贴 issue 用的纯文本。只有排查要用的版本与开关，不放库名、主机与主密钥标识这类地址与标识
+// 贴 issue 用的纯文本，分组与说法和页面上的一样（都取 contracts 的 system.ts）。
+// 只有排查要用的版本与开关，不放库名、主机与主密钥标识这类地址与标识
 export function diagnosticsText(info: Omit<SystemInfo, 'diagnostics'>): string {
   const { build, runtime, database, config, updates } = info
-  const lines: [string, string | number | null][] = [
-    ['版本', build.version],
-    ['提交', build.commit],
-    ['构建时间', build.builtAt],
-    ['Node', runtime.node],
-    ['系统', `${runtime.platform} ${runtime.osRelease}（${runtime.arch}）`],
-    ['容器', yesNo(runtime.container, '是', '否')],
-    ['已运行', durationText(runtime.uptimeSeconds)],
-    ['PostgreSQL', database.version],
-    ['pgvector', database.pgvector ?? '未安装'],
-    ['zhparser', database.zhparser ?? '未安装'],
-    ['当前迁移', database.migration],
+  const groups: [string, [string, string | null][]][] = [
     [
-      '主密钥',
-      config.masterKey.configured
-        ? yesNo(config.masterKey.rotating, '已配置，轮换中', '已配置')
-        : '未配置',
+      '构建',
+      [
+        ['版本', build.version],
+        ['提交', build.commit],
+        ['构建时间', build.builtAt],
+      ],
     ],
-    ['KIOKU_COOKIE_SECURE', String(config.cookieSecure)],
-    ['KIOKU_TRUSTED_PROXIES', config.trustedProxies],
-    ['管理界面', WEB_UI_TEXT[config.webUi]],
-    ['后台任务', yesNo(config.jobs, '运行中', '未运行')],
-    ['嵌入模型', yesNo(config.embedding, '已配置', '未配置')],
-    ['抽取模型', yesNo(config.extraction, '已配置', '未配置')],
-    ['检查新版本', yesNo(updates.enabled, '开启', '关闭')],
+    [
+      '运行环境',
+      [
+        ['Node', runtime.node],
+        ['系统', systemText(runtime)],
+        ['容器', CONTAINER_NAMES[runtime.container]],
+        ['已运行', uptimeText(runtime.uptimeSeconds)],
+      ],
+    ],
+    [
+      '数据库',
+      [
+        ['版本', database.version],
+        ['pgvector', extensionText(database.pgvector)],
+        ['zhparser', extensionText(database.zhparser)],
+        ['迁移', database.migration],
+      ],
+    ],
+    [
+      '配置与后台任务',
+      [
+        ['主密钥', masterKeyText(config.masterKey)],
+        ['Cookie', cookieText(config.cookieSecure)],
+        ['受信代理', trustedProxiesText(config.trustedProxies)],
+        ['管理界面', WEB_UI_NAMES[config.webUi]],
+        ['后台任务', jobsText(config.jobs)],
+        ['嵌入模型', configuredText(config.embedding)],
+        ['抽取模型', configuredText(config.extraction)],
+        ['检查新版本', updates.enabled ? '开启' : '关闭'],
+      ],
+    ],
   ]
-  return ['Kioku 诊断信息', ...lines.map(([label, value]) => `${label}：${value ?? '–'}`)].join(
-    '\n',
-  )
+  return [
+    'Kioku 诊断信息',
+    ...groups.map(([title, lines]) =>
+      [`\n[${title}]`, ...lines.map(([label, value]) => `${label}：${value ?? '–'}`)].join('\n'),
+    ),
+  ].join('\n')
 }

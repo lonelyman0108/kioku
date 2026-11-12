@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { versionLabel } from '@kioku/contracts'
 import { useQuery } from '@tanstack/vue-query'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -17,7 +18,6 @@ import { useViewport } from '../composables/useViewport'
 import { actionableInboxCount, inboxTabActionable, inboxTabLabels } from '../inbox'
 import { bindingNote, budgetWarning, splitNote, strataTarget } from '../overview'
 import { instanceSettingsRoute, spaceSettingsRoute } from '../settingsSections'
-import { versionLabel } from '../systemInfo'
 import { formatRelative, formatTime } from '../time'
 
 const route = useRoute()

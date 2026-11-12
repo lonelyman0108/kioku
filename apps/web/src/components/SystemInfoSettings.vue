@@ -1,4 +1,18 @@
 <script setup lang="ts">
+import {
+  CONTAINER_NAMES,
+  configuredText,
+  cookieText,
+  extensionText,
+  jobsText,
+  masterKeyText,
+  systemText,
+  trustedProxiesText,
+  uptimeText,
+  versionLabel,
+  WEB_UI_NAMES,
+  type SystemInfo,
+} from '@kioku/contracts'
 import { useToast } from '@nuxt/ui/composables'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref } from 'vue'
@@ -8,29 +22,28 @@ import { api } from '../api/endpoints'
 import { useCopy } from '../composables/useCopy'
 import { useNow } from '../composables/useNow'
 import { icons } from '../icons'
-import {
-  commitUrl,
-  configured,
-  shortCommit,
-  updateStatus,
-  uptimeText,
-  versionLabel,
-  WEB_UI_TEXT,
-} from '../systemInfo'
+import { commitUrl, shortCommit, updateStatus } from '../systemInfo'
 import { formatTime } from '../time'
 import Hint from './Hint.vue'
 import PropertyList from './strata/PropertyList.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SettingsBlock from './strata/SettingsBlock.vue'
 
-// 实例 › 系统信息：构建、运行环境、数据库、配置与后台任务，排查问题、贴 issue 时用；检查新版本的开关也在这里
+// 实例 › 系统信息：构建、运行环境、数据库、配置与后台任务，排查问题、贴 issue 时用；检查新版本的开关也在这里。
+// 说法和复制的诊断信息共用 contracts 的 system.ts
 const SYSTEM_KEY = ['instance-system']
+// 服务端正在向 GitHub 请求时，隔这么久再取一次
+const CHECKING_REFETCH_MS = 3000
 const toast = useToast()
 const queryClient = useQueryClient()
 const copy = useCopy()
 const now = useNow()
 
-const system = useQuery({ queryKey: SYSTEM_KEY, queryFn: api.systemInfo })
+const system = useQuery({
+  queryKey: SYSTEM_KEY,
+  queryFn: api.systemInfo,
+  refetchInterval: (query) => (query.state.data?.updates.checking ? CHECKING_REFETCH_MS : false),
+})
 const data = computed(() => system.data.value)
 
 // 已运行多久按启动时间现算，页面开着也跟着走
@@ -56,8 +69,8 @@ const runtime = computed(() => {
   return [
     [
       { key: 'node', label: 'Node', value: r?.node },
-      { key: 'os', label: '系统', value: r ? `${r.platform} ${r.osRelease}（${r.arch}）` : null },
-      { key: 'container', label: '容器', value: r ? (r.container ? '是' : '否') : null },
+      { key: 'os', label: '系统', value: r ? systemText(r) : null },
+      { key: 'container', label: '容器', value: r ? CONTAINER_NAMES[r.container] : null },
       { key: 'startedAt', label: '启动时间', value: r ? formatTime(r.startedAt) : null },
       { key: 'uptime', label: '已运行', value: uptime.value },
     ],
@@ -68,8 +81,8 @@ const database = computed(() => {
   return [
     [
       { key: 'version', label: '版本', value: d?.version },
-      { key: 'pgvector', label: 'pgvector', value: d ? (d.pgvector ?? '未安装') : null },
-      { key: 'zhparser', label: 'zhparser', value: d ? (d.zhparser ?? '未安装') : null },
+      { key: 'pgvector', label: 'pgvector', value: d ? extensionText(d.pgvector) : null },
+      { key: 'zhparser', label: 'zhparser', value: d ? extensionText(d.zhparser) : null },
       { key: 'migration', label: '迁移' },
     ],
     [
@@ -84,35 +97,33 @@ const config = computed(() => {
   return [
     [
       { key: 'masterKey', label: '主密钥' },
-      ...(c.masterKey.configured
-        ? [{ key: 'rotating', label: '轮换', value: c.masterKey.rotating ? '轮换中' : '否' }]
-        : []),
-      { key: 'cookie', label: 'Cookie', value: c.cookieSecure ? '仅 HTTPS' : '允许 HTTP' },
-      {
-        key: 'proxies',
-        label: '受信代理',
-        value: c.trustedProxies ? String(c.trustedProxies) : '无',
-      },
-      { key: 'webUi', label: '管理界面', value: WEB_UI_TEXT[c.webUi] },
+      { key: 'cookie', label: 'Cookie', value: cookieText(c.cookieSecure) },
+      { key: 'proxies', label: '受信代理', value: trustedProxiesText(c.trustedProxies) },
+      { key: 'webUi', label: '管理界面', value: WEB_UI_NAMES[c.webUi] },
     ],
     [
-      { key: 'jobs', label: '后台任务', value: c.jobs ? '运行中' : '未运行' },
-      { key: 'embedding', label: '嵌入模型', value: configured(c.embedding) },
-      { key: 'extraction', label: '抽取模型', value: configured(c.extraction) },
+      { key: 'jobs', label: '后台任务', value: jobsText(c.jobs) },
+      { key: 'embedding', label: '嵌入模型', value: configuredText(c.embedding) },
+      { key: 'extraction', label: '抽取模型', value: configuredText(c.extraction) },
     ],
   ]
 })
 
 const updates = computed(() => data.value?.updates ?? null)
+// 上一次检查：失败或没有完成时写尝试的时间
+const lastCheck = computed(() => {
+  const u = updates.value
+  if (!u?.enabled || u.checking) return null
+  if (u.failed && u.attemptedAt) return { label: '上次尝试', at: u.attemptedAt }
+  return u.checkedAt ? { label: '上次检查', at: u.checkedAt } : null
+})
 const saving = ref(false)
 async function setUpdateCheck(enabled: boolean) {
   if (saving.value) return
   saving.value = true
   try {
-    const view = await api.saveUpdateCheck(enabled)
-    queryClient.setQueryData(SYSTEM_KEY, (old: typeof data.value) =>
-      old ? { ...old, updates: view } : old,
-    )
+    // 返回整份系统信息：诊断信息里也有这个开关
+    queryClient.setQueryData<SystemInfo>(SYSTEM_KEY, await api.saveUpdateCheck(enabled))
     // 概览的系统提醒跟着变
     void queryClient.invalidateQueries({ queryKey: ['overview'] })
   } catch (err) {
@@ -192,22 +203,19 @@ async function setUpdateCheck(enabled: boolean) {
         </template>
         <PropertyList :groups="config">
           <template #masterKey>
-            <template v-if="data.config.masterKey.configured">
-              已配置
-              <span class="ml-1 font-mono text-[13px] text-muted">{{
-                data.config.masterKey.id
-              }}</span>
-            </template>
-            <template v-else>未配置</template>
+            {{ masterKeyText(data.config.masterKey) }}
+            <span v-if="data.config.masterKey.id" class="ml-1 font-mono text-[13px] text-muted">{{
+              data.config.masterKey.id
+            }}</span>
           </template>
         </PropertyList>
       </SettingsBlock>
 
       <SettingsBlock v-if="updates" title="检查新版本">
         <template #note>
-          打开后服务器每天最多向 GitHub 请求一次最新正式版，默认关闭。
+          打开后服务器每天向 GitHub 请求一次最新正式版，默认关闭。
           <Hint>
-            只比较正式版，不含预发布。发现新版本时在此处与概览的系统提醒中提示，仅实例管理员可见。当前版本不是正式版（本地构建、edge
+            只比较正式版，不含预发布。发现新版本时在此处与概览的系统提醒中提示。检查失败时一小时后重试。当前版本不是正式版（本地构建、edge
             镜像）时不检查。
           </Hint>
         </template>
@@ -231,8 +239,8 @@ async function setUpdateCheck(enabled: boolean) {
               查看发布说明<UIcon :name="icons.link" class="link-icon" />
             </a>
           </p>
-          <p v-if="updates.enabled && updates.checkedAt" class="text-xs text-muted">
-            上次检查：{{ formatTime(updates.checkedAt) }}
+          <p v-if="lastCheck" class="text-xs text-muted">
+            {{ lastCheck.label }}：{{ formatTime(lastCheck.at) }}
             <template v-if="updates.latest"
               >，最新正式版 {{ versionLabel(updates.latest) }}</template
             >

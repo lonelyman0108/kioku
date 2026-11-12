@@ -1,11 +1,11 @@
 import { createRoute } from '@hono/zod-openapi'
-import { ErrorResponse, SystemInfo, UpdateCheckSettings, UpdateCheckView } from '@kioku/contracts'
+import { ErrorResponse, SystemInfo, UpdateCheckSettings } from '@kioku/contracts'
 
 import { lockAsAdmin, requireConsole, requireInstanceAdmin } from '../auth/middleware'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { systemInfo } from '../settings/systemInfo'
-import { refreshUpdateCheck, saveUpdateCheck, updateCheckView } from '../settings/updateCheck'
+import { saveUpdateCheck, startUpdateCheck } from '../settings/updateCheck'
 
 const forbidden = jsonResponse('需要实例管理员', ErrorResponse)
 
@@ -27,18 +27,19 @@ function updateCheckRoute(deps: Deps) {
     method: 'put',
     path: '/instance/update-check',
     tags: ['settings'],
-    summary: '打开或关闭检查新版本（只有实例管理员）：打开后每天最多向 GitHub 请求一次最新的正式版',
+    summary:
+      '打开或关闭检查新版本（只有实例管理员）：打开后向 GitHub 请求最新的正式版，成功之后隔一天、失败之后隔一小时再查。返回整份系统信息',
     middleware: [requireConsole(deps), requireInstanceAdmin(deps)],
     request: { body: jsonBody(UpdateCheckSettings) },
-    responses: { 200: jsonResponse('检查新版本', UpdateCheckView), 403: forbidden },
+    responses: { 200: jsonResponse('系统信息', SystemInfo), 403: forbidden },
   })
 }
 
 export function systemRoutes(deps: Deps) {
   return router()
     .openapi(infoRoute(deps), async (c) => {
-      // 开着、今天还没查过时先查一次再给结果；失败只记日志
-      await refreshUpdateCheck(deps.db, deps.updateCheck)
+      // 到了间隔时在后台查一次，不等 GitHub：这次给出已知的结果，checking 为真时界面过一会儿再取
+      await startUpdateCheck(deps.db, deps.updateCheck)
       return c.json(await systemInfo(deps), 200)
     })
     .openapi(updateCheckRoute(deps), async (c) => {
@@ -50,7 +51,8 @@ export function systemRoutes(deps: Deps) {
         return true
       })
       if (!saved) return c.json({ error: '需要实例管理员' }, 403)
-      await refreshUpdateCheck(deps.db, deps.updateCheck)
-      return c.json(await updateCheckView(deps.db, deps.updateCheck?.current), 200)
+      await startUpdateCheck(deps.db, deps.updateCheck)
+      // 返回整份系统信息：诊断信息里也有这个开关
+      return c.json(await systemInfo(deps), 200)
     })
 }

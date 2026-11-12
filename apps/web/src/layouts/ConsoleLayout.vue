@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { versionLabel } from '@kioku/contracts'
 import type { CommandPaletteItem, DropdownMenuItem } from '@nuxt/ui'
 import { useToast } from '@nuxt/ui/composables'
 import { useQuery } from '@tanstack/vue-query'
@@ -29,7 +30,6 @@ import {
   roleName,
   spaceSettingsRoute,
 } from '../settingsSections'
-import { versionLabel } from '../systemInfo'
 
 const router = useRouter()
 const route = useRoute()

@@ -77,7 +77,6 @@ import {
   SubjectInfo,
   SubjectList,
   SystemInfo,
-  UpdateCheckView,
   VaultCheckResult,
   VaultConnectResult,
   VaultConnection,
@@ -206,7 +205,7 @@ export const api = {
     request('PUT', '/instance/space-limit', { body: { maxOwnedSpaces }, schema: SpaceLimitView }),
   systemInfo: () => request('GET', '/instance/system', { schema: SystemInfo }),
   saveUpdateCheck: (enabled: boolean) =>
-    request('PUT', '/instance/update-check', { body: { enabled }, schema: UpdateCheckView }),
+    request('PUT', '/instance/update-check', { body: { enabled }, schema: SystemInfo }),
   apps: (spaceId: string) =>
     request('GET', `/spaces/${spaceId}/apps`, { schema: z.array(AppInfo) }),
   createApp: (

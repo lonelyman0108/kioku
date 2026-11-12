@@ -15,7 +15,7 @@ import { jsonResponse, router } from '../http/openapi'
 import { consoleMemberFor, consoleRoleFor, memoryServiceForConsole } from '../memory/context'
 import { inboxCounts } from '../memory/inbox'
 import { loadRecallWindow } from '../recall/retention'
-import { refreshUpdateCheck, updateNotice } from '../settings/updateCheck'
+import { loadUpdateStatus, startUpdateCheck, updateNotice } from '../settings/updateCheck'
 
 // 概览里列出的最近改动数
 const RECENT_LIMIT = 8
@@ -58,12 +58,12 @@ async function backupSummary(db: Db, accountId: string) {
   }
 }
 
-// 新版本的提醒也只给实例管理员。开着、今天还没查过时在后台查一次，不等它：这一次用上一次的结果
+// 新版本的提醒也只给实例管理员。到了间隔时在后台查一次（用这里读到的状态，不到间隔不碰库），不等 GitHub：这一次用已知的结果
 async function updateSummary(deps: Deps, accountId: string) {
   if (!(await isInstanceAdmin(deps.db, accountId))) return null
-  const { enabled, notice } = await updateNotice(deps.db, deps.updateCheck?.current)
-  if (enabled) void refreshUpdateCheck(deps.db, deps.updateCheck)
-  return notice
+  const status = await loadUpdateStatus(deps.db)
+  await startUpdateCheck(deps.db, deps.updateCheck, status)
+  return updateNotice(status, deps.updateCheck?.current)
 }
 
 export function overviewRoutes(deps: Deps) {
