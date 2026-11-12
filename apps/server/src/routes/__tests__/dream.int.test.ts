@@ -37,8 +37,9 @@ import { staticEmbedderSource } from '../../embedding/source'
 import { DREAM_ERROR_WORDINGS, dreamSpace } from '../../extraction/dream'
 import type { ChatMessage, ChatModel } from '../../extraction/provider'
 import { saveExtractionConfig } from '../../extraction/settings'
+import { applyImport, existingImportApps, planImport, type LoreSnapshot } from '../../importer/lore'
 import type { Jobs } from '../../jobs/queue'
-import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
+import { databaseNow, openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { fakeChatModel, handleOf } from '../../testing/fakeChatModel'
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 
@@ -635,6 +636,54 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
     ).toBe(204)
     const history = await ok<MemoryHistory>(await send('GET', `/memories/history?id=${report.id}`))
     expect(history.events.map((e) => e.type)).toEqual(['create', 'update', 'reactivate'])
+  })
+
+  it('过时：从 Lore 导入、时间晚于现在的记忆，设为过时之后马上在已过期里', async () => {
+    // Lore 文件里的时间允许比现在晚一天以内：导入时建立、生效与更新时间夹到现在，原来的记在导入事件里
+    const later = new Date((await databaseNow(database.db)).getTime() + 3_600_000)
+    const snapshot: LoreSnapshot = {
+      nodes: [
+        {
+          uuid: 'uuid-report',
+          uri: 'core://report',
+          aliases: [],
+          priority: 2,
+          disclosure: null,
+          content: '周五交周报',
+          createdAt: later,
+          updatedAt: later,
+          previousVersions: 0,
+          keywords: [],
+        },
+      ],
+      recallEvents: null,
+    }
+    const target = { db: database.db, spaceId: ws.spaceId, accountId: ws.accountId, masterKey }
+    const options = {
+      accountId: ws.accountId,
+      persona: { slug: 'default', name: '默认人格' },
+      secretUris: new Set<string>(),
+    }
+    const existing = await existingImportApps(database.db, ws.spaceId)
+    const result = await applyImport(target, planImport(snapshot, existing, options))
+    expect(result.created).toEqual(['core://report'])
+    const [report] = await inSpace((tx) =>
+      tx.select().from(memories).where(eq(memories.path, 'report')),
+    )
+    expect(report!.validFrom.getTime()).toBeLessThan(later.getTime())
+    expect(report!.updatedAt.getTime()).toBeLessThan(later.getTime())
+    expect((await eventsOf(report!.id))[0]!.context).toMatchObject({
+      sourceCreatedAt: later.toISOString(),
+      sourceUpdatedAt: later.toISOString(),
+    })
+
+    await dream(staleOf({ 周五交周报: '期限过了' }))
+    await ok(await apply((await only()).id))
+    expect((await send('GET', `/memories?uri=${encodeURIComponent('core://report')}`)).status).toBe(
+      404,
+    )
+    const expired = await ok<ExpiredMemoryList>(await send('GET', '/memories/expired'))
+    expect(expired.items.map((i) => i.id)).toEqual([report!.id])
   })
 
   // 有效期与更新时间只按数据库的钟。只假造应用的 Date，冻结在快或慢两分钟的那一刻：执行之后，

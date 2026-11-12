@@ -5,6 +5,7 @@ import type { PgTransactionConfig } from 'drizzle-orm/pg-core'
 import { drizzle, type PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import postgres from 'postgres'
 
+import { transactionMoment } from './moment'
 import { microsOf } from './paging'
 import * as schema from './schema'
 
@@ -38,7 +39,7 @@ const STATEMENT_MICROS = microsOf(sql`statement_timestamp()`)
 // 内容表只能在这里面访问：事务内声明当前空间，RLS 据此过滤；事务结束后设置自动失效，不会串到连接池里的下一个请求。
 // config 是事务的选项，例如导出时要一个可重复读的只读事务。
 // 有效期与更新时间只用数据库的钟：声明空间的那条语句顺带取一次数据库的时间（不多一次往返），作为这个事务里唯一的
-// 「现在」，交给 fn，也能用 nowOf(tx) 取。取 statement_timestamp()（这条语句开始的时刻），不取 now()（事务开始的时刻）：
+// 「现在」，交给 fn，也能用 nowOf(tx) 取；fn 里没有显式传时刻的有效期判断默认也用它（见 db/moment.ts）。取 statement_timestamp()（这条语句开始的时刻），不取 now()（事务开始的时刻）：
 // 测试台的回滚模式整个运行是一个根事务，now() 一直停在开始的时候，每个 withSpace 是其中的一个 savepoint，
 // 这样各自取到当时的时刻；也不取 clock_timestamp()，同一条语句里它每次求值都不同。截到毫秒：JS 的 Date 只到毫秒，
 // SQL 条件与 JS 判断（canRead 等）拿同一个值比才一致
@@ -54,8 +55,17 @@ export function withSpace<T>(
     )
     const now = new Date(Number(BigInt(row!.micros) / 1000n))
     moments.set(tx, now)
-    return fn(tx, now)
+    return transactionMoment.run(now, () => fn(tx, now))
   }, config)
+}
+
+// 数据库现在的时间（截到毫秒），给不在 withSpace 里的地方用：保留期的清理这类后台任务默认按它算，
+// 测试里要算「现在之后多久」也用它
+export async function databaseNow(db: Db | Tx): Promise<Date> {
+  const [row] = await db.execute<{ micros: string }>(
+    sql`select ${STATEMENT_MICROS}::text as micros`,
+  )
+  return new Date(Number(BigInt(row!.micros) / 1000n))
 }
 
 // 这个事务开头取的数据库时间（见 withSpace）。判断或写入有效期、更新时间都用它，不用应用的 new Date()

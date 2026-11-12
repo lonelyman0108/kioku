@@ -186,7 +186,69 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       ),
     )
 
+  // 另开一条连接，在事务里拿住锁，发出请求；等请求确实等在这把锁上（pg_blocking_pids）之后做 between，
+  // 再提交、放开锁，返回请求的结果。不靠睡眠猜时机
+  async function whileBlocking<T>(
+    lock: (tx: postgres.TransactionSql) => Promise<unknown>,
+    request: () => T | Promise<T>,
+    between: (tx: postgres.TransactionSql) => Promise<unknown>,
+  ): Promise<T> {
+    const side = postgres(testDatabaseUrl!, { max: 2, onnotice: () => {} })
+    let pending: Promise<T> | undefined
+    try {
+      await side.begin(async (tx) => {
+        await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
+        await lock(tx)
+        const [{ pid }] = (await tx`select pg_backend_pid() as pid`) as unknown as [{ pid: number }]
+        pending = Promise.resolve(request())
+        for (let i = 0; ; i++) {
+          const [row] = await side<{ n: number }[]>`
+            select count(*)::int as n from pg_stat_activity
+            where ${pid}::int = any(pg_blocking_pids(pid))`
+          if (row!.n > 0) break
+          if (i >= 200) throw new Error('请求没有等在这把锁上')
+          await new Promise((r) => setTimeout(r, 25))
+        }
+        await between(tx)
+      })
+      return await pending!
+    } finally {
+      // 用例中途失败时也等发出的请求结束，免得它和下一个用例的清库交错
+      await pending?.catch(() => {})
+      await side.end()
+    }
+  }
+  // 等到数据库的时间过了 at
+  const sleepPast = async (at: Date) => {
+    const wait = at.getTime() - (await dbNow()) + 200
+    await new Promise((resolve) => setTimeout(resolve, Math.max(0, wait)))
+  }
+
   describe('设有效到', () => {
+    // 「至少晚一分钟」按数据库的时间比：只假造应用的 Date，冻结在快或慢两分钟的那一刻
+    for (const [name, skew] of [
+      ['快', 120_000],
+      ['慢', -120_000],
+    ] as const) {
+      it(`应用的时钟比数据库${name}两分钟时，有效到按数据库的时间比：晚 30 秒的拒绝、晚 61 秒的可以`, async () => {
+        vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + skew })
+        try {
+          const soon = new Date((await dbNow()) + 30_000).toISOString()
+          expect(
+            await errorOf(await keyCreate({ uri: 'user://a/b', content: 'x', validTo: soon }), 400),
+          ).toContain('晚于当前时间至少一分钟')
+          const later = new Date((await dbNow()) + 61_000).toISOString()
+          const m = await ok<MemoryView>(
+            await keyCreate({ uri: 'user://a/c', content: 'y', validTo: later }),
+            201,
+          )
+          expect(m.validTo).toBe(later)
+        } finally {
+          vi.useRealTimers()
+        }
+      })
+    }
+
     it('Key 新建与修改时设有效到、改掉、清掉；不提它时不动，列表与历史里看得到', async () => {
       const until = new Date(Date.now() + 3 * DAY)
       // 带时区的写法，存下来是同一个时刻
@@ -313,46 +375,6 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
   })
 
   describe('并发与到期的边界', () => {
-    // 另开一条连接，在事务里拿住锁，发出请求；等请求确实等在这把锁上（pg_blocking_pids）之后做 between，
-    // 再提交、放开锁，返回请求的结果。不靠睡眠猜时机
-    async function whileBlocking(
-      lock: (tx: postgres.TransactionSql) => Promise<unknown>,
-      request: () => Response | Promise<Response>,
-      between: (tx: postgres.TransactionSql) => Promise<unknown>,
-    ): Promise<Response> {
-      const side = postgres(testDatabaseUrl!, { max: 2, onnotice: () => {} })
-      let pending: Promise<Response> | undefined
-      try {
-        await side.begin(async (tx) => {
-          await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
-          await lock(tx)
-          const [{ pid }] = (await tx`select pg_backend_pid() as pid`) as unknown as [
-            { pid: number },
-          ]
-          pending = Promise.resolve(request())
-          for (let i = 0; ; i++) {
-            const [row] = await side<{ n: number }[]>`
-              select count(*)::int as n from pg_stat_activity
-              where ${pid}::int = any(pg_blocking_pids(pid))`
-            if (row!.n > 0) break
-            if (i >= 200) throw new Error('请求没有等在这把锁上')
-            await new Promise((r) => setTimeout(r, 25))
-          }
-          await between(tx)
-        })
-        return await pending!
-      } finally {
-        // 用例中途失败时也等发出的请求结束，免得它和下一个用例的清库交错
-        await pending?.catch(() => {})
-        await side.end()
-      }
-    }
-    // 等到数据库的时间过了 at
-    const sleepPast = async (at: Date) => {
-      const wait = at.getTime() - (await dbNow()) + 200
-      await new Promise((resolve) => setTimeout(resolve, Math.max(0, wait)))
-    }
-
     it('让出 URI 时，读到之后被别的事务重新生效的记录不会被软删除', async () => {
       const old = await ok<MemoryView>(
         await keyCreate({ uri: 'user://notes/race', content: '旧的', validTo: inDays(1) }),
@@ -1203,6 +1225,40 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
         }
       })
     }
+
+    it('推翻时等锁期间别的事务已经把旧事实设为过时：锁到之后按它现在的状态判断，不重复推翻，当作新的事实', async () => {
+      const id = await subjectId()
+      const [current] = (await detail(id)).facts
+      expect(current!.content).toBe('在学韩语')
+      await say('我又改学法语了')
+      let theirs: { valid_to: Date; version: number } | undefined
+      await whileBlocking(
+        (tx) => tx`select id from memories where id = ${current!.id} for update`,
+        () =>
+          extract({
+            facts: [{ subject: 'M1', op: 'update', replaces: 'F1', content: '在学法语' }],
+          }),
+        // 开始得更晚的事务把它设为过时：有效到与更新时间都是那一刻，晚于抽取的事务开头取的时刻
+        async (tx) => {
+          const [row] = (await tx`
+            update memories
+            set valid_to = statement_timestamp(), updated_at = statement_timestamp(),
+              version = version + 1
+            where id = ${current!.id}
+            returning valid_to, version`) as unknown as [{ valid_to: Date; version: number }]
+          theirs = row
+        },
+      )
+      const row = await rowOf(current!.id)
+      expect(row.version).toBe(theirs!.version)
+      expect(row.validTo).toEqual(theirs!.valid_to)
+      const events = await withSpace(database.db, ws.spaceId, (tx) =>
+        tx.select().from(memoryEvents).where(eq(memoryEvents.memoryId, current!.id)),
+      )
+      expect(events.map((e) => e.eventType)).toEqual(['create'])
+      // 新的那条照样记下
+      expect((await detail(id)).facts.map((f) => f.content)).toEqual(['在学法语'])
+    })
 
     it('事实的重新生效只看推翻时设的 valid_to：因为到期时间失效的返回 409，不会报成功却还是失效的', async () => {
       const id = await subjectId()

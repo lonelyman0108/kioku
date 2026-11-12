@@ -7,7 +7,7 @@ import type {
 } from '@kioku/contracts'
 import { and, desc, eq, exists, inArray, isNull, ne, or, sql, type SQL } from 'drizzle-orm'
 
-import type { Tx } from '../db/client'
+import { nowOf, type Tx } from '../db/client'
 import { microsOf } from '../db/paging'
 import { accounts, apps, conversations, extractionRuns, memories, subjects } from '../db/schema'
 import { readableConditions } from '../memory/filter'
@@ -36,12 +36,14 @@ export function visibleConversations(access: Access): SQL {
   )!
 }
 
-// 来自对话的记忆不分人格，读权限里的人格限制用不上
-const readable = (access: Access) => readableConditions(access, { personaIds: [] })
+// 来自对话的记忆不分人格，读权限里的人格限制用不上。now 是判断有效期的时刻（事务开头取的数据库时间，
+// 不给时同样默认用它，见 momentSql）：一个片段在几条语句里用时，几条拿同一个时刻比
+const readable = (access: Access, now?: Date) =>
+  readableConditions(access, { personaIds: [], ...(now ? { now } : {}) })
 
 // 挂在会话上的、当前账号读得到的会话摘要
-const summariesOf = (access: Access) =>
-  and(eq(memories.form, 'extracted'), eq(memories.layer, 'episode'), readable(access))!
+const summariesOf = (access: Access, now?: Date) =>
+  and(eq(memories.form, 'extracted'), eq(memories.layer, 'episode'), readable(access, now))!
 
 // 在会话里听到、记在联系人身上的、现在有效的事实
 const factsOf = (access: Access) =>
@@ -78,7 +80,8 @@ export async function conversationInfos(
     .limit(limit)
   if (!rows.length) return []
   const ids = rows.map((r) => r.conversation.id)
-  const inPage = and(inArray(memories.conversationId, ids), summariesOf(access))
+  // 条数与最新一段在两条语句里算，拿同一个时刻比
+  const inPage = and(inArray(memories.conversationId, ids), summariesOf(access, nowOf(tx)))
   const [counts, latest] = await Promise.all([
     tx
       .select({ id: memories.conversationId, n: sql<number>`count(*)::int` })

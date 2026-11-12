@@ -126,7 +126,8 @@ async function explainHidden(
 ): Promise<RecallDebug['filtered']> {
   if (!ids.length) return []
   const rows = await tx.select().from(memories).where(inArray(memories.id, ids))
-  const override = personaOverride(keyAccess, { personaIds: chain, inheritance: true })
+  const now = nowOf(tx)
+  const override = personaOverride(keyAccess, { personaIds: chain, inheritance: true }, now)
   const overridden = new Set(
     override
       ? (
@@ -142,7 +143,7 @@ async function explainHidden(
     const row = byId.get(id)
     if (!row) return []
     const reason =
-      readDenial(keyAccess, row, { personaIds: chain, now: nowOf(tx) }) ??
+      readDenial(keyAccess, row, { personaIds: chain, now }) ??
       (overridden.has(id) ? ('override' as const) : null)
     return reason
       ? [

@@ -25,7 +25,7 @@ import {
 } from 'drizzle-orm'
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core'
 
-import { errorText, withSpace, type Db, type Tx } from '../db/client'
+import { databaseNow, errorText, withSpace, type Db, type Tx } from '../db/client'
 import {
   accounts,
   conversations,
@@ -674,15 +674,17 @@ export interface RetentionRun extends PurgeResult {
   paused: boolean
 }
 
-// 每小时的定时清理里调用，保留期的清理一天（UTC）做一次。保留期第一次生效时先暂停一个保留期；暂停已经结束的去掉；
+// 每小时的定时清理里调用，保留期的清理一天（UTC）做一次。现在是几点按数据库的时间（判断整理建议还作不作数要看
+// 记忆的有效期，有效期只用数据库的钟），测试可以传入别的时刻。保留期第一次生效时先暂停一个保留期；暂停已经结束的去掉；
 // 暂停期间只做删账号留下的历史。今天已经完整做完的不做（暂停中做完的那次不挡住暂停结束、提前开始之后当天的完整清理）；
 // 没做完（有一类出错，或者到了时间）时下一个小时再试，同一天同一种最多试 RETENTION_DAILY_TRIES 次，第二天再来。
 // 每次尝试只记它自己做了什么；全部做完才记成最近一次完整的清理。错误记在设置里给实例管理员看，不抛出。没做时返回 null
 export async function retentionJob(
   db: Db,
-  now = new Date(),
+  at?: Date,
   budgetMs = RETENTION_BUDGET_MS,
 ): Promise<RetentionRun | null> {
+  const now = at ?? (await databaseNow(db))
   await startIfFirst(db, now)
   const state = await endPause(db, now)
   const paused = activePause(state, now) !== null

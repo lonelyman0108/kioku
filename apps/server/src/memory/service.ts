@@ -1181,7 +1181,8 @@ export class MemoryService {
   ): Promise<MemoryView> {
     const parsed = parse(input.uri)
     const now = nowOf(tx)
-    const validFrom = meta.createdAt ?? now
+    const validFrom = notAfter(meta.createdAt, now)
+    const updatedAt = notAfter(meta.updatedAt, now)
     const validTo = input.validTo === undefined ? null : checkValidTo(input.validTo, validFrom, now)
     const ownership = await this.resolveOwnership(tx, parsed)
     const sensitivity = input.sensitivity ?? DEFAULT_SENSITIVITY[layerOf(parsed)]
@@ -1234,10 +1235,10 @@ export class MemoryService {
         priority: input.priority,
         disclosure: input.disclosure ?? null,
         validTo,
-        // 新建、生效与更新时间都是这一刻（事务开头取的数据库时间），从别的系统导入时沿用那边的
+        // 新建、生效与更新时间都是这一刻（事务开头取的数据库时间），从别的系统导入时沿用那边的、但不晚于这一刻
         createdAt: validFrom,
         validFrom,
-        updatedAt: meta.updatedAt ?? now,
+        updatedAt,
       })
       .returning()
     const glossary = [...new Set(input.glossary)].sort()
@@ -1247,13 +1248,25 @@ export class MemoryService {
         .values(glossary.map((keyword) => ({ spaceId: this.ctx.spaceId, memoryId: id, keyword })))
     }
     await this.syncCredentialRefs(tx, id, sensitivity, input.content)
+    // 来源的时间晚于现在、被夹到现在时，原来的时间记在事件里
+    const clamped = {
+      ...(meta.createdAt && meta.createdAt !== validFrom
+        ? { sourceCreatedAt: meta.createdAt.toISOString() }
+        : {}),
+      ...(meta.updatedAt && meta.updatedAt !== updatedAt
+        ? { sourceUpdatedAt: meta.updatedAt.toISOString() }
+        : {}),
+    }
+    const eventContext = Object.keys(clamped).length
+      ? { ...meta.eventContext, ...clamped }
+      : meta.eventContext
     await this.event(
       tx,
       id,
       meta.eventType ?? 'create',
       null,
       snapshot(row!, glossary),
-      meta.eventContext,
+      eventContext,
     )
     if (ignored) await this.ignoredEvent(tx, row!, glossary)
     // 正文是调用方刚写的
@@ -1328,8 +1341,11 @@ export class MemoryService {
             .for('update')
         : []
     // 推翻也是改那一条：读得到但改不了时（写不了这一层，或它是受信的而这一批来自不可信来源）
-    // 不动它，当作新的事实
-    const before = found && canModify(this.ctx.access, found) ? found : undefined
+    // 不动它，当作新的事实。锁到的是这一行最新的版本，再按它现在的状态判断一次：事务开头之后、等锁的时候，
+    // 开始得更晚的事务可能已经推翻了它或把它设为过时，有效到晚于这个事务的「现在」，按这一刻看还有效。
+    // 按这一刻与它自己的更新时间里晚的那个判断，已经被处理过的不重复推翻，当作新的事实
+    const current = found && isValidAt(found, laterOf(now, found.updatedAt)) ? found : undefined
+    const before = current && canModify(this.ctx.access, current) ? current : undefined
     const [row] = await tx
       .insert(memories)
       .values({
@@ -1357,7 +1373,7 @@ export class MemoryService {
     }
     const [after] = await tx
       .update(memories)
-      .set({ validTo: validToFor(now), version: before.version + 1, updatedAt: updatedAtFor(now) })
+      .set({ validTo: now, version: before.version + 1, updatedAt: updatedAtFor(now) })
       .where(eq(memories.id, before.id))
       .returning()
     await this.event(tx, before.id, 'update', snapshot(before, []), snapshot(after!, []), {
@@ -2167,10 +2183,9 @@ export class MemoryService {
           break
         }
         case 'stale':
-          // 有效到设为现在（不早于生效时间）：策展记忆之后在「已过期」里能重新生效，抽取的事实等于被推翻
-          // （对象页上能重新生效）。服务端写入，不受接口「至少晚一分钟」的限制
-          for (const row of rows)
-            await this.rewriteRow(tx, row, { validTo: validToFor(now) }, context)
+          // 有效到设为现在：策展记忆之后在「已过期」里能重新生效，抽取的事实等于被推翻（对象页上能重新生效）。
+          // 服务端写入，不受接口「至少晚一分钟」的限制。生效时间不会晚于现在（导入的时间也夹到现在，见 notAfter）
+          for (const row of rows) await this.rewriteRow(tx, row, { validTo: now }, context)
           changed.push(...rows.map((r) => r.id))
           break
         case 'review':
@@ -2464,10 +2479,11 @@ export class MemoryService {
   }
 
   // 树、列表与快速匹配用的读权限条件：listSecret 时按显式读取算，secret 记忆也列出来（见 MemoryContext）
-  private listable(personaIds: string[]): SQL {
+  private listable(personaIds: string[], now?: Date): SQL {
     return readableConditions(this.ctx.access, {
       personaIds,
       explicit: this.ctx.listSecret === true,
+      ...(now ? { now } : {}),
     })
   }
 
@@ -2696,7 +2712,9 @@ export class MemoryService {
     recall: RecallWindow,
   ): Promise<{ top: RecalledMemory[]; never: NeverRecalledMemory[]; neverTotal: number }> {
     return this.run(async (tx, personaIds) => {
-      const visible = and(this.listable(personaIds), eq(memories.form, 'curated'))
+      // 几条语句（排行、从没召回的列表与总数）拿同一个时刻比
+      const now = nowOf(tx)
+      const visible = and(this.listable(personaIds, now), eq(memories.form, 'curated'))
       const top = await tx.execute<{
         id: string
         domain: string
@@ -2723,7 +2741,7 @@ export class MemoryService {
         where ${visible} and (r.hits is not null or s.count is not null)
         order by total desc, last desc, ${memories.id}
         limit ${limits.top}`)
-      const neverWhere = and(visible, neverRecalled(recall))
+      const neverWhere = and(visible, neverRecalled(recall, now))
       const [never, [total]] = await Promise.all([
         tx
           .select({
@@ -3733,9 +3751,13 @@ const DAY_MS = 86_400_000
 function updatedAtFor(at: Date): SQL {
   return sql`greatest(${momentSql(at)}, ${memories.updatedAt})`
 }
-// 把有效到设为现在（设为过时、抽取推翻旧事实）：at，但不早于生效时间
-function validToFor(at: Date): SQL {
-  return sql`greatest(${momentSql(at)}, ${memories.validFrom})`
+
+const laterOf = (a: Date, b: Date) => (a.getTime() >= b.getTime() ? a : b)
+
+// 从别的系统带来的时间（Lore 导入的建立、更新时间）不晚于 now：来源的钟可能比数据库快（Lore 文件允许晚一天以内），
+// 晚于现在的生效、更新时间会让设为过时等到那时才算过期、按更新时间排序一直排在最前。没给时就是 now
+export function notAfter(at: Date | undefined, now: Date): Date {
+  return at && at.getTime() <= now.getTime() ? at : now
 }
 
 // 有效期到什么时候为止：有效到与到期时间里早的那个，都没有时为 null（一直有效）
@@ -3976,8 +3998,8 @@ export interface RecallWindow {
 // 从没被召回过：策展记忆里，保留期内的明细里没有、清理时也没并入过累计的。不算的：secret 本来就不进召回；
 // 会进启动上下文的节点每次会话开始都注入，只是不记成召回；建了、或开始记录召回事件，都还不到保留天数的，
 // 还没来得及被用到（从 Lore 导入的记忆保留原来的建立时间，升级之后不会一下子全算进来）
-function neverRecalled(recall: RecallWindow): SQL {
-  const settled = sql`now() - make_interval(days => ${recall.retentionDays}::int)`
+function neverRecalled(recall: RecallWindow, now?: Date): SQL {
+  const settled = sql`${momentSql(now)} - make_interval(days => ${recall.retentionDays}::int)`
   const since = recall.recordingSince.toISOString()
   return sql`(${memories.form} = 'curated' and ${memories.sensitivity} <> 'secret'
     and not (${BOOT_ELIGIBLE})

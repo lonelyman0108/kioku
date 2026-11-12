@@ -67,7 +67,7 @@ import {
   memoryCredentialRefs,
   vaultConnections,
 } from '../db/schema'
-import { STILL_VALID } from '../memory/filter'
+import { stillValid } from '../memory/filter'
 import { hasMaskedText } from '../memory/masked'
 import { benchMarkReader, MemoryError, versionConflict } from '../memory/service'
 import { formatUri } from '../memory/uri'
@@ -161,7 +161,8 @@ const LIST_LIMIT = 1000
 // 凭据详情里最多列出这么多条引用它的记忆
 const REFERENCE_LIMIT = 200
 
-// 算数的引用：凭据所有者本人的记忆里没删除、不是 secret、仍有效的（索引按正文重写，状态在这里判断）
+// 算数的引用：凭据所有者本人的记忆里没删除、不是 secret、仍有效的（索引按正文重写，状态在这里判断）。
+// 有效期按所在事务开头取的数据库时间（见 momentSql），同一个事务里几条语句一致
 const effectiveRef = (ownerAccountId: string) =>
   and(
     eq(memories.id, memoryCredentialRefs.memoryId),
@@ -169,7 +170,7 @@ const effectiveRef = (ownerAccountId: string) =>
     eq(memories.layer, 'user'),
     isNull(memories.deletedAt),
     ne(memories.sensitivity, 'secret'),
-    STILL_VALID,
+    stillValid(),
   )
 const EVENT_ID = /^\d{1,15}$/
 
