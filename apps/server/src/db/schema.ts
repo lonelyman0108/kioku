@@ -179,9 +179,19 @@ export const accountLinks = pgTable(
   (t) => [index().on(t.accountId), index().on(t.expiresAt)],
 )
 
-// 浏览器授权的申请（routes/device.ts）：命令行申请，成员在管理界面的确认页确认，命令行凭设备码取走一次访问密钥。
+// 浏览器授权申请里的一个平台
+export interface DeviceGrantPlatform {
+  runtimeFamily: string
+  clientName: string | null
+}
+// 确认时一个平台的选择：跳过，或者用哪个应用、签发什么样的访问密钥
+export type DeviceGrantSelection =
+  | { runtimeFamily: string; skip: true }
+  | { runtimeFamily: string; appId: string; keyName: string; scopes: KeyScopes }
+
+// 浏览器授权的申请（routes/device.ts）：命令行申请，成员在管理界面的确认页确认，命令行凭设备码取走访问密钥。
 // 设备码与确认码都只存 SHA-256；访问密钥在取走的那一刻才生成，这里不存明文。
-// 确认时记下确认人、空间、应用、名称与权限范围，取走时照签发的规则再核对一遍。
+// 确认时记下确认人、空间与每个平台的选择（应用、名称与权限范围），取走时照签发的规则再核对一遍。
 // 取走、拒绝之后这一行就删掉，过期的由定时任务清理（jobs/cleanup.ts）
 export const deviceGrants = pgTable(
   'device_grants',
@@ -189,8 +199,10 @@ export const deviceGrants = pgTable(
     id: uuid().primaryKey().defaultRandom(),
     deviceHash: text().notNull().unique(),
     userHash: text().notNull().unique(),
-    runtimeFamily: text().notNull(),
-    // 命令行自报的名字，只在确认页显示
+    // 单个平台的申请（runtimeFamily）与几个平台的申请（platforms）二选一，取走时按这个决定回哪种形状
+    runtimeFamily: text(),
+    platforms: jsonb().$type<DeviceGrantPlatform[]>(),
+    // 命令行自报的机器名，只在确认页显示
     clientName: text(),
     clientAddress: text(),
     // 按客户端限制同时有多少条待确认的申请（http/clientIp.ts 的 clientKey）
@@ -199,10 +211,15 @@ export const deviceGrants = pgTable(
       .notNull()
       .default('pending'),
     approvedBy: uuid().references(() => accounts.id, { onDelete: 'cascade' }),
+    // 确认时每个平台的选择，顺序和申请的一样
+    selections: jsonb().$type<DeviceGrantSelection[]>(),
     // 取走时和确认人现在的成员关系比：确认之后离开过空间的不签发
     approvedAt: timestamp({ withTimezone: true }),
     spaceId: uuid().references(() => spaces.id, { onDelete: 'cascade' }),
+    // 单个平台的申请用的应用：应用删掉时，确认过、还没取走的申请一起删。
+    // 几个平台的不设它，删掉其中一个应用不连带别的平台，取走时这一项按应用不在了处理
     appId: uuid(),
+    // 只在升级之前确认、还没取走的申请里有值；之后的选择都在 selections
     keyName: text(),
     scopes: jsonb().$type<KeyScopes>(),
     createdAt: createdAt(),
@@ -212,9 +229,12 @@ export const deviceGrants = pgTable(
   (t) => [
     index().on(t.expiresAt),
     index().on(t.clientKey),
-    // 应用删掉时，确认过、还没取走的申请一起删
     foreignKey({ columns: [t.spaceId, t.appId], foreignColumns: [apps.spaceId, apps.id] }).onDelete(
       'cascade',
+    ),
+    check(
+      'device_grants_platforms_shape',
+      sql`(${t.runtimeFamily} is null) <> (${t.platforms} is null)`,
     ),
   ],
 )

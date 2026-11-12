@@ -1,11 +1,14 @@
 import { randomBytes } from 'node:crypto'
 
-import type {
-  DeviceAuthorization,
-  DeviceGrantInfo,
-  DeviceTokenResponse,
-  KeyScopes,
-  WhoAmI,
+import {
+  DEVICE_KEY_DENIALS,
+  type DeviceAuthorization,
+  type DeviceGrantApproved,
+  type DeviceGrantInfo,
+  type DeviceGrantProblem,
+  type DeviceTokenResponse,
+  type KeyScopes,
+  type WhoAmI,
 } from '@kioku/contracts'
 import { eq, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
@@ -76,6 +79,7 @@ describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
     expect(res.status).toBe(200)
     return (await res.json()) as DeviceTokenResponse
   }
+  // 单个平台的申请：确认时只有一项，extra 改这一项（runtimeFamily 默认 codex）
   const approve = (
     userCode: string,
     extra: Record<string, unknown> = {},
@@ -84,11 +88,23 @@ describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
     web('/v1/device/grants/approve', cookie, {
       userCode,
       spaceId: ws.spaceId,
-      app: { slug: 'codex', name: 'Codex' },
-      keyName: 'laptop',
-      scopes: SCOPES,
-      ...extra,
+      items: [
+        {
+          runtimeFamily: 'codex',
+          app: { slug: 'codex', name: 'Codex' },
+          keyName: 'laptop',
+          scopes: SCOPES,
+          ...extra,
+        },
+      ],
     })
+  // 单个平台的申请取到的结果：照早期的形状，只有 key 与 app
+  const single = (result: DeviceTokenResponse) => {
+    if (result.status !== 'approved' || !('key' in result)) {
+      throw new Error(`没有取到：${JSON.stringify(result)}`)
+    }
+    return result
+  }
   // 轮询之间至少隔一秒，测试里把上次轮询的时间往回拨
   const rewind = () => database.db.update(deviceGrants).set({ lastPolledAt: null })
   const grants = () => database.db.select().from(deviceGrants)
@@ -115,8 +131,9 @@ describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
       userCode: ` ${grant.userCode.toLowerCase().replace('-', ' ')} `,
     })
     expect(seen.status).toBe(200)
+    // 单个平台的申请也规整成一项
     expect((await seen.json()) as DeviceGrantInfo).toMatchObject({
-      runtimeFamily: 'codex',
+      platforms: [{ runtimeFamily: 'codex', clientName: null }],
       clientName: 'laptop',
     })
 
@@ -126,8 +143,9 @@ describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
     expect(await keys()).toHaveLength(0)
 
     await rewind()
-    const result = await poll(grant.deviceCode)
-    if (result.status !== 'approved') throw new Error(`没有取到：${result.status}`)
+    const result = single(await poll(grant.deviceCode))
+    // 早期的命令行只认这两个字段，不多给
+    expect(Object.keys(result).sort()).toEqual(['app', 'key', 'status'])
     expect(result.app).toEqual({ slug: 'codex', name: 'Codex', runtimeFamily: 'codex' })
     const who = await app.request('/v1/whoami', { headers: bearer(result.key) })
     expect(who.status).toBe(200)
@@ -350,7 +368,7 @@ describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
     const grant = await request('pi', null)
     const seen = await web('/v1/device/grants/lookup', ws.cookie, { userCode: grant.userCode })
     expect((await seen.json()) as DeviceGrantInfo).toMatchObject({
-      runtimeFamily: 'pi',
+      platforms: [{ runtimeFamily: 'pi', clientName: null }],
       clientName: null,
     })
   })
@@ -445,5 +463,282 @@ describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
     await approve(grant.userCode)
     // 确认之后不用等
     expect((await poll(grant.deviceCode)).status).toBe('approved')
+  })
+
+  describe('一次申请几个平台', () => {
+    const PLATFORMS = [
+      { runtimeFamily: 'codex', clientName: 'work' },
+      { runtimeFamily: 'pi' },
+      { runtimeFamily: 'hermes' },
+    ]
+    async function requestMany(platforms: unknown[] = PLATFORMS, clientName = 'mac') {
+      const res = await cli('/v1/device/authorize', { platforms, clientName })
+      expect(res.status).toBe(201)
+      return (await res.json()) as DeviceAuthorization
+    }
+    const item = (runtimeFamily: string, extra: Record<string, unknown> = {}) => ({
+      runtimeFamily,
+      app: { slug: `${runtimeFamily}-mac`, name: `${runtimeFamily} · mac` },
+      keyName: 'mac',
+      scopes: SCOPES,
+      ...extra,
+    })
+    const approveMany = (userCode: string, items: unknown[], cookie: string = ws.cookie) =>
+      web('/v1/device/grants/approve', cookie, { userCode, spaceId: ws.spaceId, items })
+    const many = (result: DeviceTokenResponse) => {
+      if (result.status !== 'approved' || !('keys' in result)) {
+        throw new Error(`没有取到：${JSON.stringify(result)}`)
+      }
+      return result.keys
+    }
+
+    it('查看、确认一次、取走：每个平台一项，顺序和申请的一样，取消勾选的是 skipped', async () => {
+      const hermes = await ws.createApp('hermes-old', { runtimeFamily: 'hermes' })
+      const grant = await requestMany()
+      expect(await poll(grant.deviceCode)).toEqual({ status: 'pending' })
+      const seen = await web('/v1/device/grants/lookup', ws.cookie, { userCode: grant.userCode })
+      expect((await seen.json()) as DeviceGrantInfo).toMatchObject({
+        platforms: [
+          { runtimeFamily: 'codex', clientName: 'work' },
+          { runtimeFamily: 'pi', clientName: null },
+          { runtimeFamily: 'hermes', clientName: null },
+        ],
+        clientName: 'mac',
+      })
+
+      // 顺序不必和申请一致：按运行时对上
+      const res = await approveMany(grant.userCode, [
+        item('hermes', { app: { id: hermes.id }, keyName: 'mac hermes' }),
+        { runtimeFamily: 'pi', skip: true },
+        item('codex'),
+      ])
+      expect(res.status).toBe(200)
+      expect(
+        ((await res.json()) as DeviceGrantApproved).items.map((i) => [i.runtimeFamily, i.app.slug]),
+      ).toEqual([
+        ['codex', 'codex-mac'],
+        ['hermes', 'hermes-old'],
+      ])
+      expect(await keys()).toHaveLength(0)
+
+      await rewind()
+      const result = await poll(grant.deviceCode)
+      const issued = many(result)
+      expect(issued.map((k) => [k.runtimeFamily, k.status])).toEqual([
+        ['codex', 'issued'],
+        ['pi', 'skipped'],
+        ['hermes', 'issued'],
+      ])
+      for (const k of issued) {
+        if (k.status !== 'issued') continue
+        const who = await app.request('/v1/whoami', { headers: bearer(k.key) })
+        expect(who.status).toBe(200)
+      }
+      expect(issued[0]).toMatchObject({ app: { slug: 'codex-mac', runtimeFamily: 'codex' } })
+      expect(issued[2]).toMatchObject({ app: { slug: 'hermes-old', runtimeFamily: 'hermes' } })
+      expect((await keys()).map((k) => k.name).sort()).toEqual(['mac', 'mac hermes'])
+      expect(JSON.stringify(await keys())).not.toContain((issued[0] as { key: string }).key)
+      expect(await grants()).toHaveLength(0)
+      expect(await poll(grant.deviceCode)).toEqual({ status: 'expired' })
+    })
+
+    it('申请：两种写法二选一，平台 1 到 8 个、运行时不重复', async () => {
+      for (const body of [
+        { runtimeFamily: 'codex', platforms: [{ runtimeFamily: 'pi' }] },
+        { clientName: 'mac' },
+        { platforms: [] },
+        { platforms: [{ runtimeFamily: 'pi' }, { runtimeFamily: 'pi', clientName: 'x' }] },
+        { platforms: [{ runtimeFamily: 'nope' }] },
+        { platforms: [{ runtimeFamily: 'pi', clientName: 'a\nb' }] },
+        {
+          platforms: [
+            'claudecode',
+            'codex',
+            'openclaw',
+            'hermes',
+            'opencode',
+            'pi',
+            'dsh',
+            'astrbot',
+            'mcp',
+          ].map((runtimeFamily) => ({ runtimeFamily })),
+        },
+      ]) {
+        expect((await cli('/v1/device/authorize', body)).status, JSON.stringify(body)).toBe(400)
+      }
+      await requestMany([{ runtimeFamily: 'pi' }])
+    })
+
+    it('确认：每个平台恰好一项、至少一项不跳过；不合规则时整体不确认，申请还在', async () => {
+      const grant = await requestMany()
+      const skip = (runtimeFamily: string) => ({ runtimeFamily, skip: true })
+      for (const items of [
+        // 少一项
+        [item('codex'), item('pi')],
+        // 多一项
+        [item('codex'), item('pi'), item('hermes'), item('mcp')],
+        // 同一个平台两项
+        [item('codex'), item('pi'), item('pi', { app: { slug: 'pi-2', name: 'x' } })],
+        // 全部跳过
+        [skip('codex'), skip('pi'), skip('hermes')],
+      ]) {
+        expect((await approveMany(grant.userCode, items)).status).toBe(400)
+      }
+      // 编辑者给不了机密级：指出是哪个平台，一个应用都不建
+      const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+      const refused = await approveMany(
+        grant.userCode,
+        [
+          item('codex'),
+          item('pi', { scopes: { ...SCOPES, maxSensitivity: 'secret' } }),
+          skip('hermes'),
+        ],
+        bob.cookie,
+      )
+      expect(refused.status).toBe(403)
+      const problem = (await refused.json()) as DeviceGrantProblem
+      expect(problem.runtimeFamily).toBe('pi')
+      expect(problem.error).toMatch(/^Pi：/)
+      expect(await spaceApps()).toHaveLength(0)
+      expect(
+        (await approveMany(grant.userCode, [item('codex'), skip('pi'), skip('hermes')])).status,
+      ).toBe(200)
+    })
+
+    it('新建应用的标识被占用时回 409 并指出是哪一项，前面新建的应用不留下', async () => {
+      await ws.createApp('pi-mac', { runtimeFamily: 'pi' })
+      const grant = await requestMany()
+      const res = await approveMany(grant.userCode, [item('codex'), item('pi'), item('hermes')])
+      expect(res.status).toBe(409)
+      const problem = (await res.json()) as DeviceGrantProblem
+      expect(problem).toMatchObject({ runtimeFamily: 'pi' })
+      expect(problem.error).toContain('pi-mac')
+      // codex 那一项先建了应用，跟着回滚
+      expect((await spaceApps()).map((a) => a.slug)).toEqual(['pi-mac'])
+      // 同一个请求里两项用同一个标识也是 409
+      const twice = await approveMany(grant.userCode, [
+        item('codex', { app: { slug: 'same', name: 'x' } }),
+        item('pi', { app: { slug: 'same', name: 'x' } }),
+        item('hermes'),
+      ])
+      expect(twice.status).toBe(409)
+      expect(((await twice.json()) as DeviceGrantProblem).runtimeFamily).toBe('pi')
+      // 已有的应用运行时对不上也指出是哪一项
+      const [pi] = await spaceApps()
+      const mismatch = await approveMany(grant.userCode, [
+        item('codex', { app: { id: pi!.id } }),
+        { runtimeFamily: 'pi', skip: true },
+        { runtimeFamily: 'hermes', skip: true },
+      ])
+      expect(mismatch.status).toBe(409)
+      expect(((await mismatch.json()) as DeviceGrantProblem).runtimeFamily).toBe('codex')
+      expect(
+        (
+          await approveMany(grant.userCode, [
+            item('codex'),
+            item('pi', { app: { slug: 'pi-mac-2', name: 'x' } }),
+            item('hermes'),
+          ])
+        ).status,
+      ).toBe(200)
+    })
+
+    it('取走时逐项再核对：降级后超出范围的那一项 denied，别的照常签发', async () => {
+      const bob = await addMember(database.db, ws.spaceId, 'bob', 'owner')
+      const grant = await requestMany()
+      const res = await approveMany(
+        grant.userCode,
+        [
+          item('codex', { scopes: { ...SCOPES, credentials: 'use' } }),
+          item('pi'),
+          { runtimeFamily: 'hermes', skip: true },
+        ],
+        bob.cookie,
+      )
+      expect(res.status).toBe(200)
+      await database.db
+        .update(spaceMembers)
+        .set({ role: 'editor' })
+        .where(eq(spaceMembers.accountId, bob.accountId))
+      const result = many(await poll(grant.deviceCode))
+      expect(result).toEqual([
+        { runtimeFamily: 'codex', status: 'denied', reason: DEVICE_KEY_DENIALS.role },
+        expect.objectContaining({ runtimeFamily: 'pi', status: 'issued' }),
+        { runtimeFamily: 'hermes', status: 'skipped' },
+      ])
+      expect(await keys()).toHaveLength(1)
+    })
+
+    it('确认之后应用所有者被停用：每一项都是 denied，不签发', async () => {
+      const bob = await addMember(database.db, ws.spaceId, 'bob', 'owner')
+      const grant = await requestMany()
+      await approveMany(grant.userCode, [item('codex'), item('pi'), item('hermes')], bob.cookie)
+      await database.db
+        .update(accounts)
+        .set({ disabledAt: new Date() })
+        .where(eq(accounts.id, bob.accountId))
+      const result = many(await poll(grant.deviceCode))
+      expect(result.map((k) => k.status)).toEqual(['denied', 'denied', 'denied'])
+      expect(
+        result.every((k) => k.status === 'denied' && k.reason === DEVICE_KEY_DENIALS.member),
+      ).toBe(true)
+      expect(await keys()).toHaveLength(0)
+      expect(await grants()).toHaveLength(0)
+    })
+
+    it('确认之后删掉其中一个应用：那一项 denied，别的平台不受连累', async () => {
+      const grant = await requestMany()
+      await approveMany(grant.userCode, [item('codex'), item('pi'), item('hermes')])
+      const [pi] = (await spaceApps()).filter((a) => a.slug === 'pi-mac')
+      const removed = await app.request(`/v1/spaces/${ws.spaceId}/apps/${pi!.id}`, {
+        method: 'DELETE',
+        headers: { cookie: ws.cookie, 'sec-fetch-site': 'same-origin' },
+      })
+      expect(removed.status).toBeLessThan(300)
+      const result = many(await poll(grant.deviceCode))
+      expect(result.map((k) => k.status)).toEqual(['issued', 'denied', 'issued'])
+      expect(result[1]).toMatchObject({ reason: DEVICE_KEY_DENIALS.app })
+    })
+
+    it('同时来的两次轮询只有一次取得到；取走与删除应用同时进行不会互相卡死', async () => {
+      const grant = await requestMany()
+      await approveMany(grant.userCode, [item('codex'), item('pi'), item('hermes')])
+      const results = await Promise.all([poll(grant.deviceCode), poll(grant.deviceCode)])
+      expect(results.map((r) => r.status).sort()).toEqual(['approved', 'expired'])
+      expect(await keys()).toHaveLength(3)
+
+      for (let round = 0; round < 5; round++) {
+        const next = await requestMany()
+        const items = ['codex', 'pi', 'hermes'].map((rf) =>
+          item(rf, { app: { slug: `${rf}-race-${round}`, name: 'x' } }),
+        )
+        expect((await approveMany(next.userCode, items)).status).toBe(200)
+        const targets = (await spaceApps()).filter((a) => a.slug.endsWith(`-race-${round}`))
+        const [taken, ...removed] = await Promise.all([
+          cli('/v1/device/token', { deviceCode: next.deviceCode }),
+          ...targets.map((target) =>
+            app.request(`/v1/spaces/${ws.spaceId}/apps/${target.id}`, {
+              method: 'DELETE',
+              headers: { cookie: ws.cookie, 'sec-fetch-site': 'same-origin' },
+            }),
+          ),
+        ])
+        expect(taken!.status, `第 ${round} 轮取走`).toBe(200)
+        for (const res of removed) expect(res.status, `第 ${round} 轮删除`).toBeLessThan(500)
+      }
+    })
+
+    it('申请的上限照旧：几个平台的申请按一条算', async () => {
+      const proxied = createApp({ ...deps, trustedProxies: 1 })
+      const from = () =>
+        proxied.request('/v1/device/authorize', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-forwarded-for': '203.0.113.9' },
+          body: JSON.stringify({ platforms: PLATFORMS }),
+        })
+      for (let i = 0; i < 10; i++) expect((await from()).status).toBe(201)
+      expect((await from()).status).toBe(429)
+      expect(await grants()).toHaveLength(10)
+    })
   })
 })

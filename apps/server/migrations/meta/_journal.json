@@ -50,6 +50,13 @@
       "when": 1794395230978,
       "tag": "0006_device_grants",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1794472645286,
+      "tag": "0007_device_grant_platforms",
+      "breakpoints": true
     }
   ]
 }
