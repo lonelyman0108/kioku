@@ -264,16 +264,16 @@ export function deviceRoutes(deps: Deps) {
           return { status: 'pending' as const }
         }
         const selections = grantSelections(grant)
-        return {
-          status: 'approved' as const,
-          spaceId: grant.spaceId,
-          appIds: selections ? selectionAppIds(selections) : null,
+        const appIds = selections ? selectionAppIds(selections) : []
+        // 确认过、却没有能用的选择（数据不全）：和别的作废一样删掉这一行，答过期
+        if (!grant.spaceId || !appIds.length) {
+          await tx.delete(deviceGrants).where(eq(deviceGrants.id, grant.id))
+          return { status: 'expired' as const }
         }
+        return { status: 'approved' as const, spaceId: grant.spaceId, appIds }
       })
       if (first.status === 'slow') return c.json({ error: '轮询太频繁' }, 429)
       if (first.status !== 'approved') return c.json({ status: first.status }, 200)
-      if (!first.spaceId || !first.appIds?.length)
-        return c.json({ status: 'expired' as const }, 200)
 
       // 确认过的：在空间的事务里先按 id 依次锁住涉及的应用、再锁这条申请（同时来的两次轮询只有一次拿得到），
       // 照签发的规则逐项核对确认人现在的成员关系与应用的所有者，过了才生成访问密钥；不管成不成，这条申请都删掉。
@@ -395,6 +395,9 @@ export function deviceRoutes(deps: Deps) {
             const denial = issueDenial(member.role, item.scopes)
             if (denial) refuse(403, denial, item.runtimeFamily)
           }
+          // 选的已有应用按 id 排好一次锁全，再锁申请、逐项处理：和取走时同一个顺序（应用 → 申请），
+          // 两个平台顺序相反的申请同时确认时也不会互相等住
+          const existing = await lockApps(tx, body.items)
           const grant = await pendingGrant(tx, body.userCode)
           if (!grant) return refuse(404, '确认码不对或已过期')
           const items = orderedItems(grantPlatforms(grant), body.items)
@@ -406,7 +409,7 @@ export function deviceRoutes(deps: Deps) {
               selections.push({ runtimeFamily: item.runtimeFamily, skip: true })
               continue
             }
-            const target = await approveTarget(tx, item, accountId, spaceId)
+            const target = await approveTarget(tx, item, existing, accountId, spaceId)
             selections.push({
               runtimeFamily: item.runtimeFamily,
               appId: target.id,
@@ -462,7 +465,7 @@ export function deviceRoutes(deps: Deps) {
 
 type ApprovedItem = {
   runtimeFamily: RuntimeFamily
-  app: typeof apps.$inferSelect
+  app: AppRow
   keyName: string
 }
 
@@ -506,17 +509,33 @@ function orderedItems(
   return ordered
 }
 
-// 确认时一项用的应用：已有的要是确认人自己的、运行时和这一项一致的（签发时还会再核对一次所有者）；
+type AppRow = typeof apps.$inferSelect
+
+// 确认里选的已有应用，按 id 排序依次锁住；不存在的不在结果里
+async function lockApps(tx: Tx, items: readonly DeviceGrantItem[]): Promise<Map<string, AppRow>> {
+  const ids = [
+    ...new Set(items.flatMap((item) => ('app' in item && 'id' in item.app ? [item.app.id] : []))),
+  ].sort()
+  const locked = new Map<string, AppRow>()
+  for (const id of ids) {
+    const [row] = await tx.select().from(apps).where(eq(apps.id, id)).for('update')
+    if (row) locked.set(id, row)
+  }
+  return locked
+}
+
+// 确认时一项用的应用：已有的（lockApps 已经锁住）要是确认人自己的、运行时和这一项一致的（签发时还会再核对一次所有者）；
 // 新建的运行时取这一项的，标识被占用时整个确认作废
 async function approveTarget(
   tx: Tx,
   item: Extract<DeviceGrantItem, { app: unknown }>,
+  existing: ReadonlyMap<string, AppRow>,
   accountId: string,
   spaceId: string,
-): Promise<typeof apps.$inferSelect> {
+): Promise<AppRow> {
   const { runtimeFamily } = item
   if ('id' in item.app) {
-    const [found] = await tx.select().from(apps).where(eq(apps.id, item.app.id)).for('update')
+    const found = existing.get(item.app.id)
     if (!found) return refuse(404, '应用不存在', runtimeFamily)
     if (found.ownerAccountId !== accountId) {
       return refuse(403, '仅应用所有者可签发此应用的访问密钥', runtimeFamily)

@@ -10,6 +10,7 @@ import {
   NOTHING_SELECTED,
   appSlugProblem,
   approveBody,
+  defaultAppChoice,
   defaultAppName,
   defaultGrantPreset,
   defaultGrantScopes,
@@ -22,6 +23,7 @@ import {
   issuableSpaces,
   lookupFailure,
   nameProblem,
+  newAppSlugs,
   normalizeUserCode,
   nothingSelected,
   runtimeNames,
@@ -300,12 +302,68 @@ describe('几个平台', () => {
     const toggle = elements.find((el) => el.tag === 'USwitch')!
     expect(attr(toggle, 'label')).toBe('所有平台用同一套权限')
     // 统一时一个编辑器，不统一时每个平台一个，都是签发访问密钥的那个编辑器
+    const condition = (el: TemplateNode) =>
+      [el, ...ancestors(el)]
+        .map((a) => a.props?.find((p) => p.name === 'if')?.exp?.content)
+        .filter(Boolean)
     const editors = elements.filter((el) => el.tag === 'KeyScopeEditor')
-    expect(editors.map((el) => el.props?.find((p) => p.name === 'if')?.exp?.content)).toEqual([
-      '!sameScopes',
-      'sameScopes',
-    ])
+    expect(editors).toHaveLength(2)
+    expect(condition(editors[0]!)).toContain('!sameScopes')
+    expect(condition(editors[1]!)).toContain('sameScopes')
     for (const editor of editors) expect(bound(editor, 'is-space-owner')).toBe('isSpaceOwner')
+    // 开关在平台列表上方：关掉之后各行展开自己的编辑器
+    const list = elements.find((el) => attr(el, 'class') === 'platforms')!
+    expect(elements.indexOf(toggle)).toBeLessThan(elements.indexOf(list))
+    expect(ancestors(editors[0]!)).toContain(list)
+    expect(ancestors(editors[1]!)).not.toContain(list)
+  })
+
+  it('应用、访问密钥名称与标识的说明收在提示层里', () => {
+    expect(authorizePage).toContain('仅列出当前账号的 ${runtimeNames[row.runtimeFamily]} 应用')
+    expect(authorizePage).toContain('用于辨认，例如设备加工具')
+    expect(authorizePage).toContain('这个应用的记忆位于 app://&lt;标识&gt;/ 下')
+    const row = elements.find((el) => attr(el, 'class') === 'platform')!
+    expect(walk(row).filter((el) => el.tag === 'Hint')).toHaveLength(3)
+  })
+
+  it('默认用已有的应用：同一台机器上次建的优先，其次第一个，都没有才新建', () => {
+    const own = [
+      { id: 'first', name: 'Codex' },
+      { id: 'same', name: 'Codex · mac' },
+    ]
+    expect(defaultAppChoice(own, 'codex', 'mac')).toBe('same')
+    expect(defaultAppChoice(own, 'codex', 'linux')).toBe('first')
+    expect(defaultAppChoice([], 'codex', 'mac')).toBe(NEW_APP)
+    expect(script).toContain('defaultAppChoice(ownApps(row.runtimeFamily)')
+  })
+
+  it('默认名称不超过上限：截短机器名、保留平台名，不切开代理对', () => {
+    const long = defaultAppName('claudecode', '😀'.repeat(80))
+    expect(Array.from(long)).toHaveLength(64)
+    expect(long.startsWith('Claude Code · ')).toBe(true)
+    expect(long).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/)
+    expect(nameProblem(long)).toBeNull()
+    expect(defaultAppName('pi', 'x'.repeat(64))).toBe(`Pi · ${'x'.repeat(59)}`)
+  })
+
+  it('手填的标识先预留，默认的标识避开它们', () => {
+    const row = (runtimeFamily: 'codex' | 'pi', typed: string | null, isNew = true) => ({
+      isNew,
+      typed,
+      runtimeFamily,
+      appName: `${runtimeNames[runtimeFamily]} · mac`,
+    })
+    // 后一行手填了前一行的默认值：前一行换成下一个
+    expect(newAppSlugs([row('codex', null), row('pi', 'codex-mac')], [])).toEqual([
+      'codex-mac-2',
+      'codex-mac',
+    ])
+    expect(newAppSlugs([row('codex', null), row('pi', null)], ['pi-mac'])).toEqual([
+      'codex-mac',
+      'pi-mac-2',
+    ])
+    // 不新建的行没有标识，也不占用
+    expect(newAppSlugs([row('codex', 'x', false), row('pi', null)], [])).toEqual([null, 'pi-mac'])
   })
 
   it('平台名用契约的名称表', () => {

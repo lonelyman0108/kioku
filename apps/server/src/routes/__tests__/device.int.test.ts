@@ -700,6 +700,42 @@ describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
       expect(result[1]).toMatchObject({ reason: DEVICE_KEY_DENIALS.app })
     })
 
+    it('两个平台顺序相反的申请同时确认、用同样的已有应用：不会互相卡死', async () => {
+      const codex = await ws.createApp('codex-old', { runtimeFamily: 'codex' })
+      const hermes = await ws.createApp('hermes-old', { runtimeFamily: 'hermes' })
+      const existing = (runtimeFamily: string, id: string) => item(runtimeFamily, { app: { id } })
+      for (let round = 0; round < 5; round++) {
+        const forward = await requestMany([{ runtimeFamily: 'codex' }, { runtimeFamily: 'hermes' }])
+        const backward = await requestMany([
+          { runtimeFamily: 'hermes' },
+          { runtimeFamily: 'codex' },
+        ])
+        const results = await Promise.all([
+          approveMany(forward.userCode, [
+            existing('codex', codex.id),
+            existing('hermes', hermes.id),
+          ]),
+          approveMany(backward.userCode, [
+            existing('hermes', hermes.id),
+            existing('codex', codex.id),
+          ]),
+        ])
+        expect(
+          results.map((r) => r.status),
+          `第 ${round} 轮`,
+        ).toEqual([200, 200])
+      }
+    })
+
+    it('确认过、却没有能用的选择：答过期并删掉这一行', async () => {
+      const grant = await requestMany()
+      await approveMany(grant.userCode, [item('codex'), item('pi'), item('hermes')])
+      await database.db.update(deviceGrants).set({ selections: null })
+      expect(await poll(grant.deviceCode)).toEqual({ status: 'expired' })
+      expect(await grants()).toHaveLength(0)
+      expect(await keys()).toHaveLength(0)
+    })
+
     it('同时来的两次轮询只有一次取得到；取走与删除应用同时进行不会互相卡死', async () => {
       const grant = await requestMany()
       await approveMany(grant.userCode, [item('codex'), item('pi'), item('hermes')])

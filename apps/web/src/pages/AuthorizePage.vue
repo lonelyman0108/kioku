@@ -19,6 +19,7 @@ import {
   USER_CODE_PROBLEM,
   appSlugProblem,
   approveBody,
+  defaultAppChoice,
   defaultAppName,
   defaultGrantPreset,
   defaultGrantScopes,
@@ -32,10 +33,9 @@ import {
   lookupFailure,
   nameProblem,
   normalizeUserCode,
+  newAppSlugs,
   nothingSelected,
   runtimeNames,
-  slugFrom,
-  uniqueSlug,
   type PlatformChoice,
 } from '../authorize'
 import Hint from '../components/Hint.vue'
@@ -147,7 +147,7 @@ interface PlatformRow {
   // 这个平台自报的名字
   clientName: string | null
   selected: boolean
-  // 选过的应用；null 是没选过，用默认的新建
+  // 选过的应用；null 是没选过，用默认的（defaultAppChoice）
   picked: string | null
   typed: { slug: string | null; appName: string | null; keyName: string | null }
   // 不统一权限时这个平台自己的签发范围
@@ -167,27 +167,30 @@ const appItems = (runtimeFamily: RuntimeFamily) => [
   })),
   { label: '新建应用', value: NEW_APP },
 ]
-// 选过的应用不在了（换了空间、被删、转给别人）退回新建
+// 没选过、或者选过的应用不在了（换了空间、被删、转给别人）时用默认的：
+// 优先同一台机器上次建的应用，其次第一个自己的同运行时应用，都没有才新建
 const appChoice = (row: PlatformRow) =>
   row.picked !== null &&
   (row.picked === NEW_APP || ownApps(row.runtimeFamily).some((app) => app.id === row.picked))
     ? row.picked
-    : NEW_APP
+    : defaultAppChoice(ownApps(row.runtimeFamily), row.runtimeFamily, machine.value)
 const appName = (row: PlatformRow) =>
   row.typed.appName ?? defaultAppName(row.runtimeFamily, machine.value)
 const keyName = (row: PlatformRow) =>
   row.typed.keyName ?? defaultKeyName(machine.value, row.runtimeFamily)
 
-// 新建应用的标识：没改过的由应用名称生成，按行的顺序依次避开空间里已有的和前面几行用掉的
-const slugs = computed(() => {
-  const used = new Set(takenSlugs.value)
-  return rows.value.map((row) => {
-    if (!row.selected || appChoice(row) !== NEW_APP) return null
-    const slug = row.typed.slug ?? uniqueSlug(slugFrom(appName(row), row.runtimeFamily), used)
-    used.add(slug)
-    return slug
-  })
-})
+// 新建应用的标识：手填的先预留，没改过的由应用名称生成并依次避开
+const slugs = computed(() =>
+  newAppSlugs(
+    rows.value.map((row) => ({
+      isNew: row.selected && appChoice(row) === NEW_APP,
+      typed: row.typed.slug,
+      runtimeFamily: row.runtimeFamily,
+      appName: appName(row),
+    })),
+    takenSlugs.value,
+  ),
+)
 const slugProblems = computed(() =>
   rows.value.map((row, index) => {
     const slug = slugs.value[index]
@@ -439,6 +442,15 @@ async function deny() {
           data-state="apps-failed"
         />
 
+        <div class="platforms-head">
+          <SectionHeading title="平台" :level="2" />
+          <USwitch
+            v-if="rows.length > 1"
+            v-model="sameScopes"
+            size="sm"
+            label="所有平台用同一套权限"
+          />
+        </div>
         <section class="platforms" aria-label="平台">
           <div
             v-for="(row, index) in rows"
@@ -460,7 +472,14 @@ async function deny() {
             </div>
             <template v-if="row.selected">
               <div class="fields">
-                <UFormField label="应用">
+                <UFormField>
+                  <template #label>
+                    应用<Hint v-if="apps.isSuccess.value" label="应用列表说明">{{
+                      ownApps(row.runtimeFamily).length
+                        ? `仅列出当前账号的 ${runtimeNames[row.runtimeFamily]} 应用`
+                        : `当前账号在此空间暂无 ${runtimeNames[row.runtimeFamily]} 应用`
+                    }}</Hint>
+                  </template>
                   <USkeleton v-if="apps.isPending.value" class="h-8 w-full" />
                   <USelect
                     v-else-if="ownApps(row.runtimeFamily).length"
@@ -471,7 +490,10 @@ async function deny() {
                   />
                   <p v-else class="only">新建应用</p>
                 </UFormField>
-                <UFormField label="访问密钥名称" :error="nameProblem(keyName(row)) ?? undefined">
+                <UFormField :error="nameProblem(keyName(row)) ?? undefined">
+                  <template #label>
+                    访问密钥名称<Hint label="访问密钥名称说明">用于辨认，例如设备加工具</Hint>
+                  </template>
                   <UInput
                     :model-value="keyName(row)"
                     class="w-full"
@@ -486,7 +508,12 @@ async function deny() {
                       @update:model-value="(value: string) => (row.typed.appName = value)"
                     />
                   </UFormField>
-                  <UFormField label="应用标识" :error="slugProblems[index] ?? undefined">
+                  <UFormField :error="slugProblems[index] ?? undefined">
+                    <template #label>
+                      应用标识<Hint label="应用标识说明"
+                        >这个应用的记忆位于 app://&lt;标识&gt;/ 下</Hint
+                      >
+                    </template>
                     <UInput
                       :model-value="slugs[index] ?? ''"
                       class="w-full font-mono"
@@ -509,22 +536,14 @@ async function deny() {
           {{ NOTHING_SELECTED }}
         </p>
 
-        <div class="scope-head">
+        <template v-if="sameScopes">
           <SectionHeading title="签发范围" :level="2" />
-          <USwitch
-            v-if="rows.length > 1"
-            v-model="sameScopes"
-            size="sm"
-            label="所有平台用同一套权限"
+          <KeyScopeEditor
+            v-model:scopes="shared.scopes"
+            v-model:preset="shared.preset"
+            :is-space-owner="isSpaceOwner"
           />
-        </div>
-        <KeyScopeEditor
-          v-if="sameScopes"
-          v-model:scopes="shared.scopes"
-          v-model:preset="shared.preset"
-          :is-space-owner="isSpaceOwner"
-        />
-        <p v-else class="text-sm text-muted">各平台的签发范围在上面逐个设置。</p>
+        </template>
       </template>
 
       <p v-if="error" class="text-error" role="alert" data-state="failed">{{ error }}</p>
@@ -651,7 +670,7 @@ async function deny() {
   font-size: 14px;
   line-height: 32px;
 }
-.scope-head {
+.platforms-head {
   display: flex;
   flex-wrap: wrap;
   align-items: center;

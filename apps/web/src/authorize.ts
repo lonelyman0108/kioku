@@ -57,11 +57,34 @@ export const NEW_APP = 'new'
 // 各运行时的产品名：平台名，也用作新建应用的默认名称。只有契约里一份
 export const runtimeNames = RUNTIME_FAMILY_NAMES
 
-// 新建应用的默认名称：「平台名 · 机器名」，没有机器名时只用平台名
-export const defaultAppName = (runtimeFamily: RuntimeFamily, machine: string | null) =>
-  machine?.trim()
-    ? `${runtimeNames[runtimeFamily]} · ${machine.trim()}`
-    : runtimeNames[runtimeFamily]
+const NAME_MAX = 64
+// 名称按码点算长度，和契约的上限一致
+export const nameProblem = (name: string): string | null => {
+  const length = Array.from(name.trim()).length
+  return length >= 1 && length <= NAME_MAX ? null : `请填写 1 到 ${NAME_MAX} 个字符。`
+}
+
+// 新建应用的默认名称：「平台名 · 机器名」，没有机器名时只用平台名。
+// 超出名称上限时截短机器名、保留平台名，按码点截，不切开代理对
+export function defaultAppName(runtimeFamily: RuntimeFamily, machine: string | null): string {
+  const platform = runtimeNames[runtimeFamily]
+  const name = machine?.trim()
+  if (!name) return platform
+  const prefix = `${platform} · `
+  const room = NAME_MAX - Array.from(prefix).length
+  return `${prefix}${Array.from(name).slice(0, room).join('').trimEnd()}`
+}
+
+// 一个平台默认用哪个应用：当前账号自己的、运行时一致的应用里，名称等于默认名称的那个（同一台机器上次授权建的），
+// 没有就取第一个；一个都没有才新建。重新授权同一台机器时不多出重复的应用
+export function defaultAppChoice(
+  own: readonly Pick<AppInfo, 'id' | 'name'>[],
+  runtimeFamily: RuntimeFamily,
+  machine: string | null,
+): string {
+  const name = defaultAppName(runtimeFamily, machine)
+  return (own.find((app) => app.name === name) ?? own[0])?.id ?? NEW_APP
+}
 
 const SLUG_MAX = 63
 // 由名称生成标识：小写字母与数字之外的都换成连字符；什么都不剩时用运行时的名字
@@ -94,11 +117,24 @@ export function appSlugProblem(slug: string, taken: readonly string[]): string |
 // 同一次确认里两个平台新建的应用用了同一个标识
 export const DUPLICATE_SLUG = '与另一个平台的标识重复'
 
-const NAME_MAX = 64
-// 名称按码点算长度，和契约的上限一致
-export const nameProblem = (name: string): string | null => {
-  const length = Array.from(name.trim()).length
-  return length >= 1 && length <= NAME_MAX ? null : `请填写 1 到 ${NAME_MAX} 个字符。`
+// 各行新建应用的标识：不新建的为 null；手填的原样用，并先全部预留出来，
+// 没填的再按行的顺序由名称生成，依次避开空间里已有的、手填的与前面几行用掉的
+export interface SlugRow {
+  isNew: boolean
+  typed: string | null
+  runtimeFamily: RuntimeFamily
+  appName: string
+}
+export function newAppSlugs(rows: readonly SlugRow[], taken: readonly string[]): (string | null)[] {
+  const used = new Set(taken)
+  for (const row of rows) if (row.isNew && row.typed !== null) used.add(row.typed)
+  return rows.map((row) => {
+    if (!row.isNew) return null
+    if (row.typed !== null) return row.typed
+    const slug = uniqueSlug(slugFrom(row.appName, row.runtimeFamily), used)
+    used.add(slug)
+    return slug
+  })
 }
 
 // 访问密钥的默认名称：机器名，没有就用平台名

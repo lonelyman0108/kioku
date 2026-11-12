@@ -116,7 +116,11 @@ export const DeviceIssuedKey = z.discriminatedUnion('status', [
     app: DeviceKeyApp,
   }),
   z.object({ runtimeFamily: RuntimeFamily, status: z.literal('skipped') }),
-  z.object({ runtimeFamily: RuntimeFamily, status: z.literal('denied'), reason: z.string() }),
+  z.object({
+    runtimeFamily: RuntimeFamily,
+    status: z.literal('denied'),
+    reason: z.enum(Object.values(DEVICE_KEY_DENIALS)),
+  }),
 ])
 export type DeviceIssuedKey = z.infer<typeof DeviceIssuedKey>
 

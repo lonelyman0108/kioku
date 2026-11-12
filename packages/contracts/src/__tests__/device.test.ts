@@ -96,5 +96,12 @@ describe('取走的结果', () => {
       keys,
     })
     expect(DeviceTokenResponse.parse({ status: 'pending' })).toEqual({ status: 'pending' })
+    // denied 的原因只能是固定的几类
+    expect(
+      DeviceTokenResponse.safeParse({
+        status: 'approved',
+        keys: [{ runtimeFamily: 'pi', status: 'denied', reason: '数据库连接失败' }],
+      }).success,
+    ).toBe(false)
   })
 })

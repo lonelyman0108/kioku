@@ -19,22 +19,8 @@ import type {
   ProvisionProblem,
 } from './setup'
 
-// 归属、敏感级、凭据能力、密码库连接状态与错误、凭据的到期与轮换、疑似明文类别的中文名，管理界面和服务端的错误信息共用一份，用词才不会分叉。
+// 归属、敏感级、凭据能力、运行时、密码库连接状态与错误、凭据的到期与轮换、疑似明文类别的中文名，管理界面和服务端的错误信息共用一份，用词才不会分叉。
 // 契约只放 zod schema，这里是例外，和 bench.ts 的 isReplayStep、mayWrite 一样
-// 各运行时的产品名：确认页的平台名、新建应用的默认名称，以及浏览器授权报错里指出是哪个平台
-export const RUNTIME_FAMILY_NAMES: Record<RuntimeFamily, string> = {
-  claudecode: 'Claude Code',
-  codex: 'Codex',
-  openclaw: 'OpenClaw',
-  hermes: 'Hermes',
-  opencode: 'OpenCode',
-  pi: 'Pi',
-  dsh: 'DeepSeek Harness',
-  astrbot: 'AstrBot',
-  mcp: 'MCP',
-  other: '其他客户端',
-}
-
 export const LAYER_NAMES: Record<Layer, string> = {
   core: '通用',
   persona: '人格',
@@ -55,6 +41,20 @@ export const CREDENTIAL_CAPABILITY_NAMES: Record<CredentialCapability, string> =
   none: '不可用',
   use: '取用',
   manage: '管理',
+}
+
+// 各运行时的产品名：确认页的平台名、新建应用的默认名称，以及浏览器授权报错里指出是哪个平台
+export const RUNTIME_FAMILY_NAMES: Record<RuntimeFamily, string> = {
+  claudecode: 'Claude Code',
+  codex: 'Codex',
+  openclaw: 'OpenClaw',
+  hermes: 'Hermes',
+  opencode: 'OpenCode',
+  pi: 'Pi',
+  dsh: 'DeepSeek Harness',
+  astrbot: 'AstrBot',
+  mcp: 'MCP',
+  other: '其他客户端',
 }
 
 export const VAULT_CONNECTION_STATUS_NAMES: Record<VaultConnectionStatus, string> = {
