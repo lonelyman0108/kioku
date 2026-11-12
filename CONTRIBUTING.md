@@ -65,5 +65,5 @@
 - 标签：正式版打 `X.Y.Z`、`X.Y`、`latest`；带预发布后缀的（如 `v0.1.0-rc.1`）只打 `X.Y.Z` 本身，不动 `X.Y` 与 `latest`。规则在 `scripts/ci/image-meta.sh`。
 - 服务端镜像构建时传 `KIOKU_VERSION`（tag 去掉 `v`）、`KIOKU_COMMIT`（完整的提交 sha）、`KIOKU_BUILD_TIME`（ISO 8601 的 UTC 时间）；两个镜像都带 OCI 标签（source、revision、version、created、licenses）。
 - main 每次合并后，`edge.yml` 用同一份 `images.yml` 推两个镜像的 `edge` 标签（版本写 `edge`），不经过 PR 的门禁；连着合并时旧的 run 被取消。
-- 需要的 secrets：`DOCKERHUB_USERNAME`、`DOCKERHUB_TOKEN`（Docker Hub 的用户名与有读写权限的访问令牌）；GHCR 用 workflow 的 `GITHUB_TOKEN`（job 声明了 `packages: write`）。没配这两个 secret 时 edge 与发布的镜像步骤都会失败。
+- secrets：GHCR 用 workflow 的 `GITHUB_TOKEN`（job 声明了 `packages: write`），不用另配。Docker Hub 可选：`DOCKERHUB_USERNAME`、`DOCKERHUB_TOKEN`（用户名与有读写权限的访问令牌）都配了才推 Docker Hub，缺一个就只推 GHCR，job summary 里写「未配置 Docker Hub，已跳过」。
 - GHCR 的新包第一次推上去时默认是私有的：在包的 Package settings 里把可见性改成 Public，`compose.yaml` 才能不登录直接拉。两个包各改一次。

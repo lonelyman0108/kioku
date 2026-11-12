@@ -50,8 +50,8 @@ gh api -X PATCH repos/{owner}/{repo} -F allow_squash_merge=true -F allow_merge_c
 
 | 名字 | 级别 | 用途 | 使用位置 |
 |---|---|---|---|
-| `DOCKERHUB_USERNAME` | 仓库 secret | Docker Hub 的用户名，推 `docker.io/lonelyman0108/*` 镜像时登录 | `images.yml`（经 `release.yml`、`edge.yml` 传入） |
-| `DOCKERHUB_TOKEN` | 仓库 secret | Docker Hub 的访问令牌（Read & Write），和上面的用户名一起登录 | 同上 |
+| `DOCKERHUB_USERNAME` | 仓库 secret，可选 | Docker Hub 的用户名，推 `docker.io/lonelyman0108/*` 镜像时登录；和下一项都配了才推 Docker Hub，否则只推 GHCR | `images.yml`（经 `release.yml`、`edge.yml` 传入） |
+| `DOCKERHUB_TOKEN` | 仓库 secret，可选 | Docker Hub 的访问令牌（Read & Write），和上面的用户名一起登录 | 同上 |
 
 GHCR 不需要额外 secret，用 workflow 的 `GITHUB_TOKEN`（`packages: write`）。`release-page.sh` 只用 `github.token`。
 
