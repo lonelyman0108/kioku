@@ -24,8 +24,9 @@ docker compose up -d
 | `X.Y.Z` | 某个版本，固定不变；生产环境建议写成它，升级时自己改 |
 | `X.Y` | 这个小版本里最新的正式版 |
 | `edge` | main 上最新的提交，不保证稳定 |
+| `sha-<短提交>` | main 上的某个提交，固定不变；跟着 `edge` 部署时用它回滚 |
 
-预发布版（如 `0.1.0-rc.1`）只有它本身这一个标签，不会变成 `latest`。两个镜像都有 `linux/amd64` 与 `linux/arm64`。
+`latest` 只跟最高的正式版：补发旧系列的修复版（例如 `0.2.0` 之后的 `0.1.5`）只更新 `0.1`。预发布版（如 `0.1.0-rc.1`）只有它本身这一个标签，不会变成 `latest`。第一个正式版发布之前还没有 `latest`，先在 `.env` 里写 `KIOKU_TAG=edge`。两个镜像都有 `linux/amd64` 与 `linux/arm64`。
 
 ### 从源码构建
 
@@ -105,7 +106,7 @@ docker compose run --rm -T -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_
 
 ## 升级
 
-先做一份整库快照（回滚时用），再换新版本的镜像，启动时自动迁移数据库。迁移只向前：旧版本的镜像连不上升级过的库（库里有它不认识的迁移时拒绝启动），回滚用下面的快照恢复。快照要用数据库超级用户：应用角色受行级安全约束，用它导出会报错。用 `latest` 这类会变的标签时，先在 `http://<主机>:18920/v1/health` 记下现在的版本号，回滚时要用。
+先做一份整库快照（回滚时用），再换新版本的镜像，启动时自动迁移数据库。迁移只向前：旧版本的镜像连不上升级过的库（库里有它不认识的迁移时拒绝启动），回滚用下面的快照恢复。快照要用数据库超级用户：应用角色受行级安全约束，用它导出会报错。用 `latest` 这类会变的标签时，先在 `http://<主机>:18920/v1/health` 记下现在的版本号，回滚时要用；跟着 `edge` 部署的版本号都是 `edge`，记下 `sha-<短提交>` 标签（见「回滚」）。
 
 ```bash
 docker compose exec db pg_dump -U postgres -Fc kioku > ~/kioku-backup/kioku-$(date +%F-%H%M%S).dump
@@ -122,7 +123,11 @@ docker compose up -d
 
 ## 回滚
 
-停掉服务，把已经迁移到新版本的库改名留着，建一个空库，把升级前的快照恢复进去，然后把 `.env` 的 `KIOKU_TAG` 改回升级前的版本号，执行 `docker compose up -d`（从源码构建的换回旧版本的代码，`up -d --build`）。不能直接往旧库里 `pg_restore --clean`：新版本建的表和函数不在快照里，会残留下来，下次升级时迁移会因为它们已存在而失败。
+停掉服务，把已经迁移到新版本的库改名留着，建一个空库，把升级前的快照恢复进去，然后把 `.env` 的 `KIOKU_TAG` 改回升级前的版本号，执行 `docker compose up -d`（从源码构建的换回旧版本的代码，`up -d --build`）。跟着 `edge` 部署时没有版本号可改回，升级前记下现在跑的提交（镜像的 `org.opencontainers.image.revision` 标签，下面的命令打印它），回滚时把 `KIOKU_TAG` 写成 `sha-` 加它的前 7 位。
+
+```bash
+docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$(docker compose images -q kioku)"
+```不能直接往旧库里 `pg_restore --clean`：新版本建的表和函数不在快照里，会残留下来，下次升级时迁移会因为它们已存在而失败。
 
 ```bash
 docker compose stop kioku

@@ -1,6 +1,6 @@
 # 构建并推送服务端（kioku）与数据库（kioku-postgres）两个镜像，同时推到 GHCR 与 Docker Hub。
 # amd64 与 arm64 各在原生的 runner 上构建（数据库镜像要编译 zhparser，QEMU 模拟太慢），按摘要推上去，再合并成一个多架构清单打标签。
-# 只被 release.yml（版本 tag）与 edge.yml（main 合并后）调用；标签规则见 scripts/ci/image-meta.sh。
+# 只被 release.yml（版本 tag）与 edge.yml（main 合并后）调用，调用处限定本仓库（fork 里不推）；标签规则见 scripts/ci/image-meta.sh。
 # Docker Hub 可选：没配 DOCKERHUB_USERNAME、DOCKERHUB_TOKEN 时只推 GHCR，在 job summary 里写明跳过。
 name: Images
 on:
@@ -26,24 +26,33 @@ jobs:
   meta:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    # secrets 不能直接写在 step 的 if 里，先在 job 级算好
-    env:
-      HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
     permissions:
       contents: read
     outputs:
       version: ${{ steps.meta.outputs.version }}
       tags: ${{ steps.meta.outputs.tags }}
       created: ${{ steps.meta.outputs.created }}
+      dockerhub: ${{ steps.dockerhub.outputs.enabled }}
     steps:
+      # 版本 tag 要和仓库里已有的 tag 比，决定打不打 X.Y 与 latest，所以取全部 tag
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 标签规则自测
+        run: scripts/ci/image-meta.sh --self-test
       - id: meta
         env:
           REF: ${{ inputs.ref }}
-        run: scripts/ci/image-meta.sh "$REF" >> "$GITHUB_OUTPUT"
-      - name: Docker Hub
-        if: env.HAS_DOCKERHUB != 'true'
-        run: echo '未配置 Docker Hub，已跳过' >> "$GITHUB_STEP_SUMMARY"
+          COMMIT: ${{ github.sha }}
+        run: scripts/ci/image-meta.sh "$REF" "$COMMIT" >> "$GITHUB_OUTPUT"
+      # secrets 不能直接写在 step 的 if 里：在这里算一次，作为 output 给后面的 job
+      - id: dockerhub
+        name: Docker Hub
+        env:
+          ENABLED: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
+        run: |
+          echo "enabled=$ENABLED" >> "$GITHUB_OUTPUT"
+          [ "$ENABLED" = true ] || echo '未配置 Docker Hub，已跳过' >> "$GITHUB_STEP_SUMMARY"
 
   build:
     needs: meta
@@ -52,23 +61,26 @@ jobs:
         image: [kioku, kioku-postgres]
         arch: [amd64, arm64]
         include:
+          # 版本、提交与构建时间只给服务端镜像，数据库镜像的 Dockerfile 不读它们
           - image: kioku
             context: .
             title: Kioku
             description: Kioku 长期记忆服务，同时托管管理界面
+            build-args: |
+              KIOKU_VERSION=${{ needs.meta.outputs.version }}
+              KIOKU_COMMIT=${{ github.sha }}
+              KIOKU_BUILD_TIME=${{ needs.meta.outputs.created }}
           - image: kioku-postgres
             context: docker/postgres
             title: Kioku PostgreSQL
             description: Kioku 用的 PostgreSQL：pgvector 加 zhparser 中文分词
+            build-args: ''
           - arch: amd64
             runner: ubuntu-24.04
           - arch: arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
-    # secrets 不能直接写在 step 的 if 里，先在 job 级算好
-    env:
-      HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
     permissions:
       contents: read
       packages: write
@@ -80,7 +92,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - if: env.HAS_DOCKERHUB == 'true'
+      - if: needs.meta.outputs.dockerhub == 'true'
         uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -91,11 +103,7 @@ jobs:
         with:
           context: ${{ matrix.context }}
           platforms: linux/${{ matrix.arch }}
-          # 版本、提交与构建时间只给服务端镜像，数据库镜像的 Dockerfile 不读它们
-          build-args: |
-            ${{ matrix.image == 'kioku' && format('KIOKU_VERSION={0}', needs.meta.outputs.version) || '' }}
-            ${{ matrix.image == 'kioku' && format('KIOKU_COMMIT={0}', github.sha) || '' }}
-            ${{ matrix.image == 'kioku' && format('KIOKU_BUILD_TIME={0}', needs.meta.outputs.created) || '' }}
+          build-args: ${{ matrix.build-args }}
           labels: |
             org.opencontainers.image.title=${{ matrix.title }}
             org.opencontainers.image.description=${{ matrix.description }}
@@ -104,7 +112,7 @@ jobs:
             org.opencontainers.image.version=${{ needs.meta.outputs.version }}
             org.opencontainers.image.created=${{ needs.meta.outputs.created }}
             org.opencontainers.image.licenses=Apache-2.0
-          outputs: type=image,"name=${{ env.GHCR }}/${{ matrix.image }}${{ env.HAS_DOCKERHUB == 'true' && format(',{0}/{1}', env.DOCKERHUB, matrix.image) || '' }}",push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,"name=${{ env.GHCR }}/${{ matrix.image }}${{ needs.meta.outputs.dockerhub == 'true' && format(',{0}/{1}', env.DOCKERHUB, matrix.image) || '' }}",push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}-${{ matrix.arch }}
       - name: 记下摘要
@@ -131,9 +139,6 @@ jobs:
             description: Kioku 用的 PostgreSQL：pgvector 加 zhparser 中文分词
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    # secrets 不能直接写在 step 的 if 里，先在 job 级算好
-    env:
-      HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
     permissions:
       contents: read
       packages: write
@@ -150,7 +155,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - if: env.HAS_DOCKERHUB == 'true'
+      - if: needs.meta.outputs.dockerhub == 'true'
         uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -158,7 +163,7 @@ jobs:
       - name: 合并清单并打标签
         env:
           IMAGE: ${{ matrix.image }}
-          REGISTRIES: ${{ env.GHCR }}${{ env.HAS_DOCKERHUB == 'true' && format(' {0}', env.DOCKERHUB) || '' }}
+          REGISTRIES: ${{ env.GHCR }}${{ needs.meta.outputs.dockerhub == 'true' && format(' {0}', env.DOCKERHUB) || '' }}
           TAGS: ${{ needs.meta.outputs.tags }}
           VERSION: ${{ needs.meta.outputs.version }}
           CREATED: ${{ needs.meta.outputs.created }}
