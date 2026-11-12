@@ -9,25 +9,17 @@ export const SetupCode = z
   .string()
   .trim()
   .min(1, '请填写初始化码')
-  .max(128, '初始化码不超过 128 个字符')
+  .max(256, '初始化码不超过 256 个字符')
 
 // 数据库从哪里来：环境变量 DATABASE_URL，或者数据目录里的 kioku.json（初始化页保存的）
 export const DATABASE_SOURCES = ['env', 'file'] as const
 export const DatabaseSource = z.enum(DATABASE_SOURCES)
 export type DatabaseSource = z.infer<typeof DatabaseSource>
 
-// missing：没有配置，只提供初始化；unavailable：配置了但连不上或检查没过，定时重试；ready：已接上
+// missing：没有配置，只提供初始化；unavailable：配置了却暂时连不上，定时重试（不当作要初始化）；ready：已接上
 export const DATABASE_STATES = ['missing', 'unavailable', 'ready'] as const
 export const DatabaseState = z.enum(DATABASE_STATES)
 export type DatabaseState = z.infer<typeof DatabaseState>
-
-export const SetupStatus = z.object({
-  needsSetup: z.boolean(),
-  database: z.object({ state: DatabaseState, source: DatabaseSource.nullable() }),
-  // 是否配了 KIOKU_MASTER_KEY：没配时机密记忆、托管凭据等不可用
-  masterKey: z.boolean(),
-})
-export type SetupStatus = z.infer<typeof SetupStatus>
 
 export const SetupRequest = z.object({
   setupCode: SetupCode,
@@ -113,8 +105,28 @@ export const EXISTING_DATA = ['empty', 'kioku', 'pre_baseline', 'newer'] as cons
 export const ExistingData = z.enum(EXISTING_DATA)
 export type ExistingData = z.infer<typeof ExistingData>
 
+// 拦住接入的问题：连不上、角色绕过行级安全、库里没装或服务器上没有扩展、库的结构这个版本用不了。
+// 检查只在 assess 里判断一次，服务端的日志与界面的检查行都按这份列表写
+export const DATABASE_PROBLEMS = [
+  'connection',
+  'superuser',
+  'bypass_rls',
+  'extension_not_installed',
+  'extension_missing',
+  'pre_baseline',
+  'newer',
+] as const
+export const DatabaseProblemCode = z.enum(DATABASE_PROBLEMS)
+export type DatabaseProblemCode = z.infer<typeof DatabaseProblemCode>
+export const DatabaseProblem = z.object({
+  code: DatabaseProblemCode,
+  // 扩展两类带上是哪个扩展
+  extension: DatabaseExtension.optional(),
+})
+export type DatabaseProblem = z.infer<typeof DatabaseProblem>
+
 export const DatabaseCheck = z.object({
-  // 连不上时只有这一项，其余为空
+  // 连不上时的类别，其余各项为空，problems 里只有 connection
   failure: DatabaseFailure.nullable(),
   role: z.object({ name: z.string(), superuser: z.boolean(), bypassRls: z.boolean() }).nullable(),
   extensions: z.array(z.object({ name: DatabaseExtension, state: ExtensionState })),
@@ -123,10 +135,25 @@ export const DatabaseCheck = z.object({
   accounts: z.number().int().nullable(),
   // 不是 Kioku 建的表，只提醒，不拦
   unrelatedTables: z.number().int(),
-  // 没有拦住的问题，可以保存并接入
+  problems: z.array(DatabaseProblem),
+  // problems 为空：可以保存并接入
   ready: z.boolean(),
 })
 export type DatabaseCheck = z.infer<typeof DatabaseCheck>
+
+export const SetupStatus = z.object({
+  // 没有任何账号、要建第一个管理员。数据库暂时连不上时为 false：不知道有没有账号，不当作要初始化
+  needsSetup: z.boolean(),
+  database: z.object({
+    state: DatabaseState,
+    source: DatabaseSource.nullable(),
+    // 暂时连不上时最近一次检查的类别，其余状态为 null
+    failure: DatabaseFailure.nullable(),
+  }),
+  // 是否配了 KIOKU_MASTER_KEY：没配时机密记忆、托管凭据等不可用
+  masterKey: z.boolean(),
+})
+export type SetupStatus = z.infer<typeof SetupStatus>
 
 // 当前的数据库：来自哪里、连接信息与检查结果。没有配置时三项都是 null
 export const DatabaseInspection = z.object({

@@ -38,6 +38,7 @@ import loginPage from '../pages/LoginPage.vue?raw'
 import overviewPage from '../pages/OverviewPage.vue?raw'
 import settingsPage from '../pages/SettingsPage.vue?raw'
 import setupPage from '../pages/SetupPage.vue?raw'
+import databaseUnavailablePage from '../pages/DatabaseUnavailablePage.vue?raw'
 import unavailablePage from '../pages/UnavailablePage.vue?raw'
 import { routes } from '../routes'
 import useSessionSource from '../composables/useSession.ts?raw'
@@ -1499,8 +1500,17 @@ describe('初始化', () => {
     const forms = elements.filter((el) => el.tag === 'form')
     expect(forms).toHaveLength(1)
     expect(handler(forms[0]!, 'submit')).toBe('runCheck')
-    // 没配主密钥时提醒一句
+    // 没配主密钥时提醒一句；代建的规则收进提示层，正文只留一句
     expect(flat(setupPage)).toContain('配置KIOKU_MASTER_KEY后重启服务')
+    expect(flat(setupPage)).toContain('新建应用角色与库，只保存应用角色的连接。<Hint')
+  })
+
+  it('数据库暂时连不上不进初始化页：守卫带到数据库不可用页，那一页不给初始化码', () => {
+    expect(routesSource).toContain("if (status.database.state === 'unavailable') {")
+    expect(routesSource).toContain("name: 'database-unavailable'")
+    expect(setupPage).toContain("await router.replace({ name: 'database-unavailable' })")
+    expect(databaseUnavailablePage).not.toContain('setupCode')
+    expect(flat(databaseUnavailablePage)).toContain('正在自动重试')
   })
 
   it('校验的提示是中文：这是装好之后看到的第一屏', () => {

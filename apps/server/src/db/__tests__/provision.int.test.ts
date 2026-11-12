@@ -8,8 +8,12 @@ import type { DatabaseConnection } from '@kioku/contracts'
 import postgres from 'postgres'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 
+import { SetupGate } from '../../auth/setupCode'
 import { loadConfig } from '../../config'
-import { startRuntime, type Runtime } from '../../runtime'
+import type { SetupHost } from '../../http/env'
+import { setupDatabaseRoutes } from '../../routes/setup'
+import { FatalStartupError, startRuntime, type Runtime } from '../../runtime'
+import { ActivationError } from '../../setupErrors'
 import { connectionUrl, probeDatabase, summarize } from '../probe'
 
 // 要超级用户才测得了：拒绝超级用户与 BYPASSRLS、缺扩展、代建。本地设 KIOKU_TEST_SUPERUSER_URL
@@ -17,7 +21,7 @@ import { connectionUrl, probeDatabase, summarize } from '../probe'
 // 建出的角色与库都带随机后缀，结束时删掉
 const superuserUrl = process.env.KIOKU_TEST_SUPERUSER_URL
 const migrationsFolder = fileURLToPath(new URL('../../../migrations', import.meta.url))
-const CODE = 'TEST-SETUP-CODE-2'
+const CODE = 'TEST-SETUP-CODE-0002'
 
 function connectionOf(url: string): DatabaseConnection {
   const s = summarize(url)!
@@ -97,7 +101,7 @@ describe.skipIf(!superuserUrl)('数据库检查与超级用户代建', () => {
       runtime!.fetch(
         new Request(`http://localhost/v1${path}`, {
           method: body === undefined ? 'GET' : 'POST',
-          headers: { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin' },
+          headers: { 'content-type': 'application/json' },
           ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         }),
       )
@@ -189,6 +193,72 @@ describe.skipIf(!superuserUrl)('数据库检查与超级用户代建', () => {
       expect(await weak.json()).toMatchObject({ problem: 'not_superuser' })
       expect(await admin`select 1 from pg_database where datname = ${db}`).toHaveLength(0)
       expect(runtime!.state()).toBe('missing')
+    })
+  })
+
+  it('冷启动时角色是超级用户：拒绝启动，不进入重试', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'kioku-fatal-'))
+    try {
+      await expect(
+        startRuntime(
+          {
+            ...loadConfig({ KIOKU_DATA_DIR: dataDir, DATABASE_URL: superuserUrl! }),
+            migrationsFolder,
+            webDir: '',
+          },
+          { log: () => {} },
+        ),
+      ).rejects.toThrow(FatalStartupError)
+    } finally {
+      await rm(dataDir, { recursive: true, force: true })
+    }
+  })
+
+  describe('代建之后按接入的阶段决定回滚', () => {
+    // 只测路由的回滚判断：activate 换成按阶段失败的假实现
+    const routesWith = (activate: SetupHost['activate']) => {
+      const gate = new SetupGate(CODE)
+      gate.open()
+      const host: SetupHost = {
+        gate,
+        migrationsFolder,
+        masterKey: false,
+        database: () => ({ state: 'missing', source: null, url: null, check: null }),
+        exclusive: (fn) => fn(),
+        activate,
+      }
+      return setupDatabaseRoutes(host, 0, () => Promise.resolve(true))
+    }
+    const provisionWith = async (activate: SetupHost['activate'], base: string) => {
+      const role = name(base)
+      const db = name(base)
+      roles.push(role)
+      databases.push(db)
+      const res = await routesWith(activate).request('/setup/database/provision', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ setupCode: CODE, superuser: superuser(), role, database: db }),
+      })
+      const left = {
+        role: (await admin`select 1 from pg_roles where rolname = ${role}`).length,
+        database: (await admin`select 1 from pg_database where datname = ${db}`).length,
+      }
+      return { status: res.status, left }
+    }
+
+    it('准备阶段失败（ActivationError）：删掉建出来的库与角色', async () => {
+      const result = await provisionWith(
+        () => Promise.reject(new ActivationError('准备失败')),
+        'prep',
+      )
+      expect(result.status).toBe(500)
+      expect(result.left).toEqual({ role: 0, database: 0 })
+    })
+
+    it('切换之后出错：库与角色都留着', async () => {
+      const result = await provisionWith(() => Promise.reject(new Error('切换之后出错')), 'after')
+      expect(result.status).toBe(500)
+      expect(result.left).toEqual({ role: 1, database: 1 })
     })
   })
 })

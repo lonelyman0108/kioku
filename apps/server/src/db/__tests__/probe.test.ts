@@ -5,6 +5,8 @@ import { describe, expect, it } from 'vitest'
 import {
   assess,
   connectionUrl,
+  failedCheck,
+  isFatal,
   failureOf,
   scramVerifier,
   summarize,
@@ -44,20 +46,35 @@ describe('数据库检查', () => {
     for (const [err, kind] of cases) expect(failureOf(err)).toBe(kind)
   })
 
-  it('超级用户、BYPASSRLS、缺扩展、库的结构用不了时拦住；无关的表与已有账号只提醒', () => {
-    expect(assess(facts).ready).toBe(true)
+  it('拦住接入的原因只在 assess 里算一次；无关的表与已有账号只提醒', () => {
+    expect(assess(facts)).toMatchObject({ problems: [], ready: true })
     expect(assess({ ...facts, unrelatedTables: 3 }).ready).toBe(true)
     expect(assess({ ...facts, existing: 'kioku', accounts: 2 }).ready).toBe(true)
-    expect(assess({ ...facts, role: { ...facts.role, superuser: true } }).ready).toBe(false)
-    expect(assess({ ...facts, role: { ...facts.role, bypassRls: true } }).ready).toBe(false)
-    expect(
-      assess({
-        ...facts,
-        extensions: [facts.extensions[0]!, { name: 'zhparser', state: 'available' }],
-      }).ready,
-    ).toBe(false)
-    expect(assess({ ...facts, existing: 'pre_baseline' }).ready).toBe(false)
-    expect(assess({ ...facts, existing: 'newer' }).ready).toBe(false)
+    const bad = assess({
+      ...facts,
+      role: { ...facts.role, superuser: true, bypassRls: true },
+      extensions: [
+        { name: 'vector', state: 'available' },
+        { name: 'zhparser', state: 'missing' },
+      ],
+      existing: 'pre_baseline',
+    })
+    expect(bad.problems).toEqual([
+      { code: 'superuser' },
+      { code: 'extension_not_installed', extension: 'vector' },
+      { code: 'extension_missing', extension: 'zhparser' },
+      { code: 'pre_baseline' },
+    ])
+    expect(bad.ready).toBe(false)
+    expect(isFatal(bad)).toBe(true)
+    expect(assess({ ...facts, role: { ...facts.role, bypassRls: true } }).problems).toEqual([
+      { code: 'bypass_rls' },
+    ])
+    expect(assess({ ...facts, existing: 'newer' }).problems).toEqual([{ code: 'newer' }])
+    // 连不上可能自己好，不算致命
+    const lost = failedCheck('timeout')
+    expect(lost).toMatchObject({ problems: [{ code: 'connection' }], ready: false })
+    expect(isFatal(lost)).toBe(false)
   })
 
   it('表单拼出的连接串由 postgres.js 解析回同样的字段', () => {

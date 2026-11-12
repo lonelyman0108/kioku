@@ -6,6 +6,7 @@ import {
   type DatabaseConnection,
   type DatabaseExtension,
   type DatabaseFailure,
+  type DatabaseProblem,
   type DatabaseSummary,
   type ExistingData,
   type ExtensionState,
@@ -15,6 +16,7 @@ import { getTableName, is } from 'drizzle-orm'
 import { PgTable } from 'drizzle-orm/pg-core'
 import postgres from 'postgres'
 
+import { postgresOptions } from './client'
 import { migrationState } from './migrate'
 import * as schema from './schema'
 
@@ -25,15 +27,14 @@ import * as schema from './schema'
 const CONNECT_TIMEOUT_SECONDS = 10
 const STATEMENT_TIMEOUT_MS = 10_000
 
+// 选项和服务的连接池同一个来源（postgresOptions），只多了这次检查用的时限与单条连接。
+// 不发额外的启动参数：经 PgBouncer 时它会拒绝不认识的启动参数，检查过了服务却连不上。
+// 语句的时限在事务里用 set local 设（见 probeDatabase），不留在连接上
 function open(url: string): postgres.Sql {
-  return postgres(url, {
-    max: 1,
-    connect_timeout: CONNECT_TIMEOUT_SECONDS,
-    idle_timeout: 1,
-    fetch_types: false,
-    onnotice: () => {},
-    connection: { application_name: 'kioku-setup', statement_timeout: STATEMENT_TIMEOUT_MS },
-  })
+  return postgres(
+    url,
+    postgresOptions({ max: 1, connect_timeout: CONNECT_TIMEOUT_SECONDS, idle_timeout: 1 }),
+  )
 }
 
 // 按表单拼连接串。主机已按契约只收主机名与地址，IPv6 地址加方括号；其余各段按 URL 编码，
@@ -47,7 +48,7 @@ export function connectionUrl(c: DatabaseConnection): string {
 // 给人看的连接信息，按 postgres.js 自己的解析取（不连库）；解析不了时为 null
 export function summarize(url: string): DatabaseSummary | null {
   try {
-    const { options } = postgres(url, { max: 1, onnotice: () => {} })
+    const { options } = postgres(url, postgresOptions({ max: 1 }))
     const ssl = options.ssl as unknown
     return {
       host: String(options.host[0] ?? ''),
@@ -114,14 +115,25 @@ export interface DatabaseFacts {
   unrelatedTables: number
 }
 
-// 哪些问题拦住接入：角色绕过行级安全、缺扩展、库的结构这个版本用不了。无关的表与已有账号只提醒
+// 哪些问题拦住接入，只在这里判断：角色绕过行级安全、缺扩展、库的结构这个版本用不了。
+// 无关的表与已有账号只提醒，不算问题
+export function problemsOf(facts: DatabaseFacts): DatabaseProblem[] {
+  const problems: DatabaseProblem[] = []
+  if (facts.role.superuser) problems.push({ code: 'superuser' })
+  else if (facts.role.bypassRls) problems.push({ code: 'bypass_rls' })
+  for (const { name, state } of facts.extensions) {
+    if (state === 'available') problems.push({ code: 'extension_not_installed', extension: name })
+    if (state === 'missing') problems.push({ code: 'extension_missing', extension: name })
+  }
+  if (facts.existing === 'pre_baseline' || facts.existing === 'newer') {
+    problems.push({ code: facts.existing })
+  }
+  return problems
+}
+
 export function assess(facts: DatabaseFacts): DatabaseCheck {
-  const ready =
-    !facts.role.superuser &&
-    !facts.role.bypassRls &&
-    facts.extensions.every((e) => e.state === 'installed') &&
-    (facts.existing === 'empty' || facts.existing === 'kioku')
-  return { failure: null, ...facts, ready }
+  const problems = problemsOf(facts)
+  return { failure: null, ...facts, problems, ready: problems.length === 0 }
 }
 
 export function failedCheck(failure: DatabaseFailure): DatabaseCheck {
@@ -132,15 +144,26 @@ export function failedCheck(failure: DatabaseFailure): DatabaseCheck {
     existing: null,
     accounts: null,
     unrelatedTables: 0,
+    problems: [{ code: 'connection' }],
     ready: false,
   }
+}
+
+// 连不上之外的问题：角色、扩展、库的结构。这些不会自己好，服务启动时遇到就拒绝启动
+export function isFatal(check: DatabaseCheck): boolean {
+  return check.problems.some((p) => p.code !== 'connection')
 }
 
 // 检查一个库能不能给 Kioku 用（只读，不改库）
 export async function probeDatabase(url: string, migrationsFolder: string): Promise<DatabaseCheck> {
   const client = open(url)
   try {
-    return assess(await gatherFacts(client, migrationsFolder))
+    // 只读的事务：语句时限用 set local，事务结束就失效，经连接池复用的连接上不留设置
+    const facts = await client.begin('read only', async (tx) => {
+      await tx.unsafe(`set local statement_timeout = ${STATEMENT_TIMEOUT_MS}`)
+      return gatherFacts(tx, migrationsFolder)
+    })
+    return assess(facts)
   } catch (err) {
     console.warn('数据库检查失败', { code: errorCode(err) })
     return failedCheck(failureOf(err))
@@ -149,7 +172,10 @@ export async function probeDatabase(url: string, migrationsFolder: string): Prom
   }
 }
 
-async function gatherFacts(client: postgres.Sql, migrationsFolder: string): Promise<DatabaseFacts> {
+async function gatherFacts(
+  client: postgres.TransactionSql,
+  migrationsFolder: string,
+): Promise<DatabaseFacts> {
   const [role] = await client<{ name: string; superuser: boolean; bypassRls: boolean }[]>`
     select rolname as name, rolsuper as superuser, rolbypassrls as "bypassRls"
     from pg_roles where rolname = current_user`

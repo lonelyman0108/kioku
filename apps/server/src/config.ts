@@ -77,8 +77,9 @@ export function normalizeSetupCode(value: string): string {
 function parseSetupCode(value: string | undefined): string | null {
   if (value === undefined || value === '') return null
   const length = normalizeSetupCode(value).length
-  if (length < 8 || length > 64) {
-    throw new Error('KIOKU_SETUP_CODE 去掉空白与连字符后应为 8 到 64 个字符')
+  // 码短了能猜：初始化页对外开着时，防猜只靠码本身的强度
+  if (length < 16 || length > 128) {
+    throw new Error('KIOKU_SETUP_CODE 去掉空白与连字符后应为 16 到 128 个字符')
   }
   return value
 }

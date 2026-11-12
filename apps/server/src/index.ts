@@ -2,15 +2,13 @@ import { serve } from '@hono/node-server'
 
 import { loadConfig } from './config'
 import { logInternalError } from './db/client'
-import { startRuntime } from './runtime'
-import { StartupError, startupText } from './service'
+import { FatalStartupError, startRuntime } from './runtime'
 
 const config = loadConfig()
+// 不会自己好的问题（角色绕过行级安全、库的结构用不了、主密钥对不上等）拒绝启动；别的意外也退出，日志不带错误原文
 const runtime = await startRuntime(config).catch((err: unknown) => {
-  // 配了数据库、检查也通过了却起不来（例如主密钥对不上）：和以前一样拒绝启动
-  if (!(err instanceof StartupError)) throw err
-  logInternalError(`启动失败（${err.step}）`, err.cause)
-  console.error(startupText(err))
+  if (err instanceof FatalStartupError) console.error(`拒绝启动：${err.message}`)
+  else logInternalError('启动失败', err)
   process.exit(1)
 })
 

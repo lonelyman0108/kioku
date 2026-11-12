@@ -68,12 +68,12 @@ describe('数据目录与数据库连接的读取顺序', () => {
     ).toBe('postgres://127.0.0.1/env')
   })
 
-  it('KIOKU_SETUP_CODE 太短时拒绝启动', () => {
-    expect(() => loadConfig({ KIOKU_DATA_DIR: dir, KIOKU_SETUP_CODE: 'ab-cd' })).toThrow(
-      /KIOKU_SETUP_CODE/,
-    )
-    expect(loadConfig({ KIOKU_DATA_DIR: dir, KIOKU_SETUP_CODE: 'abcd-efgh' }).setupCode).toBe(
-      'abcd-efgh',
-    )
+  it('KIOKU_SETUP_CODE 少于 16 个字符时拒绝启动', () => {
+    expect(() =>
+      loadConfig({ KIOKU_DATA_DIR: dir, KIOKU_SETUP_CODE: 'abcd-efgh-ijkl-mno' }),
+    ).toThrow(/KIOKU_SETUP_CODE/)
+    expect(
+      loadConfig({ KIOKU_DATA_DIR: dir, KIOKU_SETUP_CODE: 'abcd-efgh-ijkl-mnop' }).setupCode,
+    ).toBe('abcd-efgh-ijkl-mnop')
   })
 })

@@ -54,7 +54,7 @@ describe.skipIf(!testDatabaseUrl)('初始化、登录与 API Key', () => {
   it('首次初始化只能做一次', async () => {
     expect(await (await app.request('/v1/setup/status')).json()).toEqual({
       needsSetup: true,
-      database: { state: 'ready', source: null },
+      database: { state: 'ready', source: null, failure: null },
       masterKey: false,
     })
     await setup()

@@ -4,7 +4,7 @@ import { drizzle } from 'drizzle-orm/postgres-js'
 import { migrate } from 'drizzle-orm/postgres-js/migrator'
 import postgres from 'postgres'
 
-import type { Database, Db, Tx } from './client'
+import { postgresOptions, type Database, type Db, type Tx } from './client'
 
 // 执行迁移的咨询锁：服务启动时的迁移与恢复备份时的迁移用同一把，互相排队
 const MIGRATE_LOCK = 'kioku.migrate'
@@ -16,7 +16,7 @@ const PRE_BASELINE_DATABASE =
 // 多个实例同时启动时用会话级咨询锁串行执行迁移。锁和迁移必须在同一条连接上，
 // 所以单独开一个只有一条连接的客户端，用完即关。
 export async function runMigrations(database: Database, migrationsFolder: string): Promise<void> {
-  const client = postgres(database.url, { max: 1, onnotice: () => {} })
+  const client = postgres(database.url, postgresOptions({ max: 1 }))
   try {
     await client`select pg_advisory_lock(hashtext(${MIGRATE_LOCK}))`
     await assertKnownMigrations(client, readMigrationFiles({ migrationsFolder }))
@@ -46,7 +46,7 @@ type MigrationState =
 // 库里的迁移和这个版本的比：none 是还没迁移过，known 是都认得，另两种见 MigrationStateError。
 // 启动时的迁移与初始化页的检查共用这一份判断
 export async function migrationState(
-  client: postgres.Sql,
+  client: postgres.Sql | postgres.TransactionSql,
   migrationsFolder: string,
 ): Promise<MigrationState['state']> {
   return (await classifyMigrations(client, readMigrationFiles({ migrationsFolder }))).state
@@ -55,7 +55,7 @@ export async function migrationState(
 // 库里执行过的迁移都要在这个版本的迁移目录里（按哈希，drizzle 记的是迁移文件内容的 sha256）。drizzle 只看最后一个
 // 迁移的时间戳：改版之前的库按时间戳还差着基线，它会从头建表，在已有的表上报「已存在」，看不出是怎么回事
 async function classifyMigrations(
-  client: postgres.Sql,
+  client: postgres.Sql | postgres.TransactionSql,
   local: readonly MigrationMeta[],
 ): Promise<MigrationState> {
   const [table] = await client<{ exists: boolean }[]>`

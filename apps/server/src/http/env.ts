@@ -25,13 +25,15 @@ export interface SetupHost {
     state: DatabaseState
     source: DatabaseSource | null
     url: string | null
-    // 连不上时最近一次检查的结果
+    // 暂时连不上时最近一次检查的结果（定时重试时更新），初始化状态按它报原因，不另外探测
     check: DatabaseCheck | null
   }
   // 同一时刻只做一件改数据库的事（检查之后的代建、接入）；已经在做时抛 SetupBusyError
   exclusive<T>(fn: () => Promise<T>): Promise<T>
-  // 保存连接并当场接上：起完整的服务、写 kioku.json、换上完整的接口。失败时抛 ActivationError，状态不变
-  activate(url: string): Promise<void>
+  // 保存连接并当场接上，分两段：准备（起完整的服务、数账号、写 kioku.json）可能失败，失败时抛 ActivationError，
+  // 起到一半的都关掉、状态不变；切换（换上完整的接口、开关初始化码）不会失败。
+  // 只有 ActivationError 表示没有接上：调用方据此决定能不能回滚（例如删掉代建的库），别的错误一律当作已经切换
+  activate(url: string): Promise<'switched'>
 }
 
 export interface Deps {

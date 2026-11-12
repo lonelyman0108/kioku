@@ -12,6 +12,7 @@ import { useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import Hint from '../components/Hint.vue'
 import SegmentedChoice from '../components/SegmentedChoice.vue'
 import EntryFrame from '../components/strata/EntryFrame.vue'
 import NoteLine from '../components/strata/NoteLine.vue'
@@ -90,6 +91,11 @@ async function loadStatus() {
     loadError.value = err instanceof ApiError ? err.message : '读取初始化状态失败'
     return
   }
+  // 配了的库暂时连不上：不是初始化，到数据库不可用页等着
+  if (status.value.database.state === 'unavailable') {
+    await router.replace({ name: 'database-unavailable' })
+    return
+  }
   if (!status.value.needsSetup) {
     // 接入的是已有实例：用已有账号登录
     await router.replace({ name: 'login' })
@@ -132,7 +138,6 @@ const inspect = () =>
     async () => {
       inspection.value = await api.inspectDatabase(admin.setupCode)
       check.value = inspection.value.check
-      // 连不上的库在服务端重试：可能这时已经接上了
       await loadStatus()
     },
     '读取数据库状态失败',
@@ -236,16 +241,12 @@ async function submitAdmin() {
             autocapitalize="characters"
             autocorrect="off"
             spellcheck="false"
-            maxlength="128"
+            maxlength="256"
           />
         </UFormField>
 
         <!-- 来自环境变量或 kioku.json：只显示，不能改 -->
         <template v-if="!editable">
-          <NoteLine v-if="status.database.state === 'unavailable'" tone="error" role="alert">
-            数据库暂时无法连接
-            <template #detail>服务每隔一段时间重试一次，接上后刷新此页。</template>
-          </NoteLine>
           <p v-if="status.database.source" class="text-sm text-muted">
             连接来自{{ DATABASE_SOURCE_NAMES[status.database.source] }}，此处无法修改。
           </p>
@@ -306,8 +307,12 @@ async function submitAdmin() {
 
           <div v-else class="space-y-4" data-state="provision">
             <p class="text-sm text-muted">
-              用超级用户新建应用角色（随机密码，不是超级用户、不带 BYPASSRLS）与库，并装好
-              vector、zhparser 扩展。只保存应用角色的连接，超级用户的密码不保存。
+              新建应用角色与库，只保存应用角色的连接。
+              <Hint label="代建规则">
+                应用角色使用随机密码，不是超级用户、不带
+                BYPASSRLS，也不能建库、建角色；库的所有者是应用角色， 并在库里装好 vector 与
+                zhparser 扩展。超级用户的密码只用于这一次，不保存、不写入日志。
+              </Hint>
             </p>
             <div class="fields">
               <UFormField label="主机" class="wide">
@@ -395,7 +400,7 @@ async function submitAdmin() {
               :ui="{ base: 'font-mono uppercase tracking-widest' }"
               autocomplete="off"
               spellcheck="false"
-              maxlength="128"
+              maxlength="256"
             />
           </UFormField>
           <UFormField label="用户名" name="username" help="小写字母、数字和 _.-">

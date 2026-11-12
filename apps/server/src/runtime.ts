@@ -1,9 +1,8 @@
 import { join } from 'node:path'
 
 import {
-  DATABASE_FAILURE_NAMES,
   DATABASE_SOURCE_NAMES,
-  EXISTING_DATA_NAMES,
+  databaseProblemText,
   type DatabaseCheck,
   type DatabaseSource,
   type DatabaseState,
@@ -16,17 +15,19 @@ import { createVaultClient } from './credential/bitwarden/client'
 import type { VaultClient } from './credential/bitwarden/types'
 import { assertWritable, DATA_FILE, writeDataFile } from './dataDir'
 import { logInternalError } from './db/client'
-import { probeDatabase } from './db/probe'
+import { failedCheck, failureOf, isFatal, probeDatabase } from './db/probe'
 import type { SetupHost } from './http/env'
 import { settleRecallEvents } from './recall/events'
 import { startService, startupText, StartupError, type Service } from './service'
 import { ActivationError, SetupBusyError } from './setupErrors'
 
 // 服务的运行状态：接没接上数据库，请求交给哪个应用。
-// - 没有配置数据库：只提供初始化（createSetupApp），在初始化页填库、当场接上之后换成完整的服务；
-// - 配了却连不上或检查没过：同样只提供初始化（只能看、不能改），定时重试，接上之后换成完整的服务；
-// - 接上了：完整的服务（startService），冷启动与初始化后接上走的是同一个函数。
-// 还没有任何账号时打开初始化码并打印到日志，有了账号就作废
+// - missing：没有配置数据库，只提供初始化（createSetupApp），在初始化页填库、当场接上之后换成完整的服务；
+// - unavailable：配了却暂时连不上（连不上、超时、认证失败、库不存在这类可能自己好的问题），同样只挂
+//   createSetupApp，但不当作要初始化、不开初始化码，健康检查回 503；按退避重试，接上之后换成完整的服务；
+// - ready：完整的服务（startService），冷启动、重试接上与初始化页接入走的是同一个函数。
+// 角色绕过行级安全、缺扩展、库的结构用不了、主密钥对不上这类不会自己好的问题，照旧拒绝启动（FatalStartupError）。
+// 初始化码只在 missing、或者接上之后确认没有任何账号时打开并打印，有了账号就作废
 
 type Fetch = (request: Request, ...rest: unknown[]) => Response | Promise<Response>
 
@@ -40,10 +41,18 @@ export interface Runtime {
 
 export interface RuntimeOptions {
   vault?: VaultClient
-  // 配了的库连不上时隔多久重试，默认 15 秒；测试里调小
+  // 暂时连不上时第一次隔多久重试，之后每次翻倍、最多 maxRetryMs。默认 5 秒与 60 秒；测试里调小
   retryMs?: number
+  maxRetryMs?: number
   log?: (line: string) => void
+  // 重试时遇到不会自己好的问题：默认打印原因后退出进程，和冷启动时拒绝启动一样。测试里接住
+  onFatal?: (message: string) => void
+  // 起完整服务的函数，默认 startService；测试里换成会在某一步失败的
+  start?: typeof startService
 }
+
+// 不会自己好的问题：冷启动时由调用方打印并退出进程
+export class FatalStartupError extends Error {}
 
 interface DatabaseStatus {
   state: DatabaseState
@@ -52,23 +61,23 @@ interface DatabaseStatus {
   check: DatabaseCheck | null
 }
 
-// 检查没过的原因，写进日志的一句
+// 检查没过的原因，写进日志的一句，和初始化页同一份原因码
 function checkProblem(check: DatabaseCheck): string {
-  if (check.failure) return DATABASE_FAILURE_NAMES[check.failure]
-  if (check.role?.superuser) return `角色 ${check.role.name} 是超级用户，会绕过行级安全`
-  if (check.role?.bypassRls) return `角色 ${check.role.name} 带 BYPASSRLS，会绕过行级安全`
-  const missing = check.extensions.filter((e) => e.state !== 'installed').map((e) => e.name)
-  if (missing.length) return `缺少扩展 ${missing.join('、')}`
-  if (check.existing && check.existing !== 'empty' && check.existing !== 'kioku') {
-    return `库里是${EXISTING_DATA_NAMES[check.existing]}`
-  }
-  return '检查未通过'
+  return check.problems.map((p) => databaseProblemText(p, check.failure)).join('；')
 }
 
 export async function startRuntime(config: Config, options: RuntimeOptions = {}): Promise<Runtime> {
   const log = options.log ?? ((line: string) => console.log(line))
   const vault = options.vault ?? createVaultClient()
-  const retryMs = options.retryMs ?? 15_000
+  const firstRetryMs = options.retryMs ?? 5_000
+  const maxRetryMs = options.maxRetryMs ?? 60_000
+  const onFatal =
+    options.onFatal ??
+    ((message: string) => {
+      console.error(message)
+      process.exit(1)
+    })
+  const start = options.start ?? startService
   const gate = new SetupGate(config.setupCode)
   let service: Service | null = null
   let status: DatabaseStatus = config.database
@@ -76,6 +85,7 @@ export async function startRuntime(config: Config, options: RuntimeOptions = {})
     : { state: 'missing', source: null, url: null, check: null }
   let busy = false
   let retryTimer: NodeJS.Timeout | null = null
+  let retryMs = firstRetryMs
   let stopped = false
   let lastProblem = ''
 
@@ -113,17 +123,17 @@ export async function startRuntime(config: Config, options: RuntimeOptions = {})
     webDir: config.webDir,
   })
 
-  // 接上之后：有账号就作废初始化码，没有就打开
-  const ready = async (svc: Service, source: DatabaseSource, url: string) => {
+  // 切换：只有同步的赋值与开关初始化码，不会失败。要查的（账号数）都在切换之前查完
+  const switchTo = (svc: Service, source: DatabaseSource, url: string, accounts: number) => {
     service = svc
     status = { state: 'ready', source, url, check: null }
-    if ((await svc.accounts()) === 0) announce()
+    if (accounts === 0) announce()
     else gate.close()
   }
 
-  // 初始化页填的库：先确认数据目录写得进去，再起服务，起来之后写 kioku.json，最后换上完整的服务。
-  // 任何一步失败都回到接入之前：服务关掉，文件没写
-  async function activate(url: string): Promise<void> {
+  // 初始化页填的库。准备阶段：确认数据目录写得进去、起服务、数账号、写 kioku.json，任何一步失败都关掉已经起来的、
+  // 不写文件、状态不变，抛 ActivationError；准备完才切换
+  async function activate(url: string): Promise<'switched'> {
     if (status.state !== 'missing') throw new ActivationError('数据库已配置')
     const file = join(config.dataDir, DATA_FILE)
     try {
@@ -136,73 +146,114 @@ export async function startRuntime(config: Config, options: RuntimeOptions = {})
     }
     let svc: Service
     try {
-      svc = await startService(config, url, { setup: host, vault })
+      svc = await start(config, url, { setup: host, vault })
     } catch (err) {
-      if (!(err instanceof StartupError)) throw err
-      logInternalError(`接入数据库失败（${err.step}）`, err.cause)
-      throw new ActivationError(startupText(err))
+      if (err instanceof StartupError) {
+        logInternalError(`接入数据库失败（${err.step}）`, err.cause)
+        throw new ActivationError(startupText(err))
+      }
+      logInternalError('接入数据库失败', err)
+      throw new ActivationError('接入失败，原因见服务日志')
     }
+    let accounts: number
     try {
+      accounts = await svc.accounts()
       await writeDataFile(config.dataDir, { databaseUrl: url })
     } catch (err) {
-      console.error('写入数据库连接失败', { code: (err as { code?: unknown }).code })
+      logInternalError('保存数据库连接失败', err)
       await stopService(svc)
-      throw new ActivationError(`无法写入 ${file}，没有接入`)
+      throw new ActivationError(`无法完成接入：读取账号或写入 ${file} 失败，没有接入`)
     }
+    switchTo(svc, 'file', url, accounts)
     log(`已接入数据库，连接保存在 ${file}`)
-    await ready(svc, 'file', url)
+    return 'switched'
   }
 
-  // 配了的库连不上：隔一会儿再试，接上之后换成完整的服务。原因变了才写一次日志
-  const scheduleRetry = () => {
-    if (stopped) return
-    retryTimer = setTimeout(() => void retry(), retryMs)
-    retryTimer.unref()
-  }
   const report = (problem: string) => {
     if (problem === lastProblem) return
     lastProblem = problem
     const from = status.source ? DATABASE_SOURCE_NAMES[status.source] : '配置'
-    console.error(`数据库不可用（来自${from}）：${problem}；每 ${retryMs / 1000} 秒重试一次`)
+    console.error(`数据库暂时不可用（来自${from}）：${problem}；自动重试中`)
   }
-  async function retry(): Promise<void> {
-    retryTimer = null
-    if (stopped || status.state !== 'unavailable' || !status.url) return
-    const { url, source } = status
+
+  // 暂时连不上：按退避重试（5 秒起，每次翻倍，最多 60 秒）
+  const scheduleRetry = () => {
+    if (stopped) return
+    retryTimer = setTimeout(() => {
+      retryTimer = null
+      void retry().catch((err: unknown) => {
+        // 任何意外都接住，记下来接着重试：定时器里的 rejection 没人处理会让进程崩溃
+        logInternalError('重试连接数据库出错', err)
+        scheduleRetry()
+      })
+    }, retryMs)
+    retryTimer.unref()
+    retryMs = Math.min(retryMs * 2, maxRetryMs)
+  }
+
+  // 起一次服务（冷启动与重试共用）：检查过了再起；不会自己好的问题抛 FatalStartupError，
+  // 暂时的问题返回 null（状态记成 unavailable），起来了就切换
+  async function attempt(url: string, source: DatabaseSource): Promise<boolean> {
     const check = await probeDatabase(url, config.migrationsFolder)
     if (!check.ready) {
-      status = { ...status, check }
+      if (isFatal(check)) {
+        throw new FatalStartupError(
+          `数据库来自${DATABASE_SOURCE_NAMES[source]}，无法使用：${checkProblem(check)}`,
+        )
+      }
+      status = { state: 'unavailable', source, url, check }
       report(checkProblem(check))
-      return scheduleRetry()
+      return false
     }
+    let svc: Service
     try {
-      const svc = await startService(config, url, { setup: host, vault })
-      if (stopped) return await stopService(svc)
-      log('已接上数据库')
-      await ready(svc, source!, url)
+      svc = await start(config, url, { setup: host, vault })
     } catch (err) {
       if (!(err instanceof StartupError)) throw err
       logInternalError(`启动失败（${err.step}）`, err.cause)
+      // 检查过了才起，只有连接这一步会是暂时的（检查之后库又断了）
+      if (err.step !== 'connect') throw new FatalStartupError(startupText(err))
+      status = { state: 'unavailable', source, url, check: failedCheck(failureOf(err.cause)) }
       report(startupText(err))
-      scheduleRetry()
+      return false
     }
+    let accounts: number
+    try {
+      accounts = await svc.accounts()
+    } catch (err) {
+      logInternalError('读取账号数失败', err)
+      await stopService(svc)
+      report('读取账号数失败')
+      return false
+    }
+    if (stopped) {
+      await stopService(svc)
+      return false
+    }
+    switchTo(svc, source, url, accounts)
+    return true
+  }
+
+  async function retry(): Promise<void> {
+    if (stopped || status.state !== 'unavailable' || !status.url || !status.source) return
+    try {
+      if (await attempt(status.url, status.source)) {
+        log('已接上数据库')
+        return
+      }
+    } catch (err) {
+      if (err instanceof FatalStartupError) return onFatal(err.message)
+      throw err
+    }
+    scheduleRetry()
   }
 
   if (!config.database) {
     log(`没有配置数据库（DATABASE_URL 或 ${join(config.dataDir, DATA_FILE)}），只提供初始化页`)
     announce()
-  } else {
-    const { url, source } = config.database
-    const check = await probeDatabase(url, config.migrationsFolder)
-    if (check.ready) {
-      // 冷启动时检查过了还起不来（主密钥对不上这类）照旧拒绝启动，由调用方退出
-      await ready(await startService(config, url, { setup: host, vault }), source, url)
-    } else {
-      status = { state: 'unavailable', source, url, check }
-      report(checkProblem(check))
-      announce()
-      scheduleRetry()
-    }
+  } else if (!(await attempt(config.database.url, config.database.source))) {
+    // 暂时连不上：不开初始化码（不知道有没有账号），等重试接上之后再看
+    scheduleRetry()
   }
 
   return {

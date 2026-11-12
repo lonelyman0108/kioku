@@ -173,9 +173,15 @@ export function createSetupApp(options: {
 }) {
   const { host, trustedProxies } = options
   const app = shell()
-  const needsSetup = () => Promise.resolve(true)
-  app.route('/v1', health)
-  app.route('/v1', setupStatusRoutes(host, host.masterKey, needsSetup))
+  // 没接上数据库：等人填库（missing）时要初始化；暂时连不上（unavailable）时不知道，按不要算
+  const needsSetup = () => Promise.resolve(host.database().state === 'missing')
+  // 等人初始化时服务是好的，健康检查照常 200；配了的库暂时连不上时回 503，容器的健康检查与编排看得到
+  app.get('/v1/health', (c) =>
+    host.database().state === 'unavailable'
+      ? c.json({ status: 'unavailable', version: VERSION, database: 'unavailable' }, 503)
+      : c.json({ status: 'ok', version: VERSION }, 200),
+  )
+  app.route('/v1', setupStatusRoutes(host, needsSetup))
   app.route('/v1', setupDatabaseRoutes(host, trustedProxies, needsSetup))
   app.all('/v1/*', (c) =>
     c.json(

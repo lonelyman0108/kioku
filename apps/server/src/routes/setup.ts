@@ -1,6 +1,7 @@
 import { createRoute } from '@hono/zod-openapi'
 import {
   DATABASE_FAILURE_NAMES,
+  DATABASE_UNAVAILABLE_CODE,
   DATABASE_SOURCE_NAMES,
   DatabaseCheck,
   DatabaseCheckRequest,
@@ -21,7 +22,6 @@ import { count, sql } from 'drizzle-orm'
 import type { Context } from 'hono'
 import { setCookie } from 'hono/cookie'
 
-import { isSameOrigin } from '../auth/csrf'
 import { hashPassword } from '../auth/password'
 import { createSession, SESSION_COOKIE, SESSION_TTL_MS } from '../auth/session'
 import type { Db } from '../db/client'
@@ -58,11 +58,13 @@ const setup = createRoute({
     403: jsonResponse('初始化码错误', ErrorResponse),
     409: jsonResponse('已经初始化过', ErrorResponse),
     429: jsonResponse('初始化码错误次数过多', ErrorResponse),
+    503: jsonResponse('数据库暂时无法连接', ErrorResponse),
   },
 })
 
 const codeResponses = {
-  403: jsonResponse('初始化码错误，或者不是同源页面的请求', ErrorResponse),
+  503: jsonResponse('数据库暂时无法连接', ErrorResponse),
+  403: jsonResponse('初始化码错误', ErrorResponse),
   409: jsonResponse('已完成初始化，或者数据库已配置', ErrorResponse),
   429: jsonResponse('初始化码错误次数过多', ErrorResponse),
 }
@@ -115,16 +117,19 @@ const provision = createRoute({
 
 const DONE = '已完成初始化'
 
-// 核对初始化码。不是同源页面发来的写请求直接拒绝：初始化页之外的网页不能替人填库、建账号。
-// 返回 null 表示通过
+// 核对初始化码，返回 null 表示通过。这几个接口靠初始化码保护，不另要同源：
+// 别的网页拿不到码，脚本化初始化（curl 带 KIOKU_SETUP_CODE）也不用伪造浏览器的请求头。
+// 同源检查照原来的规则只管带会话 Cookie 的请求（sameOriginForCookies）
 function guard(c: Context, host: SetupHost, trustedProxies: number, code: string) {
-  if (!isSameOrigin(c)) return c.json({ error: '跨站请求被拒绝' }, 403)
   const identity = clientIdentity(c, trustedProxies)
   switch (host.gate.verify(code, identity.identified ? identity.key : null)) {
     case 'ok':
       return null
     case 'closed':
-      return c.json({ error: DONE }, 409)
+      // 码只在等人初始化时开着：暂时连不上的库不知道有没有账号，不开
+      return host.database().state === 'unavailable'
+        ? c.json({ error: '数据库暂时无法连接', code: DATABASE_UNAVAILABLE_CODE }, 503)
+        : c.json({ error: DONE }, 409)
     case 'limited':
       return c.json({ error: '初始化码错误次数过多，请稍后重试', code: SETUP_CODE_LIMITED }, 429)
     case 'wrong':
@@ -159,7 +164,10 @@ export function setupDatabaseRoutes(
       if (denied) return denied
       if (!(await needsSetup())) return c.json({ error: DONE }, 409)
       const current = host.database()
-      const result = current.url ? await probeDatabase(current.url, host.migrationsFolder) : null
+      const result =
+        current.state === 'ready' && current.url
+          ? await probeDatabase(current.url, host.migrationsFolder)
+          : current.check
       return c.json(
         {
           source: current.source,
@@ -213,25 +221,29 @@ export function setupDatabaseRoutes(
       const locked = notEditable(host)
       if (locked) return c.json({ error: locked }, 409)
       try {
-        return await host.exclusive(async () => {
+        const result = await host.exclusive(async () => {
           const made = await provisionDatabase(body)
           try {
-            const result = await probeDatabase(made.url, host.migrationsFolder)
-            if (!result.ready) {
+            const check = await probeDatabase(made.url, host.migrationsFolder)
+            if (!check.ready) {
               throw new ActivationError(
-                result.failure
-                  ? `无法用新建的角色连接：${DATABASE_FAILURE_NAMES[result.failure]}`
+                check.failure
+                  ? `无法用新建的角色连接：${DATABASE_FAILURE_NAMES[check.failure]}`
                   : '新建的库检查未通过',
               )
             }
             await host.activate(made.url)
-            return c.json({ summary: summarize(made.url)!, check: result }, 200)
+            return { url: made.url, check }
           } catch (err) {
-            // 接不上就把刚建的库与角色删掉，不留下没人知道密码的角色
-            await made.undo().catch(() => console.error('删除代建的库与角色失败'))
+            // 只有没接上（ActivationError：准备阶段失败，没有切换、没写 kioku.json）才删掉刚建的库与角色，
+            // 不留下没人知道密码的角色。别的错误按已经切换算：服务可能正在用这个库，绝不删
+            if (err instanceof ActivationError) {
+              await made.undo().catch(() => console.error('删除代建的库与角色失败'))
+            }
             throw err
           }
         })
+        return c.json({ summary: summarize(result.url)!, check: result.check }, 200)
       } catch (err) {
         if (err instanceof ProvisionError) {
           const { failure, extensions } = err.detail
@@ -257,19 +269,26 @@ export function setupDatabaseRoutes(
     })
 }
 
-// 初始化状态：没有 host 的（测试）按已接上的库算
+// 初始化状态。source 是 host，没有 host 的（测试）只给主密钥，按已接上的库算。
+// 数据库暂时连不上时不说要初始化：不知道有没有账号，管理界面据此显示数据库不可用，而不是初始化页
 export function setupStatusRoutes(
-  host: SetupHost | undefined,
-  masterKey: boolean,
+  source: SetupHost | { masterKey: boolean },
   needsSetup: () => Promise<boolean>,
 ) {
   return router().openapi(status, async (c) => {
-    const current = host?.database() ?? { state: 'ready' as const, source: null }
+    const current =
+      'database' in source
+        ? source.database()
+        : { state: 'ready' as const, source: null, check: null }
     return c.json(
       {
-        needsSetup: current.state === 'ready' ? await needsSetup() : true,
-        database: { state: current.state, source: current.source },
-        masterKey,
+        needsSetup: current.state === 'ready' ? await needsSetup() : current.state === 'missing',
+        database: {
+          state: current.state,
+          source: current.source,
+          failure: current.state === 'unavailable' ? (current.check?.failure ?? null) : null,
+        },
+        masterKey: source.masterKey,
       },
       200,
     )
@@ -287,7 +306,7 @@ export function setupRoutes(deps: Deps) {
   const trustedProxies = deps.trustedProxies ?? 0
   const needsSetup = () => noAccounts(deps.db)
   const app = router()
-  app.route('/', setupStatusRoutes(host, Boolean(deps.masterKey), needsSetup))
+  app.route('/', setupStatusRoutes(host ?? { masterKey: Boolean(deps.masterKey) }, needsSetup))
   if (host) app.route('/', setupDatabaseRoutes(host, trustedProxies, needsSetup))
   return app.openapi(setup, async (c) => {
     const body = c.req.valid('json')

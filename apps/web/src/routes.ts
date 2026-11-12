@@ -8,6 +8,12 @@ import { legacySettingsRedirect, legacySpaceSettingsRedirect } from './settingsS
 
 export const routes: RouteRecordRaw[] = [
   { path: '/setup', name: 'setup', component: () => import('./pages/SetupPage.vue') },
+  // 配了的数据库暂时连不上：服务在重试，不进初始化页
+  {
+    path: '/database-unavailable',
+    name: 'database-unavailable',
+    component: () => import('./pages/DatabaseUnavailablePage.vue'),
+  },
   { path: '/login', name: 'login', component: () => import('./pages/LoginPage.vue') },
   // 设置密码链接：不需要登录，已登录时也照样打开
   {
@@ -178,10 +184,17 @@ export function installGuards(router: Router): void {
     if (to.name === 'unavailable') return true
     try {
       if (!setupDone) {
-        setupDone = !(await api.setupStatus()).needsSetup
+        const status = await api.setupStatus()
+        // 数据库暂时连不上：不知道有没有账号，不当作要初始化；每次导航都重新确认
+        if (status.database.state === 'unavailable') {
+          return to.name === 'database-unavailable'
+            ? true
+            : { name: 'database-unavailable', query: { next: to.fullPath } }
+        }
+        setupDone = !status.needsSetup
         if (!setupDone) return to.name === 'setup' ? true : { name: 'setup' }
       }
-      if (to.name === 'setup') return { name: 'home' }
+      if (to.name === 'setup' || to.name === 'database-unavailable') return { name: 'home' }
       if (to.name === 'password') return true
       const me = await loadMe()
       if (!me) return to.name === 'login' ? true : { name: 'login', query: { next: to.fullPath } }

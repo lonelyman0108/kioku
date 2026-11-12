@@ -1,10 +1,13 @@
 import {
   DATABASE_FAILURE_NAMES,
+  DATABASE_PROBLEM_NAMES,
   DATABASE_SOURCE_NAMES,
   DatabaseSetupError,
   EXISTING_DATA_NAMES,
   EXTENSION_STATE_NAMES,
   type DatabaseCheck,
+  type DatabaseProblem,
+  type DatabaseProblemCode,
   type DatabaseFailure,
   type DatabaseSource,
   type DatabaseSslMode,
@@ -53,14 +56,25 @@ export interface CheckRow {
   detail?: string
 }
 
-const BYPASS_DETAIL =
-  '会绕过行级安全，空间之间的隔离不生效。改用 NOSUPERUSER NOBYPASSRLS 的普通角色。'
-const EXTENSION_AVAILABLE = (name: string) =>
-  `需要超级用户在这个库里执行 CREATE EXTENSION ${name}，或者改用「用超级用户创建」。`
-const EXTENSION_MISSING =
-  '需要 Kioku 的 PostgreSQL 镜像，或者在服务器上自行安装 pgvector 与 zhparser。'
+// 每类问题的下一步，和契约的 DATABASE_PROBLEM_NAMES 一一对应；连不上的按类别另见 FAILURE_HINTS
+const PROBLEM_HINTS: Record<
+  Exclude<DatabaseProblemCode, 'connection'>,
+  (p: DatabaseProblem) => string
+> = {
+  superuser: () =>
+    '会绕过行级安全，空间之间的隔离不生效。改用 NOSUPERUSER NOBYPASSRLS 的普通角色。',
+  bypass_rls: () =>
+    '会绕过行级安全，空间之间的隔离不生效。改用 NOSUPERUSER NOBYPASSRLS 的普通角色。',
+  extension_not_installed: (p) =>
+    `需要超级用户在这个库里执行 CREATE EXTENSION ${p.extension ?? ''}，或者改用「用超级用户创建」。`,
+  extension_missing: () =>
+    '需要 Kioku 的 PostgreSQL 镜像，或者在服务器上自行安装 pgvector 与 zhparser。',
+  pre_baseline: () => '这个版本不兼容旧数据：清空数据库重建后再接入，然后从 Lore 重新导入。',
+  newer: () => '用做这个库的版本启动。',
+}
 
-// 检查结果逐项列出：连不上时只有连接一项
+// 检查结果逐项列出。哪一项拦住接入只看服务端给的 problems（规则只在服务端的 assess 里），这里只决定怎么列：
+// 连不上时只有连接一项
 export function checkRows(check: DatabaseCheck): CheckRow[] {
   if (check.failure) {
     return [
@@ -73,33 +87,51 @@ export function checkRows(check: DatabaseCheck): CheckRow[] {
       },
     ]
   }
+  const problem = (match: (p: DatabaseProblem) => boolean) => check.problems.find(match)
+  const verdictOf = (found: DatabaseProblem | undefined) =>
+    found
+      ? {
+          verdict: 'blocked' as const,
+          detail: PROBLEM_HINTS[found.code as keyof typeof PROBLEM_HINTS](found),
+        }
+      : { verdict: 'passed' as const }
+
   const rows: CheckRow[] = [{ key: 'connection', label: '连接', value: '成功', verdict: 'passed' }]
   if (check.role) {
-    const { name, superuser, bypassRls } = check.role
+    const found = problem((p) => p.code === 'superuser' || p.code === 'bypass_rls')
     rows.push({
       key: 'role',
       label: '角色',
-      value: superuser ? `${name}（超级用户）` : bypassRls ? `${name}（带 BYPASSRLS）` : name,
-      verdict: superuser || bypassRls ? 'blocked' : 'passed',
-      ...(superuser || bypassRls ? { detail: BYPASS_DETAIL } : {}),
+      value: found
+        ? `${check.role.name}（${DATABASE_PROBLEM_NAMES[found.code]}）`
+        : check.role.name,
+      ...verdictOf(found),
     })
   }
   for (const { name, state } of check.extensions) {
-    const detail =
-      state === 'available'
-        ? EXTENSION_AVAILABLE(name)
-        : state === 'missing'
-          ? EXTENSION_MISSING
-          : null
     rows.push({
       key: `extension-${name}`,
       label: `扩展 ${name}`,
       value: EXTENSION_STATE_NAMES[state],
-      verdict: state === 'installed' ? 'passed' : 'blocked',
-      ...(detail ? { detail } : {}),
+      ...verdictOf(problem((p) => p.extension === name)),
     })
   }
-  if (check.existing) rows.push(existingRow(check.existing, check.accounts))
+  if (check.existing) {
+    const found = problem((p) => p.code === 'pre_baseline' || p.code === 'newer')
+    const withAccounts = check.existing === 'kioku' && Boolean(check.accounts)
+    rows.push({
+      key: 'existing',
+      label: '已有数据',
+      value: withAccounts
+        ? `${EXISTING_DATA_NAMES.kioku}（${check.accounts} 个账号）`
+        : EXISTING_DATA_NAMES[check.existing],
+      ...(found
+        ? verdictOf(found)
+        : withAccounts
+          ? { verdict: 'notice' as const, detail: '将接入已有实例，接入后用已有账号登录。' }
+          : { verdict: 'passed' as const }),
+    })
+  }
   if (check.unrelatedTables > 0) {
     rows.push({
       key: 'unrelated',
@@ -110,38 +142,6 @@ export function checkRows(check: DatabaseCheck): CheckRow[] {
     })
   }
   return rows
-}
-
-function existingRow(
-  existing: NonNullable<DatabaseCheck['existing']>,
-  accounts: number | null,
-): CheckRow {
-  const base = { key: 'existing', label: '已有数据' }
-  if (existing === 'pre_baseline') {
-    return {
-      ...base,
-      value: EXISTING_DATA_NAMES.pre_baseline,
-      verdict: 'blocked',
-      detail: '这个版本不兼容旧数据：清空数据库重建后再接入，然后从 Lore 重新导入。',
-    }
-  }
-  if (existing === 'newer') {
-    return {
-      ...base,
-      value: EXISTING_DATA_NAMES.newer,
-      verdict: 'blocked',
-      detail: '用做这个库的版本启动。',
-    }
-  }
-  if (existing === 'kioku' && accounts) {
-    return {
-      ...base,
-      value: `${EXISTING_DATA_NAMES.kioku}（${accounts} 个账号）`,
-      verdict: 'notice',
-      detail: '将接入已有实例，接入后用已有账号登录。',
-    }
-  }
-  return { ...base, value: EXISTING_DATA_NAMES[existing], verdict: 'passed' }
 }
 
 // 当前连接的属性列表：密码只说填没填

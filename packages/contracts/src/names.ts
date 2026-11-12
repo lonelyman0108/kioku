@@ -10,6 +10,8 @@ import type {
 import type { CredentialCapability, Layer, Sensitivity } from './memory'
 import type {
   DatabaseFailure,
+  DatabaseProblem,
+  DatabaseProblemCode,
   DatabaseSource,
   ExistingData,
   ExtensionState,
@@ -158,4 +160,25 @@ export const PROVISION_PROBLEM_NAMES: Record<ProvisionProblem, string> = {
   database_exists: '库已存在',
   extension_missing: '服务器上缺少扩展',
   failed: '创建失败',
+}
+
+// 拦住接入的问题，服务端日志与初始化页的检查行共用
+export const DATABASE_PROBLEM_NAMES: Record<DatabaseProblemCode, string> = {
+  connection: '无法连接',
+  superuser: '角色是超级用户，会绕过行级安全',
+  bypass_rls: '角色带 BYPASSRLS，会绕过行级安全',
+  extension_not_installed: '库里尚未安装扩展',
+  extension_missing: '服务器上缺少扩展',
+  pre_baseline: '库里是记忆架构改版之前的结构',
+  newer: '库里有这个版本不认识的迁移',
+}
+
+// 一条问题的完整说法：扩展两类带上扩展名，连不上带上类别
+export function databaseProblemText(
+  problem: DatabaseProblem,
+  failure?: DatabaseFailure | null,
+): string {
+  if (problem.code === 'connection' && failure) return DATABASE_FAILURE_NAMES[failure]
+  const name = DATABASE_PROBLEM_NAMES[problem.code]
+  return problem.extension ? `${name} ${problem.extension}` : name
 }
