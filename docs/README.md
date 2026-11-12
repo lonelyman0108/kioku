@@ -3,6 +3,7 @@
 | 文档 | 说明 |
 |---|---|
 | [design.md](design.md) | 总体设计：数据模型、归属与授权、接入协议、界面用语 |
+| [deploy.md](deploy.md) | 部署与运维：反向代理、备份与恢复、升级与回滚、主密钥轮换、配置项 |
 | [migrate-from-lore.md](migrate-from-lore.md) | 从 Lore 迁移：映射规则、导入步骤与对照检查 |
 | [SETUP.md](SETUP.md) | 仓库与平台设置、secrets 名字、runner label、部署位置、重建步骤 |
 | [plans/PLAN.md](plans/PLAN.md) | 计划模板：新主题复制一份改名，全生命周期持续勾选 |
@@ -12,7 +13,8 @@
 
 | 问题 | 以哪份为准 |
 |---|---|
-| 这个项目是什么、怎么跑、怎么部署 | `README.md` |
+| 这个项目是什么、怎么跑 | `README.md` |
+| 怎么部署、备份、升级 | `docs/deploy.md` |
 | 人怎么提交、开 PR、发版 | `CONTRIBUTING.md` |
 | agent 怎么干活、有哪些禁区和坑 | `AGENTS.md`（`CLAUDE.md` 只引用它） |
 | 平台和机器怎么设置、怎么重建 | `docs/SETUP.md` |
