@@ -55,15 +55,10 @@ export const DatabaseIdentifier = z
 export const DatabaseConnection = z.object({
   host: Host,
   port: z.number().int().min(1, '端口在 1 到 65535 之间').max(65535, '端口在 1 到 65535 之间'),
-  // 库名与用户名只收标识符字符：连接串里不用转义，两个驱动（postgres.js 与 pg-boss 的 node-postgres）解出来一样
-  database: z
-    .string()
-    .trim()
-    .regex(/^[A-Za-z0-9_]{1,63}$/, '库名只能包含字母、数字和下划线，最多 63 位'),
-  username: z
-    .string()
-    .trim()
-    .regex(/^[A-Za-z0-9_]{1,63}$/, '用户名只能包含字母、数字和下划线，最多 63 位'),
+  // 库名与用户名不限字符（带连字符的库名、Azure 的 user@server 都要能填）：连接串里按 URL 编码，
+  // 服务与 pg-boss 都用 postgres.js 的解析结果（pg-boss 逐项取，不自己解析连接串），两边拿到的一样
+  database: z.string().trim().min(1, '请填写库名').max(63, '库名不超过 63 个字符'),
+  username: z.string().trim().min(1, '请填写用户名').max(128, '用户名不超过 128 个字符'),
   password: z.string().max(1024, '密码不超过 1024 个字符'),
   ssl: DatabaseSslMode,
 })

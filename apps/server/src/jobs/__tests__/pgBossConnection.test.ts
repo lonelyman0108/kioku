@@ -1,5 +1,8 @@
+import postgres from 'postgres'
 import { describe, expect, it } from 'vitest'
 
+import { postgresOptions } from '../../db/client'
+import { connectionUrl } from '../../db/probe'
 import { pgBossConnection, pgBossSsl } from '../queue'
 
 describe('pg-boss 的连接选项按 postgres.js 的解析给', () => {
@@ -41,6 +44,31 @@ describe('pg-boss 的连接选项按 postgres.js 的解析给', () => {
     expect(await pgBossConnection('postgres://u@[::1]:5432/k?sslmode=verify-full')).toMatchObject({
       host: '::1',
       ssl: {},
+    })
+  })
+
+  it('初始化页填的特殊字符经 kioku.json 的连接串后，两个驱动拿到的库名、用户与密码完全一样', async () => {
+    const form = {
+      host: 'db.example.com',
+      port: 5432,
+      database: 'my-db',
+      username: 'app@server',
+      password: 'p@ss:w/o#r%d',
+      ssl: 'disable' as const,
+    }
+    // 保存进 kioku.json 的就是这个连接串
+    const url = connectionUrl(form)
+    const { options } = postgres(url, postgresOptions({ max: 1 }))
+    const boss = await pgBossConnection(url)
+    expect({ database: options.database, user: options.user, password: options.pass }).toEqual({
+      database: 'my-db',
+      user: 'app@server',
+      password: 'p@ss:w/o#r%d',
+    })
+    expect({ database: boss.database, user: boss.user, password: boss.password }).toEqual({
+      database: 'my-db',
+      user: 'app@server',
+      password: 'p@ss:w/o#r%d',
     })
   })
 })
