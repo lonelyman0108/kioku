@@ -1,4 +1,4 @@
-import { LAYERS, type CreatedKey, type Me } from '@kioku/contracts'
+import { LAYERS, type CreatedKey, type Me, type WhoAmI } from '@kioku/contracts'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
@@ -155,6 +155,53 @@ describe.skipIf(!testDatabaseUrl)('初始化、登录与 API Key', () => {
     })
     expect(revoked.status).toBe(204)
     expect((await app.request('/v1/whoami', bearer)).status).toBe(401)
+  })
+
+  it('whoami 带空间名与应用所有者的显示名，改名之后跟着变', async () => {
+    const { cookie, me } = await setup()
+    const spaceId = me.spaces[0]!.id
+    const created = await app.request(
+      `/v1/spaces/${spaceId}/apps`,
+      json('POST', { slug: 'codex', name: 'Codex', runtimeFamily: 'codex' }, cookie),
+    )
+    const appInfo = (await created.json()) as { id: string }
+    const keyRes = await app.request(
+      `/v1/spaces/${spaceId}/apps/${appInfo.id}/keys`,
+      json(
+        'POST',
+        {
+          name: '本机',
+          scopes: {
+            readLayers: [...LAYERS],
+            writeLayers: [],
+            maxSensitivity: 'private',
+            admin: false,
+          },
+        },
+        cookie,
+      ),
+    )
+    const { key } = (await keyRes.json()) as CreatedKey
+    const whoami = async () => {
+      const res = await app.request('/v1/whoami', { headers: { authorization: `Bearer ${key}` } })
+      expect(res.status).toBe(200)
+      return (await res.json()) as WhoAmI
+    }
+    expect(await whoami()).toMatchObject({ spaceId, spaceName: '家', accountName: 'Alice' })
+
+    const renamedAccount = await app.request(
+      '/v1/auth/profile',
+      json('PATCH', { displayName: 'Alice L' }, cookie),
+    )
+    expect(renamedAccount.status).toBe(200)
+    expect(await whoami()).toMatchObject({ spaceName: '家', accountName: 'Alice L' })
+
+    const renamedSpace = await app.request(
+      `/v1/spaces/${spaceId}`,
+      json('PATCH', { name: '工作' }, cookie),
+    )
+    expect(renamedSpace.status).toBe(200)
+    expect(await whoami()).toMatchObject({ spaceName: '工作', accountName: 'Alice L' })
   })
 
   it('应用标识重复返回 409', async () => {

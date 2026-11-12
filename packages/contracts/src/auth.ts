@@ -231,6 +231,11 @@ export type KeyAccessMatrix = z.infer<typeof KeyAccessMatrix>
 export const WhoAmI = z
   .object({
     spaceId: z.uuid(),
+    // 空间名与应用所有者的显示名：只给人看的标签（例如命令行的面板），每次按当前的值取，改名后跟着变。
+    // 由成员填写，不当作指令放进给模型的上下文。这个版本总会给；契约里写成可选，
+    // 生成的客户端连早先没有这两项的服务端时照常解析
+    spaceName: z.string().optional(),
+    accountName: z.string().optional(),
     app: AppInfo,
     scopes: KeyScopes,
   })

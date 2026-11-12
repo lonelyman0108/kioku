@@ -1,8 +1,10 @@
 import type { LifecycleEvent, RecallRequest, RecallResponse, WhoAmI } from '@kioku/contracts'
+import { eq } from 'drizzle-orm'
 
 import { conversationRefOf, touchConversation } from '../access/conversations'
 import { defaultSession, resolveKeySession, type KeySession } from '../access/session'
 import { loggableError, withSpace } from '../db/client'
+import { accounts, spaces } from '../db/schema'
 import { bufferTurn, canWriteTurns } from '../extraction/buffer'
 import type { Deps, KeyPrincipal } from '../http/env'
 import { handleLifecycle, type LifecycleResult } from './lifecycle'
@@ -65,6 +67,18 @@ export async function recallRequest(
   return { candidates, subjects }
 }
 
-export function whoamiOf(key: KeyPrincipal): WhoAmI {
-  return { spaceId: key.spaceId, app: key.app, scopes: key.scopes }
+// 名字每次现取，不放进 Key 的身份里：改名之后立刻跟着变。放在 withSpace 里读，测试台的回滚模式下也落在它的事务里
+export async function whoamiOf(deps: Pick<Deps, 'db'>, key: KeyPrincipal): Promise<WhoAmI> {
+  const names = await withSpace(deps.db, key.spaceId, async (tx) => {
+    const [space] = await tx
+      .select({ name: spaces.name })
+      .from(spaces)
+      .where(eq(spaces.id, key.spaceId))
+    const [owner] = await tx
+      .select({ name: accounts.displayName })
+      .from(accounts)
+      .where(eq(accounts.id, key.app.ownerAccountId))
+    return { spaceName: space?.name ?? '', accountName: owner?.name ?? '' }
+  })
+  return { spaceId: key.spaceId, ...names, app: key.app, scopes: key.scopes }
 }

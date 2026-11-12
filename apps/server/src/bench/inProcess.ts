@@ -142,12 +142,12 @@ export function inProcessExecutor(
       case 'boot':
         return rest('boot', () => scopeFor(session).boot())
       case 'whoami':
-        return rest('whoami', async () => whoamiOf(key))
+        return rest('whoami', () => whoamiOf(deps, key))
     }
   }
 
   return {
-    whoami: async () => whoamiOf(key),
+    whoami: () => whoamiOf(deps, key),
     async execute(step, options) {
       const outcome = await call(step)
       // 这一步记下的都取走：被吞掉的错误（例如对象直连读取失败）不能算到下一步头上
