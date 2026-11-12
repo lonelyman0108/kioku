@@ -16,6 +16,7 @@ import {
   promptText,
   SUPPLEMENT_MAX,
   rangeOf,
+  runtimeName,
   overriddenAt,
   overriddenIn,
   stepOf,
@@ -364,5 +365,14 @@ describe('只读', () => {
       expect(tpl).toContain('@submit.prevent="save"')
       expect(tpl.indexOf('<SaveBar')).toBeGreaterThan(tpl.indexOf('<form'))
     }
+  })
+})
+
+describe('客户端名', () => {
+  it('取契约的运行时名称表，不认得的原样显示', () => {
+    expect(runtimeName('claudecode')).toBe('Claude Code')
+    expect(runtimeName('hermes')).toBe('Hermes')
+    expect(runtimeName('toString')).toBe('toString')
+    expect(runtimeName('future')).toBe('future')
   })
 })

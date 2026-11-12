@@ -1,5 +1,6 @@
 import {
   PROMPT_SUPPLEMENT_MAX_CHARS,
+  RUNTIME_FAMILY_NAMES,
   TUNING_KEYS,
   TuningValues,
   WEIGHT_KEYS,
@@ -141,9 +142,11 @@ export const overriddenIn = (overrides: Partial<Record<string, unknown>> | undef
     ? new Set((TUNING_KEYS as readonly TuningKey[]).filter((k) => overrides[k] !== undefined))
     : undefined
 
-// 客户端名，宿主上限的表格用
-const RUNTIME_NAMES: Record<string, string> = { claudecode: 'Claude Code', codex: 'Codex' }
-export const runtimeName = (family: string) => RUNTIME_NAMES[family] ?? family
+// 客户端名，宿主上限的表格用；名称表只有契约里一份，不认得的运行时原样显示
+export const runtimeName = (family: string) =>
+  Object.hasOwn(RUNTIME_FAMILY_NAMES, family)
+    ? RUNTIME_FAMILY_NAMES[family as keyof typeof RUNTIME_FAMILY_NAMES]
+    : family
 
 // 试算：拿召回调试的候选，按表单里的最低分与条数在本地重算。和服务端一样：按未取整的分数排序、和最低分比，
 // 过了最低分的取前 limit 条注入，过了但排在后面的是超出条数，其余不注入

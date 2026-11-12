@@ -1,4 +1,4 @@
-import type { AppInfo, SpaceSummary } from '@kioku/contracts'
+import { RUNTIME_FAMILY_NAMES, type AppInfo, type SpaceSummary } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 import { parse } from 'vue/compiler-sfc'
 
@@ -7,9 +7,11 @@ import endpoints from '../api/endpoints?raw'
 import {
   GRANT_GONE,
   NEW_APP,
+  NOTHING_SELECTED,
   appSlugProblem,
   approveBody,
-  defaultAppSlug,
+  defaultAppChoice,
+  defaultAppName,
   defaultGrantPreset,
   defaultGrantScopes,
   defaultKeyName,
@@ -21,7 +23,13 @@ import {
   issuableSpaces,
   lookupFailure,
   nameProblem,
+  newAppSlugs,
   normalizeUserCode,
+  nothingSelected,
+  runtimeNames,
+  slugFrom,
+  uniqueSlug,
+  type PlatformChoice,
 } from '../authorize'
 import appKeys from '../components/AppKeys.vue?raw'
 import { issuedCredentialCapability, tightenScopes } from '../components/keyPresets'
@@ -147,9 +155,17 @@ describe('确认这一步', () => {
     }
     expect(handler(button('确认'), 'click')).toBe('approve')
     expect(handler(button('拒绝'), 'click')).toBe('deny')
-    // 整个确认这一步里没有表单：权限编辑器的单选与勾选框不会隐式提交
-    const editor = elements.find((el) => el.tag === 'KeyScopeEditor')!
-    expect(ancestors(editor).some((a) => a.tag === 'form')).toBe(false)
+    // 整个确认这一步里没有表单：权限编辑器、平台的勾选框与输入框都不会隐式提交
+    for (const tag of ['KeyScopeEditor', 'UCheckbox', 'USwitch', 'UInput', 'USelect']) {
+      for (const el of elements.filter(
+        (e) => e.tag === tag && attr(e, 'placeholder') !== 'XXXX-XXXX',
+      )) {
+        expect(
+          ancestors(el).some((a) => a.tag === 'form'),
+          tag,
+        ).toBe(false)
+      }
+    }
     // 页面上唯一的表单是第一步的查看申请
     const forms = elements.filter((el) => el.tag === 'form')
     expect(forms).toHaveLength(1)
@@ -201,10 +217,22 @@ describe('空间与应用', () => {
     expect(grantApps(list, undefined, 'codex')).toEqual([])
   })
 
-  it('新应用的默认标识避开已有的', () => {
-    expect(defaultAppSlug('codex', [])).toBe('codex')
-    expect(defaultAppSlug('codex', ['codex'])).toBe('codex-2')
-    expect(defaultAppSlug('codex', ['codex', 'codex-2'])).toBe('codex-3')
+  it('新应用的默认名称是「平台名 · 机器名」，标识由名称生成并避开已有的', () => {
+    expect(defaultAppName('claudecode', 'mac')).toBe('Claude Code · mac')
+    expect(defaultAppName('codex', null)).toBe('Codex')
+    expect(slugFrom('Claude Code · mac', 'claudecode')).toBe('claude-code-mac')
+    // 什么都不剩时用运行时的名字
+    expect(slugFrom('克劳德', 'claudecode')).toBe('claudecode')
+    expect(slugFrom('x'.repeat(80), 'pi')).toHaveLength(63)
+    expect(uniqueSlug('codex', new Set())).toBe('codex')
+    expect(uniqueSlug('codex', new Set(['codex']))).toBe('codex-2')
+    expect(uniqueSlug('codex', new Set(['codex', 'codex-2']))).toBe('codex-3')
+    const long = 'x'.repeat(63)
+    expect(uniqueSlug(long, new Set([long]))).toBe(`${'x'.repeat(61)}-2`)
+  })
+
+  it('平台名只有契约里一份', () => {
+    expect(runtimeNames).toBe(RUNTIME_FAMILY_NAMES)
   })
 
   it('标识照契约校验，已有的不能再用', () => {
@@ -216,25 +244,131 @@ describe('空间与应用', () => {
   })
 
   it('访问密钥的默认名称：自报的名字，没有就用运行时的名字', () => {
-    expect(defaultKeyName({ clientName: 'laptop', runtimeFamily: 'codex' })).toBe('laptop')
-    expect(defaultKeyName({ clientName: null, runtimeFamily: 'codex' })).toBe('Codex')
+    expect(defaultKeyName('laptop', 'codex')).toBe('laptop')
+    expect(defaultKeyName(null, 'codex')).toBe('Codex')
+    expect(defaultKeyName('  ', 'pi')).toBe('Pi')
     expect(nameProblem('  ')).not.toBeNull()
     expect(nameProblem('a'.repeat(65))).not.toBeNull()
     expect(nameProblem('😀'.repeat(64))).toBeNull()
   })
 
-  it('请求体：已有的应用带 id，新建的带标识与名称', () => {
-    const base = {
-      userCode: 'BCDFGHJK',
-      spaceId: 's',
+  it('请求体：每个平台一项、顺序不变；勾掉的是跳过，已有的应用带 id，新建的带标识与名称', () => {
+    const choice = (over: Partial<PlatformChoice>): PlatformChoice => ({
+      runtimeFamily: 'codex',
+      selected: true,
+      appChoice: NEW_APP,
       newApp: { slug: 'codex', name: ' Codex ' },
       keyName: ' laptop ',
       scopes: defaultGrantScopes(false),
-    }
-    expect(approveBody({ ...base, appChoice: 'app-id' }).app).toEqual({ id: 'app-id' })
-    const created = approveBody({ ...base, appChoice: NEW_APP })
-    expect(created.app).toEqual({ slug: 'codex', name: 'Codex' })
-    expect(created.keyName).toBe('laptop')
+      ...over,
+    })
+    const body = approveBody('BCDFGHJK', 's', [
+      choice({}),
+      choice({ runtimeFamily: 'pi', selected: false }),
+      choice({ runtimeFamily: 'hermes', appChoice: 'app-id' }),
+    ])
+    expect(body.items.map((i) => i.runtimeFamily)).toEqual(['codex', 'pi', 'hermes'])
+    expect(body.items[0]).toMatchObject({
+      app: { slug: 'codex', name: 'Codex' },
+      keyName: 'laptop',
+    })
+    expect(body.items[1]).toEqual({ runtimeFamily: 'pi', skip: true })
+    expect(body.items[2]).toMatchObject({ app: { id: 'app-id' } })
+  })
+
+  it('至少选一个平台', () => {
+    expect(nothingSelected([{ selected: false }, { selected: false }])).toBe(true)
+    expect(nothingSelected([{ selected: false }, { selected: true }])).toBe(false)
+    expect(NOTHING_SELECTED).toBe('至少选择一个平台')
+    // 一个都没勾时确认不可用
+    expect(authorizePage).toContain('!noneSelected.value &&')
+  })
+})
+
+describe('几个平台', () => {
+  const script = parse(authorizePage).descriptor.scriptSetup!.content
+
+  it('每个平台一行、默认全选，带勾选框', () => {
+    expect(script).toContain('selected: true,')
+    const row = elements.find((el) => attr(el, 'class') === 'platform')!
+    expect(row.props?.find((p) => p.name === 'for')?.exp?.content).toContain('in rows')
+    const checkbox = walk(row).find((el) => el.tag === 'UCheckbox')!
+    expect(bound(checkbox, 'label')).toBe('runtimeNames[row.runtimeFamily]')
+  })
+
+  it('默认所有平台用同一套权限，可以关掉后逐个改', () => {
+    expect(script).toContain('const sameScopes = ref(true)')
+    expect(script).toContain('sameScopes.value = true')
+    const toggle = elements.find((el) => el.tag === 'USwitch')!
+    expect(attr(toggle, 'label')).toBe('所有平台用同一套权限')
+    // 统一时一个编辑器，不统一时每个平台一个，都是签发访问密钥的那个编辑器
+    const condition = (el: TemplateNode) =>
+      [el, ...ancestors(el)]
+        .map((a) => a.props?.find((p) => p.name === 'if')?.exp?.content)
+        .filter(Boolean)
+    const editors = elements.filter((el) => el.tag === 'KeyScopeEditor')
+    expect(editors).toHaveLength(2)
+    expect(condition(editors[0]!)).toContain('!sameScopes')
+    expect(condition(editors[1]!)).toContain('sameScopes')
+    for (const editor of editors) expect(bound(editor, 'is-space-owner')).toBe('isSpaceOwner')
+    // 开关在平台列表上方：关掉之后各行展开自己的编辑器
+    const list = elements.find((el) => attr(el, 'class') === 'platforms')!
+    expect(elements.indexOf(toggle)).toBeLessThan(elements.indexOf(list))
+    expect(ancestors(editors[0]!)).toContain(list)
+    expect(ancestors(editors[1]!)).not.toContain(list)
+  })
+
+  it('应用、访问密钥名称与标识的说明收在提示层里', () => {
+    expect(authorizePage).toContain('仅列出当前账号的 ${runtimeNames[row.runtimeFamily]} 应用')
+    expect(authorizePage).toContain('用于辨认，例如设备加工具')
+    expect(authorizePage).toContain('这个应用的记忆位于 app://&lt;标识&gt;/ 下')
+    const row = elements.find((el) => attr(el, 'class') === 'platform')!
+    expect(walk(row).filter((el) => el.tag === 'Hint')).toHaveLength(3)
+  })
+
+  it('默认用已有的应用：同一台机器上次建的优先，其次第一个，都没有才新建', () => {
+    const own = [
+      { id: 'first', name: 'Codex' },
+      { id: 'same', name: 'Codex · mac' },
+    ]
+    expect(defaultAppChoice(own, 'codex', 'mac')).toBe('same')
+    expect(defaultAppChoice(own, 'codex', 'linux')).toBe('first')
+    expect(defaultAppChoice([], 'codex', 'mac')).toBe(NEW_APP)
+    expect(script).toContain('defaultAppChoice(ownApps(row.runtimeFamily)')
+  })
+
+  it('默认名称不超过上限：截短机器名、保留平台名，不切开代理对', () => {
+    const long = defaultAppName('claudecode', '😀'.repeat(80))
+    expect(Array.from(long)).toHaveLength(64)
+    expect(long.startsWith('Claude Code · ')).toBe(true)
+    expect(long).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/)
+    expect(nameProblem(long)).toBeNull()
+    expect(defaultAppName('pi', 'x'.repeat(64))).toBe(`Pi · ${'x'.repeat(59)}`)
+  })
+
+  it('手填的标识先预留，默认的标识避开它们', () => {
+    const row = (runtimeFamily: 'codex' | 'pi', typed: string | null, isNew = true) => ({
+      isNew,
+      typed,
+      runtimeFamily,
+      appName: `${runtimeNames[runtimeFamily]} · mac`,
+    })
+    // 后一行手填了前一行的默认值：前一行换成下一个
+    expect(newAppSlugs([row('codex', null), row('pi', 'codex-mac')], [])).toEqual([
+      'codex-mac-2',
+      'codex-mac',
+    ])
+    expect(newAppSlugs([row('codex', null), row('pi', null)], ['pi-mac'])).toEqual([
+      'codex-mac',
+      'pi-mac-2',
+    ])
+    // 不新建的行没有标识，也不占用
+    expect(newAppSlugs([row('codex', 'x', false), row('pi', null)], [])).toEqual([null, 'pi-mac'])
+  })
+
+  it('平台名用契约的名称表', () => {
+    expect(runtimeNames.hermes).toBe('Hermes')
+    expect(authorizePage).not.toMatch(/'Claude Code'|'Codex'/)
   })
 })
 
@@ -288,11 +422,21 @@ describe('失败的处理', () => {
     })
   })
 
-  it('409：标识被占用，写在标识那一栏', () => {
+  it('409：标识被占用，写在那个平台的标识一栏', () => {
     expect(grantFailure(new ApiError(409, '标识 codex 已被占用'), '确认失败')).toEqual({
       kind: 'slug',
       text: '标识 codex 已被占用',
     })
+    expect(
+      grantFailure(
+        new ApiError(409, 'Pi：标识 pi 已被占用', { error: 'x', runtimeFamily: 'pi' }),
+        '确认失败',
+      ),
+    ).toEqual({ kind: 'slug', text: 'Pi：标识 pi 已被占用', runtimeFamily: 'pi' })
+    // 认不得的运行时不当真
+    expect(grantFailure(new ApiError(403, 'x', { runtimeFamily: 'toString' }), '确认失败')).toEqual(
+      { kind: 'message', text: 'x' },
+    )
   })
 
   it('不是接口给的错误（断网、响应对不上契约）用固定的说法', () => {
