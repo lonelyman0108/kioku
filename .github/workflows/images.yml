@@ -71,7 +71,7 @@ jobs:
           - image: kioku
             context: .
             title: Kioku
-            description: Kioku 长期记忆服务，同时托管管理界面
+            description: 记忆有归属，也有深浅。Kioku 的服务端与管理界面在一个镜像里
             build-args: |
               KIOKU_VERSION=${{ needs.meta.outputs.version }}
               KIOKU_COMMIT=${{ inputs.commit || github.sha }}
@@ -79,7 +79,7 @@ jobs:
           - image: kioku-postgres
             context: docker/postgres
             title: Kioku PostgreSQL
-            description: Kioku 用的 PostgreSQL：pgvector 加 zhparser 中文分词
+            description: Kioku 的数据库：PostgreSQL 加 pgvector 与 zhparser 中文分词
             build-args: ''
           - arch: amd64
             runner: ubuntu-24.04
@@ -112,6 +112,9 @@ jobs:
           context: ${{ matrix.context }}
           platforms: linux/${{ matrix.arch }}
           build-args: ${{ matrix.build-args }}
+          # 不附构建证明：它会以 unknown/unknown 平台出现在清单里，包页面的安装命令多出一行无法运行的
+          provenance: false
+          sbom: false
           labels: |
             org.opencontainers.image.title=${{ matrix.title }}
             org.opencontainers.image.description=${{ matrix.description }}
@@ -143,9 +146,9 @@ jobs:
       matrix:
         include:
           - image: kioku
-            description: Kioku 长期记忆服务，同时托管管理界面
+            description: 记忆有归属，也有深浅。Kioku 的服务端与管理界面在一个镜像里
           - image: kioku-postgres
-            description: Kioku 用的 PostgreSQL：pgvector 加 zhparser 中文分词
+            description: Kioku 的数据库：PostgreSQL 加 pgvector 与 zhparser 中文分词
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
