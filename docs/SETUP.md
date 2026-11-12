@@ -61,7 +61,7 @@ GHCR 不需要额外 secret，用 workflow 的 `GITHUB_TOKEN`（`packages: write
 |---|---|---|
 | `ci.yml` | `ubuntu-24.04` | 必需检查 `gate` |
 | `release.yml` | `ubuntu-24.04` | 推送 `v*` tag 触发；门禁之后调 `images.yml` |
-| `edge.yml` | — | push 到 main 触发，只调 `images.yml` 推 `edge` |
+| `edge.yml` | — | main 上 push 触发的 CI 成功后（`workflow_run`）触发，只调 `images.yml` 推 `edge` 与 `sha-<短提交>` |
 | `images.yml` | `ubuntu-24.04`、`ubuntu-24.04-arm` | 只被调用；amd64 与 arm64 各在原生 runner 上构建（公开仓库免费），合并清单在 `ubuntu-24.04` |
 
 ## 部署位置
