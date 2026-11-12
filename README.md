@@ -23,6 +23,13 @@
 <a href="https://github.com/lonelyman0108/kioku-plugins">插件</a>
 </p>
 
+<p align="center">
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/memories-dark.png">
+<img src="docs/screenshots/memories-light.png" alt="记忆目录与详情" width="820">
+</picture>
+</p>
+
 ## 三个场合
 
 > **在 Claude Code 里定下的项目约定**，第二天换到 Codex，它照样记得。
@@ -32,6 +39,13 @@
 > **群友在这个群聊过的事**，记在这个群友名下；换个群，不会串。
 
 靠的不是提示词里一句「请勿泄露」，而是检索之前服务端就已裁掉：访问密钥定上限，会话上下文再收一次，PostgreSQL 行级安全兜底。
+
+<p align="center">
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/conversations-dark.png">
+<img src="docs/screenshots/conversations-light.png" alt="群聊的会话摘要与记在各个群友名下的事实" width="820">
+</picture>
+</p>
 
 ## 地层
 
@@ -46,6 +60,13 @@
 ```
 
 越往下越通用。每条记忆另有一个敏感级：公开、内部、私密、机密，机密只存密文。
+
+<p align="center">
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/overview-dark.png">
+<img src="docs/screenshots/overview-light.png" alt="概览里的地层柱：六类归属与四级敏感" width="820">
+</picture>
+</p>
 
 ## 为什么是 Kioku
 
@@ -84,6 +105,13 @@ npx @kioku-memory/cli login codex --server-url https://kioku.example.com
 | DeepSeek Harness | ● | ● | ● | ● |
 | AstrBot（群聊机器人） | 人格 | ● | 对话抽取 | — |
 | 任意 MCP 客户端 | — | — | — | ● |
+
+<p align="center">
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/recall-dark.png">
+<img src="docs/screenshots/recall-light.png" alt="召回调试：同一句话按访问密钥算出的候选与得分" width="820">
+</picture>
+</p>
 
 各平台的安装见 [kioku-plugins](https://github.com/lonelyman0108/kioku-plugins)；MCP 地址是 `/v1/mcp`，其余接口见 `/v1/openapi.json`。用过 Lore 的：[从 Lore 迁移](docs/migrate-from-lore.md)。
 
