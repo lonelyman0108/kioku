@@ -15,6 +15,7 @@ import { jsonResponse, router } from '../http/openapi'
 import { consoleMemberFor, consoleRoleFor, memoryServiceForConsole } from '../memory/context'
 import { inboxCounts } from '../memory/inbox'
 import { loadRecallWindow } from '../recall/retention'
+import { loadUpdateStatus, startUpdateCheck, updateNotice } from '../settings/updateCheck'
 
 // 概览里列出的最近改动数
 const RECENT_LIMIT = 8
@@ -57,6 +58,14 @@ async function backupSummary(db: Db, accountId: string) {
   }
 }
 
+// 新版本的提醒也只给实例管理员。到了间隔时在后台查一次（用这里读到的状态，不到间隔不碰库），不等 GitHub：这一次用已知的结果
+async function updateSummary(deps: Deps, accountId: string) {
+  if (!(await isInstanceAdmin(deps.db, accountId))) return null
+  const status = await loadUpdateStatus(deps.db)
+  await startUpdateCheck(deps.db, deps.updateCheck, status)
+  return updateNotice(status, deps.updateCheck?.current)
+}
+
 export function overviewRoutes(deps: Deps) {
   const app = router().openapi(counts, async (c) => {
     const { spaceId } = c.req.valid('param')
@@ -69,7 +78,7 @@ export function overviewRoutes(deps: Deps) {
     const accountId = c.get('console').accountId
     // 先确认是成员，不是成员就不去查别的空间的数据
     const role = await consoleRoleFor(deps, spaceId, accountId)
-    const [settings, recall, appRows, members, extraction, backup, pendingBindings] =
+    const [settings, recall, appRows, members, extraction, backup, update, pendingBindings] =
       await Promise.all([
         embeddingSettingsView(deps.db),
         loadRecallWindow(deps.db, spaceId),
@@ -86,6 +95,7 @@ export function overviewRoutes(deps: Deps) {
           .where(eq(spaceMembers.spaceId, spaceId)),
         extractionUsage(deps.db, spaceId),
         backupSummary(deps.db, accountId),
+        updateSummary(deps, accountId),
         withSpace(deps.db, spaceId, (tx) =>
           pendingBindingsFor(tx, { accountId, role }, PENDING_BINDINGS_LIMIT),
         ),
@@ -174,6 +184,7 @@ export function overviewRoutes(deps: Deps) {
         }),
         recent: recent.items,
         backup,
+        update,
         pendingBindings,
         inbox,
       },

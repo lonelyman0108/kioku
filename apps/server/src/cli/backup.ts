@@ -6,7 +6,7 @@ import { loadConfig } from '../config'
 import { checkMasterKey } from '../crypto/rotation'
 import { assertRuntimeRole, connect } from '../db/client'
 import { pendingMigrations } from '../db/migrate'
-import { runCli, UsageError } from './common'
+import { DATABASE_ENV_HELP, databaseUrlOf, runCli, UsageError } from './common'
 
 const HELP = `把整个实例备份成一个加密的文件。
 
@@ -20,7 +20,7 @@ const HELP = `把整个实例备份成一个加密的文件。
   --out <文件>   写到这个文件，已存在时不覆盖；写 - 时输出到标准输出
 
 环境变量：
-  DATABASE_URL               Kioku 的数据库，与服务相同
+${DATABASE_ENV_HELP}
   KIOKU_MASTER_KEY           与服务相同
   KIOKU_MASTER_KEY_PREVIOUS  轮换主密钥期间与服务相同`
 
@@ -52,7 +52,7 @@ async function main(): Promise<void> {
             ? new Error(`${out} 已存在，换一个文件名`)
             : err
         })
-  const database = connect(config.databaseUrl, { max: 2 })
+  const database = connect(databaseUrlOf(config), { max: 2 })
   let written = false
   try {
     await assertRuntimeRole(database.db)

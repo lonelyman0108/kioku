@@ -57,6 +57,8 @@ def main() -> None:
         if kept:
             paths[path] = kept
     document["paths"] = paths
+    # 服务端的版本随每次提交变（构建时取自 git），SDK 不跟着变
+    document.setdefault("info", {})["version"] = "dev"
     schemas = document.get("components", {}).get("schemas", {})
     keep = reachable(document)
     document.setdefault("components", {})["schemas"] = {

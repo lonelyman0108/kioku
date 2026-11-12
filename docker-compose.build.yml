@@ -34,10 +34,11 @@ services:
       KIOKU_MASTER_KEY: ${KIOKU_MASTER_KEY:?在 .env 里设置 KIOKU_MASTER_KEY}
       # 只在轮换主密钥期间、或恢复轮换之前做的备份时配：旧的那把主密钥
       KIOKU_MASTER_KEY_PREVIOUS: ${KIOKU_MASTER_KEY_PREVIOUS:-}
-      # 建第一个管理员时要输入的初始化码；不设时服务启动时生成一个，打印在日志里
+      # 固定的初始化码（至少 16 个字符，例如 openssl rand -hex 16）；不设时每次启动随机生成一个，打印在日志里
       KIOKU_SETUP_CODE: ${KIOKU_SETUP_CODE:-}
       KIOKU_COOKIE_SECURE: ${KIOKU_COOKIE_SECURE:-true}
       KIOKU_TRUSTED_PROXIES: ${KIOKU_TRUSTED_PROXIES:-0}
+    # 数据目录：不设 DATABASE_URL、在初始化页填数据库时，连接保存在这里的 kioku.json
     volumes:
       - kioku-data:/data
     # 放在反向代理后面时在 .env 里设 KIOKU_BIND=127.0.0.1，端口只给本机的代理访问

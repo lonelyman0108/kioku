@@ -8,6 +8,12 @@ import { legacySettingsRedirect, legacySpaceSettingsRedirect } from './settingsS
 
 export const routes: RouteRecordRaw[] = [
   { path: '/setup', name: 'setup', component: () => import('./pages/SetupPage.vue') },
+  // 配了的数据库暂时连不上：服务在重试，不进初始化页
+  {
+    path: '/database-unavailable',
+    name: 'database-unavailable',
+    component: () => import('./pages/DatabaseUnavailablePage.vue'),
+  },
   { path: '/login', name: 'login', component: () => import('./pages/LoginPage.vue') },
   // 设置密码链接：不需要登录，已登录时也照样打开
   {
@@ -161,8 +167,13 @@ export const memoryNodeRoute = (spaceId: string, node: string) => ({
   query: { node },
 })
 
-// 初始化状态只会从「需要」变成「不需要」，确认过一次就不再请求
+// 初始化状态只会从「需要」变成「不需要」，确认过一次就不再请求；
+// 服务回报没接上数据库时（重启后连不上库）由 setupLost 清掉，下次导航重新确认
 let setupDone = false
+
+export function setupLost(): void {
+  setupDone = false
+}
 
 export function installGuards(router: Router): void {
   // 记下最近访问的空间：个人与实例设置这些不带空间的页面沿用它
@@ -173,10 +184,17 @@ export function installGuards(router: Router): void {
     if (to.name === 'unavailable') return true
     try {
       if (!setupDone) {
-        setupDone = !(await api.setupStatus()).needsSetup
+        const status = await api.setupStatus()
+        // 数据库暂时连不上：不知道有没有账号，不当作要初始化；每次导航都重新确认
+        if (status.database.state === 'unavailable') {
+          return to.name === 'database-unavailable'
+            ? true
+            : { name: 'database-unavailable', query: { next: to.fullPath } }
+        }
+        setupDone = !status.needsSetup
         if (!setupDone) return to.name === 'setup' ? true : { name: 'setup' }
       }
-      if (to.name === 'setup') return { name: 'home' }
+      if (to.name === 'setup' || to.name === 'database-unavailable') return { name: 'home' }
       if (to.name === 'password') return true
       const me = await loadMe()
       if (!me) return to.name === 'login' ? true : { name: 'login', query: { next: to.fullPath } }

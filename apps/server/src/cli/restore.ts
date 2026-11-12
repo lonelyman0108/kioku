@@ -8,7 +8,7 @@ import { fetchBackup } from '../backup/storage'
 import { loadConfig } from '../config'
 import { prepareMasterKey } from '../crypto/rotation'
 import { assertRuntimeRole, connect } from '../db/client'
-import { runCli, UsageError } from './common'
+import { DATABASE_ENV_HELP, databaseUrlOf, runCli, UsageError } from './common'
 
 const HELP = `把备份恢复到一个新实例。
 
@@ -28,7 +28,7 @@ const HELP = `把备份恢复到一个新实例。
   --s3-object <对象名>    取这一份（完整的对象名）；不加时取前缀下最新的一份
 
 环境变量：
-  DATABASE_URL               新实例的数据库
+${DATABASE_ENV_HELP}
   KIOKU_MASTER_KEY           做备份时的主密钥
   KIOKU_MASTER_KEY_PREVIOUS  备份之后轮换过主密钥时：KIOKU_MASTER_KEY 配新的，这里配做备份时的那把
   AWS_ACCESS_KEY_ID          从存储桶取备份时用的 Access Key ID
@@ -117,7 +117,7 @@ async function main(): Promise<void> {
   if (!config.masterKey) {
     throw new UsageError('备份用主密钥加密：需要设置做备份时的 KIOKU_MASTER_KEY')
   }
-  const database = connect(config.databaseUrl, { max: 2 })
+  const database = connect(databaseUrlOf(config), { max: 2 })
   try {
     await assertRuntimeRole(database.db)
     // 取备份之前先确认能恢复到这个库，免得白白下载一大份

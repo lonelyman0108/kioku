@@ -1,11 +1,12 @@
 import type { BackupRunStatus, DreamRunStatus, DreamTrigger } from '@kioku/contracts'
 import { PgBoss, type JobResult } from 'pg-boss'
+import postgres from 'postgres'
 
 import { backupJob } from '../backup/storage'
 import type { MasterKey } from '../crypto/keyring'
 import { keyringOf } from '../crypto/keyring'
 import { recordMasterKeyError, rotationPass } from '../crypto/rotation'
-import { errorText, loggableError, type Db } from '../db/client'
+import { errorText, loggableError, postgresOptions, type Db } from '../db/client'
 import { backfillJob, embedJobs, pruneJob, switchJob, type EmbedTarget } from '../embedding/jobs'
 import type { EmbedderSource } from '../embedding/source'
 import { EMBED_BATCH } from '../embedding/worker'
@@ -52,6 +53,60 @@ const BACKUP_CRON = '7 * * * *'
 // 切换或放弃之后等一会儿再清向量：写向量时会锁住设置、按当时的设置决定写不写，这里只是多留一点余量
 const PRUNE_AFTER_SECONDS = 30
 
+// pg-boss 用的是 node-postgres，服务用的是 postgres.js，两者读连接串的规则不一样：node-postgres 把 sslmode=require
+// 当成 verify-full、不认 prefer 的退回明文，库名用 decodeURI 解码。所以不把连接串交给它，
+// 按 postgres.js 解析出的选项（和服务同一份 postgresOptions）逐项传：主机、端口、库名、用户、密码与 ssl。
+// prefer、allow 在 postgres.js 里是「先试 SSL、不行就明文」，node-postgres 做不到，按服务这条连接实际用没用 SSL 定
+export type PostgresSsl = false | string | boolean | object
+
+// postgres.js 的 ssl 选项换成 node-postgres 的：disable 不加密；require 加密不校验证书；
+// verify-ca 与 verify-full 在 postgres.js 里都按默认的 TLS 校验（证书与主机名），这边同样；
+// prefer、allow 看 serverUsesSsl（服务的连接实际用没用上 SSL），用上了就是加密不校验证书
+export function pgBossSsl(ssl: PostgresSsl, serverUsesSsl: boolean): boolean | object {
+  if (ssl === false || ssl === 'disable' || ssl === 'false') return false
+  if (ssl === 'require' || ssl === 'no-verify') return { rejectUnauthorized: false }
+  if (ssl === 'prefer' || ssl === 'allow')
+    return serverUsesSsl ? { rejectUnauthorized: false } : false
+  if (ssl === 'verify-ca' || ssl === 'verify-full' || ssl === true) return {}
+  if (typeof ssl === 'object') return ssl
+  // 认不出的写法按最严格的来
+  return {}
+}
+
+export interface PgBossConnection {
+  host: string
+  port: number
+  database: string
+  user: string
+  password: string
+  ssl: boolean | object
+}
+
+// 按 postgres.js 的解析给 pg-boss 的连接选项。prefer、allow 时连一下库，看这条连接实际用没用 SSL
+export async function pgBossConnection(url: string): Promise<PgBossConnection> {
+  const { options } = postgres(url, postgresOptions({ max: 1 }))
+  const ssl = options.ssl as PostgresSsl
+  let serverUsesSsl = false
+  if (ssl === 'prefer' || ssl === 'allow') {
+    const client = postgres(url, postgresOptions({ max: 1 }))
+    try {
+      const [row] = await client<{ ssl: boolean }[]>`
+        select coalesce((select ssl from pg_stat_ssl where pid = pg_backend_pid()), false) as ssl`
+      serverUsesSsl = row?.ssl === true
+    } finally {
+      await client.end({ timeout: 1 })
+    }
+  }
+  return {
+    host: String(options.host[0] ?? 'localhost'),
+    port: Number(options.port[0] ?? 5432),
+    database: String(options.database ?? ''),
+    user: String(options.user ?? ''),
+    password: typeof options.pass === 'string' ? options.pass : '',
+    ssl: pgBossSsl(ssl, serverUsesSsl),
+  }
+}
+
 export interface Jobs {
   enqueueEmbed(spaceId: string, memoryId: string): void
   // 排一批缓冲的抽取，delaySeconds 秒之后开始。同一批只排一个：已经排着的就把开始时间改成这次的，
@@ -93,7 +148,10 @@ export async function startJobs(options: {
   // 写入之后的向量任务一批最多处理多久，不设时 EMBED_BUDGET_MS；测试里调小
   embedBudgetMs?: number
 }): Promise<Jobs & { stop: () => Promise<void> }> {
-  const boss = new PgBoss({ connectionString: options.connectionString, schema: 'pgboss' })
+  const boss = new PgBoss({
+    ...(await pgBossConnection(options.connectionString)),
+    schema: 'pgboss',
+  })
   boss.on('error', (err) => console.error('后台任务出错', err))
   await boss.start()
   // 队列已经存在时建队列不改选项，所以再更新一遍
@@ -332,7 +390,7 @@ export async function startJobs(options: {
 export async function requestBackfill(connectionString: string): Promise<void> {
   // 不做 pg-boss 自己的迁移：工具与服务版本不一致时，不能让工具替服务升级任务表
   const boss = new PgBoss({
-    connectionString,
+    ...(await pgBossConnection(connectionString)),
     schema: 'pgboss',
     supervise: false,
     schedule: false,

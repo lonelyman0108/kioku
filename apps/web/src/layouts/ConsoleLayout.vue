@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { versionLabel } from '@kioku/contracts'
 import type { CommandPaletteItem, DropdownMenuItem } from '@nuxt/ui'
 import { useToast } from '@nuxt/ui/composables'
 import { useQuery } from '@tanstack/vue-query'
@@ -192,6 +193,11 @@ const {
 
 const colorPreference = useColorPreference()
 const displayName = computed(() => me.data.value?.displayName ?? '')
+// 账号菜单底部的版本号，取自公开的存活检查：服务重启之前不会变
+const health = useQuery({ queryKey: ['health'], queryFn: api.health, staleTime: Infinity })
+const versionText = computed(() =>
+  health.data.value ? `Kioku ${versionLabel(health.data.value.version)}` : null,
+)
 const userMenu = computed<DropdownMenuItem[][]>(() => [
   [{ type: 'label', label: displayName.value, description: me.data.value?.username }],
   accountNav.value.map((item) => ({ label: item.label, icon: item.icon, to: item.to })),
@@ -206,6 +212,7 @@ const userMenu = computed<DropdownMenuItem[][]>(() => [
     })),
   ],
   [{ label: '退出登录', icon: icons.logout, onSelect: () => void logout() }],
+  ...(versionText.value ? [[{ type: 'label' as const, label: versionText.value }]] : []),
 ])
 // 菜单项上额外带的角色名：组件库的插槽不知道这个字段
 const roleOf = (item: unknown) => (item as { role?: string }).role
@@ -496,6 +503,7 @@ provide(LOGOUT, logout)
                 >
                   退出登录
                 </button>
+                <p v-if="versionText" class="pt-2 text-xs text-muted">{{ versionText }}</p>
               </div>
             </div>
           </template>

@@ -44,10 +44,35 @@ docker compose -f docker-compose.build.yml up -d --build
 
 启动前在 `.env` 里定下 `KIOKU_COOKIE_SECURE`：经 HTTPS 访问时保持 `true`；只在局域网用 `http://` 地址访问时改成 `false`，否则浏览器不保存登录 Cookie，登录后会一直回到登录页（`http://localhost` 例外，浏览器把它当安全地址）。
 
-打开 `http://<主机>:18920`，首次进入初始化页，建第一个账号和空间。初始化页要输入初始化码：服务启动时生成一个、打印在日志里（`docker compose logs kioku`），也可以在 `.env` 里用 `KIOKU_SETUP_CODE` 自己指定。之后在「应用」里为每个客户端建应用、签发访问密钥：
+打开 `http://<主机>:18920`，首次进入初始化页。初始化要填初始化码：服务启动时打印在日志里（`docker compose logs kioku` 里「Kioku 初始化码」那一行；也可以在 `.env` 里用 `KIOKU_SETUP_CODE` 自己指定），先确认数据库，再建第一个账号和空间，详见下面的「初始化与数据库」。之后在「应用」里为每个客户端建应用、签发访问密钥：
 
 - MCP：`http://<主机>:18920/v1/mcp`（Streamable HTTP，`Authorization: Bearer <访问密钥>`）
 - 生命周期钩子：`POST /v1/lifecycle/event`；其他接口见 `/v1/openapi.json`
+
+## 初始化与数据库
+
+数据库有两种给法：
+
+- **预先配好**：设环境变量 `DATABASE_URL`（两个 compose 文件都是这样，`db` 容器首次启动时建好应用角色、库和扩展）。初始化页的第一步只显示这个连接（密码只显示已填）和检查结果，标明来自环境变量、不能修改，确认后建管理员。
+- **在初始化页填**：不设 `DATABASE_URL`，服务照样启动，只提供初始化页（其余接口回 503）。第一步填主机、端口、库名、用户名、密码与 SSL 模式，先「检查」再「保存并接入」：服务当场接上（迁移、启动后台任务），不用重启。连接保存在数据目录的 `kioku.json`（权限 600），之后在界面上不能再改，要改就编辑这个文件或改设环境变量再重启；环境变量优先于文件。
+
+检查的内容：能否连上（失败时只给类别：无法连接、认证失败、超时、库不存在等）；角色不能是超级用户或带 `BYPASSRLS`（否则行级安全不生效，空间之间不隔离）；库里要有 `vector` 与 `zhparser` 两个扩展；库里已有 Kioku 的数据时说明将接入已有实例（是记忆架构改版之前的结构时拒绝）；有不是 Kioku 建的表时提醒。
+
+手上只有超级用户时，选「用超级用户创建」：填超级用户的账号密码、要建的应用角色名和库名，Kioku 建一个 `NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE` 的应用角色（随机密码）、建库（所有者是应用角色），在新库里装好两个扩展，然后只保存应用角色的连接；超级用户的密码不保存、不进日志。服务器上没有这两个扩展时用 Kioku 的 PostgreSQL 镜像（`docker/postgres`），或者自己装 pgvector 与 zhparser。
+
+数据目录由 `KIOKU_DATA_DIR` 指定，镜像里是 `/data`。在初始化页填数据库时要把它挂成持久的卷（两个 compose 文件里的 `kioku-data`），否则重建容器后连接丢失、又回到初始化页。
+
+配好的数据库（环境变量或 `kioku.json`）启动时连不上：连不上、超时、认证失败、库不存在这类可能自己恢复的问题，服务照样启动，按退避自动重试（5 秒起，最多隔 60 秒），接上后自动换成完整的服务。这期间 `/v1/health` 回 503，管理界面显示「数据库不可用」和原因，不进初始化页，也不生成初始化码。不会自己恢复的问题照旧拒绝启动，日志里写明原因：角色是超级用户或带 `BYPASSRLS`、库里缺扩展、记忆架构改版之前的结构、库里有这个版本不认识的迁移、主密钥对不上。
+
+初始化码只在等人初始化时生成：没有配置数据库，或者接上之后发现还没有任何账号。随机生成的码有 130 位熵，每次启动换一个，打印在日志里；建好第一个管理员之后作废。码错时按客户端限流（同一客户端 15 分钟最多 5 次，IPv6 按 /64 算一个客户端），不设全实例的上限，别人刷不满部署者的额度。需要固定的码（例如自动化部署）时设 `KIOKU_SETUP_CODE`，至少 16 个字符，例如 `openssl rand -hex 16` 生成。
+
+脚本化初始化：设好 `DATABASE_URL` 与 `KIOKU_SETUP_CODE`，服务起来之后直接调接口建第一个管理员，返回 201 即完成（码放在请求体里，不放在地址里）：
+
+```bash
+curl -fsS -X POST http://127.0.0.1:18920/v1/setup \
+  -H 'content-type: application/json' \
+  -d "{\"setupCode\":\"$KIOKU_SETUP_CODE\",\"username\":\"admin\",\"displayName\":\"管理员\",\"password\":\"<至少 10 位>\",\"spaceName\":\"我的空间\"}"
+```
 
 ## HTTPS 与反向代理
 
@@ -146,7 +171,9 @@ docker compose exec -T db pg_restore -U postgres --exit-on-error -d kioku < ~/ki
 
 | 名称 | 默认值 | 说明 |
 |---|---|---|
-| `DATABASE_URL` | 必填 | PostgreSQL 连接串。角色不能是超级用户或带 `BYPASSRLS`，否则拒绝启动 |
+| `DATABASE_URL` | 选填 | PostgreSQL 连接串，优先于数据目录的 `kioku.json`。都没有时只提供初始化页，在那里填数据库。角色不能是超级用户或带 `BYPASSRLS`，否则拒绝启动 |
+| `KIOKU_DATA_DIR` | `apps/server/.data`（镜像里 `/data`） | 数据目录，初始化页保存的数据库连接（`kioku.json`）放在这里。命令行工具（备份、恢复、Lore 导入）没设 `DATABASE_URL` 时也从这里读 |
+| `KIOKU_SETUP_CODE` | 随机生成 | 固定的初始化码（去掉空白与连字符后 16 到 128 个字符，更短时拒绝启动）。不设时等人初始化的实例每次启动随机生成一个，打印在日志里 |
 | `KIOKU_MASTER_KEY` | 空 | 32 字节随机数的 base64（`openssl rand -base64 32`）。用来加密机密级记忆、Kioku 托管的凭据值、密码库连接保存的令牌与密钥，以及实例设置里嵌入接口与抽取模型的 API Key，不设置时这几项都不能用 |
 | `KIOKU_MASTER_KEY_PREVIOUS` | 空 | 只在轮换主密钥期间配：旧的主密钥，见上面的「轮换主密钥」 |
 | `KIOKU_COOKIE_SECURE` | `true` | 登录 Cookie 是否只走 HTTPS。浏览器在 localhost 上也接受；用局域网 HTTP 地址访问时设为 `false` |
@@ -156,4 +183,3 @@ docker compose exec -T db pg_restore -U postgres --exit-on-error -d kioku < ~/ki
 | `PORT` | `18920` | 监听端口 |
 | `KIOKU_WEB_DIR` | `apps/web/dist` | 管理界面构建产物的目录；目录不存在时只提供 API |
 | `KIOKU_MIGRATIONS_DIR` | `apps/server/migrations` | 数据库迁移目录 |
-| `KIOKU_VERSION` | `dev` | `/v1/health` 显示的版本号 |

@@ -16,8 +16,16 @@ export interface Database {
   close: () => Promise<void>
 }
 
+// postgres.js 的连接选项只在这里定：服务的连接池、迁移用的单条连接、初始化页的检查都从这里取，
+// 连得上检查就连得上服务（例如经 PgBouncer 时不发额外的启动参数）
+export function postgresOptions(
+  overrides: postgres.Options<Record<string, postgres.PostgresType>> = {},
+): postgres.Options<Record<string, postgres.PostgresType>> {
+  return { max: 10, onnotice: () => {}, ...overrides }
+}
+
 export function connect(url: string, options: { max?: number } = {}): Database {
-  const client = postgres(url, { max: options.max ?? 10, onnotice: () => {} })
+  const client = postgres(url, postgresOptions(options.max ? { max: options.max } : {}))
   const db = drizzle(client, { schema, casing: 'snake_case' })
   return { db, url, close: () => client.end() }
 }
