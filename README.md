@@ -90,15 +90,18 @@ docker compose up -d
 ## 接入
 
 ```bash
-npx @kioku-memory/cli login codex --server-url https://kioku.example.com
+npx @kioku-memory/cli
 ```
 
-终端给出确认码，在管理界面的确认页输入、选好权限，访问密钥直接写进本机配置，全程不显示。
+不带参数就是交互式向导：扫出本机装了哪些客户端，选好要接的几个，去浏览器确认一次就写好配置，访问密钥全程不显示。手头没有服务器的，向导里也可以顺带用 Docker 在本机起一个。
 
 | 平台 | 启动加载 | 每轮召回 | 会话摘要 | 记忆工具 |
 |---|:-:|:-:|:-:|:-:|
 | Claude Code | ● | ● | ● | ● |
 | Codex | ● | ● | ● | ● |
+| Gemini CLI | ● | ● | ● | ● |
+| Antigravity | ● | ● | ● | ● |
+| OpenCode | ● | ● | ● | ● |
 | pi | ● | ● | ● | ● |
 | Hermes | ● | ● | ● | ● |
 | OpenClaw | ● | ● | ● | ● |
