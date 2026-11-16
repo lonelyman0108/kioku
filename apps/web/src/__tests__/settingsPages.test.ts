@@ -1432,13 +1432,14 @@ describe('Lore 导入', () => {
     for (const el of paths) expect(el.props?.some((p) => p.name === 'wrap')).toBe(true)
   })
 
-  it('标题的宽度跟着计划：看计划时才加宽', () => {
-    expect(
-      bound(
-        elements.find((el) => el.tag === 'SettingsBlock')!,
-        'wide',
-      ),
-    ).toBe('Boolean(plan)')
+  it('选择来源、计划与结果在独立弹窗里：看计划用宽弹窗，执行期间不让关，标签符合无障碍导航', () => {
+    const modal = elements.find((el) => el.tag === 'UModal')!
+    expect(modal).toBeDefined()
+    expect(bound(modal, 'dismissible')).toBe('!busy')
+    expect(loreImport).toContain('sm:max-w-4xl')
+    expect(elements.filter((el) => attr(el, 'role') === 'tab')).toHaveLength(3)
+    expect(elements.filter((el) => attr(el, 'role') === 'tabpanel')).toHaveLength(3)
+    expect(loreImport).toContain(':loading="busy"')
   })
 })
 

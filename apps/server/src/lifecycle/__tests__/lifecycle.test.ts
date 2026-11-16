@@ -422,6 +422,51 @@ describe('每轮输入的召回', () => {
       expect(line.split(' | ')[2]).toBe(`${'长'.repeat(50)}…`)
     })
   })
+
+  it('gemini 与 agy 按各自宿主的格式输出上下文，无上下文时返回 none', async () => {
+    const scope = scopeWith(async () => [])
+    const gemStart = await handleLifecycle(scope, 'gemini', { event: 'session.start' })
+    expect(gemStart.hostOutput).toMatchObject({
+      mode: 'stdout_json',
+      value: { hookSpecificOutput: { hookEventName: 'SessionStart' } },
+    })
+    const agyStart = await handleLifecycle(scope, 'agy', { event: 'session.start' })
+    expect(agyStart.hostOutput).toMatchObject({
+      mode: 'stdout_json',
+      value: { injectSteps: [{ systemMessage: { systemMessage: expect.any(String) } }] },
+    })
+    const gemPrompt = await handleLifecycle(scope, 'gemini', {
+      event: 'prompt.submit',
+      prompt: '规则',
+    })
+    expect(gemPrompt.hostOutput).toEqual({
+      mode: 'stdout_json',
+      value: {
+        hookSpecificOutput: {
+          hookEventName: 'BeforeAgent',
+          additionalContext: '<recall>\n0.50 | core://rules | 规则\n</recall>',
+        },
+      },
+    })
+    const agyPrompt = await handleLifecycle(scope, 'agy', {
+      event: 'prompt.submit',
+      prompt: '规则',
+    })
+    expect(agyPrompt.hostOutput).toEqual({
+      mode: 'stdout_json',
+      value: {
+        injectSteps: [
+          { systemMessage: { systemMessage: '<recall>\n0.50 | core://rules | 规则\n</recall>' } },
+        ],
+      },
+    })
+    const emptyScope: RecallScope = { ...scope, recall: async () => [] }
+    const emptyPrompt = await handleLifecycle(emptyScope, 'agy', {
+      event: 'prompt.submit',
+      prompt: '',
+    })
+    expect(emptyPrompt.hostOutput).toEqual({ mode: 'none', value: null })
+  })
 })
 
 const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')

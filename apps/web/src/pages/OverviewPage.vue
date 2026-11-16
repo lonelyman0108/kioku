@@ -9,6 +9,7 @@ import { backupNotice } from '../backup'
 import Hint from '../components/Hint.vue'
 import OverviewRow from '../components/OverviewRow.vue'
 import RecentChange from '../components/RecentChange.vue'
+import RuntimeLabel from '../components/RuntimeLabel.vue'
 import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import SectionHeading from '../components/strata/SectionHeading.vue'
 import StrataColumn from '../components/strata/StrataColumn.vue'
@@ -343,7 +344,7 @@ const canAdjustBudget = computed(() => space.value?.role === 'owner')
                 class="app-name"
               >
                 <b>{{ app.name }}</b>
-                <span class="app-runtime">{{ app.runtimeFamily }}</span>
+                <RuntimeLabel class="app-runtime" :family="app.runtimeFamily" :size="14" />
               </RouterLink>
               <template v-if="app.keys">
                 <span class="app-meta">
@@ -510,14 +511,12 @@ const canAdjustBudget = computed(() => space.value?.role === 'owner')
   white-space: nowrap;
 }
 .app-runtime {
-  display: block;
-  overflow: hidden;
-  font-family: var(--font-mono);
-  font-size: 12px;
+  display: flex;
+  max-width: 100%;
+  margin-top: 1px;
+  font-size: 13px;
   line-height: 1.4;
   color: var(--ui-text-muted);
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .app-meta {
   font-size: 13px;

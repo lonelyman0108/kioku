@@ -14,6 +14,7 @@ import AppRecallEvents from '../components/AppRecallEvents.vue'
 import AppSimulator from '../components/AppSimulator.vue'
 import Hint from '../components/Hint.vue'
 import KeyMatrix from '../components/KeyMatrix.vue'
+import RuntimeLabel from '../components/RuntimeLabel.vue'
 import NoteLine from '../components/strata/NoteLine.vue'
 import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import SectionHeading from '../components/strata/SectionHeading.vue'
@@ -245,7 +246,7 @@ watch([spaceId, appId], () => {
         <dl class="app-meta">
           <div>
             <dt>运行时</dt>
-            <dd class="font-mono">{{ app.runtimeFamily }}</dd>
+            <dd><RuntimeLabel :family="app.runtimeFamily" /></dd>
           </div>
           <div>
             <dt>默认人格</dt>

@@ -8,6 +8,7 @@ import { conversationKind, conversationRoute, conversationTitle } from '../conve
 import { memoryRoute } from '../routes'
 import { formatRelative, formatShort, formatTime } from '../time'
 import Hint from './Hint.vue'
+import RuntimeLabel from './RuntimeLabel.vue'
 import CoordinateLine from './strata/CoordinateLine.vue'
 import MemoryRow from './strata/MemoryRow.vue'
 import NoteLine from './strata/NoteLine.vue'
@@ -86,7 +87,7 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
       <div class="detail-nav"><slot name="nav" /></div>
       <h1 ref="titleEl" tabindex="-1">{{ app.name }}</h1>
       <p class="detail-meta">
-        <span>{{ app.runtimeFamily }}</span>
+        <RuntimeLabel :family="app.runtimeFamily" :size="14" />
         <span v-if="persona">
           默认人格
           <button type="button" class="inline-link" @click="emit('openPersona', persona.id)">

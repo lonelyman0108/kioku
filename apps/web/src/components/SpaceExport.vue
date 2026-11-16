@@ -6,25 +6,35 @@ import { computed, ref, watch } from 'vue'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { saveFile } from '../download'
+import { icons } from '../icons'
 import Hint from './Hint.vue'
+import TransferEntryRow from './TransferEntryRow.vue'
 import NoteLine from './strata/NoteLine.vue'
 import SettingsBlock from './strata/SettingsBlock.vue'
 
 const props = defineProps<{ spaceId: string; spaceName: string; editable: boolean }>()
 
 const toast = useToast()
+const open = ref(false)
 const passphrase = ref('')
 const confirm = ref('')
 const exporting = ref(false)
 
-// 换了空间就清掉：口令是给这一次导出设的
+// 换了空间或关掉弹窗时清掉口令：口令只属于这一次导出
 watch(
   () => props.spaceId,
   () => {
+    open.value = false
     passphrase.value = ''
     confirm.value = ''
   },
 )
+watch(open, (opened) => {
+  if (!opened) {
+    passphrase.value = ''
+    confirm.value = ''
+  }
+})
 
 const problem = computed(() => {
   if (!passphrase.value) return null
@@ -53,6 +63,7 @@ async function exportSpace() {
     if (forSpace === props.spaceId) {
       passphrase.value = ''
       confirm.value = ''
+      open.value = false
     }
     toast.add({
       title: '已导出',
@@ -84,38 +95,55 @@ async function exportSpace() {
       </Hint>
     </template>
     <p v-if="!editable" class="text-muted">仅空间所有者可导出</p>
-    <form v-else class="space-y-4" @submit.prevent="exportSpace">
-      <UFormField
-        label="口令"
-        :help="`至少 ${SPACE_EXPORT_PASSPHRASE_MIN} 位，导入时需要输入；Kioku 不保存口令，丢失后无法打开文件。`"
-      >
-        <UInput
-          v-model="passphrase"
-          type="password"
-          autocomplete="new-password"
-          class="w-full"
-          :disabled="exporting"
-        />
-      </UFormField>
-      <UFormField label="确认口令">
-        <UInput
-          v-model="confirm"
-          type="password"
-          autocomplete="new-password"
-          class="w-full"
-          :disabled="exporting"
-        />
-      </UFormField>
-      <NoteLine v-if="problem" tone="warning">{{ problem }}</NoteLine>
-      <UButton
-        type="submit"
-        color="primary"
-        variant="outline"
-        :loading="exporting"
-        :disabled="!ready"
-      >
-        导出
-      </UButton>
-    </form>
+    <TransferEntryRow
+      v-else
+      :icon="icons.exportSpace"
+      title="加密导出文件（.kioku-space）"
+      description="打包共享记忆、人格、应用、联系人与本人记忆及凭据；在弹窗中设置文件口令后下载。"
+    >
+      <template #action>
+        <UButton color="neutral" variant="outline" :icon="icons.exportSpace" @click="open = true">
+          导出空间
+        </UButton>
+      </template>
+    </TransferEntryRow>
+
+    <UModal v-model:open="open" title="导出当前空间" :dismissible="!exporting" :close="!exporting">
+      <template #body>
+        <form class="space-y-4" @submit.prevent="exportSpace">
+          <UFormField
+            label="口令"
+            :help="`至少 ${SPACE_EXPORT_PASSPHRASE_MIN} 位，导入时需要输入；Kioku 不保存口令，丢失后无法打开文件。`"
+          >
+            <UInput
+              v-model="passphrase"
+              type="password"
+              autocomplete="new-password"
+              class="w-full"
+              :disabled="exporting"
+              autofocus
+            />
+          </UFormField>
+          <UFormField label="确认口令">
+            <UInput
+              v-model="confirm"
+              type="password"
+              autocomplete="new-password"
+              class="w-full"
+              :disabled="exporting"
+            />
+          </UFormField>
+          <NoteLine v-if="problem" tone="warning">{{ problem }}</NoteLine>
+          <div class="flex justify-end gap-2 pt-2">
+            <UButton color="neutral" variant="ghost" :disabled="exporting" @click="open = false">
+              取消
+            </UButton>
+            <UButton type="submit" color="primary" :loading="exporting" :disabled="!ready">
+              导出
+            </UButton>
+          </div>
+        </form>
+      </template>
+    </UModal>
   </SettingsBlock>
 </template>

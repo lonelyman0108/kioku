@@ -33,6 +33,7 @@ export const icons = {
   // 按空间导出与导入
   exportSpace: 'i-lucide-file-down',
   importSpace: 'i-lucide-file-up',
+  lore: 'i-lucide-book-open',
   vector: 'i-lucide-sparkles',
   user: 'i-lucide-user',
   bot: 'i-lucide-bot',

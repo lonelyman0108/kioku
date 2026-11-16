@@ -8,6 +8,7 @@ import { coordinateHead } from '../coordinates'
 import { layerLabels, sensitivityLabels } from '../labels'
 import { personaRows } from '../personas'
 import Hint from './Hint.vue'
+import RuntimeLabel from './RuntimeLabel.vue'
 import CoordinateLine from './strata/CoordinateLine.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SectionHeading from './strata/SectionHeading.vue'
@@ -147,7 +148,7 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
             <button type="button" class="side-name" @click="emit('openApp', a.id)">
               {{ a.name }}
             </button>
-            <span class="side-meta">{{ a.runtimeFamily }}</span>
+            <RuntimeLabel class="side-meta" :family="a.runtimeFamily" :size="14" />
           </li>
         </ul>
         <p v-else-if="apps.data.value" class="empty">暂无应用</p>

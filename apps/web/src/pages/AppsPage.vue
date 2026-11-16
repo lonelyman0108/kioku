@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import { RUNTIME_FAMILIES, SENSITIVITIES, type RuntimeFamily } from '@kioku/contracts'
+import { SENSITIVITIES, type RuntimeFamily } from '@kioku/contracts'
 import { useQueries, useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
@@ -11,6 +11,8 @@ import { refreshAppCaches } from '../appQueries'
 import { lastUsedAt } from '../apps'
 import { usableKeys } from '../benchSession'
 import Hint from '../components/Hint.vue'
+import RuntimeIcon from '../components/RuntimeIcon.vue'
+import RuntimeLabel from '../components/RuntimeLabel.vue'
 import AccessLegend from '../components/strata/AccessLegend.vue'
 import EmptyState from '../components/strata/EmptyState.vue'
 import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
@@ -22,6 +24,7 @@ import { useKeyMatrices } from '../composables/useKeyMatrices'
 import { useSession } from '../composables/useSession'
 import { scopesSummary, sensitivityLabels } from '../labels'
 import { failedReads } from '../query'
+import { RUNTIME_OPTIONS } from '../runtimes'
 import { formatRelative, formatTime } from '../time'
 
 const route = useRoute()
@@ -49,7 +52,6 @@ const personaItems = computed(() => [
   { label: '不使用人格', value: null },
   ...(personas.data.value ?? []).map((p) => ({ label: p.name, value: p.id })),
 ])
-const runtimeItems = RUNTIME_FAMILIES.map((r) => ({ label: r, value: r }))
 const personaName = (id: string | null) =>
   personas.data.value?.find((p) => p.id === id)?.name ?? '–'
 const ownerName = (id: string) =>
@@ -103,24 +105,30 @@ function failed(err: unknown, fallback: string) {
 }
 
 const open = ref(false)
-// 切换空间时关掉新建窗口：里面的内容属于上一个空间
-watch(spaceId, () => (open.value = false))
 const form = reactive({
   slug: '',
   name: '',
   runtimeFamily: 'claudecode' as RuntimeFamily,
   defaultPersonaId: null as string | null,
 })
+const resetForm = () =>
+  Object.assign(form, { slug: '', name: '', runtimeFamily: 'claudecode', defaultPersonaId: null })
+// 切换空间时关掉新建窗口并清掉表单：默认人格属于上一个空间
+watch(spaceId, () => {
+  open.value = false
+  resetForm()
+})
 // 创建中不接受第二次提交：连点两次会先成功、再报标识已被占用
 const creating = ref(false)
 async function create() {
   if (creating.value) return
   creating.value = true
+  const sid = spaceId.value
   try {
-    await api.createApp(spaceId.value, { ...form })
+    await api.createApp(sid, { ...form })
     open.value = false
-    Object.assign(form, { slug: '', name: '', runtimeFamily: 'claudecode', defaultPersonaId: null })
-    await refreshAppCaches(queryClient, spaceId.value)
+    resetForm()
+    await refreshAppCaches(queryClient, sid)
     toast.add({ title: '已创建应用', color: 'success' })
   } catch (err) {
     failed(err, '创建失败')
@@ -186,7 +194,9 @@ async function create() {
                   <code>app://{{ app.slug }}</code>
                 </RouterLink>
               </td>
-              <td class="cell-runtime">{{ app.runtimeFamily }}</td>
+              <td class="cell-runtime">
+                <RuntimeLabel :family="app.runtimeFamily" />
+              </td>
               <td class="cell-persona">{{ personaName(app.defaultPersonaId) }}</td>
               <td class="cell-keys">
                 <div v-if="canSeeKeys" class="keys-inner">
@@ -255,7 +265,13 @@ async function create() {
     </template>
   </div>
 
-  <UModal v-model:open="open" title="新建应用">
+  <UModal
+    v-model:open="open"
+    title="新建应用"
+    :dismissible="!creating"
+    :close="!creating"
+    :ui="{ content: 'sm:max-w-xl' }"
+  >
     <template #body>
       <form id="create-app" class="space-y-4" @submit.prevent="create">
         <UFormField label="标识" help="小写字母、数字和连字符；这个应用的记忆位于 app://<标识>/ 下">
@@ -265,7 +281,27 @@ async function create() {
           <UInput v-model="form.name" class="w-full" required />
         </UFormField>
         <UFormField label="运行时" help="决定生命周期钩子的输出格式">
-          <USelect v-model="form.runtimeFamily" :items="runtimeItems" class="w-full" />
+          <div class="runtime-grid" role="radiogroup" aria-label="运行时">
+            <label
+              v-for="opt in RUNTIME_OPTIONS"
+              :key="opt.value"
+              :data-selected="form.runtimeFamily === opt.value"
+              class="runtime-card"
+            >
+              <input
+                v-model="form.runtimeFamily"
+                type="radio"
+                name="app-runtime-family"
+                :value="opt.value"
+                class="sr-only"
+              />
+              <RuntimeIcon :family="opt.value" :size="18" class="runtime-card-icon" />
+              <span class="runtime-card-text">
+                <span class="runtime-card-name">{{ opt.label }}</span>
+                <span class="runtime-card-hint">{{ opt.hint }}</span>
+              </span>
+            </label>
+          </div>
         </UFormField>
         <UFormField label="默认人格">
           <USelect v-model="form.defaultPersonaId" :items="personaItems" class="w-full" />
@@ -274,7 +310,9 @@ async function create() {
     </template>
     <template #footer>
       <div class="flex w-full justify-end gap-2">
-        <UButton color="neutral" variant="ghost" @click="open = false">取消</UButton>
+        <UButton color="neutral" variant="ghost" :disabled="creating" @click="open = false">
+          取消
+        </UButton>
         <UButton type="submit" form="create-app" :loading="creating">创建</UButton>
       </div>
     </template>
@@ -355,8 +393,63 @@ td {
   color: var(--ui-text-muted);
 }
 .cell-runtime {
-  font-family: var(--font-mono);
   font-size: 13px;
+}
+.runtime-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.runtime-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid var(--ui-border);
+  background: var(--ui-bg);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    background-color 0.15s ease;
+}
+.runtime-card:hover {
+  border-color: var(--strata-rule);
+}
+.runtime-card:has(input:focus-visible) {
+  outline: 2px solid var(--ui-text-highlighted);
+  outline-offset: 2px;
+}
+.runtime-card[data-selected='true'] {
+  border-color: var(--ui-text-highlighted);
+  background: var(--ui-bg-elevated);
+}
+.runtime-card-icon {
+  display: inline-block;
+  flex: none;
+  margin-top: 2px;
+  color: var(--ui-text);
+}
+.runtime-card-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.runtime-card-name {
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.3;
+  color: var(--ui-text-highlighted);
+}
+.runtime-card-hint {
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--ui-text-muted);
+}
+@media (max-width: 639.98px) {
+  .runtime-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 .cell-keys {
   white-space: normal;

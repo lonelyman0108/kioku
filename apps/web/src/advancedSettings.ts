@@ -1,6 +1,5 @@
 import {
   PROMPT_SUPPLEMENT_MAX_CHARS,
-  RUNTIME_FAMILY_NAMES,
   TUNING_KEYS,
   TuningValues,
   WEIGHT_KEYS,
@@ -11,6 +10,8 @@ import {
   type TuningSources,
 } from '@kioku/contracts'
 import type { QueryClient } from '@tanstack/vue-query'
+
+export { runtimeName } from './runtimes'
 
 // 高级设置的界面：各项的名称与单位、取值范围、来源的说法、试算的本地重算与补充的拼接。
 // 取值顺序是「实例默认 → 空间 → 应用」，每一级只存覆盖了的项；补充只叠加，固定部分在前
@@ -141,12 +142,6 @@ export const overriddenIn = (overrides: Partial<Record<string, unknown>> | undef
   overrides
     ? new Set((TUNING_KEYS as readonly TuningKey[]).filter((k) => overrides[k] !== undefined))
     : undefined
-
-// 客户端名，宿主上限的表格用；名称表只有契约里一份，不认得的运行时原样显示
-export const runtimeName = (family: string) =>
-  Object.hasOwn(RUNTIME_FAMILY_NAMES, family)
-    ? RUNTIME_FAMILY_NAMES[family as keyof typeof RUNTIME_FAMILY_NAMES]
-    : family
 
 // 试算：拿召回调试的候选，按表单里的最低分与条数在本地重算。和服务端一样：按未取整的分数排序、和最低分比，
 // 过了最低分的取前 limit 条注入，过了但排在后面的是超出条数，其余不注入

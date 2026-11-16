@@ -5,8 +5,10 @@ import { readFailure } from '../api/client'
 import { REAL_MODE_CONSEQUENCES } from '../benchSession'
 import { useBench } from '../composables/useBench'
 import { scopesSummary } from '../labels'
+import { runtimeName } from '../runtimes'
 import BenchNotice from './BenchNotice.vue'
 import Hint from './Hint.vue'
+import RuntimeIcon from './RuntimeIcon.vue'
 import PageHead from './strata/PageHead.vue'
 import ScopeTags from './strata/ScopeTags.vue'
 import StrataCore from './strata/StrataCore.vue'
@@ -37,7 +39,7 @@ const {
 } = useBench()
 
 const appItems = computed(() =>
-  owned.value.map((a) => ({ label: `${a.name}（${a.runtimeFamily}）`, value: a.id })),
+  owned.value.map((a) => ({ label: `${a.name}（${runtimeName(a.runtimeFamily)}）`, value: a.id })),
 )
 const keyItems = computed(() =>
   usable.value.map((k) => ({ label: `${k.name}（${k.prefix}）`, value: k.id })),
@@ -74,7 +76,11 @@ const retryKeys = computed(() => retryOf(keys))
               aria-label="应用"
               class="w-full"
               @update:model-value="(v) => selectApp(String(v))"
-            />
+            >
+              <template v-if="app" #leading>
+                <RuntimeIcon :family="app.runtimeFamily" :size="15" />
+              </template>
+            </USelect>
           </UFormField>
           <UFormField label="访问密钥" class="w-full sm:w-60 min-[87.5rem]:w-64">
             <USelect
