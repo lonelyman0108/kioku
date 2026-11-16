@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import type { RouteLocationRaw } from 'vue-router'
 
 import { icons } from '../../icons'
+import FlagTag from './FlagTag.vue'
 
 export interface SettingsFrameSection {
   key: string
@@ -26,41 +27,49 @@ export interface SettingsFrameGroup {
   crumb?: string
   sections: SettingsFrameSection[]
 }
-
-// 设置页的骨架：标题下面一行分页换组，左栏只列当前这一组的小节，右边是当前小节；
-// 窄屏时顶上是两行，分页一行、小节一行（放不下时横向滚动），标题只留给读屏。
-// 标题、分页与左栏都不随内容滚动：滚的只有右边这一栏，切小节时导航不会在指针下面挪位置，也没有东西盖在表单上。
+// 设置页的骨架：宽屏左边是统一双级目录树，窄屏顶上是分组与小节两行横向切换条。
+// 标题与左栏都不随内容滚动：滚的只有右边这一栏，切小节时导航不会在指针下面挪位置，也没有东西盖在表单上。
 // 只有当前这一组的小节挂在页面上，内容由页面放进默认插槽（按小节的 key 调用）；组里的小节一直挂着，只切换显示：
 // 切走再回来，填了一半的表单、选好的文件都还在。别的组是别的页面，离开时由页面确认未保存的改动
 const props = defineProps<{
   groups: readonly SettingsFrameGroup[]
   group: string
   current: string
+  spaceId?: string
 }>()
 
 const active = computed(() => props.groups.find((g) => g.key === props.group))
 const panes = computed(() => active.value?.sections ?? [])
 const currentPane = computed(() => panes.value.find((s) => s.key === props.current))
 
-// 各小节共用一个滚动区（右边那一栏）：切走时记下位置，切回来时回到原处，没看过的从顶上开始
+// 各小节共用一个滚动区（右边那一栏）：切走时按组、空间与小节记下位置，切回来时回到原处
 const scroller = ref<HTMLElement | null>(null)
-const nav = ref<HTMLElement | null>(null)
+const treeNav = ref<HTMLElement | null>(null)
+const mobileNav = ref<HTMLElement | null>(null)
 const positions = new Map<string, number>()
-// 窄屏的小节那一行横向滚动，当前小节要在屏幕里；宽屏时本来就在，不会动
+
+const posKey = (group: string, spaceId: string | undefined, section: string) =>
+  `${group}:${spaceId ?? ''}:${section}`
+
+// 窄屏横向滚动条与左栏树中都要把当前小节滚动进可见范围
 function revealCurrent() {
-  nav.value
-    ?.querySelector('[aria-current="page"]')
-    ?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  for (const el of [treeNav.value, mobileNav.value]) {
+    el?.querySelector('[aria-current="page"]')?.scrollIntoView({
+      block: 'nearest',
+      inline: 'nearest',
+    })
+  }
 }
+
 watch(
-  () => props.current,
-  async (next, previous) => {
+  [() => props.current, () => props.spaceId],
+  async ([next, nextSpace], [previous, prevSpace]) => {
     // 离开这一页时小节也算变了，等下面这一拍的时候组件可能已经卸载，ref 成了 null
     const area = scroller.value
     if (!area) return
-    positions.set(previous, area.scrollTop)
+    positions.set(posKey(props.group, prevSpace, previous), area.scrollTop)
     await nextTick()
-    area.scrollTop = positions.get(next) ?? 0
+    area.scrollTop = positions.get(posKey(props.group, nextSpace, next)) ?? 0
     revealCurrent()
   },
 )
@@ -69,54 +78,92 @@ onMounted(revealCurrent)
 
 <template>
   <div class="settings">
-    <h1 class="settings-title">设置</h1>
-    <!-- 换组是换页面，照常留历史记录；当前这一组的分页就是现在这一页，点了不动 -->
-    <nav class="settings-groups" aria-label="设置的分组">
-      <RouterLink
-        v-for="g in groups"
-        :key="g.key"
-        :to="g.key === group && currentPane ? currentPane.to : g.to"
-        class="group-tab"
-        :aria-current="g.key === group ? 'page' : undefined"
-      >
-        <UIcon :name="g.icon" class="group-icon" />
-        <span class="group-label">{{ g.label }}</span>
-        <span v-if="g.aside" class="group-aside" :title="g.aside">{{ g.aside }}</span>
-      </RouterLink>
-    </nav>
+    <!-- 窄屏顶上保留两组横向导航，宽屏由左侧统一双级树承载 -->
+    <div class="narrow-chrome">
+      <h1 class="narrow-title">设置</h1>
+      <nav class="settings-groups" aria-label="设置的分组">
+        <RouterLink
+          v-for="g in groups"
+          :key="g.key"
+          :to="g.key === group && currentPane ? currentPane.to : g.to"
+          :replace="g.key === group"
+          class="group-tab"
+          :aria-current="g.key === group ? 'page' : undefined"
+        >
+          <UIcon :name="g.icon" class="group-icon" />
+          <span class="group-label">{{ g.label }}</span>
+          <span v-if="g.aside" class="group-aside" :title="g.aside">{{ g.aside }}</span>
+        </RouterLink>
+      </nav>
+      <nav ref="mobileNav" class="settings-nav" aria-label="设置的小节">
+        <RouterLink
+          v-for="section in panes"
+          :key="section.key"
+          :to="section.to"
+          replace
+          class="settings-tab"
+          :aria-current="section.key === current ? 'page' : undefined"
+        >
+          <UIcon :name="section.icon" class="tab-icon" />
+          <span class="tab-label">{{ section.label }}</span>
+          <span v-if="section.unsaved" class="tab-unsaved">未保存</span>
+          <span v-else-if="section.count" class="tab-count">{{ section.count }}</span>
+        </RouterLink>
+      </nav>
+    </div>
+
     <div class="settings-grid">
-      <div class="settings-side">
-        <!-- 组内切小节不留历史记录，返回键直接离开设置页 -->
-        <nav ref="nav" class="settings-nav" aria-label="设置的小节">
-          <RouterLink
-            v-for="section in panes"
-            :key="section.key"
-            :to="section.to"
-            replace
-            class="settings-tab"
-            :aria-current="section.key === current ? 'page' : undefined"
-          >
-            <UIcon :name="section.icon" class="tab-icon" />
-            <span class="tab-label">{{ section.label }}</span>
-            <span v-if="section.unsaved" class="tab-unsaved">未保存</span>
-            <span v-else-if="section.count" class="tab-count">{{ section.count }}</span>
-          </RouterLink>
+      <!-- 宽屏统一双级目录树 -->
+      <aside class="settings-side">
+        <div class="side-header">
+          <h1 class="settings-title">设置</h1>
+        </div>
+
+        <nav ref="treeNav" class="settings-tree" aria-label="设置目录">
+          <div v-for="g in groups" :key="g.key" class="tree-group">
+            <div class="tree-group-head">
+              <span class="tree-group-title">
+                <UIcon :name="g.icon" class="tree-group-icon" aria-hidden="true" />
+                <span>{{ g.label }}</span>
+              </span>
+              <span v-if="g.aside" class="tree-group-aside" :title="g.aside">{{ g.aside }}</span>
+            </div>
+            <RouterLink
+              v-for="section in g.sections"
+              :key="`${g.key}:${section.key}`"
+              :to="section.to"
+              :replace="g.key === group"
+              class="settings-tab"
+              :aria-current="g.key === group && section.key === current ? 'page' : undefined"
+            >
+              <UIcon :name="section.icon" class="tab-icon" />
+              <span class="tab-label">{{ section.label }}</span>
+              <span v-if="section.unsaved" class="tab-unsaved">未保存</span>
+              <span v-else-if="section.count" class="tab-count">{{ section.count }}</span>
+            </RouterLink>
+          </div>
         </nav>
-      </div>
+      </aside>
+
       <div ref="scroller" class="settings-main">
         <div class="settings-body">
-          <p v-if="active && currentPane" class="settings-crumb">
-            <span>{{ active.crumb ?? active.label }}</span>
-            <UIcon :name="icons.chevronRight" class="crumb-icon" />
-            <span>{{ currentPane.label }}</span>
-          </p>
+          <header v-if="active && currentPane" class="body-head">
+            <div>
+              <p class="settings-crumb">
+                <span>{{ active.crumb ?? active.label }}</span>
+                <UIcon :name="icons.chevronRight" class="crumb-icon" />
+                <span>{{ currentPane.label }}</span>
+              </p>
+              <h2 class="settings-heading">{{ currentPane.label }}</h2>
+            </div>
+            <FlagTag v-if="active.aside" class="scope-pill">{{ active.aside }}</FlagTag>
+          </header>
           <section
             v-for="section in panes"
             v-show="section.key === current"
             :key="section.key"
             :aria-label="section.label"
           >
-            <h2 class="settings-heading">{{ section.label }}</h2>
             <slot :section="section.key" />
           </section>
         </div>
@@ -133,102 +180,97 @@ onMounted(revealCurrent)
   min-width: 0;
   min-height: 0;
 }
-.settings-title {
-  flex: none;
-  padding: 20px 24px 6px;
-  font-size: 24px;
-  font-weight: 500;
-  line-height: 1.3;
-}
-/* 分页：一条墨线托着，当前组是粗的墨线加粗体；小节用反白，两级分得开 */
-.settings-groups {
-  display: flex;
-  flex: none;
-  min-height: 45px;
-  padding: 0 8px;
-  border-bottom: 1px solid var(--strata-rule);
-}
-.group-tab {
-  display: flex;
-  flex: 0 1 auto;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  padding: 3px 16px 0;
-  border-bottom: 3px solid transparent;
-  line-height: 1.4;
-  white-space: nowrap;
-  color: var(--ui-text-muted);
-}
-.group-tab:hover {
-  background: var(--ui-bg-muted);
-  color: var(--ui-text);
-}
-.group-tab[aria-current='page'] {
-  border-bottom-color: var(--strata-rule);
-  font-weight: 600;
-  color: var(--ui-text);
-}
-.group-tab:focus-visible {
-  outline-offset: -2px;
-}
-.group-icon {
-  display: inline-block;
-  flex: none;
-  width: 16px;
-  height: 16px;
-}
-.group-label {
-  flex: none;
-}
-.group-aside {
-  min-width: 0;
-  max-width: 18em;
-  overflow: hidden;
-  font-size: 12px;
-  font-weight: 400;
-  text-overflow: ellipsis;
-  color: var(--ui-text-muted);
+.narrow-chrome {
+  display: none;
 }
 .settings-grid {
   display: grid;
   flex: 1;
   grid-template-rows: minmax(0, 1fr);
-  grid-template-columns: 264px minmax(0, 1fr);
+  grid-template-columns: 272px minmax(0, 1fr);
   min-height: 0;
 }
-/* 左栏不跟着内容滚；视口很矮放不下时它自己能滚 */
+/* 左栏统一双级树不跟着右边滚；高度不够时自己能滚 */
 .settings-side {
+  display: flex;
+  flex-direction: column;
   min-height: 0;
-  padding-bottom: 40px;
   overflow-y: auto;
+  background: var(--ui-bg-muted);
+}
+.side-header {
+  padding: 18px 16px 14px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.settings-title {
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.settings-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 14px 10px 36px;
+}
+.tree-group {
+  display: flex;
+  flex-direction: column;
+}
+.tree-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 10px 6px;
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.tree-group-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+.tree-group-icon {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 14px;
+}
+.tree-group-aside {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .settings-tab {
   display: flex;
   align-items: center;
   gap: 10px;
-  min-height: 38px;
-  padding: 4px 24px;
-  border-bottom: 1px solid var(--ui-border);
+  min-height: 36px;
+  padding: 5px 12px;
+  border: 1px solid transparent;
   line-height: 1.4;
   color: var(--ui-text-toned);
 }
 .tab-icon {
   display: inline-block;
   flex: none;
-  width: 16px;
-  height: 16px;
+  width: 15px;
+  height: 15px;
   color: var(--ui-text-dimmed);
 }
 .tab-label {
   min-width: 0;
 }
 .settings-tab:hover {
-  background: var(--ui-bg-muted);
+  background: var(--ui-bg);
+  color: var(--ui-text);
 }
 .settings-tab[aria-current='page'],
 .settings-tab[aria-current='page']:hover {
-  border-bottom-color: var(--strata-selected);
+  border-color: var(--strata-selected);
   background: var(--strata-selected);
   color: var(--strata-on-selected);
   font-weight: 600;
@@ -268,7 +310,17 @@ onMounted(revealCurrent)
 }
 .settings-body {
   max-width: 1180px;
-  padding: 22px 40px 56px;
+  padding: 22px 36px 56px;
+}
+.body-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px 16px;
+  padding-bottom: 12px;
+  margin-bottom: 20px;
+  border-bottom: 2px solid var(--strata-rule);
 }
 .settings-crumb {
   display: flex;
@@ -282,15 +334,22 @@ onMounted(revealCurrent)
   height: 12px;
 }
 .settings-heading {
-  margin: 6px 0 20px;
+  margin-top: 4px;
   font-size: 22px;
-  font-weight: 500;
+  font-weight: 600;
   line-height: 1.3;
 }
+.scope-pill {
+  margin-bottom: 2px;
+}
 
-/* 窄屏：顶上两行，第一行分页，第二行当前组的小节，放不下时横向滚动；标题只留给读屏，把高度让给内容 */
+/* 窄屏：顶上保留分组与小节两行横向切换条，左栏隐藏，把宽度留给表单 */
 @media (max-width: 1023.98px) {
-  .settings-title {
+  .narrow-chrome {
+    display: block;
+    flex: none;
+  }
+  .narrow-title {
     position: absolute;
     width: 1px;
     height: 1px;
@@ -300,31 +359,60 @@ onMounted(revealCurrent)
     white-space: nowrap;
   }
   .settings-groups {
+    display: flex;
+    min-height: 44px;
     padding: 0 4px;
+    border-bottom: 1px solid var(--strata-rule);
   }
   .group-tab {
+    display: flex;
     flex: none;
+    align-items: center;
     gap: 6px;
+    min-width: 0;
     padding: 3px 12px 0;
+    border-bottom: 3px solid transparent;
+    line-height: 1.4;
+    white-space: nowrap;
+    color: var(--ui-text-muted);
   }
-  /* 三个分页要排进一行：只有当前组显示后面那一句，放不下时省略；别的组那一句只留给读屏 */
   .group-tab[aria-current='page'] {
     flex: 0 1 auto;
+    border-bottom-color: var(--strata-rule);
+    font-weight: 600;
+    color: var(--ui-text);
   }
   .group-tab:not([aria-current='page']) .group-aside {
     position: absolute;
     width: 1px;
     height: 1px;
+    overflow: hidden;
     clip-path: inset(50%);
+  }
+  .group-icon {
+    display: inline-block;
+    flex: none;
+    width: 16px;
+    height: 16px;
+  }
+  .group-label {
+    flex: none;
+  }
+  .group-aside {
+    min-width: 0;
+    max-width: 16em;
+    overflow: hidden;
+    font-size: 12px;
+    font-weight: 400;
+    text-overflow: ellipsis;
+    color: var(--ui-text-muted);
   }
   .settings-grid {
     display: flex;
     flex-direction: column;
   }
   .settings-side {
-    flex: none;
-    padding-bottom: 0;
-    overflow: visible;
+    display: none;
   }
   .settings-nav {
     display: flex;
@@ -337,21 +425,18 @@ onMounted(revealCurrent)
     gap: 6px;
     min-height: 44px;
     padding: 6px 12px;
-    border-bottom: 0;
+    border: 0;
     white-space: nowrap;
   }
   .settings-tab:first-child {
     padding-left: 16px;
-  }
-  .settings-tab[aria-current='page'] {
-    border-bottom: 0;
   }
   .settings-main {
     flex: 1;
     border-left: 0;
   }
   .settings-body {
-    padding: 14px 16px 40px;
+    padding: 16px 16px 40px;
   }
 }
 </style>

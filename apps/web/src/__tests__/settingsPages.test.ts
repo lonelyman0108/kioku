@@ -28,6 +28,16 @@ import EntryFrame from '../components/strata/EntryFrame.vue'
 import entryFrame from '../components/strata/EntryFrame.vue?raw'
 import SaveBar from '../components/strata/SaveBar.vue'
 import saveBar from '../components/strata/SaveBar.vue?raw'
+import settingsStageBar from '../components/strata/SettingsStageBar.vue?raw'
+import SettingsStageBar from '../components/strata/SettingsStageBar.vue'
+import SettingsSummaryStrip from '../components/strata/SettingsSummaryStrip.vue'
+import bootBudgetChartSource from '../components/BootBudgetChart.vue?raw'
+import BootBudgetChart from '../components/BootBudgetChart.vue'
+import instancePromptSettings from '../components/InstancePromptSettings.vue?raw'
+import recallWeightsChartSource from '../components/RecallWeightsChart.vue?raw'
+import RecallWeightsChart from '../components/RecallWeightsChart.vue'
+import spaceAdvancedExtraction from '../components/SpaceAdvancedExtraction.vue?raw'
+import spaceRecallSettings from '../components/SpaceRecallSettings.vue?raw'
 import SettingsBlock from '../components/strata/SettingsBlock.vue'
 import SettingsFrame, { type SettingsFrameGroup } from '../components/strata/SettingsFrame.vue'
 import settingsFrame from '../components/strata/SettingsFrame.vue?raw'
@@ -144,6 +154,9 @@ const settingsSources = {
   LoreImport: loreImport,
   AppearanceSettings: appearanceSettings,
   SpaceExtractionSettings: spaceExtractionSettings,
+  SpaceAdvancedExtraction: spaceAdvancedExtraction,
+  SpaceRecallSettings: spaceRecallSettings,
+  InstancePromptSettings: instancePromptSettings,
   SpaceTransferSettings: spaceTransferSettings,
   ModelSettings: modelSettings,
   MasterKeySettings: masterKeySettings,
@@ -517,14 +530,25 @@ describe('设置页的骨架', () => {
     expect(side).not.toContain('仅管理员')
   })
 
-  it('两个导航的名字不一样', () => {
+  it('窄屏导航与宽屏目录树的名字各不相同，宽屏列出全部分组且不放重复的空间选择框', async () => {
     const navs = elementsOf(template(settingsFrame)).filter((el) => el.tag === 'nav')
     expect(
       navs.map((el) => el.props?.find((p) => p.name === 'aria-label')?.value?.content),
-    ).toEqual(['设置的分组', '设置的小节'])
+    ).toEqual(['设置的分组', '设置的小节', '设置目录'])
+
+    const html = await frame('data')
+    const tree = navOf(html, '设置目录')
+    expect(tree).toContain('个人')
+    expect(tree).toContain('外观')
+    expect(tree).toContain('实例')
+    expect(tree).toContain('模型')
+    expect(tree).toContain('数据与保留')
+    // 顶部已有全局空间切换器，设置目录不再重复放空间选择框；不同空间仍各自记滚动位置
+    expect(html).not.toContain('<select')
+    expect(scriptOf(settingsFrame)).toContain("${group}:${spaceId ?? ''}:${section}")
   })
 
-  it('只有右边那一栏滚动：标题、分页与左栏不跟着滚，也没有贴顶的行盖在内容上', () => {
+  it('只有右边那一栏滚动：标题与左栏不跟着滚，也没有贴顶的行盖在内容上', () => {
     const css = styleOf(settingsFrame)
     expect(css).not.toContain('position: sticky')
     const [wide, narrow] = css.split('@media (max-width: 1023.98px)')
@@ -552,47 +576,63 @@ describe('设置页的骨架', () => {
     expect(directive(section, 'if')).toBeUndefined()
   })
 
-  it('分页标出当前组，左栏标出当前小节', async () => {
+  it('分页、窄屏小节条与宽屏目录树都准确标出当前位置', async () => {
     const html = await frame('data')
-    expect(currentLinks(html)).toHaveLength(2)
-    const current = currentLinks(navOf(html, '设置的小节'))
-    expect(current).toHaveLength(1)
-    expect(current[0]![0]).toContain('href="/i/data"')
+    expect(currentLinks(navOf(html, '设置的分组'))).toHaveLength(1)
+    const currentSide = currentLinks(navOf(html, '设置的小节'))
+    expect(currentSide).toHaveLength(1)
+    expect(currentSide[0]![0]).toContain('href="/i/data"')
+    const currentTree = currentLinks(navOf(html, '设置目录'))
+    expect(currentTree).toHaveLength(1)
+    expect(currentTree[0]![0]).toContain('href="/i/data"')
   })
 
-  it('组内切小节不留历史记录，换组照常留', () => {
-    const [tab, link] = elementsOf(template(settingsFrame)).filter((el) => el.tag === 'RouterLink')
-    // 当前组的分页就是现在这一页（aria-current 说的是实话），别的组去它的第一节
+  it('组内切小节不留历史记录，跨组切换照常留', () => {
+    const links = elementsOf(template(settingsFrame)).filter((el) => el.tag === 'RouterLink')
+    const [tab, mobileLink, treeLink] = links
+    // 窄屏分页：当前组留在当前小节，别的组去第一节
     expect(bound(tab!, 'to')).toBe('g.key === group && currentPane ? currentPane.to : g.to')
     expect(tab!.props?.some((p) => p.name === 'replace')).toBe(false)
-    expect(bound(link!, 'to')).toBe('section.to')
-    expect(link!.props?.some((p) => p.name === 'replace' && p.exp === undefined)).toBe(true)
+    // 窄屏小节条：同组内 replace
+    expect(bound(mobileLink!, 'to')).toBe('section.to')
+    expect(mobileLink!.props?.some((p) => p.name === 'replace' && p.exp === undefined)).toBe(true)
+    // 宽屏目录树：仅同组时 replace，跨组保留历史以便触发未保存离开确认
+    expect(bound(treeLink!, 'to')).toBe('section.to')
+    expect(bound(treeLink!, 'replace')).toBe('g.key === group')
   })
 
   it('有未保存改动的小节在左栏标出来', async () => {
     const html = await frame('models', 'data')
-    const tabs = [...html.matchAll(/<a[^>]*>.*?<\/a>/g)].map((m) => m[0])
-    expect(
-      tabs.filter((tab) => tab.includes('未保存')).map((tab) => tab.includes('数据与保留')),
-    ).toEqual([true])
+    for (const label of ['设置的小节', '设置目录']) {
+      const tabs = linksOf(navOf(html, label))
+      expect(
+        tabs.filter((tab) => tab.includes('未保存')).map((tab) => tab.includes('数据与保留')),
+      ).toEqual([true])
+    }
   })
 
   it('切换时记下滚动位置，当前小节滚进左栏的可见范围', () => {
     const script = scriptOf(settingsFrame)
-    expect(script).toContain('positions.set(previous, area.scrollTop)')
-    expect(script).toContain('area.scrollTop = positions.get(next) ?? 0')
-    expect(script).toContain("scrollIntoView({ block: 'nearest', inline: 'nearest' })")
+    expect(script).toContain(
+      'positions.set(posKey(props.group, prevSpace, previous), area.scrollTop)',
+    )
+    expect(script).toContain(
+      'area.scrollTop = positions.get(posKey(props.group, nextSpace, next)) ?? 0',
+    )
+    expect(flat(script)).toContain("scrollIntoView({block:'nearest',inline:'nearest',})")
   })
 })
 
 describe('一块设置', () => {
-  it('标题、说明、内容都在，没有说明时不留空行', async () => {
+  it('标题、说明、内容都在，没有说明时不留空行，支持状态徽章', async () => {
     const withNote = await render(
       SettingsBlock,
-      { title: '备份' },
+      { title: '备份', badge: '即时生效', tone: 'instant' },
       { note: () => '每天备份', default: () => '表单' },
     )
     expect(withNote).toContain('备份')
+    expect(withNote).toContain('即时生效')
+    expect(withNote).toContain('data-tone="instant"')
     expect(withNote).toContain('<h3')
     expect(withNote).toContain('block-note')
     expect(withNote).toContain('表单')
@@ -600,6 +640,86 @@ describe('一块设置', () => {
     const bare = await render(SettingsBlock, { title: '最近备份' }, { default: () => '状态' })
     expect(bare).not.toContain('block-note')
     expect(bare).toContain('under-heading')
+  })
+
+  it('摘要带、配比图与分段过滤条能正常渲染', async () => {
+    const strip = await render(SettingsSummaryStrip, {
+      items: [
+        { label: '每轮注入', value: '8 条', sub: '门槛 0.25', tone: 'warn' },
+        { label: '启动预算', value: '6,000 字', tone: 'ok' },
+      ],
+    })
+    expect(strip).toContain('每轮注入')
+    expect(strip).toContain('8 条')
+    expect(strip).toContain('data-tone="warn"')
+
+    const bootChart = await render(BootBudgetChart, {
+      charBudget: 6000,
+      summariesEnabled: true,
+      summariesCount: 3,
+      recentEnabled: true,
+      recentCount: 4,
+      relatedEnabled: false,
+      relatedCount: 0,
+    })
+    expect(bootChart).toContain('启动加载字数配比')
+    expect(bootChart).toContain('6,000 字')
+    expect(bootChart).toContain('2 项附带开启')
+
+    const weightsChart = await render(RecallWeightsChart, {
+      weights: [
+        { key: 'semantic', label: '向量相似度', value: 0.45 },
+        { key: 'fulltext', label: '全文检索', value: 0.3 },
+      ],
+      minScore: 0.25,
+    })
+    expect(weightsChart).toContain('召回得分比重与门槛')
+    expect(weightsChart).toContain('≥ 0.25')
+
+    const zeroWeightsChart = await render(RecallWeightsChart, {
+      weights: [
+        { key: 'semantic', label: '向量相似度', value: 0 },
+        { key: 'fulltext', label: '全文检索', value: Number.NaN },
+      ],
+      minScore: Number.POSITIVE_INFINITY,
+    })
+    expect(zeroWeightsChart).toContain('权重合计 0.00')
+    expect(zeroWeightsChart).not.toContain('0.01')
+    expect(zeroWeightsChart).not.toContain('NaN')
+    expect(recallWeightsChartSource).not.toContain('font-size: 11px')
+    expect(recallWeightsChartSource).not.toContain('--ui-error')
+
+    const nanBootChart = await render(BootBudgetChart, {
+      charBudget: Number.POSITIVE_INFINITY,
+      summariesEnabled: true,
+      summariesCount: Number.NaN,
+      recentEnabled: false,
+      recentCount: 0,
+      relatedEnabled: false,
+      relatedCount: 0,
+    })
+    expect(nanBootChart).not.toContain('NaN')
+    expect(bootBudgetChartSource).toContain('allocation.value.filter((seg) => seg.chars > 0)')
+
+    const stageBar = await render(SettingsStageBar, {
+      stages: [
+        { key: 'all', label: '全部' },
+        { key: 'recall', label: '每轮召回' },
+      ],
+      stage: 'recall',
+      onlyOverridden: true,
+      overriddenCount: 2,
+    })
+    expect(stageBar).toContain('仅看已覆盖（2）')
+    expect(stageBar).toContain('aria-pressed="true"')
+    expect(settingsStageBar).toContain('role="tab"')
+    expect(settingsStageBar).toContain('onTabKeydown')
+
+    // 实例设置「召回权重」分段匹配 recallWeights 前缀，且所有权重输入带错误提示
+    expect(instancePromptSettings).toContain(
+      "if (stage.value === 'weights') return prefix === 'recallWeights'",
+    )
+    expect(instancePromptSettings).toContain('{{ rangeText(key) }}')
   })
 
   it('标题栏的操作放进 actions', async () => {
@@ -636,6 +756,16 @@ describe('设置行与保存条', () => {
     expect(await render(SaveBar, { count: 0 })).not.toContain('未保存')
     // 保存刚发出去、改动已经算不出时，条还在，按钮都不能点
     expect(await render(SaveBar, { count: 0, saving: true })).toContain('save-bar')
+    const withDiff = await render(SaveBar, {
+      count: 1,
+      changes: [{ label: '注入条数', before: '8', after: '12' }],
+    })
+    expect(withDiff).toContain('查看变更')
+    expect(saveBar).toContain('if (count === 0) showDiff.value = false')
+    expect(saveBar).toContain(':aria-expanded="showDiff"')
+    expect(saveBar).not.toContain(
+      '.diff-values {\n  display: inline-flex;\n  align-items: center;\n  gap: 6px;\n  font-family: var(--font-mono);',
+    )
   })
 
   it('保存是提交按钮，保存中两个按钮都不能点', () => {
@@ -835,7 +965,9 @@ describe('设置页', () => {
     const component = elementsOf(template(settingsPage)).find((el) => el.tag === 'component')!
     expect(directive(component, 'model')?.arg?.content).toBe('dirty')
     expect(directive(component, 'model')?.exp?.content).toBe('dirty[section]')
-    expect(scriptOf(settingsPage)).toContain('unsaved: Boolean(dirty[section.key])')
+    expect(scriptOf(settingsPage)).toContain(
+      'unsaved: key === group.value && Boolean(dirty[section.key])',
+    )
     // 分页链到组里第一个看得到的小节
     expect(scriptOf(settingsPage)).toContain('to: linkTo(key, list[0]!.key),')
   })

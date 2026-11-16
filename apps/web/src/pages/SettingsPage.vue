@@ -76,18 +76,15 @@ const groups = computed<SettingsFrameGroup[]>(() =>
         to: linkTo(key, list[0]!.key),
         aside: asideOf(key),
         crumb: key === 'space' && space.value ? `${meta.label} · ${space.value.name}` : meta.label,
-        // 左栏只列当前这一组的小节，别的组只用得上分页那几项
-        sections:
-          key === group.value
-            ? list.map((section) => ({
-                key: section.key,
-                label: section.label,
-                icon: section.icon,
-                to: linkTo(key, section.key),
-                unsaved: Boolean(dirty[section.key]),
-                count: counts.value[`${key}:${section.key}`],
-              }))
-            : [],
+        // 左栏树列出所有可见分组的小节，组内点击原地切换，跨组由路由守卫检查未保存改动
+        sections: list.map((section) => ({
+          key: section.key,
+          label: section.label,
+          icon: section.icon,
+          to: linkTo(key, section.key),
+          unsaved: key === group.value && Boolean(dirty[section.key]),
+          count: key === 'space' ? counts.value[`${key}:${section.key}`] : undefined,
+        })),
       },
     ]
   }),
@@ -97,7 +94,12 @@ const componentOf = (key: string) => sections.value.find((s) => s.key === key)?.
 </script>
 
 <template>
-  <SettingsFrame :groups="groups" :group="group" :current="current?.key ?? ''">
+  <SettingsFrame
+    :groups="groups"
+    :group="group"
+    :current="current?.key ?? ''"
+    :space-id="space?.id"
+  >
     <template #default="{ section }">
       <component
         :is="componentOf(section)"

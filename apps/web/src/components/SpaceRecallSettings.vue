@@ -24,17 +24,21 @@ import { api } from '../api/endpoints'
 import { useSession } from '../composables/useSession'
 import { useTuningFields } from '../composables/useTuningFields'
 import { icons } from '../icons'
+import BootBudgetChart from './BootBudgetChart.vue'
 import BootExtrasRow from './BootExtrasRow.vue'
 import Hint from './Hint.vue'
 import RecallTrial from './RecallTrial.vue'
+import RecallWeightsChart from './RecallWeightsChart.vue'
 import RuntimeLabel from './RuntimeLabel.vue'
 import TuningRow from './TuningRow.vue'
 import EmptyState from './strata/EmptyState.vue'
 import FlagTag from './strata/FlagTag.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
-import SaveBar from './strata/SaveBar.vue'
+import SaveBar, { type SaveBarChange } from './strata/SaveBar.vue'
 import SettingsBlock from './strata/SettingsBlock.vue'
 import SettingsRow from './strata/SettingsRow.vue'
+import SettingsStageBar from './strata/SettingsStageBar.vue'
+import SettingsSummaryStrip, { type SummaryStripItem } from './strata/SettingsSummaryStrip.vue'
 import SettingsTable from './strata/SettingsTable.vue'
 
 // 空间 › 召回与启动加载：空间内应用的默认值。没覆盖的项沿用实例默认，应用可以再单独覆盖。
@@ -44,15 +48,19 @@ const route = useRoute()
 const toast = useToast()
 const queryClient = useQueryClient()
 const { space } = useSession()
-const spaceId = computed(() => String(route.params.spaceId))
+const spaceId = computed(() =>
+  typeof route.params.spaceId === 'string' ? route.params.spaceId : '',
+)
 
 const view = useQuery({
   queryKey: computed(() => spaceAdvancedKey(spaceId.value)),
+  enabled: computed(() => Boolean(spaceId.value)),
   queryFn: ({ queryKey: [, , sid] }) => api.spaceAdvanced(sid),
 })
 const apps = useQuery({
-  queryKey: computed(() => ['apps', spaceId.value]),
-  queryFn: () => api.apps(spaceId.value),
+  queryKey: computed(() => ['apps', spaceId.value] as const),
+  enabled: computed(() => Boolean(spaceId.value)),
+  queryFn: ({ queryKey: [, sid] }) => api.apps(sid),
 })
 const editable = computed(() => view.data.value?.canEdit ?? false)
 
@@ -71,6 +79,16 @@ watch(
 )
 const inheritedOf = (key: TuningKey) => view.data.value?.instance[key] ?? 0
 
+type StageFilter = 'all' | 'recall' | 'boot' | 'apps'
+const stage = ref<StageFilter>('all')
+const onlyOverridden = ref(false)
+const STAGES: { key: StageFilter; label: string }[] = [
+  { key: 'all', label: '全部' },
+  { key: 'recall', label: '每轮召回' },
+  { key: 'boot', label: '启动加载' },
+  { key: 'apps', label: '应用覆盖' },
+]
+
 // 每一行：名称旁边的表单值、来源与恢复
 const row = (key: (typeof APP_TUNING_KEYS)[number]) => ({
   setting: key,
@@ -78,12 +96,41 @@ const row = (key: (typeof APP_TUNING_KEYS)[number]) => ({
   source: tuning.sourceOf(key),
   inherited: inheritedOf(key),
 })
+// 「仅看已覆盖」时保留刚点过恢复或正在修改的行，避免鼠标下的行立刻消失
+const rowVisible = (key: (typeof APP_TUNING_KEYS)[number]) =>
+  !onlyOverridden.value || tuning.sourceOf(key) === 'overridden' || fields[key].changed.value
+
+const RECALL_SECTION_KEYS = [
+  'recall.limit',
+  'recall.minScore',
+  'recall.subjectFacts',
+  'recall.chatInlineChars',
+] as const
+const recallBlockHasVisible = computed(() => RECALL_SECTION_KEYS.some(rowVisible))
+
+const bootExtrasOverridden = computed(() =>
+  BOOT_EXTRAS.some(
+    (e) =>
+      tuning.sourceOf(`boot.${e.key}.enabled`) === 'overridden' ||
+      tuning.sourceOf(`boot.${e.key}.count`) === 'overridden' ||
+      fields[`boot.${e.key}.enabled`].changed.value ||
+      fields[`boot.${e.key}.count`].changed.value,
+  ),
+)
+const bootBlockHasVisible = computed(
+  () => rowVisible('boot.charBudget') || !onlyOverridden.value || bootExtrasOverridden.value,
+)
+
 const restoreExtra = (extra: BootExtra) =>
   [`boot.${extra}.enabled`, `boot.${extra}.count`].forEach((k) =>
     tuning.restore(k as (typeof APP_TUNING_KEYS)[number]),
   )
 const appCount = computed(() => apps.data.value?.length ?? 0)
 const overriddenApps = computed(() => view.data.value?.apps ?? [])
+const overriddenCount = computed(
+  () => APP_TUNING_KEYS.filter((k) => tuning.sourceOf(k) === 'overridden').length,
+)
+
 const overriddenLabel = (overrides: Record<string, unknown>) =>
   Object.entries(overrides)
     .map(
@@ -101,10 +148,12 @@ const weights = computed(() => {
   return WEIGHT_KEYS.map((key) => ({
     key,
     ...TUNING_META[key],
+    raw: Number(instance[key]) || 0,
     value: formatTuning(key, instance[key]),
   }))
 })
-// 试算用表单里的值；不合法时用生效的值
+
+// 试算与图表用当前表单里的值；不合法时用已生效的值
 const trialMinScore = computed(() =>
   fields['recall.minScore'].invalid.value
     ? (view.data.value?.effective['recall.minScore'] ?? 0)
@@ -115,6 +164,50 @@ const trialLimit = computed(() =>
     ? (view.data.value?.effective['recall.limit'] ?? 1)
     : (fields['recall.limit'].value.value ?? 1),
 )
+const liveBudget = computed(() =>
+  fields['boot.charBudget'].invalid.value
+    ? (view.data.value?.effective['boot.charBudget'] ?? 6000)
+    : (fields['boot.charBudget'].value.value ?? 6000),
+)
+
+const summaryItems = computed<SummaryStripItem[]>(() => [
+  {
+    label: '每轮注入 / 门槛',
+    value: `${trialLimit.value} 条 · ${trialMinScore.value.toFixed(2)}`,
+    sub: '低于门槛分值不自动注入',
+  },
+  {
+    label: '启动字数预算',
+    value: `${liveBudget.value.toLocaleString('en-US')} 字`,
+    sub: '受客户端上限约束',
+  },
+  {
+    label: '空间覆盖实例项',
+    value: `${overriddenCount.value} 项`,
+    sub: overriddenCount.value ? '已覆盖部分实例默认' : '全部沿用实例默认',
+    tone: overriddenCount.value ? 'warn' : 'ok',
+  },
+  {
+    label: '应用独立覆盖',
+    value: `${overriddenApps.value.length} / ${appCount.value} 个`,
+    sub: '各应用可在应用详情单独调整',
+  },
+])
+
+const changeDiffs = computed<SaveBarChange[]>(() => {
+  const saved = view.data.value?.effective
+  if (!saved) return []
+  const patch = tuning.patch()
+  return tuning.changedKeys.value.map((k) => {
+    const before = formatTuning(k, saved[k])
+    const afterVal = patch[k] === null ? inheritedOf(k) : (tuning.values.value[k] ?? undefined)
+    const after =
+      patch[k] === null
+        ? `沿用实例（${formatTuning(k, inheritedOf(k))}）`
+        : formatTuning(k, afterVal)
+    return { label: TUNING_META[k].label, before, after }
+  })
+})
 
 const saving = ref(false)
 async function save() {
@@ -139,26 +232,68 @@ async function save() {
 <template>
   <div>
     <p class="section-note">空间内应用的默认值。未覆盖的项沿用实例默认，应用可以再单独覆盖。</p>
-    <p class="chain" aria-label="取值顺序">
-      <span class="chain-step"><UIcon :name="icons.instance" aria-hidden="true" />实例默认</span>
-      <UIcon :name="icons.chevronRight" class="chain-arrow" aria-hidden="true" />
-      <span class="chain-step on" aria-current="true"
-        ><UIcon :name="icons.space" aria-hidden="true" />空间 · {{ space?.name }}</span
+    <div class="chain-row">
+      <p class="chain" aria-label="取值顺序">
+        <span class="chain-step"><UIcon :name="icons.instance" aria-hidden="true" />实例默认</span>
+        <UIcon :name="icons.chevronRight" class="chain-arrow" aria-hidden="true" />
+        <span class="chain-step on" aria-current="true"
+          ><UIcon :name="icons.space" aria-hidden="true" />空间 · {{ space?.name }}</span
+        >
+        <UIcon :name="icons.chevronRight" class="chain-arrow" aria-hidden="true" />
+        <span class="chain-step"
+          ><UIcon :name="icons.apps" aria-hidden="true" />应用 · {{ appCount }} 个，{{
+            overriddenApps.length
+          }}
+          个有覆盖</span
+        >
+      </p>
+      <FlagTag v-if="view.data.value && !editable" class="scope-flag"
+        >只读视角 · 仅空间所有者可修改</FlagTag
       >
-      <UIcon :name="icons.chevronRight" class="chain-arrow" aria-hidden="true" />
-      <span class="chain-step"
-        ><UIcon :name="icons.apps" aria-hidden="true" />应用 · {{ appCount }} 个，{{
-          overriddenApps.length
-        }}
-        个有覆盖</span
-      >
-    </p>
+    </div>
+
     <ReadFailureNote v-if="view.isError.value" :query="view" />
     <USkeleton v-if="view.isPending.value" class="mt-6 h-64 w-full" />
     <form v-else-if="view.data.value" @submit.prevent="save">
-      <SettingsBlock title="每轮召回" wide>
+      <SettingsSummaryStrip :items="summaryItems" class="mb-4" />
+
+      <div class="viz-grid">
+        <BootBudgetChart
+          :char-budget="liveBudget"
+          :summaries-enabled="tuning.values.value['boot.summaries.enabled'] === 1"
+          :summaries-count="tuning.values.value['boot.summaries.count'] ?? 0"
+          :recent-enabled="tuning.values.value['boot.recent.enabled'] === 1"
+          :recent-count="tuning.values.value['boot.recent.count'] ?? 0"
+          :related-enabled="tuning.values.value['boot.related.enabled'] === 1"
+          :related-count="tuning.values.value['boot.related.count'] ?? 0"
+        />
+        <RecallWeightsChart
+          :weights="weights.map((w) => ({ key: w.key, label: w.label, value: w.raw }))"
+          :min-score="trialMinScore"
+        />
+      </div>
+
+      <SettingsStageBar
+        v-model:stage="stage"
+        v-model:only-overridden="onlyOverridden"
+        :stages="STAGES"
+        :overridden-count="overriddenCount"
+        aria-label="参数分段"
+      />
+
+      <SettingsBlock
+        v-show="stage === 'all' || stage === 'recall'"
+        title="每轮召回"
+        :badge="editable ? '空间表单 · 提交生效' : '只读'"
+        :tone="editable ? 'form' : 'readonly'"
+        wide
+      >
         <template #note>提交提示语时注入的候选。</template>
+        <p v-if="!recallBlockHasVisible" class="py-3 text-muted">
+          当前分段暂无已覆盖实例默认的参数。
+        </p>
         <TuningRow
+          v-show="rowVisible('recall.limit')"
           v-model="fields['recall.limit'].value.value"
           v-bind="row('recall.limit')"
           level="实例"
@@ -166,6 +301,7 @@ async function save() {
           @restore="tuning.restore('recall.limit')"
         />
         <TuningRow
+          v-show="rowVisible('recall.minScore')"
           v-model="fields['recall.minScore'].value.value"
           v-bind="row('recall.minScore')"
           level="实例"
@@ -173,12 +309,14 @@ async function save() {
           @restore="tuning.restore('recall.minScore')"
         />
         <RecallTrial
+          v-show="!onlyOverridden"
           :space-id="spaceId"
           :min-score="trialMinScore"
           :limit="trialLimit"
           :app-overrides="overriddenApps"
         />
         <TuningRow
+          v-show="rowVisible('recall.subjectFacts')"
           v-model="fields['recall.subjectFacts'].value.value"
           v-bind="row('recall.subjectFacts')"
           level="实例"
@@ -186,14 +324,15 @@ async function save() {
           @restore="tuning.restore('recall.subjectFacts')"
         />
         <TuningRow
+          v-show="rowVisible('recall.chatInlineChars')"
           v-model="fields['recall.chatInlineChars'].value.value"
           v-bind="row('recall.chatInlineChars')"
           level="实例"
           :editable="editable"
           @restore="tuning.restore('recall.chatInlineChars')"
         />
-        <details class="more">
-          <summary>召回权重（仅实例可改）</summary>
+        <details v-show="!onlyOverridden" class="more">
+          <summary>召回权重明细（仅实例可改）</summary>
           <SettingsTable class="mt-2 max-w-xl">
             <thead>
               <tr>
@@ -213,9 +352,19 @@ async function save() {
         </details>
       </SettingsBlock>
 
-      <SettingsBlock title="启动加载" wide>
+      <SettingsBlock
+        v-show="stage === 'all' || stage === 'boot'"
+        title="启动加载"
+        :badge="editable ? '空间表单 · 提交生效' : '只读'"
+        :tone="editable ? 'form' : 'readonly'"
+        wide
+      >
         <template #note>会话开始时注入。</template>
+        <p v-if="!bootBlockHasVisible" class="py-3 text-muted">
+          当前分段暂无已覆盖实例默认的参数。
+        </p>
         <TuningRow
+          v-show="rowVisible('boot.charBudget')"
           v-model="fields['boot.charBudget'].value.value"
           v-bind="row('boot.charBudget')"
           level="实例"
@@ -223,6 +372,7 @@ async function save() {
           @restore="tuning.restore('boot.charBudget')"
         />
         <BootExtrasRow
+          v-show="!onlyOverridden || bootExtrasOverridden"
           :values="tuning.values.value"
           :sources="tuning.sources.value"
           :invalid="BOOT_EXTRAS.some((e) => fields[`boot.${e.key}.count`].invalid.value)"
@@ -232,7 +382,11 @@ async function save() {
           @set="tuning.set"
           @restore="restoreExtra"
         />
-        <SettingsRow label="客户端上限" description="客户端自身的限制，不可调">
+        <SettingsRow
+          v-show="!onlyOverridden"
+          label="客户端上限"
+          description="客户端自身的限制，不可调"
+        >
           <SettingsTable class="max-w-xs">
             <thead>
               <tr>
@@ -258,8 +412,13 @@ async function save() {
         </SettingsRow>
       </SettingsBlock>
 
-      <SettingsBlock title="应用的覆盖" wide>
-        <template #note>在应用详情里修改。</template>
+      <SettingsBlock
+        v-show="stage === 'all' || stage === 'apps'"
+        title="应用的覆盖"
+        badge="在应用详情中修改"
+        wide
+      >
+        <template #note>已为单个应用单独调整的参数会列在这里。</template>
         <EmptyState v-if="!overriddenApps.length" title="暂无应用覆盖" />
         <SettingsTable v-else>
           <thead>
@@ -291,6 +450,7 @@ async function save() {
         :count="changedCount"
         :saving="saving"
         :problem="tuning.problem.value"
+        :changes="changeDiffs"
         @discard="tuning.reset()"
       />
     </form>
@@ -301,12 +461,19 @@ async function save() {
 .section-note {
   color: var(--ui-text-muted);
 }
+.chain-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  margin: 12px 0 18px;
+}
 .chain {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  margin: 14px 0 28px;
   font-size: 12px;
   color: var(--ui-text-muted);
 }
@@ -325,6 +492,17 @@ async function save() {
 .chain-arrow {
   width: 12px;
   height: 12px;
+}
+.scope-flag {
+  border-color: var(--ui-warning);
+  color: var(--ui-warning);
+}
+.viz-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 16px;
+  max-width: 64rem;
+  margin-bottom: 20px;
 }
 .more {
   margin-top: 12px;
