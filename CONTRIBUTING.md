@@ -53,7 +53,7 @@
 
 ## 发布
 
-版本号与 tag 只由维护者决定和打；CHANGELOG 定稿放在发布 PR（`🔖 release: vX.Y.Z`）里。
+版本号由维护者决定；维护者发起发版后可由其本人或授权 agent 打 tag 并推送；CHANGELOG 定稿放在发布 PR（`🔖 release: vX.Y.Z`）里。
 推送 `vX.Y.Z` tag 后，`release.yml` 跑完整门禁，再用 CHANGELOG 对应一节建立或更新 GitHub Release。
 门禁通过后，`release.yml` 调 `images.yml` 构建并推送两个镜像，`linux/amd64` 与 `linux/arm64` 各在原生的 runner 上构建，再合并成一个多架构清单：
 
