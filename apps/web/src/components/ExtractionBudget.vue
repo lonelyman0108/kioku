@@ -9,7 +9,7 @@ import { fieldProblems, useSavedField } from '../composables/useSavedField'
 import { formatTime } from '../time'
 import Hint from './Hint.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
-import SaveBar from './strata/SaveBar.vue'
+import SaveBar, { type SaveBarChange } from './strata/SaveBar.vue'
 import SettingsBlock from './strata/SettingsBlock.vue'
 import SettingsRow from './strata/SettingsRow.vue'
 
@@ -19,8 +19,12 @@ const dirtyModel = defineModel<boolean>('dirty', { default: false })
 
 const toast = useToast()
 const queryClient = useQueryClient()
-const queryKey = computed(() => ['extraction-budget', props.spaceId])
-const usage = useQuery({ queryKey, queryFn: () => api.extractionBudget(props.spaceId) })
+const queryKey = computed(() => ['extraction-budget', props.spaceId] as const)
+const usage = useQuery({
+  queryKey,
+  enabled: computed(() => Boolean(props.spaceId)),
+  queryFn: ({ queryKey: [, sid] }) => api.extractionBudget(sid),
+})
 
 // 两项各和服务端最新的预算比（useSavedField）：用量隔一会儿就刷新，预算本身变了时基准跟上，本地改过的输入留着
 const monthly = useSavedField(() => usage.data.value?.monthlyTokens, {
@@ -44,10 +48,35 @@ const progress = computed(() => {
   const u = usage.data.value
   if (!u) return null
   const over = u.usedTokens >= u.monthlyTokens
+  const remaining = Math.max(u.monthlyTokens - u.usedTokens, 0)
   return {
-    percent: over ? 100 : Math.floor((u.usedTokens / u.monthlyTokens) * 100),
+    percent: over ? 100 : Math.floor((u.usedTokens / Math.max(u.monthlyTokens, 1)) * 100),
+    remaining,
     color: over ? 'error' : u.usedTokens >= u.monthlyTokens * 0.8 ? 'warning' : 'primary',
   } as const
+})
+
+const budgetChanges = computed<SaveBarChange[]>(() => {
+  const u = usage.data.value
+  if (!u) return []
+  const list: SaveBarChange[] = []
+  if (monthly.changed.value) {
+    const next = monthly.value.value
+    list.push({
+      label: '每月 token 上限',
+      before: `${u.monthlyTokens.toLocaleString('en-US')} token`,
+      after: next == null ? '—' : `${next.toLocaleString('en-US')} token`,
+    })
+  }
+  if (daily.changed.value) {
+    const next = daily.value.value
+    list.push({
+      label: '每日写入上限',
+      before: `${u.dailyWritesPerSubject} 条`,
+      after: next == null ? '—' : `${next} 条`,
+    })
+  }
+  return list
 })
 
 function discard() {
@@ -58,20 +87,23 @@ function discard() {
 const saving = ref(false)
 async function save() {
   if (saving.value || changedCount.value === 0 || problem.value) return
+  const sid = props.spaceId
   const monthlyTokens = monthly.value.value
   const dailyWritesPerSubject = daily.value.value
   if (typeof monthlyTokens !== 'number' || typeof dailyWritesPerSubject !== 'number') return
   saving.value = true
   try {
-    const saved = await api.saveExtractionBudget(props.spaceId, {
+    const saved = await api.saveExtractionBudget(sid, {
       monthlyTokens,
       dailyWritesPerSubject,
     })
-    monthly.commit(monthlyTokens, saved.monthlyTokens)
-    daily.commit(dailyWritesPerSubject, saved.dailyWritesPerSubject)
+    if (sid === props.spaceId) {
+      monthly.commit(monthlyTokens, saved.monthlyTokens)
+      daily.commit(dailyWritesPerSubject, saved.dailyWritesPerSubject)
+    }
     await Promise.all([
-      queryClient.invalidateQueries({ queryKey: queryKey.value }),
-      queryClient.invalidateQueries({ queryKey: ['overview', props.spaceId] }),
+      queryClient.invalidateQueries({ queryKey: ['extraction-budget', sid] }),
+      queryClient.invalidateQueries({ queryKey: ['overview', sid] }),
     ])
     toast.add({ title: '已保存', color: 'success' })
   } catch (err) {
@@ -83,7 +115,11 @@ async function save() {
 </script>
 
 <template>
-  <SettingsBlock title="抽取预算">
+  <SettingsBlock
+    title="抽取预算"
+    :badge="editable ? '空间所有者 · 表单保存' : '仅空间所有者可修改'"
+    :tone="editable ? 'form' : 'readonly'"
+  >
     <template #note>
       抽取事实与整理共用此 token 预算。
       <Hint>
@@ -100,14 +136,19 @@ async function save() {
         :description="`从 ${formatTime(usage.data.value.periodStart)} 起`"
       >
         <div class="w-full max-w-sm space-y-1.5">
-          <p>
-            <span class="font-semibold tabular-nums">{{
-              usage.data.value.usedTokens.toLocaleString()
-            }}</span>
-            <span class="text-xs text-muted">
-              / {{ usage.data.value.monthlyTokens.toLocaleString() }} token</span
-            >
-          </p>
+          <div class="usage-line">
+            <p>
+              <span class="font-semibold tabular-nums">{{
+                usage.data.value.usedTokens.toLocaleString()
+              }}</span>
+              <span class="text-xs text-muted">
+                / {{ usage.data.value.monthlyTokens.toLocaleString() }} token</span
+              >
+            </p>
+            <span v-if="progress" class="usage-pct tabular-nums">
+              {{ progress.percent }}% · 剩余 {{ progress.remaining.toLocaleString() }}
+            </span>
+          </div>
           <UProgress v-if="progress" :model-value="progress.percent" :color="progress.color" />
         </div>
       </SettingsRow>
@@ -143,7 +184,13 @@ async function save() {
             请填写 0 到 1000 之间的整数。
           </p>
         </SettingsRow>
-        <SaveBar :count="changedCount" :saving="saving" :problem="problem" @discard="discard" />
+        <SaveBar
+          :count="changedCount"
+          :saving="saving"
+          :problem="problem"
+          :changes="budgetChanges"
+          @discard="discard"
+        />
       </form>
       <template v-else>
         <SettingsRow label="每个联系人每日写入上限">
@@ -154,3 +201,17 @@ async function save() {
     </div>
   </SettingsBlock>
 </template>
+
+<style scoped>
+.usage-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px 12px;
+}
+.usage-pct {
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+</style>

@@ -45,7 +45,7 @@ async function save(includePrivate: boolean) {
 </script>
 
 <template>
-  <SettingsBlock title="整理">
+  <SettingsBlock title="整理" badge="当前账号 · 即时生效" tone="instant">
     <template #note>
       开启后，当前账号的本人记忆（机密除外）将发送给抽取模型整理，已发送的内容无法撤回。
       <Hint>
