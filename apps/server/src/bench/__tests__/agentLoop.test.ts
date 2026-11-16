@@ -8,6 +8,8 @@ import { agentGetsTools, agentLoopFor } from '../agentLoop'
 const EXPECTED: Record<RuntimeFamily, BenchAgentLoop> = {
   claudecode: 'hook',
   codex: 'hook',
+  gemini: 'approximate',
+  agy: 'approximate',
   astrbot: 'chat',
   mcp: 'tools',
   openclaw: 'approximate',

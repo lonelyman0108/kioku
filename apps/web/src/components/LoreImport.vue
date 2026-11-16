@@ -55,6 +55,8 @@ import {
 import { UNMATCHED_HINT } from '../plaintext'
 import { formatTime } from '../time'
 import Hint from './Hint.vue'
+import RuntimeLabel from './RuntimeLabel.vue'
+import TransferEntryRow from './TransferEntryRow.vue'
 import NoteLine from './strata/NoteLine.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 import SettingsBlock from './strata/SettingsBlock.vue'
@@ -66,6 +68,24 @@ const props = defineProps<{ spaceId: string; editable: boolean; isAdmin: boolean
 const queryClient = useQueryClient()
 
 type SourceKind = LoreImportSource['kind']
+type PlanTab = 'nodes' | 'mapping' | 'sync'
+const open = ref(false)
+const planTab = ref<PlanTab>('nodes')
+const PLAN_TABS: readonly PlanTab[] = ['nodes', 'mapping', 'sync']
+const tabRefs = ref<Partial<Record<PlanTab, HTMLButtonElement | null>>>({})
+function onPlanTabKeydown(event: KeyboardEvent, current: PlanTab) {
+  const index = PLAN_TABS.indexOf(current)
+  let nextIndex = -1
+  if (event.key === 'ArrowRight') nextIndex = (index + 1) % PLAN_TABS.length
+  else if (event.key === 'ArrowLeft') nextIndex = (index - 1 + PLAN_TABS.length) % PLAN_TABS.length
+  else if (event.key === 'Home') nextIndex = 0
+  else if (event.key === 'End') nextIndex = PLAN_TABS.length - 1
+  if (nextIndex < 0) return
+  event.preventDefault()
+  const next = PLAN_TABS[nextIndex]!
+  planTab.value = next
+  tabRefs.value[next]?.focus()
+}
 const sourceKind = ref<SourceKind>('file')
 const file = ref<File | null>(null)
 // 裁剪过的导出：执行时要重新发一次。只在内存里，换了文件、换了空间或导入成功就丢掉
@@ -97,15 +117,23 @@ const clearSelection = () => {
 // 来源或人格变了，看过的计划就不算数了；换了来源连勾选一起清
 watch([sourceKind, file, url, token, personaSlug, personaName], () => {
   plan.value = null
+  planTab.value = 'nodes'
   error.value = null
   notice.value = null
   confirmStale.value = false
 })
 watch([sourceKind, file, url], clearSelection)
 watch(file, () => (backup.value = null))
+watch(open, (opened) => {
+  if (opened && result.value && !importProblems(result.value)) {
+    result.value = null
+  }
+})
 watch(
   () => props.spaceId,
   () => {
+    open.value = false
+    planTab.value = 'nodes'
     file.value = null
     url.value = ''
     token.value = ''
@@ -184,8 +212,19 @@ async function showPlan(): Promise<boolean> {
 
 async function replan() {
   notice.value = null
+  const ok = await showPlan()
+  if (ok) result.value = null
+}
+
+function resetSource() {
+  if (busy.value) return
+  plan.value = null
   result.value = null
-  await showPlan()
+  planTab.value = 'nodes'
+  filter.value = 'all'
+  confirmStale.value = false
+  error.value = null
+  notice.value = null
 }
 
 // 表单的提交（包括在输入框里按回车的隐式提交）只用来看计划。计划显示之后什么都不做：写入只来自点「确认导入」，
@@ -218,6 +257,11 @@ async function applyPlan() {
       if (!importProblems(done)) {
         file.value = null
         token.value = ''
+        planTab.value = 'nodes'
+        filter.value = 'all'
+        confirmStale.value = false
+        error.value = null
+        notice.value = null
         clearSelection()
       }
       void queryClient.invalidateQueries()
@@ -356,12 +400,34 @@ const disclosureCut = computed(
       plan.value?.warnings.filter((w) => w.kind === 'disclosureTruncated').map((w) => w.uri) ?? [],
     ),
 )
+const syncIssuesCount = computed(() => {
+  const s = sync.value
+  const p = plan.value
+  if (!s || !p) return 0
+  return (
+    s.groups.reduce((acc, g) => acc + g.lines.length, 0) +
+    p.skipped.length +
+    p.droppedKeywords.length
+  )
+})
+const currentStep = computed(() => (result.value ? 3 : plan.value ? 2 : 1))
+const entryStatus = computed(() => {
+  if (plan.value && effects.value) {
+    return `已解析 ${plan.value.nodeCount} 个节点（将新建 ${effects.value.create} 条、同步 ${effects.value.update} 条），待确认`
+  }
+  if (result.value) {
+    return importProblems(result.value)
+      ? '上次导入有部分未完成条目，可继续处理'
+      : `上次已导入 ${result.value.created.length} 条记忆`
+  }
+  return null
+})
 </script>
 
 <template>
-  <SettingsBlock title="Lore" :level="4" :wide="Boolean(plan)">
+  <SettingsBlock title="Lore" :level="4">
     <template #note>
-      导入 Lore 的节点，确认计划后才写入。
+      导入 Lore 的节点，确认计划后才写入。查看计划与确认在独立弹窗中完成。
       <Hint>
         映射规则与命令行相同：core://agent 进入通用，core://soul
         进入人格，core://agent/&lt;运行时&gt; 进入当前账号的对应应用，preferences://
@@ -372,499 +438,806 @@ const disclosureCut = computed(
 
     <p v-if="!editable" class="text-muted">仅空间所有者可导入</p>
 
-    <!-- 结果：有没做成的就不显示成成功 -->
-    <div v-else-if="result" class="space-y-3">
-      <NoteLine v-if="importProblems(result)" tone="warning">
-        部分内容未完成：请查看下方说明，处理后重新生成计划以继续
-      </NoteLine>
-      <NoteLine v-else><span class="text-success">导入完成</span></NoteLine>
-      <ul class="space-y-1">
-        <li v-if="result.personaUsed">
-          人格 {{ persona.slug }}：{{ result.personaCreated ? '新建' : '已有' }}
-        </li>
-        <li v-else>
-          人格 {{ persona.slug }} 不存在，本次也没有要写入的
-          core://soul：未新建人格，新建应用的默认人格为空
-        </li>
-        <li v-if="result.appsCreated.length">
-          新建应用：{{
-            result.appsCreated.join('、')
-          }}。暂无访问密钥，请在「应用」中为要接入的应用签发
-        </li>
-        <li v-if="result.appsGivenPersona.length">
-          设为默认人格 {{ persona.slug }}：{{ result.appsGivenPersona.join('、') }}
-        </li>
-        <li v-if="result.appsOtherPersona.length">
-          以下应用使用其他人格，core://soul 不会进入其启动加载：{{
-            result.appsOtherPersona.join('、')
-          }}
-        </li>
-        <li>
-          新建记忆 {{ result.created.length }} 条；跳过已导入的
-          {{ result.previouslyImported.length }} 条（含导入后在 Kioku 中删除或移动的）
-        </li>
-        <li>按 Lore 同步 {{ result.sync.updated.length }} 条</li>
-        <li v-if="result.plaintextConverted.length">
-          疑似明文换成凭据占位符 {{ result.plaintextConverted.length }} 条
-        </li>
-        <li>向量在后台生成</li>
-      </ul>
-      <ul
-        v-if="
-          result.occupied.length ||
-          result.movedInLore.length ||
-          result.secretAlreadyImported.length ||
-          result.failed.length ||
-          result.sync.failed.length ||
-          result.plaintextKept.length
-        "
-        class="space-y-1 break-all"
-      >
-        <li v-for="uri in result.occupied" :key="`occupied-${uri}`">
-          跳过 <code class="uri">{{ uri }}</code
-          >：坐标已被其他记忆占用
-        </li>
-        <li v-for="m in result.movedInLore" :key="`moved-${m.uri}-${m.current}`">
-          跳过 <code class="uri">{{ m.uri }}</code
-          >：Lore 中路径已变更，<template v-if="m.current">
-            此前导入的记忆仍在 <code class="uri">{{ m.current }}</code
-            >，如需跟随请手动移动</template
-          ><template v-else>此前导入的记忆已在 Kioku 中删除</template>，未在新位置新建
-        </li>
-        <li
-          v-for="s in result.secretAlreadyImported"
-          :key="`secret-${s.uri}-${s.current}`"
-          class="text-warning"
-        >
-          <code class="uri">{{ s.uri }}</code>
-          此前已导入，当前仍为明文，本次标记的机密未生效。请到记忆详情将
-          <code class="uri">{{ s.current }}</code> 改为机密（同时清除历史中的明文）
-        </li>
-        <li v-for="f in result.failed" :key="`failed-${f.uri}`" class="text-error">
-          失败 <code class="uri">{{ f.uri }}</code
-          >：{{ f.reason }}
-        </li>
-        <li v-for="f in result.sync.failed" :key="`sync-${f.uri}`" class="text-error">
-          同步失败 <code class="uri">{{ f.uri }}</code
-          >：{{ f.reason }}
-        </li>
-        <li v-for="f in result.plaintextKept" :key="`kept-${f.uri}`" class="text-warning">
-          保留明文 <code class="uri">{{ f.uri }}</code
-          >：{{ f.reason }}<Hint>勾选了写成占位符，但照原样写入。可在待处理中转存为凭据。</Hint>
-        </li>
-      </ul>
-      <div class="flex flex-wrap gap-2 pt-1">
-        <UButton
-          v-if="importProblems(result)"
-          color="primary"
-          variant="outline"
-          :loading="busy"
-          :disabled="!ready"
-          @click="replan"
-        >
-          重新生成计划
+    <TransferEntryRow
+      v-else
+      :icon="icons.lore"
+      title="Lore 知识库"
+      description="支持上传导出的 JSON 文件，或从 Lore 服务地址拉取，核对节点、映射与凭据后写入当前空间。"
+      :status="entryStatus"
+      :status-tone="plan ? 'warning' : 'neutral'"
+    >
+      <template #action>
+        <UButton color="neutral" variant="outline" :icon="icons.lore" @click="open = true">
+          {{ plan ? '继续查看计划' : '从 Lore 导入' }}
         </UButton>
-        <UButton v-else color="neutral" variant="outline" @click="result = null">再次导入</UButton>
-      </div>
-    </div>
+      </template>
+    </TransferEntryRow>
 
-    <form v-else class="space-y-4" @submit.prevent="onSubmit">
-      <div class="source space-y-4">
-        <UTabs
-          v-if="isAdmin"
-          v-model="sourceKind"
-          :items="sourceTabs(busy)"
-          :content="false"
-          size="sm"
-          class="w-full"
-        />
-        <p v-else class="text-muted">
-          仅可上传导出文件。
-          <Hint>从地址拉取需要实例管理员权限：服务端要向该地址发送请求。</Hint>
-        </p>
-        <UFormField
-          v-if="sourceKind === 'file'"
-          label="Lore 的导出文件"
-          :error="tooLarge ? `文件超过 ${formatBytes(LORE_FILE_MAX_BYTES)} 的上限` : undefined"
-        >
-          <template #help>
-            在 Lore 设置页导出的 JSON，不超过 {{ formatBytes(LORE_FILE_MAX_BYTES) }}。
-            <Hint>
-              导出时不要包含召回事件：导入不使用，且文件会很大。文件先在浏览器中裁剪再上传，只上传所需的五张表（不超过
-              {{ formatBytes(LORE_UPLOAD_MAX_BYTES) }}），Lore 保存的 API
-              Key、事件、日记与旧版本正文不会离开浏览器。
-            </Hint>
-          </template>
-          <!-- 不预览文件内容：预览要给它建 blob: 地址当图片加载，会被内容安全策略拦下 -->
-          <UFileUpload
-            v-model="file"
-            label="选择或拖入导出文件"
-            description=".json"
-            accept=".json,application/json"
-            layout="list"
-            :file-image="false"
-            class="w-full"
-            :disabled="busy"
-          />
-        </UFormField>
-        <template v-else>
-          <UFormField label="Lore 地址">
-            <template #help>
-              填写服务根路径，仅支持 http 与 https。
-              <Hint>不能包含账号密码、查询参数与片段；不跟随重定向。</Hint>
-            </template>
-            <UInput
-              v-model="url"
-              placeholder="https://lore.example.com"
-              autocomplete="off"
-              class="w-full"
-              :disabled="busy"
-            />
-          </UFormField>
-          <UFormField label="API Token" help="Lore 的 API_TOKEN，仅本次使用，不保存">
-            <UInput
-              v-model="token"
-              type="password"
-              autocomplete="off"
-              class="w-full"
-              :disabled="busy"
-            />
-          </UFormField>
-          <NoteLine v-if="tokenExposed" tone="warning">
-            此地址为 http 且不在内网：API Token 将明文传输，而此 API Token 可清空整个
-            Lore。请尽量改用 https。
-          </NoteLine>
-        </template>
-        <div class="grid gap-4 sm:grid-cols-2">
-          <UFormField
-            label="人格标识"
-            help="core://soul 导入为此人格的设定，默认与命令行相同"
-            :error="personaProblem ?? undefined"
+    <UModal
+      :open="open"
+      title="从 Lore 导入"
+      :dismissible="!busy"
+      :close="!busy"
+      :ui="{ content: 'sm:max-w-4xl' }"
+      @update:open="(v: boolean) => !busy && (open = v)"
+    >
+      <template #body>
+        <ol class="steps mb-4" aria-label="导入步骤">
+          <li
+            :data-state="currentStep === 1 ? 'active' : currentStep > 1 ? 'done' : 'idle'"
+            :aria-current="currentStep === 1 ? 'step' : undefined"
           >
-            <UInput v-model="personaSlug" class="w-full font-mono" :disabled="busy" />
-          </UFormField>
-          <UFormField label="人格名称" help="写入新的 core://soul 且此人格不存在时，以此名称新建">
-            <UInput v-model="personaName" class="w-full" maxlength="64" :disabled="busy" />
-          </UFormField>
-        </div>
-      </div>
+            <span class="step-num">1</span>
+            <span>选择来源</span>
+          </li>
+          <li
+            :data-state="currentStep === 2 ? 'active' : currentStep > 2 ? 'done' : 'idle'"
+            :aria-current="currentStep === 2 ? 'step' : undefined"
+          >
+            <span class="step-num">2</span>
+            <span>查看与确认计划</span>
+          </li>
+          <li
+            :data-state="currentStep === 3 ? 'active' : 'idle'"
+            :aria-current="currentStep === 3 ? 'step' : undefined"
+          >
+            <span class="step-num">3</span>
+            <span>导入结果</span>
+          </li>
+        </ol>
 
-      <NoteLine v-if="notice" tone="warning">{{ notice }}</NoteLine>
-
-      <div v-if="plan && effects" class="plan">
-        <p>
-          数据导出于 {{ formatTime(plan.exportedAt) }}：{{ plan.nodeCount }} 个节点，{{
-            plan.previousVersions
-          }}
-          个旧版本不迁移。
-        </p>
-        <NoteLine tone="warning">
-          只导入本人导出的文件或本人的 Lore
-          <template #detail>
-            内容按受信来源写入。本次写入的节点中有
-            {{ effects.bootNodes }}
-            个进入启动加载，每次会话开始时注入，客户端将其作为指令读取<template
-              v-if="effects.credentialRefs.length"
-              >；正文引用了凭据 {{ effects.credentialRefs.join('、') }}，Agent
-              可取用这些凭据</template
-            >。来源不明的内容写入后，会成为当前账号 Agent 的指令。
-          </template>
-        </NoteLine>
-        <div v-if="stale === 'confirm'">
-          <NoteLine tone="error">
-            此文件早于已写入的数据（数据时间 {{ formatTime(plan.staleSince!) }}）
-            <template #detail>
-              同步只比较内容是否相同，用旧文件写入会把内容改回旧版，还可能新建已在 Lore
-              中删除的节点。建议重新导出；之后上传新的导出文件可同步回来。
-            </template>
+        <!-- 结果：有没做成的就不显示成成功 -->
+        <div v-if="result" class="space-y-4">
+          <NoteLine v-if="importProblems(result)" tone="warning">
+            部分内容未完成：请查看下方说明，处理后重新生成计划以继续
           </NoteLine>
-          <UCheckbox v-model="confirmStale" label="确认此文件较旧，仍要写入" />
-        </div>
-        <p v-else-if="stale === 'older'" class="text-muted">
-          此文件早于已写入的数据（{{
-            formatTime(plan.dataTime!)
-          }}）。本次没有要写入的内容，下方列出的「Lore 中已不存在」可能只是因为文件较旧。
-        </p>
-        <NoteLine v-if="!plan.secretAvailable" tone="warning">
-          当前实例未配置主密钥，无法标记机密。请配置 KIOKU_MASTER_KEY 后再导入机密节点。
-        </NoteLine>
-        <p v-if="planUnmatchedNote(plan)" class="text-muted">
-          疑似明文：{{ planUnmatchedNote(plan) }}<Hint>{{ UNMATCHED_HINT }}</Hint>
-        </p>
+          <NoteLine v-else><span class="text-success">导入完成</span></NoteLine>
 
-        <section>
-          <SectionHeading title="人格与应用" :level="4" />
-          <div class="plan-body space-y-1">
-            <p v-if="effects.writesPersona">
-              core://soul 导入为 <code class="uri">{{ plan.persona.slug }}</code>
-              <template v-if="plan.persona.exists">（已有）</template>
-              <template v-else>（不存在，新建为「{{ plan.persona.name }}」）</template>
-            </p>
-            <p v-else-if="plan.persona.exists">
-              本次没有要新写入的 core://soul，不新建人格。已有人格
-              <code class="uri">{{ plan.persona.slug }}</code>
-              照常使用：新建应用和暂无默认人格的应用将设为此人格。
-            </p>
-            <p v-else>
-              本次没有要新写入的 core://soul，人格
-              <code class="uri">{{ plan.persona.slug }}</code>
-              也不存在：不新建，新建应用的默认人格为空。
-            </p>
-            <p v-if="effects.writesPersona && otherPersonas.length" class="text-warning">
-              此前的导入写入了人格 {{ otherPersonas.join('、') }}：本次将另写一份
-              core://soul，此前那份不再同步。如需继续同步，请改回原人格标识。
-            </p>
-            <p v-for="mapping in effects.apps" :key="mapping.runtime" class="break-all">
-              core://agent/{{ mapping.runtime }} →
-              <template v-for="(app, i) in mapping.apps" :key="app.slug"
-                ><template v-if="i">、</template><code class="uri">{{ app.slug }}</code
-                >{{ app.create ? `（新建，类型 ${app.runtimeFamily}）` : '（已有）' }}</template
-              >
-            </p>
-            <p v-if="effects.appsGivenPersona.length">
-              以下应用暂无默认人格，将设为 {{ plan.persona.slug }}：{{
-                effects.appsGivenPersona.join('、')
-              }}
-            </p>
-            <p v-if="effects.appsOtherPersona.length" class="text-warning">
+          <dl class="kpi-strip">
+            <div class="kpi-cell">
+              <dt>新建记忆</dt>
+              <dd>{{ result.created.length }}</dd>
+            </div>
+            <div class="kpi-cell">
+              <dt>按 Lore 同步</dt>
+              <dd>{{ result.sync.updated.length }}</dd>
+            </div>
+            <div class="kpi-cell">
+              <dt>转为凭据占位符</dt>
+              <dd>{{ result.plaintextConverted.length }}</dd>
+            </div>
+            <div class="kpi-cell">
+              <dt>跳过与未完成</dt>
+              <dd>
+                {{
+                  result.occupied.length +
+                  result.movedInLore.length +
+                  result.secretAlreadyImported.length +
+                  result.failed.length +
+                  result.sync.failed.length +
+                  result.plaintextKept.length
+                }}
+              </dd>
+            </div>
+          </dl>
+
+          <ul class="space-y-1">
+            <li v-if="result.personaUsed">
+              人格 {{ persona.slug }}：{{ result.personaCreated ? '新建' : '已有' }}
+            </li>
+            <li v-else>
+              人格 {{ persona.slug }} 不存在，本次也没有要写入的
+              core://soul：未新建人格，新建应用的默认人格为空
+            </li>
+            <li v-if="result.appsCreated.length">
+              新建应用：{{
+                result.appsCreated.join('、')
+              }}。暂无访问密钥，请在「应用」中为要接入的应用签发
+            </li>
+            <li v-if="result.appsGivenPersona.length">
+              设为默认人格 {{ persona.slug }}：{{ result.appsGivenPersona.join('、') }}
+            </li>
+            <li v-if="result.appsOtherPersona.length">
               以下应用使用其他人格，core://soul 不会进入其启动加载：{{
-                effects.appsOtherPersona.join('、')
+                result.appsOtherPersona.join('、')
               }}
-            </p>
-          </div>
-        </section>
+            </li>
+            <li>
+              跳过已导入 {{ result.previouslyImported.length }} 条（含导入后在 Kioku
+              中删除或移动的）
+            </li>
+            <li class="text-muted">向量在后台生成</li>
+          </ul>
 
-        <section>
-          <SectionHeading title="节点" :level="4">
-            <template #actions>
-              <USelect
-                v-model="filter"
-                :items="filterItems"
-                size="sm"
-                class="w-44"
-                aria-label="筛选节点"
-              />
-            </template>
-          </SectionHeading>
-          <p v-if="!visibleNodes.length" class="plan-body text-muted">没有匹配的节点</p>
-          <ul v-else class="nodes">
+          <ul
+            v-if="
+              result.occupied.length ||
+              result.movedInLore.length ||
+              result.secretAlreadyImported.length ||
+              result.failed.length ||
+              result.sync.failed.length ||
+              result.plaintextKept.length
+            "
+            class="space-y-1 break-all border-t border-[var(--ui-border)] pt-3"
+          >
+            <li v-for="uri in result.occupied" :key="`occupied-${uri}`">
+              跳过 <code class="uri">{{ uri }}</code
+              >：坐标已被其他记忆占用
+            </li>
+            <li v-for="m in result.movedInLore" :key="`moved-${m.uri}-${m.current}`">
+              跳过 <code class="uri">{{ m.uri }}</code
+              >：Lore 中路径已变更，<template v-if="m.current">
+                此前导入的记忆仍在 <code class="uri">{{ m.current }}</code
+                >，如需跟随请手动移动</template
+              ><template v-else>此前导入的记忆已在 Kioku 中删除</template>，未在新位置新建
+            </li>
             <li
-              v-for="node in visibleNodes"
-              :key="node.uuid"
-              class="node"
-              :class="{ 'opacity-60': excludedIds.has(node.uuid) }"
+              v-for="s in result.secretAlreadyImported"
+              :key="`secret-${s.uri}-${s.current}`"
+              class="text-warning"
             >
-              <div class="node-head">
-                <div class="min-w-0 flex-1 basis-48">
-                  <p class="uri"><UriPath :uri="node.uri" wrap /></p>
-                  <p v-if="node.aliases.length" class="break-all text-muted">
-                    别名不导入：{{ node.aliases.join('、') }}
-                  </p>
-                </div>
-                <div class="flex shrink-0 flex-wrap gap-3">
-                  <UTooltip :text="secretHint(node)" :disabled="!secretHint(node)">
-                    <UCheckbox
-                      size="sm"
-                      label="标记机密"
-                      :model-value="secretIds.has(node.uuid) && secretSelectable(node)"
-                      :disabled="Boolean(secretHint(node))"
-                      @update:model-value="toggleSecret(node.uuid, $event)"
-                    />
-                  </UTooltip>
-                  <UCheckbox
-                    size="sm"
-                    :label="excludeLabel(node)"
-                    :model-value="excludedIds.has(node.uuid)"
-                    @update:model-value="toggleExcluded(node.uuid, $event)"
-                  />
-                </div>
-              </div>
-              <div v-for="target in node.targets" :key="target.uri" class="node-target">
-                <UIcon :name="icons.inherits" class="target-arrow" />
-                <span class="target-title">{{ targetTitle(target, secretNow(node, target)) }}</span>
-                <UriPath :uri="target.uri" wrap />
-                <span :class="STATE_CLASSES[target.state]">
-                  {{ targetStateLabels[target.state] }}
-                </span>
-                <StrataSwatch
-                  :layer="target.layer"
-                  :sensitivity="sensitivityOf(node, target)"
-                  label="both"
-                />
-                <span class="font-mono text-[13px]">P{{ target.priority }}</span>
-                <span v-if="effects.boot.has(target)" class="text-warning">进入启动加载</span>
-                <span v-if="currentNote(target)" class="break-all text-muted">
-                  {{ currentNote(target) }}
-                </span>
-              </div>
-              <p v-if="node.credentialRefs.length" class="text-muted">
-                引用凭据：{{ node.credentialRefs.join('、') }}
-              </p>
-              <!-- 正文里的疑似明文：和已有凭据同值的可以换成占位符，默认勾上 -->
-              <ul v-if="node.plaintext.length" class="spots">
-                <li v-for="spot in node.plaintext" :key="spot.index" class="spot">
-                  <span class="text-muted">
-                    第 {{ spot.index + 1 }} 处 · 第 {{ spot.line }} 行 ·
-                    {{ PLAINTEXT_KIND_NAMES[spot.kind] }}
-                  </span>
-                  <template v-if="spot.credential">
-                    <span>
-                      与凭据「{{ spot.credential.name }}」<code class="uri"
-                        >{{ spot.credential.identifier }}#{{ spot.credential.field }}</code
-                      >同值
-                    </span>
-                    <UCheckbox
-                      size="sm"
-                      label="写成占位符"
-                      :model-value="converting(node, spot)"
-                      :disabled="plaintextState(node, spot) !== 'convertible'"
-                      @update:model-value="toggleConverted(node, spot, $event)"
-                    />
-                    <span v-if="plaintextState(node, spot) === 'blocked'" class="text-warning">
-                      无法写成占位符<Hint>
-                        凭据占位符只能放在本人、敏感级不低于私密的记忆中。
-                      </Hint>
-                    </span>
-                    <span
-                      v-else-if="converting(node, spot) && keptCount(node)"
-                      class="text-warning"
-                    >
-                      另有 {{ keptCount(node) }} 条记忆保留明文<Hint>
-                        这些记忆放不进凭据占位符，或是已导入、这次同步的记忆，正文照原样写入。
-                      </Hint>
-                    </span>
-                    <span v-else-if="plaintextState(node, spot) === 'synced'" class="text-muted">
-                      已导入，按原样同步<Hint v-if="syncedStillThere(node)">
-                        同步后可在记忆详情或待处理中转存为凭据。
-                      </Hint>
-                    </span>
-                    <span v-else-if="plaintextState(node, spot) === 'unwritten'" class="text-muted">
-                      本次不写入
-                    </span>
-                  </template>
-                  <span v-else class="text-muted">
-                    无同值的凭据<Hint>
-                      导入只匹配已有的凭据。密码库条目需先在凭据页起标识，再重新生成计划；也可以导入后在待处理中转存为凭据。
-                    </Hint>
-                  </span>
-                </li>
-              </ul>
-              <p v-if="credentialNote(node)" class="text-warning">
-                {{ credentialNote(node) }}
-              </p>
-              <p v-if="node.credentialHints.extras" class="text-warning">
-                触发场景或关键词疑似包含明文凭据：机密只加密正文，这两项仍为明文
-              </p>
-              <p v-if="disclosureCut.has(node.uri)" class="text-muted">触发场景过长，写入时截断</p>
+              <code class="uri">{{ s.uri }}</code>
+              此前已导入，当前仍为明文，本次标记的机密未生效。请到记忆详情将
+              <code class="uri">{{ s.current }}</code> 改为机密（同时清除历史中的明文）
+            </li>
+            <li v-for="f in result.failed" :key="`failed-${f.uri}`" class="text-error">
+              失败 <code class="uri">{{ f.uri }}</code
+              >：{{ f.reason }}
+            </li>
+            <li v-for="f in result.sync.failed" :key="`sync-${f.uri}`" class="text-error">
+              同步失败 <code class="uri">{{ f.uri }}</code
+              >：{{ f.reason }}
+            </li>
+            <li v-for="f in result.plaintextKept" :key="`kept-${f.uri}`" class="text-warning">
+              保留明文 <code class="uri">{{ f.uri }}</code
+              >：<span>{{ f.reason }}</span>
+              <Hint>勾选了写成占位符，但照原样写入。可在待处理中转存为凭据。</Hint>
             </li>
           </ul>
-        </section>
 
-        <details v-if="plan.skipped.length">
-          <summary>不导入（{{ plan.skipped.length }}）</summary>
-          <ul class="detail-list">
-            <li v-for="(s, i) in plan.skipped" :key="i">
-              <code class="uri">{{ s.source }}</code
-              >：{{ s.reason }}
-            </li>
-          </ul>
-        </details>
-        <details v-if="plan.droppedKeywords.length">
-          <summary>丢弃的关键词（{{ plan.droppedKeywords.length }}）</summary>
-          <ul class="detail-list">
-            <li v-for="(k, i) in plan.droppedKeywords" :key="i">
-              <code class="uri">{{ k.source }}</code
-              >「{{ k.keyword }}」：{{ k.reason }}
-            </li>
-          </ul>
-        </details>
+          <NoteLine v-if="error" tone="error">{{ error }}</NoteLine>
 
-        <section v-if="sync">
-          <SectionHeading title="同步已导入的节点" :level="4" />
-          <div class="plan-body space-y-2">
-            <p v-if="sync.current || sync.groups.length">
-              已是最新 {{ sync.current }} 条。如不需要同步某节点，请在上方勾选「本次不同步」。
-            </p>
-            <p v-else class="text-muted">暂无已导入的节点</p>
-            <details
-              v-for="group in sync.groups"
-              :key="group.state"
-              :open="group.state === 'update'"
-            >
-              <summary>{{ group.heading }}（{{ group.lines.length }}）</summary>
-              <ul class="detail-list">
-                <!-- 和上面的写入目标一样先写标题，坐标跟在后面 -->
-                <li v-for="(line, i) in group.lines" :key="i" class="sync-line">
-                  <span v-if="line.title" class="target-title">{{ line.title }}</span>
-                  <UriPath :uri="line.uri" wrap />
-                  <template v-if="line.target">
-                    <span>→</span>
-                    <UriPath :uri="line.target" wrap />
-                  </template>
-                  <span v-if="line.detail">{{ line.detail }}</span>
-                </li>
-              </ul>
-            </details>
+          <div class="modal-foot">
+            <div />
+            <div class="flex flex-wrap gap-2">
+              <UButton
+                v-if="importProblems(result)"
+                color="primary"
+                variant="outline"
+                :loading="busy"
+                :disabled="!ready"
+                @click="replan"
+              >
+                重新生成计划
+              </UButton>
+              <UButton v-else color="neutral" variant="outline" @click="resetSource">
+                再次导入
+              </UButton>
+              <UButton color="neutral" variant="ghost" @click="open = false">完成</UButton>
+            </div>
           </div>
-        </section>
+        </div>
 
-        <p class="plan-total">
-          本次将新建 {{ effects.create }} 条、按 Lore 更新
-          {{ effects.update }} 条。写入中途出错时，已写入的内容保留，重新生成计划后可继续。
-        </p>
-      </div>
+        <form v-else class="space-y-4" @submit.prevent="onSubmit">
+          <div v-if="!plan" class="source space-y-4">
+            <UTabs
+              v-if="isAdmin"
+              v-model="sourceKind"
+              :items="sourceTabs(busy)"
+              :content="false"
+              size="sm"
+              class="w-full"
+            />
+            <p v-else class="text-muted">
+              仅可上传导出文件。
+              <Hint>从地址拉取需要实例管理员权限：服务端要向该地址发送请求。</Hint>
+            </p>
+            <UFormField
+              v-if="sourceKind === 'file'"
+              label="Lore 的导出文件"
+              :error="tooLarge ? `文件超过 ${formatBytes(LORE_FILE_MAX_BYTES)} 的上限` : undefined"
+            >
+              <template #help>
+                在 Lore 设置页导出的 JSON，不超过 {{ formatBytes(LORE_FILE_MAX_BYTES) }}。
+                <Hint>
+                  导出时不要包含召回事件：导入不使用，且文件会很大。文件先在浏览器中裁剪再上传，只上传所需的五张表（不超过
+                  {{ formatBytes(LORE_UPLOAD_MAX_BYTES) }}），Lore 保存的 API
+                  Key、事件、日记与旧版本正文不会离开浏览器。
+                </Hint>
+              </template>
+              <!-- 不预览文件内容：预览要给它建 blob: 地址当图片加载，会被内容安全策略拦下 -->
+              <UFileUpload
+                v-model="file"
+                label="选择或拖入导出文件"
+                description=".json"
+                accept=".json,application/json"
+                layout="list"
+                :file-image="false"
+                class="w-full"
+                :disabled="busy"
+              />
+            </UFormField>
+            <template v-else>
+              <UFormField label="Lore 地址">
+                <template #help>
+                  填写服务根路径，仅支持 http 与 https。
+                  <Hint>不能包含账号密码、查询参数与片段；不跟随重定向。</Hint>
+                </template>
+                <UInput
+                  v-model="url"
+                  placeholder="https://lore.example.com"
+                  autocomplete="off"
+                  class="w-full"
+                  :disabled="busy"
+                />
+              </UFormField>
+              <UFormField label="API Token" help="Lore 的 API_TOKEN，仅本次使用，不保存">
+                <UInput
+                  v-model="token"
+                  type="password"
+                  autocomplete="off"
+                  class="w-full"
+                  :disabled="busy"
+                />
+              </UFormField>
+              <NoteLine v-if="tokenExposed" tone="warning">
+                此地址为 http 且不在内网：API Token 将明文传输，而此 API Token 可清空整个
+                Lore。请尽量改用 https。
+              </NoteLine>
+            </template>
+            <div class="grid gap-4 sm:grid-cols-2">
+              <UFormField
+                label="人格标识"
+                help="core://soul 导入为此人格的设定，默认与命令行相同"
+                :error="personaProblem ?? undefined"
+              >
+                <UInput v-model="personaSlug" class="w-full font-mono" :disabled="busy" />
+              </UFormField>
+              <UFormField
+                label="人格名称"
+                help="写入新的 core://soul 且此人格不存在时，以此名称新建"
+              >
+                <UInput v-model="personaName" class="w-full" maxlength="64" :disabled="busy" />
+              </UFormField>
+            </div>
+          </div>
 
-      <NoteLine v-if="error" tone="error">{{ error }}</NoteLine>
+          <NoteLine v-if="notice" tone="warning">{{ notice }}</NoteLine>
 
-      <div class="flex flex-wrap gap-2">
-        <template v-if="plan">
-          <UButton :loading="busy" :disabled="!ready || confirmMissing" @click="applyPlan">
-            确认导入
-          </UButton>
-          <UButton color="neutral" variant="outline" :disabled="!ready" @click="replan">
-            重新生成计划
-          </UButton>
-        </template>
-        <UButton
-          v-else
-          type="submit"
-          color="primary"
-          variant="outline"
-          :loading="busy"
-          :disabled="!ready"
-        >
-          查看计划
-        </UButton>
-      </div>
-    </form>
+          <div v-if="plan && effects" class="plan space-y-4">
+            <div class="plan-meta-bar">
+              <p class="text-muted">
+                导出于 {{ formatTime(plan.exportedAt) }} · 共 {{ plan.nodeCount }} 个节点（{{
+                  plan.previousVersions
+                }}
+                个旧版本不迁移）
+              </p>
+              <UButton
+                color="neutral"
+                variant="outline"
+                size="xs"
+                :disabled="busy"
+                @click="resetSource"
+              >
+                更换来源
+              </UButton>
+            </div>
+
+            <dl class="kpi-strip">
+              <div class="kpi-cell">
+                <dt>将新建</dt>
+                <dd>{{ effects.create }}</dd>
+              </div>
+              <div class="kpi-cell">
+                <dt>按 Lore 更新</dt>
+                <dd>{{ effects.update }}</dd>
+              </div>
+              <div class="kpi-cell">
+                <dt>进入启动加载</dt>
+                <dd>{{ effects.bootNodes }}</dd>
+              </div>
+              <div class="kpi-cell">
+                <dt>涉及应用</dt>
+                <dd>{{ effects.apps.reduce((n, m) => n + m.apps.length, 0) }}</dd>
+              </div>
+            </dl>
+
+            <NoteLine tone="warning">
+              只导入本人导出的文件或本人的 Lore
+              <template #detail>
+                内容按受信来源写入。本次写入的节点中有
+                {{ effects.bootNodes }}
+                个进入启动加载，每次会话开始时注入，客户端将其作为指令读取<template
+                  v-if="effects.credentialRefs.length"
+                  >；正文引用了凭据 {{ effects.credentialRefs.join('、') }}，Agent
+                  可取用这些凭据</template
+                >。来源不明的内容写入后，会成为当前账号 Agent 的指令。
+              </template>
+            </NoteLine>
+            <div v-if="stale === 'confirm'" class="space-y-2">
+              <NoteLine tone="error">
+                此文件早于已写入的数据（数据时间 {{ formatTime(plan.staleSince!) }}）
+                <template #detail>
+                  同步只比较内容是否相同，用旧文件写入会把内容改回旧版，还可能新建已在 Lore
+                  中删除的节点。建议重新导出；之后上传新的导出文件可同步回来。
+                </template>
+              </NoteLine>
+              <UCheckbox v-model="confirmStale" label="确认此文件较旧，仍要写入" />
+            </div>
+            <p v-else-if="stale === 'older'" class="text-muted">
+              此文件早于已写入的数据（{{
+                formatTime(plan.dataTime!)
+              }}）。本次没有要写入的内容，「同步与跳过」分页里列出的「Lore
+              中已不存在」可能只是因为文件较旧。
+            </p>
+            <NoteLine v-if="!plan.secretAvailable" tone="warning">
+              当前实例未配置主密钥，无法标记机密。请配置 KIOKU_MASTER_KEY 后再导入机密节点。
+            </NoteLine>
+            <p v-if="planUnmatchedNote(plan)" class="text-muted">
+              疑似明文：{{ planUnmatchedNote(plan) }}<Hint>{{ UNMATCHED_HINT }}</Hint>
+            </p>
+
+            <div class="plan-tabs" role="tablist" aria-label="导入计划分页">
+              <button
+                id="lore-tab-nodes"
+                :ref="(el) => (tabRefs.nodes = el as HTMLButtonElement | null)"
+                type="button"
+                role="tab"
+                aria-controls="lore-panel-nodes"
+                :aria-selected="planTab === 'nodes'"
+                :tabindex="planTab === 'nodes' ? 0 : -1"
+                :data-active="planTab === 'nodes'"
+                class="plan-tab"
+                @click="planTab = 'nodes'"
+                @keydown="onPlanTabKeydown($event, 'nodes')"
+              >
+                节点清单（{{ visibleNodes.length }}）
+              </button>
+              <button
+                id="lore-tab-mapping"
+                :ref="(el) => (tabRefs.mapping = el as HTMLButtonElement | null)"
+                type="button"
+                role="tab"
+                aria-controls="lore-panel-mapping"
+                :aria-selected="planTab === 'mapping'"
+                :tabindex="planTab === 'mapping' ? 0 : -1"
+                :data-active="planTab === 'mapping'"
+                class="plan-tab"
+                @click="planTab = 'mapping'"
+                @keydown="onPlanTabKeydown($event, 'mapping')"
+              >
+                人格与应用（{{ effects.apps.length + 1 }}）
+              </button>
+              <button
+                id="lore-tab-sync"
+                :ref="(el) => (tabRefs.sync = el as HTMLButtonElement | null)"
+                type="button"
+                role="tab"
+                aria-controls="lore-panel-sync"
+                :aria-selected="planTab === 'sync'"
+                :tabindex="planTab === 'sync' ? 0 : -1"
+                :data-active="planTab === 'sync'"
+                class="plan-tab"
+                @click="planTab = 'sync'"
+                @keydown="onPlanTabKeydown($event, 'sync')"
+              >
+                同步与跳过（{{ syncIssuesCount }}）
+              </button>
+            </div>
+
+            <section
+              v-show="planTab === 'nodes'"
+              id="lore-panel-nodes"
+              role="tabpanel"
+              aria-labelledby="lore-tab-nodes"
+              class="space-y-3"
+            >
+              <div class="nodes-toolbar">
+                <USelect
+                  v-model="filter"
+                  :items="filterItems"
+                  size="sm"
+                  class="w-48"
+                  aria-label="筛选节点"
+                />
+                <span class="text-xs text-muted">勾选可标为机密或不导入</span>
+              </div>
+              <p v-if="!visibleNodes.length" class="plan-body text-muted">没有匹配的节点</p>
+              <ul v-else class="nodes">
+                <li
+                  v-for="node in visibleNodes"
+                  :key="node.uuid"
+                  class="node"
+                  :class="{ 'opacity-60': excludedIds.has(node.uuid) }"
+                >
+                  <div class="node-head">
+                    <div class="min-w-0 flex-1 basis-48">
+                      <p class="uri"><UriPath :uri="node.uri" wrap /></p>
+                      <p v-if="node.aliases.length" class="break-all text-muted">
+                        别名不导入：{{ node.aliases.join('、') }}
+                      </p>
+                    </div>
+                    <div class="flex shrink-0 flex-wrap gap-3">
+                      <UTooltip :text="secretHint(node)" :disabled="!secretHint(node)">
+                        <UCheckbox
+                          size="sm"
+                          label="标记机密"
+                          :model-value="secretIds.has(node.uuid) && secretSelectable(node)"
+                          :disabled="Boolean(secretHint(node))"
+                          @update:model-value="toggleSecret(node.uuid, $event)"
+                        />
+                      </UTooltip>
+                      <UCheckbox
+                        size="sm"
+                        :label="excludeLabel(node)"
+                        :model-value="excludedIds.has(node.uuid)"
+                        @update:model-value="toggleExcluded(node.uuid, $event)"
+                      />
+                    </div>
+                  </div>
+                  <div v-for="target in node.targets" :key="target.uri" class="node-target">
+                    <UIcon :name="icons.inherits" class="target-arrow" aria-hidden="true" />
+                    <!-- prettier-ignore -->
+                    <span class="target-title">{{ targetTitle(target, secretNow(node, target)) }}</span>
+                    <UriPath :uri="target.uri" wrap />
+                    <span :class="STATE_CLASSES[target.state]">
+                      {{ targetStateLabels[target.state] }}
+                    </span>
+                    <StrataSwatch
+                      :layer="target.layer"
+                      :sensitivity="sensitivityOf(node, target)"
+                      label="both"
+                    />
+                    <span class="font-mono text-[13px]">P{{ target.priority }}</span>
+                    <span v-if="effects.boot.has(target)" class="text-warning">进入启动加载</span>
+                    <span v-if="currentNote(target)" class="break-all text-muted">
+                      {{ currentNote(target) }}
+                    </span>
+                  </div>
+                  <p v-if="node.credentialRefs.length" class="text-muted">
+                    引用凭据：{{ node.credentialRefs.join('、') }}
+                  </p>
+                  <!-- 正文里的疑似明文：和已有凭据同值的可以换成占位符，默认勾上 -->
+                  <ul v-if="node.plaintext.length" class="spots">
+                    <li v-for="spot in node.plaintext" :key="spot.index" class="spot">
+                      <span class="text-muted">
+                        第 {{ spot.index + 1 }} 处 · 第 {{ spot.line }} 行 ·
+                        {{ PLAINTEXT_KIND_NAMES[spot.kind] }}
+                      </span>
+                      <template v-if="spot.credential">
+                        <span>
+                          与凭据「{{ spot.credential.name }}」<code class="uri"
+                            >{{ spot.credential.identifier }}#{{ spot.credential.field }}</code
+                          >同值
+                        </span>
+                        <UCheckbox
+                          size="sm"
+                          label="写成占位符"
+                          :model-value="converting(node, spot)"
+                          :disabled="plaintextState(node, spot) !== 'convertible'"
+                          @update:model-value="toggleConverted(node, spot, $event)"
+                        />
+                        <span v-if="plaintextState(node, spot) === 'blocked'" class="text-warning">
+                          无法写成占位符<Hint>
+                            凭据占位符只能放在本人、敏感级不低于私密的记忆中。
+                          </Hint>
+                        </span>
+                        <span
+                          v-else-if="converting(node, spot) && keptCount(node)"
+                          class="text-warning"
+                        >
+                          另有 {{ keptCount(node) }} 条记忆保留明文<Hint>
+                            这些记忆放不进凭据占位符，或是已导入、这次同步的记忆，正文照原样写入。
+                          </Hint>
+                        </span>
+                        <span
+                          v-else-if="plaintextState(node, spot) === 'synced'"
+                          class="text-muted"
+                        >
+                          已导入，按原样同步<Hint v-if="syncedStillThere(node)">
+                            同步后可在记忆详情或待处理中转存为凭据。
+                          </Hint>
+                        </span>
+                        <span
+                          v-else-if="plaintextState(node, spot) === 'unwritten'"
+                          class="text-muted"
+                        >
+                          本次不写入
+                        </span>
+                      </template>
+                      <span v-else class="text-muted">
+                        无同值的凭据<Hint>
+                          导入只匹配已有的凭据。密码库条目需先在凭据页起标识，再重新生成计划；也可以导入后在待处理中转存为凭据。
+                        </Hint>
+                      </span>
+                    </li>
+                  </ul>
+                  <p v-if="credentialNote(node)" class="text-warning">
+                    {{ credentialNote(node) }}
+                  </p>
+                  <p v-if="node.credentialHints.extras" class="text-warning">
+                    触发场景或关键词疑似包含明文凭据：机密只加密正文，这两项仍为明文
+                  </p>
+                  <p v-if="disclosureCut.has(node.uri)" class="text-muted">
+                    触发场景过长，写入时截断
+                  </p>
+                </li>
+              </ul>
+            </section>
+
+            <section
+              v-show="planTab === 'mapping'"
+              id="lore-panel-mapping"
+              role="tabpanel"
+              aria-labelledby="lore-tab-mapping"
+              class="space-y-4"
+            >
+              <SectionHeading title="人格与默认归属" :level="4" />
+              <div class="plan-body space-y-2">
+                <p v-if="effects.writesPersona">
+                  core://soul 导入为 <code class="uri">{{ plan.persona.slug }}</code>
+                  <template v-if="plan.persona.exists">（已有）</template>
+                  <template v-else>（不存在，新建为「{{ plan.persona.name }}」）</template>
+                </p>
+                <p v-else-if="plan.persona.exists">
+                  本次没有要新写入的 core://soul，不新建人格。已有人格
+                  <code class="uri">{{ plan.persona.slug }}</code>
+                  照常使用：新建应用和暂无默认人格的应用将设为此人格。
+                </p>
+                <p v-else>
+                  本次没有要新写入的 core://soul，人格
+                  <code class="uri">{{ plan.persona.slug }}</code>
+                  也不存在：不新建，新建应用的默认人格为空。
+                </p>
+                <p v-if="effects.writesPersona && otherPersonas.length" class="text-warning">
+                  此前的导入写入了人格 {{ otherPersonas.join('、') }}：本次将另写一份
+                  core://soul，此前那份不再同步。如需继续同步，请改回原人格标识。
+                </p>
+              </div>
+
+              <SectionHeading title="应用映射" :level="4" />
+              <div v-if="effects.apps.length" class="plan-body space-y-2">
+                <p v-for="mapping in effects.apps" :key="mapping.runtime" class="break-all">
+                  core://agent/{{ mapping.runtime }} →
+                  <template v-for="(app, i) in mapping.apps" :key="app.slug"
+                    ><template v-if="i">、</template><code class="uri">{{ app.slug }}</code
+                    ><template v-if="app.create"
+                      >（新建，<RuntimeLabel :family="app.runtimeFamily" :size="14" />）</template
+                    ><template v-else>（已有）</template></template
+                  >
+                </p>
+                <p v-if="effects.appsGivenPersona.length">
+                  以下应用暂无默认人格，将设为 {{ plan.persona.slug }}：{{
+                    effects.appsGivenPersona.join('、')
+                  }}
+                </p>
+                <p v-if="effects.appsOtherPersona.length" class="text-warning">
+                  以下应用使用其他人格，core://soul 不会进入其启动加载：{{
+                    effects.appsOtherPersona.join('、')
+                  }}
+                </p>
+              </div>
+              <p v-else class="text-muted">本次节点未涉及应用坐标映射。</p>
+            </section>
+
+            <section
+              v-show="planTab === 'sync'"
+              id="lore-panel-sync"
+              role="tabpanel"
+              aria-labelledby="lore-tab-sync"
+              class="space-y-4"
+            >
+              <section v-if="sync">
+                <SectionHeading title="同步已导入的节点" :level="4" />
+                <div class="plan-body space-y-2">
+                  <p v-if="sync.current || sync.groups.length">
+                    已是最新
+                    {{ sync.current }} 条。如不需要同步某节点，请在节点清单中勾选「本次不同步」。
+                  </p>
+                  <p v-else class="text-muted">暂无已导入的节点</p>
+                  <details
+                    v-for="group in sync.groups"
+                    :key="group.state"
+                    :open="group.state === 'update'"
+                  >
+                    <summary>{{ group.heading }}（{{ group.lines.length }}）</summary>
+                    <ul class="detail-list">
+                      <!-- 和上面的写入目标一样先写标题，坐标跟在后面 -->
+                      <li v-for="(line, i) in group.lines" :key="i" class="sync-line">
+                        <span v-if="line.title" class="target-title">{{ line.title }}</span>
+                        <UriPath :uri="line.uri" wrap />
+                        <template v-if="line.target">
+                          <span>→</span>
+                          <UriPath :uri="line.target" wrap />
+                        </template>
+                        <span v-if="line.detail">{{ line.detail }}</span>
+                      </li>
+                    </ul>
+                  </details>
+                </div>
+              </section>
+
+              <details v-if="plan.skipped.length" open>
+                <summary>不导入（{{ plan.skipped.length }}）</summary>
+                <ul class="detail-list">
+                  <li v-for="(s, i) in plan.skipped" :key="i">
+                    <code class="uri">{{ s.source }}</code
+                    >：{{ s.reason }}
+                  </li>
+                </ul>
+              </details>
+              <details v-if="plan.droppedKeywords.length">
+                <summary>丢弃的关键词（{{ plan.droppedKeywords.length }}）</summary>
+                <ul class="detail-list">
+                  <li v-for="(k, i) in plan.droppedKeywords" :key="i">
+                    <code class="uri">{{ k.source }}</code
+                    >「{{ k.keyword }}」：{{ k.reason }}
+                  </li>
+                </ul>
+              </details>
+              <p
+                v-if="!sync?.groups.length && !plan.skipped.length && !plan.droppedKeywords.length"
+                class="text-muted"
+              >
+                暂无同步差异或被跳过的条目。
+              </p>
+            </section>
+          </div>
+
+          <NoteLine v-if="error" tone="error">{{ error }}</NoteLine>
+
+          <div class="modal-foot">
+            <p v-if="plan && effects" class="text-xs text-muted">
+              本次将新建 {{ effects.create }} 条、按 Lore 更新
+              {{ effects.update }} 条。写入中途出错时，已写入的内容保留，重新生成计划后可继续。
+            </p>
+            <div v-else />
+            <div class="flex flex-wrap gap-2">
+              <UButton color="neutral" variant="ghost" :disabled="busy" @click="open = false">
+                取消
+              </UButton>
+              <template v-if="plan">
+                <UButton
+                  color="neutral"
+                  variant="outline"
+                  :loading="busy"
+                  :disabled="!ready"
+                  @click="replan"
+                >
+                  重新生成计划
+                </UButton>
+                <UButton :loading="busy" :disabled="!ready || confirmMissing" @click="applyPlan">
+                  确认导入
+                </UButton>
+              </template>
+              <UButton v-else type="submit" color="primary" :loading="busy" :disabled="!ready">
+                查看计划
+              </UButton>
+            </div>
+          </div>
+        </form>
+      </template>
+    </UModal>
   </SettingsBlock>
 </template>
 
 <style scoped>
-/* 来源的表单不用撑满，计划的节点要长路径和一排标记，放得宽一点 */
 .source {
-  max-width: 40rem;
+  max-width: 44rem;
 }
-.plan > * + * {
-  margin-top: 16px;
+.steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border: 1px solid var(--ui-border);
 }
-.plan > section + section,
-.plan > details + section {
-  margin-top: 24px;
+.steps li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--ui-text-muted);
+  border-right: 1px solid var(--ui-border);
+}
+.steps li:last-child {
+  border-right: 0;
+}
+.steps li[data-state='active'] {
+  color: var(--ui-text-highlighted);
+  font-weight: 600;
+  background: var(--ui-bg-elevated);
+}
+.steps li[data-state='done'] {
+  color: var(--ui-text);
+}
+.step-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  border: 1px solid var(--ui-border);
+}
+.steps li[data-state='active'] .step-num {
+  border-color: var(--ui-text-highlighted);
+  background: var(--ui-text-highlighted);
+  color: var(--ui-bg);
+}
+.plan-meta-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+}
+.kpi-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border: 1px solid var(--ui-border);
+}
+.kpi-cell {
+  padding: 10px 12px;
+  border-right: 1px solid var(--ui-border);
+}
+.kpi-cell:last-child {
+  border-right: 0;
+}
+.kpi-cell dt {
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.kpi-cell dd {
+  margin-top: 2px;
+  font-size: 20px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--ui-text-highlighted);
+}
+.plan-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  border-bottom: 1px solid var(--strata-rule);
+}
+.plan-tab {
+  padding: 8px 2px;
+  font-size: 14px;
+  color: var(--ui-text-muted);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  cursor: pointer;
+}
+.plan-tab:hover {
+  color: var(--ui-text);
+}
+.plan-tab[data-active='true'] {
+  color: var(--ui-text-highlighted);
+  font-weight: 600;
+  border-bottom-color: var(--ui-text-highlighted);
+}
+.nodes-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
 }
 .plan-body {
-  padding-top: 8px;
+  padding-top: 4px;
 }
 .uri {
   font-family: var(--font-mono);
   font-size: 13px;
 }
 .nodes {
-  max-height: 32rem;
+  max-height: 24rem;
   overflow-y: auto;
+  border-top: 1px solid var(--ui-border);
 }
 .node {
-  padding: 8px 2px 9px 0;
+  padding: 10px 4px 10px 0;
   border-bottom: 1px solid var(--ui-border);
   line-height: 1.6;
 }
@@ -880,7 +1253,7 @@ const disclosureCut = computed(
   flex-wrap: wrap;
   align-items: center;
   gap: 2px 10px;
-  margin-top: 1px;
+  margin-top: 2px;
   font-size: 13px;
 }
 .target-arrow {
@@ -907,7 +1280,7 @@ summary {
   cursor: pointer;
 }
 .spots {
-  margin-top: 2px;
+  margin-top: 4px;
   font-size: 13px;
 }
 .spot {
@@ -924,8 +1297,28 @@ summary {
 .detail-list > li + li {
   margin-top: 2px;
 }
-.plan-total {
+.modal-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
   padding-top: 12px;
   border-top: 1px solid var(--strata-rule);
+}
+@media (max-width: 639.98px) {
+  .kpi-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .steps {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .steps li {
+    border-right: 0;
+    border-bottom: 1px solid var(--ui-border);
+  }
+  .steps li:last-child {
+    border-bottom: 0;
+  }
 }
 </style>

@@ -127,15 +127,20 @@ export function restFailure(status: number, message: string): StepOutcome {
   }
 }
 
-// 宿主拿到的文字，规则和 Claude Code 插件一样（kioku-plugins 仓库的 plugins/claude-code/hooks/forward.mjs，改这里要同步改它），return_value 取 context
+// 宿主拿到的文字，规则和插件一致（stdout_json 支持 additionalContext 与 Antigravity 的 injectSteps），return_value 取 context
 export function hostText(output: HostOutput): string {
   const value = output.value as {
     hookSpecificOutput?: { additionalContext?: unknown }
+    injectSteps?: { systemMessage?: { systemMessage?: unknown } }[]
     context?: unknown
   } | null
   const text =
     output.mode === 'stdout_json'
-      ? value?.hookSpecificOutput?.additionalContext
+      ? (value?.hookSpecificOutput?.additionalContext ??
+        value?.injectSteps
+          ?.map((step) => step?.systemMessage?.systemMessage)
+          .filter((msg): msg is string => typeof msg === 'string' && msg.length > 0)
+          .join('\n\n'))
       : output.mode === 'stdout_text'
         ? output.value
         : output.mode === 'return_value'

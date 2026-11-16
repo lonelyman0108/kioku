@@ -41,6 +41,8 @@ export type Me = z.infer<typeof Me>
 export const RUNTIME_FAMILIES = [
   'claudecode',
   'codex',
+  'gemini',
+  'agy',
   'openclaw',
   'hermes',
   'opencode',

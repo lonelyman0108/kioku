@@ -19,9 +19,9 @@ import { z } from 'zod'
 
 import { looksLikePlaintextCredential, placeholderIdentifiers } from '../credential/placeholders'
 import type { CredentialService } from '../credential/service'
-import { logInternalError } from '../db/client'
+import { loggableError, logInternalError } from '../db/client'
 import type { RecallScope } from '../lifecycle/scope'
-import { guidanceFor } from '../lifecycle/lifecycle'
+import { guidanceFor, GUIDANCE } from '../lifecycle/lifecycle'
 import { hasUntouchedPlaintext, MemoryError, type MemoryService } from '../memory/service'
 import { formatBootBlock } from '../recall/boot'
 import { formatRecallBlock } from '../recall/recall'
@@ -97,14 +97,18 @@ export function buildMcpServer(
   memory: MemoryService,
   scope: RecallScope,
   credentials: CredentialService,
+  instructions?: string,
 ): McpServer {
-  const server = new McpServer({ name: 'kioku', version: VERSION })
+  const server = new McpServer(
+    { name: 'kioku', version: VERSION },
+    instructions ? { instructions } : undefined,
+  )
 
   server.registerTool(
     'kioku_boot',
     {
       description:
-        '读取启动基线：使用指引与 priority 0 的核心记忆。没有启动钩子的客户端在会话开始时调用一次。',
+        '读取启动基线：完整使用指引与 priority 0 的核心记忆。没有启动钩子的客户端在会话开始时应先调用一次；长对话或上下文压缩后也可用它重新校准。',
       annotations: { readOnlyHint: true },
     },
     () =>
@@ -119,7 +123,7 @@ export function buildMcpServer(
     'kioku_search',
     {
       description:
-        '按语义、全文和关键词搜索记忆，返回候选的坐标（URI）、标题与线索；需要正文时再用 kioku_get。',
+        '按语义、全文和关键词搜索记忆，返回候选的坐标（URI）、标题与线索；需要正文时再用 kioku_get。回答涉及历史决定、环境约束或用户偏好的问题前，即使没有提示词触发也应主动搜索确认。',
       inputSchema: {
         query: RecallRequest.shape.query.describe('要找的内容，用自然语言描述'),
         limit: z.number().int().min(1).max(30).optional().describe('最多返回几条，默认 10'),
@@ -186,7 +190,7 @@ export function buildMcpServer(
     'kioku_create',
     {
       description:
-        '新建一条长期记忆。正文要自带背景（为什么、在什么条件下），disclosure 写清楚什么场景下该想起它。' +
+        '新建一条长期记忆。不等用户点名「记住」，遇到重要新信息、偏好、纠正、环境踩坑或长期结论时主动记下。正文要自带背景（为什么、在什么条件下），disclosure 写清楚什么场景下该想起它。' +
         `${URI_FORMAT_MESSAGE}。坐标的开头决定这条记忆归谁、谁读得到：人格与应用的记忆只能写本应用当前的人格与本应用；` +
         'user:// 下的只有本人的 agent 读得到，不能设为 public。' +
         PLAINTEXT_TOOL_HELP,
@@ -420,6 +424,43 @@ export function buildMcpServer(
   return server
 }
 
+const MCP_MAX_BODY_BYTES = 4 * 1024 * 1024
+
+// 只对合规的 POST JSON initialize 请求预读取解析（避免提前吞下超大 body 或重复解析 JSON）；其余交给 transport 校验报错
+async function parseMcpPostBody(request: Request): Promise<unknown> {
+  if (request.method !== 'POST') return undefined
+  const contentType = request.headers.get('content-type') ?? ''
+  if (!contentType.includes('application/json')) return undefined
+  const length = Number(request.headers.get('content-length'))
+  if (Number.isFinite(length) && length > MCP_MAX_BODY_BYTES) return undefined
+  try {
+    const buf = await request.clone().arrayBuffer()
+    if (buf.byteLength > MCP_MAX_BODY_BYTES) return undefined
+    return JSON.parse(new TextDecoder().decode(buf))
+  } catch {
+    return undefined
+  }
+}
+
+// 只在单条 initialize 握手时附带 MCP instructions：平时 tools/call 与非法批处理请求不额外查设置表
+async function mcpInstructions(
+  scope: RecallScope,
+  parsedBody: unknown,
+): Promise<string | undefined> {
+  const isInit =
+    !Array.isArray(parsedBody) &&
+    typeof parsedBody === 'object' &&
+    parsedBody !== null &&
+    (parsedBody as { method?: unknown }).method === 'initialize'
+  if (!isInit) return undefined
+  try {
+    return guidanceFor(false, await scope.settings())
+  } catch (err) {
+    console.warn('读取 MCP 使用指引的设置失败，退回默认指引', loggableError(err))
+    return GUIDANCE
+  }
+}
+
 // 无状态模式：每个请求一个服务器实例，不在进程里保存会话，方便多实例部署
 export async function handleMcpRequest(
   memory: MemoryService,
@@ -427,12 +468,17 @@ export async function handleMcpRequest(
   credentials: CredentialService,
   request: Request,
 ): Promise<Response> {
-  const server = buildMcpServer(memory, scope, credentials)
+  const parsedBody = await parseMcpPostBody(request)
+  const instructions = await mcpInstructions(scope, parsedBody)
+  const server = buildMcpServer(memory, scope, credentials, instructions)
   // 不传 sessionIdGenerator 即无状态模式
   const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true })
   await server.connect(transport)
   try {
-    return await transport.handleRequest(request)
+    return await transport.handleRequest(
+      request,
+      parsedBody === undefined ? undefined : { parsedBody },
+    )
   } finally {
     await server.close()
   }

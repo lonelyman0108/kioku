@@ -831,6 +831,12 @@ describe('结果的文字', () => {
         value: { hookSpecificOutput: { additionalContext: '上下文' } },
       }).text,
     ).toBe('上下文')
+    expect(
+      textOf({
+        mode: 'stdout_json',
+        value: { injectSteps: [{ systemMessage: { systemMessage: 'inject 文本' } }] },
+      }).text,
+    ).toBe('inject 文本')
     expect(textOf({ mode: 'stdout_text', value: '纯文本' }).text).toBe('纯文本')
     expect(textOf({ mode: 'return_value', value: { context: '给宿主' } }).text).toBe('给宿主')
     expect(textOf({ mode: 'none', value: null }).text).toBe('')

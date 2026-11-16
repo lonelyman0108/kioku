@@ -15,7 +15,6 @@ import {
   formatTuning,
   overriddenAt,
   refreshAdvanced,
-  runtimeName,
   spaceAdvancedKey,
   TUNING_META,
   type BootExtra,
@@ -28,6 +27,7 @@ import { icons } from '../icons'
 import BootExtrasRow from './BootExtrasRow.vue'
 import Hint from './Hint.vue'
 import RecallTrial from './RecallTrial.vue'
+import RuntimeLabel from './RuntimeLabel.vue'
 import TuningRow from './TuningRow.vue'
 import EmptyState from './strata/EmptyState.vue'
 import FlagTag from './strata/FlagTag.vue'
@@ -242,7 +242,7 @@ async function save() {
             </thead>
             <tbody>
               <tr v-for="h in view.data.value.hostLimits" :key="h.runtimeFamily">
-                <td>{{ runtimeName(h.runtimeFamily) }}</td>
+                <td><RuntimeLabel :family="h.runtimeFamily" :size="15" /></td>
                 <td class="num">{{ h.chars.toLocaleString('en-US') }} 字</td>
               </tr>
               <tr>

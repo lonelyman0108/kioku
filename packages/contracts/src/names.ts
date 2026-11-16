@@ -47,6 +47,8 @@ export const CREDENTIAL_CAPABILITY_NAMES: Record<CredentialCapability, string> =
 export const RUNTIME_FAMILY_NAMES: Record<RuntimeFamily, string> = {
   claudecode: 'Claude Code',
   codex: 'Codex',
+  gemini: 'Gemini CLI',
+  agy: 'Antigravity',
   openclaw: 'OpenClaw',
   hermes: 'Hermes',
   opencode: 'OpenCode',

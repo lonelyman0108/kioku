@@ -73,6 +73,8 @@ describe.skipIf(!testDatabaseUrl)('MCP 接口', () => {
       clientInfo: { name: 'test', version: '0' },
     })
     expect(init.body.result.serverInfo.name).toBe('kioku')
+    expect(init.body.result.instructions).toContain('Kioku 是你的长期记忆')
+    expect(init.body.result.instructions).toContain('kioku_search')
     const tools = await rpc('tools/list', {})
     expect(tools.body.result.tools.map((t: { name: string }) => t.name).sort()).toEqual([
       'kioku_boot',
@@ -278,6 +280,142 @@ describe.skipIf(!testDatabaseUrl)('MCP 接口', () => {
       expect(res.headers.get('content-type')).toContain('application/json')
       expect(((await res.json()) as { error: string }).error).toContain('GET')
       expect((await app.request('/v1/mcp')).status).toBe(401)
+    })
+  })
+
+  describe('使用指引与初始化', () => {
+    const mcpDeps = () => {
+      const deps = { db: database.db, masterKey: null, jobs: null } as unknown as Deps
+      const principal: KeyPrincipal = {
+        kind: 'key',
+        keyId: randomUUID(),
+        spaceId: randomUUID(),
+        scopes: FULL_SCOPES,
+        app: {
+          id: randomUUID(),
+          slug: 'a',
+          name: 'a',
+          runtimeFamily: 'mcp',
+          ownerAccountId: randomUUID(),
+          defaultPersonaId: null,
+          config: {},
+        },
+      }
+      return {
+        memory: memoryServiceForKey(deps, principal),
+        credentials: credentialServiceForKey(deps, principal),
+      }
+    }
+    const scopeStub = (settingsFn: () => Promise<unknown>) =>
+      ({
+        settings: settingsFn,
+        recall: async () => ({
+          context: '',
+          memories: [],
+          candidates: [],
+          budget: { limit: 0, used: 0 },
+          totalCount: 0,
+        }),
+        boot: async () => ({
+          context: '',
+          limit: null,
+          boot: { entries: [], omitted: [], totalChars: 0 },
+          summaries: [],
+          recent: [],
+        }),
+        logRecall: async () => {},
+      }) as unknown as Awaited<ReturnType<typeof recallScopeForKey>>
+
+    it('仅单条 initialize 请求查设置表并将 agentGuidance/guidance 拼进 instructions（不含 chatGuidance）', async () => {
+      const { memory, credentials } = mcpDeps()
+      const settings = vi.fn().mockResolvedValue({
+        prompts: {
+          agentGuidance: ['实例补充：记录架构决策', '应用补充：使用 Tailwind'],
+          chatGuidance: ['群聊补充：不得进入 MCP'],
+          extractionRules: [],
+          dreamRules: [],
+        },
+      })
+      const scope = scopeStub(settings)
+
+      const makeReq = (body: unknown) =>
+        new Request('http://127.0.0.1/v1/mcp', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            accept: 'application/json, text/event-stream',
+          },
+          body: JSON.stringify(body),
+        })
+
+      const initRes = await handleMcpRequest(
+        memory,
+        scope,
+        credentials,
+        makeReq({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: {
+            protocolVersion: '2025-06-18',
+            capabilities: {},
+            clientInfo: { name: 't', version: '0' },
+          },
+        }),
+      )
+      expect(initRes.status).toBe(200)
+      const initJson = (await initRes.json()) as { result: { instructions?: string } }
+      expect(initJson.result.instructions).toContain('实例补充：记录架构决策')
+      expect(initJson.result.instructions).toContain('应用补充：使用 Tailwind')
+      expect(initJson.result.instructions).not.toContain('群聊补充：不得进入 MCP')
+      expect(settings).toHaveBeenCalledTimes(1)
+
+      const listRes = await handleMcpRequest(
+        memory,
+        scope,
+        credentials,
+        makeReq({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }),
+      )
+      expect(listRes.status).toBe(200)
+      expect(settings).toHaveBeenCalledTimes(1)
+    })
+
+    it('读取设置失败时记 warn 并退回默认 GUIDANCE', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        const { memory, credentials } = mcpDeps()
+        const scope = scopeStub(async () => {
+          throw new Error('db down')
+        })
+        const res = await handleMcpRequest(
+          memory,
+          scope,
+          credentials,
+          new Request('http://127.0.0.1/v1/mcp', {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              accept: 'application/json, text/event-stream',
+            },
+            body: JSON.stringify({
+              jsonrpc: '2.0',
+              id: 1,
+              method: 'initialize',
+              params: {
+                protocolVersion: '2025-06-18',
+                capabilities: {},
+                clientInfo: { name: 't', version: '0' },
+              },
+            }),
+          }),
+        )
+        expect(res.status).toBe(200)
+        const json = (await res.json()) as { result: { instructions?: string } }
+        expect(json.result.instructions).toContain('Kioku 是你的长期记忆')
+        expect(warn).toHaveBeenCalledTimes(1)
+      } finally {
+        warn.mockRestore()
+      }
     })
   })
 })

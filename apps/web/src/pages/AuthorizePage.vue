@@ -47,6 +47,8 @@ import {
   tightenScopes,
 } from '../components/keyPresets'
 import EntryFrame from '../components/strata/EntryFrame.vue'
+import RuntimeIcon from '../components/RuntimeIcon.vue'
+import RuntimeLabel from '../components/RuntimeLabel.vue'
 import NoteLine from '../components/strata/NoteLine.vue'
 import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import PropertyList, { type Property } from '../components/strata/PropertyList.vue'
@@ -460,6 +462,7 @@ async function deny() {
             :data-selected="row.selected"
           >
             <div class="platform-head">
+              <RuntimeIcon :family="row.runtimeFamily" :size="17" class="platform-icon" />
               <UCheckbox v-model="row.selected" :label="runtimeNames[row.runtimeFamily]" />
               <span v-if="row.clientName" class="aside">{{ row.clientName }}</span>
               <span v-if="!row.selected" class="aside">不签发</span>
@@ -579,12 +582,15 @@ async function deny() {
           <PropertyList
             :groups="[
               [
-                { key: 'platform', label: '平台', value: runtimeNames[item.runtimeFamily] },
+                { key: 'platform', label: '平台' },
                 { key: 'app', label: '应用' },
                 { key: 'key', label: '访问密钥', value: item.keyName },
               ],
             ]"
           >
+            <template #platform>
+              <RuntimeLabel :family="item.runtimeFamily" :size="15" />
+            </template>
             <template #app>
               <ULink
                 :to="{ name: 'app', params: { spaceId: approved.spaceId, appId: item.app.id } }"
@@ -658,7 +664,8 @@ async function deny() {
 .platform-scopes {
   margin-left: auto;
 }
-.platform[data-selected='false'] :deep(label) {
+.platform[data-selected='false'] :deep(label),
+.platform[data-selected='false'] .platform-icon {
   color: var(--ui-text-muted);
 }
 .fields {

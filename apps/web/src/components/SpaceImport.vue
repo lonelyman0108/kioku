@@ -14,18 +14,19 @@ import { api } from '../api/endpoints'
 import { formatBytes } from '../backup'
 import { useSpaceLimit } from '../composables/useCreateSpace'
 import { useSession } from '../composables/useSession'
+import { icons } from '../icons'
 import { refreshSpaces } from '../spaces'
 import { formatTime } from '../time'
 import Hint from './Hint.vue'
-import BareBlock from './strata/BareBlock.vue'
+import ModalOrBare from './strata/ModalOrBare.vue'
 import NoteLine from './strata/NoteLine.vue'
-import SettingsBlock from './strata/SettingsBlock.vue'
 
-// 导入空间：空间 › 导入与导出里是一块设置；外壳的弹窗里（bare）不带标题，标题由弹窗写。
+// 导入空间：空间 › 导入与导出里用弹窗入口，外壳的弹窗里（bare）直接放表单。
 // busy 报给弹窗：检查、导入期间不让关。导入成功后自己刷新、跳到新空间，再报 imported
 const props = withDefaults(defineProps<{ bare?: boolean }>(), { bare: false })
 const emit = defineEmits<{ imported: [] }>()
 const busy = defineModel<boolean>('busy', { default: false })
+const modalOpen = ref(false)
 
 const toast = useToast()
 const router = useRouter()
@@ -52,6 +53,12 @@ const preview = ref<SpaceImportPreview | null>(null)
 watch([file, passphrase], () => {
   preview.value = null
   error.value = null
+})
+watch(modalOpen, (opened) => {
+  if (!opened) {
+    passphrase.value = ''
+    error.value = null
+  }
 })
 
 const tooLarge = computed(() => (file.value ? file.value.size > SPACE_EXPORT_MAX_BYTES : false))
@@ -104,13 +111,24 @@ async function importSpace() {
   // 新空间要先出现在自己的空间列表里，跳过去才不会被当成不是成员；名额与实例的列表一起刷新
   await refreshSpaces(queryClient, undefined, { accounts: true }).catch(() => {})
   busy.value = false
+  modalOpen.value = false
   emit('imported')
   await router.push({ name: 'overview', params: { spaceId: result.spaceId } })
 }
 </script>
 
 <template>
-  <component :is="props.bare ? BareBlock : SettingsBlock" title="导入空间">
+  <ModalOrBare
+    v-model:open="modalOpen"
+    :bare="props.bare"
+    title="导入空间"
+    entry-title="还原为新空间（.kioku-space）"
+    entry-description="选择导出的空间文件并在弹窗中核对内容，当前账号将成为新空间的所有者。"
+    action-label="导入空间"
+    :icon="icons.importSpace"
+    :busy="busy"
+    :disabled="Boolean(blocked)"
+  >
     <template #note>
       将空间导出文件导入为新空间。仅导入本人导出、或导出人同意移交的文件。
       <Hint>
@@ -123,10 +141,12 @@ async function importSpace() {
         </p>
       </Hint>
     </template>
-    <NoteLine v-if="masterKey.data.value && !masterKey.data.value.configured" tone="warning">
-      当前实例未配置主密钥：文件包含机密记忆或托管的凭据时无法导入。请先配置 KIOKU_MASTER_KEY。
-    </NoteLine>
-    <NoteLine v-if="blocked" tone="warning">{{ blocked }}，删除或转让一个空间后再导入。</NoteLine>
+    <template #alerts>
+      <NoteLine v-if="masterKey.data.value && !masterKey.data.value.configured" tone="warning">
+        当前实例未配置主密钥：文件包含机密记忆或托管的凭据时无法导入。请先配置 KIOKU_MASTER_KEY。
+      </NoteLine>
+      <NoteLine v-if="blocked" tone="warning">{{ blocked }}，删除或转让一个空间后再导入。</NoteLine>
+    </template>
     <form class="space-y-4" @submit.prevent="preview ? importSpace() : inspect()">
       <UFormField
         label="导出文件"
@@ -193,17 +213,28 @@ async function importSpace() {
         </UFormField>
       </template>
       <NoteLine v-if="error" tone="error">{{ error }}</NoteLine>
-      <UButton
-        v-if="!preview"
-        type="submit"
-        color="primary"
-        variant="outline"
-        :loading="busy"
-        :disabled="!ready"
-      >
-        检查文件
-      </UButton>
-      <UButton v-else type="submit" :loading="busy" :disabled="!ready">确认导入</UButton>
+      <div class="flex flex-wrap justify-end gap-2">
+        <UButton
+          v-if="!props.bare"
+          color="neutral"
+          variant="ghost"
+          :disabled="busy"
+          @click="modalOpen = false"
+        >
+          取消
+        </UButton>
+        <UButton
+          v-if="!preview"
+          type="submit"
+          color="primary"
+          variant="outline"
+          :loading="busy"
+          :disabled="!ready"
+        >
+          检查文件
+        </UButton>
+        <UButton v-else type="submit" :loading="busy" :disabled="!ready">确认导入</UButton>
+      </div>
     </form>
-  </component>
+  </ModalOrBare>
 </template>
