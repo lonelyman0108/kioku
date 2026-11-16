@@ -27,13 +27,7 @@ export interface SettingsFrameGroup {
   crumb?: string
   sections: SettingsFrameSection[]
 }
-export interface SettingsFrameSpace {
-  id: string
-  name: string
-  roleLabel: string
-}
-
-// 设置页的骨架：宽屏左边是统一双级目录树（带空间切换器），窄屏顶上是分组与小节两行横向切换条。
+// 设置页的骨架：宽屏左边是统一双级目录树，窄屏顶上是分组与小节两行横向切换条。
 // 标题与左栏都不随内容滚动：滚的只有右边这一栏，切小节时导航不会在指针下面挪位置，也没有东西盖在表单上。
 // 只有当前这一组的小节挂在页面上，内容由页面放进默认插槽（按小节的 key 调用）；组里的小节一直挂着，只切换显示：
 // 切走再回来，填了一半的表单、选好的文件都还在。别的组是别的页面，离开时由页面确认未保存的改动
@@ -41,10 +35,8 @@ const props = defineProps<{
   groups: readonly SettingsFrameGroup[]
   group: string
   current: string
-  spaces?: readonly SettingsFrameSpace[]
   spaceId?: string
 }>()
-const emit = defineEmits<{ switchSpace: [spaceId: string] }>()
 
 const active = computed(() => props.groups.find((g) => g.key === props.group))
 const panes = computed(() => active.value?.sections ?? [])
@@ -58,14 +50,6 @@ const positions = new Map<string, number>()
 
 const posKey = (group: string, spaceId: string | undefined, section: string) =>
   `${group}:${spaceId ?? ''}:${section}`
-
-function onSpaceChange(event: Event) {
-  const select = event.target as HTMLSelectElement
-  const next = select.value
-  // 先恢复原选中项，由导航成功后随 props.spaceId 更新；未保存确认被取消时不留错误显示
-  select.value = props.spaceId ?? ''
-  emit('switchSpace', next)
-}
 
 // 窄屏横向滚动条与左栏树中都要把当前小节滚动进可见范围
 function revealCurrent() {
@@ -133,19 +117,6 @@ onMounted(revealCurrent)
       <aside class="settings-side">
         <div class="side-header">
           <h1 class="settings-title">设置</h1>
-          <label v-if="spaces && spaces.length > 1" class="space-picker-wrap">
-            <span class="sr-only">切换设置空间</span>
-            <select
-              class="space-picker"
-              :value="spaceId ?? ''"
-              aria-label="切换设置空间"
-              @change="onSpaceChange"
-            >
-              <option v-for="s in spaces" :key="s.id" :value="s.id">
-                空间：{{ s.name }}（{{ s.roleLabel }}）
-              </option>
-            </select>
-          </label>
         </div>
 
         <nav ref="treeNav" class="settings-tree" aria-label="设置目录">
@@ -235,18 +206,6 @@ onMounted(revealCurrent)
   font-size: 20px;
   font-weight: 600;
   line-height: 1.3;
-}
-.space-picker-wrap {
-  display: block;
-  margin-top: 10px;
-}
-.space-picker {
-  width: 100%;
-  padding: 6px 8px;
-  border: 1px solid var(--strata-rule);
-  background: var(--ui-bg);
-  color: var(--ui-text);
-  font-size: 13px;
 }
 .settings-tree {
   display: flex;

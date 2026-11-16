@@ -530,36 +530,22 @@ describe('设置页的骨架', () => {
     expect(side).not.toContain('仅管理员')
   })
 
-  it('窄屏导航与宽屏目录树的名字各不相同，宽屏列出全部分组并带空间切换', async () => {
+  it('窄屏导航与宽屏目录树的名字各不相同，宽屏列出全部分组且不放重复的空间选择框', async () => {
     const navs = elementsOf(template(settingsFrame)).filter((el) => el.tag === 'nav')
     expect(
       navs.map((el) => el.props?.find((p) => p.name === 'aria-label')?.value?.content),
     ).toEqual(['设置的分组', '设置的小节', '设置目录'])
 
-    const tree = navOf(await frame('data'), '设置目录')
+    const html = await frame('data')
+    const tree = navOf(html, '设置目录')
     expect(tree).toContain('个人')
     expect(tree).toContain('外观')
     expect(tree).toContain('实例')
     expect(tree).toContain('模型')
     expect(tree).toContain('数据与保留')
-
-    const withSpaces = await render(SettingsFrame, {
-      group: 'space',
-      current: 'general',
-      spaceId: 's1',
-      spaces: [
-        { id: 's1', name: '空间甲', roleLabel: '所有者' },
-        { id: 's2', name: '空间乙', roleLabel: '成员' },
-      ],
-      groups,
-    })
-    expect(withSpaces).toContain('切换设置空间')
-    expect(withSpaces).toContain('空间：空间甲（所有者）')
-    expect(withSpaces).toContain('空间：空间乙（成员）')
-    // 切换取消时恢复选中值、不同空间各自记滚动位置
-    const frameScript = scriptOf(settingsFrame)
-    expect(frameScript).toContain("select.value = props.spaceId ?? ''")
-    expect(frameScript).toContain("${group}:${spaceId ?? ''}:${section}")
+    // 顶部已有全局空间切换器，设置目录不再重复放空间选择框；不同空间仍各自记滚动位置
+    expect(html).not.toContain('<select')
+    expect(scriptOf(settingsFrame)).toContain("${group}:${spaceId ?? ''}:${section}")
   })
 
   it('只有右边那一栏滚动：标题与左栏不跟着滚，也没有贴顶的行盖在内容上', () => {

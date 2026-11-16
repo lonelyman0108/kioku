@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, reactive, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRoute } from 'vue-router'
 
-import type { SettingsFrameGroup, SettingsFrameSpace } from '../components/strata/SettingsFrame.vue'
+import type { SettingsFrameGroup } from '../components/strata/SettingsFrame.vue'
 import SettingsFrame from '../components/strata/SettingsFrame.vue'
 import { useUnsavedChangesGuard } from '../composables/unsavedChanges'
 import { useSectionCounts } from '../composables/useSectionCounts'
@@ -12,11 +12,9 @@ import {
   leavesSettingsPage,
   roleName,
   SETTINGS_GROUPS,
-  spaceSettingsRoute,
   visibleGroups,
   visibleSections,
   type SettingsGroupKey,
-  type SpaceSectionKey,
 } from '../settingsSections'
 
 // 三组设置共用的页面，由每组一个的路由组件（AccountSettingsPage 等）包一层，地址里的 :section 是当前小节。
@@ -24,7 +22,6 @@ import {
 const props = defineProps<{ group: SettingsGroupKey }>()
 const group = computed(() => props.group)
 const route = useRoute()
-const router = useRouter()
 const { me, space } = useSession()
 
 // 空间组用地址里的空间；个人与实例页面上用会话里当前的空间
@@ -66,21 +63,6 @@ const counts = useSectionCounts(
   computed(() => (group.value === 'space' ? (space.value?.id ?? null) : null)),
 )
 
-const spaces = computed<SettingsFrameSpace[]>(() =>
-  (me.data.value?.spaces ?? []).map((s) => ({
-    id: s.id,
-    name: s.name,
-    roleLabel: roleName(s.role),
-  })),
-)
-
-function switchSpace(nextSpaceId: string) {
-  if (!nextSpaceId || nextSpaceId === space.value?.id) return
-  const targetSection =
-    group.value === 'space' ? (current.value?.key as SpaceSectionKey | undefined) : undefined
-  void router.push(spaceSettingsRoute(nextSpaceId, targetSection))
-}
-
 const groups = computed<SettingsFrameGroup[]>(() =>
   visibleGroups({ ...viewer.value, hasSpace: Boolean(space.value) }).flatMap((key) => {
     const meta = SETTINGS_GROUPS.find((g) => g.key === key)!
@@ -116,9 +98,7 @@ const componentOf = (key: string) => sections.value.find((s) => s.key === key)?.
     :groups="groups"
     :group="group"
     :current="current?.key ?? ''"
-    :spaces="spaces"
     :space-id="space?.id"
-    @switch-space="switchSpace"
   >
     <template #default="{ section }">
       <component
