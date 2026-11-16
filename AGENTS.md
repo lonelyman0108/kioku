@@ -19,9 +19,10 @@
 
 ## 禁区
 
-原因：这些操作影响发布、平台或门禁本身，必须由维护者本人执行。
+原因：这些操作影响发布、平台或门禁本身，必须由维护者本人执行或发起。
 
-- 不打 tag、不改版本号、不运行不带 `--dry-run` 的发布脚本、不上传、不部署。
+- 不发起维护者没要求的发版。维护者发起并确认版本号后，可按 CONTRIBUTING.md「发布」一节提交发布 PR、运行发布脚本、推送版本 tag；不删除、不移动 tag。
+- 未获维护者当次明确确认前，不上传、不部署（tag 推送后由 `release.yml` 自动完成的构建与推送除外）。
 - 不改 GitHub 平台设置（secrets、规则集、仓库可见性），不读取或打印密钥文件（`~/.config/*/token`、`.env`、钥匙串）。
 - 不用 `--no-verify`、`push --force`。
 - 改 `.githooks/`、`.github/workflows/`、`scripts/check.sh`、`scripts/ci/`、发布脚本时，只开 PR（`scripts/pr.sh --no-merge`），由维护者审阅后合并。
