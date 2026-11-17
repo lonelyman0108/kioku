@@ -22,6 +22,7 @@ import {
 } from '@kioku/contracts'
 import { requireConsole, requireInstanceAdmin } from '../auth/middleware'
 import {
+  bumpPrivacyModelRevisions,
   clearPrivacyModelConfig,
   privacyModelSettingsView,
   savePrivacyModelConfig,
@@ -476,11 +477,13 @@ export function settingsRoutes(deps: Deps) {
         savePrivacyModelConfig(deps.db, deps.masterKey, c.req.valid('json')),
       )
       if (!saved.ok) return c.json({ error: saved.error }, 400)
+      await bumpPrivacyModelRevisions(deps.db)
       void deps.jobs?.enqueueSensitiveRescan?.()
       return c.json(saved.value, 200)
     })
     .openapi(privacyModelClear, async (c) => {
       await clearPrivacyModelConfig(deps.db)
+      await bumpPrivacyModelRevisions(deps.db)
       void deps.jobs?.enqueueSensitiveRescan?.()
       return c.body(null, 204)
     })

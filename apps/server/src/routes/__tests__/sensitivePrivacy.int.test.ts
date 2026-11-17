@@ -238,6 +238,14 @@ describe.skipIf(!testDatabaseUrl)('敏感内容与隐私设置', () => {
       const view = (await saveRes.json()) as PrivacyModelSettingsView
       expect(view).toMatchObject({ mode: 'http', baseUrl, hasApiKey: true, minScore: 0.7 })
 
+      // 更换服务主机而不重填或清除 API Key 时应拒绝保存
+      const crossHostRes = await send('PUT', '/settings/privacy-model', {
+        mode: 'http',
+        baseUrl: 'https://other.example.com/detect',
+        minScore: 0.7,
+      })
+      expect(crossHostRes.status).toBe(400)
+
       const testRes = await send('POST', '/settings/privacy-model/test', {})
       expect(testRes.status, await testRes.clone().text()).toBe(200)
       const testBody = (await testRes.json()) as PrivacyModelTestResult

@@ -56,7 +56,7 @@ import {
 import { exportSpace, type SpaceExport } from '../backup/spaceExport'
 import { importSpace, inspectSpaceImport } from '../backup/spaceImport'
 import { acquireTransferSlot, acquireUploadSlot, withTransferSlot } from '../backup/transferGate'
-import { loadSpacePrivacy, saveSpacePrivacy } from '../credential/privacy'
+import { bumpSpacePrivacyRevision, loadSpacePrivacy, saveSpacePrivacy } from '../credential/privacy'
 import { rescanSpaceSensitive } from '../credential/rescan'
 import { extractionUsage, saveExtractionBudget } from '../extraction/budget'
 import type { AppEnv, Deps } from '../http/env'
@@ -785,6 +785,7 @@ export function spaceRoutes(deps: Deps) {
       if ((await memberRole(deps, spaceId, c.get('console').accountId)) !== 'owner') {
         return c.json({ error: '仅空间所有者可触发回扫' }, 403)
       }
+      await bumpSpacePrivacyRevision(deps.db, spaceId)
       if (deps.jobs?.enqueueSensitiveRescan) {
         const queued = await deps.jobs.enqueueSensitiveRescan(spaceId)
         return c.json({ queued }, 200)

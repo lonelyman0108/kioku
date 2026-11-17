@@ -17,13 +17,14 @@ import {
 } from '@kioku/contracts'
 import { eq, sql } from 'drizzle-orm'
 
-import { encryptSecret, type Sealed } from '../crypto/envelope'
-import { encryptionKey, type MasterKey } from '../crypto/keyring'
+import type { Sealed } from '../crypto/envelope'
+import type { MasterKey } from '../crypto/keyring'
 import type { Db, Tx } from '../db/client'
 import { settings, spaces } from '../db/schema'
 import {
   fetchFailure,
   openApiKey,
+  resolveApiKey,
   SettingsInputError,
   unsealJson,
   withoutKey,
@@ -66,19 +67,6 @@ function normalizeUrl(raw: string | null | undefined): string | null {
     throw new SettingsInputError('服务地址只能使用 http 或 https')
   }
   return trimmed.replace(/\/+$/, '')
-}
-
-function sealJson(masterKey: MasterKey | null, value: string): SealedJson {
-  if (!masterKey) {
-    throw new SettingsInputError('保存 API Key 需要先配置环境变量 KIOKU_MASTER_KEY')
-  }
-  const { key, id: keyId } = encryptionKey(masterKey)
-  const sealed: Sealed = encryptSecret(key, value, PRIVACY_MODEL_AAD)
-  return {
-    ciphertext: sealed.ciphertext.toString('base64'),
-    wrappedKey: sealed.wrappedKey.toString('base64'),
-    keyId,
-  }
 }
 
 async function readStoredPrivacyModel(db: Db | Tx): Promise<StoredPrivacyModel> {
@@ -132,7 +120,6 @@ export async function savePrivacyModelConfig(
   masterKey: MasterKey | null,
   input: UpdatePrivacyModelSettings,
 ): Promise<PrivacyModelSettingsView> {
-  const existing = await readStoredPrivacyModel(db)
   if (input.mode === 'off') {
     await db.delete(settings).where(eq(settings.key, PRIVACY_MODEL_KEY))
     return privacyModelSettingsView(db)
@@ -145,27 +132,44 @@ export async function savePrivacyModelConfig(
   if (input.mode === 'openai' && !model) {
     throw new SettingsInputError('OpenAI 兼容模式需要填写模型名称')
   }
-  let apiKey = existing.apiKey
-  if (input.apiKey === null) {
-    apiKey = null
-  } else if (typeof input.apiKey === 'string' && input.apiKey.trim()) {
-    apiKey = sealJson(masterKey, input.apiKey.trim())
-  }
-  const next: StoredPrivacyModel = {
-    mode: input.mode,
-    baseUrl,
-    model,
-    apiKey,
-    minScore: Math.min(1, Math.max(0, input.minScore ?? 0.6)),
-  }
-  await db
-    .insert(settings)
-    .values({ key: PRIVACY_MODEL_KEY, value: next })
-    .onConflictDoUpdate({
-      target: settings.key,
-      set: { value: next, updatedAt: new Date() },
-    })
-  return privacyModelSettingsView(db)
+  // 读出、校验同源沿用与写回放在同一事务里并加行锁，避免和主密钥轮换竞态覆盖
+  return db.transaction(async (tx) => {
+    const [row] = await tx
+      .select()
+      .from(settings)
+      .where(eq(settings.key, PRIVACY_MODEL_KEY))
+      .for('update')
+    const prevRaw = (row?.value ?? {}) as Partial<StoredPrivacyModel>
+    const previous =
+      typeof prevRaw.baseUrl === 'string' && prevRaw.baseUrl
+        ? { baseUrl: prevRaw.baseUrl, apiKey: prevRaw.apiKey ?? null }
+        : undefined
+    const trimmedKey = typeof input.apiKey === 'string' ? input.apiKey.trim() : input.apiKey
+    const normalizedKey = trimmedKey === '' ? undefined : trimmedKey
+    const apiKey = resolveApiKey(
+      previous,
+      { baseUrl, apiKey: normalizedKey },
+      masterKey,
+      PRIVACY_MODEL_AAD,
+      '隐私识别模型',
+      { name: 'API Key' },
+    )
+    const next: StoredPrivacyModel = {
+      mode: input.mode,
+      baseUrl,
+      model,
+      apiKey,
+      minScore: Math.min(1, Math.max(0, input.minScore ?? 0.6)),
+    }
+    await tx
+      .insert(settings)
+      .values({ key: PRIVACY_MODEL_KEY, value: next })
+      .onConflictDoUpdate({
+        target: settings.key,
+        set: { value: next, updatedAt: new Date() },
+      })
+    return privacyModelSettingsView(tx)
+  })
 }
 
 export async function clearPrivacyModelConfig(db: Db): Promise<void> {
@@ -188,17 +192,23 @@ export async function mapPrivacyModelKey(
   db: Db,
   change: (sealed: SealedJson, aad: string) => SealedJson,
 ): Promise<number> {
-  const [row] = await db.select().from(settings).where(eq(settings.key, PRIVACY_MODEL_KEY))
-  if (!row) return 0
-  const stored = row.value as StoredPrivacyModel
-  if (!stored.apiKey) return 0
-  const after = change(stored.apiKey, PRIVACY_MODEL_AAD)
-  if (after === stored.apiKey) return 0
-  await db
-    .update(settings)
-    .set({ value: { ...stored, apiKey: after }, updatedAt: new Date() })
-    .where(eq(settings.key, PRIVACY_MODEL_KEY))
-  return 1
+  return db.transaction(async (tx) => {
+    const [row] = await tx
+      .select()
+      .from(settings)
+      .where(eq(settings.key, PRIVACY_MODEL_KEY))
+      .for('update')
+    if (!row) return 0
+    const stored = row.value as StoredPrivacyModel
+    if (!stored.apiKey) return 0
+    const after = change(stored.apiKey, PRIVACY_MODEL_AAD)
+    if (after === stored.apiKey) return 0
+    await tx
+      .update(settings)
+      .set({ value: { ...stored, apiKey: after }, updatedAt: new Date() })
+      .where(eq(settings.key, PRIVACY_MODEL_KEY))
+    return 1
+  })
 }
 
 const MODEL_LABEL_MAP: Record<string, PiiKind> = {
@@ -379,6 +389,20 @@ export async function loadSpacePrivacy(
 
 export function currentRevision(spacePrivacyRevision: number): number {
   return spacePrivacyRevision * 1000 + SENSITIVE_ENGINE_VERSION
+}
+
+export async function bumpSpacePrivacyRevision(db: Db, spaceId: string): Promise<void> {
+  await db
+    .update(spaces)
+    .set({ privacyRevision: sql`${spaces.privacyRevision} + 1` })
+    .where(eq(spaces.id, spaceId))
+}
+
+export async function bumpPrivacyModelRevisions(db: Db): Promise<void> {
+  await db
+    .update(spaces)
+    .set({ privacyRevision: sql`${spaces.privacyRevision} + 1` })
+    .where(sql`coalesce((${spaces.privacy}->>'usePrivacyModel')::boolean, false)`)
 }
 
 export async function saveSpacePrivacy(
