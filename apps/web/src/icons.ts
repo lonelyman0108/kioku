@@ -81,6 +81,7 @@ export const icons = {
   transfer: 'i-lucide-arrow-up-down',
   models: 'i-lucide-cpu',
   security: 'i-lucide-shield-check',
+  privacy: 'i-lucide-shield-alert',
   data: 'i-lucide-database',
   spaces: 'i-lucide-boxes',
   members: 'i-lucide-users',

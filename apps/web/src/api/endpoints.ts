@@ -61,6 +61,8 @@ import {
   MemoryRecallStat,
   PersonaDetail,
   PersonaInfo,
+  PrivacyModelSettingsView,
+  PrivacyModelTestResult,
   RecallDebug,
   RecallEventList,
   RecallSettings,
@@ -70,6 +72,7 @@ import {
   ReviewList,
   ReviewResult,
   SetupStatus,
+  SpacePrivacySettings,
   DatabaseCheck,
   DatabaseConnected,
   DatabaseInspection,
@@ -108,6 +111,7 @@ import {
   type MoveMemoryRequest,
   type PlaintextIgnoreRequest,
   type ReactivateRequest,
+  type RedactMemoryRequest,
   type RestoreRequest,
   type ReviewQuery,
   type RetentionSettings,
@@ -121,6 +125,8 @@ import {
   type UpdateCredentialRequest,
   type UpdateEmbeddingSettings,
   type UpdateExtractionSettings,
+  type UpdatePrivacyModelSettings,
+  type UpdateSpacePrivacySettings,
   type ExtractionBudget,
   type ConsoleUpdateMemoryRequest,
   type UpdatePersonaRequest,
@@ -356,6 +362,11 @@ export const api = {
     }),
   unignorePlaintext: (spaceId: string, body: PlaintextIgnoreRequest) =>
     request('POST', `/spaces/${spaceId}/memories/unignore-plaintext`, {
+      body,
+      schema: ConsoleMemoryView,
+    }),
+  redactMemory: (spaceId: string, body: RedactMemoryRequest) =>
+    request('POST', `/spaces/${spaceId}/memories/redact`, {
       body,
       schema: ConsoleMemoryView,
     }),
@@ -595,6 +606,23 @@ export const api = {
   clearExtractionSettings: () => request('DELETE', '/settings/extraction'),
   testExtraction: () =>
     request('POST', '/settings/extraction/test', { schema: ExtractionTestResult }),
+
+  privacyModelSettings: () =>
+    request('GET', '/settings/privacy-model', { schema: PrivacyModelSettingsView }),
+  savePrivacyModelSettings: (body: UpdatePrivacyModelSettings) =>
+    request('PUT', '/settings/privacy-model', { body, schema: PrivacyModelSettingsView }),
+  clearPrivacyModelSettings: () => request('DELETE', '/settings/privacy-model'),
+  testPrivacyModel: () =>
+    request('POST', '/settings/privacy-model/test', { schema: PrivacyModelTestResult }),
+
+  spacePrivacy: (spaceId: string) =>
+    request('GET', `/spaces/${spaceId}/privacy`, { schema: SpacePrivacySettings }),
+  saveSpacePrivacy: (spaceId: string, body: UpdateSpacePrivacySettings) =>
+    request('PUT', `/spaces/${spaceId}/privacy`, { body, schema: SpacePrivacySettings }),
+  rescanSpacePrivacy: (spaceId: string) =>
+    request('POST', `/spaces/${spaceId}/privacy/rescan`, {
+      schema: z.object({ queued: z.boolean(), updated: z.number().int().optional() }),
+    }),
 
   backupSettings: () => request('GET', '/settings/backup', { schema: BackupSettingsView }),
   saveBackupSettings: (body: UpdateBackupSettings) =>

@@ -1,5 +1,12 @@
 <script setup lang="ts">
-import { CONVERT_SCOPE_TEXT, placeholderAllowed, type MemoryListItem } from '@kioku/contracts'
+import {
+  CONVERT_SCOPE_TEXT,
+  SENSITIVE_KIND_NAMES,
+  placeholderAllowed,
+  type MemoryListItem,
+  type RedactMode,
+  type SensitiveCategory,
+} from '@kioku/contracts'
 import { useInfiniteQuery } from '@tanstack/vue-query'
 import { computed, ref, toRef, watch } from 'vue'
 
@@ -20,31 +27,67 @@ import SectionHeading from './strata/SectionHeading.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
 import MemoryName from './strata/MemoryName.vue'
 
-// 疑似明文凭据：逐条转存为凭据或者忽略，忽略过的可以看、可以撤销。列表接口不给正文，这里也不显示值
+// 疑似敏感内容：明文凭据与个人信息。凭据支持转存为凭据或忽略，个人信息支持一键打码或忽略
 const props = defineProps<{ spaceId: string }>()
 const spaceId = toRef(props, 'spaceId')
 const permissions = useMemoryPermissions(spaceId)
 const actions = usePlaintextActions(spaceId)
 
 type Filter = 'true' | 'ignored'
+type CategoryFilter = 'all' | SensitiveCategory
 const filter = ref<Filter>('true')
+const category = ref<CategoryFilter>('all')
+const redactMode = ref<RedactMode>('stars')
+
 const filters = [
   { label: '待处理', value: 'true' },
   { label: '已忽略', value: 'ignored' },
 ]
-watch(spaceId, () => (filter.value = 'true'))
+const categories = [
+  { label: '全部类别', value: 'all' },
+  { label: '明文凭据', value: 'credential' },
+  { label: '个人信息', value: 'pii' },
+]
+const redactModes = [
+  { label: '替换为 ***', value: 'stars' },
+  { label: '替换为类别标签', value: 'tag' },
+]
+watch(spaceId, () => {
+  filter.value = 'true'
+  category.value = 'all'
+})
 
 const active = useActivated()
 const list = useInfiniteQuery({
-  queryKey: computed(() => ['memory-list', props.spaceId, { plaintext: filter.value }] as const),
+  queryKey: computed(
+    () =>
+      [
+        'memory-list',
+        props.spaceId,
+        { plaintext: filter.value, category: category.value },
+      ] as const,
+  ),
   // 参数从键里取：换了筛选之后，旧键剩下的页还在重新拉取时，不会用上新的筛选条件
   queryFn: ({ pageParam, queryKey: [, sid, f] }) =>
-    api.memoryList(sid, { plaintext: f.plaintext, ...(pageParam ? { cursor: pageParam } : {}) }),
+    api.memoryList(sid, {
+      plaintext: f.plaintext,
+      ...(f.category !== 'all' ? { sensitiveCategory: f.category } : {}),
+      ...(pageParam ? { cursor: pageParam } : {}),
+    }),
   initialPageParam: undefined as string | undefined,
   getNextPageParam: (last) => last.nextCursor ?? undefined,
   enabled: active,
 })
 const items = computed(() => list.data.value?.pages.flatMap((page) => page.items) ?? [])
+
+function findingLabels(item: MemoryListItem): string[] {
+  const seen = new Set<string>()
+  for (const f of item.sensitiveFindings ?? []) {
+    const name = SENSITIVE_KIND_NAMES[f.kind] ?? f.label ?? f.kind
+    seen.add(name)
+  }
+  return [...seen]
+}
 
 const converting = ref<string | null>(null)
 const convertOpen = ref(false)
@@ -58,16 +101,33 @@ const convertible = (item: MemoryListItem) => placeholderAllowed(item.layer, ite
 
 <template>
   <div>
-    <SectionHeading title="疑似明文凭据">
+    <SectionHeading title="疑似敏感内容">
       <template #hint>
         <Hint>
-          正文疑似包含密码或令牌。建议转存为凭据，正文改用占位符。检测规则可能误判，确认不是凭据时可忽略；正文修改后会重新提示。Agent
-          写入时注明不是凭据的、空间所有者照样保存的，也列在这里。
+          正文疑似包含明文凭据或个人信息。明文凭据建议转存为凭据并以占位符引用；个人信息可一键打码脱敏。检测规则可能误判，确认无需处理时可忽略；正文修改后会重新提示。
         </Hint>
       </template>
     </SectionHeading>
     <div class="plain-bar">
       <UTabs v-model="filter" :items="filters" :content="false" size="sm" class="w-auto" />
+      <UTabs
+        v-if="filter === 'true'"
+        v-model="category"
+        :items="categories"
+        :content="false"
+        size="sm"
+        class="w-auto"
+      />
+      <div v-if="filter === 'true'" class="plain-mode">
+        <span class="plain-mode-label">打码方式</span>
+        <USelect
+          v-model="redactMode"
+          :items="redactModes"
+          value-key="value"
+          size="sm"
+          class="w-36"
+        />
+      </div>
     </div>
     <ReadFailureNote
       v-if="list.isError.value && !list.isFetchNextPageError.value"
@@ -80,7 +140,7 @@ const convertible = (item: MemoryListItem) => placeholderAllowed(item.layer, ite
     <template v-else-if="list.data.value">
       <EmptyState
         v-if="!items.length"
-        :title="filter === 'true' ? '暂无疑似明文凭据' : '暂无已忽略的提示'"
+        :title="filter === 'true' ? '暂无疑似敏感内容' : '暂无已忽略的提示'"
       />
       <ul v-else>
         <li v-for="item in items" :key="item.id" class="plain-row">
@@ -92,12 +152,18 @@ const convertible = (item: MemoryListItem) => placeholderAllowed(item.layer, ite
             <MemoryFlags :layer="item.layer" :sensitivity="item.sensitivity" />
           </div>
           <p class="plain-sub">
+            <span v-for="tag in findingLabels(item)" :key="tag" class="finding-tag">{{ tag }}</span>
             <span v-if="item.disclosure">{{ item.disclosure }}</span>
             <time :datetime="item.updatedAt" :title="formatTime(item.updatedAt)">
               更新于 {{ formatRelative(item.updatedAt) }}
             </time>
             <span
-              v-if="filter === 'true' && !permissions.readOnlyReason(item) && !convertible(item)"
+              v-if="
+                filter === 'true' &&
+                !permissions.readOnlyReason(item) &&
+                item.sensitiveCredential &&
+                !convertible(item)
+              "
               class="plain-blocked"
             >
               需先调整才能转存<Hint>{{ CONVERT_SCOPE_TEXT }}</Hint>
@@ -105,21 +171,32 @@ const convertible = (item: MemoryListItem) => placeholderAllowed(item.layer, ite
           </p>
           <div v-if="!permissions.readOnlyReason(item)" class="plain-actions">
             <template v-if="filter === 'true'">
+              <template v-if="item.sensitiveCredential">
+                <UButton
+                  v-if="convertible(item)"
+                  color="neutral"
+                  variant="outline"
+                  @click="openConvert(item)"
+                >
+                  转存为凭据
+                </UButton>
+                <UButton
+                  v-else
+                  color="neutral"
+                  variant="outline"
+                  :to="memoryRoute(spaceId, item.uri)"
+                >
+                  查看记忆
+                </UButton>
+              </template>
               <UButton
-                v-if="convertible(item)"
                 color="neutral"
                 variant="outline"
-                @click="openConvert(item)"
+                :loading="actions.busy.value === item.id"
+                :disabled="actions.busy.value !== null"
+                @click="actions.redact(item, redactMode)"
               >
-                转存为凭据
-              </UButton>
-              <UButton
-                v-else
-                color="neutral"
-                variant="outline"
-                :to="memoryRoute(spaceId, item.uri)"
-              >
-                查看记忆
+                一键打码
               </UButton>
               <UButton
                 color="neutral"
@@ -166,10 +243,31 @@ const convertible = (item: MemoryListItem) => placeholderAllowed(item.layer, ite
 <style scoped>
 .plain-bar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  gap: 8px 16px;
   min-height: 50px;
   padding: 9px 0;
   border-bottom: 1px solid var(--ui-border);
+}
+.plain-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+.plain-mode-label {
+  font-size: 13px;
+  color: var(--ui-text-muted);
+}
+.finding-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px;
+  border: 1px solid var(--ui-border);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ui-text);
 }
 .note-line.plain-note {
   margin: 10px 0 0;

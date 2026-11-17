@@ -80,6 +80,13 @@ export const SETTINGS_SECTIONS = [
   },
   {
     group: 'space',
+    key: 'privacy',
+    label: '隐私与脱敏',
+    icon: icons.privacy,
+    component: lazy(() => import('./components/SpacePrivacySettings.vue')),
+  },
+  {
+    group: 'space',
     key: 'transfer',
     label: '导入与导出',
     icon: icons.transfer,
