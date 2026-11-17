@@ -114,7 +114,7 @@ const system = ref(DEFAULT_SYSTEM_PROMPT)
 
 // 开始之前要点一下：内容会发给哪个接口的哪个模型，发什么内容。同一次对话不再问，接口地址、模型、格式或循环变了再问一次
 const consent = computed<AgentConsent | null>(() =>
-  loop.value
+  loop.value && !(selectedOption.value && !selectedOption.value.available)
     ? {
         endpoint: selectedOption.value?.endpoint ?? info.data.value?.endpoint ?? null,
         model: model.value,
@@ -278,6 +278,13 @@ watch(generation, () => {
               title="发送前确认"
               :description="consentText(consent)"
               :actions="consentActions"
+            />
+            <BenchNotice
+              v-if="selectedOption && !selectedOption.available"
+              flush
+              color="warning"
+              title="当前选中模型的访问密钥无法解密"
+              description="请在上方下拉框切换其他可用模型，或检查实例主密钥配置。"
             />
             <BenchNotice v-if="blocker" flush color="warning" :title="blocker" />
             <BenchNotice

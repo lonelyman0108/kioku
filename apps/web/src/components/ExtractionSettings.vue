@@ -28,14 +28,28 @@ const savedDream = computed(() => registry.data.value?.bindings.dream)
 const extractionIds = ref<string[]>([])
 const dreamMode = ref<DreamBindingMode>('inherit')
 const dreamIds = ref<string[]>([])
+let syncedSnapshot = ''
 
 watch(
-  () => registry.data.value?.bindings,
+  () =>
+    registry.data.value
+      ? {
+          extraction: registry.data.value.bindings.extraction,
+          dream: registry.data.value.bindings.dream,
+        }
+      : null,
   (b) => {
     if (!b) return
+    const nextSnapshot = JSON.stringify(b)
+    if (nextSnapshot === syncedSnapshot) return
+    const wasDirty = dirty.value
+    syncedSnapshot = nextSnapshot
     extractionIds.value = [...b.extraction.profileIds]
     dreamMode.value = b.dream.mode
     dreamIds.value = [...b.dream.profileIds]
+    if (wasDirty) {
+      toast.add({ title: '抽取与整理设置已在后台更新，未保存的改动已重置', color: 'warning' })
+    }
   },
   { immediate: true },
 )
@@ -71,12 +85,15 @@ async function save() {
     return
   }
   saving.value = true
+  let extractionSaved = false
   try {
-    await api.saveExtractionBinding({ profileIds: extractionIds.value })
-    await api.saveDreamBinding({
+    const savedExt = await api.saveExtractionBinding({ profileIds: extractionIds.value })
+    extractionSaved = true
+    const savedDr = await api.saveDreamBinding({
       mode: dreamMode.value,
       profileIds: dreamMode.value === 'custom' ? dreamIds.value : [],
     })
+    syncedSnapshot = JSON.stringify({ extraction: savedExt, dream: savedDr })
     await Promise.all([
       queryClient.invalidateQueries({ queryKey }),
       queryClient.invalidateQueries({ queryKey: ['settings', 'system'] }),
@@ -85,6 +102,9 @@ async function save() {
     dreamResult.value = null
     toast.add({ title: '已保存', color: 'success' })
   } catch (err) {
+    if (extractionSaved) {
+      await queryClient.invalidateQueries({ queryKey })
+    }
     toast.add({ title: err instanceof ApiError ? err.message : '保存失败', color: 'error' })
   } finally {
     saving.value = false

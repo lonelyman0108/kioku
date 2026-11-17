@@ -512,4 +512,19 @@ describe('多协议嵌入适配器与 Fallback', () => {
     ).rejects.toThrow(/后续渠道未尝试/)
     expect(calls).toBe(1)
   })
+
+  it('openai-responses 返回 status=failed 且无输出时抛错触发 Fallback', async () => {
+    const fakeFetch = (async () =>
+      new Response(
+        JSON.stringify({ status: 'failed', error: { message: 'upstream failed' }, output: [] }),
+        { status: 200 },
+      )) as typeof fetch
+    await expect(
+      callChatProfile(
+        { ...chatBase, format: 'openai-responses', baseUrl: 'https://api.example.com/v1' },
+        { messages: [{ role: 'user', content: 'hi' }] },
+        fakeFetch,
+      ),
+    ).rejects.toThrow(/返回失败状态/)
+  })
 })

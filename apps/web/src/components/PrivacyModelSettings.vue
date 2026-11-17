@@ -47,14 +47,24 @@ const form = reactive<{
   minScore: 0.6,
 })
 
+let syncedSnapshot = ''
 watch(
   saved,
   (s) => {
     if (!s) return
+    const nextSnapshot = JSON.stringify(s)
+    if (nextSnapshot === syncedSnapshot) return
+    const wasDirty = dirty.value
+    syncedSnapshot = nextSnapshot
     form.mode = s.mode
     form.baseUrl = s.baseUrl ?? ''
     form.profileIds = [...s.profileIds]
     form.minScore = s.minScore
+    form.apiKey = ''
+    form.clearKey = false
+    if (wasDirty) {
+      toast.add({ title: '隐私识别设置已在后台更新，未保存的改动已重置', color: 'warning' })
+    }
   },
   { immediate: true },
 )
@@ -98,15 +108,22 @@ async function save() {
   if (keyMissing.value) return
   saving.value = true
   try {
-    await api.savePrivacyBinding({
+    const updated = await api.savePrivacyBinding({
       mode: form.mode,
       baseUrl: form.mode === 'http' ? form.baseUrl.trim() || null : null,
       profileIds: form.mode === 'model' ? form.profileIds : [],
       minScore: Number.isFinite(form.minScore)
         ? Math.min(1, Math.max(0, Number(form.minScore)))
         : 0.6,
-      ...(form.clearKey ? { apiKey: null } : form.apiKey ? { apiKey: form.apiKey } : {}),
+      ...(form.mode === 'http'
+        ? form.clearKey
+          ? { apiKey: null }
+          : form.apiKey
+            ? { apiKey: form.apiKey }
+            : {}
+        : {}),
     })
+    syncedSnapshot = JSON.stringify(updated)
     form.apiKey = ''
     form.clearKey = false
     result.value = null

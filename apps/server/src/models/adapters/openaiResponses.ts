@@ -161,6 +161,14 @@ export async function callOpenAiResponses(
   }
 
   const calls = normalizeToolCalls(rawCalls)
+  if (
+    !contentText &&
+    !refusalText &&
+    !calls.length &&
+    (parsed.status === 'failed' || isRecord(parsed.error))
+  ) {
+    throw new ModelCallError(`${what}返回失败状态：${excerptUpstream(raw, profile.apiKey)}`)
+  }
   const message: Record<string, unknown> = {
     role: 'assistant',
     content: contentText,

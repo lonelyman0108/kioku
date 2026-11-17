@@ -1572,7 +1572,13 @@ describe('贴底的区块', () => {
       '模型对话',
       benchAgentView,
       'composer',
-      ['consent && needsConsent && !agentSending', 'blocker', 'diverged', 'exportNote'],
+      [
+        'consent && needsConsent && !agentSending',
+        'selectedOption && !selectedOption.available',
+        'blocker',
+        'diverged',
+        'exportNote',
+      ],
     ],
   ] as const
 

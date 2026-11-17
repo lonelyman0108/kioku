@@ -23,7 +23,7 @@ import type {
   UpdatePrivacyBinding,
   UpsertModelProvider,
 } from '@kioku/contracts'
-import { eq, inArray } from 'drizzle-orm'
+import { eq, inArray, sql } from 'drizzle-orm'
 
 import type { Sealed } from '../crypto/envelope'
 import type { MasterKey } from '../crypto/keyring'
@@ -192,141 +192,145 @@ async function upsertSetting(tx: Tx, key: string, value: unknown): Promise<void>
 }
 
 // 把旧版的 embedding / extraction / privacy_model 配置幂等迁移为 model-providers 与 model-bindings；
-// 保留原密文的 aad，保证不依赖 KIOKU_MASTER_KEY 也能完成迁移与旧备份恢复
-export async function migrateLegacyModelSettings(db: Db | Tx): Promise<void> {
-  const run = async (tx: Tx) => {
-    const rows = await tx
-      .select()
-      .from(settings)
-      .where(inArray(settings.key, [...ALL_KEYS]))
-      .orderBy(settings.key)
-      .for('update')
-    const byKey = new Map(rows.map((r) => [r.key, r.value]))
-    const hasLegacy = LEGACY_KEYS.some((k) => byKey.has(k))
-    if (!hasLegacy) return
-    if (byKey.has(MODEL_PROVIDERS_KEY) || byKey.has(MODEL_BINDINGS_KEY)) {
-      await tx.delete(settings).where(inArray(settings.key, [...LEGACY_KEYS]))
-      return
-    }
+// 保留原密文的 aad，保证不依赖 KIOKU_MASTER_KEY 也能完成迁移与旧备份恢复。
+// 锁定顺序与 lockOrdered 一致（model-providers 先于 model-bindings），避免与并发写入互锁
+async function migrateLegacyModelSettingsInTx(tx: Tx): Promise<void> {
+  const rows = await tx
+    .select()
+    .from(settings)
+    .where(inArray(settings.key, [...ALL_KEYS]))
+    .orderBy(
+      sql`case ${settings.key} when ${MODEL_PROVIDERS_KEY} then 0 when ${MODEL_BINDINGS_KEY} then 1 else 2 end`,
+      settings.key,
+    )
+    .for('update')
+  const byKey = new Map(rows.map((r) => [r.key, r.value]))
+  const hasLegacy = LEGACY_KEYS.some((k) => byKey.has(k))
+  if (!hasLegacy) return
+  if (byKey.has(MODEL_PROVIDERS_KEY) || byKey.has(MODEL_BINDINGS_KEY)) {
+    await tx.delete(settings).where(inArray(settings.key, [...LEGACY_KEYS]))
+    return
+  }
 
-    const providers: StoredProvider[] = []
-    const bindings = emptyBindings()
+  const providers: StoredProvider[] = []
+  const bindings = emptyBindings()
 
-    const legacyExtraction = byKey.get('extraction') as
-      { baseUrl?: string; model?: string; apiKey?: SealedJson | null } | undefined
-    if (legacyExtraction?.baseUrl && legacyExtraction?.model) {
+  const legacyExtraction = byKey.get('extraction') as
+    { baseUrl?: string; model?: string; apiKey?: SealedJson | null } | undefined
+  if (legacyExtraction?.baseUrl && legacyExtraction?.model) {
+    const profileId = newId()
+    providers.push({
+      id: newId(),
+      name: '抽取模型（迁移）',
+      format: 'openai-chat',
+      baseUrl: legacyExtraction.baseUrl,
+      apiKey: withLegacyAad(legacyExtraction.apiKey, 'settings:extraction'),
+      profiles: [
+        {
+          id: profileId,
+          kind: 'chat',
+          label: null,
+          model: legacyExtraction.model,
+          thinking: 'default',
+          thinkingStyle: 'auto',
+          maxTokens: null,
+        },
+      ],
+    })
+    bindings.extraction = { profileIds: [profileId] }
+  }
+
+  const legacyEmbedding = normalizeLegacyEmbedding(byKey.get('embedding'))
+  const migrateSetup = (
+    setup: {
+      model: string
+      channels: { baseUrl: string; model: string; apiKey?: SealedJson | null }[]
+    } | null,
+    prefix: string,
+  ): StoredEmbeddingSetup | null => {
+    if (!setup) return null
+    const profileIds: string[] = []
+    for (const [i, ch] of setup.channels.entries()) {
       const profileId = newId()
       providers.push({
         id: newId(),
-        name: '抽取模型（迁移）',
+        name: setup.channels.length > 1 ? `${prefix} ${i + 1}` : prefix,
         format: 'openai-chat',
-        baseUrl: legacyExtraction.baseUrl,
-        apiKey: withLegacyAad(legacyExtraction.apiKey, 'settings:extraction'),
+        baseUrl: ch.baseUrl,
+        apiKey: withLegacyAad(ch.apiKey, 'settings:embedding'),
+        profiles: [{ id: profileId, kind: 'embedding', label: null, model: ch.model }],
+      })
+      profileIds.push(profileId)
+    }
+    return { model: setup.model, profileIds }
+  }
+  bindings.embedding = {
+    active: migrateSetup(legacyEmbedding.active, '嵌入渠道（迁移）'),
+    next: migrateSetup(legacyEmbedding.next, '新嵌入渠道（迁移）'),
+  }
+
+  const legacyPrivacy = byKey.get('privacy_model') as
+    | {
+        mode?: string
+        baseUrl?: string | null
+        model?: string | null
+        apiKey?: SealedJson | null
+        minScore?: number
+      }
+    | undefined
+  if (legacyPrivacy && (legacyPrivacy.mode === 'http' || legacyPrivacy.mode === 'openai')) {
+    const minScore =
+      typeof legacyPrivacy.minScore === 'number'
+        ? Math.min(1, Math.max(0, legacyPrivacy.minScore))
+        : 0.6
+    if (legacyPrivacy.mode === 'http' && legacyPrivacy.baseUrl) {
+      bindings.privacy = {
+        mode: 'http',
+        baseUrl: legacyPrivacy.baseUrl,
+        apiKey: withLegacyAad(legacyPrivacy.apiKey, 'settings:privacy_model'),
+        profileIds: [],
+        minScore,
+      }
+    } else if (legacyPrivacy.mode === 'openai' && legacyPrivacy.baseUrl && legacyPrivacy.model) {
+      const profileId = newId()
+      providers.push({
+        id: newId(),
+        name: '隐私识别模型（迁移）',
+        format: 'openai-chat',
+        baseUrl: legacyPrivacy.baseUrl,
+        apiKey: withLegacyAad(legacyPrivacy.apiKey, 'settings:privacy_model'),
         profiles: [
           {
             id: profileId,
             kind: 'chat',
             label: null,
-            model: legacyExtraction.model,
+            model: legacyPrivacy.model,
             thinking: 'default',
             thinkingStyle: 'auto',
             maxTokens: null,
           },
         ],
       })
-      bindings.extraction = { profileIds: [profileId] }
-    }
-
-    const legacyEmbedding = normalizeLegacyEmbedding(byKey.get('embedding'))
-    const migrateSetup = (
-      setup: {
-        model: string
-        channels: { baseUrl: string; model: string; apiKey?: SealedJson | null }[]
-      } | null,
-      prefix: string,
-    ): StoredEmbeddingSetup | null => {
-      if (!setup) return null
-      const profileIds: string[] = []
-      for (const [i, ch] of setup.channels.entries()) {
-        const profileId = newId()
-        providers.push({
-          id: newId(),
-          name: setup.channels.length > 1 ? `${prefix} ${i + 1}` : prefix,
-          format: 'openai-chat',
-          baseUrl: ch.baseUrl,
-          apiKey: withLegacyAad(ch.apiKey, 'settings:embedding'),
-          profiles: [{ id: profileId, kind: 'embedding', label: null, model: ch.model }],
-        })
-        profileIds.push(profileId)
-      }
-      return { model: setup.model, profileIds }
-    }
-    bindings.embedding = {
-      active: migrateSetup(legacyEmbedding.active, '嵌入渠道（迁移）'),
-      next: migrateSetup(legacyEmbedding.next, '新嵌入渠道（迁移）'),
-    }
-
-    const legacyPrivacy = byKey.get('privacy_model') as
-      | {
-          mode?: string
-          baseUrl?: string | null
-          model?: string | null
-          apiKey?: SealedJson | null
-          minScore?: number
-        }
-      | undefined
-    if (legacyPrivacy && (legacyPrivacy.mode === 'http' || legacyPrivacy.mode === 'openai')) {
-      const minScore =
-        typeof legacyPrivacy.minScore === 'number'
-          ? Math.min(1, Math.max(0, legacyPrivacy.minScore))
-          : 0.6
-      if (legacyPrivacy.mode === 'http' && legacyPrivacy.baseUrl) {
-        bindings.privacy = {
-          mode: 'http',
-          baseUrl: legacyPrivacy.baseUrl,
-          apiKey: withLegacyAad(legacyPrivacy.apiKey, 'settings:privacy_model'),
-          profileIds: [],
-          minScore,
-        }
-      } else if (legacyPrivacy.mode === 'openai' && legacyPrivacy.baseUrl && legacyPrivacy.model) {
-        const profileId = newId()
-        providers.push({
-          id: newId(),
-          name: '隐私识别模型（迁移）',
-          format: 'openai-chat',
-          baseUrl: legacyPrivacy.baseUrl,
-          apiKey: withLegacyAad(legacyPrivacy.apiKey, 'settings:privacy_model'),
-          profiles: [
-            {
-              id: profileId,
-              kind: 'chat',
-              label: null,
-              model: legacyPrivacy.model,
-              thinking: 'default',
-              thinkingStyle: 'auto',
-              maxTokens: null,
-            },
-          ],
-        })
-        bindings.privacy = {
-          mode: 'model',
-          baseUrl: null,
-          apiKey: null,
-          profileIds: [profileId],
-          minScore,
-        }
+      bindings.privacy = {
+        mode: 'model',
+        baseUrl: null,
+        apiKey: null,
+        profileIds: [profileId],
+        minScore,
       }
     }
-
-    await upsertSetting(tx, MODEL_PROVIDERS_KEY, { providers })
-    await upsertSetting(tx, MODEL_BINDINGS_KEY, bindings)
-    await tx.delete(settings).where(inArray(settings.key, [...LEGACY_KEYS]))
   }
 
-  if ('transaction' in db && typeof db.transaction === 'function') {
-    await db.transaction(run)
+  await upsertSetting(tx, MODEL_PROVIDERS_KEY, { providers })
+  await upsertSetting(tx, MODEL_BINDINGS_KEY, bindings)
+  await tx.delete(settings).where(inArray(settings.key, [...LEGACY_KEYS]))
+}
+
+export async function migrateLegacyModelSettings(db: Db | Tx): Promise<void> {
+  if ('rollback' in db) {
+    await migrateLegacyModelSettingsInTx(db as Tx)
   } else {
-    await run(db as Tx)
+    await db.transaction(migrateLegacyModelSettingsInTx)
   }
 }
 
@@ -578,7 +582,7 @@ function referencedUsages(bindings: StoredBindings): Map<string, string[]> {
 function toStoredProfiles(input: UpsertModelProvider, existing: StoredProfile[]): StoredProfile[] {
   const seen = new Set(existing.map((p) => p.id))
   return input.profiles.map((p) => {
-    const id = p.id && seen.has(p.id) ? p.id : (p.id ?? newId())
+    const id = p.id && seen.has(p.id) ? p.id : newId()
     if (p.kind === 'chat') {
       return {
         id,
@@ -1110,9 +1114,13 @@ export async function loadBenchAgentModelState(
   }
 
   const extractionPrimary = bindings.extraction.profileIds[0]
+  const primaryOption = extractionPrimary
+    ? options.find((o) => o.profileId === extractionPrimary)
+    : undefined
   const preferred =
-    (extractionPrimary && options.find((o) => o.profileId === extractionPrimary)) ||
+    (primaryOption?.available ? primaryOption : null) ||
     options.find((o) => o.available) ||
+    primaryOption ||
     options[0] ||
     null
 

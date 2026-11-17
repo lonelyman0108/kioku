@@ -367,4 +367,40 @@ describe.skipIf(!testDatabaseUrl)('模型服务商与用途绑定设置', () => 
     expect(noMaster.status).toBe(400)
     expect(((await noMaster.json()) as { error: string }).error).toContain('KIOKU_MASTER_KEY')
   })
+
+  it('创建或编辑服务商传入未知或属于其他服务商的条目 ID 时忽略并重分配新 ID，不能劫持绑定', async () => {
+    const provA = await createProvider({
+      name: '服务商A',
+      format: 'openai-chat',
+      baseUrl: `${baseUrl}/v1`,
+      apiKey: 'sk-a',
+      profiles: [{ kind: 'chat', model: 'm-a' }],
+    })
+    const pidA = provA.profiles[0]!.id
+    await call('PUT', '/bindings/extraction', { profileIds: [pidA] })
+
+    const provB = await createProvider({
+      name: '服务商B',
+      format: 'openai-chat',
+      baseUrl: `${baseUrl}/v1`,
+      apiKey: 'sk-b',
+      profiles: [{ id: pidA, kind: 'chat', model: 'm-b' }],
+    })
+    const pidB = provB.profiles[0]!.id
+    expect(pidB).not.toBe(pidA)
+
+    const updatedB = (await (
+      await call('PUT', `/providers/${provB.id}`, {
+        name: '服务商B',
+        format: 'openai-chat',
+        baseUrl: `${baseUrl}/v1`,
+        profiles: [{ id: pidA, kind: 'chat', model: 'm-b2' }],
+      })
+    ).json()) as ModelProviderView
+    expect(updatedB.profiles[0]!.id).not.toBe(pidA)
+
+    const extractors = await loadExtractionConfig(database.db, masterKey)
+    expect(extractors).toHaveLength(1)
+    expect(extractors![0]!.model).toBe('m-a')
+  })
 })

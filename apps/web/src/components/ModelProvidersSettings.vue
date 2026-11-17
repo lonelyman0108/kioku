@@ -69,7 +69,7 @@ interface ProfileDraft {
   model: string
   thinking: ThinkingLevel
   thinkingStyle: ThinkingStyle
-  maxTokens: string
+  maxTokens: string | number | undefined
 }
 
 let draftSeq = 0
@@ -184,7 +184,9 @@ async function saveProvider() {
           model: p.model.trim(),
         }
       }
-      const maxTokensNum = p.maxTokens.trim() ? Number(p.maxTokens.trim()) : null
+      const maxTokensRaw =
+        p.maxTokens === null || p.maxTokens === undefined ? '' : String(p.maxTokens).trim()
+      const maxTokens = maxTokensRaw === '' ? null : Number(maxTokensRaw)
       return {
         ...(p.id ? { id: p.id } : {}),
         kind: 'chat' as const,
@@ -192,7 +194,7 @@ async function saveProvider() {
         model: p.model.trim(),
         thinking: p.thinking,
         thinkingStyle: form.format === 'openai-chat' ? p.thinkingStyle : ('auto' as const),
-        maxTokens: maxTokensNum && Number.isFinite(maxTokensNum) ? Math.trunc(maxTokensNum) : null,
+        maxTokens,
       }
     })
     const payload = {
@@ -482,6 +484,7 @@ async function confirmDelete() {
                     v-model="p.maxTokens"
                     type="number"
                     min="1"
+                    max="1000000"
                     placeholder="默认"
                     class="w-full"
                   />
