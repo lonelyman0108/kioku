@@ -18,6 +18,9 @@ export interface DreamPromptItem {
   // 策展记忆的敏感级说法：只合并相同的
   visibility: string | null
   updated: string
+  // 累计召回次数与当前优先级，供高频晋升建议判断
+  recallCount?: number
+  priority?: number
   // 正文太长、只给了开头的：不能合并
   truncated: boolean
   content: string
@@ -43,9 +46,11 @@ const MERGE_NODE =
 const MERGE_FACT =
   '- merge：同一个对象（subject 相同）的几条事实说的是同一件事、可以并成一条。memories 填这几条的代号（至少两条），keep 填保留的那条（其余几条删掉），content 写合并之后的事实：一句话，第三人称，不超过 60 字，不写名字与代号。'
 const DISTILL =
-  '- distill：几条事实（至少两条）合起来是一个值得长期记住的主题，例如一个人的情况、一个群的规矩。memories 填这几条的代号，uri 写建议放在哪里（user://<位置>/<标识>，例如 user://people/xiaoming，只用小写字母、数字、_ 和 -；成员执行时可以改到别处），content 写提炼之后的正文：重新组织、浓缩，不是把几条拼起来；disclosure 用一句话写什么场景下需要想起它。'
+  '- distill：几条事实（至少两条）合起来是一个值得长期记住的主题，例如一个人的情况、一个群的规矩（优先关注 recallCount 较高的高频事实）。memories 填这几条的代号，uri 写建议放在哪里（user://<位置>/<标识>，例如 user://people/xiaoming，只用小写字母、数字、_ 和 -；成员执行时可以改到别处），content 写提炼之后的正文：重新组织、浓缩，不是把几条拼起来；disclosure 用一句话写什么场景下需要想起它。'
 const STALE_NODE =
   '- stale：某一条可能已经不对了，例如被后来的记忆推翻、说的是已经过去的安排或期限。memories 只填这一条。'
+const PROMOTE_NODE =
+  '- promote：某条记忆累计召回次数（recallCount）较高且当前 priority >= 2，建议调高优先级（targetPriority 为 0 表示加入启动加载，1 表示设为重要）。memories 只填这一条。'
 const STALE_FACT =
   '- stale：某条事实可能已经不对了，例如被后来的事实推翻、说的是已经过去的安排。memories 只填这一条。'
 const REVIEW =
@@ -66,7 +71,7 @@ export function system(scope: Pick<DreamPromptScope, 'talk'>): string {
     : '你帮一个长期记忆库做整理：找出可以合并的、可能已经过时的记忆。只提建议，由人确认之后才执行。'
   const kinds = scope.talk
     ? ['能提的建议：', MERGE_FACT, DISTILL, STALE_FACT, REVIEW]
-    : ['能提的建议：', MERGE_NODE, STALE_NODE]
+    : ['能提的建议：', MERGE_NODE, STALE_NODE, PROMOTE_NODE]
   return [intro, ...OUTPUT, '', ...ITEMS, '', ...kinds, '', ...RULES].join('\n')
 }
 
@@ -80,6 +85,8 @@ function itemLine(item: DreamPromptItem): string {
     ...(item.subject ? { subject: item.subject } : {}),
     ...(item.visibility ? { visibility: item.visibility } : {}),
     ...(item.kind === 'node' ? {} : { trusted: item.trusted }),
+    ...(item.recallCount !== undefined ? { recallCount: item.recallCount } : {}),
+    ...(item.priority !== undefined ? { priority: item.priority } : {}),
     updated: item.updated,
     ...(item.truncated ? { truncated: true } : {}),
     content: item.content,
@@ -135,6 +142,12 @@ export const DreamCandidate = z.discriminatedUnion('kind', [
     kind: z.literal('review'),
     memories: Handles,
     verdict: z.enum(['confirm', 'delete']),
+    reason: Reason,
+  }),
+  z.object({
+    kind: z.literal('promote'),
+    memories: Handles,
+    targetPriority: z.number().int().min(0).max(1),
     reason: Reason,
   }),
 ])

@@ -21,6 +21,8 @@ import {
   dreamSuggestions,
   memories,
   memoryEmbeddings,
+  memoryRecallStats,
+  recallEventHits,
   spaceMembers,
   spaces,
   subjects,
@@ -589,9 +591,10 @@ async function dreamScope(
 ): Promise<ScopeResult | null> {
   const { spaceId } = options
   const owner = pending.owner
-  const { batch, prompt, names } = await withSpace(db, spaceId, async (tx) => {
+  const { batch, prompt, names, recallCounts } = await withSpace(db, spaceId, async (tx) => {
     const owners = await allowedOwners(tx, spaceId)
     const batch = await loadBatch(tx, pending, context.activeModel, owners)
+    const pickedIds = [...batch.changed, ...batch.neighbors].map((p) => p.row.id)
     const subjectIds = [
       ...new Set(
         [...batch.changed, ...batch.neighbors].flatMap((p) =>
@@ -605,7 +608,8 @@ async function dreamScope(
           .from(subjects)
           .where(inArray(subjects.id, subjectIds))
       : []
-    return { batch, prompt: await scopeTitle(tx, pending), names }
+    const recallCounts = await loadRecallCounts(tx, pickedIds)
+    return { batch, prompt: await scopeTitle(tx, pending), names, recallCounts }
   })
   if (!batch.changed.length) return null
   await options.afterBatch?.(pending.key)
@@ -614,20 +618,25 @@ async function dreamScope(
   const subjectName = new Map(names.map((n) => [n.id, n.name]))
   const picked = [...batch.changed, ...batch.neighbors]
   const byHandle = new Map(picked.map((p, i) => [`M${i + 1}`, p]))
-  const items: DreamPromptItem[] = [...byHandle].map(([handle, p]) => ({
-    handle,
-    fresh: p.fresh,
-    kind: p.row.form === 'curated' ? 'node' : isFact(p.row) ? 'fact' : 'summary',
-    uri: p.row.domain && p.row.path ? formatUri(p.row.domain, p.row.path) : null,
-    subject: p.row.subjectId
-      ? clipChars(oneLine(subjectName.get(p.row.subjectId) ?? ''), 40, '…') || null
-      : null,
-    trusted: p.row.provenance !== 'untrusted',
-    visibility: prompt.talk ? null : p.row.sensitivity,
-    updated: p.row.updatedAt.toISOString().slice(0, 10),
-    truncated: p.truncated,
-    content: p.content,
-  }))
+  const items: DreamPromptItem[] = [...byHandle].map(([handle, p]) => {
+    const recallCount = recallCounts.get(p.row.id) ?? 0
+    return {
+      handle,
+      fresh: p.fresh,
+      kind: p.row.form === 'curated' ? 'node' : isFact(p.row) ? 'fact' : 'summary',
+      uri: p.row.domain && p.row.path ? formatUri(p.row.domain, p.row.path) : null,
+      subject: p.row.subjectId
+        ? clipChars(oneLine(subjectName.get(p.row.subjectId) ?? ''), 40, '…') || null
+        : null,
+      trusted: p.row.provenance !== 'untrusted',
+      visibility: prompt.talk ? null : p.row.sensitivity,
+      ...(recallCount > 0 ? { recallCount } : {}),
+      ...(p.row.form === 'curated' ? { priority: p.row.priority } : {}),
+      updated: p.row.updatedAt.toISOString().slice(0, 10),
+      truncated: p.truncated,
+      content: p.content,
+    }
+  })
   const counts = { changed: batch.changed.length, considered: picked.length }
   const record = (tx: Tx, fields: RunFields) =>
     recordRun(tx, options, { scope: pending.key, ownerAccountId: owner, ...counts, ...fields })
@@ -696,7 +705,7 @@ async function dreamScope(
   let dropped = Math.max(0, candidates.length - context.maxSuggestions)
   const proposals = new Map<string, Proposal>()
   for (const candidate of candidates.slice(0, context.maxSuggestions)) {
-    const proposal = validate(candidate, byHandle, prompt.talk)
+    const proposal = validate(candidate, byHandle, prompt.talk, recallCounts)
     if (!proposal) dropped++
     else if (!proposals.has(proposal.fingerprint)) proposals.set(proposal.fingerprint, proposal)
   }
@@ -773,8 +782,38 @@ interface Proposal {
   uri: string | null
   disclosure: string | null
   verdict: 'confirm' | 'delete' | null
+  targetPriority: number | null
   reason: string
   fingerprint: string
+}
+
+const PROMOTE_MIN_RECALLS = 3
+
+async function loadRecallCounts(
+  tx: Tx,
+  memoryIds: readonly string[],
+): Promise<Map<string, number>> {
+  const counts = new Map<string, number>()
+  if (!memoryIds.length) return counts
+  const stats = await tx
+    .select({ memoryId: memoryRecallStats.memoryId, count: memoryRecallStats.count })
+    .from(memoryRecallStats)
+    .where(inArray(memoryRecallStats.memoryId, [...memoryIds]))
+  for (const row of stats) {
+    counts.set(row.memoryId, (counts.get(row.memoryId) ?? 0) + row.count)
+  }
+  const hits = await tx
+    .select({
+      memoryId: recallEventHits.memoryId,
+      hits: sql<number>`count(*)::int`,
+    })
+    .from(recallEventHits)
+    .where(inArray(recallEventHits.memoryId, [...memoryIds]))
+    .groupBy(recallEventHits.memoryId)
+  for (const row of hits) {
+    counts.set(row.memoryId, (counts.get(row.memoryId) ?? 0) + Number(row.hits))
+  }
+  return counts
 }
 
 // 「种类 + 涉及的记忆 id 与各自的版本」：同样的建议（拒绝过的也算）不再提，涉及的记忆改过之后就不一样了
@@ -803,6 +842,7 @@ function validate(
   candidate: DreamCandidate | null,
   byHandle: ReadonlyMap<string, Picked>,
   talk: boolean,
+  recallCounts: ReadonlyMap<string, number>,
 ): Proposal | null {
   if (!candidate) return null
   const picked: Picked[] = []
@@ -824,6 +864,7 @@ function validate(
     uri: null,
     disclosure: null,
     verdict: null,
+    targetPriority: null,
     reason,
     fingerprint: suggestionFingerprint(candidate.kind, ordered),
     ...fields,
@@ -890,6 +931,13 @@ function validate(
       )
         return null
       return proposal({ verdict: candidate.verdict })
+    }
+    case 'promote': {
+      const row = rows[0]!
+      if (talk || picked.length !== 1 || row.form !== 'curated') return null
+      if (row.priority <= candidate.targetPriority) return null
+      if ((recallCounts.get(row.id) ?? 0) < PROMOTE_MIN_RECALLS) return null
+      return proposal({ targetPriority: candidate.targetPriority })
     }
   }
 }
