@@ -675,10 +675,11 @@ async function protectCurrent(target: ProtectTarget) {
 async function redactCurrent(mode: RedactMode) {
   const m = base.value
   if (!m) return
-  const view = await plaintextActions.redact(m, mode)
-  if (view && view.id === base.value?.id) {
+  try {
+    const view = await plaintextActions.redact(m, mode)
+    if (view && view.id === base.value?.id) adopt(view)
+  } finally {
     redactOpen.value = false
-    adopt(view)
   }
 }
 function onConverted(memory: ConsoleMemoryView) {
@@ -982,6 +983,7 @@ const properties = computed<Property[][]>(() => {
                 {{ base.layer === 'user' ? '设为私密' : '移入本人私密' }}
               </UButton>
               <UButton
+                v-if="permissions.sensitivities.value.includes('secret')"
                 size="sm"
                 color="neutral"
                 variant="outline"

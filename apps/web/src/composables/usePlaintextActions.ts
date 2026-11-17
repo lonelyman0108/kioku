@@ -49,9 +49,10 @@ export function usePlaintextActions(spaceId: Ref<string>) {
       return memory
     } catch (err) {
       toast.add({ title: err instanceof ApiError ? err.message : '操作失败', color: 'error' })
-      // 列表里的版本已经旧了：重新读取，看过新的正文再决定
+      // 列表或详情里的版本已经旧了：重新读取，看过新的正文再决定
       if (err instanceof ApiError && (err.status === 404 || err.status === 409)) {
         refreshAfterPlaintext(queryClient, sid)
+        void queryClient.invalidateQueries({ queryKey: ['memory', sid] })
       }
       return null
     } finally {

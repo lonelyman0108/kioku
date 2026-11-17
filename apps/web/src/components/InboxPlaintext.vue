@@ -96,8 +96,11 @@ const redactTarget = ref<MemoryListItem | null>(null)
 async function confirmRedact(mode: RedactMode) {
   const target = redactTarget.value
   if (!target) return
-  const updated = await actions.redact(target, mode)
-  if (updated) redactTarget.value = null
+  try {
+    await actions.redact(target, mode)
+  } finally {
+    redactTarget.value = null
+  }
 }
 // 占位符放不进这条记忆时，转存一定失败：这一行的操作换成去调整它
 const convertible = (item: MemoryListItem) => placeholderAllowed(item.layer, item.sensitivity)
@@ -200,6 +203,7 @@ const convertible = (item: MemoryListItem) => placeholderAllowed(item.layer, ite
                 </UButton>
               </template>
               <UButton
+                v-if="permissions.sensitivities.value.includes('secret')"
                 color="neutral"
                 variant="outline"
                 :loading="actions.busy.value === item.id"
