@@ -33,11 +33,13 @@ export interface EndpointSettingsView {
   hasApiKey: boolean
 }
 
-// 加密保存的 Key，JSON 里按 base64 存；keyId 是包装数据密钥用的主密钥的标识（加上标识之前保存的没有）
+// 加密保存的 Key，JSON 里按 base64 存；keyId 是包装数据密钥用的主密钥的标识（加上标识之前保存的没有）；
+// aad 仅在从旧设置项迁移过来的密文上保留原来的绑定上下文，默认用当前所在设置项的 aad
 export interface SealedJson {
   ciphertext: string
   wrappedKey: string
   keyId?: string
+  aad?: string
 }
 
 // 管理员填的设置不成立，原因可以直接给管理员看
@@ -73,7 +75,11 @@ export function openApiKey(
     throw new ApiKeyLockedError(`${label}的 ${name} 已加密保存，但服务端未配置 KIOKU_MASTER_KEY`)
   }
   try {
-    return decryptSecret(decryptionKey(masterKey, sealed.keyId), unsealJson(sealed), aad)
+    return decryptSecret(
+      decryptionKey(masterKey, sealed.keyId),
+      unsealJson(sealed),
+      sealed.aad ?? aad,
+    )
   } catch (cause) {
     throw new ApiKeyLockedError(
       `${label}的 ${name} 无法解密：当前 KIOKU_MASTER_KEY 与保存时使用的不一致，或保存的内容已损坏。轮换主密钥期间，旧密钥须配置在 KIOKU_MASTER_KEY_PREVIOUS，实例设置显示轮换完成后再移除`,

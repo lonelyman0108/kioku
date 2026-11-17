@@ -1,17 +1,16 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import type {
-  PrivacyModelMode,
-  PrivacyModelSettingsView,
-  PrivacyModelTestResult,
-} from '@kioku/contracts'
+import type { ModelChainTestResult, PrivacyBindingMode } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, reactive, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import { profileIdsChanged } from '../embeddingDrafts'
 import { needsNewKey, newKeyHint } from '../endpointKey'
+import { flattenProfiles } from '../models'
 import Hint from './Hint.vue'
+import ModelChainEditor from './ModelChainEditor.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SettingsBlock from './strata/SettingsBlock.vue'
 
@@ -20,80 +19,81 @@ const dirtyModel = defineModel<boolean>('dirty', { default: false })
 
 const toast = useToast()
 const queryClient = useQueryClient()
-const queryKey = ['settings', 'privacy-model']
-const settings = useQuery({ queryKey, queryFn: api.privacyModelSettings })
+const queryKey = ['settings', 'models']
+const registry = useQuery({ queryKey, queryFn: api.modelRegistry })
 
-const modeItems: { label: string; value: PrivacyModelMode }[] = [
+const saved = computed(() => registry.data.value?.bindings.privacy)
+const chatOptions = computed(() => flattenProfiles(registry.data.value?.providers ?? [], 'chat'))
+
+const modeItems: { label: string; value: PrivacyBindingMode }[] = [
   { label: '关闭', value: 'off' },
   { label: 'HTTP 识别接口', value: 'http' },
-  { label: 'OpenAI 兼容模型', value: 'openai' },
+  { label: '已配置对话模型', value: 'model' },
 ]
 
 const form = reactive<{
-  mode: PrivacyModelMode
+  mode: PrivacyBindingMode
   baseUrl: string
-  model: string
   apiKey: string
   clearKey: boolean
+  profileIds: string[]
   minScore: number
 }>({
   mode: 'off',
   baseUrl: '',
-  model: '',
   apiKey: '',
   clearKey: false,
+  profileIds: [],
   minScore: 0.6,
 })
 
-const baseUrlHelp = computed(() =>
-  form.mode === 'http'
-    ? '兼容 POST /detect，例如 http://127.0.0.1:8080/detect'
-    : 'OpenAI 兼容接口地址，例如 https://api.example.com/v1',
-)
-const apiKeyHelp = computed(() =>
-  settings.data.value?.hasApiKey
-    ? '已加密保存；留空表示不修改，更换接口主机时必须重新填写。'
-    : '可选，本地服务不需要认证时留空；填写后使用实例主密钥加密保存。',
-)
-
+let syncedSnapshot = ''
 watch(
-  () => settings.data.value,
+  saved,
   (s) => {
     if (!s) return
+    const nextSnapshot = JSON.stringify(s)
+    if (nextSnapshot === syncedSnapshot) return
+    const wasDirty = dirty.value
+    syncedSnapshot = nextSnapshot
     form.mode = s.mode
     form.baseUrl = s.baseUrl ?? ''
-    form.model = s.model ?? ''
+    form.profileIds = [...s.profileIds]
     form.minScore = s.minScore
+    form.apiKey = ''
+    form.clearKey = false
+    if (wasDirty) {
+      toast.add({ title: '隐私识别设置已在后台更新，未保存的改动已重置', color: 'warning' })
+    }
   },
   { immediate: true },
 )
 
 const keyMissing = computed(
   () =>
-    form.mode !== 'off' &&
+    form.mode === 'http' &&
     needsNewKey({
       baseUrl: form.baseUrl,
-      savedBaseUrl: settings.data.value?.baseUrl ?? null,
-      hasApiKey: settings.data.value?.hasApiKey ?? false,
+      savedBaseUrl: saved.value?.baseUrl ?? null,
+      hasApiKey: saved.value?.hasApiKey ?? false,
       apiKey: form.apiKey,
       clearKey: form.clearKey,
     }),
 )
 
 const dirty = computed(() => {
-  const saved = settings.data.value
-  if (!saved) return false
+  if (!saved.value) return false
   return (
-    form.mode !== saved.mode ||
-    form.baseUrl !== (saved.baseUrl ?? '') ||
-    form.model !== (saved.model ?? '') ||
-    Math.abs(form.minScore - saved.minScore) > 1e-6 ||
+    form.mode !== saved.value.mode ||
+    form.baseUrl !== (saved.value.baseUrl ?? '') ||
+    profileIdsChanged(form.profileIds, saved.value.profileIds) ||
+    Math.abs(form.minScore - saved.value.minScore) > 1e-6 ||
     form.apiKey !== '' ||
     form.clearKey
   )
 })
 
-const result = ref<PrivacyModelTestResult | null>(null)
+const result = ref<ModelChainTestResult | null>(null)
 watch(
   dirty,
   (changed) => {
@@ -108,19 +108,26 @@ async function save() {
   if (keyMissing.value) return
   saving.value = true
   try {
-    const saved = await api.savePrivacyModelSettings({
+    const updated = await api.savePrivacyBinding({
       mode: form.mode,
-      baseUrl: form.mode === 'off' ? null : form.baseUrl || null,
-      model: form.mode === 'openai' ? form.model || null : null,
+      baseUrl: form.mode === 'http' ? form.baseUrl.trim() || null : null,
+      profileIds: form.mode === 'model' ? form.profileIds : [],
       minScore: Number.isFinite(form.minScore)
         ? Math.min(1, Math.max(0, Number(form.minScore)))
         : 0.6,
-      ...(form.clearKey ? { apiKey: null } : form.apiKey ? { apiKey: form.apiKey } : {}),
+      ...(form.mode === 'http'
+        ? form.clearKey
+          ? { apiKey: null }
+          : form.apiKey
+            ? { apiKey: form.apiKey }
+            : {}
+        : {}),
     })
-    queryClient.setQueryData(queryKey, saved)
+    syncedSnapshot = JSON.stringify(updated)
     form.apiKey = ''
     form.clearKey = false
     result.value = null
+    await queryClient.invalidateQueries({ queryKey })
     toast.add({ title: '已保存', color: 'success' })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '保存失败', color: 'error' })
@@ -133,7 +140,7 @@ const testing = ref(false)
 async function test() {
   testing.value = true
   try {
-    result.value = await api.testPrivacyModel()
+    result.value = await api.testPrivacyBinding()
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '测试失败', color: 'error' })
   } finally {
@@ -146,20 +153,12 @@ const clearing = ref(false)
 async function clear() {
   clearing.value = true
   try {
-    await api.clearPrivacyModelSettings()
-    queryClient.setQueryData<PrivacyModelSettingsView>(queryKey, {
-      mode: 'off',
-      configured: false,
-      baseUrl: null,
-      model: null,
-      hasApiKey: false,
-      minScore: 0.6,
-    })
+    await api.savePrivacyBinding({ mode: 'off', profileIds: [], minScore: 0.6 })
     form.mode = 'off'
     form.baseUrl = ''
-    form.model = ''
     form.apiKey = ''
     form.clearKey = false
+    form.profileIds = []
     form.minScore = 0.6
     result.value = null
     confirmingClear.value = false
@@ -176,29 +175,30 @@ async function clear() {
 <template>
   <SettingsBlock title="隐私识别模型">
     <template #note>
-      可选的实体识别模型（本地 HTTP 服务或 OpenAI
-      兼容小模型），仅在开启此项的空间中辅助识别人名、住址与私有账号。
+      可选的实体识别模型（本地 HTTP
+      服务或已配置对话模型），仅在开启此项的空间中辅助识别人名、住址与私有账号。
       <Hint>
         仅作增量补充：内置的明文凭据与格式明确的个人信息规则始终本地运行；模型识别结果同样支持保护隔离、抹除敏感段与白名单放行。
       </Hint>
     </template>
-    <ReadFailureNote v-if="settings.isError.value" :query="settings" />
-    <USkeleton v-if="settings.isPending.value" class="h-40 w-full" />
-    <form v-else-if="settings.data.value" class="space-y-4" @submit.prevent="save">
+    <ReadFailureNote v-if="registry.isError.value" :query="registry" />
+    <USkeleton v-if="registry.isPending.value" class="h-40 w-full" />
+    <form v-else-if="saved" class="space-y-4" @submit.prevent="save">
       <UFormField label="识别方式">
         <USelect v-model="form.mode" :items="modeItems" value-key="value" class="w-full max-w-xs" />
       </UFormField>
 
-      <template v-if="form.mode !== 'off'">
-        <UFormField label="接口地址" :help="baseUrlHelp">
+      <template v-if="form.mode === 'http'">
+        <UFormField label="接口地址" help="兼容 POST /detect，例如 http://127.0.0.1:8080/detect">
           <UInput v-model="form.baseUrl" class="w-full font-mono" required />
-        </UFormField>
-        <UFormField v-if="form.mode === 'openai'" label="模型" help="例如 qwen2.5-7b-instruct">
-          <UInput v-model="form.model" class="w-full font-mono" required />
         </UFormField>
         <UFormField
           label="API Key"
-          :help="apiKeyHelp"
+          :help="
+            saved.hasApiKey
+              ? '已加密保存；留空表示不修改，更换接口主机时必须重新填写。'
+              : '可选，本地服务不需要认证时留空；填写后使用实例主密钥加密保存。'
+          "
           :error="keyMissing ? newKeyHint('API Key', true) : undefined"
         >
           <UInput
@@ -210,21 +210,32 @@ async function clear() {
           />
         </UFormField>
         <UCheckbox
-          v-if="settings.data.value?.hasApiKey"
+          v-if="saved.hasApiKey"
           v-model="form.clearKey"
           label="清除已保存的 API Key（新接口不需要时）"
         />
-        <UFormField label="最低置信度" help="范围 0 到 1，低于该分数的实体结果会被忽略，默认 0.6">
-          <UInput
-            v-model.number="form.minScore"
-            type="number"
-            min="0"
-            max="1"
-            step="0.05"
-            class="w-40 font-mono"
-          />
+      </template>
+
+      <template v-else-if="form.mode === 'model'">
+        <UFormField label="对话模型" help="按顺位顺序 Fallback，建议选择响应快的小模型。">
+          <ModelChainEditor v-model="form.profileIds" :options="chatOptions" :min="0" />
         </UFormField>
       </template>
+
+      <UFormField
+        v-if="form.mode !== 'off'"
+        label="最低置信度"
+        help="范围 0 到 1，低于该分数的实体结果会被忽略，默认 0.6"
+      >
+        <UInput
+          v-model.number="form.minScore"
+          type="number"
+          min="0"
+          max="1"
+          step="0.05"
+          class="w-40 font-mono"
+        />
+      </UFormField>
 
       <div class="flex flex-wrap items-center gap-2">
         <UButton
@@ -237,34 +248,40 @@ async function clear() {
           保存
         </UButton>
         <UButton
-          v-if="form.mode !== 'off' || settings.data.value?.configured"
+          v-if="form.mode !== 'off' || saved?.configured"
           color="neutral"
           variant="outline"
           :loading="testing"
-          :disabled="!settings.data.value?.configured || dirty"
+          :disabled="!saved?.configured || dirty"
           @click="test"
         >
           测试连接
         </UButton>
         <UButton
-          v-if="settings.data.value?.mode !== 'off' || settings.data.value?.configured"
+          v-if="saved?.mode !== 'off' || saved?.configured"
           color="error"
           variant="outline"
           @click="confirmingClear = true"
         >
           清除设置
         </UButton>
-        <span v-if="dirty && settings.data.value?.configured" class="text-muted">
-          保存改动后才能测试
-        </span>
-        <span v-if="result" :class="result.ok ? 'text-success' : 'text-error'">
-          {{
-            result.ok
-              ? `连接正常，耗时 ${result.latencyMs ?? 0} ms，检出 ${result.findings ?? 0} 处实体`
-              : result.message
-          }}
-        </span>
+        <span v-if="dirty && saved?.configured" class="text-muted">保存改动后才能测试</span>
       </div>
+
+      <ul v-if="result" class="space-y-1 text-sm">
+        <li
+          v-for="(item, i) in result.results"
+          :key="i"
+          :class="item.ok ? 'text-success' : 'text-error'"
+        >
+          <template v-if="item.model">{{ item.model }}：</template>
+          {{
+            item.ok
+              ? `连接正常，耗时 ${item.latencyMs} ms，检出 ${item.findings ?? 0} 处实体`
+              : item.error
+          }}
+        </li>
+      </ul>
     </form>
   </SettingsBlock>
 

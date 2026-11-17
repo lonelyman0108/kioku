@@ -1,62 +1,61 @@
 import { describe, expect, it } from 'vitest'
 
-import { draftOf } from '../embeddingDrafts'
 import { hostOf, needsNewKey, newKeyHint } from '../endpointKey'
 
-const saved = { id: 'c1', baseUrl: 'https://e.example.com/v1', model: 'm', hasApiKey: true }
-
-describe('换了接口主机时密钥要先说怎么处理：嵌入渠道', () => {
-  // 换模型时照抄现在的渠道：请求用的模型名留空，Key 留空表示沿用
-  const copied = () => ({ ...draftOf(saved), model: '' })
-
-  it('主机变了、Key 留空、也没勾清除：提交之前就拦下', () => {
-    expect(needsNewKey({ ...copied(), baseUrl: 'https://other.example.net/v1' })).toBe(true)
-    // 端口、协议不同也是别的主机，和服务端沿用 Key 的规则一样
-    expect(needsNewKey({ ...copied(), baseUrl: 'https://e.example.com:8443/v1' })).toBe(true)
-    expect(needsNewKey({ ...copied(), baseUrl: 'http://e.example.com/v1' })).toBe(true)
-  })
-
-  it('填了新的 Key 或勾了清除就行；同一个主机只改路径时沿用已保存的', () => {
-    const moved = { ...copied(), baseUrl: 'https://other.example.net/v1' }
-    expect(needsNewKey({ ...moved, apiKey: 'sk-new' })).toBe(false)
-    expect(needsNewKey({ ...moved, clearKey: true })).toBe(false)
-    expect(needsNewKey({ ...copied(), baseUrl: 'https://e.example.com/v2' })).toBe(false)
-    expect(needsNewKey({ ...copied(), baseUrl: 'https://E.example.com/v1/' })).toBe(false)
-    expect(needsNewKey(copied())).toBe(false)
-  })
-
-  it('没有保存 Key 的、新加的渠道不用管；地址还没填成 http 或 https 时先不提示', () => {
-    const noKey = { ...draftOf({ ...saved, hasApiKey: false }), baseUrl: 'https://x.example.net' }
-    expect(needsNewKey(noKey)).toBe(false)
-    expect(needsNewKey({ ...draftOf(), baseUrl: 'https://x.example.net' })).toBe(false)
-    expect(needsNewKey({ ...copied(), baseUrl: 'https://' })).toBe(false)
-    expect(needsNewKey({ ...copied(), baseUrl: 'ftp://other.example.net/v1' })).toBe(false)
-  })
-})
-
-describe('换了接口主机时密钥要先说怎么处理：抽取模型与备份', () => {
-  // 抽取模型：表单上一个接口，可以清除已保存的 Key
-  const extraction = (baseUrl: string, apiKey = '', clearKey = false) => ({
+describe('换了接口主机时密钥要先说怎么处理：模型服务商', () => {
+  const provider = (baseUrl: string, apiKey = '', clearKey = false) => ({
     baseUrl,
-    savedBaseUrl: 'https://llm.example.com/v1',
+    savedBaseUrl: 'https://e.example.com/v1',
     hasApiKey: true,
     apiKey,
     clearKey,
   })
-  // 备份：Secret 不能清除，只能重填
+
+  it('主机变了、Key 留空、也没勾清除：提交之前就拦下', () => {
+    expect(needsNewKey(provider('https://other.example.net/v1'))).toBe(true)
+    expect(needsNewKey(provider('https://e.example.com:8443/v1'))).toBe(true)
+    expect(needsNewKey(provider('http://e.example.com/v1'))).toBe(true)
+  })
+
+  it('填了新的 Key 或勾了清除就行；同一个主机只改路径时沿用已保存的', () => {
+    expect(needsNewKey(provider('https://other.example.net/v1', 'sk-new'))).toBe(false)
+    expect(needsNewKey(provider('https://other.example.net/v1', '', true))).toBe(false)
+    expect(needsNewKey(provider('https://e.example.com/v2'))).toBe(false)
+    expect(needsNewKey(provider('https://E.example.com/v1/'))).toBe(false)
+    expect(needsNewKey(provider('https://e.example.com/v1'))).toBe(false)
+  })
+
+  it('没有保存 Key 的、新加的服务商不用管；地址还没填成 http 或 https 时先不提示', () => {
+    expect(
+      needsNewKey({
+        baseUrl: 'https://x.example.net',
+        savedBaseUrl: 'https://e.example.com/v1',
+        hasApiKey: false,
+        apiKey: '',
+        clearKey: false,
+      }),
+    ).toBe(false)
+    expect(
+      needsNewKey({
+        baseUrl: 'https://x.example.net',
+        savedBaseUrl: null,
+        hasApiKey: false,
+        apiKey: '',
+        clearKey: false,
+      }),
+    ).toBe(false)
+    expect(needsNewKey(provider('https://'))).toBe(false)
+    expect(needsNewKey(provider('ftp://other.example.net/v1'))).toBe(false)
+  })
+})
+
+describe('换了接口主机时密钥要先说怎么处理：备份', () => {
   const backup = (endpoint: string, secret = '', hasSecret = true) => ({
     baseUrl: endpoint,
     savedBaseUrl: hasSecret ? 'https://s3.example.com' : null,
     hasApiKey: hasSecret,
     apiKey: secret,
     clearKey: false,
-  })
-
-  it('抽取模型换了主机：要么重填 Key，要么清除', () => {
-    expect(needsNewKey(extraction('https://other.example.net/v1'))).toBe(true)
-    expect(needsNewKey(extraction('https://other.example.net/v1', 'sk-new'))).toBe(false)
-    expect(needsNewKey(extraction('https://other.example.net/v1', '', true))).toBe(false)
-    expect(needsNewKey(extraction('https://llm.example.com/v2'))).toBe(false)
   })
 
   it('备份换了接口主机：只有重填 Secret 才行；还没保存过 Secret 时不用管', () => {

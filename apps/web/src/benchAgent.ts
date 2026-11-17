@@ -85,15 +85,15 @@ export const AGENT_UNAVAILABLE_NOTES: Record<
   notAdmin: {
     title: '模型对话仅限实例管理员',
     description:
-      '模型对话使用实例设置中抽取模型的接口与 API Key。API Key 属于实例，且不计入抽取预算，因此不开放给其他成员。',
+      '模型对话使用实例设置中配置的模型接口与 API Key。API Key 属于实例，且不计入抽取预算，因此不开放给其他成员。',
   },
   noModel: {
     title: '尚未配置模型',
     description:
-      '在实例设置中配置抽取模型后可用，模型需支持工具调用。注意：配置后抽取与整理也会开始运行，整理默认将本人记忆发送给该模型。如不希望发送，请先在空间设置中关闭「允许整理本人记忆」，再配置模型。',
+      '在实例设置中配置对话模型后可用，模型需支持工具调用。如仅用于测试台而尚未绑定抽取模型，不会触发自动抽取或整理。',
   },
   keyLocked: {
-    title: '抽取模型的 API Key 无法解密',
+    title: '模型的 API Key 无法解密',
     description:
       '已配置模型，但保存的 API Key 无法解密：主密钥未配置或已更换。请检查 KIOKU_MASTER_KEY（轮换时，旧密钥配置在 KIOKU_MASTER_KEY_PREVIOUS），或在实例设置中重新填写 API Key。',
   },
@@ -104,6 +104,8 @@ export interface AgentConsent {
   // 接口的地址（协议、主机与路径）；服务端没有给时是 null
   endpoint: string | null
   model: string
+  profileId?: string
+  format?: string
   loop: BenchAgentLoop
 }
 
@@ -118,7 +120,7 @@ export function consentText({ endpoint, model, loop }: AgentConsent): string {
   }
   const masked = '机密正文与凭据的值都会打码。'
   const where = endpoint ? ` ${endpoint} 上的模型「${model}」` : `模型「${model}」`
-  return `${what[loop]}将发送给${where}（实例设置中抽取模型的接口）。发送的都是当前访问密钥可读取的内容；${masked}用量不计入抽取预算。`
+  return `${what[loop]}将发送给${where}（实例设置中配置的模型接口）。发送的都是当前访问密钥可读取的内容；${masked}用量不计入抽取预算。`
 }
 
 // 消息的文字。content 可能是 null（只调工具时常见）、空串或分段数组（[{ type: 'text', text }]）
@@ -269,6 +271,8 @@ export function consentNeeded({ consented }: AgentConversation, target: AgentCon
   return (
     consented?.endpoint !== target.endpoint ||
     consented.model !== target.model ||
+    consented.profileId !== target.profileId ||
+    consented.format !== target.format ||
     consented.loop !== target.loop
   )
 }
@@ -288,6 +292,7 @@ export interface AgentSendOptions {
   // 系统提示的基础文字
   system: string
   model: string
+  profileId?: string
   // 页面上的会话上下文，一条消息从头到尾用同一份
   context: SessionContextInput | undefined
   signal: AbortSignal
@@ -498,7 +503,7 @@ function emptyReplyText(finishReason: string | null): string {
 export async function sendAgentMessage(
   start: AgentConversation,
   text: string,
-  { loop, turnEnd, mode, system, model, context, signal, io, onChange }: AgentSendOptions,
+  { loop, turnEnd, mode, system, profileId, context, signal, io, onChange }: AgentSendOptions,
 ): Promise<AgentConversation> {
   let state: AgentConversation = {
     ...start,
@@ -615,7 +620,10 @@ export async function sendAgentMessage(
     updateExchange({ phase: 'model' })
     let turn: BenchAgentTurnResult
     try {
-      turn = await io.turn({ model, messages: [...before, ...working] }, signal)
+      turn = await io.turn(
+        { ...(profileId ? { profileId } : {}), messages: [...before, ...working] },
+        signal,
+      )
     } catch (err) {
       if (signal.aborted) return finish('stopped', `已停止。${afterReply()}`)
       const failure = turnFailureMessage(err)

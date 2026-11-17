@@ -1209,7 +1209,9 @@ describe('模型对话的页面', () => {
     expect(actions).toContain('onClick: () => consent.value && consentTo(consent.value)')
     // 同意的键：服务端给的接口地址、这里的模型名、服务端给的循环
     const target = blockOf(view.script, 'const consent = ')
-    expect(target).toContain('endpoint: info.data.value?.endpoint ?? null')
+    expect(target).toContain(
+      'endpoint: selectedOption.value?.endpoint ?? info.data.value?.endpoint ?? null',
+    )
     expect(target).toContain('model: model.value')
     expect(target).toContain('loop: loop.value')
     expect(view.script).toContain('consentNeeded(agent.value, consent.value)')
@@ -1231,14 +1233,14 @@ describe('模型对话的页面', () => {
     expect(bodyOf(useBench, 'sendToAgent')).toContain('if (running.value || !target) return null')
   })
 
-  it('模型名清空时退回默认：发出去的总是一个模型名', () => {
-    expect(view.script).toContain('modelText.value.trim() || defaultModel.value')
-    const input = must(
-      view.elements.find((el) => bound(el, 'model-value') === 'modelText'),
-      '模型名的输入框',
+  it('模型选择器默认选用服务端默认模型条目，发送时带上 profileId', () => {
+    expect(view.script).toContain('info.data.value?.defaultProfileId')
+    const select = must(
+      view.elements.find((el) => bound(el, 'model-value') === 'selectedProfileId'),
+      '模型的选择框',
     )
-    expect(handler(input, 'update:model-value')).toBe('(v) => (modelEdit = String(v))')
-    expect(bodyOf(view.script, 'send')).toContain('model: model.value')
+    expect(handler(select, 'update:model-value')).toBe('(v) => (profileEdit = String(v))')
+    expect(bodyOf(view.script, 'send')).toContain('profileId: selectedOption.value.profileId')
   })
 
   it('发送：真实模式下只有点按钮才发，回车不发', () => {
@@ -1570,7 +1572,13 @@ describe('贴底的区块', () => {
       '模型对话',
       benchAgentView,
       'composer',
-      ['consent && needsConsent && !agentSending', 'blocker', 'diverged', 'exportNote'],
+      [
+        'consent && needsConsent && !agentSending',
+        'selectedOption && !selectedOption.available',
+        'blocker',
+        'diverged',
+        'exportNote',
+      ],
     ],
   ] as const
 

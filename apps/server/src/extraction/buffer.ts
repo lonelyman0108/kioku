@@ -13,7 +13,7 @@ import { withSpace, type Db, type Tx } from '../db/client'
 import { conversationTurns, spaces } from '../db/schema'
 import type { Deps, KeyPrincipal } from '../http/env'
 import { loadSpaceSettings } from '../settings/advanced'
-import { extractionSettingsView } from './settings'
+import { hasExtractionModel } from './settings'
 
 // 内置值：攒满这么多轮就马上排一次抽取；不满时等这一批空闲这么久再抽取。按空间的高级设置算（extractionDelay）
 export const BATCH_TURNS = TUNING_DEFAULTS['extraction.batchTurns']
@@ -59,7 +59,7 @@ export async function bufferTurn(
   session: KeySession,
   input: TurnEndEvent,
 ): Promise<void> {
-  if (!(await extractionSettingsView(deps.db)).configured) return
+  if (!(await hasExtractionModel(deps.db))) return
   const { context } = session
   // 契约保证带会话上下文的 turn.end 是私聊、群聊或频道，并且带着发言人；不带的按应用与所属成员分批
   const scope = !context.chatType

@@ -26,8 +26,9 @@ import {
 } from '../../testing/fakeEmbeddingServer'
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 import { backfillJob, embedJobs, pruneJob, switchJob, type Retry } from '../jobs'
+import { createModelProvider } from '../../models/store'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
-import { loadEmbeddingSetups, saveActiveEmbedding } from '../settings'
+import { loadEmbeddingSetups } from '../settings'
 import { settingsEmbedderSource, staticEmbedderSource, type EmbedderSource } from '../source'
 
 describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
@@ -94,15 +95,51 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
         ? { method, headers: { cookie, 'sec-fetch-site': 'same-origin' } }
         : jsonRequest(method, body, { cookie }),
     )
-  const put = async (path: string, body: unknown) => {
-    const res = await call('PUT', path, body)
+  const addProfile = async (
+    name: string,
+    model: string,
+    extra: { apiKey?: string | null } = {},
+  ) => {
+    const res = await app.request(
+      '/v1/settings/models/providers',
+      jsonRequest(
+        'POST',
+        {
+          name: `渠道-${name}-${model}`,
+          format: 'openai-chat',
+          baseUrl: server.url(name),
+          ...extra,
+          profiles: [{ kind: 'embedding', model }],
+        },
+        { cookie: ws.cookie },
+      ),
+    )
+    expect(res.status).toBe(201)
+    return ((await res.json()) as { profiles: { id: string }[] }).profiles[0]!.id
+  }
+  const put = async (
+    path: string,
+    body: {
+      model: string
+      channels?: { name: string; model: string; apiKey?: string | null }[]
+      profileIds?: string[]
+    },
+  ) => {
+    const profileIds =
+      body.profileIds ??
+      (await Promise.all(
+        (body.channels ?? []).map((c) =>
+          addProfile(c.name, c.model, c.apiKey !== undefined ? { apiKey: c.apiKey } : {}),
+        ),
+      ))
+    const res = await call('PUT', path, { model: body.model, profileIds })
     expect(res.status).toBe(200)
     return (await res.json()) as EmbeddingSettingsView
   }
   const view = async () => (await (await call('GET', '')).json()) as EmbeddingSettingsView
   const status = async () => (await (await call('GET', '/status')).json()) as EmbeddingStatus
-  const channel = (name: string, model: string, extra: Record<string, unknown> = {}) => ({
-    baseUrl: server.url(name),
+  const channel = (name: string, model: string, extra: { apiKey?: string | null } = {}) => ({
+    name,
     model,
     ...extra,
   })
@@ -135,16 +172,16 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
     return body.candidates.filter((c) => c.via.includes('semantic')).length
   }
 
-  it('只有一个接口时的旧设置读出来是一个渠道，向量照旧记在原来的模型名下', async () => {
+  it('只有一个接口时的旧设置迁移后是一个渠道，向量照旧记在原来的模型名下', async () => {
     await database.db.insert(settings).values({
       key: 'embedding',
       value: { baseUrl: server.url('a'), model: 'old-model', apiKey: null },
     })
-    expect(await view()).toEqual({
+    expect(await view()).toMatchObject({
       dimensions: 1024,
       active: {
         model: 'old-model',
-        channels: [{ id: 'c1', baseUrl: server.url('a'), model: 'old-model', hasApiKey: false }],
+        channels: [{ baseUrl: server.url('a'), model: 'old-model', hasApiKey: false }],
       },
       next: null,
     })
@@ -465,64 +502,20 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
     expect((await call('POST', '/switch', {})).status).toBe(400)
   })
 
-  it('设置的限制：换模型标识走换模型；换模型时照抄渠道，同一主机沿用 Key；换成别的新模型时清掉原来那个的向量', async () => {
+  it('设置的限制：换模型标识走换模型；重复模型条目与权限拦截；换成别的新模型时清掉原来那个的向量', async () => {
     const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
-    expect(
-      (await call('PUT', '/next', { model: 'm2', channels: [channel('a', 'm2')] })).status,
-    ).toBe(400)
-    const active = await put('', {
-      model: 'm1',
-      channels: [channel('a', 'm1', { apiKey: 'sk-1' })],
-    })
-    const id = active.active!.channels[0]!.id
-    expect((await call('PUT', '', { model: 'm2', channels: [channel('a', 'm2')] })).status).toBe(
-      400,
-    )
-    expect(
-      (await call('PUT', '/next', { model: 'm1', channels: [channel('a', 'm1')] })).status,
-    ).toBe(400)
-    expect(
-      (
-        await call('PUT', '', {
-          model: 'm1',
-          channels: [channel('a', 'm1', { id }), channel('b', 'm1', { id })],
-        })
-      ).status,
-    ).toBe(400)
+    const p1 = await addProfile('a', 'm1', { apiKey: 'sk-1' })
+    const p2 = await addProfile('a', 'm2')
+    const p3 = await addProfile('a', 'm3')
+    expect((await call('PUT', '/next', { model: 'm2', profileIds: [p2] })).status).toBe(400)
+    await put('', { model: 'm1', profileIds: [p1] })
+    expect((await call('PUT', '', { model: 'm2', profileIds: [p2] })).status).toBe(400)
+    expect((await call('PUT', '/next', { model: 'm1', profileIds: [p1] })).status).toBe(400)
+    expect((await call('PUT', '', { model: 'm1', profileIds: [p1, p1] })).status).toBe(400)
 
-    const next = await put('/next', {
-      model: 'm2',
-      channels: [{ id, baseUrl: server.url('a'), model: 'm2' }],
-    })
-    const nextId = next.next!.channels[0]!.id
-    // 换成另一个新模型时，原来新模型的渠道保存的 Key 照样沿用，换了主机又没填时报错
-    const renamed = await put('/next', {
-      model: 'm2b',
-      channels: [{ id: nextId, baseUrl: server.url('a'), model: 'm2b' }],
-    })
-    expect(renamed.next!.channels[0]).toMatchObject({ id: nextId, hasApiKey: true })
-    expect(
-      (
-        await call('PUT', '/next', {
-          model: 'm2c',
-          channels: [{ id: nextId, baseUrl: 'https://other.example.net/v1', model: 'm2c' }],
-        })
-      ).status,
-    ).toBe(400)
-    await put('/next', { model: 'm2', channels: [{ id, baseUrl: server.url('a'), model: 'm2' }] })
-    expect(next.next!.channels[0]).toMatchObject({ hasApiKey: true })
-    expect(next.next!.channels[0]!.id).not.toBe(id)
-    expect(
-      (
-        await call('PUT', '/next', {
-          model: 'm2',
-          channels: [{ id, baseUrl: 'https://other.example.net/v1', model: 'm2' }],
-        })
-      ).status,
-    ).toBe(400)
-
+    await put('/next', { model: 'm2', profileIds: [p2] })
     queued.length = 0
-    await put('/next', { model: 'm3', channels: [channel('a', 'm3')] })
+    await put('/next', { model: 'm3', profileIds: [p3] })
     expect(queued).toEqual(['prune', 'switch'])
 
     for (const [method, path] of [
@@ -530,7 +523,7 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
       ['DELETE', '/next'],
       ['POST', '/switch'],
     ] as const) {
-      const body = method === 'PUT' ? { model: 'm4', channels: [channel('a', 'm4')] } : undefined
+      const body = method === 'PUT' ? { model: 'm4', profileIds: [p3] } : undefined
       expect((await call(method, path, body, editor.cookie)).status).toBe(403)
     }
   })
@@ -575,12 +568,12 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
     const noKey = await testWith({ masterKey: null })
     expect(noKey.status).toBe(400)
     expect(((await noKey.json()) as { error: string }).error).toContain(
-      '嵌入接口的 Key 已加密保存，但服务端未配置 KIOKU_MASTER_KEY',
+      '的 Key 已加密保存，但服务端未配置 KIOKU_MASTER_KEY',
     )
     const mismatch = await testWith({ masterKey: randomBytes(32) })
     expect(mismatch.status).toBe(400)
     const { error } = (await mismatch.json()) as { error: string }
-    expect(error).toContain('嵌入接口的 Key 无法解密')
+    expect(error).toContain('的 Key 无法解密')
     expect(error).toContain('旧密钥须配置在 KIOKU_MASTER_KEY_PREVIOUS')
     expect(server.requests).toEqual([])
   })
@@ -594,7 +587,6 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
       expect(res.status).toBe(500)
       expect(await res.json()).toEqual({ error: '服务内部错误' })
       expect(server.requests).toEqual([])
-      // 前提：确实是数据库报的错（表不存在），这条用例测的是这种错误
       expect(logged).toHaveBeenCalledOnce()
       expect(logged.mock.calls[0]![1]).toMatchObject({ code: '42P01' })
       const text = inspect(logged.mock.calls, { depth: null })
@@ -607,10 +599,14 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
   })
 
   it('已经存着的 Key 中间有换行（fetch 把整个请求头写进错误）：连通性测试报连不上，不带 Key', async () => {
-    await saveActiveEmbedding(database.db, masterKey, {
-      model: 'm1',
-      channels: [channel('a', 'm1', { apiKey: 'sk-pasted\nwith-newline' })],
+    const { provider } = await createModelProvider(database.db, masterKey, {
+      name: '换行密钥渠道',
+      format: 'openai-chat',
+      baseUrl: server.url('a'),
+      apiKey: 'sk-pasted\nwith-newline',
+      profiles: [{ kind: 'embedding', model: 'm1' }],
     })
+    await put('', { model: 'm1', profileIds: [provider.profiles[0]!.id] })
     const res = await testWith({})
     expect(res.status).toBe(200)
     const { active } = (await res.json()) as EmbeddingTestResult
@@ -629,16 +625,24 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
       (await loadEmbeddingSetups(database.db, masterKey)).active!.channels[0]!.apiKey
     expect(await stored()).toBe('sk-chan')
 
-    for (const path of ['', '/next']) {
-      const res = await call('PUT', path, {
-        model: path ? 'm2' : 'm1',
-        channels: [channel('a', 'm1', { apiKey: 'sk-new\nkey' })],
-      })
-      expect(res.status).toBe(400)
-      const { error } = (await res.json()) as { error: string }
-      expect(error).toContain('只能包含英文字母、数字和半角符号')
-      expect(error).not.toContain('sk-new')
-    }
+    const res = await app.request(
+      '/v1/settings/models/providers',
+      jsonRequest(
+        'POST',
+        {
+          name: 'bad',
+          format: 'openai-chat',
+          baseUrl: server.url('a'),
+          apiKey: 'sk-new\nkey',
+          profiles: [{ kind: 'embedding', model: 'm1' }],
+        },
+        { cookie: ws.cookie },
+      ),
+    )
+    expect(res.status).toBe(400)
+    const { error } = (await res.json()) as { error: string }
+    expect(error).toContain('只能包含英文字母、数字和半角符号')
+    expect(error).not.toContain('sk-new')
     expect(await stored()).toBe('sk-chan')
     expect((await view()).next).toBeNull()
   })

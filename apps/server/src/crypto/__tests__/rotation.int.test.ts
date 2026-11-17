@@ -127,18 +127,43 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
     )
     expect(cred.status).toBe(201)
     const credentialId = ((await cred.json()) as { id: string }).id
+    const embedProv = await send(
+      app,
+      'POST',
+      '/v1/settings/models/providers',
+      {
+        name: '嵌入服务商',
+        format: 'openai-chat',
+        baseUrl: 'https://e.example.com/v1',
+        apiKey: 'sk-embed',
+        profiles: [{ kind: 'embedding', model: 'm' }],
+      },
+      { cookie: ws.cookie },
+    )
+    expect(embedProv.status).toBe(201)
+    const embedId = ((await embedProv.json()) as { profiles: { id: string }[] }).profiles[0]!.id
+    const extractProv = await send(
+      app,
+      'POST',
+      '/v1/settings/models/providers',
+      {
+        name: '抽取服务商',
+        format: 'openai-chat',
+        baseUrl: 'https://x.example.com/v1',
+        apiKey: 'sk-extract',
+        profiles: [{ kind: 'chat', model: 'x' }],
+      },
+      { cookie: ws.cookie },
+    )
+    expect(extractProv.status).toBe(201)
+    const extractProvJson = (await extractProv.json()) as {
+      id: string
+      profiles: { id: string }[]
+    }
+    const extractId = extractProvJson.profiles[0]!.id
     for (const [path, body] of [
-      [
-        '/v1/settings/embedding',
-        {
-          model: 'm',
-          channels: [{ baseUrl: 'https://e.example.com/v1', model: 'm', apiKey: 'sk-embed' }],
-        },
-      ],
-      [
-        '/v1/settings/extraction',
-        { baseUrl: 'https://x.example.com/v1', model: 'x', apiKey: 'sk-extract' },
-      ],
+      ['/v1/settings/embedding', { model: 'm', profileIds: [embedId] }],
+      ['/v1/settings/models/bindings/extraction', { profileIds: [extractId] }],
     ] as const) {
       expect((await send(app, 'PUT', path, body, { cookie: ws.cookie })).status).toBe(200)
     }
@@ -159,7 +184,7 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
         }),
       }),
     )
-    return { credentialId, connectionId }
+    return { credentialId, connectionId, extractProviderId: extractProvJson.id, extractId }
   }
 
   it('轮换全过程：补标识、旧的那把没配时拒绝启动、换完之后只配新的也都解得开', async () => {
@@ -176,11 +201,11 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
       await tx.update(credentials).set({ keyId: null })
     })
     await database.db.execute(
-      sql`update settings set value = value #- '{apiKey,keyId}' where key = 'extraction'`,
+      sql`update settings set value = jsonb_set(value, '{providers,1,apiKey}', (value#>'{providers,1,apiKey}') - 'keyId') where key = 'model-providers'`,
     )
     await prepareMasterKey(database.db, oldKey)
     expect((await keyIds()).every((r) => r.keyId === keyIdOf(oldKey))).toBe(true)
-    expect((await loadExtractionConfig(database.db, oldKey))?.apiKey).toBe('sk-extract')
+    expect((await loadExtractionConfig(database.db, oldKey))?.[0]?.apiKey).toBe('sk-extract')
 
     // 配错了主密钥、或者没配：拒绝启动
     await expect(prepareMasterKey(database.db, newKey)).rejects.toThrow(
@@ -230,7 +255,7 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
     expect((await loadEmbeddingSetups(database.db, newKey)).active?.channels[0]?.apiKey).toBe(
       'sk-embed',
     )
-    expect((await loadExtractionConfig(database.db, newKey))?.apiKey).toBe('sk-extract')
+    expect((await loadExtractionConfig(database.db, newKey))?.[0]?.apiKey).toBe('sk-extract')
     const deleted = await withSpace(database.db, ws.spaceId, (tx) =>
       tx.select().from(memories).where(eq(memories.path, 'home/old')),
     )
@@ -333,18 +358,22 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
       tx.update(memories).set({ keyId: null }).where(eq(memories.path, 'home/wifi')),
     )
     await database.db.execute(
-      sql`update settings set value = value #- '{apiKey,keyId}' where key = 'extraction'`,
+      sql`update settings set value = jsonb_set(value, '{providers,1,apiKey}', (value#>'{providers,1,apiKey}') - 'keyId') where key = 'model-providers'`,
     )
     await checkMasterKey(database.db, oldKey)
     const [wifi] = await withSpace(database.db, ws.spaceId, (tx) =>
       tx.select({ keyId: memories.keyId }).from(memories).where(eq(memories.path, 'home/wifi')),
     )
     expect(wifi?.keyId).toBeNull()
-    const [extraction] = await database.db
+    const [providersRow] = await database.db
       .select()
       .from(settings)
-      .where(eq(settings.key, 'extraction'))
-    expect(JSON.stringify(extraction?.value)).not.toContain('keyId')
+      .where(eq(settings.key, 'model-providers'))
+    expect(JSON.stringify(providersRow?.value)).toContain('"keyId"')
+    expect(
+      (providersRow?.value as { providers: { apiKey?: { keyId?: string } }[] }).providers[1]?.apiKey
+        ?.keyId,
+    ).toBeUndefined()
     await expect(checkMasterKey(database.db, newKey)).rejects.toThrow(
       /主密钥对不上：机密记忆 2 条、托管的凭据 1 条、密码库连接 1 条、实例设置中加密保存的密钥 2 条解不开/,
     )
@@ -413,38 +442,49 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
     expect(row).toMatchObject({ name: 'NAS 2', keyId: keyIdOf(newKey) })
   })
 
-  it('轮换时改了抽取模型的设置（沿用 Key）：不把读到的旧包装写回去', async () => {
-    await seed()
+  it('轮换时改了模型服务商的设置（沿用 Key）：不把读到的旧包装写回去', async () => {
+    const { extractProviderId, extractId } = await seed()
     await rotatedWhileBlocked(
-      (tx) => tx`select key from settings where key = 'extraction' for update`,
+      (tx) => tx`select key from settings where key = 'model-providers' for update`,
       () =>
         send(
           appWith(rotating),
           'PUT',
-          '/v1/settings/extraction',
-          { baseUrl: 'https://x.example.com/v1', model: 'x2' },
+          `/v1/settings/models/providers/${extractProviderId}`,
+          {
+            name: '抽取服务商',
+            format: 'openai-chat',
+            baseUrl: 'https://x.example.com/v1',
+            profiles: [{ id: extractId, kind: 'chat', model: 'x2' }],
+          },
           { cookie: ws.cookie },
         ),
       async (tx) => {
         const [row] =
-          (await tx`select value from settings where key = 'extraction'`) as unknown as [
-            { value: { apiKey: { wrappedKey: string; keyId: string } } },
+          (await tx`select value from settings where key = 'model-providers'`) as unknown as [
+            {
+              value: {
+                providers: { id: string; apiKey?: { wrappedKey: string; keyId: string } }[]
+              }
+            },
           ]
-        const apiKey = row.value.apiKey
-        const wrapped = rewrapKey(
-          oldKey,
-          newKey,
-          Buffer.from(apiKey.wrappedKey, 'base64'),
-          'settings:extraction',
-        )
-        const value = {
-          ...row.value,
-          apiKey: { ...apiKey, wrappedKey: wrapped.toString('base64'), keyId: keyIdOf(newKey) },
-        }
-        await tx`update settings set value = ${tx.json(value)} where key = 'extraction'`
+        const nextProviders = row.value.providers.map((p) => {
+          if (!p.apiKey) return p
+          const wrapped = rewrapKey(
+            oldKey,
+            newKey,
+            Buffer.from(p.apiKey.wrappedKey, 'base64'),
+            'settings:model-providers',
+          )
+          return {
+            ...p,
+            apiKey: { ...p.apiKey, wrappedKey: wrapped.toString('base64'), keyId: keyIdOf(newKey) },
+          }
+        })
+        await tx`update settings set value = ${tx.json({ providers: nextProviders })} where key = 'model-providers'`
       },
     )
-    expect((await loadExtractionConfig(database.db, newKey))?.apiKey).toBe('sk-extract')
+    expect((await loadExtractionConfig(database.db, newKey))?.[0]?.apiKey).toBe('sk-extract')
   })
 
   it('轮换任务：只剩密码库连接还用旧主密钥时也接着换，换完再来一次什么都不做', async () => {

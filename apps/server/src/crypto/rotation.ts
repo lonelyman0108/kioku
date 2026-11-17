@@ -2,14 +2,19 @@ import type { MasterKeyStatus } from '@kioku/contracts'
 import { and, asc, count, eq, gt, isNotNull, isNull, notInArray, sql } from 'drizzle-orm'
 
 import { BACKUP_LABEL, mapBackupKey, sealedBackupKey } from '../backup/settings'
-import { mapPrivacyModelKey, sealedPrivacyModelKey } from '../credential/privacy'
 import { credentialAad } from '../credential/service'
 import { vaultAad } from '../credential/vault'
 import { eachSpace, withSpace, type Db } from '../db/client'
 import { credentials, memories, settings, spaces, vaultConnections } from '../db/schema'
-import { mapEmbeddingKeys, sealedEmbeddingKeys } from '../embedding/settings'
-import { EXTRACTION_ENDPOINT, sealedExtractionKey } from '../extraction/settings'
-import { mapEndpointKey, type SealedJson } from '../settings/endpoint'
+import {
+  mapModelProviderKeys,
+  mapPrivacyHttpKey,
+  migrateLegacyModelSettings,
+  sealedLegacyModelKeys,
+  sealedPrivacyHttpKey,
+  sealedProviderKeys,
+} from '../models/store'
+import { type SealedJson } from '../settings/endpoint'
 import { canUnwrap, rewrapKey, type Sealed } from './envelope'
 import { keyIdOf, keyringOf, type Keyring, type MasterKey } from './keyring'
 
@@ -41,15 +46,9 @@ const SETTINGS: {
   read: (db: Db) => Promise<SealedSetting[]>
   map: (db: Db, change: Change) => Promise<number>
 }[] = [
-  { label: '嵌入接口', read: sealedEmbeddingKeys, map: mapEmbeddingKeys },
-  {
-    label: EXTRACTION_ENDPOINT.label,
-    read: async (db) => {
-      const key = await sealedExtractionKey(db)
-      return key ? [key] : []
-    },
-    map: (db, change) => mapEndpointKey(db, EXTRACTION_ENDPOINT, change),
-  },
+  { label: '模型服务商', read: sealedProviderKeys, map: mapModelProviderKeys },
+  { label: '隐私识别模型', read: sealedPrivacyHttpKey, map: mapPrivacyHttpKey },
+  { label: '旧版模型设置', read: sealedLegacyModelKeys, map: async () => 0 },
   {
     label: BACKUP_LABEL,
     read: async (db) => {
@@ -57,14 +56,6 @@ const SETTINGS: {
       return key ? [key] : []
     },
     map: mapBackupKey,
-  },
-  {
-    label: '隐私识别模型',
-    read: async (db) => {
-      const key = await sealedPrivacyModelKey(db)
-      return key ? [key] : []
-    },
-    map: mapPrivacyModelKey,
   },
 ]
 
@@ -107,6 +98,7 @@ export async function checkMasterKey(db: Db, masterKey: MasterKey | null): Promi
 }
 
 async function inspectMasterKey(db: Db, masterKey: MasterKey | null, fill: boolean): Promise<void> {
+  if (fill) await migrateLegacyModelSettings(db)
   const ring = masterKey ? keyringOf(masterKey) : null
   const known = ring ? knownIds(ring) : []
   const problems = new Map<string, number>()
@@ -218,6 +210,7 @@ export async function rotateMasterKey(
   db: Db,
   masterKey: MasterKey,
 ): Promise<{ rewrapped: number; remaining: number }> {
+  await migrateLegacyModelSettings(db)
   const { current, previous } = keyringOf(masterKey)
   if (!previous) return { rewrapped: 0, remaining: 0 }
   const currentId = keyIdOf(current)

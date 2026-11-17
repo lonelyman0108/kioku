@@ -33,6 +33,7 @@ import {
   DeletedCredentialList,
   DeletedMemoryList,
   DreamApplied,
+  DreamBindingView,
   DreamMemberSettings,
   DreamQueued,
   DreamRunList,
@@ -43,9 +44,8 @@ import {
   EmbeddingStatus,
   EmbeddingTestResult,
   ExpiredMemoryList,
-  ExtractionSettingsView,
+  ExtractionBindingView,
   ExtractionUsage,
-  ExtractionTestResult,
   MasterKeyStatus,
   GlossaryIndex,
   GroupPersonaRuleList,
@@ -59,10 +59,13 @@ import {
   MemoryHistory,
   MemoryList,
   MemoryRecallStat,
+  ModelChainTestResult,
+  ModelProfileTestResult,
+  ModelProviderView,
+  ModelRegistryView,
   PersonaDetail,
   PersonaInfo,
-  PrivacyModelSettingsView,
-  PrivacyModelTestResult,
+  PrivacyBindingView,
   RecallDebug,
   RecallEventList,
   RecallSettings,
@@ -124,10 +127,12 @@ import {
   type ReconnectVaultRequest,
   type SetVaultDestinationRequest,
   type UpdateCredentialRequest,
+  type UpdateDreamBinding,
   type UpdateEmbeddingSettings,
-  type UpdateExtractionSettings,
-  type UpdatePrivacyModelSettings,
+  type UpdateExtractionBinding,
+  type UpdatePrivacyBinding,
   type UpdateSpacePrivacySettings,
+  type UpsertModelProvider,
   type ExtractionBudget,
   type ConsoleUpdateMemoryRequest,
   type UpdatePersonaRequest,
@@ -605,21 +610,35 @@ export const api = {
   resumeRetention: () =>
     request('POST', '/settings/retention/resume', { schema: RetentionResumed }),
 
-  extractionSettings: () =>
-    request('GET', '/settings/extraction', { schema: ExtractionSettingsView }),
-  saveExtractionSettings: (body: UpdateExtractionSettings) =>
-    request('PUT', '/settings/extraction', { body, schema: ExtractionSettingsView }),
-  clearExtractionSettings: () => request('DELETE', '/settings/extraction'),
-  testExtraction: () =>
-    request('POST', '/settings/extraction/test', { schema: ExtractionTestResult }),
+  modelRegistry: () => request('GET', '/settings/models', { schema: ModelRegistryView }),
+  createModelProvider: (body: UpsertModelProvider) =>
+    request('POST', '/settings/models/providers', { body, schema: ModelProviderView }),
+  updateModelProvider: (providerId: string, body: UpsertModelProvider) =>
+    request('PUT', `/settings/models/providers/${providerId}`, { body, schema: ModelProviderView }),
+  deleteModelProvider: (providerId: string) =>
+    request('DELETE', `/settings/models/providers/${providerId}`),
+  testModelProfile: (profileId: string) =>
+    request('POST', `/settings/models/profiles/${profileId}/test`, {
+      schema: ModelProfileTestResult,
+    }),
 
-  privacyModelSettings: () =>
-    request('GET', '/settings/privacy-model', { schema: PrivacyModelSettingsView }),
-  savePrivacyModelSettings: (body: UpdatePrivacyModelSettings) =>
-    request('PUT', '/settings/privacy-model', { body, schema: PrivacyModelSettingsView }),
-  clearPrivacyModelSettings: () => request('DELETE', '/settings/privacy-model'),
-  testPrivacyModel: () =>
-    request('POST', '/settings/privacy-model/test', { schema: PrivacyModelTestResult }),
+  saveExtractionBinding: (body: UpdateExtractionBinding) =>
+    request('PUT', '/settings/models/bindings/extraction', {
+      body,
+      schema: ExtractionBindingView,
+    }),
+  testExtractionBinding: () =>
+    request('POST', '/settings/models/bindings/extraction/test', { schema: ModelChainTestResult }),
+
+  saveDreamBinding: (body: UpdateDreamBinding) =>
+    request('PUT', '/settings/models/bindings/dream', { body, schema: DreamBindingView }),
+  testDreamBinding: () =>
+    request('POST', '/settings/models/bindings/dream/test', { schema: ModelChainTestResult }),
+
+  savePrivacyBinding: (body: UpdatePrivacyBinding) =>
+    request('PUT', '/settings/models/bindings/privacy', { body, schema: PrivacyBindingView }),
+  testPrivacyBinding: () =>
+    request('POST', '/settings/models/bindings/privacy/test', { schema: ModelChainTestResult }),
 
   spacePrivacy: (spaceId: string) =>
     request('GET', `/spaces/${spaceId}/privacy`, { schema: SpacePrivacySettings }),

@@ -6,7 +6,16 @@ vi.mock('../settings', () => ({ loadEmbeddingSetups: vi.fn() }))
 const { loadEmbeddingSetups } = await import('../settings')
 const { settingsEmbedderSource } = await import('../source')
 
-const channel = { baseUrl: 'https://e.example.com/v1', model: 'remote-name', apiKey: null }
+const channel = {
+  profileId: 'p1',
+  providerId: 'prov1',
+  providerName: 'TestProvider',
+  format: 'openai-chat' as const,
+  baseUrl: 'https://e.example.com/v1',
+  model: 'remote-name',
+  label: null,
+  apiKey: null,
+}
 
 describe('嵌入设置缓存', () => {
   it('读取失败不缓存，下次重试', async () => {

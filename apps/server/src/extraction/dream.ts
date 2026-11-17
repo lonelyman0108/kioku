@@ -41,8 +41,8 @@ import {
 } from '../memory/scopes'
 import { formatUri } from '../memory/uri'
 import { anyTermQuery, clipChars, inlineText, oneLine, searchTerms } from '../recall/recall'
+import type { ResolvedChatProfile } from '../models/types'
 import { loadSpaceSettings } from '../settings/advanced'
-import type { EndpointConfig } from '../settings/endpoint'
 import { extractionUsage } from './budget'
 import {
   DREAM_PARSE_ERROR,
@@ -59,8 +59,8 @@ import {
   factProblem,
   mergedNodeProblem,
 } from './dreamText'
-import { openAiChatModel, type ChatModel } from './provider'
-import { loadExtractionConfig } from './settings'
+import { profilesChatModel, type ChatModel } from './provider'
+import { loadDreamConfig } from './settings'
 
 // Dream：按空间整理记忆，提出合并、提炼、过时与审核建议，建议进待审，成员确认后才执行（见 MemoryService.applySuggestion）。
 // 这里只读记忆、请求模型、存建议，不写记忆。用抽取模型，用量计入同一份月度预算，用完就不整理。
@@ -171,7 +171,7 @@ export interface DreamOptions {
   trigger: DreamTrigger
   now?: Date
   // 只在测试里换成假的模型
-  modelFor?: (config: EndpointConfig) => ChatModel
+  modelFor?: (profiles: readonly ResolvedChatProfile[]) => ChatModel
   // 只在测试里用：读完一个范围这一次的记忆之后、请求模型之前调用
   afterBatch?: (scope: string) => Promise<void>
 }
@@ -261,9 +261,9 @@ async function dreamOnce(
     await summarize({ skipped: reason })
     return { outcome: 'skipped', reason }
   }
-  const config = await loadExtractionConfig(db, masterKey)
-  if (!config) return skip('no-model')
-  const model = (options.modelFor ?? openAiChatModel)(config)
+  const profiles = await loadDreamConfig(db, masterKey)
+  if (!profiles?.length) return skip('no-model')
+  const model = (options.modelFor ?? profilesChatModel)(profiles)
   const overBudget = async () => {
     const usage = await extractionUsage(db, spaceId)
     return usage.usedTokens >= usage.monthlyTokens
@@ -699,7 +699,7 @@ async function dreamScope(
     return { tokens: 0, more: batch.more, again: false, failed: true }
   }
   const usage = {
-    model: model.model,
+    model: completion.model ?? model.model,
     promptTokens: completion.usage.promptTokens,
     completionTokens: completion.usage.completionTokens,
   }

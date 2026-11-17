@@ -16,9 +16,7 @@ const ACCESS_KEY = /(?<![\w/`.])Keys?(?![\w`])/i
 // 用的也是抽取模型的），Lore 保存的 API Key（Lore 导入的提示），对象存储的 Access Key ID 与 Secret Access Key
 // （备份），主密钥加密的是 API Key 与 Secret Access Key。别的文件写这几个名字照样报
 const UPSTREAM_KEYS: [file: string, names: RegExp][] = [
-  ['/components/EmbeddingChannelRow.vue', /API Key/g],
-  ['/components/EmbeddingSettings.vue', /API Key/g],
-  ['/components/ExtractionSettings.vue', /API Key/g],
+  ['/components/ModelProvidersSettings.vue', /API Key/g],
   ['/components/PrivacyModelSettings.vue', /API Key/g],
   ['/benchAgent.ts', /API Key/g],
   ['/components/BenchAgent.vue', /API Key/g],
