@@ -2,6 +2,7 @@
 import {
   CONVERT_SCOPE_TEXT,
   SENSITIVE_KIND_NAMES,
+  isProtectedPersonalMemory,
   placeholderAllowed,
   type MemoryListItem,
   type RedactMode,
@@ -182,7 +183,12 @@ const convertible = (item: MemoryListItem) => placeholderAllowed(item.layer, ite
                   查看记忆
                 </UButton>
               </template>
-              <template v-if="item.sensitivePii">
+              <template
+                v-if="
+                  item.sensitivePii &&
+                  !isProtectedPersonalMemory(item.layer, item.sensitivity, item.provenance)
+                "
+              >
                 <UButton
                   color="primary"
                   variant="outline"
