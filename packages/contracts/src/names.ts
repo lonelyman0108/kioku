@@ -7,6 +7,7 @@ import type {
   VaultDisabledReason,
   VaultErrorKind,
 } from './credentials'
+import type { PiiKind, SensitiveKind } from './sensitive'
 import type { RuntimeFamily } from './auth'
 import type { CredentialCapability, Layer, Sensitivity } from './memory'
 import type {
@@ -135,6 +136,32 @@ export const PLAINTEXT_KIND_NAMES: Record<PlaintextKind, string> = {
   jwt: 'JWT',
   private_key: '私钥',
   kioku: 'Kioku 访问密钥',
+  provider_token: '第三方服务令牌',
+  url_password: '网址内嵌密码',
+  header_secret: '请求头凭据',
+  wallet_key: '加密钱包私钥',
+  seed_phrase: '钱包助记词',
+  custom: '自定义规则命中',
+}
+
+export const PII_KIND_NAMES: Record<PiiKind, string> = {
+  phone: '手机号',
+  id_card: '身份证号',
+  bank_card: '银行卡号',
+  email: '电子邮箱',
+  public_ip: '公网 IP 地址',
+  mac: 'MAC 地址',
+  ssn: '社会安全号 (SSN)',
+  iban: '国际银行账号 (IBAN)',
+  passport: '护照号',
+  person: '个人姓名',
+  address: '住址',
+  account: '账号',
+}
+
+export const SENSITIVE_KIND_NAMES: Record<SensitiveKind, string> = {
+  ...PLAINTEXT_KIND_NAMES,
+  ...PII_KIND_NAMES,
 }
 
 // 初始化页与服务端日志共用：连不上数据库的原因只写类别

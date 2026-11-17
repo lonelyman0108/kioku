@@ -6,9 +6,9 @@ import { OriginScope } from './conversations'
 
 // Dream：后台按空间整理记忆，只提建议。建议进待审，成员确认后才按建议执行，Dream 自己不写记忆。
 // 四种建议：合并（几条变一条）、提炼（几条抽取的事实变一个策展节点的草稿）、过时（这条可能已经不对了）、
-// 审核（不可信的内容建议确认或删除）
+// 审核（不可信的内容建议确认或删除）、晋升（高频被召回的记忆建议设为重要或加入启动加载）
 
-export const DREAM_SUGGESTION_KINDS = ['merge', 'distill', 'stale', 'review'] as const
+export const DREAM_SUGGESTION_KINDS = ['merge', 'distill', 'stale', 'review', 'promote'] as const
 export const DreamSuggestionKind = z.enum(DREAM_SUGGESTION_KINDS)
 export type DreamSuggestionKind = z.infer<typeof DreamSuggestionKind>
 
@@ -63,6 +63,8 @@ export const DreamSuggestion = z.object({
   disclosure: z.string().nullable(),
   // 审核：建议确认还是删除
   verdict: DreamVerdict.nullable(),
+  // 晋升：建议调到的优先级（0 为加入启动加载，1 为高优先级）
+  targetPriority: z.number().int().min(0).max(99).nullable().optional(),
   // 查看者能不能执行、拒绝：viewer，或者写不了其中某条记忆时不能
   actionable: z.boolean(),
   createdAt: z.iso.datetime(),
@@ -90,6 +92,7 @@ export const ApplyDreamSuggestion = z.object({
   uri: MemoryUri.optional(),
   title: MemoryTitle.optional(),
   disclosure: z.string().trim().max(500).nullable().optional(),
+  priority: z.number().int().min(0).max(99).optional(),
 })
 export type ApplyDreamSuggestion = z.infer<typeof ApplyDreamSuggestion>
 
