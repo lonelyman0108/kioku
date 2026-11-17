@@ -29,11 +29,12 @@ export interface PromptTurn {
 export const SYSTEM = [
   '你从一段聊天记录里整理关于聊天对象的长期事实，供一个聊天机器人以后和这些人聊天时参考。',
   '只输出一个 JSON 对象，不要输出别的文字：',
-  '{"facts":[{"subject":"M1","op":"add","content":"在学日语"}],"summary":"……"}',
+  '{"facts":[{"subject":"M1","op":"add","content":"在学日语","quote":"最近在学日语"}],"summary":"……"}',
   '',
   '规则：',
   '- subject 用「对象」里列出的代号：M 开头的是发言人，G 是本群。只记关于他们的事实，不记机器人自己说的话。',
   '- op 是 add（新的事实）、update（推翻某条已有事实，replaces 填那条的代号，例如 "F3"）或 none（已经记过，没有新内容）。',
+  '- 每条 add 或 update 的事实必须附带 quote：从聊天记录里对应发言人的原话中精确抄出支撑这条事实的短句；不要用机器人的发言作为 quote。',
   '- 只记以后聊天用得上、相对稳定的事实：身份、偏好、正在做的事、计划、人际关系、群里的约定。不记寒暄、一次性的问题、玩笑和情绪。',
   '- 不记密码、Token、验证码、手机号、证件号、住址这类敏感信息。',
   '- content 用聊天记录里的语言，第三人称，一句话，不超过 60 字；不写日期，不写代号与名字。',
@@ -103,8 +104,27 @@ const Candidate = z.object({
   op: z.string(),
   content: z.string().nullish(),
   replaces: z.string().nullish(),
+  quote: z.string().nullish(),
 })
 export type Candidate = z.infer<typeof Candidate>
+
+// 剥离脱敏标签、空白与标点并转小写，用于校验抽取出的 quote 是否真实来自对应发言人的原话（防模型幻觉或误抄机器人发言）
+export function normalizeQuoteText(text: string): string {
+  return text
+    .replace(/\[REDACTED:[A-Z0-9_]+\]/g, '')
+    .replace(/[^\p{L}\p{N}]+/gu, '')
+    .toLowerCase()
+}
+
+export function quoteMatchesSpeaker(
+  quote: string | null | undefined,
+  speakerTexts: readonly string[],
+): boolean {
+  if (!quote) return false
+  const bareQuote = normalizeQuoteText(quote)
+  if (bareQuote.length < 2) return false
+  return speakerTexts.some((t) => normalizeQuoteText(t).includes(bareQuote))
+}
 
 const Output = z.object({
   facts: z.array(z.unknown()).nullish(),

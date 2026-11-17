@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { UriPrefix } from './memories'
 import { LAYERS, Layer, Provenance, Sensitivity } from './memory'
 import { RecallCandidate } from './recall'
+import { SensitiveCategory, StoredSensitiveFinding } from './sensitive'
 import { SubjectBinding } from './subjects'
 import { UpdateNotice } from './system'
 
@@ -26,9 +27,11 @@ export const MemoryListQuery = z.object({
   // true 只列要补 disclosure 的：没写、又不进启动上下文（会进的每次会话开始都注入，不靠它被想起），
   // 和概览的 missingDisclosure 同一个条件；false 列别的那些。查询参数按字符串 'true' / 'false' 传
   missingDisclosure: z.enum(['true', 'false']).optional(),
-  // true 只列正文像有明文密码或 Token、提示没被忽略的（规则见 PLAINTEXT_CREDENTIAL；secret 的正文是密文，不算），
+  // true 只列正文疑似含敏感内容（凭据或个人信息）且提示没被忽略的（secret 的正文是密文，不算），
   // false 列别的那些，ignored 只列提示被忽略了的
   plaintext: z.enum(['true', 'false', 'ignored']).optional(),
+  // 可选按敏感类别细筛：credential（明文凭据）或 pii（个人信息）
+  sensitiveCategory: SensitiveCategory.optional(),
   // 更新时间在这个范围里：不早于 updatedAfter，早于 updatedBefore
   updatedAfter: z.iso.datetime({ offset: true }).optional(),
   updatedBefore: z.iso.datetime({ offset: true }).optional(),
@@ -54,6 +57,9 @@ export const MemoryListItem = z.object({
   updatedAt: z.string(),
   // 有效到；null 表示一直有效。列表只列现在有效的，过期的在「已过期」里
   validTo: z.string().nullable(),
+  sensitiveCredential: z.boolean().optional(),
+  sensitivePii: z.boolean().optional(),
+  sensitiveFindings: z.array(StoredSensitiveFinding).optional(),
 })
 export type MemoryListItem = z.infer<typeof MemoryListItem>
 

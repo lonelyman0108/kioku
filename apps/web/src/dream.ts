@@ -31,6 +31,10 @@ export const suggestionKinds: Record<DreamSuggestionKind, { label: string; effec
     label: '待确认内容',
     effect: '确认后记为本人来源；删除后不再注入对话，从对话中抽取的内容无法在管理界面恢复。',
   },
+  promote: {
+    label: '提升优先级',
+    effect: '执行后将这条记忆调整为重要或加入启动加载，高频内容无需检索即可稳定生效。',
+  },
 }
 
 // 建议看的是哪一部分记忆

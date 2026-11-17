@@ -9,6 +9,8 @@ import {
   ExtractionTestResult,
   InstanceAdvancedView,
   MasterKeyStatus,
+  PrivacyModelSettingsView,
+  PrivacyModelTestResult,
   RecallSettings,
   RetentionResumed,
   RetentionSettings,
@@ -16,8 +18,16 @@ import {
   UpdateEmbeddingSettings,
   UpdateExtractionSettings,
   UpdateInstanceAdvanced,
+  UpdatePrivacyModelSettings,
 } from '@kioku/contracts'
 import { requireConsole, requireInstanceAdmin } from '../auth/middleware'
+import {
+  bumpPrivacyModelRevisions,
+  clearPrivacyModelConfig,
+  privacyModelSettingsView,
+  savePrivacyModelConfig,
+  testPrivacyModel,
+} from '../credential/privacy'
 import { masterKeyStatus } from '../crypto/rotation'
 import { EMBEDDING_DIMENSIONS } from '../db/schema'
 import { embeddingCoverage } from '../embedding/coverage'
@@ -249,6 +259,43 @@ const extractionTest = createRoute({
   responses: { 200: jsonResponse('测试结果', ExtractionTestResult), 403: forbidden },
 })
 
+const privacyModelView = createRoute({
+  method: 'get',
+  path: '/settings/privacy-model',
+  tags: ['settings'],
+  summary: '隐私识别模型设置（不返回 Key）',
+  responses: { 200: jsonResponse('设置', PrivacyModelSettingsView), 403: forbidden },
+})
+
+const privacyModelUpdate = createRoute({
+  method: 'put',
+  path: '/settings/privacy-model',
+  tags: ['settings'],
+  summary: '配置外部/本地隐私识别模型（HTTP NER 或 OpenAI 兼容小模型）',
+  request: { body: jsonBody(UpdatePrivacyModelSettings) },
+  responses: {
+    200: jsonResponse('已保存', PrivacyModelSettingsView),
+    400: jsonResponse('无法保存', ErrorResponse),
+    403: forbidden,
+  },
+})
+
+const privacyModelClear = createRoute({
+  method: 'delete',
+  path: '/settings/privacy-model',
+  tags: ['settings'],
+  summary: '关闭并清除隐私识别模型设置',
+  responses: { 204: { description: '已清除' }, 403: forbidden },
+})
+
+const privacyModelTest = createRoute({
+  method: 'post',
+  path: '/settings/privacy-model/test',
+  tags: ['settings'],
+  summary: '测试已保存的隐私识别模型连通性',
+  responses: { 200: jsonResponse('测试结果', PrivacyModelTestResult), 403: forbidden },
+})
+
 const advancedView = createRoute({
   method: 'get',
   path: '/settings/advanced',
@@ -424,6 +471,25 @@ export function settingsRoutes(deps: Deps) {
         ? c.json({ queued }, 202)
         : c.json({ error: '未能加入队列：服务未启动后台任务或入队失败，请稍后重试' }, 503)
     })
+    .openapi(privacyModelView, async (c) => c.json(await privacyModelSettingsView(deps.db), 200))
+    .openapi(privacyModelUpdate, async (c) => {
+      const saved = await saving(() =>
+        savePrivacyModelConfig(deps.db, deps.masterKey, c.req.valid('json')),
+      )
+      if (!saved.ok) return c.json({ error: saved.error }, 400)
+      await bumpPrivacyModelRevisions(deps.db)
+      void deps.jobs?.enqueueSensitiveRescan?.()
+      return c.json(saved.value, 200)
+    })
+    .openapi(privacyModelClear, async (c) => {
+      await clearPrivacyModelConfig(deps.db)
+      await bumpPrivacyModelRevisions(deps.db)
+      void deps.jobs?.enqueueSensitiveRescan?.()
+      return c.body(null, 204)
+    })
+    .openapi(privacyModelTest, async (c) =>
+      c.json(await testPrivacyModel(deps.db, deps.masterKey), 200),
+    )
 }
 
 const PROBE = '连通性测试'

@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto'
 
 import {
+  DEFAULT_SPACE_PRIVACY,
+  resolveSpacePrivacy,
   sensitivityAllowed,
   type SpaceImportCounts,
   type SpaceImportPreview,
@@ -10,6 +12,7 @@ import { eq } from 'drizzle-orm'
 import type { z } from 'zod'
 
 import { placeholderIdentifiers } from '../credential/placeholders'
+import { currentRevision, evaluateSensitiveContent } from '../credential/privacy'
 import { sealCredentialValues } from '../credential/service'
 import { claimOwnerSeat, spaceLimitReached } from '../access/spaces'
 import type { MasterKey } from '../crypto/keyring'
@@ -479,12 +482,17 @@ async function writeSpace(
   if (limit !== null) throw new MemoryError(409, spaceLimitReached(limit))
   progress.step = '空间的设置'
   progress.fromFile = true
+  const importedPrivacy = x.header.space.privacy
+    ? resolveSpacePrivacy(x.header.space.privacy)
+    : DEFAULT_SPACE_PRIVACY
+  const importedRevision = currentRevision(1)
   await tx.insert(spaces).values({
     id: spaceId,
     name: ctx.name,
     extractionMonthlyTokens: x.header.space.extractionMonthlyTokens,
     extractionDailyWrites: x.header.space.extractionDailyWrites,
     advanced: x.header.space.advanced,
+    privacy: x.header.space.privacy ?? {},
   })
   derived('新空间的成员')
   // 导出人的本人记忆归了导入人，导出人关掉的 Dream 整理在导入人身上也关着，由导入人决定要不要打开
@@ -699,8 +707,27 @@ async function writeSpace(
           path: parsed?.path ?? null,
           title: m.title,
           ...(m.sensitivity === 'secret'
-            ? { content: null, ...sealMemoryContent(masterKey!, id, m.content) }
-            : { content: m.content, ciphertext: null, wrappedKey: null, keyId: null }),
+            ? {
+                content: null,
+                ...sealMemoryContent(masterKey!, id, m.content),
+                sensitiveRevision: importedRevision,
+                sensitiveCredential: false,
+                sensitivePii: false,
+                sensitiveFindings: [],
+              }
+            : (() => {
+                const scan = evaluateSensitiveContent(m.content, importedPrivacy)
+                return {
+                  content: m.content,
+                  ciphertext: null,
+                  wrappedKey: null,
+                  keyId: null,
+                  sensitiveRevision: importedRevision,
+                  sensitiveCredential: scan.hasCredential,
+                  sensitivePii: scan.hasPii,
+                  sensitiveFindings: scan.findings,
+                }
+              })()),
           priority: m.priority,
           disclosure: m.disclosure,
           validFrom: notAfter(time(m.validFrom), now),

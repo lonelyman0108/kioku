@@ -2,6 +2,7 @@ import type { MasterKeyStatus } from '@kioku/contracts'
 import { and, asc, count, eq, gt, isNotNull, isNull, notInArray, sql } from 'drizzle-orm'
 
 import { BACKUP_LABEL, mapBackupKey, sealedBackupKey } from '../backup/settings'
+import { mapPrivacyModelKey, sealedPrivacyModelKey } from '../credential/privacy'
 import { credentialAad } from '../credential/service'
 import { vaultAad } from '../credential/vault'
 import { eachSpace, withSpace, type Db } from '../db/client'
@@ -56,6 +57,14 @@ const SETTINGS: {
       return key ? [key] : []
     },
     map: mapBackupKey,
+  },
+  {
+    label: '隐私识别模型',
+    read: async (db) => {
+      const key = await sealedPrivacyModelKey(db)
+      return key ? [key] : []
+    },
+    map: mapPrivacyModelKey,
   },
 ]
 

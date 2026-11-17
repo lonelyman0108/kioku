@@ -187,9 +187,9 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
       () =>
         fakeModel({
           facts: [
-            { subject: 'M1', op: 'add', content: '在学日语' },
-            { subject: 'M2', op: 'add', content: '喜欢猫' },
-            { subject: 'G', op: 'add', content: '是个读书会' },
+            { subject: 'M1', op: 'add', content: '在学日语', quote: '我在学日语' },
+            { subject: 'M2', op: 'add', content: '喜欢猫', quote: '我喜欢猫' },
+            { subject: 'G', op: 'add', content: '是个读书会', quote: '我在学日语' },
           ],
           summary: '群里聊了学日语和猫',
         }),
@@ -553,7 +553,7 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
           )
           return {
             content: JSON.stringify({
-              facts: [{ subject: 'M1', op: 'add', content: '住在上海' }],
+              facts: [{ subject: 'M1', op: 'add', content: '住在上海', quote: '我住在上海' }],
               summary: '私聊里聊了上海',
             }),
             usage: { promptTokens: 40, completionTokens: 10 },
@@ -596,7 +596,7 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
           expect(res.status).toBe(200)
           return {
             content: JSON.stringify({
-              facts: [{ subject: 'M2', op: 'add', content: '喜欢猫' }],
+              facts: [{ subject: 'M2', op: 'add', content: '喜欢猫', quote: '我喜欢猫' }],
               summary: '群里聊了猫',
             }),
             usage: { promptTokens: 40, completionTokens: 10 },

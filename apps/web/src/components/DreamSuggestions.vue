@@ -75,6 +75,7 @@ interface Draft {
   content: string
   uri: string
   disclosure: string
+  priority: number
 }
 const drafts = reactive(new Map<string, Draft>())
 watch(
@@ -86,6 +87,7 @@ function startEdit(item: DreamSuggestion) {
     content: item.content ?? '',
     uri: item.uri ?? '',
     disclosure: item.disclosure ?? '',
+    priority: item.targetPriority ?? 1,
   })
 }
 // 草稿写到哪一类归属：坐标的开头说了算
@@ -99,6 +101,7 @@ const looksPlaintext = (text: string) => PLAINTEXT_CREDENTIAL.test(text)
 function draftProblem(item: DreamSuggestion): string | null {
   const draft = drafts.get(item.id)
   if (!draft) return null
+  if (item.kind === 'promote') return null
   if (!draft.content.trim()) return '正文不能为空'
   if (item.kind === 'distill' && !URI_PATTERN.test(draft.uri.trim())) {
     return URI_FORMAT_HINT
@@ -110,6 +113,7 @@ function bodyOf(item: DreamSuggestion): ApplyDreamSuggestion {
   const draft = drafts.get(item.id)
   if (!draft) return {}
   if (item.kind === 'merge') return { content: draft.content }
+  if (item.kind === 'promote') return { priority: draft.priority }
   const uri = draft.uri.trim()
   return { uri, content: draft.content, disclosure: draft.disclosure.trim() || null }
 }
@@ -119,6 +123,7 @@ function actionLabel(item: DreamSuggestion): string {
   if (item.kind === 'merge') return '合并'
   if (item.kind === 'distill') return '新建记忆'
   if (item.kind === 'stale') return '设为过时'
+  if (item.kind === 'promote') return '提升优先级'
   return item.verdict === 'delete' ? '删除' : '确认'
 }
 // 会删掉记忆的先确认：合并删掉其余几条，审核里的删除
@@ -383,6 +388,29 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
               <p>{{ item.content }}</p>
             </div>
           </template>
+          <template v-else-if="item.kind === 'promote'">
+            <UFormField v-if="drafts.has(item.id)" class="draft-field" label="目标优先级">
+              <USelect
+                v-model="drafts.get(item.id)!.priority"
+                :items="[
+                  { label: '最高优先级 · 每次会话启动加载', value: 0 },
+                  { label: '重要 · 优先召回', value: 1 },
+                ]"
+                value-key="value"
+                class="w-60"
+              />
+            </UFormField>
+            <div v-else class="draft">
+              <span class="draft-label">建议目标</span>
+              <p>
+                {{
+                  (item.targetPriority ?? 1) === 0
+                    ? '最高优先级 · 每次会话启动加载'
+                    : '重要 · 优先召回'
+                }}
+              </p>
+            </div>
+          </template>
           <NoteLine
             v-if="drafts.has(item.id) && looksPlaintext(drafts.get(item.id)!.content)"
             class="dream-note"
@@ -410,7 +438,10 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
             {{ actionLabel(item) }}
           </UButton>
           <UButton
-            v-if="(item.kind === 'merge' || item.kind === 'distill') && !drafts.has(item.id)"
+            v-if="
+              (item.kind === 'merge' || item.kind === 'distill' || item.kind === 'promote') &&
+              !drafts.has(item.id)
+            "
             color="primary"
             variant="outline"
             :disabled="Boolean(busy)"

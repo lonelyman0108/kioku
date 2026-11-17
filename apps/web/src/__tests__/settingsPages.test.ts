@@ -177,7 +177,14 @@ describe('小节的注册', () => {
       ['instance', '实例'],
     ])
     expect(keysOf('account')).toEqual(['account', 'appearance'])
-    expect(keysOf('space')).toEqual(['general', 'members', 'recall', 'extraction', 'transfer'])
+    expect(keysOf('space')).toEqual([
+      'general',
+      'members',
+      'recall',
+      'extraction',
+      'privacy',
+      'transfer',
+    ])
     expect(keysOf('instance')).toEqual([
       'accounts',
       'spaces',
@@ -194,6 +201,7 @@ describe('小节的注册', () => {
       '成员',
       '召回与启动加载',
       '抽取与整理',
+      '隐私与脱敏',
       '导入与导出',
       '账号',
       '空间',
@@ -230,6 +238,7 @@ describe('小节的注册', () => {
       'members',
       'recall',
       'extraction',
+      'privacy',
       'transfer',
     ])
   })
@@ -995,16 +1004,16 @@ describe('设置页', () => {
   it('合在一页的小节把各自的改动合起来报给页面', () => {
     const models = elementsOf(template(modelSettings))
     expect(
-      ['EmbeddingSettings', 'ExtractionSettings'].map(
+      ['EmbeddingSettings', 'ExtractionSettings', 'PrivacyModelSettings'].map(
         (tag) =>
           directive(
             models.find((e) => e.tag === tag)!,
             'model',
           )?.exp?.content,
       ),
-    ).toEqual(['dirty.embedding', 'dirty.extraction'])
+    ).toEqual(['dirty.embedding', 'dirty.extraction', 'dirty.privacy'])
     expect(modelSettings).toContain(
-      "const dirty = useDirtyParts(dirtyModel, ['embedding', 'extraction'])",
+      "const dirty = useDirtyParts(dirtyModel, ['embedding', 'extraction', 'privacy'])",
     )
     const data = elementsOf(template(dataSettings))
     expect(

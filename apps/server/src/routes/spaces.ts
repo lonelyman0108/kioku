@@ -17,8 +17,10 @@ import {
   SpaceLimitPolicy,
   SpaceLimitView,
   SpaceMember,
+  SpacePrivacySettings,
   TransferOwnershipRequest,
   UpdateMemberRequest,
+  UpdateSpacePrivacySettings,
   SpaceExportRequest,
   SpaceImportForm,
   SpaceImportInspectForm,
@@ -54,9 +56,12 @@ import {
 import { exportSpace, type SpaceExport } from '../backup/spaceExport'
 import { importSpace, inspectSpaceImport } from '../backup/spaceImport'
 import { acquireTransferSlot, acquireUploadSlot, withTransferSlot } from '../backup/transferGate'
+import { bumpSpacePrivacyRevision, loadSpacePrivacy, saveSpacePrivacy } from '../credential/privacy'
+import { rescanSpaceSensitive } from '../credential/rescan'
 import { extractionUsage, saveExtractionBudget } from '../extraction/budget'
 import type { AppEnv, Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
+import { SettingsInputError } from '../settings/endpoint'
 
 const params = z.object({ spaceId: z.uuid() })
 const forbidden = jsonResponse('没有权限', ErrorResponse)
@@ -81,6 +86,43 @@ const saveBudget = createRoute({
   responses: {
     200: jsonResponse('预算与用量', ExtractionUsage),
     400: jsonResponse('请求不合法', ErrorResponse),
+    403: forbidden,
+  },
+})
+
+const privacyView = createRoute({
+  method: 'get',
+  path: '/spaces/{spaceId}/privacy',
+  tags: ['console'],
+  summary: '空间隐私与敏感内容识别设置',
+  request: { params },
+  responses: { 200: jsonResponse('空间隐私设置', SpacePrivacySettings), 403: forbidden },
+})
+
+const savePrivacy = createRoute({
+  method: 'put',
+  path: '/spaces/{spaceId}/privacy',
+  tags: ['console'],
+  summary: '修改空间隐私与敏感内容识别设置（仅空间所有者），保存后触发后台回扫',
+  request: { params, body: jsonBody(UpdateSpacePrivacySettings) },
+  responses: {
+    200: jsonResponse('空间隐私设置', SpacePrivacySettings),
+    400: jsonResponse('请求不合法', ErrorResponse),
+    403: forbidden,
+  },
+})
+
+const rescanPrivacy = createRoute({
+  method: 'post',
+  path: '/spaces/{spaceId}/privacy/rescan',
+  tags: ['console'],
+  summary: '手动触发空间敏感内容回扫（仅空间所有者）',
+  request: { params },
+  responses: {
+    200: jsonResponse(
+      '已触发回扫',
+      z.object({ queued: z.boolean(), updated: z.number().int().optional() }),
+    ),
     403: forbidden,
   },
 })
@@ -711,5 +753,44 @@ export function spaceRoutes(deps: Deps) {
       }
       await saveExtractionBudget(deps.db, spaceId, c.req.valid('json'))
       return c.json(await extractionUsage(deps.db, spaceId), 200)
+    })
+    .openapi(privacyView, async (c) => {
+      const { spaceId } = c.req.valid('param')
+      if (!(await memberRole(deps, spaceId, c.get('console').accountId))) {
+        return c.json(notMember, 403)
+      }
+      const { settings } = await loadSpacePrivacy(deps.db, spaceId)
+      return c.json(settings, 200)
+    })
+    .openapi(savePrivacy, async (c) => {
+      const { spaceId } = c.req.valid('param')
+      if ((await memberRole(deps, spaceId, c.get('console').accountId)) !== 'owner') {
+        return c.json({ error: '仅空间所有者可修改隐私设置' }, 403)
+      }
+      try {
+        const { settings } = await saveSpacePrivacy(deps.db, spaceId, c.req.valid('json'))
+        if (deps.jobs?.enqueueSensitiveRescan) {
+          void deps.jobs.enqueueSensitiveRescan(spaceId)
+        } else {
+          await rescanSpaceSensitive(deps.db, deps.masterKey, spaceId)
+        }
+        return c.json(settings, 200)
+      } catch (err) {
+        if (err instanceof SettingsInputError) return c.json({ error: err.message }, 400)
+        throw err
+      }
+    })
+    .openapi(rescanPrivacy, async (c) => {
+      const { spaceId } = c.req.valid('param')
+      if ((await memberRole(deps, spaceId, c.get('console').accountId)) !== 'owner') {
+        return c.json({ error: '仅空间所有者可触发回扫' }, 403)
+      }
+      await bumpSpacePrivacyRevision(deps.db, spaceId)
+      if (deps.jobs?.enqueueSensitiveRescan) {
+        const queued = await deps.jobs.enqueueSensitiveRescan(spaceId)
+        return c.json({ queued }, 200)
+      }
+      const updated = await rescanSpaceSensitive(deps.db, deps.masterKey, spaceId)
+      return c.json({ queued: false, updated }, 200)
     })
 }

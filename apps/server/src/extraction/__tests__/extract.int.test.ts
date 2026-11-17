@@ -172,8 +172,8 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
       '```json\n' +
         JSON.stringify({
           facts: [
-            { subject: 'M1', op: 'add', content: '在学日语' },
-            { subject: 'G', op: 'add', content: '每周五晚上读书' },
+            { subject: 'M1', op: 'add', content: '在学日语', quote: '我最近在学日语' },
+            { subject: 'G', op: 'add', content: '每周五晚上读书', quote: '我们周五晚上读书' },
             { subject: 'M2', op: 'none' },
           ],
           summary: '大家聊了学日语和读书会的时间',
@@ -242,8 +242,11 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
   it('推翻旧事实：旧的设 valid_to、留下历史，新的挂在同一个对象上；一字不差的算已经记过', async () => {
     await say(inGroup(), '我在学日语')
     await extract(
-      fakeModel(JSON.stringify({ facts: [{ subject: 'M1', op: 'add', content: '在学日语' }] }))
-        .model,
+      fakeModel(
+        JSON.stringify({
+          facts: [{ subject: 'M1', op: 'add', content: '在学日语', quote: '我在学日语' }],
+        }),
+      ).model,
     )
     const [old] = await extracted()
 
@@ -251,8 +254,14 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
     const { model, calls } = fakeModel(
       JSON.stringify({
         facts: [
-          { subject: 'M1', op: 'update', replaces: 'F1', content: '在学韩语' },
-          { subject: 'M1', op: 'add', content: ' 在学日语 ' },
+          {
+            subject: 'M1',
+            op: 'update',
+            replaces: 'F1',
+            content: '在学韩语',
+            quote: '我改学韩语了',
+          },
+          { subject: 'M1', op: 'add', content: ' 在学日语 ', quote: '还在学日语' },
         ],
       }),
     )
@@ -325,8 +334,8 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
       fakeModel(
         JSON.stringify({
           facts: [
-            { subject: 'M1', op: 'add', content: '在学日语' },
-            { subject: 'M2', op: 'add', content: '在学法语' },
+            { subject: 'M1', op: 'add', content: '在学日语', quote: '我在学日语' },
+            { subject: 'M2', op: 'add', content: '在学法语', quote: '我在学法语' },
           ],
         }),
       ).model,
@@ -336,7 +345,15 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
     await say(inGroup('1002', '小红'), '我也开始学日语了')
     const { model, calls } = fakeModel(
       JSON.stringify({
-        facts: [{ subject: 'M2', op: 'update', replaces: 'F1', content: '在学日语和法语' }],
+        facts: [
+          {
+            subject: 'M2',
+            op: 'update',
+            replaces: 'F1',
+            content: '在学日语和法语',
+            quote: '我也开始学日语了',
+          },
+        ],
       }),
     )
     await extract(model)
@@ -446,7 +463,9 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
     await extract(
       fakeModel(
         '格式示例：```json\n{"facts":[],"summary":""}\n```\n答案：' +
-          JSON.stringify({ facts: [{ subject: 'M1', op: 'add', content: '在学日语' }] }),
+          JSON.stringify({
+            facts: [{ subject: 'M1', op: 'add', content: '在学日语', quote: '我在学日语' }],
+          }),
       ).model,
     )
     expect((await extracted()).map((r) => r.content)).toEqual(['在学日语'])
@@ -459,7 +478,13 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
         '好的，格式是 {subject, op}，结果如下：\n' +
           JSON.stringify({
             facts: [
-              { subject: 'M1', op: 'add', content: '在学日语', replaces: null },
+              {
+                subject: 'M1',
+                op: 'add',
+                content: '在学日语',
+                replaces: null,
+                quote: '我在学日语',
+              },
               { subject: 'G', op: 'none', content: null },
             ],
             summary: null,
@@ -501,9 +526,9 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
     const { model, calls } = fakeModel(
       JSON.stringify({
         facts: [
-          { subject: 'M1', op: 'add', content: '在学日语' },
-          { subject: 'M1', op: 'add', content: '在学日语' },
-          { subject: 'M1', op: 'add', content: '很早以前记下的事' },
+          { subject: 'M1', op: 'add', content: '在学日语', quote: '我在学日语' },
+          { subject: 'M1', op: 'add', content: '在学日语', quote: '我在学日语' },
+          { subject: 'M1', op: 'add', content: '很早以前记下的事', quote: '我在学日语' },
         ],
       }),
     )
@@ -524,7 +549,9 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
     const revoked = await database.db.select().from(apiKeys).where(isNotNull(apiKeys.revokedAt))
     expect(revoked).toHaveLength(1)
     const { model, calls } = fakeModel(
-      JSON.stringify({ facts: [{ subject: 'M1', op: 'add', content: '在学日语' }] }),
+      JSON.stringify({
+        facts: [{ subject: 'M1', op: 'add', content: '在学日语', quote: '我在学日语' }],
+      }),
     )
     await extract(model)
     const prompt = calls[0]![1]!.content
@@ -552,8 +579,8 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
       fakeModel(
         JSON.stringify({
           facts: [
-            { subject: 'M1', op: 'add', content: '在学法语' },
-            { subject: 'M2', op: 'add', content: '在学日语' },
+            { subject: 'M1', op: 'add', content: '在学法语', quote: '我在学法语' },
+            { subject: 'M2', op: 'add', content: '在学日语', quote: '我在学日语' },
           ],
           summary: '大家聊了学外语',
         }),
@@ -574,8 +601,11 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
     try {
       await expect(
         extract(
-          fakeModel(JSON.stringify({ facts: [{ subject: 'M1', op: 'add', content: '在学日语' }] }))
-            .model,
+          fakeModel(
+            JSON.stringify({
+              facts: [{ subject: 'M1', op: 'add', content: '在学日语', quote: '我在学日语' }],
+            }),
+          ).model,
         ),
       ).rejects.toThrow()
     } finally {
@@ -594,7 +624,14 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
     await extract(
       fakeModel(
         JSON.stringify({
-          facts: [{ subject: 'M1', op: 'add', content: '觉得  C++ 比 <Rust>\u0000 好' }],
+          facts: [
+            {
+              subject: 'M1',
+              op: 'add',
+              content: '觉得  C++ 比 <Rust>\u0000 好',
+              quote: '我觉得 C++ 比 <Rust> 好',
+            },
+          ],
         }),
       ).model,
     )
@@ -612,8 +649,11 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
     try {
       await expect(
         extract(
-          fakeModel(JSON.stringify({ facts: [{ subject: 'M1', op: 'add', content: '在学日语' }] }))
-            .model,
+          fakeModel(
+            JSON.stringify({
+              facts: [{ subject: 'M1', op: 'add', content: '在学日语', quote: '我在学日语' }],
+            }),
+          ).model,
         ),
       ).rejects.toThrow()
     } finally {
@@ -641,8 +681,11 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
     const privately = { chatType: 'direct', platform: 'qq', sender: { id: '1001', name: '小明' } }
     await say(privately, '我打算换工作')
     await extract(
-      fakeModel(JSON.stringify({ facts: [{ subject: 'M1', op: 'add', content: '打算换工作' }] }))
-        .model,
+      fakeModel(
+        JSON.stringify({
+          facts: [{ subject: 'M1', op: 'add', content: '打算换工作', quote: '我打算换工作' }],
+        }),
+      ).model,
     )
     const s1 = await subjectOf('person', '1001')
     expect((await extracted())[0]).toMatchObject({ originScope: `direct:${s1}` })
@@ -658,5 +701,32 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
     const items = ((await activity.json()) as ActivityList).items
     const factId = (await extracted())[0]!.id
     expect(items.some((i) => i.memoryId === factId)).toBe(false)
+  })
+
+  it('发给模型前会先对对话和已有事实做敏感内容打码，并拦截缺引文或编造引文的候选', async () => {
+    await say(inGroup(), '我的手机号是 13812345678，最近在学日语', '机器人回复说他在学钢琴')
+    const { model, calls } = fakeModel(
+      JSON.stringify({
+        facts: [
+          { subject: 'M1', op: 'add', content: '在学日语', quote: '最近在学日语' },
+          { subject: 'M1', op: 'add', content: '手机号未脱敏' },
+          { subject: 'M1', op: 'add', content: '在学钢琴', quote: '他在学钢琴' },
+          { subject: 'M1', op: 'add', content: '在学画画', quote: '我在学画画' },
+          { subject: 'M1', op: 'add', content: '手机是 [REDACTED:PHONE]', quote: '最近在学日语' },
+        ],
+        summary: '聊了手机号 13812345678 和学日语',
+      }),
+    )
+    await extract(model)
+    const prompt = calls[0]![1]!.content
+    expect(prompt).not.toContain('13812345678')
+    expect(prompt).toContain('[REDACTED:PHONE]')
+
+    const rows = await extracted()
+    const facts = rows.filter((r) => r.layer === 'subject').map((r) => r.content)
+    const summary = rows.find((r) => r.layer === 'episode')?.content
+    expect(facts).toEqual(['在学日语'])
+    expect(summary).not.toContain('13812345678')
+    expect((await runs())[0]).toMatchObject({ added: 1, dropped: 4, summarized: true })
   })
 })

@@ -1,6 +1,7 @@
 import { z } from 'zod'
 
 import { CURATED_LAYERS, Layer, NAMESPACED_LAYERS, Provenance, Sensitivity } from './memory'
+import { StoredSensitiveFinding } from './sensitive'
 
 // 坐标（代码与 MCP 里叫 uri）= 开头://位置/标识，存成 domain 与 path 两列。开头只有四种，就是记下的四类归属
 // （CURATED_LAYERS）：core://、user://，以及 persona://<人格标识>/、app://<应用标识>/，后两种开头之后的第一段是人格或应用的标识，
@@ -76,12 +77,14 @@ export const MemoryView = z
   .meta({ id: 'MemoryView' })
 export type MemoryView = z.infer<typeof MemoryView>
 
-// 管理界面读到的记忆。接入方的 MemoryView 不变，下面两个字段只给管理界面
+// 管理界面读到的记忆。接入方的 MemoryView 不变，下面字段只给管理界面
 export const ConsoleMemoryView = MemoryView.extend({
   // secret 有正文、这次没给（content 为 null），要显式查看（reveal），查看记一次访问
   contentHidden: z.boolean(),
-  // 现在的正文疑似明文，而且这段正文的提示被忽略了；正文改了就不再算
+  // 现在的正文疑似含敏感内容（明文凭据或个人信息），而且这段正文的提示被忽略了；正文改了就不再算
   plaintextIgnored: z.boolean(),
+  // 落库扫描出的敏感内容摘要（不含原文值），旧测试构造未传时默认为空
+  sensitiveFindings: z.array(StoredSensitiveFinding).optional(),
 })
 export type ConsoleMemoryView = z.infer<typeof ConsoleMemoryView>
 

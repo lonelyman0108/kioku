@@ -273,9 +273,17 @@ const memoryLink = (uri: string) => memoryRoute(spaceId.value, uri)
 .source-rest-recall {
   background: var(--source-4);
 }
+.stat-apps ul,
+.stat-top ul,
+.stat-never ul {
+  max-height: 22rem;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: 4px;
+}
 .top-row {
   display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) 30px 66px;
+  grid-template-columns: 18px minmax(0, 1fr) minmax(24px, auto) 66px;
   column-gap: 8px;
   align-items: center;
   padding: 5px 0 4px;
@@ -293,6 +301,7 @@ const memoryLink = (uri: string) => memoryRoute(spaceId.value, uri)
 .top-row a,
 .never-row a {
   min-width: 0;
+  overflow: hidden;
 }
 .top-row a:hover,
 .never-row a:hover {

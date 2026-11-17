@@ -99,8 +99,8 @@ describe.skipIf(!testDatabaseUrl)('待审队列', () => {
   const chatInGroup = async (
     reply: unknown = {
       facts: [
-        { subject: 'M1', op: 'add', content: '在学日语' },
-        { subject: 'G', op: 'add', content: '是个读书会' },
+        { subject: 'M1', op: 'add', content: '在学日语', quote: '我在学日语' },
+        { subject: 'G', op: 'add', content: '是个读书会', quote: '我在学日语' },
       ],
       summary: '群里聊了学日语',
     },
@@ -235,7 +235,9 @@ describe.skipIf(!testDatabaseUrl)('待审队列', () => {
 
     // 抽取时给模型看的已有事实里，确认过的这条是 F1
     await chatInGroup({
-      facts: [{ subject: 'M1', op: 'update', replaces: 'F1', content: '在学韩语' }],
+      facts: [
+        { subject: 'M1', op: 'update', replaces: 'F1', content: '在学韩语', quote: '我在学日语' },
+      ],
     })
     const [kept] = await rowsOf([fact.id])
     expect([kept!.provenance, kept!.validTo]).toEqual(['owner', null])

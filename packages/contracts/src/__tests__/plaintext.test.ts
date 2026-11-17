@@ -661,7 +661,7 @@ describe('「密码：…」后面不是值的写法', () => {
     ]) {
       expect(flagged(`password: ${type}`), type).toBe(false)
     }
-    for (const value of ['string123', 'stringent', 'str0ng', 'nullable', 'any_key', 'int3ger']) {
+    for (const value of ['string123', 'stringent', 'str0ng', 'nullable', 'any_val', 'int3ger']) {
       expect(flagged(`password: ${value}`), value).toBe(true)
     }
   })
@@ -732,9 +732,12 @@ describe('「密码：…」后面不是值的写法', () => {
     }
   })
 
-  it('代码表达式照样算：确实不是凭据时由写入方确认', () => {
-    expect(flagged('password: config.password')).toBe(true)
-    expect(flagged('token = getToken()')).toBe(true)
+  it('代码变量名与无参调用不算（反误报过滤）', () => {
+    expect(findPlaintextCredentials('password: config.password')).toEqual([])
+    expect(findPlaintextCredentials('token = getToken()')).toEqual([])
+    expect(findPlaintextCredentials('access_token = get_access_token_v2')).toEqual([])
+    expect(findPlaintextCredentials('secret: env.SECRET_V2')).toEqual([]) // gitleaks:allow
+    expect(findPlaintextCredentials('token: refreshToken2')).toEqual([])
   })
 })
 

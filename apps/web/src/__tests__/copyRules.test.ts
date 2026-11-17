@@ -19,6 +19,7 @@ const UPSTREAM_KEYS: [file: string, names: RegExp][] = [
   ['/components/EmbeddingChannelRow.vue', /API Key/g],
   ['/components/EmbeddingSettings.vue', /API Key/g],
   ['/components/ExtractionSettings.vue', /API Key/g],
+  ['/components/PrivacyModelSettings.vue', /API Key/g],
   ['/benchAgent.ts', /API Key/g],
   ['/components/BenchAgent.vue', /API Key/g],
   ['/components/LoreImport.vue', /API Key/g],

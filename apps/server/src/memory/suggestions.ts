@@ -174,6 +174,7 @@ export async function listSuggestions(
           uri: s.uri,
           disclosure: s.disclosure,
           verdict: s.verdict as DreamVerdict | null,
+          targetPriority: s.targetPriority ?? null,
           actionable: role !== 'viewer' && items.every(({ row }) => canModify(access, row)),
           createdAt: s.createdAt.toISOString(),
         }
@@ -262,6 +263,11 @@ function actionOf(
     case 'review':
       if (extra([])) throw new MemoryError(400, '这条建议没有可修改的内容')
       return { kind: 'review', verdict: row.verdict as DreamVerdict }
+    case 'promote': {
+      if (extra(['priority'])) throw new MemoryError(400, '晋升建议只能修改目标优先级')
+      const priority = edits.priority ?? row.targetPriority ?? 1
+      return { kind: 'promote', priority }
+    }
   }
 }
 

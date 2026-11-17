@@ -34,6 +34,7 @@ import {
   PageQuery,
   PlaintextIgnoreRequest,
   ReactivateRequest,
+  RedactMemoryRequest,
   RestoreRequest,
   RevealMemoryRequest,
   UndeleteRequest,
@@ -311,6 +312,14 @@ function consoleOnlyRoutes(deps: Deps) {
     request: { params, body: jsonBody(PlaintextIgnoreRequest) },
     responses: { 200: jsonResponse('记忆', ConsoleView), ...errors },
   })
+  const redactMemory = createRoute({
+    method: 'post',
+    path: '/spaces/{spaceId}/memories/redact',
+    tags: ['console'],
+    summary: '一键打码：把正文里的疑似明文凭据或个人敏感信息替换为遮盖符',
+    request: { params, body: jsonBody(RedactMemoryRequest) },
+    responses: { 200: jsonResponse('记忆', ConsoleView), ...errors },
+  })
   const convertToCredential = createRoute({
     method: 'post',
     path: '/spaces/{spaceId}/memories/convert-to-credential',
@@ -418,6 +427,10 @@ function consoleOnlyRoutes(deps: Deps) {
     .openapi(unignorePlaintext, async (c) => {
       const { service } = await consoleMember(deps, c)
       return c.json(await service.unignorePlaintext(c.req.valid('json')), 200)
+    })
+    .openapi(redactMemory, async (c) => {
+      const { service } = await consoleMember(deps, c)
+      return c.json(await service.redact(c.req.valid('json')), 200)
     })
     .openapi(convertToCredential, async (c) => {
       const { spaceId, service } = await consoleMember(deps, c)

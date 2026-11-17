@@ -485,7 +485,13 @@
               "aws",
               "jwt",
               "private_key",
-              "kioku"
+              "kioku",
+              "provider_token",
+              "url_password",
+              "header_secret",
+              "wallet_key",
+              "seed_phrase",
+              "custom"
             ]
           }
         },

@@ -1,8 +1,9 @@
-import type { PlaintextKind } from '@kioku/contracts'
+import { resolveSpacePrivacy, type PlaintextKind } from '@kioku/contracts'
 import { eq } from 'drizzle-orm'
 
+import { currentRevision, evaluateSensitiveContent } from '../credential/privacy'
 import { withSpace, type Db } from '../db/client'
-import { memories } from '../db/schema'
+import { memories, spaces } from '../db/schema'
 
 // 每一类已知格式的令牌各一个样例，在运行时拼出来：仓库里不出现完整的令牌写法，免得被托管平台的密钥扫描拦下
 const join = (...parts: string[]) => parts.join('')
@@ -52,7 +53,22 @@ export async function setPlaintextContent(
   memoryId: string,
   content: string,
 ): Promise<void> {
-  await withSpace(db, spaceId, (tx) =>
-    tx.update(memories).set({ content }).where(eq(memories.id, memoryId)),
-  )
+  await withSpace(db, spaceId, async (tx) => {
+    const [space] = await tx
+      .select({ privacy: spaces.privacy, revision: spaces.privacyRevision })
+      .from(spaces)
+      .where(eq(spaces.id, spaceId))
+    const privacy = resolveSpacePrivacy((space?.privacy ?? {}) as Record<string, unknown>)
+    const scan = evaluateSensitiveContent(content, privacy)
+    await tx
+      .update(memories)
+      .set({
+        content,
+        sensitiveRevision: currentRevision(space?.revision ?? 1),
+        sensitiveCredential: scan.hasCredential,
+        sensitivePii: scan.hasPii,
+        sensitiveFindings: scan.findings,
+      })
+      .where(eq(memories.id, memoryId))
+  })
 }

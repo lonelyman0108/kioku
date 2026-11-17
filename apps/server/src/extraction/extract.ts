@@ -1,15 +1,19 @@
-import { TUNING_DEFAULTS } from '@kioku/contracts'
+import { maskSensitiveContent, TUNING_DEFAULTS } from '@kioku/contracts'
 import { and, asc, eq, inArray, sql } from 'drizzle-orm'
 
 import type { Access, SessionContext } from '../access/access'
 import { ensureConversation, findConversation, type ConversationRef } from '../access/conversations'
 import { groupPersona, type KeySession } from '../access/session'
 import { principalForKeyId } from '../auth/middleware'
+import { mentionsPlaceholder } from '../credential/placeholders'
 import {
-  looksLikePlaintextCredential,
-  maskPlaintextCredentials,
-  mentionsPlaceholder,
-} from '../credential/placeholders'
+  detectWithPrivacyModel,
+  evaluateSensitiveContent,
+  loadPrivacyModelConfig,
+  loadSpacePrivacy,
+  type ModelEntitySpan,
+  type PrivacyModelConfig,
+} from '../credential/privacy'
 import type { MasterKey } from '../crypto/keyring'
 import { errorText, withSpace, type Db, type Tx } from '../db/client'
 import {
@@ -28,7 +32,13 @@ import { readableSubjectFacts } from '../recall/subjects'
 import { loadSpaceSettings } from '../settings/advanced'
 import { canWriteTurns, type BufferedSession } from './buffer'
 import { extractionUsage, writesToday } from './budget'
-import { extractionMessages, parseExtraction, summaryMessages, type PromptSubject } from './prompt'
+import {
+  extractionMessages,
+  parseExtraction,
+  quoteMatchesSpeaker,
+  summaryMessages,
+  type PromptSubject,
+} from './prompt'
 import type { ChatModel } from './provider'
 
 // 服务端自己判断出的失败原因，不带模型接口或数据库的原文，对象页里所有成员都看得到
@@ -271,23 +281,70 @@ export async function extractBatch(
       ? [{ id: groupId, handle: 'G', role: 'group' as const, name: groupName, facts: [] }]
       : []),
   ]
+  const { settings: spacePrivacy } = await loadSpacePrivacy(db, target.spaceId)
+  let privacyModel: PrivacyModelConfig | null = null
+  if (spacePrivacy.pii && spacePrivacy.usePrivacyModel) {
+    try {
+      privacyModel = await loadPrivacyModelConfig(db, masterKey)
+    } catch {
+      privacyModel = null
+    }
+  }
+  const redactForLlm = async (text: string): Promise<string> => {
+    if (!text) return text
+    let modelSpans: ModelEntitySpan[] = []
+    if (privacyModel && spacePrivacy.pii && spacePrivacy.usePrivacyModel) {
+      try {
+        modelSpans = await detectWithPrivacyModel(privacyModel, text)
+      } catch {
+        modelSpans = []
+      }
+    }
+    return maskSensitiveContent(
+      text,
+      {
+        credentials: spacePrivacy.credentials,
+        pii: spacePrivacy.pii,
+        piiKinds: spacePrivacy.piiKinds,
+        customRules: spacePrivacy.customRules,
+        allowlist: spacePrivacy.allowlist,
+      },
+      'tag',
+      modelSpans,
+    )
+  }
+
   // 给模型看的事实：句柄对应哪一条、模型看到的是哪一版（推翻时按版本核对，见 writeExtraction）
   const shown = new Map<string, { id: string; subjectId: string; version: number }>()
   for (const subject of subjects) {
     for (const fact of facts.filter((f) => f.subjectId === subject.id)) {
       const handle = `F${shown.size + 1}`
       shown.set(handle, { id: fact.id, subjectId: subject.id, version: fact.version })
-      subject.facts.push({ handle, content: fact.content })
+      subject.facts.push({ handle, content: await redactForLlm(fact.content) })
     }
   }
   const handleOf = new Map(subjects.map((s) => [s.id, s.handle]))
-  const transcript = turns.map((t) => ({
-    // 不带会话上下文的是所属成员和自己的 Agent 在说话
-    speaker: noContext ? '本人' : handleOf.get(t.senderSubjectId!)!,
-    speakerName: t.senderName,
-    user: t.userText,
-    reply: t.replyText,
-  }))
+  // 按发言人代号保存原始与脱敏后的用户发言，供后续验证抽取结果的 quote 是否真实出自对应发言人
+  const speakerTexts = new Map<string, string[]>()
+  const allUserTexts: string[] = []
+  const transcript = await Promise.all(
+    turns.map(async (t) => {
+      const speaker = noContext ? '本人' : handleOf.get(t.senderSubjectId!)!
+      const redactedUser = await redactForLlm(t.userText)
+      const redactedReply = await redactForLlm(t.replyText)
+      const list = speakerTexts.get(speaker) ?? []
+      list.push(t.userText, redactedUser)
+      speakerTexts.set(speaker, list)
+      allUserTexts.push(t.userText, redactedUser)
+      return {
+        speaker,
+        speakerName: t.senderName,
+        user: redactedUser,
+        reply: redactedReply,
+      }
+    }),
+  )
+  if (groupId) speakerTexts.set('G', allUserTexts)
   // 会话摘要的有效天数与抽取规则的补充按空间的设置（实例与空间两级）
   const settings = await loadSpaceSettings(db, target.spaceId)
   const rules = settings.prompts.extractionRules
@@ -337,12 +394,17 @@ export async function extractBatch(
       continue
     }
     const content = oneLine(candidate.content ?? '')
+    const sensitive = evaluateSensitiveContent(content, spacePrivacy)
+    const quotedOk = quoteMatchesSpeaker(candidate.quote, speakerTexts.get(subject.handle) ?? [])
     if (
       !layers.subject ||
       (op !== 'add' && op !== 'update') ||
       !content ||
       [...content].length > MAX_FACT_CHARS ||
-      looksLikePlaintextCredential(content) ||
+      !quotedOk ||
+      content.includes('[REDACTED:') ||
+      sensitive.hasCredential ||
+      sensitive.hasPii ||
       mentionsPlaceholder(content)
     ) {
       counts.dropped++
@@ -386,7 +448,17 @@ export async function extractBatch(
     today.set(f.subjectId, written + 1)
     return true
   })
-  const summary = maskPlaintextCredentials(oneLine(parsed.summary))
+  const summary = maskSensitiveContent(
+    oneLine(parsed.summary),
+    {
+      credentials: spacePrivacy.credentials,
+      pii: spacePrivacy.pii,
+      piiKinds: spacePrivacy.piiKinds,
+      customRules: spacePrivacy.customRules,
+      allowlist: spacePrivacy.allowlist,
+    },
+    'stars',
+  )
   if (
     layers.episode &&
     summary &&

@@ -1,5 +1,5 @@
 import { useToast } from '@nuxt/ui/composables'
-import type { ConsoleMemoryView } from '@kioku/contracts'
+import type { ConsoleMemoryView, RedactMode } from '@kioku/contracts'
 import { useQueryClient, type QueryClient } from '@tanstack/vue-query'
 import { ref, type Ref } from 'vue'
 
@@ -21,14 +21,17 @@ export function refreshAfterPlaintext(
   void queryClient.invalidateQueries({ queryKey: ['memory-history', spaceId, memory.id] })
 }
 
-// 忽略和撤销忽略：带着看到提示时的版本，期间正文被改过就不替新的正文做决定，由服务端返回冲突
+// 忽略、撤销忽略与一键打码：带着看到提示时的版本，期间正文被改过就不替新的正文做决定，由服务端返回冲突
 export function usePlaintextActions(spaceId: Ref<string>) {
   const toast = useToast()
   const queryClient = useQueryClient()
   const busy = ref<string | null>(null)
 
   async function run(
-    call: typeof api.ignorePlaintext,
+    call: (
+      sid: string,
+      body: { memoryId: string; expectedVersion: number },
+    ) => Promise<ConsoleMemoryView>,
     done: string,
     target: { id: string; version: number },
   ): Promise<ConsoleMemoryView | null> {
@@ -58,5 +61,7 @@ export function usePlaintextActions(spaceId: Ref<string>) {
       run(api.ignorePlaintext, '已忽略，正文修改后会重新提示', target),
     unignore: (target: { id: string; version: number }) =>
       run(api.unignorePlaintext, '已撤销忽略', target),
+    redact: (target: { id: string; version: number }, mode: RedactMode = 'stars') =>
+      run((sid, body) => api.redactMemory(sid, { ...body, mode }), '已完成脱敏打码', target),
   }
 }
