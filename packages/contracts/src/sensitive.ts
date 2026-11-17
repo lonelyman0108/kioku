@@ -664,26 +664,29 @@ function isCodeOrNonSecretLabelValue(
   valStart: number,
   valEnd: number,
 ): boolean {
-  const v = text.slice(valStart, valEnd)
-  if (!v) return true
-  if (v[0] === '=' && text[valStart - 1] === ':') return true
-  if (CALL_EXPR_RE.test(v)) return true
-  if (namesASecret(v)) return true
-  if (pathValue(v)) return true
-  if (VERSION_RANGE_RE.test(v)) return true
-  if (TIMESTAMP_RE.test(v)) return true
+  const len = valEnd - valStart
+  if (len <= 0) return true
+  if (text[valStart] === '=' && text[valStart - 1] === ':') return true
   if (isPlainKeyName(text, labelStart, labelEnd)) return true
-  // 密钥/令牌类标签后跟纯数字时：不足 6 位或后接计量单位（如 密钥为 2048 位）不算密钥
-  const rawLabel = text.slice(labelStart, labelEnd).toLowerCase().replace(/\s+/g, '_')
-  if (/^\d+$/.test(v) && (KEY_ONLY_LABELS.has(rawLabel) || rawLabel.endsWith('_key'))) {
-    if (v.length < 6) return true
-    if (COUNT_UNIT_RE.test(text.slice(valEnd, valEnd + 16))) return true
+  if (len >= 2) {
+    const v = text.slice(valStart, valEnd)
+    if (CALL_EXPR_RE.test(v)) return true
+    if (namesASecret(v)) return true
+    if (pathValue(v)) return true
+    if (VERSION_RANGE_RE.test(v)) return true
+    if (TIMESTAMP_RE.test(v)) return true
+    if (/^L\d+(?:[-:,]L?\d+)*[.,;:]?$/i.test(v)) return true
+    // 密钥/令牌类标签后跟纯数字时：不足 6 位或后接计量单位（如 密钥为 2048 位）不算密钥
+    if (/^\d+$/.test(v)) {
+      const rawLabel = text.slice(labelStart, labelEnd).toLowerCase().replace(/\s+/g, '_')
+      if (KEY_ONLY_LABELS.has(rawLabel) || rawLabel.endsWith('_key')) {
+        if (v.length < 6) return true
+        if (COUNT_UNIT_RE.test(text.slice(valEnd, valEnd + 16))) return true
+      }
+    }
+    if (LINE_REF_RE.test(v) && fileField(text, labelStart)) return true
   }
-  const isFile = fileField(text, labelStart)
-  if (isFile) return true
-  if (/^L\d+(?:[-:,]L?\d+)*[.,;:]?$/i.test(v)) return true
-  if (LINE_REF_RE.test(v) && isFile) return true
-  return false
+  return fileField(text, labelStart)
 }
 
 // 排除全小写连字符 URL slug（如 sk-hynix-third-quarter-profit）
@@ -1238,20 +1241,22 @@ export function scanSensitiveContent(
         }
         const span = scan.labelValue(valueFirst)
         if (!span) continue
-        // 检查值本身是否是已知格式令牌
+        // 检查值本身是否是已知格式令牌（最短令牌 >= 19 个字符或以私钥头开头）
         let at = span.start
         while (at < text.length && QUOTES.includes(text[at]!)) at++
         let tokenKind: TokenKind | null = null
         let tokenSpan: { start: number; end: number; extendedEnd: number } | null = null
-        for (const [tk, tre] of TOKEN_AT) {
-          tre.lastIndex = at
-          const hit = tre.exec(text)
-          if (!hit) continue
-          const candidateVal = text.slice(at, at + hit[0].length)
-          if (tk === 'sk' && !notASlug(candidateVal)) continue
-          tokenKind = tk
-          tokenSpan = scan.tokenValue(tk, at, hit[0].length)
-          break
+        if (span.end - at >= 16 || (text[at] === '-' && text.startsWith('-----', at))) {
+          for (const [tk, tre] of TOKEN_AT) {
+            tre.lastIndex = at
+            const hit = tre.exec(text)
+            if (!hit) continue
+            const candidateVal = text.slice(at, at + hit[0].length)
+            if (tk === 'sk' && !notASlug(candidateVal)) continue
+            tokenKind = tk
+            tokenSpan = scan.tokenValue(tk, at, hit[0].length)
+            break
+          }
         }
         if (tokenKind && tokenSpan) {
           re.lastIndex = Math.max(re.lastIndex, tokenSpan.end)
@@ -1263,9 +1268,9 @@ export function scanSensitiveContent(
           })
           continue
         }
-        const rawLabelVal = text.slice(span.start, span.end)
         if (
-          /^(?:0x[0-9a-f]{56,64}|[0-9a-f]{64})$/i.test(rawLabelVal) &&
+          span.end - span.start >= 58 &&
+          /^(?:0x[0-9a-f]{56,64}|[0-9a-f]{64})$/i.test(text.slice(span.start, span.end)) &&
           hasWalletCue(text, span.start)
         ) {
           raw.push({
@@ -1308,69 +1313,61 @@ export function scanSensitiveContent(
     }
 
     // URL 内嵌密码
-    for (const m of text.matchAll(URL_PASSWORD_RE)) {
-      const user = m[1] ?? ''
-      const pw = m[2] ?? ''
-      const pwStart = m.index + m[0].length - pw.length - 1
-      const pwEnd = pwStart + pw.length
-      const atIdx = m.index + m[0].length - 1
-      if (hiddenInUrl(text, user, pw, atIdx)) {
-        raw.push({
-          category: 'credential',
-          kind: 'url_password',
-          start: pwStart,
-          end: pwEnd,
-          extendedEnd: pwEnd,
-          field: 'password',
-        })
+    if (text.includes('://')) {
+      for (const m of text.matchAll(URL_PASSWORD_RE)) {
+        const user = m[1] ?? ''
+        const pw = m[2] ?? ''
+        const pwStart = m.index + m[0].length - pw.length - 1
+        const pwEnd = pwStart + pw.length
+        const atIdx = m.index + m[0].length - 1
+        if (hiddenInUrl(text, user, pw, atIdx)) {
+          raw.push({
+            category: 'credential',
+            kind: 'url_password',
+            start: pwStart,
+            end: pwEnd,
+            extendedEnd: pwEnd,
+            field: 'password',
+          })
+        }
       }
     }
 
     // HTTP Authorization / Cookie / X-Auth-Key 头
-    for (const m of text.matchAll(HEADER_SECRET_RE)) {
-      const val = m[2] ?? ''
-      if (!validHeaderValue(val)) continue
-      const valStart = m.index + m[0].length - val.length
-      raw.push({
-        category: 'credential',
-        kind: 'header_secret',
-        start: valStart,
-        end: valStart + val.length,
-        extendedEnd: valStart + val.length,
-        field: 'token',
-      })
+    if (text.includes(' ') || text.includes('\t')) {
+      for (const m of text.matchAll(HEADER_SECRET_RE)) {
+        const val = m[2] ?? ''
+        if (!validHeaderValue(val)) continue
+        const valStart = m.index + m[0].length - val.length
+        raw.push({
+          category: 'credential',
+          kind: 'header_secret',
+          start: valStart,
+          end: valStart + val.length,
+          extendedEnd: valStart + val.length,
+          field: 'token',
+        })
+      }
     }
-    for (const m of text.matchAll(X_AUTH_KEY_RE)) {
-      const val = m[1] ?? ''
-      if (!notAVariable(val)) continue
-      const valStart = m.index + m[0].length - val.length
-      raw.push({
-        category: 'credential',
-        kind: 'header_secret',
-        start: valStart,
-        end: valStart + val.length,
-        extendedEnd: valStart + val.length,
-        field: 'api_key',
-      })
+    if (text.includes('-')) {
+      for (const m of text.matchAll(X_AUTH_KEY_RE)) {
+        const val = m[1] ?? ''
+        if (!notAVariable(val)) continue
+        const valStart = m.index + m[0].length - val.length
+        raw.push({
+          category: 'credential',
+          kind: 'header_secret',
+          start: valStart,
+          end: valStart + val.length,
+          extendedEnd: valStart + val.length,
+          field: 'api_key',
+        })
+      }
     }
 
     // 加密钱包私钥与助记词
-    for (const m of text.matchAll(FIXED_WALLET_RE)) {
-      raw.push({
-        category: 'credential',
-        kind: 'wallet_key',
-        start: m.index,
-        end: m.index + m[0].length,
-        extendedEnd: m.index + m[0].length,
-        field: 'private_key',
-      })
-    }
-    for (const m of text.matchAll(SOLANA_KEYPAIR_RE)) {
-      const nums = m[0]
-        .slice(1, -1)
-        .split(',')
-        .map((n) => Number(n.trim()))
-      if (nums.length === 64 && nums.every((n) => Number.isInteger(n) && n >= 0 && n <= 255)) {
+    if (text.length >= 60) {
+      for (const m of text.matchAll(FIXED_WALLET_RE)) {
         raw.push({
           category: 'credential',
           kind: 'wallet_key',
@@ -1381,35 +1378,57 @@ export function scanSensitiveContent(
         })
       }
     }
-    for (const m of text.matchAll(WALLET_HEX_RE)) {
-      if (hasWalletCue(text, m.index)) {
-        raw.push({
-          category: 'credential',
-          kind: 'wallet_key',
-          start: m.index,
-          end: m.index + m[0].length,
-          extendedEnd: m.index + m[0].length,
-          field: 'private_key',
-        })
+    if (text.includes('[')) {
+      for (const m of text.matchAll(SOLANA_KEYPAIR_RE)) {
+        const nums = m[0]
+          .slice(1, -1)
+          .split(',')
+          .map((n) => Number(n.trim()))
+        if (nums.length === 64 && nums.every((n) => Number.isInteger(n) && n >= 0 && n <= 255)) {
+          raw.push({
+            category: 'credential',
+            kind: 'wallet_key',
+            start: m.index,
+            end: m.index + m[0].length,
+            extendedEnd: m.index + m[0].length,
+            field: 'private_key',
+          })
+        }
       }
     }
-    for (const m of text.matchAll(SEED_PHRASE_RE)) {
-      const phrase = m[1] ?? ''
-      const words = phrase.split(/[ \t]+/)
-      if (
-        words.length >= 12 &&
-        words.length <= 25 &&
-        words.every((w) => BIP39_ENGLISH_WORDS.has(w))
-      ) {
-        const start = m.index + m[0].length - phrase.length
-        raw.push({
-          category: 'credential',
-          kind: 'seed_phrase',
-          start,
-          end: start + phrase.length,
-          extendedEnd: start + phrase.length,
-          field: 'secret',
-        })
+    if (text.length >= 58) {
+      for (const m of text.matchAll(WALLET_HEX_RE)) {
+        if (hasWalletCue(text, m.index)) {
+          raw.push({
+            category: 'credential',
+            kind: 'wallet_key',
+            start: m.index,
+            end: m.index + m[0].length,
+            extendedEnd: m.index + m[0].length,
+            field: 'private_key',
+          })
+        }
+      }
+    }
+    if (text.includes(' ') || text.includes('\t')) {
+      for (const m of text.matchAll(SEED_PHRASE_RE)) {
+        const phrase = m[1] ?? ''
+        const words = phrase.split(/[ \t]+/)
+        if (
+          words.length >= 12 &&
+          words.length <= 25 &&
+          words.every((w) => BIP39_ENGLISH_WORDS.has(w))
+        ) {
+          const start = m.index + m[0].length - phrase.length
+          raw.push({
+            category: 'credential',
+            kind: 'seed_phrase',
+            start,
+            end: start + phrase.length,
+            extendedEnd: start + phrase.length,
+            field: 'secret',
+          })
+        }
       }
     }
 
