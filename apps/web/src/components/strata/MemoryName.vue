@@ -15,6 +15,7 @@ const name = computed(() => memoryTitle(props))
 
 <style scoped>
 .memory-name {
+  display: block;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
