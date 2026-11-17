@@ -148,7 +148,7 @@ async function syncRows(
         continue
       }
       const text = embeddingText({
-        uri: formatUri(row.domain, row.path),
+        uri: maskForOutbound(formatUri(row.domain, row.path), privacy),
         disclosure: row.disclosure ? maskForOutbound(row.disclosure, privacy) : null,
         glossary: glossaryRows
           .filter((g) => g.memoryId === row.id)

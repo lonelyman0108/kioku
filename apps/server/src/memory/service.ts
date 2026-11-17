@@ -2001,7 +2001,9 @@ export class MemoryService {
       )
       await this.checkKeptRefs(tx, row, ownership)
 
-      const basePath = row.domain === 'core' ? row.path : `${row.domain}/${row.path}`
+      const segments = row.path.split('/')
+      const basePath =
+        row.domain === 'core' || segments.length >= 16 ? row.path : `${row.domain}/${row.path}`
       const freePath = await this.resolveFreeUserPath(tx, ownerAccountId, basePath)
       const to = parse(formatUri('user', freePath))
       await this.claimUri(tx, to, ownership, released)
@@ -2053,7 +2055,7 @@ export class MemoryService {
     const slash = basePath.lastIndexOf('/')
     const head = slash >= 0 ? basePath.slice(0, slash + 1) : ''
     const tail = slash >= 0 ? basePath.slice(slash + 1) : basePath
-    const prefix = `${head}${tail}`
+    const lookupPrefix = `${head}${tail.slice(0, 50)}`
     const existing = await tx
       .select({
         path: memories.path,
@@ -2072,7 +2074,7 @@ export class MemoryService {
           isNull(memories.deletedAt),
           eq(memories.domain, 'user'),
           eq(memories.ownerAccountId, ownerAccountId),
-          or(eq(memories.path, prefix), like(memories.path, `${escapeLike(prefix)}-%`)),
+          or(eq(memories.path, basePath), like(memories.path, `${escapeLike(lookupPrefix)}%`)),
         ),
       )
     const blocked = new Set(

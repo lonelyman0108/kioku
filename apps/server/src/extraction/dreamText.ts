@@ -18,10 +18,27 @@ export const DISCLOSURE_CHARS = 200
 const PLAINTEXT = '疑似含明文密码或令牌：整理建议不写入凭据的值'
 const REDACTED_MARKER = /\[REDACTED:[A-Z0-9_]+\]/
 
+function countMarkers(text: string): Map<string, number> {
+  const counts = new Map<string, number>()
+  for (const match of text.match(/\[REDACTED:[A-Z0-9_]+\]/g) ?? []) {
+    counts.set(match, (counts.get(match) ?? 0) + 1)
+  }
+  return counts
+}
+
 function hasNewRedactedMarker(text: string, sources: readonly (string | null)[] = []): boolean {
-  const matches = text.match(/\[REDACTED:[A-Z0-9_]+\]/g)
-  if (!matches) return false
-  return matches.some((token) => !sources.some((s) => s?.includes(token)))
+  const outCounts = countMarkers(text)
+  if (!outCounts.size) return false
+  const sourceMax = new Map<string, number>()
+  for (const src of sources) {
+    for (const [token, count] of countMarkers(src ?? '')) {
+      sourceMax.set(token, Math.max(sourceMax.get(token) ?? 0, count))
+    }
+  }
+  for (const [token, count] of outCounts) {
+    if (count > (sourceMax.get(token) ?? 0)) return true
+  }
+  return false
 }
 
 // 合并后的事实：一句话，长度和抽取的事实一样有上限

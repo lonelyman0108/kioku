@@ -5,7 +5,7 @@ import { consoleAccess, resolveAccess, type Access, type ConsoleRole } from '../
 import { conversationRefOf, latestSummaries } from '../access/conversations'
 import { defaultSession, type KeySession } from '../access/session'
 import { memberRole } from '../auth/middleware'
-import { loadSpacePrivacy } from '../credential/privacy'
+import { loadOutboundRedactor, maskForOutbound } from '../credential/privacy'
 import { loggableError, withSpace, type Tx } from '../db/client'
 import { apps, memories } from '../db/schema'
 import type { Embedder } from '../embedding/provider'
@@ -92,12 +92,12 @@ export async function semanticFor(
       console.warn('读取嵌入设置失败，本次召回不使用向量', loggableError(err))
       return null
     })
-    const privacy = spaceId
-      ? await loadSpacePrivacy(deps.db, spaceId)
-          .then((r) => r.settings)
-          .catch(() => DEFAULT_SPACE_PRIVACY)
+    const redactor = spaceId
+      ? await loadOutboundRedactor(deps.db, deps.masterKey ?? null, spaceId).catch(
+          () => (text: string) => maskForOutbound(text, DEFAULT_SPACE_PRIVACY),
+        )
       : DEFAULT_SPACE_PRIVACY
-    return embedQuery(embedder, query, privacy)
+    return embedQuery(embedder, query, redactor)
   }
   if (timeoutMs === undefined) return compute()
   // 先返回的一方胜出后清掉计时器，不留着它等到点

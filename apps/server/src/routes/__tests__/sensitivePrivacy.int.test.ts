@@ -501,5 +501,27 @@ describe.skipIf(!testDatabaseUrl)('敏感内容与隐私设置', () => {
       await send('GET', `/spaces/${ws.spaceId}/dream/suggestions`)
     ).json()) as DreamSuggestionList
     expect(suggestions.items).toEqual([])
+
+    // 4. 64 字符长尾段连续迁入 user_private 时能正确递增后缀（-2, -3）而不冲突
+    const longSeg = 'a'.repeat(64)
+    const p1 = await createMemory('手机 13812345678', `core://${longSeg}`)
+    const p2 = await createMemory('手机 13812345678', `core://sub/${longSeg}`)
+    await createMemory('占用目标', `user://${longSeg}`)
+    await createMemory('占用 -2 截断', `user://${'a'.repeat(62)}-2`)
+    const p1Protect = await send('POST', `/spaces/${ws.spaceId}/memories/protect`, {
+      memoryId: p1.id,
+      expectedVersion: p1.version,
+      target: 'user_private',
+    })
+    expect(p1Protect.status).toBe(200)
+    const p1Moved = await getMemory(`user://${'a'.repeat(62)}-3`)
+    expect(p1Moved.content).toBe('手机 13812345678')
+    const p2Protect = await send('POST', `/spaces/${ws.spaceId}/memories/protect`, {
+      memoryId: p2.id,
+      expectedVersion: p2.version,
+      target: 'user_private',
+    })
+    expect(p2Protect.status, await p2Protect.clone().text()).toBe(200)
+    expect(((await p2Protect.json()) as ConsoleMemoryView).uri).toBe(`user://sub/${longSeg}`)
   })
 })

@@ -91,11 +91,16 @@ const QUERY_EMBED_CHANNEL_TIMEOUT_MS = 10_000
 export async function embedQuery(
   embedder: Embedder | null,
   query: string,
-  privacy: SpacePrivacySettings = DEFAULT_SPACE_PRIVACY,
+  redactor:
+    SpacePrivacySettings | ((text: string) => Promise<string> | string) = DEFAULT_SPACE_PRIVACY,
 ): Promise<QueryVector | null> {
   if (!embedder) return null
   try {
-    const masked = maskForOutbound(normalizeQuery(query), privacy)
+    const normalized = normalizeQuery(query)
+    const masked =
+      typeof redactor === 'function'
+        ? await redactor(normalized)
+        : maskForOutbound(normalized, redactor)
     const [vector] = await embedder.embed([masked], {
       signal: AbortSignal.timeout(QUERY_EMBED_TIMEOUT_MS),
       timeoutMs: QUERY_EMBED_CHANNEL_TIMEOUT_MS,

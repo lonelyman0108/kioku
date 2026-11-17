@@ -212,6 +212,7 @@ export async function runBench(
     deps,
     literalQueries(request.steps, run),
     benchLimits(deps).embedBudgetMs,
+    key.spaceId,
   )
   return inRollback(deps, vectors, (scoped, rollback) =>
     runSteps(inProcessExecutor(scoped, key, { run, account, rollback }), input),
