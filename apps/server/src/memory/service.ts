@@ -1159,6 +1159,7 @@ export class MemoryService {
     sensitivity?: Sensitivity,
   ): Promise<ModelEntitySpan[]> {
     if (!content || sensitivity === 'secret') return []
+    if (typeof (this.ctx.db as { select?: unknown })?.select !== 'function') return []
     const { settings } = await loadSpacePrivacy(this.ctx.db, this.ctx.spaceId)
     if (!settings.pii || !settings.usePrivacyModel) return []
     try {

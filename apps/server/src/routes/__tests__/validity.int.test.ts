@@ -1161,10 +1161,20 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
         model: 'm',
       })
       await say('我在学日语')
-      await extract({ facts: [{ subject: 'M1', op: 'add', content: '在学日语' }] })
+      await extract({
+        facts: [{ subject: 'M1', op: 'add', content: '在学日语', quote: '我在学日语' }],
+      })
       await say('我改学韩语了')
       await extract({
-        facts: [{ subject: 'M1', op: 'update', replaces: 'F1', content: '在学韩语' }],
+        facts: [
+          {
+            subject: 'M1',
+            op: 'update',
+            replaces: 'F1',
+            content: '在学韩语',
+            quote: '我改学韩语了',
+          },
+        ],
       })
     })
 
@@ -1212,7 +1222,15 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
         vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + skew })
         try {
           await extract({
-            facts: [{ subject: 'M1', op: 'update', replaces: 'F1', content: '在学法语' }],
+            facts: [
+              {
+                subject: 'M1',
+                op: 'update',
+                replaces: 'F1',
+                content: '在学法语',
+                quote: '我又改学法语了',
+              },
+            ],
           })
           const after = await detail(await subjectId())
           expect(after.facts.map((f) => f.content)).toEqual(['在学法语'])
@@ -1237,7 +1255,15 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
         (tx) => tx`select id from memories where id = ${current!.id} for update`,
         () =>
           extract({
-            facts: [{ subject: 'M1', op: 'update', replaces: 'F1', content: '在学法语' }],
+            facts: [
+              {
+                subject: 'M1',
+                op: 'update',
+                replaces: 'F1',
+                content: '在学法语',
+                quote: '我又改学法语了',
+              },
+            ],
           }),
         // 开始得更晚的事务把它设为过时：有效到与更新时间都是那一刻，晚于抽取的事务开头取的时刻
         async (tx) => {
@@ -1281,7 +1307,15 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
           )
           return {
             content: JSON.stringify({
-              facts: [{ subject: 'M1', op: 'update', replaces: 'F1', content: '在学法语' }],
+              facts: [
+                {
+                  subject: 'M1',
+                  op: 'update',
+                  replaces: 'F1',
+                  content: '在学法语',
+                  quote: '我又改学法语了',
+                },
+              ],
             }),
             usage: { promptTokens: 40, completionTokens: 10 },
           }
