@@ -262,9 +262,9 @@ const summaryItems = computed(() => [
     <form v-else-if="query.data.value" class="space-y-8" @submit.prevent="save">
       <SettingsBlock title="敏感内容识别">
         <template #note>
-          控制写入与抽取前的本地敏感内容检测；对话发给抽取模型前会自动脱敏为不可逆标签。
+          控制写入与外发至外部模型或向量服务前的敏感内容保护；原始记忆保留在本地，外发前自动脱敏。
           <Hint>
-            新增明文凭据默认拦截写入，仅含个人信息的内容照常保存并进入「待处理」，可在管理界面一键打码或忽略。
+            新增明文凭据默认拦截写入；个人信息在本人私密边界内静默留存，出现在共享或非私密范围内时进入「待处理」，可移入本人私密、设为机密、抹除敏感段或忽略。
           </Hint>
         </template>
 

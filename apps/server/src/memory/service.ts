@@ -64,6 +64,7 @@ import type {
   PlaintextCredentialMatch,
   PlaintextFinding,
   PlaintextIgnoreRequest,
+  ProtectMemoryRequest,
   Provenance,
   RecalledMemory,
   RecallEventList,
@@ -1912,6 +1913,184 @@ export class MemoryService {
     })
   }
 
+  // 保护含个人敏感信息的记忆（保留原文）：设为机密（密文存储），或迁入本人私密（外发前自动脱敏，不进待处理红点）
+  async protectSensitive(input: ProtectMemoryRequest): Promise<MemoryView> {
+    if (this.viaKey) throw new MemoryError(403, '通过访问密钥无法执行保护操作，请在管理界面操作')
+    return this.write(async (tx, personaIds, released) => {
+      const row = await this.readableById(tx, input.memoryId, personaIds, true)
+      if (row.version !== input.expectedVersion) {
+        throw new MemoryError(409, `版本已变化：当前是 ${row.version}，请先重新读取`)
+      }
+      this.assertModifiable(row, `无权修改${LAYER_NAMES[row.layer]}的记忆`)
+      if (row.form !== 'curated' || !row.domain || !row.path) {
+        throw new MemoryError(400, '只有已保存的记忆支持保护操作')
+      }
+
+      if (input.target === 'secret') {
+        if (row.sensitivity === 'secret') {
+          const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
+          return this.toView(tx, row, glossary, null)
+        }
+        checkSensitivity(row.layer, 'secret')
+        this.assertWritable(
+          {
+            layer: row.layer,
+            personaId: row.personaId,
+            appId: row.appId,
+            sensitivity: 'secret',
+          },
+          `无权把这条记忆设为${sensitivityWithValue('secret')}`,
+        )
+        return this.applyUpdate(
+          tx,
+          row,
+          { sensitivity: 'secret', expectedVersion: row.version },
+          {
+            released,
+            plaintextGate: false,
+            ...(row.provenance === 'untrusted' ? { provenance: 'owner' as const } : {}),
+            eventType: 'protect',
+            eventContext: { target: 'secret' },
+          },
+        )
+      }
+
+      if (row.sensitivity === 'secret') {
+        throw new MemoryError(400, '机密记忆已加密保护，无需转为私密')
+      }
+      if (row.layer === 'user') {
+        if (row.sensitivity === 'private' && row.provenance !== 'untrusted') {
+          const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
+          return this.toView(tx, row, glossary, null)
+        }
+        checkSensitivity('user', 'private')
+        this.assertWritable(
+          {
+            layer: 'user',
+            personaId: null,
+            appId: null,
+            sensitivity: 'private',
+          },
+          `无权修改${LAYER_NAMES.user}的记忆`,
+        )
+        return this.applyUpdate(
+          tx,
+          row,
+          { sensitivity: 'private', expectedVersion: row.version },
+          {
+            released,
+            plaintextGate: false,
+            ...(row.provenance === 'untrusted' ? { provenance: 'owner' as const } : {}),
+            eventType: 'protect',
+            eventContext: { target: 'user_private' },
+          },
+        )
+      }
+
+      const ownerAccountId = ownerFor(this.ctx.access, 'user')
+      if (!ownerAccountId) throw new MemoryError(403, '无权写入本人的记忆')
+      const ownership: Ownership = {
+        layer: 'user',
+        ownerAccountId,
+        personaId: null,
+        appId: null,
+      }
+      this.assertWritable(
+        { ...ownership, sensitivity: 'private' },
+        `无权把记忆移到${layerWithValue('user')}`,
+      )
+      await this.checkKeptRefs(tx, row, ownership)
+
+      const segments = row.path.split('/')
+      const basePath =
+        row.domain === 'core' || segments.length >= 16 ? row.path : `${row.domain}/${row.path}`
+      const freePath = await this.resolveFreeUserPath(tx, ownerAccountId, basePath)
+      const to = parse(formatUri('user', freePath))
+      await this.claimUri(tx, to, ownership, released)
+
+      const now = nowOf(tx)
+      const [updated] = await tx
+        .update(memories)
+        .set({
+          ...ownership,
+          domain: to.domain,
+          path: to.path,
+          sensitivity: 'private',
+          provenance: row.provenance === 'untrusted' ? 'owner' : row.provenance,
+          plaintextIgnoredHash: null,
+          version: sql`${memories.version} + 1`,
+          updatedAt: updatedAtFor(now),
+        })
+        .where(
+          and(
+            eq(memories.id, row.id),
+            eq(memories.version, row.version),
+            isNull(memories.deletedAt),
+          ),
+        )
+        .returning()
+      if (!updated) throw new MemoryError(409, '记忆刚被其他请求修改，请重新读取')
+      if (updated.content !== null) {
+        await this.syncCredentialRefs(tx, updated.id, updated.sensitivity, updated.content)
+      }
+      const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
+      await this.event(
+        tx,
+        row.id,
+        'protect',
+        snapshot(row, glossary),
+        snapshot(updated, glossary),
+        { target: 'user_private', fromUri: formatUri(row.domain, row.path) },
+      )
+      return this.toView(tx, updated, glossary, null)
+    })
+  }
+
+  private async resolveFreeUserPath(
+    tx: Tx,
+    ownerAccountId: string,
+    basePath: string,
+  ): Promise<string> {
+    const now = nowOf(tx)
+    const slash = basePath.lastIndexOf('/')
+    const head = slash >= 0 ? basePath.slice(0, slash + 1) : ''
+    const tail = slash >= 0 ? basePath.slice(slash + 1) : basePath
+    const lookupPrefix = `${head}${tail.slice(0, 50)}`
+    const existing = await tx
+      .select({
+        path: memories.path,
+        ownerAccountId: memories.ownerAccountId,
+        layer: memories.layer,
+        sensitivity: memories.sensitivity,
+        personaId: memories.personaId,
+        appId: memories.appId,
+        provenance: memories.provenance,
+        validTo: memories.validTo,
+        expiresAt: memories.expiresAt,
+      })
+      .from(memories)
+      .where(
+        and(
+          isNull(memories.deletedAt),
+          eq(memories.domain, 'user'),
+          eq(memories.ownerAccountId, ownerAccountId),
+          or(eq(memories.path, basePath), like(memories.path, `${escapeLike(lookupPrefix)}%`)),
+        ),
+      )
+    const blocked = new Set(
+      existing
+        .filter((m) => m.path && (isValidAt(m, now) || !canRelease(this.ctx.access, m)))
+        .map((m) => m.path!),
+    )
+    if (!blocked.has(basePath)) return basePath
+    for (let n = 2; ; n++) {
+      const suffix = `-${n}`
+      const candidate = `${head}${tail.slice(0, Math.max(1, 64 - suffix.length))}${suffix}`
+      const parsed = parseUri(formatUri('user', candidate))
+      if (parsed && !blocked.has(parsed.path)) return parsed.path
+    }
+  }
+
   // 转存之前对记忆的检查：版本、能不能改、是不是机密、能不能放占位符、正文里有没有这段值、
   // 坐标与触发场景这些明文里有没有、换完之后长度。转存的事务里查一次；设了去处的新建要先写进密码库，
   // 写之前另在一个短事务里先查一遍（checkConvertible），免得每次失败都在集合里留一个装着值的条目
@@ -2768,7 +2947,11 @@ export class MemoryService {
             query.sensitiveCategory === 'credential'
               ? eq(memories.sensitiveCredential, true)
               : undefined,
-            query.sensitiveCategory === 'pii' ? eq(memories.sensitivePii, true) : undefined,
+            query.sensitiveCategory === 'pii'
+              ? query.plaintext === 'true'
+                ? and(eq(memories.sensitivePii, true), sql`not ${PROTECTED_PERSONAL}`)
+                : eq(memories.sensitivePii, true)
+              : undefined,
             // 时间原样交给数据库换算：经过 JS 的 Date 会丢掉微秒
             query.updatedAfter
               ? sql`${memories.updatedAt} >= ${query.updatedAfter}::timestamptz`
@@ -4254,12 +4437,15 @@ export function plaintextMatch(text: SQLWrapper): SQL {
   )})`
 }
 // 列表与待处理统计直接查写入或回扫时落库的布尔标记，不再实时在 SQL 里跑大正则
+// 已经处于「本人 + 私密/机密 + 受信任来源」安全边界内的记忆，个人信息不进待处理告警（外发前仍会自动脱敏）
+const PROTECTED_PERSONAL = sql`(${memories.layer} = 'user' and ${memories.sensitivity} in ('private', 'secret') and ${memories.provenance} <> 'untrusted')`
+const NEEDS_SENSITIVE_ALERT = sql`(${memories.sensitiveCredential} or (${memories.sensitivePii} and not ${PROTECTED_PERSONAL}))`
 const HAS_SENSITIVE = sql`(${memories.sensitiveCredential} or ${memories.sensitivePii})`
 // 提示被忽略了：存着的哈希和现在的正文对得上。判断只看这个比较，applyUpdate 在正文变化时清掉哈希只是不留着它。
 // 没有哈希的行不算哈希（case 里不会执行），开销只落在忽略过的那几条上
 const IGNORED_NOW = sql`(case when ${memories.plaintextIgnoredHash} is null then false
   else ${memories.plaintextIgnoredHash} = encode(sha256(convert_to(${memories.content}, 'UTF8')), 'hex') end)`
-const PLAINTEXT = sql`(${HAS_SENSITIVE} and not ${IGNORED_NOW})`
+const PLAINTEXT = sql`(${NEEDS_SENSITIVE_ALERT} and not ${IGNORED_NOW})`
 const PLAINTEXT_IGNORED = sql`(${HAS_SENSITIVE} and ${IGNORED_NOW})`
 
 // 和上面 SQL 里的哈希相同的算法，忽略时写进去、读的时候比对

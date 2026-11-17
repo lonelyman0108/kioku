@@ -1,5 +1,6 @@
 import { and, asc, eq, gt, inArray, isNull, notInArray, sql } from 'drizzle-orm'
 
+import { loadSpacePrivacy, maskForOutbound } from '../credential/privacy'
 import { withSpace, type Db, type Tx } from '../db/client'
 import { memories, memoryEmbeddings, memoryGlossary, spaces } from '../db/schema'
 import { formatUri } from '../memory/uri'
@@ -119,6 +120,7 @@ async function syncRows(
   if (!ids.length) return 0
 
   const { stale, pending, readAt } = await withSpace(db, spaceId, async (tx) => {
+    const { settings: privacy } = await loadSpacePrivacy(tx, spaceId)
     // 按 id 排：一批里请求的顺序固定，出问题时好重现
     const rows = await tx
       .select({ row: memories, stamp, embeddable: sql<boolean>`coalesce(${EMBEDDABLE}, false)` })
@@ -146,13 +148,13 @@ async function syncRows(
         continue
       }
       const text = embeddingText({
-        uri: formatUri(row.domain, row.path),
-        disclosure: row.disclosure,
+        uri: maskForOutbound(formatUri(row.domain, row.path), privacy),
+        disclosure: row.disclosure ? maskForOutbound(row.disclosure, privacy) : null,
         glossary: glossaryRows
           .filter((g) => g.memoryId === row.id)
-          .map((g) => g.keyword)
+          .map((g) => maskForOutbound(g.keyword, privacy))
           .sort(),
-        content: row.content,
+        content: maskForOutbound(row.content, privacy),
       })
       const hash = textHash(embedder.model, text)
       if (hashes.get(row.id) !== hash) pending.push({ id: row.id, text, hash })

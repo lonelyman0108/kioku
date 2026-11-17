@@ -5,10 +5,14 @@ import {
   MEMORY_TITLE_MAX,
   MemoryTitle,
   PLAINTEXT_CREDENTIAL,
+  isProtectedPersonalMemory,
+  needsSensitiveInboxAlert,
   placeholderAllowed,
   sensitivityAllowed,
   type ConsoleMemoryView,
   type Layer,
+  type ProtectTarget,
+  type RedactMode,
   type Sensitivity,
 } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
@@ -69,6 +73,7 @@ import Hint from './Hint.vue'
 import MemoryContent from './MemoryContent.vue'
 import MemoryHistory from './MemoryHistory.vue'
 import MoveMemoryModal from './MoveMemoryModal.vue'
+import RedactConfirmModal from './RedactConfirmModal.vue'
 import PlaintextSaveModal from './PlaintextSaveModal.vue'
 import NoteLine from './strata/NoteLine.vue'
 import CoordinateLine from './strata/CoordinateLine.vue'
@@ -610,10 +615,44 @@ const plaintext = computed(() => {
   const m = base.value
   return m && looksPlaintext(m) ? plaintextValues(m) : null
 })
+const hasPiiFinding = (m: ConsoleMemoryView | null | undefined) =>
+  !!m?.sensitiveFindings?.some((f) => f.category === 'pii')
+// 未进入本人私密边界的个人信息：需要提醒成员移入本人私密或设为机密
+const unprotectedPii = computed(() => {
+  const m = base.value
+  const hasPii = hasPiiFinding(m)
+  return (
+    !!m &&
+    !plaintext.value &&
+    !m.plaintextIgnored &&
+    hasPii &&
+    needsSensitiveInboxAlert({
+      layer: m.layer,
+      sensitivity: m.sensitivity,
+      provenance: m.provenance,
+      sensitiveCredential: false,
+      sensitivePii: hasPii,
+      plaintextIgnored: m.plaintextIgnored,
+    })
+  )
+})
+// 已处于本人私密（受信任来源）且含个人信息：静默提示已受外发脱敏与权限边界保护
+const protectedPii = computed(() => {
+  const m = base.value
+  return (
+    !!m &&
+    !plaintext.value &&
+    !m.plaintextIgnored &&
+    m.sensitivity !== 'secret' &&
+    hasPiiFinding(m) &&
+    isProtectedPersonalMemory(m.layer, m.sensitivity, m.provenance)
+  )
+})
 
-// 疑似明文的提示：转存为凭据、忽略、撤销忽略。结果写进缓存并载入，不用再读一次；
-// 版本变了的（转存）由 adopt 通知页面，版本没变的（忽略）条数和列表在 usePlaintextActions 里刷新
+// 疑似明文的提示：转存为凭据、保护隔离、抹除敏感段、忽略与撤销忽略。结果写进缓存并载入，不用再读一次；
+// 版本变了的（转存 / 保护 / 抹除）由 adopt 或 onMoved 通知页面，版本没变的（忽略）条数和列表在 usePlaintextActions 里刷新
 const convertOpen = ref(false)
+const redactOpen = ref(false)
 // 占位符放不进这条记忆时转存一定失败，先调整
 const convertible = computed(
   () => !!base.value && placeholderAllowed(base.value.layer, base.value.sensitivity),
@@ -624,6 +663,24 @@ async function setPlaintextIgnored(ignored: boolean) {
   if (!m) return
   const view = await (ignored ? plaintextActions.ignore(m) : plaintextActions.unignore(m))
   if (view && view.id === base.value?.id) adopt(view)
+}
+async function protectCurrent(target: ProtectTarget) {
+  const m = base.value
+  if (!m) return
+  const view = await plaintextActions.protect(m, target)
+  if (!view || view.id !== base.value?.id) return
+  if (view.uri !== m.uri) await onMoved(view, m.uri)
+  else adopt(view)
+}
+async function redactCurrent(mode: RedactMode) {
+  const m = base.value
+  if (!m) return
+  try {
+    const view = await plaintextActions.redact(m, mode)
+    if (view && view.id === base.value?.id) adopt(view)
+  } finally {
+    redactOpen.value = false
+  }
 }
 function onConverted(memory: ConsoleMemoryView) {
   if (memory.id === base.value?.id) adopt(memory)
@@ -910,6 +967,55 @@ const properties = computed<Property[][]>(() => {
               </UButton>
             </template>
           </NoteLine>
+          <NoteLine v-else-if="unprotectedPii" tone="warning">
+            正文疑似包含个人信息，当前归属或可见范围较宽
+            <Hint>
+              建议保留原值并移入本人私密或设为机密，外发至模型与嵌入前会自动脱敏；误粘贴的冗余文本可抹除敏感段。
+            </Hint>
+            <template v-if="!readOnly" #actions>
+              <UButton
+                size="sm"
+                color="primary"
+                variant="outline"
+                :loading="plaintextActions.busy.value === base.id"
+                @click="protectCurrent('user_private')"
+              >
+                {{ base.layer === 'user' ? '设为私密' : '移入本人私密' }}
+              </UButton>
+              <UButton
+                v-if="permissions.sensitivities.value.includes('secret')"
+                size="sm"
+                color="neutral"
+                variant="outline"
+                :loading="plaintextActions.busy.value === base.id"
+                @click="protectCurrent('secret')"
+              >
+                设为机密
+              </UButton>
+              <UButton
+                size="sm"
+                color="neutral"
+                variant="ghost"
+                :loading="plaintextActions.busy.value === base.id"
+                @click="redactOpen = true"
+              >
+                抹除敏感段
+              </UButton>
+              <UButton
+                size="sm"
+                color="neutral"
+                variant="ghost"
+                :loading="plaintextActions.busy.value === base.id"
+                @click="setPlaintextIgnored(true)"
+              >
+                忽略
+              </UButton>
+            </template>
+          </NoteLine>
+          <NoteLine v-else-if="protectedPii">
+            包含个人信息 · 仅本人与私有应用可见，外发模型前自动脱敏
+            <Hint>当前已受本人私密边界保护，原文完整保留，无需打码或抹除。</Hint>
+          </NoteLine>
           <NoteLine v-else-if="base.plaintextIgnored">
             疑似明文的提示已忽略<Hint>正文修改后会重新提示。</Hint>
             <template v-if="!readOnly" #actions>
@@ -1172,6 +1278,14 @@ const properties = computed<Property[][]>(() => {
         :can-convert="canConvert"
         :can-save-anyway="canSaveAnyway"
         @proceed="onGateProceed"
+      />
+
+      <RedactConfirmModal
+        :open="redactOpen"
+        :title="base?.title"
+        :busy="plaintextActions.busy.value === base?.id"
+        @close="redactOpen = false"
+        @confirm="redactCurrent"
       />
 
       <UModal

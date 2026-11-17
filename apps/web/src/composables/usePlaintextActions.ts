@@ -1,5 +1,5 @@
 import { useToast } from '@nuxt/ui/composables'
-import type { ConsoleMemoryView, RedactMode } from '@kioku/contracts'
+import type { ConsoleMemoryView, ProtectTarget, RedactMode } from '@kioku/contracts'
 import { useQueryClient, type QueryClient } from '@tanstack/vue-query'
 import { ref, type Ref } from 'vue'
 
@@ -21,7 +21,7 @@ export function refreshAfterPlaintext(
   void queryClient.invalidateQueries({ queryKey: ['memory-history', spaceId, memory.id] })
 }
 
-// 忽略、撤销忽略与一键打码：带着看到提示时的版本，期间正文被改过就不替新的正文做决定，由服务端返回冲突
+// 忽略、撤销忽略、保护（移入本人私密 / 设为机密）与抹除敏感段：带着看到提示时的版本，由服务端核对并发
 export function usePlaintextActions(spaceId: Ref<string>) {
   const toast = useToast()
   const queryClient = useQueryClient()
@@ -34,6 +34,7 @@ export function usePlaintextActions(spaceId: Ref<string>) {
     ) => Promise<ConsoleMemoryView>,
     done: string,
     target: { id: string; version: number },
+    refreshTree = false,
   ): Promise<ConsoleMemoryView | null> {
     if (busy.value) return null
     const sid = spaceId.value
@@ -42,12 +43,16 @@ export function usePlaintextActions(spaceId: Ref<string>) {
       const memory = await call(sid, { memoryId: target.id, expectedVersion: target.version })
       toast.add({ title: done, color: 'success' })
       refreshAfterPlaintext(queryClient, sid, memory)
+      if (refreshTree) {
+        void queryClient.invalidateQueries({ queryKey: ['memory-children', sid] })
+      }
       return memory
     } catch (err) {
       toast.add({ title: err instanceof ApiError ? err.message : '操作失败', color: 'error' })
-      // 列表里的版本已经旧了：重新读取，看过新的正文再决定
+      // 列表或详情里的版本已经旧了：重新读取，看过新的正文再决定
       if (err instanceof ApiError && (err.status === 404 || err.status === 409)) {
         refreshAfterPlaintext(queryClient, sid)
+        void queryClient.invalidateQueries({ queryKey: ['memory', sid] })
       }
       return null
     } finally {
@@ -61,7 +66,21 @@ export function usePlaintextActions(spaceId: Ref<string>) {
       run(api.ignorePlaintext, '已忽略，正文修改后会重新提示', target),
     unignore: (target: { id: string; version: number }) =>
       run(api.unignorePlaintext, '已撤销忽略', target),
+    protect: (
+      target: { id: string; version: number; layer?: string },
+      protectTarget: ProtectTarget,
+    ) =>
+      run(
+        (sid, body) => api.protectMemory(sid, { ...body, target: protectTarget }),
+        protectTarget === 'secret'
+          ? '已设为机密，正文已加密存储'
+          : target.layer && target.layer !== 'user'
+            ? '已移入本人私密，原文已保留'
+            : '已设为本人私密，原文已保留',
+        target,
+        protectTarget === 'user_private' && target.layer !== 'user',
+      ),
     redact: (target: { id: string; version: number }, mode: RedactMode = 'stars') =>
-      run((sid, body) => api.redactMemory(sid, { ...body, mode }), '已完成脱敏打码', target),
+      run((sid, body) => api.redactMemory(sid, { ...body, mode }), '已抹除敏感段', target),
   }
 }

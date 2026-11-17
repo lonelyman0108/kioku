@@ -72,6 +72,8 @@ describe('Key 的权限', () => {
 describe('记忆事件', () => {
   it('转存、忽略明文提示与访问有自己的说法，不把类型名显示出来', () => {
     expect(eventLabel('convert_credential').label).toBe('转存为凭据')
+    expect(eventLabel('protect').label).toBe('保护敏感内容')
+    expect(eventLabel('redact').label).toBe('抹除敏感段')
     expect(eventLabel('ignore_plaintext').label).toBe('忽略明文提示')
     expect(eventLabel('unignore_plaintext').label).toBe('撤销忽略')
     expect(eventLabel('access').label).toBe('查看正文')

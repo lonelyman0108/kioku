@@ -1,13 +1,16 @@
 import {
+  DEFAULT_SPACE_PRIVACY,
   TUNING_DEFAULTS,
   type DebugCandidate,
   type Layer,
   type RecallCandidate,
   type RecallVia,
+  type SpacePrivacySettings,
 } from '@kioku/contracts'
 import { and, desc, eq, inArray, ne, sql } from 'drizzle-orm'
 
 import type { Access } from '../access/access'
+import { maskForOutbound } from '../credential/privacy'
 import { nowOf, type Tx } from '../db/client'
 import { memories, memoryEmbeddings, memoryGlossary } from '../db/schema'
 import type { Embedder } from '../embedding/provider'
@@ -88,10 +91,17 @@ const QUERY_EMBED_CHANNEL_TIMEOUT_MS = 10_000
 export async function embedQuery(
   embedder: Embedder | null,
   query: string,
+  redactor:
+    SpacePrivacySettings | ((text: string) => Promise<string> | string) = DEFAULT_SPACE_PRIVACY,
 ): Promise<QueryVector | null> {
   if (!embedder) return null
   try {
-    const [vector] = await embedder.embed([normalizeQuery(query)], {
+    const normalized = normalizeQuery(query)
+    const masked =
+      typeof redactor === 'function'
+        ? await redactor(normalized)
+        : maskForOutbound(normalized, redactor)
+    const [vector] = await embedder.embed([masked], {
       signal: AbortSignal.timeout(QUERY_EMBED_TIMEOUT_MS),
       timeoutMs: QUERY_EMBED_CHANNEL_TIMEOUT_MS,
     })

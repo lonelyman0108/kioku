@@ -110,6 +110,7 @@ import {
   type MemoryListQuery,
   type MoveMemoryRequest,
   type PlaintextIgnoreRequest,
+  type ProtectMemoryRequest,
   type ReactivateRequest,
   type RedactMemoryRequest,
   type RestoreRequest,
@@ -367,6 +368,11 @@ export const api = {
     }),
   redactMemory: (spaceId: string, body: RedactMemoryRequest) =>
     request('POST', `/spaces/${spaceId}/memories/redact`, {
+      body,
+      schema: ConsoleMemoryView,
+    }),
+  protectMemory: (spaceId: string, body: ProtectMemoryRequest) =>
+    request('POST', `/spaces/${spaceId}/memories/protect`, {
       body,
       schema: ConsoleMemoryView,
     }),

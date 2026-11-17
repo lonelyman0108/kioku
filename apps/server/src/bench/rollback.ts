@@ -244,6 +244,7 @@ export async function prepareQueryVectors(
   deps: Deps,
   queries: readonly BenchQuery[],
   budgetMs: number,
+  spaceId?: string,
 ): Promise<QueryVectors> {
   // 顺带预热：嵌入设置的缓存为空时要读库，事务开着时这要第二条连接
   const embedder = await deps.embedder.get().catch((err: unknown) => {
@@ -252,14 +253,41 @@ export async function prepareQueryVectors(
   })
   const vectors = new Map<string, number[]>()
   if (!embedder) return { model: null, vectors }
+  const captured: { text: string | null } = { text: null }
+  const capturingDeps: Deps = {
+    ...deps,
+    embedder: {
+      ...deps.embedder,
+      async get() {
+        const inner = await deps.embedder.get()
+        if (!inner) return null
+        return {
+          ...inner,
+          embed: async (texts, options) => {
+            captured.text = texts[0] ?? null
+            return inner.embed(texts, options)
+          },
+        }
+      },
+    },
+  }
   const deadline = Date.now() + budgetMs
   for (const { text, timeoutMs } of queries) {
     const query = normalizeQuery(text)
     if (!query || vectors.has(query)) continue
     const left = deadline - Date.now()
     if (left <= 0) break
-    const found = await semanticFor(deps, query, Math.min(timeoutMs ?? left, left))
-    if (found) vectors.set(query, found.vector)
+    captured.text = null
+    const found = await semanticFor(
+      capturingDeps,
+      query,
+      Math.min(timeoutMs ?? left, left),
+      spaceId,
+    )
+    if (found) {
+      vectors.set(query, found.vector)
+      if (captured.text) vectors.set(captured.text, found.vector)
+    }
   }
   return { model: embedder.model, vectors }
 }

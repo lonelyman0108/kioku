@@ -287,6 +287,8 @@ export const ACTIVITY_TYPES = [
   'reactivate',
   'confirm',
   'convert_credential',
+  'protect',
+  'redact',
   'ignore_plaintext',
   'unignore_plaintext',
 ] as const

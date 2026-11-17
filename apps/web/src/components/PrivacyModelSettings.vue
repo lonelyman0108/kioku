@@ -179,7 +179,7 @@ async function clear() {
       可选的实体识别模型（本地 HTTP 服务或 OpenAI
       兼容小模型），仅在开启此项的空间中辅助识别人名、住址与私有账号。
       <Hint>
-        仅作增量补充：内置的明文凭据与格式明确的个人信息规则始终本地运行；模型识别结果同样支持一键打码与白名单放行。
+        仅作增量补充：内置的明文凭据与格式明确的个人信息规则始终本地运行；模型识别结果同样支持保护隔离、抹除敏感段与白名单放行。
       </Hint>
     </template>
     <ReadFailureNote v-if="settings.isError.value" :query="settings" />

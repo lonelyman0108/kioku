@@ -1,10 +1,11 @@
-import type { MemberRole, RecallCandidate } from '@kioku/contracts'
+import { DEFAULT_SPACE_PRIVACY, type MemberRole, type RecallCandidate } from '@kioku/contracts'
 import { and, eq, inArray } from 'drizzle-orm'
 
 import { consoleAccess, resolveAccess, type Access, type ConsoleRole } from '../access/access'
 import { conversationRefOf, latestSummaries } from '../access/conversations'
 import { defaultSession, type KeySession } from '../access/session'
 import { memberRole } from '../auth/middleware'
+import { loadOutboundRedactor, maskForOutbound } from '../credential/privacy'
 import { loggableError, withSpace, type Tx } from '../db/client'
 import { apps, memories } from '../db/schema'
 import type { Embedder } from '../embedding/provider'
@@ -84,13 +85,19 @@ export async function semanticFor(
   deps: Deps,
   query: string,
   timeoutMs?: number,
+  spaceId?: string,
 ): Promise<QueryVector | null> {
   const compute = async () => {
     const embedder: Embedder | null = await deps.embedder.get().catch((err: unknown) => {
       console.warn('读取嵌入设置失败，本次召回不使用向量', loggableError(err))
       return null
     })
-    return embedQuery(embedder, query)
+    const redactor = spaceId
+      ? await loadOutboundRedactor(deps.db, deps.masterKey ?? null, spaceId).catch(
+          () => (text: string) => maskForOutbound(text, DEFAULT_SPACE_PRIVACY),
+        )
+      : DEFAULT_SPACE_PRIVACY
+    return embedQuery(embedder, query, redactor)
   }
   if (timeoutMs === undefined) return compute()
   // 先返回的一方胜出后清掉计时器，不留着它等到点
@@ -188,7 +195,7 @@ export async function recallForConsole(
   const query = normalizeQuery(rawQuery)
   if (!query) return []
   const [semantic, settings] = await Promise.all([
-    semanticFor(deps, query, CONSOLE_SEMANTIC_TIMEOUT_MS),
+    semanticFor(deps, query, CONSOLE_SEMANTIC_TIMEOUT_MS, spaceId),
     loadInstanceSettings(deps.db),
   ])
   const weights = weightsOf(settings.values)
@@ -224,7 +231,9 @@ export function recallScopeForKey(
       const query = normalizeQuery(rawQuery)
       if (!query) return []
       // 嵌入接口慢时不拖住整个召回：到时间就放弃向量这一路
-      const semantic = useSemantic ? await semanticFor(deps, query, semanticTimeoutMs) : null
+      const semantic = useSemantic
+        ? await semanticFor(deps, query, semanticTimeoutMs, key.spaceId)
+        : null
       const scored = await run(async (tx, personaIds) => {
         const { values } = await settingsIn(tx)
         return scoreRecall(tx, access, semantic, query, {
