@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest'
 
 import {
   addedSensitiveContent,
+  isProtectedPersonalMemory,
   maskSensitiveContent,
+  needsSensitiveInboxAlert,
   normalizeRuleKind,
   resolveSpacePrivacy,
   scanSensitiveContent,
@@ -206,5 +208,72 @@ describe('自定义规则、白名单与打码', () => {
     const after = '电话 13800138000\n新卡 6222020200111222333'
     const added = addedSensitiveContent(before, after)
     expect(added.map((h) => h.kind)).toEqual(['bank_card'])
+  })
+
+  it('needsSensitiveInboxAlert 仅对本人私密边界外的 PII 或明文凭据触发待处理告警', () => {
+    expect(isProtectedPersonalMemory('user', 'private', 'owner')).toBe(true)
+    expect(isProtectedPersonalMemory('user', 'private', 'untrusted')).toBe(false)
+    expect(isProtectedPersonalMemory('user', 'internal', 'owner')).toBe(false)
+    expect(isProtectedPersonalMemory('core', 'private', 'owner')).toBe(false)
+
+    // 本人私密受信任的 PII 不进待处理告警
+    expect(
+      needsSensitiveInboxAlert({
+        layer: 'user',
+        sensitivity: 'private',
+        provenance: 'owner',
+        sensitiveCredential: false,
+        sensitivePii: true,
+        plaintextIgnored: false,
+      }),
+    ).toBe(false)
+
+    // 共享、非私密或未确认来源的 PII 需要告警
+    expect(
+      needsSensitiveInboxAlert({
+        layer: 'core',
+        sensitivity: 'internal',
+        provenance: 'owner',
+        sensitivePii: true,
+      }),
+    ).toBe(true)
+    expect(
+      needsSensitiveInboxAlert({
+        layer: 'user',
+        sensitivity: 'internal',
+        provenance: 'owner',
+        sensitivePii: true,
+      }),
+    ).toBe(true)
+    expect(
+      needsSensitiveInboxAlert({
+        layer: 'user',
+        sensitivity: 'private',
+        provenance: 'untrusted',
+        sensitivePii: true,
+      }),
+    ).toBe(true)
+
+    // 明文凭据即使在本人私密中也必须进待处理（非机密且未忽略）
+    expect(
+      needsSensitiveInboxAlert({
+        layer: 'user',
+        sensitivity: 'private',
+        provenance: 'owner',
+        sensitiveCredential: true,
+        sensitivePii: false,
+      }),
+    ).toBe(true)
+
+    // 已设为机密或已忽略均不提示
+    expect(
+      needsSensitiveInboxAlert({
+        layer: 'user',
+        sensitivity: 'secret',
+        provenance: 'owner',
+        sensitiveCredential: true,
+        sensitivePii: true,
+      }),
+    ).toBe(false)
   })
 })

@@ -173,6 +173,48 @@ export const RedactMemoryRequest = z.object({
 })
 export type RedactMemoryRequest = z.infer<typeof RedactMemoryRequest>
 
+export const PROTECT_TARGETS = ['user_private', 'secret'] as const
+export const ProtectTarget = z.enum(PROTECT_TARGETS)
+export type ProtectTarget = z.infer<typeof ProtectTarget>
+
+export const ProtectMemoryRequest = z.object({
+  memoryId: z.uuid(),
+  expectedVersion: z.number().int(),
+  target: ProtectTarget,
+})
+export type ProtectMemoryRequest = z.infer<typeof ProtectMemoryRequest>
+
+// 本人私密且来源受信任的记忆：个人信息保留在个人边界内，不进待处理红点，外发模型前由出站脱敏保护
+export function isProtectedPersonalMemory(
+  layer: string,
+  sensitivity: string,
+  provenance: string,
+): boolean {
+  return (
+    layer === 'user' &&
+    (sensitivity === 'private' || sensitivity === 'secret') &&
+    provenance !== 'untrusted'
+  )
+}
+
+// 待处理 › 疑似敏感内容的判定口径（与服务端 SQL 条件一致）：
+// 非机密明文凭据始终提示；个人信息仅在未进入「本人私密且受信任」安全边界时提示
+export function needsSensitiveInboxAlert(input: {
+  layer: string
+  sensitivity: string
+  provenance?: string | null
+  sensitiveCredential?: boolean | null
+  sensitivePii?: boolean | null
+  plaintextIgnored?: boolean | null
+}): boolean {
+  if (input.sensitivity === 'secret' || input.plaintextIgnored) return false
+  if (input.sensitiveCredential) return true
+  if (input.sensitivePii) {
+    return !isProtectedPersonalMemory(input.layer, input.sensitivity, input.provenance ?? 'owner')
+  }
+  return false
+}
+
 // 规则类别标准化为大写字母、数字与下划线
 export function normalizeRuleKind(kind: string): string {
   const cleaned = kind
