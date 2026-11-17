@@ -23,11 +23,12 @@ import Hint from './Hint.vue'
 import MemoryFlags from './strata/MemoryFlags.vue'
 import NoteLine from './strata/NoteLine.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
+import RedactConfirmModal from './RedactConfirmModal.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
 import MemoryName from './strata/MemoryName.vue'
 
-// 疑似敏感内容：明文凭据与个人信息。凭据支持转存为凭据或忽略，个人信息支持一键打码或忽略
+// 疑似敏感内容：明文凭据建议转存为凭据；个人信息保留原值，建议移入本人私密或设为机密，抹除敏感段作为确认后的清理动作
 const props = defineProps<{ spaceId: string }>()
 const spaceId = toRef(props, 'spaceId')
 const permissions = useMemoryPermissions(spaceId)
@@ -37,7 +38,6 @@ type Filter = 'true' | 'ignored'
 type CategoryFilter = 'all' | SensitiveCategory
 const filter = ref<Filter>('true')
 const category = ref<CategoryFilter>('all')
-const redactMode = ref<RedactMode>('stars')
 
 const filters = [
   { label: '待处理', value: 'true' },
@@ -47,10 +47,6 @@ const categories = [
   { label: '全部类别', value: 'all' },
   { label: '明文凭据', value: 'credential' },
   { label: '个人信息', value: 'pii' },
-]
-const redactModes = [
-  { label: '替换为 ***', value: 'stars' },
-  { label: '替换为类别标签', value: 'tag' },
 ]
 watch(spaceId, () => {
   filter.value = 'true'
@@ -95,6 +91,13 @@ function openConvert(item: MemoryListItem) {
   converting.value = item.uri
   convertOpen.value = true
 }
+const redactTarget = ref<MemoryListItem | null>(null)
+async function confirmRedact(mode: RedactMode) {
+  const target = redactTarget.value
+  if (!target) return
+  const updated = await actions.redact(target, mode)
+  if (updated) redactTarget.value = null
+}
 // 占位符放不进这条记忆时，转存一定失败：这一行的操作换成去调整它
 const convertible = (item: MemoryListItem) => placeholderAllowed(item.layer, item.sensitivity)
 </script>
@@ -104,7 +107,7 @@ const convertible = (item: MemoryListItem) => placeholderAllowed(item.layer, ite
     <SectionHeading title="疑似敏感内容">
       <template #hint>
         <Hint>
-          正文疑似包含明文凭据或个人信息。明文凭据建议转存为凭据并以占位符引用；个人信息可一键打码脱敏。检测规则可能误判，确认无需处理时可忽略；正文修改后会重新提示。
+          共享归属或非私密范围内疑似包含明文凭据或个人信息。明文凭据建议转存为凭据并以占位符引用；个人信息建议保留原值并移入本人私密或设为机密，外发至模型与嵌入前会自动脱敏。误粘贴的冗余文本可抹除敏感段；规则误判时可忽略。
         </Hint>
       </template>
     </SectionHeading>
@@ -118,16 +121,6 @@ const convertible = (item: MemoryListItem) => placeholderAllowed(item.layer, ite
         size="sm"
         class="w-auto"
       />
-      <div v-if="filter === 'true'" class="plain-mode">
-        <span class="plain-mode-label">打码方式</span>
-        <USelect
-          v-model="redactMode"
-          :items="redactModes"
-          value-key="value"
-          size="sm"
-          class="w-36"
-        />
-      </div>
     </div>
     <ReadFailureNote
       v-if="list.isError.value && !list.isFetchNextPageError.value"
@@ -189,14 +182,34 @@ const convertible = (item: MemoryListItem) => placeholderAllowed(item.layer, ite
                   查看记忆
                 </UButton>
               </template>
+              <template v-if="item.sensitivePii">
+                <UButton
+                  color="primary"
+                  variant="outline"
+                  :loading="actions.busy.value === item.id"
+                  :disabled="actions.busy.value !== null"
+                  @click="actions.protect(item, 'user_private')"
+                >
+                  {{ item.layer === 'user' ? '设为私密' : '移入本人私密' }}
+                </UButton>
+              </template>
               <UButton
                 color="neutral"
                 variant="outline"
                 :loading="actions.busy.value === item.id"
                 :disabled="actions.busy.value !== null"
-                @click="actions.redact(item, redactMode)"
+                @click="actions.protect(item, 'secret')"
               >
-                一键打码
+                设为机密
+              </UButton>
+              <UButton
+                color="neutral"
+                variant="ghost"
+                :loading="actions.busy.value === item.id"
+                :disabled="actions.busy.value !== null"
+                @click="redactTarget = item"
+              >
+                抹除敏感段
               </UButton>
               <UButton
                 color="neutral"
@@ -237,6 +250,13 @@ const convertible = (item: MemoryListItem) => placeholderAllowed(item.layer, ite
     </template>
 
     <ConvertCredentialModal v-model:open="convertOpen" :space-id="spaceId" :uri="converting" />
+    <RedactConfirmModal
+      :open="redactTarget !== null"
+      :title="redactTarget?.title"
+      :busy="actions.busy.value !== null"
+      @close="redactTarget = null"
+      @confirm="confirmRedact"
+    />
   </div>
 </template>
 
@@ -249,16 +269,6 @@ const convertible = (item: MemoryListItem) => placeholderAllowed(item.layer, ite
   min-height: 50px;
   padding: 9px 0;
   border-bottom: 1px solid var(--ui-border);
-}
-.plain-mode {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  margin-left: auto;
-}
-.plain-mode-label {
-  font-size: 13px;
-  color: var(--ui-text-muted);
 }
 .finding-tag {
   display: inline-flex;
@@ -313,6 +323,7 @@ const convertible = (item: MemoryListItem) => placeholderAllowed(item.layer, ite
 }
 .plain-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 6px;
 }

@@ -253,8 +253,12 @@ describe('疑似明文', () => {
     expect(handler(buttonOf(memoryEditor, '忽略'), 'click')).toBe('setPlaintextIgnored(true)')
     expect(handler(buttonOf(memoryEditor, '撤销忽略'), 'click')).toBe('setPlaintextIgnored(false)')
     expect(memoryEditor).toContain('v-else-if="base.plaintextIgnored"')
-    expect(memoryEditor.match(/<template v-if="!readOnly" #actions>/g)).toHaveLength(2)
+    expect(memoryEditor.match(/<template v-if="!readOnly" #actions>/g)).toHaveLength(3)
+    expect(memoryEditor).toContain('v-else-if="unprotectedPii"')
+    expect(memoryEditor).toContain('v-else-if="protectedPii"')
+    expect(memoryEditor).toContain('<RedactConfirmModal')
     expect(inboxPlaintext).toContain('<ConvertCredentialModal')
+    expect(inboxPlaintext).toContain('<RedactConfirmModal')
   })
 })
 
