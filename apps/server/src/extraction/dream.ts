@@ -13,6 +13,7 @@ import {
 import { and, asc, desc, eq, inArray, isNull, ne, notInArray, or, sql, type SQL } from 'drizzle-orm'
 
 import { maskPlaintextCredentials, mentionsPlaceholder } from '../credential/placeholders'
+import { loadOutboundRedactor } from '../credential/privacy'
 import type { MasterKey } from '../crypto/keyring'
 import { errorText, loggableError, withSpace, type Db, type Tx } from '../db/client'
 import {
@@ -278,6 +279,7 @@ async function dreamOnce(
   const queue = await pendingScopes(db, spaceId)
   if (!queue.length) return skip('idle')
   const activeModel = (await loadEmbeddingModels(db)).active?.model ?? null
+  const redactForLlm = await loadOutboundRedactor(db, masterKey, spaceId)
   // 这次整理一共请求了几次模型
   let requested = 0
 
@@ -303,7 +305,12 @@ async function dreamOnce(
         break
       }
       pending.shift()
-      const result = await dreamScope(db, model, options, scope, { activeModel, now, ...tuning })
+      const result = await dreamScope(db, model, options, scope, {
+        activeModel,
+        now,
+        redactForLlm,
+        ...tuning,
+      })
       progress.scope = null
       if (!result) continue
       calls++
@@ -587,6 +594,7 @@ async function dreamScope(
     now: Date
     maxSuggestions: number
     rules: readonly string[]
+    redactForLlm: (text: string) => Promise<string>
   },
 ): Promise<ScopeResult | null> {
   const { spaceId } = options
@@ -618,25 +626,27 @@ async function dreamScope(
   const subjectName = new Map(names.map((n) => [n.id, n.name]))
   const picked = [...batch.changed, ...batch.neighbors]
   const byHandle = new Map(picked.map((p, i) => [`M${i + 1}`, p]))
-  const items: DreamPromptItem[] = [...byHandle].map(([handle, p]) => {
-    const recallCount = recallCounts.get(p.row.id) ?? 0
-    return {
-      handle,
-      fresh: p.fresh,
-      kind: p.row.form === 'curated' ? 'node' : isFact(p.row) ? 'fact' : 'summary',
-      uri: p.row.domain && p.row.path ? formatUri(p.row.domain, p.row.path) : null,
-      subject: p.row.subjectId
-        ? clipChars(oneLine(subjectName.get(p.row.subjectId) ?? ''), 40, '…') || null
-        : null,
-      trusted: p.row.provenance !== 'untrusted',
-      visibility: prompt.talk ? null : p.row.sensitivity,
-      ...(recallCount > 0 ? { recallCount } : {}),
-      ...(p.row.form === 'curated' ? { priority: p.row.priority } : {}),
-      updated: p.row.updatedAt.toISOString().slice(0, 10),
-      truncated: p.truncated,
-      content: p.content,
-    }
-  })
+  const items: DreamPromptItem[] = await Promise.all(
+    [...byHandle].map(async ([handle, p]) => {
+      const recallCount = recallCounts.get(p.row.id) ?? 0
+      return {
+        handle,
+        fresh: p.fresh,
+        kind: p.row.form === 'curated' ? 'node' : isFact(p.row) ? 'fact' : 'summary',
+        uri: p.row.domain && p.row.path ? formatUri(p.row.domain, p.row.path) : null,
+        subject: p.row.subjectId
+          ? clipChars(oneLine(subjectName.get(p.row.subjectId) ?? ''), 40, '…') || null
+          : null,
+        trusted: p.row.provenance !== 'untrusted',
+        visibility: prompt.talk ? null : p.row.sensitivity,
+        ...(recallCount > 0 ? { recallCount } : {}),
+        ...(p.row.form === 'curated' ? { priority: p.row.priority } : {}),
+        updated: p.row.updatedAt.toISOString().slice(0, 10),
+        truncated: p.truncated,
+        content: await context.redactForLlm(p.content),
+      }
+    }),
+  )
   const counts = { changed: batch.changed.length, considered: picked.length }
   const record = (tx: Tx, fields: RunFields) =>
     recordRun(tx, options, { scope: pending.key, ownerAccountId: owner, ...counts, ...fields })

@@ -69,7 +69,7 @@ export async function recallDebug(
   const limit = trial.limit ?? values['recall.limit']
   const weights = weightsOf(values)
   // 向量只算一次，两边共用；和每轮输入时一样有时限
-  const semantic = await semanticFor(deps, query, PROMPT_SEMANTIC_TIMEOUT_MS)
+  const semantic = await semanticFor(deps, query, PROMPT_SEMANTIC_TIMEOUT_MS, key.spaceId)
   // 管理界面看得到全部人格，不按继承覆盖，和管理界面的搜索一样
   const visible = await runInSpace(deps.db, key.spaceId, 'all', (tx, personaIds) =>
     scoreRecall(tx, member, semantic, query, {

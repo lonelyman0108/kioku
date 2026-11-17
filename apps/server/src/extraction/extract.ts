@@ -7,12 +7,9 @@ import { groupPersona, type KeySession } from '../access/session'
 import { principalForKeyId } from '../auth/middleware'
 import { mentionsPlaceholder } from '../credential/placeholders'
 import {
-  detectWithPrivacyModel,
   evaluateSensitiveContent,
-  loadPrivacyModelConfig,
+  loadOutboundRedactor,
   loadSpacePrivacy,
-  type ModelEntitySpan,
-  type PrivacyModelConfig,
 } from '../credential/privacy'
 import type { MasterKey } from '../crypto/keyring'
 import { errorText, withSpace, type Db, type Tx } from '../db/client'
@@ -282,37 +279,7 @@ export async function extractBatch(
       : []),
   ]
   const { settings: spacePrivacy } = await loadSpacePrivacy(db, target.spaceId)
-  let privacyModel: PrivacyModelConfig | null = null
-  if (spacePrivacy.pii && spacePrivacy.usePrivacyModel) {
-    try {
-      privacyModel = await loadPrivacyModelConfig(db, masterKey)
-    } catch {
-      privacyModel = null
-    }
-  }
-  const redactForLlm = async (text: string): Promise<string> => {
-    if (!text) return text
-    let modelSpans: ModelEntitySpan[] = []
-    if (privacyModel && spacePrivacy.pii && spacePrivacy.usePrivacyModel) {
-      try {
-        modelSpans = await detectWithPrivacyModel(privacyModel, text)
-      } catch {
-        modelSpans = []
-      }
-    }
-    return maskSensitiveContent(
-      text,
-      {
-        credentials: spacePrivacy.credentials,
-        pii: spacePrivacy.pii,
-        piiKinds: spacePrivacy.piiKinds,
-        customRules: spacePrivacy.customRules,
-        allowlist: spacePrivacy.allowlist,
-      },
-      'tag',
-      modelSpans,
-    )
-  }
+  const redactForLlm = await loadOutboundRedactor(db, masterKey, target.spaceId)
 
   // 给模型看的事实：句柄对应哪一条、模型看到的是哪一版（推翻时按版本核对，见 writeExtraction）
   const shown = new Map<string, { id: string; subjectId: string; version: number }>()

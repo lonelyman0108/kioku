@@ -33,6 +33,7 @@ import {
   MoveMemoryRequest,
   PageQuery,
   PlaintextIgnoreRequest,
+  ProtectMemoryRequest,
   ReactivateRequest,
   RedactMemoryRequest,
   RestoreRequest,
@@ -316,8 +317,16 @@ function consoleOnlyRoutes(deps: Deps) {
     method: 'post',
     path: '/spaces/{spaceId}/memories/redact',
     tags: ['console'],
-    summary: '一键打码：把正文里的疑似明文凭据或个人敏感信息替换为遮盖符',
+    summary: '抹除敏感段：把正文里的疑似明文凭据或个人敏感信息不可逆地替换为遮盖符',
     request: { params, body: jsonBody(RedactMemoryRequest) },
+    responses: { 200: jsonResponse('记忆', ConsoleView), ...errors },
+  })
+  const protectMemory = createRoute({
+    method: 'post',
+    path: '/spaces/{spaceId}/memories/protect',
+    tags: ['console'],
+    summary: '保护含个人敏感信息的记忆：保留原文并转为本人私密或设为机密',
+    request: { params, body: jsonBody(ProtectMemoryRequest) },
     responses: { 200: jsonResponse('记忆', ConsoleView), ...errors },
   })
   const convertToCredential = createRoute({
@@ -431,6 +440,10 @@ function consoleOnlyRoutes(deps: Deps) {
     .openapi(redactMemory, async (c) => {
       const { service } = await consoleMember(deps, c)
       return c.json(await service.redact(c.req.valid('json')), 200)
+    })
+    .openapi(protectMemory, async (c) => {
+      const { service } = await consoleMember(deps, c)
+      return c.json(await service.protectSensitive(c.req.valid('json')), 200)
     })
     .openapi(convertToCredential, async (c) => {
       const { spaceId, service } = await consoleMember(deps, c)

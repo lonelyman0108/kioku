@@ -1,5 +1,6 @@
 import {
   DEFAULT_SPACE_PRIVACY,
+  maskSensitiveContent,
   resolveSpacePrivacy,
   scanSensitiveContent,
   toStoredFindings,
@@ -501,5 +502,55 @@ export function evaluateSensitiveContent(
     hasCredential,
     hasPii,
     findings: mergedFindings,
+  }
+}
+
+// 发往外部模型或向量服务前的同步脱敏（仅替换命中片段，不修改本地原文）
+export function maskForOutbound(
+  text: string,
+  privacy: SpacePrivacySettings,
+  modelSpans: readonly ModelEntitySpan[] = [],
+): string {
+  if (!text) return text
+  return maskSensitiveContent(
+    text,
+    {
+      credentials: privacy.credentials,
+      pii: privacy.pii,
+      piiKinds: privacy.piiKinds,
+      customRules: privacy.customRules,
+      allowlist: privacy.allowlist,
+    },
+    'tag',
+    modelSpans,
+  )
+}
+
+// 构建空间级出站脱敏器：按空间隐私策略脱敏，并在启用隐私识别模型时附加模型实体检测
+export async function loadOutboundRedactor(
+  db: Db,
+  masterKey: MasterKey | null,
+  spaceId: string,
+): Promise<(text: string) => Promise<string>> {
+  const { settings: privacy } = await loadSpacePrivacy(db, spaceId)
+  let modelConfig: PrivacyModelConfig | null = null
+  if (privacy.pii && privacy.usePrivacyModel) {
+    try {
+      modelConfig = await loadPrivacyModelConfig(db, masterKey)
+    } catch {
+      modelConfig = null
+    }
+  }
+  return async (text: string): Promise<string> => {
+    if (!text) return text
+    let modelSpans: ModelEntitySpan[] = []
+    if (modelConfig && privacy.pii && privacy.usePrivacyModel) {
+      try {
+        modelSpans = await detectWithPrivacyModel(modelConfig, text)
+      } catch {
+        modelSpans = []
+      }
+    }
+    return maskForOutbound(text, privacy, modelSpans)
   }
 }

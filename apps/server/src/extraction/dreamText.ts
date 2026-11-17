@@ -16,12 +16,20 @@ export const DRAFT_CHARS = 2_000
 export const DISCLOSURE_CHARS = 200
 
 const PLAINTEXT = '疑似含明文密码或令牌：整理建议不写入凭据的值'
+const REDACTED_MARKER = /\[REDACTED:[A-Z0-9_]+\]/
+
+function hasNewRedactedMarker(text: string, sources: readonly (string | null)[] = []): boolean {
+  const matches = text.match(/\[REDACTED:[A-Z0-9_]+\]/g)
+  if (!matches) return false
+  return matches.some((token) => !sources.some((s) => s?.includes(token)))
+}
 
 // 合并后的事实：一句话，长度和抽取的事实一样有上限
 export function factProblem(text: string): string | null {
   if (!text || [...text].length > MAX_FACT_CHARS) {
     return `合并后的事实须为一句话，不超过 ${MAX_FACT_CHARS} 个字`
   }
+  if (REDACTED_MARKER.test(text)) return '合并后的事实不能含脱敏占位标记'
   if (looksLikePlaintextCredential(text)) return `合并后的事实${PLAINTEXT}`
   if (mentionsPlaceholder(text)) return '合并后的事实不能含凭据占位符'
   return null
@@ -34,6 +42,7 @@ export function mergedNodeProblem(
 ): string | null {
   if (!text) return '合并后的正文不能为空'
   if ([...text].length > MERGED_NODE_CHARS) return `合并后的正文不超过 ${MERGED_NODE_CHARS} 个字`
+  if (hasNewRedactedMarker(text, sources)) return '合并后的正文不能引入脱敏占位标记'
   if (looksLikePlaintextCredential(text)) return `合并后的正文${PLAINTEXT}`
   const { refs, malformed } = scanPlaceholders(text)
   const known = new Set(sources.flatMap((s) => [...placeholderIdentifiers(s ?? '')]))
@@ -47,6 +56,7 @@ export function mergedNodeProblem(
 export function draftProblem(text: string): string | null {
   if (!text) return '提炼的正文不能为空'
   if ([...text].length > DRAFT_CHARS) return `提炼的正文不超过 ${DRAFT_CHARS} 个字`
+  if (REDACTED_MARKER.test(text)) return '提炼的正文不能含脱敏占位标记'
   if (looksLikePlaintextCredential(text)) return `提炼的正文${PLAINTEXT}`
   if (mentionsPlaceholder(text)) return '提炼的正文不能含凭据占位符'
   return null
@@ -55,6 +65,7 @@ export function draftProblem(text: string): string | null {
 // 提炼的 disclosure（一行）
 export function disclosureProblem(text: string): string | null {
   if ([...text].length > DISCLOSURE_CHARS) return `触发场景不超过 ${DISCLOSURE_CHARS} 个字`
+  if (REDACTED_MARKER.test(text)) return '触发场景不能含脱敏占位标记'
   if (looksLikePlaintextCredential(text) || mentionsPlaceholder(text)) {
     return '触发场景不能含明文密码、令牌或凭据占位符'
   }

@@ -20,9 +20,12 @@ import { createApp } from '../../app'
 import { rotateMasterKey } from '../../crypto/rotation'
 import { withSpace, type Database } from '../../db/client'
 import { dreamSuggestions, memoryEvents, memoryRecallStats, settings } from '../../db/schema'
+import type { Embedder } from '../../embedding/provider'
 import { staticEmbedderSource } from '../../embedding/source'
+import { embedMemories } from '../../embedding/worker'
 import { dreamSpace } from '../../extraction/dream'
 import { saveExtractionConfig } from '../../extraction/settings'
+import { embedQuery } from '../../recall/recall'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { fakeChatModel } from '../../testing/fakeChatModel'
 import { bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
@@ -72,26 +75,44 @@ describe.skipIf(!testDatabaseUrl)('敏感内容与隐私设置', () => {
     return (await res.json()) as ConsoleMemoryView
   }
 
-  const createMemory = async (content: string, uri = 'user://contact') => {
+  const createMemory = async (
+    content: string,
+    uri = 'user://contact',
+    sensitivity?: 'public' | 'internal' | 'private' | 'secret',
+  ) => {
     const res = await send('POST', `/spaces/${ws.spaceId}/memories`, {
       uri,
       title: '联系方式',
       content,
+      ...(sensitivity ? { sensitivity } : {}),
     })
     expect(res.status, await res.clone().text()).toBe(201)
     return (await res.json()) as ConsoleMemoryView
   }
 
-  it('只含个人信息不拦截写入，进入待处理并支持两种模式一键打码', async () => {
-    const first = await createMemory(
-      '备用手机 13812345678，邮箱 alice@corp-acme.com',
-      'user://phone-1',
+  it('本人私密 PII 保留原文且不进待处理，边界外 PII 支持移入本人私密、设为机密与抹除敏感段', async () => {
+    // 1. 已处于本人私密且受信任的 PII：保留 findings（供详情提示与出站脱敏），但不进待处理告警
+    const alreadySafe = await createMemory(
+      '本人备用号 13700009999',
+      'user://already-safe',
+      'private',
     )
-    expect(first.sensitiveFindings?.map((f) => f.kind)).toEqual(
+    expect(alreadySafe.sensitiveFindings?.map((f) => f.kind)).toContain('phone')
+
+    // 2. 位于共享归属（core://）或本人非私密（user:// + internal）的 PII 进入待处理
+    const shared = await createMemory(
+      '备用手机 13812345678，邮箱 alice@corp-acme.com',
+      'core://phone-1',
+    )
+    expect(shared.sensitiveFindings?.map((f) => f.kind)).toEqual(
       expect.arrayContaining(['phone', 'email']),
     )
 
-    const second = await createMemory('客服号码 13900001111', 'user://phone-2')
+    const personalInternal = await createMemory(
+      '客服号码 13900001111',
+      'user://phone-2',
+      'internal',
+    )
 
     const countsRes = await send('GET', `/spaces/${ws.spaceId}/inbox/counts`)
     expect(countsRes.status).toBe(200)
@@ -103,34 +124,72 @@ describe.skipIf(!testDatabaseUrl)('敏感内容与隐私设置', () => {
     )
     expect(listRes.status).toBe(200)
     const list = (await listRes.json()) as MemoryList
-    expect(list.items.map((m) => m.id)).toEqual(expect.arrayContaining([first.id, second.id]))
-    expect(list.items.every((m) => m.sensitivePii && !m.sensitiveCredential)).toBe(true)
+    expect(list.items.map((m) => m.id)).toEqual(
+      expect.arrayContaining([shared.id, personalInternal.id]),
+    )
+    expect(list.items.map((m) => m.id)).not.toContain(alreadySafe.id)
 
-    // 默认打码模式（***）
+    // 3. 移入本人私密：迁到 user://phone-1 + private，完整保留原文，移除待处理红点
+    const protectUserRes = await send('POST', `/spaces/${ws.spaceId}/memories/protect`, {
+      memoryId: shared.id,
+      expectedVersion: shared.version,
+      target: 'user_private',
+    })
+    expect(protectUserRes.status, await protectUserRes.clone().text()).toBe(200)
+    const movedSafe = (await protectUserRes.json()) as ConsoleMemoryView
+    expect(movedSafe.uri).toBe('user://phone-1')
+    expect(movedSafe.layer).toBe('user')
+    expect(movedSafe.sensitivity).toBe('private')
+    expect(movedSafe.content).toBe('备用手机 13812345678，邮箱 alice@corp-acme.com')
+
+    // 4. 设为机密：原地密文保护、清除敏感标签、原文可通过显式查看读回
+    const protectSecretRes = await send('POST', `/spaces/${ws.spaceId}/memories/protect`, {
+      memoryId: personalInternal.id,
+      expectedVersion: personalInternal.version,
+      target: 'secret',
+    })
+    expect(protectSecretRes.status, await protectSecretRes.clone().text()).toBe(200)
+    const sealed = (await protectSecretRes.json()) as ConsoleMemoryView
+    expect(sealed.sensitivity).toBe('secret')
+    expect(sealed.contentHidden).toBe(true)
+
+    const afterProtectCounts = InboxCounts.parse(
+      await (await send('GET', `/spaces/${ws.spaceId}/inbox/counts`)).json(),
+    )
+    expect(afterProtectCounts.plaintext).toBe(0)
+
+    const protectHistory = (await (
+      await send(
+        'GET',
+        `/spaces/${ws.spaceId}/memories/history?id=${encodeURIComponent(shared.id)}`,
+      )
+    ).json()) as MemoryHistory
+    expect(protectHistory.events.some((e) => e.type === 'protect')).toBe(true)
+
+    // 5. 误粘贴的冗余敏感文本支持 stars 与 tag 两种模式抹除敏感段
+    const noiseA = await createMemory('误粘贴手机 13812345678', 'core://noise-a')
+    const noiseB = await createMemory('误粘贴手机 13900001111', 'core://noise-b')
+
     const redactRes = await send('POST', `/spaces/${ws.spaceId}/memories/redact`, {
-      memoryId: first.id,
-      expectedVersion: first.version,
+      memoryId: noiseA.id,
+      expectedVersion: noiseA.version,
       mode: 'stars',
     })
     expect(redactRes.status, await redactRes.clone().text()).toBe(200)
     const redacted = (await redactRes.json()) as ConsoleMemoryView
-    expect(redacted.content).not.toContain('13812345678')
-    expect(redacted.content).not.toContain('alice@corp-acme.com')
-    expect(redacted.content).toContain('***')
+    expect(redacted.content).toBe('误粘贴手机 ***')
     expect(redacted.sensitiveFindings).toEqual([])
 
-    // 类别标签打码模式（[REDACTED:PHONE]）
     const tagRes = await send('POST', `/spaces/${ws.spaceId}/memories/redact`, {
-      memoryId: second.id,
-      expectedVersion: second.version,
+      memoryId: noiseB.id,
+      expectedVersion: noiseB.version,
       mode: 'tag',
     })
     expect(tagRes.status, await tagRes.clone().text()).toBe(200)
     const tagged = (await tagRes.json()) as ConsoleMemoryView
-    expect(tagged.content).toBe('客服号码 [REDACTED:PHONE]')
+    expect(tagged.content).toBe('误粘贴手机 [REDACTED:PHONE]')
     expect(tagged.sensitiveFindings).toEqual([])
 
-    // 打码后不再出现在待处理列表
     const afterCounts = InboxCounts.parse(
       await (await send('GET', `/spaces/${ws.spaceId}/inbox/counts`)).json(),
     )
@@ -138,7 +197,7 @@ describe.skipIf(!testDatabaseUrl)('敏感内容与隐私设置', () => {
 
     const historyRes = await send(
       'GET',
-      `/spaces/${ws.spaceId}/memories/history?id=${encodeURIComponent(second.id)}`,
+      `/spaces/${ws.spaceId}/memories/history?id=${encodeURIComponent(noiseB.id)}`,
     )
     expect(historyRes.status).toBe(200)
     const history = (await historyRes.json()) as MemoryHistory
@@ -367,5 +426,80 @@ describe.skipIf(!testDatabaseUrl)('敏感内容与隐私设置', () => {
       tx.select().from(memoryEvents).where(eq(memoryEvents.memoryId, mem.id)),
     )
     expect(events.some((e) => e.eventType === 'update')).toBe(true)
+  })
+
+  it('向外部嵌入、查询嵌入与整理模型外发前自动脱敏，且本地原文与拒收含脱敏标记的新建议均不受影响', async () => {
+    const rawPhone = '13812345678'
+    const rawEmail = 'bob@corp-acme.com'
+    const mem = await createMemory(
+      `本人联系电话 ${rawPhone}，账单邮箱 ${rawEmail}`,
+      'user://personal-contact',
+      'private',
+    )
+
+    // 1. 嵌入写入前先脱敏，本地数据库仍保留完整原文
+    const embeddedTexts: string[] = []
+    const capturingEmbedder: Embedder = {
+      model: 'capturing-embedder',
+      async embed(texts) {
+        embeddedTexts.push(...texts)
+        return texts.map(() => Array.from({ length: 1024 }, () => 0.01))
+      },
+    }
+    expect(await embedMemories(database.db, capturingEmbedder, ws.spaceId, [mem.id])).toBe(1)
+    expect(embeddedTexts).toHaveLength(1)
+    expect(embeddedTexts[0]).toContain('[REDACTED:PHONE]')
+    expect(embeddedTexts[0]).toContain('[REDACTED:EMAIL]')
+    expect(embeddedTexts[0]).not.toContain(rawPhone)
+    expect(embeddedTexts[0]).not.toContain(rawEmail)
+
+    const storedAfterEmbed = await getMemory('user://personal-contact')
+    expect(storedAfterEmbed.content).toContain(rawPhone)
+    expect(storedAfterEmbed.content).toContain(rawEmail)
+
+    // 2. 语义查询嵌入前先脱敏
+    await embedQuery(capturingEmbedder, `查询手机号 ${rawPhone}`)
+    expect(embeddedTexts[1]).toBe('查询手机号 [REDACTED:PHONE]')
+
+    // 3. 整理模型入参前先脱敏，同时拒绝模型回吐带 [REDACTED:...] 的合并建议覆盖原文
+    await saveExtractionConfig(database.db, masterKey, {
+      baseUrl: 'https://llm.example.com/v1',
+      model: 'm',
+    })
+    await createMemory(`日常办公联系方式 ${rawPhone}`, 'core://office-contact-1')
+    await createMemory(`备用联系方式 ${rawEmail}`, 'core://office-contact-2')
+
+    const { model, calls } = fakeChatModel(async () =>
+      JSON.stringify({
+        suggestions: [
+          {
+            kind: 'merge',
+            memories: ['M1', 'M2'],
+            keep: 'M1',
+            content: '办公电话 [REDACTED:PHONE]，邮箱 [REDACTED:EMAIL]',
+            reason: '两条联系信息可以合并',
+          },
+        ],
+      }),
+    )
+
+    const outcome = await dreamSpace(database.db, masterKey, {
+      spaceId: ws.spaceId,
+      runId: randomUUID(),
+      trigger: 'manual',
+      modelFor: () => model,
+    })
+    expect(outcome.outcome).toBe('done')
+
+    const promptSent = calls.map((msgs) => msgs.map((m) => m.content).join('\n')).join('\n')
+    expect(promptSent).toContain('[REDACTED:PHONE]')
+    expect(promptSent).toContain('[REDACTED:EMAIL]')
+    expect(promptSent).not.toContain(rawPhone)
+    expect(promptSent).not.toContain(rawEmail)
+
+    const suggestions = (await (
+      await send('GET', `/spaces/${ws.spaceId}/dream/suggestions`)
+    ).json()) as DreamSuggestionList
+    expect(suggestions.items).toEqual([])
   })
 })
