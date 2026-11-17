@@ -82,7 +82,9 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
   const clearSettings = () =>
     database.db
       .delete(settings)
-      .where(sql`${settings.key} in ('extraction', 'embedding', 'advanced')`)
+      .where(
+        sql`${settings.key} in ('extraction', 'embedding', 'advanced', 'model-providers', 'model-bindings')`,
+      )
 
   beforeAll(async () => {
     database = await openTestDatabase()
@@ -1308,13 +1310,24 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
   })
 
   it('近邻：有向量时按向量找最相近的，这条没有向量时按全文', async () => {
-    const res = await app.request(
-      '/v1/settings/embedding',
+    const prov = await app.request(
+      '/v1/settings/models/providers',
       jsonRequest(
-        'PUT',
-        { model: 'm', channels: [{ baseUrl: 'https://embed.example.com/v1', model: 'm' }] },
+        'POST',
+        {
+          name: '嵌入服务商',
+          format: 'openai-chat',
+          baseUrl: 'https://embed.example.com/v1',
+          profiles: [{ kind: 'embedding', model: 'm' }],
+        },
         { cookie: ws.cookie },
       ),
+    )
+    expect(prov.status).toBe(201)
+    const profileId = ((await prov.json()) as { profiles: { id: string }[] }).profiles[0]!.id
+    const res = await app.request(
+      '/v1/settings/embedding',
+      jsonRequest('PUT', { model: 'm', profileIds: [profileId] }, { cookie: ws.cookie }),
     )
     expect(res.status).toBe(200)
     await remember({ uri: 'core://a', content: '回答问题时用中文' })
@@ -1550,7 +1563,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
       {
         trigger: 'scheduled',
         scope: null,
-        error: '整理出错：抽取模型的 Key 已加密保存，但服务端未配置 KIOKU_MASTER_KEY',
+        error: '整理出错：模型服务商「抽取模型」的 Key 已加密保存，但服务端未配置 KIOKU_MASTER_KEY',
       },
     ])
     expect(await dreamsDue(database.db)).toEqual([])
@@ -1574,17 +1587,22 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     // 记着主密钥的标识：还没解密就知道对不上
     expect(await failing()).toEqual({ outcome: 'failed', reason: null })
     // 加上标识之前保存的：解密时才失败，里面那层是解密库的英文报错
-    const [row] = await database.db.select().from(settings).where(eq(settings.key, 'extraction'))
-    const value = row!.value as { apiKey: { keyId?: string } }
-    delete value.apiKey.keyId
-    await database.db.update(settings).set({ value }).where(eq(settings.key, 'extraction'))
+    const [row] = await database.db
+      .select()
+      .from(settings)
+      .where(eq(settings.key, 'model-providers'))
+    const value = row!.value as { providers: { apiKey: { keyId?: string } | null }[] }
+    for (const p of value.providers) {
+      if (p.apiKey) delete p.apiKey.keyId
+    }
+    await database.db.update(settings).set({ value }).where(eq(settings.key, 'model-providers'))
     expect(await failing()).toEqual({ outcome: 'failed', reason: null })
 
     expect(calls).toEqual([])
     const errors = (await runs()).map((r) => r.error)
     expect(errors).toHaveLength(2)
     for (const error of errors) {
-      expect(error).toMatch(/^整理出错：抽取模型的 Key 无法解密/)
+      expect(error).toMatch(/^整理出错：模型服务商「抽取模型」的 Key 无法解密/)
       expect(error).toContain('旧密钥须配置在 KIOKU_MASTER_KEY_PREVIOUS')
     }
   })
@@ -1632,7 +1650,10 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
         return e.cause?.message ?? e.message
       }
       expect(logged.mock.calls.map(([label, err]) => [label, messageOf(err)])).toEqual([
-        ['Dream 整理出错', '抽取模型的 Key 已加密保存，但服务端未配置 KIOKU_MASTER_KEY'],
+        [
+          'Dream 整理出错',
+          '模型服务商「抽取模型」的 Key 已加密保存，但服务端未配置 KIOKU_MASTER_KEY',
+        ],
         ['Dream 的运行记录也写不进去', '测试里故意出的错'],
       ])
     } finally {

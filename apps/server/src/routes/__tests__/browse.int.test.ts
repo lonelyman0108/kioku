@@ -88,14 +88,26 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
     return (await res.json()) as ConsoleSearchResponse
   }
   const saveEmbedding = async () => {
+    const prov = await app.request(
+      '/v1/settings/models/providers',
+      jsonRequest(
+        'POST',
+        {
+          name: '嵌入服务商',
+          format: 'openai-chat',
+          baseUrl: 'https://embed.example.com/v1',
+          profiles: [{ kind: 'embedding', model: 'fake-embedding' }],
+        },
+        { cookie: ws.cookie },
+      ),
+    )
+    expect(prov.status).toBe(201)
+    const profileId = ((await prov.json()) as { profiles: { id: string }[] }).profiles[0]!.id
     const res = await app.request(
       '/v1/settings/embedding',
       jsonRequest(
         'PUT',
-        {
-          model: 'fake-embedding',
-          channels: [{ baseUrl: 'https://embed.example.com/v1', model: 'fake-embedding' }],
-        },
+        { model: 'fake-embedding', profileIds: [profileId] },
         { cookie: ws.cookie },
       ),
     )

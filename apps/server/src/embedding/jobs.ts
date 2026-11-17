@@ -1,4 +1,5 @@
 import { errorText, type Db } from '../db/client'
+import { embeddingNextSnapshot } from '../models/store'
 import { embeddingCoverage } from './coverage'
 import { clearEmbeddingError, recordEmbeddingError } from './errors'
 import { loadEmbeddingModels, switchEmbedding } from './settings'
@@ -230,12 +231,13 @@ export async function switchJob(
 ): Promise<SwitchOutcome> {
   const target = (await loadEmbeddingModels(db)).next
   if (!target) return 'idle'
-  const snapshot = JSON.stringify(target)
+  const snapshot = await embeddingNextSnapshot(db)
+  if (!snapshot) return 'idle'
   try {
     const next = await source.next()
     if (next?.model !== target.model) return 'changed'
-    // 每补一页之前看一眼设置：被放弃、换成了别的模型或者渠道改了，就停下，不再用拿到手的渠道请求
-    const unchanged = async () => JSON.stringify((await loadEmbeddingModels(db)).next) === snapshot
+    // 每补一页之前看一眼设置与底层服务商/模型是否变化：被放弃、换成了别的模型或者渠道改了，就停下
+    const unchanged = async () => (await embeddingNextSnapshot(db)) === snapshot
     let requeued = 0
     const failures = failureLog()
     const written = await backfillEmbeddings(db, next, {

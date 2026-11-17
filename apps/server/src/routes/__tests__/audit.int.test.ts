@@ -159,32 +159,54 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
     expect(((await (await get(key, 'user://home/ip')).json()) as MemoryView).content).toBe('新地址')
   })
 
-  it('换了嵌入接口的主机必须重新说明 Key 怎么处理', async () => {
-    type View = { active: { channels: { id: string; hasApiKey: boolean }[] } }
-    const put = (channel: Record<string, unknown>) =>
+  it('换了服务商的接口主机必须重新说明 Key 怎么处理', async () => {
+    const create = await app.request(
+      '/v1/settings/models/providers',
+      jsonRequest(
+        'POST',
+        {
+          name: '嵌入服务商',
+          format: 'openai-chat',
+          baseUrl: 'https://e.example.com/v1',
+          apiKey: 'sk-secret',
+          profiles: [{ kind: 'embedding', model: 'm' }],
+        },
+        { cookie: ws.cookie },
+      ),
+    )
+    expect(create.status).toBe(201)
+    const provider = (await create.json()) as {
+      id: string
+      hasApiKey: boolean
+      profiles: { id: string }[]
+    }
+    const profileId = provider.profiles[0]!.id
+    const update = (body: Record<string, unknown>) =>
       app.request(
-        '/v1/settings/embedding',
-        jsonRequest('PUT', { model: 'm', channels: [channel] }, { cookie: ws.cookie }),
+        `/v1/settings/models/providers/${provider.id}`,
+        jsonRequest(
+          'PUT',
+          {
+            name: '嵌入服务商',
+            format: 'openai-chat',
+            profiles: [{ id: profileId, kind: 'embedding', model: 'm' }],
+            ...body,
+          },
+          { cookie: ws.cookie },
+        ),
       )
-    const first = (await (
-      await put({ baseUrl: 'https://e.example.com/v1', model: 'm', apiKey: 'sk-secret' })
-    ).json()) as View
-    const id = first.active.channels[0]!.id
-    expect(
-      await (await put({ id, baseUrl: 'https://e.example.com/v2', model: 'm' })).json(),
-    ).toMatchObject({ active: { channels: [{ id, hasApiKey: true }] } })
-    const moved = await put({ id, baseUrl: 'https://other.example.net/v1', model: 'm' })
+    expect(await (await update({ baseUrl: 'https://e.example.com/v2' })).json()).toMatchObject({
+      hasApiKey: true,
+    })
+    const moved = await update({ baseUrl: 'https://other.example.net/v1' })
     expect(moved.status).toBe(400)
-    // 照管理界面上的说法：重新填写，或者清除已保存的 Key，不提 null 这类接口细节
     expect(await moved.json()).toEqual({
       error:
-        '第 1 个渠道的接口主机已变更，已保存的 Key 不会发送给新主机。请重新填写；新接口不需要 Key 时，请清除已保存的 Key。',
+        '接口主机已变更，已保存的 Key 不会发送给新主机。请重新填写；新接口不需要 Key 时，请清除已保存的 Key。',
     })
     expect(
-      await (
-        await put({ id, baseUrl: 'https://other.example.net/v1', model: 'm', apiKey: null })
-      ).json(),
-    ).toMatchObject({ active: { channels: [{ id, hasApiKey: false }] } })
+      await (await update({ baseUrl: 'https://other.example.net/v1', apiKey: null })).json(),
+    ).toMatchObject({ hasApiKey: false })
   })
 
   it('并发登录也只放行 5 次尝试', async () => {

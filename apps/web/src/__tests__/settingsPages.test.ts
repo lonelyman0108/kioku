@@ -10,13 +10,15 @@ import appearanceSettings from '../components/AppearanceSettings.vue?raw'
 import backupSettings from '../components/BackupSettings.vue?raw'
 import dataSettings from '../components/DataSettings.vue?raw'
 import dreamSuggestions from '../components/DreamSuggestions.vue?raw'
-import embeddingChannelRow from '../components/EmbeddingChannelRow.vue?raw'
 import embeddingSettings from '../components/EmbeddingSettings.vue?raw'
 import extractionBudget from '../components/ExtractionBudget.vue?raw'
 import extractionSettings from '../components/ExtractionSettings.vue?raw'
 import loreImport from '../components/LoreImport.vue?raw'
 import masterKeySettings from '../components/MasterKeySettings.vue?raw'
+import modelChainEditor from '../components/ModelChainEditor.vue?raw'
+import modelProvidersSettings from '../components/ModelProvidersSettings.vue?raw'
 import modelSettings from '../components/ModelSettings.vue?raw'
+import privacyModelSettings from '../components/PrivacyModelSettings.vue?raw'
 import myDreamSettings from '../components/MyDreamSettings.vue?raw'
 import retentionSettings from '../components/RetentionSettings.vue?raw'
 import spaceExport from '../components/SpaceExport.vue?raw'
@@ -143,8 +145,11 @@ const render = async (
 }
 
 const settingsSources = {
+  ModelProvidersSettings: modelProvidersSettings,
+  ModelChainEditor: modelChainEditor,
   EmbeddingSettings: embeddingSettings,
   ExtractionSettings: extractionSettings,
+  PrivacyModelSettings: privacyModelSettings,
   ExtractionBudget: extractionBudget,
   BackupSettings: backupSettings,
   RetentionSettings: retentionSettings,
@@ -1004,16 +1009,21 @@ describe('设置页', () => {
   it('合在一页的小节把各自的改动合起来报给页面', () => {
     const models = elementsOf(template(modelSettings))
     expect(
-      ['EmbeddingSettings', 'ExtractionSettings', 'PrivacyModelSettings'].map(
+      [
+        'ModelProvidersSettings',
+        'EmbeddingSettings',
+        'ExtractionSettings',
+        'PrivacyModelSettings',
+      ].map(
         (tag) =>
           directive(
             models.find((e) => e.tag === tag)!,
             'model',
           )?.exp?.content,
       ),
-    ).toEqual(['dirty.embedding', 'dirty.extraction', 'dirty.privacy'])
+    ).toEqual(['dirty.providers', 'dirty.embedding', 'dirty.extraction', 'dirty.privacy'])
     expect(modelSettings).toContain(
-      "const dirty = useDirtyParts(dirtyModel, ['embedding', 'extraction', 'privacy'])",
+      "const dirty = useDirtyParts(dirtyModel, ['providers', 'embedding', 'extraction', 'privacy'])",
     )
     const data = elementsOf(template(dataSettings))
     expect(
@@ -1112,9 +1122,10 @@ describe('设置页', () => {
     expect(handler(button, 'click')).toBe('colorPreference.set(option.value)')
   })
 
-  it('渠道不再是圆角卡片，用线分开', () => {
-    expect(embeddingChannelRow).not.toContain('rounded-md')
-    expect(embeddingChannelRow).toContain('border-t border-default')
+  it('模型条目列表不再是圆角卡片，用线分开', () => {
+    expect(modelChainEditor).not.toContain('rounded-md')
+    expect(modelChainEditor).toContain('border-t border-default')
+    expect(modelProvidersSettings).not.toContain('rounded-md')
   })
 })
 
@@ -1124,7 +1135,13 @@ describe('读取失败', () => {
     ['MasterKeySettings', masterKeySettings, 'masterKey', 'masterKey.data.value'],
     ['EmbeddingSettings', embeddingSettings, 'settings', 'settings.isPending.value'],
     ['EmbeddingSettings', embeddingSettings, 'status', 'status.data.value'],
-    ['ExtractionSettings', extractionSettings, 'settings', 'settings.isPending.value'],
+    ['ExtractionSettings', extractionSettings, 'registry', 'registry.isPending.value'],
+    [
+      'ModelProvidersSettings',
+      modelProvidersSettings,
+      'registryQuery',
+      'registryQuery.isPending.value',
+    ],
     ['BackupSettings', backupSettings, 'settings', 'settings.isPending.value'],
     // 两样查询的错误挨着，后面才是内容
     ['RetentionSettings', retentionSettings, 'settings', 'recallSettings.isError.value'],
@@ -1184,9 +1201,9 @@ describe('读取失败', () => {
       'ExtractionSettings',
       extractionSettings,
       'save',
-      'settings',
-      'settings.data.value',
-      'settings.isPending.value',
+      'registry',
+      'registry.data.value',
+      'registry.isPending.value',
     ],
     ['BackupSettings', backupSettings, 'save', 'settings', 'view', 'settings.isPending.value'],
     // 两样设置一张表：哪一样读到了就给哪一行，两样都在读时显示骨架
@@ -1261,7 +1278,7 @@ describe('读取失败', () => {
   it.each([
     ['EmbeddingSettings', embeddingSettings, 'settings'],
     ['EmbeddingSettings', embeddingSettings, 'status'],
-    ['ExtractionSettings', extractionSettings, 'settings'],
+    ['ExtractionSettings', extractionSettings, 'registry'],
     ['BackupSettings', backupSettings, 'settings'],
     ['RetentionSettings', retentionSettings, 'settings'],
     ['RetentionSettings', retentionSettings, 'recallSettings'],
@@ -1349,9 +1366,10 @@ describe('标题和说明一直在', () => {
     return null
   }
   const blocks: [string, string, string][] = [
-    ['嵌入模型', embeddingSettings, 'OpenAI 兼容的 /embeddings 接口'],
+    ['模型服务商', modelProvidersSettings, '统一管理上游接口地址、API Key 与模型条目'],
+    ['嵌入模型', embeddingSettings, '从已配置的嵌入模型中选择备选渠道'],
     ['向量', embeddingSettings, '显示已生成当前模型向量的记忆数量。'],
-    ['抽取模型', extractionSettings, 'OpenAI 兼容的 /chat/completions 接口'],
+    ['抽取与整理模型', extractionSettings, '从已配置的对话模型中指定抽取与整理使用的模型链'],
     [
       '主密钥',
       masterKeySettings,
@@ -1533,12 +1551,11 @@ describe('带后果的文字整句留着', () => {
 describe('清除设置', () => {
   const body = (source: string) => /async function clear\(\)[^]*?\n\}/.exec(scriptOf(source))![0]
 
-  it('抽取模型：先按「没有设置」写进缓存再去刷新：刷新失败时不能停在旧的设置上，清空的表单一直算有改动', () => {
+  it('抽取模型：清空表单后立即清除绑定与提示', () => {
     const clear = body(extractionSettings)
-    const written = clear.indexOf('queryClient.setQueryData')
-    expect(written).toBeGreaterThan(-1)
-    expect(clear.indexOf('invalidateQueries({ queryKey')).toBeGreaterThan(written)
-    expect(clear).toContain('configured: false')
+    expect(clear).toContain('saveExtractionBinding({ profileIds: [] })')
+    expect(clear).toContain('extractionIds.value = []')
+    expect(clear).toContain('invalidateQueries({ queryKey')
   })
 
   it('备份：同样先写再刷新，表单回到空白，填了一半的内容也不留', () => {

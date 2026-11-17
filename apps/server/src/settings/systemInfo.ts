@@ -24,7 +24,7 @@ import { keyIdOf, keyringOf } from '../crypto/keyring'
 import type { Db } from '../db/client'
 import { lastMigration } from '../db/migrate'
 import { embeddingSettingsView } from '../embedding/settings'
-import { extractionSettingsView } from '../extraction/settings'
+import { hasExtractionModel } from '../extraction/settings'
 import type { Deps } from '../http/env'
 import { BUILD } from '../version'
 import { loadUpdateStatus, updateCheckView } from './updateCheck'
@@ -122,7 +122,7 @@ export async function systemInfo(deps: Deps, now: Date = new Date()): Promise<Sy
   const [database, embedding, extraction, update] = await Promise.all([
     databaseInfo(deps.db),
     embeddingSettingsView(deps.db),
-    extractionSettingsView(deps.db),
+    hasExtractionModel(deps.db),
     loadUpdateStatus(deps.db),
   ])
   const uptimeSeconds = Math.max(0, Math.floor((now.getTime() - STARTED_AT.getTime()) / 1000))
@@ -150,7 +150,7 @@ export async function systemInfo(deps: Deps, now: Date = new Date()): Promise<Sy
       webUi: webUiState(deps.webDir),
       jobs: deps.jobs !== null,
       embedding: embedding.active !== null,
-      extraction: extraction.configured,
+      extraction,
     },
     updates: updateCheckView(update, deps.updateCheck?.current),
   }

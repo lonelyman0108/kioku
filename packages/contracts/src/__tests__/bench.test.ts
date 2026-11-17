@@ -151,11 +151,13 @@ describe('模型代理的请求', () => {
     ).toBe(true)
   })
 
-  it('模型名去掉两边的空白，全是空白的不行', () => {
-    const parsed = BenchAgentTurnRequest.parse({ model: ' m ', messages: [user] })
-    expect(parsed.model).toBe('m')
-    expect(BenchAgentTurnRequest.safeParse({ model: '  ', messages: [user] }).success).toBe(false)
-    expect(BenchAgentTurnRequest.parse({ messages: [user] }).model).toBeUndefined()
+  it('模型条目编号去掉两边的空白，全是空白的不行', () => {
+    const parsed = BenchAgentTurnRequest.parse({ profileId: ' p1 ', messages: [user] })
+    expect(parsed.profileId).toBe('p1')
+    expect(BenchAgentTurnRequest.safeParse({ profileId: '  ', messages: [user] }).success).toBe(
+      false,
+    )
+    expect(BenchAgentTurnRequest.parse({ messages: [user] }).profileId).toBeUndefined()
   })
 })
 

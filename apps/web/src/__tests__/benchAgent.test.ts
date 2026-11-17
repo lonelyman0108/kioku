@@ -243,7 +243,7 @@ function harness(options: HarnessOptions = {}) {
   const io: AgentIO = {
     async turn(request, signal) {
       const parsed = BenchAgentTurnRequest.parse(request)
-      expect(parsed.model).toBe(MODEL)
+      expect(parsed.profileId).toBe(MODEL)
       turnRequests.push(structuredClone(parsed.messages))
       const problem = historyProblem(parsed.messages)
       if (problem) unexpected = problem
@@ -268,6 +268,7 @@ function harness(options: HarnessOptions = {}) {
       mode,
       system,
       model: MODEL,
+      profileId: MODEL,
       context,
       signal: controller.signal,
       io,

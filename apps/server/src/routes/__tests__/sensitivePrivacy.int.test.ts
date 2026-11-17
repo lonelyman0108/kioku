@@ -9,8 +9,8 @@ import {
   type MemoryHistory,
   type MemoryList,
   type MemoryView,
-  type PrivacyModelSettingsView,
-  type PrivacyModelTestResult,
+  type ModelChainTestResult,
+  type PrivacyBindingView,
   type SpacePrivacySettings,
 } from '@kioku/contracts'
 import { eq } from 'drizzle-orm'
@@ -287,29 +287,29 @@ describe.skipIf(!testDatabaseUrl)('敏感内容与隐私设置', () => {
     const baseUrl = `http://127.0.0.1:${addr.port}/detect`
 
     try {
-      const saveRes = await send('PUT', '/settings/privacy-model', {
+      const saveRes = await send('PUT', '/settings/models/bindings/privacy', {
         mode: 'http',
         baseUrl,
         apiKey: 'ner-secret-key',
         minScore: 0.7,
       })
       expect(saveRes.status, await saveRes.clone().text()).toBe(200)
-      const view = (await saveRes.json()) as PrivacyModelSettingsView
+      const view = (await saveRes.json()) as PrivacyBindingView
       expect(view).toMatchObject({ mode: 'http', baseUrl, hasApiKey: true, minScore: 0.7 })
 
       // 更换服务主机而不重填或清除 API Key 时应拒绝保存
-      const crossHostRes = await send('PUT', '/settings/privacy-model', {
+      const crossHostRes = await send('PUT', '/settings/models/bindings/privacy', {
         mode: 'http',
         baseUrl: 'https://other.example.com/detect',
         minScore: 0.7,
       })
       expect(crossHostRes.status).toBe(400)
 
-      const testRes = await send('POST', '/settings/privacy-model/test', {})
+      const testRes = await send('POST', '/settings/models/bindings/privacy/test', {})
       expect(testRes.status, await testRes.clone().text()).toBe(200)
-      const testBody = (await testRes.json()) as PrivacyModelTestResult
+      const testBody = (await testRes.json()) as ModelChainTestResult
       expect(testBody.ok).toBe(true)
-      expect(testBody.findings).toBe(1)
+      expect(testBody.results[0]?.findings).toBe(1)
 
       // 空间开启 usePrivacyModel 后写入记忆会调用模型并记录命中的 PII
       await send('PUT', `/spaces/${ws.spaceId}/privacy`, { usePrivacyModel: true })
@@ -333,7 +333,7 @@ describe.skipIf(!testDatabaseUrl)('敏感内容与隐私设置', () => {
         embedder: staticEmbedderSource(null),
         jobs: null,
       })
-      const retestRes = await appNext.request('/v1/settings/privacy-model/test', {
+      const retestRes = await appNext.request('/v1/settings/models/bindings/privacy/test', {
         method: 'POST',
         headers: {
           cookie: ws.cookie,
@@ -343,13 +343,18 @@ describe.skipIf(!testDatabaseUrl)('敏感内容与隐私设置', () => {
         body: JSON.stringify({}),
       })
       expect(retestRes.status).toBe(200)
-      expect(((await retestRes.json()) as PrivacyModelTestResult).ok).toBe(true)
+      expect(((await retestRes.json()) as ModelChainTestResult).ok).toBe(true)
 
-      const delRes = await appNext.request('/v1/settings/privacy-model', {
-        method: 'DELETE',
-        headers: { cookie: ws.cookie, 'sec-fetch-site': 'same-origin' },
+      const offRes = await appNext.request('/v1/settings/models/bindings/privacy', {
+        method: 'PUT',
+        headers: {
+          cookie: ws.cookie,
+          'content-type': 'application/json',
+          'sec-fetch-site': 'same-origin',
+        },
+        body: JSON.stringify({ mode: 'off' }),
       })
-      expect(delRes.status).toBe(204)
+      expect(offRes.status).toBe(200)
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()))
     }

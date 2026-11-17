@@ -1,27 +1,53 @@
 import type { MasterKey } from '../crypto/keyring'
-import type { Db } from '../db/client'
+import type { Db, Tx } from '../db/client'
 import {
-  clearEndpointConfig,
-  endpointSettingsView,
-  loadEndpointConfig,
-  saveEndpointConfig,
-  sealedEndpointKey,
-  type EndpointInput,
-  type ModelEndpoint,
-} from '../settings/endpoint'
+  createModelProvider,
+  loadDreamProfiles,
+  loadExtractionProfiles,
+  loadModelRegistryView,
+  saveExtractionBinding,
+} from '../models/store'
+import type { EndpointInput } from '../settings/endpoint'
 
-// 抽取模型和嵌入接口一样在实例设置里配（OpenAI 兼容接口、模型与 Key）。没配时不抽取，
-// 对话缓冲到期后直接丢弃；清掉设置，抽取随即停止
-export const EXTRACTION_ENDPOINT: ModelEndpoint = { key: 'extraction', label: '抽取模型' }
+export async function hasExtractionModel(db: Db | Tx): Promise<boolean> {
+  const view = await loadModelRegistryView(db)
+  return view.bindings.extraction.configured
+}
 
-export const sealedExtractionKey = (db: Db) => sealedEndpointKey(db, EXTRACTION_ENDPOINT)
+export async function loadExtractionConfig(db: Db | Tx, masterKey: MasterKey | null) {
+  const profiles = await loadExtractionProfiles(db, masterKey)
+  return profiles.length ? profiles : null
+}
 
-export const loadExtractionConfig = (db: Db, masterKey: MasterKey | null) =>
-  loadEndpointConfig(db, masterKey, EXTRACTION_ENDPOINT)
+export async function loadDreamConfig(db: Db | Tx, masterKey: MasterKey | null) {
+  const profiles = await loadDreamProfiles(db, masterKey)
+  return profiles.length ? profiles : null
+}
 
-export const saveExtractionConfig = (db: Db, masterKey: MasterKey | null, input: EndpointInput) =>
-  saveEndpointConfig(db, masterKey, EXTRACTION_ENDPOINT, input)
+// 供测试与初始化快捷配置单个抽取模型，底层写入服务商与用途绑定
+export async function saveExtractionConfig(
+  db: Db,
+  masterKey: MasterKey | null,
+  input: EndpointInput,
+): Promise<void> {
+  const { provider } = await createModelProvider(db, masterKey, {
+    name: '抽取模型',
+    format: 'openai-chat',
+    baseUrl: input.baseUrl,
+    ...(input.apiKey !== undefined ? { apiKey: input.apiKey } : {}),
+    profiles: [
+      {
+        kind: 'chat',
+        label: null,
+        model: input.model,
+        thinking: 'default',
+        thinkingStyle: 'auto',
+      },
+    ],
+  })
+  await saveExtractionBinding(db, { profileIds: [provider.profiles[0]!.id] })
+}
 
-export const extractionSettingsView = (db: Db) => endpointSettingsView(db, EXTRACTION_ENDPOINT)
-
-export const clearExtractionConfig = (db: Db) => clearEndpointConfig(db, EXTRACTION_ENDPOINT)
+export async function clearExtractionConfig(db: Db): Promise<void> {
+  await saveExtractionBinding(db, { profileIds: [] })
+}

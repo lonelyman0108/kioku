@@ -1,26 +1,22 @@
 import { z } from 'zod'
 
-const BaseUrl = z.url({ protocol: /^https?$/, error: '接口地址须以 http:// 或 https:// 开头' })
+import { MAX_FALLBACK_MODELS, ModelFormat } from './models'
+import { ApiKey, BaseUrl, pastedSecret } from './secret'
 
-// 粘贴来的密钥：去掉首尾的空白（多带一个换行很常见），别的只收可打印的 ASCII（空格到 ~）。换行、零宽字符、全角符号放过去的话，
-// 它进请求头时 fetch 直接报错，进签名时算出来的签名对不上，都看不出是密钥的问题。name 是这个密钥叫什么
-const pastedSecret = (name: string) =>
-  z
-    .string()
-    .trim()
-    .min(1, `${name} 不能只有空白`)
-    .regex(
-      /^[\x20-\x7e]+$/,
-      `${name} 只能包含英文字母、数字和半角符号，请检查粘贴的内容是否含换行、零宽字符或全角符号`,
-    )
-const ApiKey = pastedSecret('Key')
+export { ApiKey, BaseUrl, pastedSecret }
 
-// 嵌入渠道：同一个模型的一个接口。按顺序请求，前一个出错时换下一个；不同模型的向量不能混着比，所以一组渠道只能是同一个模型
+// 嵌入渠道：同一向量空间下的一个已配置模型条目。按顺序请求，前一个出错时换下一个；
+// 不同模型的向量不能混着比，所以一组渠道只能是同一个逻辑模型
 export const EmbeddingChannelView = z.object({
   id: z.string(),
+  profileId: z.string(),
+  providerId: z.string(),
+  providerName: z.string(),
+  format: ModelFormat,
   baseUrl: z.string(),
-  // 请求这个接口时用的模型名；服务商给模型改名时只改这里，不用重新生成向量
+  // 请求这个接口时用的模型名；服务商给模型改名时只改条目本身，不用重新生成向量
   model: z.string(),
+  label: z.string().nullable(),
   hasApiKey: z.boolean(),
 })
 export type EmbeddingChannelView = z.infer<typeof EmbeddingChannelView>
@@ -28,6 +24,7 @@ export type EmbeddingChannelView = z.infer<typeof EmbeddingChannelView>
 export const EmbeddingSetupView = z.object({
   // 模型标识：向量按它存，换模型才会变
   model: z.string(),
+  profileIds: z.array(z.string()),
   channels: z.array(EmbeddingChannelView),
 })
 export type EmbeddingSetupView = z.infer<typeof EmbeddingSetupView>
@@ -42,20 +39,13 @@ export const EmbeddingSettingsView = z.object({
 })
 export type EmbeddingSettingsView = z.infer<typeof EmbeddingSettingsView>
 
-export const EmbeddingChannelInput = z.object({
-  // 已有的渠道带上 id：不填 Key 时沿用它保存的 Key（接口主机没变才行）
-  id: z.string().min(1).max(32).optional(),
-  // OpenAI 兼容接口的根地址，例如 https://api.example.com/v1；只收 http 与 https
-  baseUrl: BaseUrl,
-  model: z.string().min(1).max(128),
-  // 不填表示沿用已保存的 Key；填 null 表示这个渠道不用 Key
-  apiKey: ApiKey.nullable().optional(),
-})
-export type EmbeddingChannelInput = z.infer<typeof EmbeddingChannelInput>
-
 export const UpdateEmbeddingSettings = z.object({
-  model: z.string().min(1).max(128),
-  channels: z.array(EmbeddingChannelInput).min(1).max(5),
+  model: z.string().trim().min(1, '请填写模型标识').max(128),
+  profileIds: z
+    .array(z.string().min(1).max(32))
+    .min(1, '至少选择一个嵌入模型')
+    .max(MAX_FALLBACK_MODELS, `最多选择 ${MAX_FALLBACK_MODELS} 个备选模型`)
+    .refine((ids) => new Set(ids).size === ids.length, '不能重复选择同一模型条目'),
 })
 export type UpdateEmbeddingSettings = z.infer<typeof UpdateEmbeddingSettings>
 
@@ -92,30 +82,7 @@ export const EmbeddingStatus = z.object({
 })
 export type EmbeddingStatus = z.infer<typeof EmbeddingStatus>
 
-// 抽取模型：OpenAI 兼容的 chat completions 接口（例如 new-api），在实例设置里配。
-// 没配时不从对话里抽取事实，对话缓冲到期后直接丢弃
-export const ExtractionSettingsView = z.object({
-  configured: z.boolean(),
-  baseUrl: z.string().nullable(),
-  model: z.string().nullable(),
-  hasApiKey: z.boolean(),
-})
-export type ExtractionSettingsView = z.infer<typeof ExtractionSettingsView>
-
-export const UpdateExtractionSettings = z.object({
-  baseUrl: BaseUrl,
-  model: z.string().min(1).max(128),
-  // 不填表示沿用已保存的 Key；填 null 表示清除
-  apiKey: ApiKey.nullable().optional(),
-})
-export type UpdateExtractionSettings = z.infer<typeof UpdateExtractionSettings>
-
-export const ExtractionTestResult = z.object({
-  ok: z.boolean(),
-  latencyMs: z.number().int(),
-  error: z.string().nullable(),
-})
-export type ExtractionTestResult = z.infer<typeof ExtractionTestResult>
+// 抽取模型测试与旧版兼容相关类型已移至 models.ts；这里只保留其余系统设置契约
 
 // 主密钥：标识是哈希，推不出密钥本身，用来核对配的是哪一把。轮换期间配着旧的那把，
 // 后台把还是旧密钥包装的数据密钥换成新的包装，remaining 都是 0 之后就可以去掉 KIOKU_MASTER_KEY_PREVIOUS

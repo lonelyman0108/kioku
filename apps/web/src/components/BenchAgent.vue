@@ -24,6 +24,7 @@ import { divergenceNotice, NOT_API_FAILURE, runBlocker, sessionUsage } from '../
 import { useBench } from '../composables/useBench'
 import { saveFile } from '../download'
 import { icons } from '../icons'
+import { FORMAT_LABELS } from '../models'
 import { instanceSettingsRoute } from '../settingsSections'
 import BenchAgentExchange from './BenchAgentExchange.vue'
 import BenchContextForm from './BenchContextForm.vue'
@@ -91,17 +92,37 @@ const unavailableActions = computed(() =>
       ],
 )
 
-// 模型名：没改过时跟着实例设置，清空了也退回实例设置的
-const modelEdit = ref<string | null>(null)
-const defaultModel = computed(() => info.data.value?.defaultModel ?? '')
-const modelText = computed(() => modelEdit.value ?? defaultModel.value)
-const model = computed(() => modelText.value.trim() || defaultModel.value)
+// 选中的对话模型条目：未手动切换时跟着服务端给出的默认条目
+const profileEdit = ref<string | null>(null)
+const modelOptions = computed(() => info.data.value?.models ?? [])
+const selectedProfileId = computed(() => {
+  const edited = profileEdit.value
+  if (edited && modelOptions.value.some((m) => m.profileId === edited)) return edited
+  return info.data.value?.defaultProfileId ?? modelOptions.value[0]?.profileId ?? ''
+})
+const selectedOption = computed(
+  () => modelOptions.value.find((m) => m.profileId === selectedProfileId.value) ?? null,
+)
+const modelItems = computed(() =>
+  modelOptions.value.map((m) => ({
+    label: `${m.providerName} / ${m.label ? `${m.label} (${m.model})` : m.model}${m.available ? '' : '（访问密钥无法解密）'}`,
+    value: m.profileId,
+  })),
+)
+const model = computed(() => selectedOption.value?.model ?? info.data.value?.defaultModel ?? '')
 const system = ref(DEFAULT_SYSTEM_PROMPT)
 
-// 开始之前要点一下：内容会发给哪个接口的哪个模型，发什么内容。同一次对话不再问，接口地址、模型名、循环变了再问一次
+// 开始之前要点一下：内容会发给哪个接口的哪个模型，发什么内容。同一次对话不再问，接口地址、模型、格式或循环变了再问一次
 const consent = computed<AgentConsent | null>(() =>
   loop.value
-    ? { endpoint: info.data.value?.endpoint ?? null, model: model.value, loop: loop.value }
+    ? {
+        endpoint: selectedOption.value?.endpoint ?? info.data.value?.endpoint ?? null,
+        model: model.value,
+        ...(selectedOption.value
+          ? { profileId: selectedOption.value.profileId, format: selectedOption.value.format }
+          : {}),
+        loop: loop.value,
+      }
     : null,
 )
 const needsConsent = computed(() => !consent.value || consentNeeded(agent.value, consent.value))
@@ -138,7 +159,7 @@ const input = ref('')
 const canSend = computed(
   () =>
     available.value &&
-    Boolean(model.value) &&
+    Boolean(selectedOption.value?.available ?? model.value) &&
     Boolean(input.value.trim()) &&
     !needsConsent.value &&
     !blocker.value &&
@@ -154,6 +175,7 @@ async function send() {
     turnEnd: turnEnd.value,
     system: system.value,
     model: model.value,
+    ...(selectedOption.value ? { profileId: selectedOption.value.profileId } : {}),
   })
   // 这条消息没有进历史（模型没有回复，或者中途作废）：文字放回去，可以再发一次。这时已经又写了别的就不动
   if (!finished?.inHistory && !input.value) input.value = text
@@ -342,14 +364,22 @@ watch(generation, () => {
           <Hint>每一轮下方显示运行标记，可在变更记录中对应这些写入。</Hint>
         </p>
         <BenchContextForm v-if="loop !== 'tools'" />
-        <UFormField label="模型" help="接口与 API Key 沿用实例设置的抽取模型，此处仅改模型名">
-          <UInput
-            :model-value="modelText"
-            :placeholder="defaultModel"
+        <UFormField
+          label="模型"
+          :help="
+            selectedOption
+              ? `${FORMAT_LABELS[selectedOption.format]} · ${selectedOption.endpoint}`
+              : '从实例设置配置的对话模型中选择'
+          "
+        >
+          <USelect
+            :model-value="selectedProfileId"
+            :items="modelItems"
+            value-key="value"
             :disabled="running"
             aria-label="模型"
-            class="w-full font-mono"
-            @update:model-value="(v) => (modelEdit = String(v))"
+            class="w-full"
+            @update:model-value="(v) => (profileEdit = String(v))"
           />
         </UFormField>
         <UFormField

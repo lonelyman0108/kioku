@@ -1,6 +1,6 @@
 import type { MasterKey } from '../crypto/keyring'
 import type { Db } from '../db/client'
-import { channelEmbedder, type Embedder } from './provider'
+import { profilesEmbedder, type Embedder } from './provider'
 import { loadEmbeddingSetups, type EmbeddingSetup } from './settings'
 
 export interface EmbedderSource {
@@ -13,7 +13,7 @@ export interface EmbedderSource {
 }
 
 const embedderOf = (setup: EmbeddingSetup | null) =>
-  setup && channelEmbedder(setup.model, setup.channels)
+  setup && profilesEmbedder(setup.model, setup.channels)
 
 export function settingsEmbedderSource(db: Db, masterKey: MasterKey | null): EmbedderSource {
   let cached: Promise<{ active: Embedder | null; next: Embedder | null }> | null = null

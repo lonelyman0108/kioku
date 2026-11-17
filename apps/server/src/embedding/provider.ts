@@ -1,4 +1,6 @@
 import { EMBEDDING_DIMENSIONS } from '../db/schema'
+import { callEmbeddingFallback } from '../models/execute'
+import type { ResolvedEmbeddingProfile } from '../models/types'
 import {
   fetchFailure,
   MODEL_ENDPOINT_CHECK,
@@ -101,5 +103,16 @@ export function channelEmbedder(
       }
       throw new Error(errors.length === 1 ? errors[0] : `所有渠道均失败。${errors.join('；')}`)
     },
+  }
+}
+
+export function profilesEmbedder(
+  model: string,
+  profiles: readonly ResolvedEmbeddingProfile[],
+  fetchImpl: typeof fetch = fetch,
+): Embedder {
+  return {
+    model,
+    embed: (texts, options = {}) => callEmbeddingFallback(profiles, texts, options, fetchImpl),
   }
 }

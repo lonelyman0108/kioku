@@ -10,18 +10,11 @@ import { computed, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
-import {
-  draftOf,
-  draftsChanged,
-  followEmbedding,
-  inputOf,
-  switchTracker,
-  type ChannelDraft,
-} from '../embeddingDrafts'
-import { needsNewKey } from '../endpointKey'
+import { followEmbedding, profileIdsChanged, switchTracker } from '../embeddingDrafts'
 import { icons } from '../icons'
-import EmbeddingChannels from './EmbeddingChannels.vue'
+import { flattenProfiles } from '../models'
 import Hint from './Hint.vue'
+import ModelChainEditor from './ModelChainEditor.vue'
 import NoteLine from './strata/NoteLine.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SettingsBlock from './strata/SettingsBlock.vue'
@@ -36,6 +29,11 @@ const POLL_INTERVAL_MS = 5_000
 const failed = (err: unknown, fallback: string) =>
   toast.add({ title: err instanceof ApiError ? err.message : fallback, color: 'error' })
 
+const registry = useQuery({ queryKey: ['settings', 'models'], queryFn: api.modelRegistry })
+const embeddingOptions = computed(() =>
+  flattenProfiles(registry.data.value?.providers ?? [], 'embedding'),
+)
+
 // 正在换模型时一直跟进：后台补齐后会自动切过去，设置与进度都会变
 const settings = useQuery({
   queryKey: ['settings', 'embedding'],
@@ -45,8 +43,6 @@ const settings = useQuery({
 const active = computed(() => settings.data.value?.active ?? null)
 const next = computed(() => settings.data.value?.next ?? null)
 
-// 进度刷不刷只看进度本身（见 followEmbedding）：换模型、补齐时一直跟着，补齐了就停。
-// 保存、切换、补齐之后都会重新读一次进度，读到还没补齐就接着刷
 const status = useQuery({
   queryKey: ['settings', 'embedding', 'status'],
   queryFn: api.embeddingStatus,
@@ -65,20 +61,20 @@ const refresh = () => queryClient.invalidateQueries({ queryKey: ['settings', 'em
 
 // 正在用的模型：模型标识只在第一次配置时填，之后要换就走换模型
 const modelId = ref('')
-const activeDrafts = ref<ChannelDraft[]>([draftOf()])
+const activeProfileIds = ref<string[]>([])
 let syncedActive = ''
 function syncActive(value: EmbeddingSetupView | null) {
   syncedActive = JSON.stringify(value)
   modelId.value = value?.model ?? ''
-  activeDrafts.value = value ? value.channels.map(draftOf) : [draftOf()]
+  activeProfileIds.value = value ? [...value.profileIds] : []
 }
 watch(
   active,
   (value, previous) => {
-    // 跟进进度时设置每隔几秒读一次，内容没变就不重填，不冲掉正在编辑的内容；自己保存的已经按返回的同步过了
     if (JSON.stringify(value) === syncedActive) return
-    // 设置在后台变了（例如换模型补齐后自动切过去）：没保存的改动对不上新的设置，丢掉并说一声
-    const discarded = previous ? draftsChanged(activeDrafts.value, previous.channels) : false
+    const discarded = previous
+      ? profileIdsChanged(activeProfileIds.value, previous.profileIds)
+      : false
     syncActive(value)
     if (discarded) {
       toast.add({ title: '嵌入设置已在后台更新，未保存的渠道改动已丢弃', color: 'warning' })
@@ -86,24 +82,29 @@ watch(
   },
   { immediate: true },
 )
+watch(
+  activeProfileIds,
+  (ids) => {
+    if (active.value || modelId.value.trim() || !ids.length) return
+    const first = embeddingOptions.value.find((o) => o.profileId === ids[0])
+    if (first) modelId.value = first.model
+  },
+  { deep: false },
+)
 const activeDirty = computed(() =>
   active.value
-    ? draftsChanged(activeDrafts.value, active.value.channels)
-    : modelId.value !== '' || activeDrafts.value.some((d) => d.baseUrl || d.model || d.apiKey),
+    ? profileIdsChanged(activeProfileIds.value, active.value.profileIds)
+    : modelId.value !== '' || activeProfileIds.value.length > 0,
 )
-// 有渠道换了接口主机、又没说 Key 怎么处理（见 needsNewKey）：服务端会拒，提交之前就拦下，
-// 按钮旁边说一句，具体的说明在那个渠道的 Key 旁边
-const KEY_MISSING = '有渠道更换了接口主机，请重新填写或清除其 API Key'
-const activeKeyMissing = computed(() => activeDrafts.value.some(needsNewKey))
 const saving = ref(false)
 async function saveActive() {
-  if (activeKeyMissing.value) return
+  if (!activeProfileIds.value.length) return
   const first = !active.value
   saving.value = true
   try {
     const saved = await api.saveEmbeddingSettings({
       model: modelId.value.trim(),
-      channels: activeDrafts.value.map(inputOf),
+      profileIds: activeProfileIds.value,
     })
     syncActive(saved.active)
     await refresh()
@@ -118,23 +119,25 @@ async function saveActive() {
   }
 }
 
-// 换模型：新模型的标识与渠道。开始时照抄现在的渠道（同一主机沿用已保存的 Key），请求用的模型名留空让管理员填
+// 换模型：新模型的标识与渠道引用
 const starting = ref(false)
 const nextModel = ref('')
-const nextDrafts = ref<ChannelDraft[]>([])
+const nextProfileIds = ref<string[]>([])
 let syncedNext = ''
 function syncNext(value: EmbeddingSetupView | null) {
   syncedNext = JSON.stringify(value)
   if (!value) return
   nextModel.value = value.model
-  nextDrafts.value = value.channels.map(draftOf)
+  nextProfileIds.value = [...value.profileIds]
   starting.value = false
 }
 watch(
   next,
   (value, previous) => {
     if (JSON.stringify(value) === syncedNext) return
-    const discarded = previous ? draftsChanged(nextDrafts.value, previous.channels) : false
+    const discarded = previous
+      ? profileIdsChanged(nextProfileIds.value, previous.profileIds)
+      : false
     syncNext(value)
     if (discarded) {
       toast.add({ title: '更换模型的设置已在后台更新，未保存的渠道改动已丢弃', color: 'warning' })
@@ -143,8 +146,6 @@ watch(
   { immediate: true },
 )
 
-// 换模型结束（补齐后自动切过去、现在切换或放弃）的提示，只给这个页面开着时读到的变化（见 switchTracker）。
-// ending 是这个页面自己点的「立即切换」「放弃」：放弃由点的地方提示，进度也已经跟着设置一起重新读了
 const sawSwitch = switchTracker()
 let ending: 'switch' | 'abort' | null = null
 watch(
@@ -154,7 +155,6 @@ watch(
     if (!ended) return
     const own = ending !== null
     ending = null
-    // 后台结束的（设置的轮询发现的）：进度可能还停在换模型的时候，读一次；正在读的就等它，不重发
     if (!own) void status.refetch({ cancelRefetch: false })
     if (ended === 'switched') {
       toast.add({
@@ -168,23 +168,31 @@ watch(
 )
 function openStart() {
   nextModel.value = ''
-  nextDrafts.value = (active.value?.channels ?? []).map((c) => ({ ...draftOf(c), model: '' }))
+  nextProfileIds.value = []
   starting.value = true
 }
+watch(
+  nextProfileIds,
+  (ids) => {
+    if (!starting.value || nextModel.value.trim() || !ids.length) return
+    const first = embeddingOptions.value.find((o) => o.profileId === ids[0])
+    if (first) nextModel.value = first.model
+  },
+  { deep: false },
+)
 const nextDirty = computed(() =>
   next.value
-    ? draftsChanged(nextDrafts.value, next.value.channels)
-    : starting.value && nextModel.value !== '',
+    ? profileIdsChanged(nextProfileIds.value, next.value.profileIds)
+    : starting.value && (nextModel.value !== '' || nextProfileIds.value.length > 0),
 )
-// 换模型时照抄现在的渠道，改了接口主机的也要先说 Key 怎么处理，不要等点了确认框里的「开始」才报错
-const nextKeyMissing = computed(() => nextDrafts.value.some(needsNewKey))
 const confirmStart = ref(false)
 function askStart() {
-  if (!nextKeyMissing.value) confirmStart.value = true
+  if (!nextProfileIds.value.length) return
+  confirmStart.value = true
 }
 const savingNext = ref(false)
 async function saveNext() {
-  if (nextKeyMissing.value) {
+  if (!nextProfileIds.value.length) {
     confirmStart.value = false
     return
   }
@@ -193,7 +201,7 @@ async function saveNext() {
   try {
     const saved = await api.saveNextEmbedding({
       model: nextModel.value.trim(),
-      channels: nextDrafts.value.map(inputOf),
+      profileIds: nextProfileIds.value,
     })
     syncNext(saved.next)
     await refresh()
@@ -209,7 +217,6 @@ async function saveNext() {
   }
 }
 
-// 马上再补一遍新模型的向量（例如修好了渠道之后），不用等定时任务
 const retrying = ref(false)
 async function retryNext() {
   retrying.value = true
@@ -261,7 +268,6 @@ const remaining = computed(() => {
   return s?.next ? Math.max(0, s.eligible - s.next.embedded) : 0
 })
 
-// 「测试连接」测的是已保存的设置：有没保存的改动时先保存再测，改动之后旧的测试结果也不再显示
 const testing = ref(false)
 const result = ref<EmbeddingTestResult | null>(null)
 watch(
@@ -298,7 +304,6 @@ async function rebuild() {
   try {
     await api.rebuildEmbeddings()
     toast.add({ title: '已加入队列，后台将检查全部记忆，补齐缺失或过时的向量', color: 'success' })
-    // 重新读一次进度：缺向量的话就接着刷到补齐
     void status.refetch({ cancelRefetch: false })
   } catch (err) {
     failed(err, '加入队列失败')
@@ -312,38 +317,44 @@ async function rebuild() {
   <SettingsColumns>
     <SettingsBlock title="嵌入模型">
       <template #note>
-        OpenAI 兼容的 /embeddings 接口，须支持 dimensions 参数，向量维度固定为
+        从已配置的嵌入模型中选择备选渠道，向量维度固定为
         {{ settings.data.value?.dimensions ?? 1024 }}。
         <Hint>
-          整个实例共用一个模型。可配置多个渠道（同一模型的不同接口），按顺序请求，前一个出错时切换到下一个。
+          整个实例共用一个模型。可按顺序选择多个渠道（同一向量空间的不同服务商），前一个出错时切换到下一个。
         </Hint>
       </template>
-      <!-- 后台刷新失败时读到过的设置留着，错误放在上面 -->
       <ReadFailureNote v-if="settings.isError.value" :query="settings" />
-      <!--
-        没读到过设置时不给表单：空表单会被当成第一次配置，保存就盖掉了读不到的那份。
-        重新读取时错误会被清掉，所以只看有没有数据
-      -->
       <USkeleton v-if="settings.isPending.value" class="h-40 w-full" />
       <form v-else-if="settings.data.value" class="space-y-4" @submit.prevent="saveActive">
         <UFormField
           label="模型标识"
           :help="
             active
-              ? '向量按此标识存储；更换模型请使用下方的「更换模型」。'
-              : '向量按此标识存储，例如模型名称。'
+              ? '用于区分向量空间的逻辑名称（同一模型的多个渠道共用）；更换模型请使用下方的「更换模型」。'
+              : '用于区分向量空间的逻辑名称（例如 text-embedding-3-large），同一模型的不同渠道共用此标识；首次选好模型后会自动填入，可按需修改。'
           "
         >
-          <UInput v-model="modelId" class="w-full font-mono" :disabled="!!active" required />
+          <UInput
+            v-model="modelId"
+            placeholder="例如 text-embedding-3-large"
+            class="w-full font-mono"
+            :disabled="!!active"
+            required
+          />
         </UFormField>
-        <EmbeddingChannels v-model="activeDrafts" />
+        <ModelChainEditor
+          v-model="activeProfileIds"
+          :options="embeddingOptions"
+          :min="active ? 1 : 0"
+          empty-hint="请先在上方「模型服务商」中添加嵌入模型。"
+        />
         <div class="flex flex-wrap items-center gap-2">
           <UButton
             type="submit"
             color="primary"
             variant="outline"
             :loading="saving"
-            :disabled="!activeDirty || activeKeyMissing"
+            :disabled="!activeDirty || !activeProfileIds.length"
             >保存</UButton
           >
           <UButton
@@ -355,8 +366,7 @@ async function rebuild() {
           >
             测试连接
           </UButton>
-          <span v-if="activeKeyMissing" class="text-error">{{ KEY_MISSING }}</span>
-          <span v-else-if="active && (activeDirty || nextDirty)" class="text-muted"
+          <span v-if="active && (activeDirty || nextDirty)" class="text-muted"
             >保存改动后才能测试</span
           >
         </div>
@@ -400,14 +410,14 @@ async function rebuild() {
           </NoteLine>
         </div>
         <form class="space-y-4" @submit.prevent="saveNext">
-          <EmbeddingChannels v-model="nextDrafts" />
+          <ModelChainEditor v-model="nextProfileIds" :options="embeddingOptions" :min="1" />
           <div class="flex flex-wrap items-center gap-2">
             <UButton
               type="submit"
               color="primary"
               variant="outline"
               :loading="savingNext"
-              :disabled="!nextDirty || nextKeyMissing"
+              :disabled="!nextDirty || !nextProfileIds.length"
               >保存</UButton
             >
             <UButton
@@ -436,7 +446,6 @@ async function rebuild() {
             >
               放弃
             </UButton>
-            <span v-if="nextKeyMissing" class="text-error">{{ KEY_MISSING }}</span>
           </div>
           <ul v-if="result?.next" class="space-y-1">
             <li
@@ -453,13 +462,16 @@ async function rebuild() {
         <UFormField label="新模型的标识" help="须与当前标识不同；向量按此标识存储。">
           <UInput v-model="nextModel" class="w-full font-mono" required />
         </UFormField>
-        <EmbeddingChannels v-model="nextDrafts" />
+        <ModelChainEditor v-model="nextProfileIds" :options="embeddingOptions" :min="0" />
         <div class="flex flex-wrap items-center gap-2">
-          <UButton type="submit" color="primary" variant="outline" :disabled="nextKeyMissing"
+          <UButton
+            type="submit"
+            color="primary"
+            variant="outline"
+            :disabled="!nextModel.trim() || !nextProfileIds.length"
             >开始更换模型</UButton
           >
           <UButton color="neutral" variant="ghost" @click="starting = false">取消</UButton>
-          <span v-if="nextKeyMissing" class="text-error">{{ KEY_MISSING }}</span>
         </div>
       </form>
       <UButton v-else color="neutral" variant="outline" @click="openStart">更换模型…</UButton>
@@ -473,7 +485,6 @@ async function rebuild() {
             统计范围为全实例当前有效、非机密、有正文的记忆。已过期的记忆不再召回，也不生成向量，恢复生效后再生成。新写入的记忆自动排队；接口出错后可以手动补齐。
           </Hint>
         </template>
-        <!-- 后台刷新失败时读到过的进度留着，错误放在上面 -->
         <ReadFailureNote v-if="status.isError.value" :query="status" />
         <div v-if="status.data.value" class="space-y-3">
           <div class="flex flex-wrap items-baseline gap-x-2">

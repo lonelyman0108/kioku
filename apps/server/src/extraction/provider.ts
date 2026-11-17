@@ -1,3 +1,6 @@
+import { textOfContent } from '../models/common'
+import { callChatFallback } from '../models/execute'
+import type { ResolvedChatProfile } from '../models/types'
 import {
   fetchFailure,
   MODEL_ENDPOINT_CHECK,
@@ -13,12 +16,39 @@ export interface ChatMessage {
 
 export interface ChatCompletion {
   content: string
+  model?: string
   usage: { promptTokens: number; completionTokens: number }
 }
 
 export interface ChatModel {
   model: string
   complete(messages: ChatMessage[], options?: { timeoutMs?: number }): Promise<ChatCompletion>
+}
+
+export function profilesChatModel(
+  profiles: readonly ResolvedChatProfile[],
+  fetchImpl: typeof fetch = fetch,
+): ChatModel {
+  const primary = profiles[0]
+  return {
+    model: primary?.model ?? '',
+    async complete(messages, options = {}) {
+      const result = await callChatFallback(
+        profiles,
+        {
+          messages: messages.map((m) => ({ ...m })),
+          what: '抽取模型',
+          ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+        },
+        fetchImpl,
+      )
+      return {
+        content: textOfContent(result.message.content),
+        model: result.model,
+        usage: result.usage,
+      }
+    },
+  }
 }
 
 // 推理模型想得久，抽取一批对话可能要一两分钟；连通性测试也按这个等，免得慢一点的模型被报成不通

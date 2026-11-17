@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import type { ExtractionSettingsView, ExtractionTestResult } from '@kioku/contracts'
+import type { DreamBindingMode, ModelChainTestResult } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
-import { needsNewKey, newKeyHint } from '../endpointKey'
+import { profileIdsChanged } from '../embeddingDrafts'
+import { flattenProfiles } from '../models'
 import Hint from './Hint.vue'
+import ModelChainEditor from './ModelChainEditor.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SettingsBlock from './strata/SettingsBlock.vue'
 
@@ -16,48 +18,71 @@ const dirtyModel = defineModel<boolean>('dirty', { default: false })
 
 const toast = useToast()
 const queryClient = useQueryClient()
-const queryKey = ['settings', 'extraction']
-const settings = useQuery({ queryKey, queryFn: api.extractionSettings })
+const queryKey = ['settings', 'models']
+const registry = useQuery({ queryKey, queryFn: api.modelRegistry })
 
-// apiKey 留空表示沿用已保存的 Key；勾选「清除」时发 null
-const form = reactive({ baseUrl: '', model: '', apiKey: '', clearKey: false })
+const chatOptions = computed(() => flattenProfiles(registry.data.value?.providers ?? [], 'chat'))
+const savedExtraction = computed(() => registry.data.value?.bindings.extraction)
+const savedDream = computed(() => registry.data.value?.bindings.dream)
+
+const extractionIds = ref<string[]>([])
+const dreamMode = ref<DreamBindingMode>('inherit')
+const dreamIds = ref<string[]>([])
+
 watch(
-  () => settings.data.value,
-  (s) => {
-    if (!s) return
-    form.baseUrl = s.baseUrl ?? ''
-    form.model = s.model ?? ''
+  () => registry.data.value?.bindings,
+  (b) => {
+    if (!b) return
+    extractionIds.value = [...b.extraction.profileIds]
+    dreamMode.value = b.dream.mode
+    dreamIds.value = [...b.dream.profileIds]
   },
   { immediate: true },
 )
 
-// 换了接口主机又没说 Key 怎么处理：服务端会拒，提交之前就在 Key 旁边说明，保存按钮不可点
-const keyMissing = computed(() =>
-  needsNewKey({
-    baseUrl: form.baseUrl,
-    savedBaseUrl: settings.data.value?.baseUrl ?? null,
-    hasApiKey: settings.data.value?.hasApiKey ?? false,
-    apiKey: form.apiKey,
-    clearKey: form.clearKey,
-  }),
+const dirty = computed(() => {
+  if (!savedExtraction.value || !savedDream.value) return false
+  return (
+    profileIdsChanged(extractionIds.value, savedExtraction.value.profileIds) ||
+    dreamMode.value !== savedDream.value.mode ||
+    (dreamMode.value === 'custom' && profileIdsChanged(dreamIds.value, savedDream.value.profileIds))
+  )
+})
+
+const extractionResult = ref<ModelChainTestResult | null>(null)
+const dreamResult = ref<ModelChainTestResult | null>(null)
+
+watch(
+  dirty,
+  (changed) => {
+    dirtyModel.value = changed
+    if (changed) {
+      extractionResult.value = null
+      dreamResult.value = null
+    }
+  },
+  { immediate: true },
 )
 
 const saving = ref(false)
 async function save() {
-  if (keyMissing.value) return
+  if (dreamMode.value === 'custom' && !dreamIds.value.length) {
+    toast.add({ title: '单独指定整理模型时请至少选择一个对话模型', color: 'error' })
+    return
+  }
   saving.value = true
   try {
-    const saved = await api.saveExtractionSettings({
-      baseUrl: form.baseUrl,
-      model: form.model,
-      ...(form.clearKey ? { apiKey: null } : form.apiKey ? { apiKey: form.apiKey } : {}),
+    await api.saveExtractionBinding({ profileIds: extractionIds.value })
+    await api.saveDreamBinding({
+      mode: dreamMode.value,
+      profileIds: dreamMode.value === 'custom' ? dreamIds.value : [],
     })
-    // 先换上保存之后的设置，再清掉填过的 Key：要不要重填 Key 按刚保存的主机与 Key 判断，
-    // 不等重新读取（等的时候、读取失败时会按旧的主机误报要重填）
-    queryClient.setQueryData(queryKey, saved)
-    form.apiKey = ''
-    form.clearKey = false
-    result.value = null
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey }),
+      queryClient.invalidateQueries({ queryKey: ['settings', 'system'] }),
+    ])
+    extractionResult.value = null
+    dreamResult.value = null
     toast.add({ title: '已保存', color: 'success' })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '保存失败', color: 'error' })
@@ -66,34 +91,27 @@ async function save() {
   }
 }
 
-const testing = ref(false)
-const result = ref<ExtractionTestResult | null>(null)
-// 「测试连接」测的是已保存的设置：表单有没保存的改动时先保存再测，改动之后旧的测试结果也不再显示
-const dirty = computed(() => {
-  const saved = settings.data.value
-  return (
-    form.baseUrl !== (saved?.baseUrl ?? '') ||
-    form.model !== (saved?.model ?? '') ||
-    form.apiKey !== '' ||
-    form.clearKey
-  )
-})
-watch(
-  dirty,
-  (changed) => {
-    dirtyModel.value = changed
-    if (changed) result.value = null
-  },
-  { immediate: true },
-)
-async function test() {
-  testing.value = true
+const testingExtraction = ref(false)
+async function testExtraction() {
+  testingExtraction.value = true
   try {
-    result.value = await api.testExtraction()
+    extractionResult.value = await api.testExtractionBinding()
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '测试失败', color: 'error' })
   } finally {
-    testing.value = false
+    testingExtraction.value = false
+  }
+}
+
+const testingDream = ref(false)
+async function testDream() {
+  testingDream.value = true
+  try {
+    dreamResult.value = await api.testDreamBinding()
+  } catch (err) {
+    toast.add({ title: err instanceof ApiError ? err.message : '测试失败', color: 'error' })
+  } finally {
+    testingDream.value = false
   }
 }
 
@@ -102,21 +120,18 @@ const clearing = ref(false)
 async function clear() {
   clearing.value = true
   try {
-    await api.clearExtractionSettings()
-    // 先按「没有设置」填好界面，再去刷新：刷新出错时不能停在旧的设置上，那样清空的表单一直算有改动
-    queryClient.setQueryData<ExtractionSettingsView>(queryKey, {
-      configured: false,
-      baseUrl: null,
-      model: null,
-      hasApiKey: false,
-    })
-    form.baseUrl = ''
-    form.model = ''
-    form.apiKey = ''
-    form.clearKey = false
-    result.value = null
+    await api.saveExtractionBinding({ profileIds: [] })
+    await api.saveDreamBinding({ mode: 'inherit', profileIds: [] })
+    extractionIds.value = []
+    dreamMode.value = 'inherit'
+    dreamIds.value = []
+    extractionResult.value = null
+    dreamResult.value = null
     confirmingClear.value = false
-    await queryClient.invalidateQueries({ queryKey })
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey }),
+      queryClient.invalidateQueries({ queryKey: ['settings', 'system'] }),
+    ])
     toast.add({ title: '已清除，抽取已停止', color: 'success' })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '清除失败', color: 'error' })
@@ -127,79 +142,97 @@ async function clear() {
 </script>
 
 <template>
-  <SettingsBlock title="抽取模型">
+  <SettingsBlock title="抽取与整理模型">
     <template #note>
-      OpenAI 兼容的 /chat/completions 接口（例如 new-api），用于抽取事实、生成会话摘要。
+      从已配置的对话模型中指定抽取与整理使用的模型链（按顺位顺序 Fallback）。
       <Hint>
-        从群聊与私聊中抽取关于对方的事实。整个实例共用一个模型；未配置时不抽取，对话缓冲到期后直接丢弃。
+        抽取用于从群聊与私聊中抽取事实并生成会话摘要；未绑定模型时停止抽取，对话缓冲到期后直接丢弃。整理默认沿用抽取模型，也可单独指定更擅长推理的模型。
       </Hint>
     </template>
-    <!-- 后台刷新失败时读到过的设置留着，错误放在上面 -->
-    <ReadFailureNote v-if="settings.isError.value" :query="settings" />
-    <!-- 没读到过设置时不给表单：空表单保存会盖掉读不到的那份。重新读取时错误会被清掉，所以只看有没有数据 -->
-    <USkeleton v-if="settings.isPending.value" class="h-40 w-full" />
-    <form v-else-if="settings.data.value" class="space-y-4" @submit.prevent="save">
-      <UFormField label="接口地址" help="例如 https://api.example.com/v1">
-        <UInput v-model="form.baseUrl" class="w-full font-mono" required />
-      </UFormField>
-      <UFormField label="模型" help="模型名称，例如 deepseek-chat">
-        <UInput v-model="form.model" class="w-full font-mono" required />
-      </UFormField>
-      <UFormField
-        label="API Key"
-        :help="
-          settings.data.value?.hasApiKey
-            ? '已加密保存；留空表示不修改，更换接口主机时必须重新填写。'
-            : '使用实例主密钥加密保存。'
-        "
-        :error="keyMissing ? newKeyHint('API Key', true) : undefined"
-      >
-        <UInput
-          v-model="form.apiKey"
-          type="password"
-          autocomplete="off"
-          class="w-full"
-          :disabled="form.clearKey"
+    <ReadFailureNote v-if="registry.isError.value" :query="registry" />
+    <USkeleton v-if="registry.isPending.value" class="h-40 w-full" />
+    <form v-else-if="registry.data.value" class="space-y-5" @submit.prevent="save">
+      <div class="space-y-2">
+        <div class="font-medium">抽取模型</div>
+        <ModelChainEditor v-model="extractionIds" :options="chatOptions" :min="0" />
+      </div>
+
+      <div class="space-y-3 border-t border-default pt-4">
+        <UFormField label="整理模型">
+          <USelect
+            v-model="dreamMode"
+            :items="[
+              { label: '沿用抽取模型', value: 'inherit' },
+              { label: '单独指定模型', value: 'custom' },
+            ]"
+            value-key="value"
+            class="w-full max-w-xs"
+          />
+        </UFormField>
+        <ModelChainEditor
+          v-if="dreamMode === 'custom'"
+          v-model="dreamIds"
+          :options="chatOptions"
+          :min="0"
         />
-      </UFormField>
-      <UCheckbox
-        v-if="settings.data.value?.hasApiKey"
-        v-model="form.clearKey"
-        label="清除已保存的 API Key（新接口不需要时）"
-      />
+      </div>
+
       <div class="flex flex-wrap items-center gap-2">
-        <UButton
-          type="submit"
-          color="primary"
-          variant="outline"
-          :loading="saving"
-          :disabled="keyMissing"
-          >保存</UButton
-        >
+        <UButton type="submit" color="primary" variant="outline" :loading="saving">保存</UButton>
         <UButton
           color="neutral"
           variant="outline"
-          :loading="testing"
-          :disabled="!settings.data.value?.configured || dirty"
-          @click="test"
+          :loading="testingExtraction"
+          :disabled="!savedExtraction?.configured || dirty"
+          @click="testExtraction"
         >
-          测试连接
+          测试抽取连接
         </UButton>
         <UButton
-          v-if="settings.data.value?.configured"
+          v-if="savedDream?.mode === 'custom'"
+          color="neutral"
+          variant="outline"
+          :loading="testingDream"
+          :disabled="!savedDream.configured || dirty"
+          @click="testDream"
+        >
+          测试整理连接
+        </UButton>
+        <UButton
+          v-if="savedExtraction?.configured"
           color="error"
           variant="outline"
           @click="confirmingClear = true"
         >
           清除设置
         </UButton>
-        <span v-if="dirty && settings.data.value?.configured" class="text-muted"
-          >保存改动后才能测试</span
-        >
-        <span v-if="result" :class="result.ok ? 'text-success' : 'text-error'">
-          {{ result.ok ? `连接正常，耗时 ${result.latencyMs} ms` : result.error }}
+        <span v-if="dirty && savedExtraction?.configured" class="text-muted">
+          保存改动后才能测试
         </span>
       </div>
+
+      <ul v-if="extractionResult" class="space-y-1 text-sm">
+        <li
+          v-for="(item, i) in extractionResult.results"
+          :key="i"
+          :class="item.ok ? 'text-success' : 'text-error'"
+        >
+          抽取顺位 {{ i + 1 }}<template v-if="item.model">（{{ item.model }}）</template>：{{
+            item.ok ? `连接正常，耗时 ${item.latencyMs} ms` : item.error
+          }}
+        </li>
+      </ul>
+      <ul v-if="dreamResult" class="space-y-1 text-sm">
+        <li
+          v-for="(item, i) in dreamResult.results"
+          :key="i"
+          :class="item.ok ? 'text-success' : 'text-error'"
+        >
+          整理顺位 {{ i + 1 }}<template v-if="item.model">（{{ item.model }}）</template>：{{
+            item.ok ? `连接正常，耗时 ${item.latencyMs} ms` : item.error
+          }}
+        </li>
+      </ul>
     </form>
   </SettingsBlock>
 
@@ -221,8 +254,9 @@ async function clear() {
           variant="ghost"
           :disabled="clearing"
           @click="confirmingClear = false"
-          >取消</UButton
         >
+          取消
+        </UButton>
         <UButton color="error" :loading="clearing" @click="clear">清除</UButton>
       </div>
     </template>

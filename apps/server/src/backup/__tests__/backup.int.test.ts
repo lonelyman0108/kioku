@@ -398,18 +398,28 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
       })
     })
 
+    const provRes = await send(
+      'POST',
+      '/v1/settings/models/providers',
+      {
+        name: '测试服务商',
+        format: 'openai-chat',
+        baseUrl: 'https://e.example.com/v1',
+        apiKey: 'sk-embed',
+        profiles: [
+          { kind: 'embedding', model: 'm' },
+          { kind: 'chat', model: 'x' },
+        ],
+      },
+      cookie,
+    )
+    expect(provRes.status).toBe(201)
+    const prov = (await provRes.json()) as { profiles: { id: string; kind: string }[] }
+    const embedId = prov.profiles.find((p) => p.kind === 'embedding')!.id
+    const chatId = prov.profiles.find((p) => p.kind === 'chat')!.id
     for (const [path, body] of [
-      [
-        '/v1/settings/embedding',
-        {
-          model: 'm',
-          channels: [{ baseUrl: 'https://e.example.com/v1', model: 'm', apiKey: 'sk-embed' }],
-        },
-      ],
-      [
-        '/v1/settings/extraction',
-        { baseUrl: 'https://x.example.com/v1', model: 'x', apiKey: 'sk-extract' },
-      ],
+      ['/v1/settings/embedding', { model: 'm', profileIds: [embedId] }],
+      ['/v1/settings/models/bindings/extraction', { profileIds: [chatId] }],
     ] as const) {
       expect((await send('PUT', path, body, cookie)).status).toBe(200)
     }

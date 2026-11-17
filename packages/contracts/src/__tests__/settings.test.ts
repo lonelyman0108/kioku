@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { z } from 'zod'
 
-import { UpdateBackupSettings, UpdateEmbeddingSettings, UpdateExtractionSettings } from '../index'
+import { UpdateBackupSettings, UpdatePrivacyBinding, UpsertModelProvider } from '../index'
 
 // 解析一份设置：通过时取出密钥字段，不通过时取第一条问题
 const outcome = <T>(result: z.ZodSafeParseResult<T>, field: (data: T) => unknown) =>
@@ -9,18 +9,25 @@ const outcome = <T>(result: z.ZodSafeParseResult<T>, field: (data: T) => unknown
     ? { success: true, value: field(result.data) }
     : { success: false, message: result.error.issues[0]?.message }
 
-const extraction = (apiKey: unknown) =>
+const provider = (apiKey: unknown) =>
   outcome(
-    UpdateExtractionSettings.safeParse({ baseUrl: 'https://example.com/v1', model: 'm', apiKey }),
+    UpsertModelProvider.safeParse({
+      name: '示例服务商',
+      format: 'openai-chat',
+      baseUrl: 'https://example.com/v1',
+      apiKey,
+      profiles: [{ kind: 'chat', model: 'm' }],
+    }),
     (data) => data.apiKey,
   )
-const embedding = (apiKey: unknown) =>
+const privacyHttp = (apiKey: unknown) =>
   outcome(
-    UpdateEmbeddingSettings.safeParse({
-      model: 'm',
-      channels: [{ baseUrl: 'https://example.com/v1', model: 'm', apiKey }],
+    UpdatePrivacyBinding.safeParse({
+      mode: 'http',
+      baseUrl: 'http://127.0.0.1:8080/detect',
+      apiKey,
     }),
-    (data) => data.channels[0]?.apiKey,
+    (data) => data.apiKey,
   )
 const backup = (secretAccessKey: unknown) =>
   outcome(
@@ -36,8 +43,8 @@ const backup = (secretAccessKey: unknown) =>
   )
 
 describe.each([
-  ['抽取模型的 Key', 'Key', extraction],
-  ['嵌入渠道的 Key', 'Key', embedding],
+  ['服务商的 Key', 'Key', provider],
+  ['隐私识别接口的 Key', 'Key', privacyHttp],
   ['备份存储的 Secret', 'Secret Access Key', backup],
 ])('%s', (_, name, parse) => {
   it.each(['sk-abc\n', 'sk-abc\r\n', ' sk-abc', '\tsk-abc \n', 'sk-abc\u00a0'])(
@@ -87,8 +94,8 @@ describe.each([
 
 describe('Key 与 Secret 的差别', () => {
   it('Key 填 null 表示不用 Key；Secret 不能清除', () => {
-    expect(extraction(null)).toEqual({ success: true, value: null })
-    expect(embedding(null)).toEqual({ success: true, value: null })
+    expect(provider(null)).toEqual({ success: true, value: null })
+    expect(privacyHttp(null)).toEqual({ success: true, value: null })
     expect(backup(null).success).toBe(false)
   })
 

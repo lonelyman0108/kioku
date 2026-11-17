@@ -329,7 +329,7 @@ export async function extractBatch(
     throw err
   }
   const usage = {
-    model: model.model,
+    model: completion.model ?? model.model,
     promptTokens: completion.usage.promptTokens,
     completionTokens: completion.usage.completionTokens,
   }

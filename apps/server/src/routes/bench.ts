@@ -16,18 +16,13 @@ import { bodyLimit } from 'hono/body-limit'
 import { keyToSimulate } from '../access/simulate'
 import { isInstanceAdmin } from '../auth/middleware'
 import { agentGetsTools, agentLoopFor, agentSendsTurnEnd } from '../bench/agentLoop'
-import {
-  AgentModelError,
-  endpointAddress,
-  requestAgentTurn,
-  toolDefinitions,
-} from '../bench/agentModel'
+import { AgentModelError, requestAgentTurn, toolDefinitions } from '../bench/agentModel'
 import { benchTools, runBench } from '../bench/inProcess'
 import { BENCH_SCENARIOS } from '../bench/scenarios'
-import { extractionSettingsView, loadExtractionConfig } from '../extraction/settings'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { consoleRoleFor } from '../memory/context'
+import { loadBenchAgentModelState, resolveChatProfileById } from '../models/store'
 import { unlocked } from '../settings/endpoint'
 
 const KeyParams = z.object({ spaceId: z.uuid(), appId: z.uuid(), keyId: z.uuid() })
@@ -83,7 +78,7 @@ const agentInfoRoute = createRoute({
   path: '/spaces/{spaceId}/apps/{appId}/keys/{keyId}/bench/agent',
   tags: ['bench'],
   summary:
-    '测试台：模型代理用不用得了（不是实例管理员也返回原因）、默认模型、接口的地址、这个运行时的循环与给不给工具（只给应用主人）',
+    '测试台：模型代理可用状态（非实例管理员也返回原因）、可选对话模型列表、默认模型、接口地址、运行时循环与是否给工具（只给应用所有者）',
   request: { params: KeyParams },
   responses: { 200: jsonResponse('模型代理的情况', BenchAgentInfo), ...errors },
 })
@@ -93,7 +88,7 @@ const agentTurnRoute = createRoute({
   path: '/spaces/{spaceId}/apps/{appId}/keys/{keyId}/bench/agent/turn',
   tags: ['bench'],
   summary:
-    '测试台：请求一次模型，用抽取模型的接口与 Key，工具来自真实的 tools/list；不计入抽取预算、不写库（只给实例管理员且是应用主人）',
+    '测试台：请求一次模型，使用所选对话模型或默认模型，工具来自真实 tools/list；不计入抽取预算、不写库（只给实例管理员且是应用所有者）',
   middleware: [
     bodyLimit({
       // 留出请求体里 messages 之外的部分，messages 本身的上限在契约里
@@ -104,7 +99,7 @@ const agentTurnRoute = createRoute({
   request: { params: KeyParams, body: jsonBody(BenchAgentTurnRequest) },
   responses: {
     200: jsonResponse('助手消息与解析好的工具调用', BenchAgentTurnResult),
-    400: jsonResponse('请求不合法、还没有配抽取模型，或者保存的 Key 解不开', ErrorResponse),
+    400: jsonResponse('请求不合法、尚未配置可用的对话模型，或保存的 Key 解不开', ErrorResponse),
     413: jsonResponse('请求体太大', ErrorResponse),
     502: jsonResponse('请求模型失败，带截断后的上游原文', ErrorResponse),
     ...errors,
@@ -145,34 +140,34 @@ export function benchRoutes(deps: Deps) {
           {
             available: false,
             reason: 'notAdmin' as const,
+            defaultProfileId: null,
             defaultModel: null,
             endpoint: null,
+            models: [],
             ...runtime,
           },
           200,
         )
       }
-      // 真的解一次，不只看设置在不在：Key 解不开时说能用，界面放开了之后每次请求都是 400
-      const config = await unlocked(() => loadExtractionConfig(deps.db, deps.masterKey))
-      if (!config.ok) {
-        const { model, baseUrl } = await extractionSettingsView(deps.db)
-        return c.json(
-          {
-            available: false,
-            reason: 'keyLocked' as const,
-            defaultModel: model,
-            endpoint: baseUrl && endpointAddress(baseUrl),
-            ...runtime,
-          },
-          200,
-        )
-      }
+      const state = await loadBenchAgentModelState(deps.db, deps.masterKey)
+      const def = state.defaultProfileId
+        ? (state.models.find((m) => m.profileId === state.defaultProfileId) ?? null)
+        : null
+      const anyAvailable = state.models.some((m) => m.available)
+      const reason =
+        state.models.length === 0
+          ? ('noModel' as const)
+          : !anyAvailable
+            ? ('keyLocked' as const)
+            : null
       return c.json(
         {
-          available: config.value !== null,
-          reason: config.value ? null : ('noModel' as const),
-          defaultModel: config.value?.model ?? null,
-          endpoint: config.value && endpointAddress(config.value.baseUrl),
+          available: anyAvailable,
+          reason,
+          defaultProfileId: state.defaultProfileId,
+          defaultModel: def?.model ?? null,
+          endpoint: def?.endpoint ?? null,
+          models: state.models,
           ...runtime,
         },
         200,
@@ -185,28 +180,39 @@ export function benchRoutes(deps: Deps) {
       if (!(await isInstanceAdmin(deps.db, accountId))) {
         return c.json(
           {
-            error:
-              '仅实例管理员可使用模型代理：请求用的是实例中抽取模型的 API Key，且不计入抽取预算',
+            error: '仅实例管理员可使用模型代理：请求使用实例配置的模型 API Key，且不计入抽取预算',
           },
           403,
         )
       }
-      const loaded = await unlocked(() => loadExtractionConfig(deps.db, deps.masterKey))
+      const { profileId, messages } = c.req.valid('json')
+      let targetId = profileId
+      if (!targetId) {
+        const state = await loadBenchAgentModelState(deps.db, deps.masterKey)
+        if (!state.models.length) {
+          return c.json({ error: '尚未配置可用的对话模型，请先在实例设置中添加模型。' }, 400)
+        }
+        targetId = state.defaultProfileId ?? undefined
+      }
+      if (!targetId) {
+        return c.json({ error: '尚未配置可用的对话模型，请先在实例设置中添加模型。' }, 400)
+      }
+      const loaded = await unlocked(() => resolveChatProfileById(deps.db, deps.masterKey, targetId))
       if (!loaded.ok) return c.json({ error: loaded.error }, 400)
       const config = loaded.value
       if (!config) {
-        return c.json({ error: '未配置模型。请先在实例设置中配置抽取模型。' }, 400)
+        return c.json({ error: '所选模型条目不存在，请重新选择后再试。' }, 400)
       }
-      const { model, messages } = c.req.valid('json')
       const tools = agentGetsTools(agentLoopFor(found.key.app.runtimeFamily))
         ? toolDefinitions(await benchTools(deps, found.key))
         : []
       // 这里没有事务：请求模型可能要一两分钟，不占连接、不持锁
       try {
-        const turn = await requestAgentTurn(
-          { ...config, model: model ?? config.model },
-          { messages, tools, signal: c.req.raw.signal },
-        )
+        const turn = await requestAgentTurn(config, {
+          messages,
+          tools,
+          signal: c.req.raw.signal,
+        })
         return c.json(turn, 200)
       } catch (err) {
         if (err instanceof AgentModelError) return c.json({ error: err.message }, 502)

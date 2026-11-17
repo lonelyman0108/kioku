@@ -121,37 +121,6 @@ export function resolveSpacePrivacy(
   }
 }
 
-export const PRIVACY_MODEL_MODES = ['off', 'http', 'openai'] as const
-export const PrivacyModelMode = z.enum(PRIVACY_MODEL_MODES)
-export type PrivacyModelMode = z.infer<typeof PrivacyModelMode>
-
-export const PrivacyModelSettingsView = z.object({
-  mode: PrivacyModelMode,
-  configured: z.boolean(),
-  baseUrl: z.string().nullable(),
-  model: z.string().nullable(),
-  hasApiKey: z.boolean(),
-  minScore: z.number().min(0).max(1),
-})
-export type PrivacyModelSettingsView = z.infer<typeof PrivacyModelSettingsView>
-
-export const UpdatePrivacyModelSettings = z.object({
-  mode: PrivacyModelMode,
-  baseUrl: z.string().trim().max(500).nullable().optional(),
-  model: z.string().trim().max(200).nullable().optional(),
-  apiKey: z.string().max(1000).nullable().optional(),
-  minScore: z.number().min(0).max(1).default(0.6),
-})
-export type UpdatePrivacyModelSettings = z.infer<typeof UpdatePrivacyModelSettings>
-
-export const PrivacyModelTestResult = z.object({
-  ok: z.boolean(),
-  message: z.string(),
-  latencyMs: z.number().int().min(0).optional(),
-  findings: z.number().int().min(0).optional(),
-})
-export type PrivacyModelTestResult = z.infer<typeof PrivacyModelTestResult>
-
 // 存库与返回给前端的安全摘要：只留类别、细类、行号与可选规则名，绝不存明文值
 export const StoredSensitiveFinding = z.object({
   category: SensitiveCategory,

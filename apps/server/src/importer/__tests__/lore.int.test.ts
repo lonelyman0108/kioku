@@ -428,7 +428,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
     })
     expect(await verifyMasterKey(database.db, ws.spaceId, masterKey)).toBe(true)
     await expect(verifyMasterKey(database.db, ws.spaceId, randomBytes(32))).rejects.toThrow(
-      '解不开已保存的抽取模型 Key',
+      '解不开已保存的模型服务商 Key',
     )
   })
 

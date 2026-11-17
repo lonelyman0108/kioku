@@ -1062,22 +1062,33 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
   })
 
   it('嵌入设置只有管理员能改，Key 加密保存', async () => {
-    const put = await app.request(
-      '/v1/settings/embedding',
+    const provRes = await app.request(
+      '/v1/settings/models/providers',
       jsonRequest(
-        'PUT',
+        'POST',
         {
-          model: 'm',
-          channels: [{ baseUrl: 'https://e.example.com/v1', model: 'm', apiKey: 'sk-very-secret' }],
+          name: '嵌入服务商',
+          format: 'openai-chat',
+          baseUrl: 'https://e.example.com/v1',
+          apiKey: 'sk-very-secret',
+          profiles: [{ kind: 'embedding', model: 'm' }],
         },
         { cookie: ws.cookie },
       ),
+    )
+    expect(provRes.status).toBe(201)
+    const provider = (await provRes.json()) as { id: string; profiles: { id: string }[] }
+    const profileId = provider.profiles[0]!.id
+
+    const put = await app.request(
+      '/v1/settings/embedding',
+      jsonRequest('PUT', { model: 'm', profileIds: [profileId] }, { cookie: ws.cookie }),
     )
     expect(put.status).toBe(200)
     const saved = (await put.json()) as EmbeddingSettingsView
     expect(saved).toMatchObject({
       dimensions: 1024,
-      active: { model: 'm', channels: [{ model: 'm', hasApiKey: true }] },
+      active: { model: 'm', profileIds: [profileId], channels: [{ model: 'm', hasApiKey: true }] },
       next: null,
     })
     const stored = await database.db.select().from(settings)
@@ -1085,14 +1096,14 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
 
     // 同一主机只改路径、不带 Key 时沿用原来的 Key
     await app.request(
-      '/v1/settings/embedding',
+      `/v1/settings/models/providers/${provider.id}`,
       jsonRequest(
         'PUT',
         {
-          model: 'm',
-          channels: [
-            { id: saved.active!.channels[0]!.id, baseUrl: 'https://e.example.com/v2', model: 'm' },
-          ],
+          name: '嵌入服务商',
+          format: 'openai-chat',
+          baseUrl: 'https://e.example.com/v2',
+          profiles: [{ id: profileId, kind: 'embedding', model: 'm' }],
         },
         { cookie: ws.cookie },
       ),

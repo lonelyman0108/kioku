@@ -2,6 +2,7 @@ import { z } from 'zod'
 
 import { WhoAmI } from './auth'
 import { CredentialCapability, Layer, Sensitivity, SubjectKind } from './memory'
+import { ModelFormat, ThinkingLevel } from './models'
 import { SessionExtra, TurnEndEvent } from './recall'
 
 // 测试台：不接真实客户端，按一把 Key 模拟接入方调用 Kioku，步骤的结果和真实接入方收到的一样。
@@ -316,20 +317,36 @@ export const BENCH_AGENT_LOOPS = ['hook', 'chat', 'tools', 'approximate'] as con
 export const BenchAgentLoop = z.enum(BENCH_AGENT_LOOPS)
 export type BenchAgentLoop = z.infer<typeof BenchAgentLoop>
 
-// 模型代理用不了的原因。notAdmin：不是实例管理员（Key 是实例的，而且不计入抽取预算）；noModel：还没配抽取模型；
-// keyLocked：配了，但保存的 Key 解不开（主密钥没配或对不上）
+// 模型代理用不了的原因。notAdmin：不是实例管理员（Key 是实例的，而且不计入抽取预算）；noModel：还没有可用的对话模型；
+// keyLocked：有模型配置，但保存的 Key 解不开（主密钥没配或对不上）
 export const BENCH_AGENT_UNAVAILABLE = ['notAdmin', 'noModel', 'keyLocked'] as const
 export const BenchAgentUnavailable = z.enum(BENCH_AGENT_UNAVAILABLE)
 export type BenchAgentUnavailable = z.infer<typeof BenchAgentUnavailable>
+
+export const BenchAgentModelOption = z.object({
+  profileId: z.string(),
+  providerId: z.string(),
+  providerName: z.string(),
+  format: ModelFormat,
+  model: z.string(),
+  label: z.string().nullable(),
+  thinking: ThinkingLevel,
+  endpoint: z.string(),
+  available: z.boolean(),
+})
+export type BenchAgentModelOption = z.infer<typeof BenchAgentModelOption>
 
 export const BenchAgentInfo = z.object({
   available: z.boolean(),
   // 用不了的原因，能用时为 null
   reason: BenchAgentUnavailable.nullable(),
-  // 实例设置里的模型名。不是实例管理员时为 null：配没配、配的什么都是实例设置，不给他们看
+  // 默认选中的对话模型条目编号与模型名。不是实例管理员时为 null：配没配、配的什么都是实例设置，不给他们看
+  defaultProfileId: z.string().nullable(),
   defaultModel: z.string().nullable(),
-  // 抽取模型接口的地址（协议、主机与路径）：内容发给它，开始之前要写明。不带账号密码、查询与片段；不是实例管理员或没配时为 null
+  // 默认模型接口的地址（协议、主机与路径）：内容发给它，开始之前要写明。不带账号密码、查询与片段；不是实例管理员或没配时为 null
   endpoint: z.string().nullable(),
+  // 已配置的全部对话模型条目；不是实例管理员时为空数组
+  models: z.array(BenchAgentModelOption),
   loop: BenchAgentLoop,
   // 给不给模型工具
   tools: z.boolean(),
@@ -338,19 +355,33 @@ export const BenchAgentInfo = z.object({
 })
 export type BenchAgentInfo = z.infer<typeof BenchAgentInfo>
 
+// 跨协议思维链块：保留服务商要求回传的不透明签名与上下文（如 Anthropic signature、Gemini thoughtSignature、
+// OpenAI Responses reasoning item），由服务端按当前目标格式决定是否还原
+export const BenchAgentReasoningBlock = z.object({
+  format: ModelFormat,
+  kind: z.enum(['thinking', 'redacted_thinking', 'responses_reasoning', 'thought_signature']),
+  text: z.string().optional(),
+  signature: z.string().optional(),
+  data: z.string().optional(),
+  id: z.string().optional(),
+  encryptedContent: z.string().optional(),
+  toolCallId: z.string().optional(),
+})
+export type BenchAgentReasoningBlock = z.infer<typeof BenchAgentReasoningBlock>
+
 // 对话的上限：历史每一轮都整段发给模型，这么长早就超过模型的上下文了
 export const BENCH_AGENT_MAX_MESSAGES = 1000
 export const BENCH_AGENT_MAX_BYTES = 4 * 1024 * 1024
 
-// 一条消息：除了 role 都原样转发。助手消息可能带 tool_calls 与 reasoning_content（有的模型要求原样带回），
+// 一条消息：除了 role 都原样转发。助手消息可能带 tool_calls、reasoning_content 与 reasoning_blocks，
 // tool 消息带 tool_call_id
 export const BenchAgentMessage = z.looseObject({ role: z.string().min(1).max(64) })
 export type BenchAgentMessage = z.infer<typeof BenchAgentMessage>
 
 export const BenchAgentTurnRequest = z
   .strictObject({
-    // 换一个模型名，接口与 Key 不变；不给时用实例设置里的模型
-    model: z.string().trim().min(1).max(128, '模型名过长，最多 128 个字符').optional(),
+    // 指定要用的对话模型条目；不给时用默认（抽取主模型或第一个可用对话模型）
+    profileId: z.string().trim().min(1).max(32).optional(),
     messages: z
       .array(BenchAgentMessage)
       .min(1)

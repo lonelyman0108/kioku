@@ -1,59 +1,64 @@
-import { createRoute } from '@hono/zod-openapi'
+import { createRoute, z } from '@hono/zod-openapi'
 import {
+  DreamBindingView,
   EmbeddingRebuildResult,
   EmbeddingSettingsView,
   EmbeddingStatus,
   EmbeddingTestResult,
   ErrorResponse,
-  ExtractionSettingsView,
-  ExtractionTestResult,
+  ExtractionBindingView,
   InstanceAdvancedView,
   MasterKeyStatus,
-  PrivacyModelSettingsView,
-  PrivacyModelTestResult,
+  ModelChainTestResult,
+  ModelProfileTestResult,
+  ModelProviderView,
+  ModelRegistryView,
+  PrivacyBindingView,
   RecallSettings,
   RetentionResumed,
   RetentionSettings,
   RetentionView,
+  UpdateDreamBinding,
   UpdateEmbeddingSettings,
-  UpdateExtractionSettings,
+  UpdateExtractionBinding,
   UpdateInstanceAdvanced,
-  UpdatePrivacyModelSettings,
+  UpdatePrivacyBinding,
+  UpsertModelProvider,
 } from '@kioku/contracts'
+
 import { requireConsole, requireInstanceAdmin } from '../auth/middleware'
-import {
-  bumpPrivacyModelRevisions,
-  clearPrivacyModelConfig,
-  privacyModelSettingsView,
-  savePrivacyModelConfig,
-  testPrivacyModel,
-} from '../credential/privacy'
+import { bumpPrivacyModelRevisions, testPrivacyModel } from '../credential/privacy'
 import { masterKeyStatus } from '../crypto/rotation'
 import { EMBEDDING_DIMENSIONS } from '../db/schema'
 import { embeddingCoverage } from '../embedding/coverage'
 import { loadEmbeddingError } from '../embedding/errors'
-import { openAiEmbedder } from '../embedding/provider'
 import {
   clearNextEmbedding,
-  embeddingView,
+  embeddingSettingsView,
   loadEmbeddingModels,
   loadEmbeddingSetups,
   saveActiveEmbedding,
   saveNextEmbedding,
   switchEmbedding,
   type EmbeddingSetup,
-  type StoredEmbedding,
 } from '../embedding/settings'
-import { openAiChatModel } from '../extraction/provider'
-import {
-  clearExtractionConfig,
-  extractionSettingsView,
-  loadExtractionConfig,
-  saveExtractionConfig,
-} from '../extraction/settings'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { endPause, retentionView, saveRetentionDays } from '../jobs/retention'
+import { callChatProfile, callEmbeddingProfile } from '../models/execute'
+import {
+  createModelProvider,
+  deleteModelProvider,
+  loadDreamProfiles,
+  loadExtractionProfiles,
+  loadModelRegistryView,
+  resolveProfileById,
+  saveDreamBinding,
+  saveExtractionBinding,
+  savePrivacyBinding,
+  updateModelProvider,
+} from '../models/store'
+import type { ResolvedChatProfile } from '../models/types'
 import { loadRecallSettings, saveRecallSettings } from '../recall/retention'
 import { saveInstanceAdvanced } from '../settings/advanced'
 import { instanceAdvancedView } from '../settings/advancedViews'
@@ -61,6 +66,136 @@ import { SettingsInputError, unlocked } from '../settings/endpoint'
 import { backupRoutes } from './backup'
 
 const forbidden = jsonResponse('需要实例管理员', ErrorResponse)
+
+// ---- 模型服务商与用途绑定 ----
+
+const modelsView = createRoute({
+  method: 'get',
+  path: '/settings/models',
+  tags: ['settings'],
+  summary: '已配置的模型服务商、模型条目与各用途绑定（不返回 Key）',
+  responses: { 200: jsonResponse('模型配置', ModelRegistryView), 403: forbidden },
+})
+
+const providerCreate = createRoute({
+  method: 'post',
+  path: '/settings/models/providers',
+  tags: ['settings'],
+  summary: '新增模型服务商及其模型条目',
+  request: { body: jsonBody(UpsertModelProvider) },
+  responses: {
+    201: jsonResponse('已创建', ModelProviderView),
+    400: jsonResponse('无法保存', ErrorResponse),
+    403: forbidden,
+  },
+})
+
+const providerUpdate = createRoute({
+  method: 'put',
+  path: '/settings/models/providers/{providerId}',
+  tags: ['settings'],
+  summary: '修改模型服务商及其模型条目',
+  request: {
+    params: z.object({ providerId: z.string().min(1).max(32) }),
+    body: jsonBody(UpsertModelProvider),
+  },
+  responses: {
+    200: jsonResponse('已保存', ModelProviderView),
+    400: jsonResponse('无法保存', ErrorResponse),
+    403: forbidden,
+  },
+})
+
+const providerDelete = createRoute({
+  method: 'delete',
+  path: '/settings/models/providers/{providerId}',
+  tags: ['settings'],
+  summary: '删除未被引用的模型服务商',
+  request: { params: z.object({ providerId: z.string().min(1).max(32) }) },
+  responses: {
+    204: { description: '已删除' },
+    400: jsonResponse('无法删除', ErrorResponse),
+    403: forbidden,
+  },
+})
+
+const profileTest = createRoute({
+  method: 'post',
+  path: '/settings/models/profiles/{profileId}/test',
+  tags: ['settings'],
+  summary: '用已保存的服务商配置测试单个模型条目连通性',
+  request: { params: z.object({ profileId: z.string().min(1).max(32) }) },
+  responses: {
+    200: jsonResponse('测试结果', ModelProfileTestResult),
+    400: jsonResponse('找不到或解不开配置', ErrorResponse),
+    403: forbidden,
+  },
+})
+
+const extractionBindingUpdate = createRoute({
+  method: 'put',
+  path: '/settings/models/bindings/extraction',
+  tags: ['settings'],
+  summary: '设置抽取模型的对话模型链（按顺序 Fallback）；传空数组停止抽取',
+  request: { body: jsonBody(UpdateExtractionBinding) },
+  responses: {
+    200: jsonResponse('已保存', ExtractionBindingView),
+    400: jsonResponse('无法保存', ErrorResponse),
+    403: forbidden,
+  },
+})
+
+const extractionBindingTest = createRoute({
+  method: 'post',
+  path: '/settings/models/bindings/extraction/test',
+  tags: ['settings'],
+  summary: '逐个测试已绑定的抽取模型连通性',
+  responses: { 200: jsonResponse('测试结果', ModelChainTestResult), 403: forbidden },
+})
+
+const dreamBindingUpdate = createRoute({
+  method: 'put',
+  path: '/settings/models/bindings/dream',
+  tags: ['settings'],
+  summary: '设置整理（Dream）的模型绑定（沿用抽取或单独指定）',
+  request: { body: jsonBody(UpdateDreamBinding) },
+  responses: {
+    200: jsonResponse('已保存', DreamBindingView),
+    400: jsonResponse('无法保存', ErrorResponse),
+    403: forbidden,
+  },
+})
+
+const dreamBindingTest = createRoute({
+  method: 'post',
+  path: '/settings/models/bindings/dream/test',
+  tags: ['settings'],
+  summary: '逐个测试已绑定的整理模型连通性',
+  responses: { 200: jsonResponse('测试结果', ModelChainTestResult), 403: forbidden },
+})
+
+const privacyBindingUpdate = createRoute({
+  method: 'put',
+  path: '/settings/models/bindings/privacy',
+  tags: ['settings'],
+  summary: '配置隐私识别模型（关闭、HTTP 识别接口或已配置对话模型）',
+  request: { body: jsonBody(UpdatePrivacyBinding) },
+  responses: {
+    200: jsonResponse('已保存', PrivacyBindingView),
+    400: jsonResponse('无法保存', ErrorResponse),
+    403: forbidden,
+  },
+})
+
+const privacyBindingTest = createRoute({
+  method: 'post',
+  path: '/settings/models/bindings/privacy/test',
+  tags: ['settings'],
+  summary: '测试已保存的隐私识别模型连通性',
+  responses: { 200: jsonResponse('测试结果', ModelChainTestResult), 403: forbidden },
+})
+
+// ---- 嵌入模型 ----
 
 const view = createRoute({
   method: 'get',
@@ -74,7 +209,7 @@ const update = createRoute({
   method: 'put',
   path: '/settings/embedding',
   tags: ['settings'],
-  summary: '修改正在用的模型的渠道；还没配置时是第一次配置，之后在后台为全部记忆生成向量',
+  summary: '修改正在用的模型的渠道引用；还没配置时是第一次配置，之后在后台为全部记忆生成向量',
   request: { body: jsonBody(UpdateEmbeddingSettings) },
   responses: {
     200: jsonResponse('已保存', EmbeddingSettingsView),
@@ -87,7 +222,7 @@ const updateNext = createRoute({
   method: 'put',
   path: '/settings/embedding/next',
   tags: ['settings'],
-  summary: '换模型，或改正在换过去的模型的渠道：后台补齐新模型的向量，补齐后切过去',
+  summary: '换模型，或改正在换过去的模型的渠道引用：后台补齐新模型的向量，补齐后切过去',
   request: { body: jsonBody(UpdateEmbeddingSettings) },
   responses: {
     200: jsonResponse('已保存', EmbeddingSettingsView),
@@ -153,6 +288,21 @@ const status = createRoute({
   responses: { 200: jsonResponse('进度', EmbeddingStatus), 403: forbidden },
 })
 
+const rebuild = createRoute({
+  method: 'post',
+  path: '/settings/embedding/rebuild',
+  tags: ['settings'],
+  summary: '在后台检查全部记忆，补齐缺少或过时的向量；正在换模型时也接着补新模型的',
+  responses: {
+    202: jsonResponse('已排队', EmbeddingRebuildResult),
+    400: jsonResponse('还没有保存嵌入设置', ErrorResponse),
+    503: jsonResponse('没有排进队列（服务没有启动后台任务，或入队失败）', ErrorResponse),
+    403: forbidden,
+  },
+})
+
+// ---- 其余实例设置 ----
+
 const masterKey = createRoute({
   method: 'get',
   path: '/settings/master-key',
@@ -209,93 +359,6 @@ const retentionResume = createRoute({
   responses: { 200: jsonResponse('保留期', RetentionResumed), 403: forbidden },
 })
 
-const rebuild = createRoute({
-  method: 'post',
-  path: '/settings/embedding/rebuild',
-  tags: ['settings'],
-  summary: '在后台检查全部记忆，补齐缺少或过时的向量；正在换模型时也接着补新模型的',
-  responses: {
-    202: jsonResponse('已排队', EmbeddingRebuildResult),
-    400: jsonResponse('还没有保存嵌入设置', ErrorResponse),
-    503: jsonResponse('没有排进队列（服务没有启动后台任务，或入队失败）', ErrorResponse),
-    403: forbidden,
-  },
-})
-
-const extractionView = createRoute({
-  method: 'get',
-  path: '/settings/extraction',
-  tags: ['settings'],
-  summary: '抽取模型设置（不返回 Key）',
-  responses: { 200: jsonResponse('设置', ExtractionSettingsView), 403: forbidden },
-})
-
-const extractionUpdate = createRoute({
-  method: 'put',
-  path: '/settings/extraction',
-  tags: ['settings'],
-  summary: '修改抽取模型：从对话里抽取事实、写会话摘要用的 OpenAI 兼容接口',
-  request: { body: jsonBody(UpdateExtractionSettings) },
-  responses: {
-    200: jsonResponse('已保存', ExtractionSettingsView),
-    400: jsonResponse('无法保存', ErrorResponse),
-    403: forbidden,
-  },
-})
-
-const extractionClear = createRoute({
-  method: 'delete',
-  path: '/settings/extraction',
-  tags: ['settings'],
-  summary: '清掉抽取模型的设置：抽取随即停止，对话缓冲到期后直接丢弃',
-  responses: { 204: { description: '已清除' }, 403: forbidden },
-})
-
-const extractionTest = createRoute({
-  method: 'post',
-  path: '/settings/extraction/test',
-  tags: ['settings'],
-  summary: '用已保存的设置请求一次抽取模型，检查连通性',
-  responses: { 200: jsonResponse('测试结果', ExtractionTestResult), 403: forbidden },
-})
-
-const privacyModelView = createRoute({
-  method: 'get',
-  path: '/settings/privacy-model',
-  tags: ['settings'],
-  summary: '隐私识别模型设置（不返回 Key）',
-  responses: { 200: jsonResponse('设置', PrivacyModelSettingsView), 403: forbidden },
-})
-
-const privacyModelUpdate = createRoute({
-  method: 'put',
-  path: '/settings/privacy-model',
-  tags: ['settings'],
-  summary: '配置外部/本地隐私识别模型（HTTP NER 或 OpenAI 兼容小模型）',
-  request: { body: jsonBody(UpdatePrivacyModelSettings) },
-  responses: {
-    200: jsonResponse('已保存', PrivacyModelSettingsView),
-    400: jsonResponse('无法保存', ErrorResponse),
-    403: forbidden,
-  },
-})
-
-const privacyModelClear = createRoute({
-  method: 'delete',
-  path: '/settings/privacy-model',
-  tags: ['settings'],
-  summary: '关闭并清除隐私识别模型设置',
-  responses: { 204: { description: '已清除' }, 403: forbidden },
-})
-
-const privacyModelTest = createRoute({
-  method: 'post',
-  path: '/settings/privacy-model/test',
-  tags: ['settings'],
-  summary: '测试已保存的隐私识别模型连通性',
-  responses: { 200: jsonResponse('测试结果', PrivacyModelTestResult), 403: forbidden },
-})
-
 const advancedView = createRoute({
   method: 'get',
   path: '/settings/advanced',
@@ -324,11 +387,10 @@ export function settingsRoutes(deps: Deps) {
   app.use('/settings/*', requireConsole(deps), requireInstanceAdmin(deps))
   app.route('/', backupRoutes(deps))
 
-  const viewOf = (stored: StoredEmbedding) => ({
+  const embeddingView = async () => ({
     dimensions: EMBEDDING_DIMENSIONS,
-    ...embeddingView(stored),
+    ...(await embeddingSettingsView(deps.db)),
   })
-  // 管理员填的设置不成立时返回 400 与原因，别的错误照常抛出
   const saving = async <T>(save: () => Promise<T>) => {
     try {
       return { ok: true as const, value: await save() }
@@ -337,27 +399,181 @@ export function settingsRoutes(deps: Deps) {
       throw err
     }
   }
+
   return app
-    .openapi(view, async (c) => c.json(viewOf(await loadEmbeddingModels(deps.db)), 200))
-    .openapi(update, async (c) => {
+    .openapi(modelsView, async (c) => c.json(await loadModelRegistryView(deps.db), 200))
+    .openapi(providerCreate, async (c) => {
       const saved = await saving(() =>
-        saveActiveEmbedding(deps.db, deps.masterKey, c.req.valid('json')),
+        createModelProvider(deps.db, deps.masterKey, c.req.valid('json')),
       )
+      if (!saved.ok) return c.json({ error: saved.error }, 400)
+      return c.json(saved.value.provider, 201)
+    })
+    .openapi(providerUpdate, async (c) => {
+      const { providerId } = c.req.valid('param')
+      const saved = await saving(() =>
+        updateModelProvider(deps.db, deps.masterKey, providerId, c.req.valid('json')),
+      )
+      if (!saved.ok) return c.json({ error: saved.error }, 400)
+      if (saved.value.affectsEmbedding) deps.embedder.invalidate()
+      return c.json(saved.value.provider, 200)
+    })
+    .openapi(providerDelete, async (c) => {
+      const { providerId } = c.req.valid('param')
+      const saved = await saving(() => deleteModelProvider(deps.db, providerId))
+      if (!saved.ok) return c.json({ error: saved.error }, 400)
+      return c.body(null, 204)
+    })
+    .openapi(profileTest, async (c) => {
+      const { profileId } = c.req.valid('param')
+      const resolved = await unlocked(() => resolveProfileById(deps.db, deps.masterKey, profileId))
+      if (!resolved.ok) return c.json({ error: resolved.error }, 400)
+      if (!resolved.value) return c.json({ error: '找不到这个模型条目' }, 400)
+      const started = Date.now()
+      if (resolved.value.kind === 'chat') {
+        const p = resolved.value.profile
+        try {
+          await callChatProfile(p, {
+            messages: [{ role: 'user', content: '这是连通性测试，只回复 ok。' }],
+            what: '模型接口',
+          })
+          return c.json(
+            {
+              profileId: p.profileId,
+              providerName: p.providerName,
+              model: p.model,
+              ok: true,
+              latencyMs: Date.now() - started,
+              error: null,
+            },
+            200,
+          )
+        } catch (err) {
+          return c.json(
+            {
+              profileId: p.profileId,
+              providerName: p.providerName,
+              model: p.model,
+              ok: false,
+              latencyMs: Date.now() - started,
+              error: (err as Error).message,
+            },
+            200,
+          )
+        }
+      }
+      const p = resolved.value.profile
+      try {
+        await callEmbeddingProfile(p, [PROBE])
+        return c.json(
+          {
+            profileId: p.profileId,
+            providerName: p.providerName,
+            model: p.model,
+            ok: true,
+            latencyMs: Date.now() - started,
+            error: null,
+          },
+          200,
+        )
+      } catch (err) {
+        return c.json(
+          {
+            profileId: p.profileId,
+            providerName: p.providerName,
+            model: p.model,
+            ok: false,
+            latencyMs: Date.now() - started,
+            error: (err as Error).message,
+          },
+          200,
+        )
+      }
+    })
+    .openapi(extractionBindingUpdate, async (c) => {
+      const saved = await saving(() => saveExtractionBinding(deps.db, c.req.valid('json')))
+      if (!saved.ok) return c.json({ error: saved.error }, 400)
+      return c.json(saved.value, 200)
+    })
+    .openapi(extractionBindingTest, async (c) => {
+      const loaded = await unlocked(() => loadExtractionProfiles(deps.db, deps.masterKey))
+      if (!loaded.ok) {
+        return c.json(
+          {
+            ok: false,
+            results: [
+              {
+                profileId: null,
+                providerName: null,
+                model: null,
+                ok: false,
+                latencyMs: 0,
+                error: loaded.error,
+              },
+            ],
+          },
+          200,
+        )
+      }
+      return c.json(await testChatChain(loaded.value, '尚未绑定抽取模型'), 200)
+    })
+    .openapi(dreamBindingUpdate, async (c) => {
+      const saved = await saving(() => saveDreamBinding(deps.db, c.req.valid('json')))
+      if (!saved.ok) return c.json({ error: saved.error }, 400)
+      return c.json(saved.value, 200)
+    })
+    .openapi(dreamBindingTest, async (c) => {
+      const loaded = await unlocked(() => loadDreamProfiles(deps.db, deps.masterKey))
+      if (!loaded.ok) {
+        return c.json(
+          {
+            ok: false,
+            results: [
+              {
+                profileId: null,
+                providerName: null,
+                model: null,
+                ok: false,
+                latencyMs: 0,
+                error: loaded.error,
+              },
+            ],
+          },
+          200,
+        )
+      }
+      return c.json(await testChatChain(loaded.value, '尚未绑定整理模型'), 200)
+    })
+    .openapi(privacyBindingUpdate, async (c) => {
+      const saved = await saving(() =>
+        savePrivacyBinding(deps.db, deps.masterKey, c.req.valid('json')),
+      )
+      if (!saved.ok) return c.json({ error: saved.error }, 400)
+      await bumpPrivacyModelRevisions(deps.db)
+      void deps.jobs?.enqueueSensitiveRescan?.()
+      return c.json(saved.value, 200)
+    })
+    .openapi(privacyBindingTest, async (c) =>
+      c.json(await testPrivacyModel(deps.db, deps.masterKey), 200),
+    )
+    .openapi(view, async (c) => c.json(await embeddingView(), 200))
+    .openapi(update, async (c) => {
+      const saved = await saving(() => saveActiveEmbedding(deps.db, c.req.valid('json')))
       if (!saved.ok) return c.json({ error: saved.error }, 400)
       deps.embedder.invalidate()
       void deps.jobs?.enqueueBackfill()
-      return c.json(viewOf(saved.value), 200)
+      return c.json({ dimensions: EMBEDDING_DIMENSIONS, ...saved.value }, 200)
     })
     .openapi(updateNext, async (c) => {
-      const saved = await saving(() =>
-        saveNextEmbedding(deps.db, deps.masterKey, c.req.valid('json')),
-      )
+      const saved = await saving(() => saveNextEmbedding(deps.db, c.req.valid('json')))
       if (!saved.ok) return c.json({ error: saved.error }, 400)
       deps.embedder.invalidate()
-      // 换成了另一个新模型：原来那个已经生成的向量用不上了
       if (saved.value.replaced) void deps.jobs?.enqueuePrune()
       void deps.jobs?.enqueueSwitch()
-      return c.json(viewOf(saved.value.stored), 200)
+      return c.json(
+        { dimensions: EMBEDDING_DIMENSIONS, active: saved.value.active, next: saved.value.next },
+        200,
+      )
     })
     .openapi(clearNext, async (c) => {
       const cleared = await clearNextEmbedding(deps.db)
@@ -381,10 +597,9 @@ export function settingsRoutes(deps: Deps) {
         return c.json({ error: '没有正在更换的模型' }, 400)
       }
       deps.embedder.invalidate()
-      // 旧模型的向量删掉；还没有新模型向量的记忆接着补
       void deps.jobs?.enqueuePrune()
       void deps.jobs?.enqueueBackfill()
-      return c.json(viewOf(await loadEmbeddingModels(deps.db)), 200)
+      return c.json(await embeddingView(), 200)
     })
     .openapi(test, async (c) => {
       const setups = await unlocked(() => loadEmbeddingSetups(deps.db, deps.masterKey))
@@ -402,41 +617,12 @@ export function settingsRoutes(deps: Deps) {
         embeddingCoverage(deps.db, models),
         loadEmbeddingError(deps.db),
       ])
-      const progress = (setup: StoredEmbedding['active']) =>
+      const progress = (setup: { model: string } | null) =>
         setup && { model: setup.model, embedded: embedded.get(setup.model) ?? 0 }
       return c.json(
         { eligible, active: progress(stored.active), next: progress(stored.next), lastError },
         200,
       )
-    })
-    .openapi(extractionView, async (c) => c.json(await extractionSettingsView(deps.db), 200))
-    .openapi(extractionUpdate, async (c) => {
-      const saved = await saving(() =>
-        saveExtractionConfig(deps.db, deps.masterKey, c.req.valid('json')),
-      )
-      if (!saved.ok) return c.json({ error: saved.error }, 400)
-      return c.json(saved.value, 200)
-    })
-    .openapi(extractionClear, async (c) => {
-      await clearExtractionConfig(deps.db)
-      return c.body(null, 204)
-    })
-    .openapi(extractionTest, async (c) => {
-      const started = Date.now()
-      const result = (error: string | null) =>
-        c.json({ ok: error === null, latencyMs: Date.now() - started, error }, 200)
-      const config = await unlocked(() => loadExtractionConfig(deps.db, deps.masterKey))
-      if (!config.ok) return result(config.error)
-      if (!config.value) return result('尚未保存抽取模型设置')
-      try {
-        await openAiChatModel(config.value).complete([
-          { role: 'user', content: '这是连通性测试，只回复 ok。' },
-        ])
-        return result(null)
-      } catch (err) {
-        // 这里只有请求模型：模型报的错要让管理员看到，它的文字不带 Key
-        return result((err as Error).message)
-      }
     })
     .openapi(masterKey, async (c) => c.json(await masterKeyStatus(deps.db, deps.masterKey), 200))
     .openapi(recallView, async (c) => c.json(await loadRecallSettings(deps.db), 200))
@@ -457,7 +643,6 @@ export function settingsRoutes(deps: Deps) {
     })
     .openapi(retentionResume, async (c) => {
       await endPause(deps.db)
-      // 只等排队、不等清理做完；排不上时如实告诉界面，下一次定时清理（每小时）照样会做
       const queued = deps.jobs ? await deps.jobs.enqueueCleanup() : false
       return c.json({ ...(await retentionView(deps.db)), queued }, 200)
     })
@@ -465,31 +650,61 @@ export function settingsRoutes(deps: Deps) {
       const stored = await loadEmbeddingModels(deps.db)
       if (!stored.active) return c.json({ error: '尚未保存嵌入设置' }, 400)
       if (stored.next) void deps.jobs?.enqueueSwitch()
-      // 入队失败时如实返回，状态码也不报成已接受，不让管理员以为补齐已经在跑
       const queued = deps.jobs ? await deps.jobs.enqueueBackfill() : false
       return queued
         ? c.json({ queued }, 202)
         : c.json({ error: '未能加入队列：服务未启动后台任务或入队失败，请稍后重试' }, 503)
     })
-    .openapi(privacyModelView, async (c) => c.json(await privacyModelSettingsView(deps.db), 200))
-    .openapi(privacyModelUpdate, async (c) => {
-      const saved = await saving(() =>
-        savePrivacyModelConfig(deps.db, deps.masterKey, c.req.valid('json')),
-      )
-      if (!saved.ok) return c.json({ error: saved.error }, 400)
-      await bumpPrivacyModelRevisions(deps.db)
-      void deps.jobs?.enqueueSensitiveRescan?.()
-      return c.json(saved.value, 200)
-    })
-    .openapi(privacyModelClear, async (c) => {
-      await clearPrivacyModelConfig(deps.db)
-      await bumpPrivacyModelRevisions(deps.db)
-      void deps.jobs?.enqueueSensitiveRescan?.()
-      return c.body(null, 204)
-    })
-    .openapi(privacyModelTest, async (c) =>
-      c.json(await testPrivacyModel(deps.db, deps.masterKey), 200),
-    )
+}
+
+async function testChatChain(
+  profiles: readonly ResolvedChatProfile[],
+  emptyMessage: string,
+): Promise<ModelChainTestResult> {
+  if (!profiles.length) {
+    return {
+      ok: false,
+      results: [
+        {
+          profileId: null,
+          providerName: null,
+          model: null,
+          ok: false,
+          latencyMs: 0,
+          error: emptyMessage,
+        },
+      ],
+    }
+  }
+  const results = await Promise.all(
+    profiles.map(async (p) => {
+      const started = Date.now()
+      try {
+        await callChatProfile(p, {
+          messages: [{ role: 'user', content: '这是连通性测试，只回复 ok。' }],
+          what: '模型接口',
+        })
+        return {
+          profileId: p.profileId,
+          providerName: p.providerName,
+          model: p.model,
+          ok: true,
+          latencyMs: Date.now() - started,
+          error: null,
+        }
+      } catch (err) {
+        return {
+          profileId: p.profileId,
+          providerName: p.providerName,
+          model: p.model,
+          ok: false,
+          latencyMs: Date.now() - started,
+          error: (err as Error).message,
+        }
+      }
+    }),
+  )
+  return { ok: results.some((r) => r.ok), results }
 }
 
 const PROBE = '连通性测试'
@@ -506,17 +721,15 @@ function cosine(a: number[], b: number[]): number {
   return dot / (Math.sqrt(na) * Math.sqrt(nb) || 1)
 }
 
-// 一组渠道各请求一次同一段文本：维度不对算失败；和第一个通了的渠道比相似度，看是不是同一个模型
 async function testChannels(setup: EmbeddingSetup | null) {
   if (!setup) return null
   const results = await Promise.all(
     setup.channels.map(async (channel) => {
       const started = Date.now()
       try {
-        const [vector] = await openAiEmbedder(channel).embed([PROBE])
+        const [vector] = await callEmbeddingProfile(channel, [PROBE])
         return { vector: vector!, latencyMs: Date.now() - started, error: null }
       } catch (err) {
-        // 模型报的错要让管理员看到，它的文字不带 Key
         return { vector: null, latencyMs: Date.now() - started, error: (err as Error).message }
       }
     }),

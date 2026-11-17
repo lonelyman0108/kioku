@@ -182,8 +182,10 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       const unavailable = {
         available: false,
         reason: 'notAdmin',
+        defaultProfileId: null,
         defaultModel: null,
         endpoint: null,
+        models: [],
         loop: 'hook',
         tools: true,
         turnEnd: true,
@@ -264,28 +266,30 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
   })
 
   describe('设置', () => {
-    it('没配模型：请求模型 400，说明去实例设置配抽取模型；查情况给原因；配好之后可用', async () => {
+    it('没配模型：请求模型 400，说明去实例设置添加模型；查情况给原因；配好之后可用', async () => {
       const res = await postTurn({ messages: [USER] })
       expect(res.status).toBe(400)
       const error = await errorOf(res)
       expect(error).toContain('实例设置')
-      expect(error).toContain('抽取模型')
       expect(BenchAgentInfo.parse(await (await getInfo()).json())).toEqual({
         available: false,
         reason: 'noModel',
+        defaultProfileId: null,
         defaultModel: null,
         endpoint: null,
+        models: [],
         loop: 'hook',
         tools: true,
         turnEnd: true,
       })
 
       const server = await startModel(() => '好')
-      expect(BenchAgentInfo.parse(await (await getInfo()).json())).toEqual({
+      expect(BenchAgentInfo.parse(await (await getInfo()).json())).toMatchObject({
         available: true,
         reason: null,
         defaultModel: 'fake-model',
         endpoint: server.url,
+        models: [{ model: 'fake-model', endpoint: server.url, available: true }],
         loop: 'hook',
         tools: true,
         turnEnd: true,
@@ -293,12 +297,14 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
     })
 
     it('接口的地址：协议、主机、端口与路径都在，不带账号密码、查询与片段；哪样变了都跟着变', async () => {
-      const save = (baseUrl: string) =>
-        saveExtractionConfig(database.db, masterKey, {
+      const save = async (baseUrl: string) => {
+        await database.db.delete(settings)
+        await saveExtractionConfig(database.db, masterKey, {
           baseUrl,
           model: 'fake-model',
           apiKey: API_KEY,
         })
+      }
       const endpoint = async () => BenchAgentInfo.parse(await (await getInfo()).json()).endpoint
 
       await save('https://user:hunter2@model.example.com:8443/openai/v1?token=abc#frag')
@@ -325,6 +331,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       reason: 'keyLocked',
       defaultModel: 'fake-model',
       endpoint: server.url,
+      models: [{ model: 'fake-model', endpoint: server.url, available: false }],
       loop: 'hook',
       tools: true,
       turnEnd: true,
@@ -338,7 +345,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       expect(await errorOf(res)).toContain('KIOKU_MASTER_KEY')
       const info = await getInfo(ws.cookie, benchPath(), noKey)
       expect(info.status).toBe(200)
-      expect(BenchAgentInfo.parse(await info.json())).toEqual(keyLocked(server))
+      expect(BenchAgentInfo.parse(await info.json())).toMatchObject(keyLocked(server))
       expect(server.requests).toHaveLength(0)
     })
 
@@ -349,20 +356,23 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         const res = await postTurn({ messages: [USER] }, ws.cookie, benchPath(), otherKey)
         expect(res.status).toBe(400)
         const error = await errorOf(res)
-        expect(error).toContain('抽取模型的 Key 无法解密')
+        expect(error).toContain('的 Key 无法解密')
         expect(error).toContain('KIOKU_MASTER_KEY')
         expect(error).toContain('旧密钥须配置在 KIOKU_MASTER_KEY_PREVIOUS')
         const info = await getInfo(ws.cookie, benchPath(), otherKey)
         expect(info.status).toBe(200)
-        expect(BenchAgentInfo.parse(await info.json())).toEqual(keyLocked(server))
+        expect(BenchAgentInfo.parse(await info.json())).toMatchObject(keyLocked(server))
       }
       // 记着主密钥的标识：还没解密就知道对不上
       await expectLocked()
       // 加上标识之前保存的：解密时才失败
-      const [row] = await database.db.select().from(settings).where(eq(settings.key, 'extraction'))
-      const value = row!.value as { apiKey: { keyId?: string } }
-      delete value.apiKey.keyId
-      await database.db.update(settings).set({ value }).where(eq(settings.key, 'extraction'))
+      const [row] = await database.db
+        .select()
+        .from(settings)
+        .where(eq(settings.key, 'model-providers'))
+      const value = row!.value as { providers: { apiKey?: { keyId?: string } }[] }
+      delete value.providers[0]!.apiKey!.keyId
+      await database.db.update(settings).set({ value }).where(eq(settings.key, 'model-providers'))
       await expectLocked()
       expect(server.requests).toHaveLength(0)
     })
@@ -446,7 +456,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         const key = await ws.createKey(created)
         const path = benchPath(created, key.id)
         const server = await startModel(() => '好')
-        expect(await (await getInfo(ws.cookie, path)).json()).toEqual({
+        expect(await (await getInfo(ws.cookie, path)).json()).toMatchObject({
           available: true,
           reason: null,
           defaultModel: 'fake-model',
@@ -838,11 +848,29 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       expect(server.requests[1]).toEqual(history)
     })
 
-    it('改模型名生效，接口与 Key 不变；用量与耗时都返回', async () => {
+    it('切换已配置模型条目生效；用量与耗时都返回', async () => {
       const server = await startModel(async () => {
         await new Promise((resolve) => setTimeout(resolve, 30))
         return '好'
       })
+      const created = await app.request(
+        '/v1/settings/models/providers',
+        jsonRequest(
+          'POST',
+          {
+            name: '备选服务商',
+            format: 'openai-chat',
+            baseUrl: server.url,
+            apiKey: API_KEY,
+            profiles: [{ kind: 'chat', model: 'other-model' }],
+          },
+          { cookie: ws.cookie },
+        ),
+      )
+      expect(created.status).toBe(201)
+      const otherProfileId = ((await created.json()) as { profiles: { id: string }[] }).profiles[0]!
+        .id
+
       const byDefault = await turn({ messages: [USER] })
       expect(byDefault.model).toBe('fake-model')
       expect(server.bodies[0]!.model).toBe('fake-model')
@@ -850,11 +878,11 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       // 假模型等了 30 毫秒。定时器可能早到一点，留出余量
       expect(byDefault.ms).toBeGreaterThanOrEqual(25)
 
-      const other = await turn({ model: '  other-model ', messages: [USER] })
+      const other = await turn({ profileId: otherProfileId, messages: [USER] })
       expect(other.model).toBe('other-model')
       expect(server.bodies[1]!.model).toBe('other-model')
       expect(server.authorizations[1]).toBe(`Bearer ${API_KEY}`)
-      // 实例设置没变
+      // 默认模型不变
       expect(await (await getInfo()).json()).toMatchObject({ defaultModel: 'fake-model' })
     })
   })
@@ -1027,13 +1055,12 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         { messages: ['不是对象'] },
         {},
         { messages: [USER], temperature: 0.5 },
-        { messages: [USER], model: '   ' },
+        { messages: [USER], profileId: '   ' },
       ]) {
         expect((await postTurn(body)).status, JSON.stringify(body)).toBe(400)
       }
-      const longName = await postTurn({ messages: [USER], model: 'x'.repeat(129) })
-      expect(longName.status).toBe(400)
-      expect(await errorOf(longName)).toContain('模型名过长')
+      const longId = await postTurn({ messages: [USER], profileId: 'x'.repeat(33) })
+      expect(longId.status).toBe(400)
       expect(server.requests).toHaveLength(0)
     })
 

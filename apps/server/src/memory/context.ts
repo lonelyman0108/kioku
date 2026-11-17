@@ -87,13 +87,14 @@ export async function semanticFor(
   timeoutMs?: number,
   spaceId?: string,
 ): Promise<QueryVector | null> {
+  const budgetSignal = timeoutMs !== undefined ? AbortSignal.timeout(timeoutMs) : undefined
   const compute = async () => {
     const embedder: Embedder | null = await deps.embedder.get().catch((err: unknown) => {
       console.warn('读取嵌入设置失败，本次召回不使用向量', loggableError(err))
       return null
     })
     const redactor = spaceId
-      ? await loadOutboundRedactor(deps.db, deps.masterKey ?? null, spaceId).catch(
+      ? await loadOutboundRedactor(deps.db, deps.masterKey ?? null, spaceId, budgetSignal).catch(
           () => (text: string) => maskForOutbound(text, DEFAULT_SPACE_PRIVACY),
         )
       : DEFAULT_SPACE_PRIVACY

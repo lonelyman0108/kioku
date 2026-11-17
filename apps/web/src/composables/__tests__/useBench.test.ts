@@ -855,6 +855,7 @@ const TOOLS_LOOP = {
   turnEnd: false,
   system: '基础',
   model: 'fake-model',
+  profileId: 'p1',
 }
 const CONSENT = {
   endpoint: 'https://model.example.com/v1',
@@ -897,7 +898,7 @@ describe('模型对话', () => {
     expect(fakes.api.benchAgentTurn).toHaveBeenCalledTimes(1)
     const [space, appId, keyId, body, signal] = fakes.api.benchAgentTurn.mock.calls[0]!
     expect([space, appId, keyId]).toEqual(['s1', 'a1', 'k1'])
-    expect(body).toMatchObject({ model: 'fake-model' })
+    expect(body).toMatchObject({ profileId: 'p1' })
     expect(signal).toBeInstanceOf(AbortSignal)
     expect(finished?.end).toBe('done')
     expect(bench.agent.value.messages.map((m) => m.role)).toEqual(['user', 'assistant'])
