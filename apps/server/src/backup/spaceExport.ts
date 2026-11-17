@@ -33,6 +33,7 @@ import {
 } from '../memory/service'
 import { formatUri } from '../memory/uri'
 import { APP_ADVANCED_FIELD, parseAppAdvanced, parseSpaceAdvanced } from '../settings/advanced'
+import { resolveSpacePrivacy } from '@kioku/contracts'
 import { VERSION } from '../version'
 import { deriveExportKey, ExportTooLarge, sealSpaceExport, type KdfParams } from './spaceFormat'
 import {
@@ -116,6 +117,9 @@ export async function exportSpace(
             extractionMonthlyTokens: space.extractionMonthlyTokens,
             extractionDailyWrites: space.extractionDailyWrites,
             advanced: parseSpaceAdvanced(space.advanced),
+            ...(Object.keys(space.privacy).length
+              ? { privacy: resolveSpacePrivacy(space.privacy) }
+              : {}),
           },
         })
         const source = lines(tx, {

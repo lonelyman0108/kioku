@@ -3,6 +3,7 @@ import { PgBoss, type JobResult } from 'pg-boss'
 import postgres from 'postgres'
 
 import { backupJob } from '../backup/storage'
+import { rescanAllSpacesSensitive, rescanSpaceSensitive } from '../credential/rescan'
 import type { MasterKey } from '../crypto/keyring'
 import { keyringOf } from '../crypto/keyring'
 import { recordMasterKeyError, rotationPass } from '../crypto/rotation'
@@ -26,6 +27,7 @@ const EXTRACT = 'extract-session'
 const BACKUP = 'backup'
 const DREAM = 'dream'
 const DREAM_TICK = 'dream-tick'
+const RESCAN_SENSITIVE = 'rescan-sensitive'
 // 每小时看一次哪些空间今天（UTC）还没做过定时的 Dream 整理，排上（见 dreamsDue）
 const DREAM_CRON = '41 * * * *'
 // 每小时清一次过期的数据（见 cleanupExpired）；保留期的硬删除跟在后面，一天做一次（见 retentionJob）
@@ -130,6 +132,8 @@ export interface Jobs {
   enqueueDream(spaceId: string): Promise<string | null>
   // 按编号查这个空间的一次整理的状态；编号不对、不是这个空间的、或者早就清理掉了时为 null
   dreamRun(spaceId: string, id: string): Promise<DreamRunStatus | null>
+  // 回扫指定空间或所有空间的非机密记忆的敏感命中状态
+  enqueueSensitiveRescan?: (spaceId?: string) => Promise<boolean>
 }
 
 interface DreamJob {
@@ -184,6 +188,7 @@ export async function startJobs(options: {
   await boss.createQueue(DREAM, { policy: 'stately', ...dreamQueue })
   await boss.updateQueue(DREAM, dreamQueue)
   await boss.createQueue(DREAM_TICK, { policy: 'singleton' })
+  await boss.createQueue(RESCAN_SENSITIVE, { policy: 'stately' })
 
   // 入队，返回任务编号（队列的策略挡下、没有建新任务时为 null）；入队失败时返回 undefined，只记日志。
   // 失败后默认重试几次；retry 为 false 时用队列上的选项（例如备份不重试）
@@ -330,6 +335,14 @@ export async function startJobs(options: {
   await boss.work(DREAM_TICK, async () => {
     for (const spaceId of await dreamsDue(options.db)) await sendDream(spaceId, 'scheduled')
   })
+  await boss.work<{ spaceId?: string }>(RESCAN_SENSITIVE, async ([job]) => {
+    if (!job) return
+    if (job.data?.spaceId) {
+      await rescanSpaceSensitive(options.db, options.masterKey, job.data.spaceId)
+    } else {
+      await rescanAllSpacesSensitive(options.db, options.masterKey)
+    }
+  })
   await boss.schedule(CLEANUP, CLEANUP_CRON)
   await boss.schedule(BACKUP, BACKUP_CRON)
   await boss.schedule(SWITCH, SWITCH_CRON)
@@ -381,6 +394,20 @@ export async function startJobs(options: {
         ? { state: 'finished', outcome: output.outcome, reason: output.reason ?? null }
         : { state: 'finished', outcome: 'failed', reason: null }
     },
+    enqueueSensitiveRescan: (spaceId) =>
+      boss
+        .upsert(RESCAN_SENSITIVE, spaceId ? { spaceId } : {}, {
+          singletonKey: spaceId ?? 'all',
+          retryLimit: 3,
+          retryBackoff: true,
+        })
+        .then(
+          () => true,
+          (err: unknown) => {
+            console.error('敏感内容回扫入队失败', err)
+            return false
+          },
+        ),
     stop: () => boss.stop({ graceful: true }),
   }
 }

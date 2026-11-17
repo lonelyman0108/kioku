@@ -4,12 +4,12 @@ import {
   CONVERT_SCOPE_TEXT,
   CREDENTIAL_PLACEHOLDER,
   CREDENTIAL_PLACEHOLDER_START,
+  addedSensitiveContent,
   CURATED_LAYERS,
   DEFAULT_SENSITIVITY,
   LAYER_NAMES,
+  maskSensitiveContent,
   NAMESPACED_LAYERS,
-  addedPlaintextCredentials,
-  findPlaintextCredentials,
   PLAINTEXT_CREDENTIAL_PARTS,
   PLAINTEXT_KIND_NAMES,
   ActivityFieldFilter,
@@ -43,6 +43,10 @@ import type {
   EventActor,
   ExpiredMemoryList,
   GlossaryIndex,
+  PlaintextKind,
+  RedactMemoryRequest,
+  SpacePrivacySettings,
+  StoredSensitiveFinding,
   LayerCount,
   MemoryChildren,
   MemoryHistory,
@@ -115,6 +119,13 @@ import {
   replaceOutsidePlaceholders,
   scanPlaceholders,
 } from '../credential/placeholders'
+import {
+  detectWithPrivacyModel,
+  evaluateSensitiveContent,
+  loadPrivacyModelConfig,
+  loadSpacePrivacy,
+  type ModelEntitySpan,
+} from '../credential/privacy'
 import { isUniqueViolation, nowOf, pgConstraint, pgErrorCode, type Db, type Tx } from '../db/client'
 import {
   decodeTimeCursor,
@@ -275,16 +286,11 @@ export type UpdateInput = UpdateMemoryRequest & PlaintextFlags
 // 旧的那几处这次都删掉了的照常记
 function ignoresPlaintext(
   input: PlaintextFlags,
-  content: string,
+  hasSensitive: boolean,
   sensitivity: Sensitivity,
   pendingBefore: boolean,
 ) {
-  return (
-    !!input.ignorePlaintext &&
-    !pendingBefore &&
-    sensitivity !== 'secret' &&
-    looksLikePlaintextCredential(content)
-  )
+  return !!input.ignorePlaintext && !pendingBefore && sensitivity !== 'secret' && hasSensitive
 }
 
 // 写入之后正文里还有原来就有、没处理过的疑似明文（不是这次新增的，记忆也没被忽略）的结果。
@@ -526,6 +532,7 @@ export type SuggestionAction =
     }
   | { kind: 'stale' }
   | { kind: 'review'; verdict: 'confirm' | 'delete' }
+  | { kind: 'promote'; priority: number }
 
 // 锁住的一条建议：涉及的记忆与生成时各自的版本，是不是还没处理，以及要做的事。要做的事在确认查看者看得到它、
 // 它也还没处理、涉及的记忆也锁住核对过之后才取（成员的修改不对时报 400，正文的检查要用到这几条记忆），
@@ -559,16 +566,18 @@ export interface CreateMeta {
   provenance?: Provenance
   // 写入前拦截新增的疑似明文（见 checkAddedPlaintext）。不给时拦；导入工具传 false，它在计划里另外处理
   plaintextGate?: boolean
+  modelSpans?: readonly ModelEntitySpan[]
 }
 
 // 导入工具按来源系统同步已导入的记忆时用：事件记成 sync 并带上出处
 export interface UpdateMeta {
-  eventType?: 'update' | 'sync'
+  eventType?: 'update' | 'sync' | 'redact'
   eventContext?: Record<string, unknown>
   requireAppOwner?: string
   via?: SecretVia
   // 同 CreateMeta.plaintextGate：导入工具的同步传 false
   plaintextGate?: boolean
+  modelSpans?: readonly ModelEntitySpan[]
 }
 
 function parse(uri: string): ParsedUri {
@@ -595,8 +604,18 @@ export function openMemoryContent(
   )
 }
 
-// 事件快照里不放的列：密文、数据密钥与它的主密钥标识、全文检索向量（向量里有正文分词）、忽略明文提示用的正文哈希
-const UNSNAPSHOTTED = ['ciphertext', 'wrappedKey', 'keyId', 'fts', 'plaintextIgnoredHash'] as const
+// 事件快照里不放的列：密文、数据密钥与它的主密钥标识、全文检索向量、忽略明文提示用的正文哈希与敏感扫描元数据
+const UNSNAPSHOTTED = [
+  'ciphertext',
+  'wrappedKey',
+  'keyId',
+  'fts',
+  'plaintextIgnoredHash',
+  'sensitiveRevision',
+  'sensitiveCredential',
+  'sensitivePii',
+  'sensitiveFindings',
+] as const
 export type SnapshotRow = Omit<MemoryRow, (typeof UNSNAPSHOTTED)[number]>
 
 // 写快照用得到的列：批量写入时只取回这些，不把密文与全文检索向量也取回来
@@ -896,6 +915,7 @@ export class MemoryService {
     const extra: Omit<ConsoleMemoryView, keyof MemoryView> = {
       contentHidden: hidden,
       plaintextIgnored: plaintextIgnored(row),
+      sensitiveFindings: row.sensitivity === 'secret' ? [] : row.sensitiveFindings,
     }
     return { ...view, ...extra }
   }
@@ -1134,8 +1154,25 @@ export class MemoryService {
     })
   }
 
+  private async preflightModelSpans(
+    content: string | undefined,
+    sensitivity?: Sensitivity,
+  ): Promise<ModelEntitySpan[]> {
+    if (!content || sensitivity === 'secret') return []
+    const { settings } = await loadSpacePrivacy(this.ctx.db, this.ctx.spaceId)
+    if (!settings.pii || !settings.usePrivacyModel) return []
+    try {
+      const config = await loadPrivacyModelConfig(this.ctx.db, this.ctx.masterKey)
+      if (!config) return []
+      return await detectWithPrivacyModel(config, content)
+    } catch {
+      return []
+    }
+  }
+
   async create(input: CreateInput, meta: CreateMeta = {}): Promise<MemoryView> {
-    const gated = { ...meta, plaintextGate: meta.plaintextGate ?? true }
+    const modelSpans = await this.preflightModelSpans(input.content, input.sensitivity)
+    const gated = { ...meta, plaintextGate: meta.plaintextGate ?? true, modelSpans }
     return this.write((tx, _personaIds, released) => this.insertCurated(tx, input, gated, released))
   }
 
@@ -1156,19 +1193,25 @@ export class MemoryService {
   // 明文一旦写进去就进了历史、全文检索与向量。结果是 secret 的不拦：正文加密，不进这几处。
   // 三个标记都放行：plaintextOk 与 allowPlaintext 照常写入、进待处理，ignorePlaintext 见 ignoresPlaintext
   private checkAddedPlaintext(
+    privacy: SpacePrivacySettings,
     input: PlaintextFlags,
     before: string | null,
     after: string,
     sensitivity: Sensitivity,
   ): void {
-    if (sensitivity === 'secret') return
+    if (sensitivity === 'secret' || !privacy.credentials) return
     if (input.plaintextOk || input.ignorePlaintext || input.allowPlaintext) return
-    const added = addedPlaintextCredentials(before, after)
+    const added = addedSensitiveContent(before, after, {
+      credentials: true,
+      pii: false,
+      customRules: privacy.customRules,
+      allowlist: privacy.allowlist,
+    })
     if (!added.length) return
     throw new MemoryError(
       400,
-      plaintextRejection(added, this.viaKey),
-      added.map(({ line, kind }) => ({ line, kind })),
+      plaintextRejection(added as unknown as PlaintextCredentialMatch[], this.viaKey),
+      added.map(({ line, kind }) => ({ line, kind: kind as PlaintextKind })),
     )
   }
 
@@ -1208,21 +1251,42 @@ export class MemoryService {
     }
     this.rejectMaskedText(input.content)
     this.checkPlaintextFlags(input)
-    if (meta.plaintextGate) this.checkAddedPlaintext(input, null, input.content, sensitivity)
+    const { settings: privacy, revision: sensitiveRevision } = await loadSpacePrivacy(
+      tx,
+      this.ctx.spaceId,
+    )
+    if (meta.plaintextGate) {
+      this.checkAddedPlaintext(privacy, input, null, input.content, sensitivity)
+    }
     checkOutsideContent(input.disclosure, input.glossary, input.title)
     await this.checkCredentialRefs(tx, { ...ownership, sensitivity, content: input.content }, null)
     await this.claimUri(tx, parsed, ownership, released)
 
     const id = randomUUID()
-    const ignored = ignoresPlaintext(input, input.content, sensitivity, false)
+    const scan =
+      sensitivity === 'secret'
+        ? { hasCredential: false, hasPii: false, findings: [] as StoredSensitiveFinding[] }
+        : evaluateSensitiveContent(input.content, privacy, meta.modelSpans ?? [])
+    const ignored = ignoresPlaintext(input, scan.hasCredential || scan.hasPii, sensitivity, false)
     const body =
       sensitivity === 'secret'
-        ? { content: null, ...this.seal(input.content, id) }
+        ? {
+            content: null,
+            ...this.seal(input.content, id),
+            sensitiveRevision,
+            sensitiveCredential: false,
+            sensitivePii: false,
+            sensitiveFindings: [] as StoredSensitiveFinding[],
+          }
         : {
             content: input.content,
             ciphertext: null,
             wrappedKey: null,
             keyId: null,
+            sensitiveRevision,
+            sensitiveCredential: scan.hasCredential,
+            sensitivePii: scan.hasPii,
+            sensitiveFindings: scan.findings,
             ...(ignored ? { plaintextIgnoredHash: contentHash(input.content) } : {}),
           }
     const [row] = await tx
@@ -1424,6 +1488,7 @@ export class MemoryService {
   }
 
   async update(input: UpdateInput, meta: UpdateMeta = {}): Promise<MemoryView> {
+    const modelSpans = await this.preflightModelSpans(input.content, input.sensitivity)
     const parsed = parse(input.uri)
     return this.write(async (tx, personaIds, released) => {
       const before = await this.findReadable(tx, parsed, personaIds)
@@ -1435,6 +1500,7 @@ export class MemoryService {
       return this.applyUpdate(tx, before, input, {
         released,
         plaintextGate: meta.plaintextGate ?? true,
+        modelSpans,
         ...(meta.eventType ? { eventType: meta.eventType } : {}),
         ...(meta.eventContext ? { eventContext: meta.eventContext } : {}),
         ...(meta.via ? { via: meta.via } : {}),
@@ -1461,6 +1527,7 @@ export class MemoryService {
       provenance?: Provenance
       // 响应带着解密出来的正文时经由哪里，记在访问事件里（见 toView）
       via?: SecretVia
+      modelSpans?: readonly ModelEntitySpan[]
     } = {},
   ): Promise<MemoryView> {
     if (input.expectedVersion !== undefined && input.expectedVersion !== before.version) {
@@ -1509,12 +1576,21 @@ export class MemoryService {
       },
       before.sensitivity === 'secret' && input.content === undefined,
     )
+    const { settings: privacy, revision: sensitiveRevision } = await loadSpacePrivacy(
+      tx,
+      this.ctx.spaceId,
+    )
+    const scan =
+      sensitivity === 'secret'
+        ? { hasCredential: false, hasPii: false, findings: [] as StoredSensitiveFinding[] }
+        : evaluateSensitiveContent(plaintext, privacy, meta.modelSpans ?? [])
+
     // 降级之后正文会进历史快照、全文检索和向量，带着明文降级就收不回来了。强制降级只给空间 owner
     if (
       before.sensitivity === 'secret' &&
       sensitivity !== 'secret' &&
       !(input.allowPlaintext && this.ctx.spaceOwner) &&
-      looksLikePlaintextCredential(plaintext)
+      scan.hasCredential
     ) {
       throw new MemoryError(
         400,
@@ -1524,21 +1600,43 @@ export class MemoryService {
     // 正文没改就不查：已有的疑似明文不挡修改
     const beforeContent = this.contentOf(before)
     if (meta.plaintextGate && input.content !== undefined) {
-      this.checkAddedPlaintext(input, beforeContent, input.content, sensitivity)
+      this.checkAddedPlaintext(privacy, input, beforeContent, input.content, sensitivity)
     }
-    // 写入之前就在待处理里的疑似明文（明文的正文像明文，提示没被忽略），其中有的在新正文里还在。
-    // 只有带着 ignorePlaintext 时用得上，不带时不算
+    // 写入之前就在待处理里的疑似敏感内容，其中有的在新正文里还在时，不替旧项做忽略决定
+    const beforeHasSensitive = before.sensitiveCredential || before.sensitivePii
     const pendingBefore =
       !!input.ignorePlaintext &&
       before.content !== null &&
-      looksLikePlaintextCredential(before.content) &&
+      beforeHasSensitive &&
       !plaintextIgnored(before) &&
-      hasExistingPlaintext(before.content, plaintext)
-    const ignored = ignoresPlaintext(input, plaintext, sensitivity, pendingBefore)
+      hasExistingPlaintext(privacy, before.content, plaintext)
+    const ignored = ignoresPlaintext(
+      input,
+      scan.hasCredential || scan.hasPii,
+      sensitivity,
+      pendingBefore,
+    )
     const body =
       sensitivity === 'secret'
-        ? { content: null, plaintextIgnoredHash: null, ...this.seal(plaintext, before.id) }
-        : { content: plaintext, ciphertext: null, wrappedKey: null, keyId: null }
+        ? {
+            content: null,
+            plaintextIgnoredHash: null,
+            sensitiveRevision,
+            sensitiveCredential: false,
+            sensitivePii: false,
+            sensitiveFindings: [] as StoredSensitiveFinding[],
+            ...this.seal(plaintext, before.id),
+          }
+        : {
+            content: plaintext,
+            ciphertext: null,
+            wrappedKey: null,
+            keyId: null,
+            sensitiveRevision,
+            sensitiveCredential: scan.hasCredential,
+            sensitivePii: scan.hasPii,
+            sensitiveFindings: scan.findings,
+          }
 
     const beforeGlossary =
       meta.glossary ?? (await this.glossaryOf(tx, [before.id])).get(before.id) ?? []
@@ -1628,7 +1726,7 @@ export class MemoryService {
       sensitivity !== 'secret' &&
       !plaintextIgnored(row) &&
       beforeContent !== null &&
-      hasExistingPlaintext(beforeContent, plaintext)
+      hasExistingPlaintext(privacy, beforeContent, plaintext)
     // 改成 secret 之后，历史事件里不能再留着明文
     if (becameSecret) {
       await this.scrubHistory(tx, before.id, headings!)
@@ -1713,15 +1811,32 @@ export class MemoryService {
       if (row.content === null) {
         throw new MemoryError(400, '机密记忆的正文已加密，没有明文提示')
       }
-      if (ignored && !looksLikePlaintextCredential(row.content)) {
-        throw new MemoryError(400, '这条记忆的正文没有疑似明文，无需忽略')
+      const { settings: privacy, revision: sensitiveRevision } = await loadSpacePrivacy(
+        tx,
+        this.ctx.spaceId,
+      )
+      const scan = evaluateSensitiveContent(row.content, privacy)
+      const hasSensitive =
+        row.sensitiveCredential || row.sensitivePii || scan.hasCredential || scan.hasPii
+      if (ignored && !hasSensitive) {
+        throw new MemoryError(400, '这条记忆的正文没有疑似敏感内容，无需忽略')
       }
       const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
       // 明文提示只有不是 secret 的记忆才有，上面已经挡了：这里的正文本来就是明文
       if (plaintextIgnored(row) === ignored) return this.toView(tx, row, glossary, null)
       const [after] = await tx
         .update(memories)
-        .set({ plaintextIgnoredHash: ignored ? contentHash(row.content) : null })
+        .set({
+          plaintextIgnoredHash: ignored ? contentHash(row.content) : null,
+          ...(scan.hasCredential || scan.hasPii
+            ? {
+                sensitiveRevision,
+                sensitiveCredential: scan.hasCredential || row.sensitiveCredential,
+                sensitivePii: scan.hasPii || row.sensitivePii,
+                sensitiveFindings: scan.findings.length ? scan.findings : row.sensitiveFindings,
+              }
+            : {}),
+        })
         .where(eq(memories.id, row.id))
         .returning()
       // 事件不改正文，快照里不再存一份：历史里的明文越少越好
@@ -1733,6 +1848,66 @@ export class MemoryService {
         null,
       )
       return this.toView(tx, after!, glossary, null)
+    })
+  }
+
+  // 一键打码：把记忆正文中的疑似明文凭据或 PII 替换为 *** 或 [REDACTED:KIND]
+  async redact(input: RedactMemoryRequest): Promise<MemoryView> {
+    if (this.viaKey) throw new MemoryError(403, '通过访问密钥无法执行一键打码，请在管理界面操作')
+    const { settings: privacy } = await loadSpacePrivacy(this.ctx.db, this.ctx.spaceId)
+    let modelConfig: Awaited<ReturnType<typeof loadPrivacyModelConfig>> = null
+    if (privacy.pii && privacy.usePrivacyModel) {
+      try {
+        modelConfig = await loadPrivacyModelConfig(this.ctx.db, this.ctx.masterKey)
+      } catch {
+        modelConfig = null
+      }
+    }
+    return this.write(async (tx, personaIds, released) => {
+      const row = await this.readableById(tx, input.memoryId, personaIds, true)
+      if (row.version !== input.expectedVersion) {
+        throw new MemoryError(409, `版本已变化：当前是 ${row.version}，请先重新读取`)
+      }
+      this.assertModifiable(row, `无权修改${LAYER_NAMES[row.layer]}的记忆`)
+      if (row.content === null) {
+        throw new MemoryError(400, '机密记忆的正文已加密，无需打码')
+      }
+      let modelSpans: ModelEntitySpan[] = []
+      if (modelConfig && privacy.pii && privacy.usePrivacyModel) {
+        try {
+          modelSpans = await detectWithPrivacyModel(modelConfig, row.content)
+        } catch {
+          modelSpans = []
+        }
+      }
+      const cats = new Set(input.categories ?? ['credential', 'pii'])
+      const redacted = maskSensitiveContent(
+        row.content,
+        {
+          credentials: cats.has('credential') && privacy.credentials,
+          pii: cats.has('pii') && privacy.pii,
+          piiKinds: privacy.piiKinds,
+          customRules: privacy.customRules,
+          allowlist: privacy.allowlist,
+        },
+        input.mode,
+        cats.has('pii') ? modelSpans : [],
+      )
+      if (redacted === row.content) {
+        const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
+        return this.toView(tx, row, glossary, null)
+      }
+      return this.applyUpdate(
+        tx,
+        row,
+        { content: redacted, expectedVersion: row.version },
+        {
+          released,
+          plaintextGate: false,
+          eventType: 'redact',
+          eventContext: { mode: input.mode, categories: [...cats] },
+        },
+      )
     })
   }
 
@@ -2224,6 +2399,12 @@ export class MemoryService {
           await this.settleReview(tx, rows, action.verdict, context)
           changed.push(...rows.map((r) => r.id))
           break
+        case 'promote':
+          for (const row of rows) {
+            await this.rewriteRow(tx, row, { priority: action.priority }, context)
+          }
+          changed.push(...rows.map((r) => r.id))
+          break
       }
       await done(tx)
       return view
@@ -2320,10 +2501,25 @@ export class MemoryService {
     fields: PgUpdateSetSource<typeof memories>,
     eventContext: Record<string, unknown>,
   ): Promise<void> {
+    let sensitivePatch: PgUpdateSetSource<typeof memories> = {}
+    if (typeof fields.content === 'string' && row.sensitivity !== 'secret') {
+      const { settings: privacy, revision: sensitiveRevision } = await loadSpacePrivacy(
+        tx,
+        this.ctx.spaceId,
+      )
+      const scan = evaluateSensitiveContent(fields.content, privacy)
+      sensitivePatch = {
+        sensitiveRevision,
+        sensitiveCredential: scan.hasCredential,
+        sensitivePii: scan.hasPii,
+        sensitiveFindings: scan.findings,
+      }
+    }
     const [after] = await tx
       .update(memories)
       .set({
         ...fields,
+        ...sensitivePatch,
         // 和 applyUpdate 一样：正文变了，忽略时记下的哈希不留着
         ...(fields.content !== undefined ? { plaintextIgnoredHash: null } : {}),
         version: sql`${memories.version} + 1`,
@@ -2541,6 +2737,9 @@ export class MemoryService {
           updatedAt: memories.updatedAt,
           updatedMicros: sql<string>`${UPDATED_MICROS}::text`,
           validTo: memories.validTo,
+          sensitiveCredential: memories.sensitiveCredential,
+          sensitivePii: memories.sensitivePii,
+          sensitiveFindings: memories.sensitiveFindings,
         })
         .from(memories)
         .where(
@@ -2565,6 +2764,10 @@ export class MemoryService {
             query.plaintext === 'true' ? PLAINTEXT : undefined,
             query.plaintext === 'false' ? sql`not coalesce(${PLAINTEXT}, false)` : undefined,
             query.plaintext === 'ignored' ? PLAINTEXT_IGNORED : undefined,
+            query.sensitiveCategory === 'credential'
+              ? eq(memories.sensitiveCredential, true)
+              : undefined,
+            query.sensitiveCategory === 'pii' ? eq(memories.sensitivePii, true) : undefined,
             // 时间原样交给数据库换算：经过 JS 的 Date 会丢掉微秒
             query.updatedAfter
               ? sql`${memories.updatedAt} >= ${query.updatedAfter}::timestamptz`
@@ -2594,6 +2797,9 @@ export class MemoryService {
           version: r.version,
           updatedAt: r.updatedAt.toISOString(),
           validTo: r.validTo?.toISOString() ?? null,
+          sensitiveCredential: r.sensitiveCredential,
+          sensitivePii: r.sensitivePii,
+          sensitiveFindings: r.sensitivity === 'secret' ? [] : r.sensitiveFindings,
         })),
         nextCursor: rows.length > query.limit && last ? encodeCursor(query.sort, last) : null,
       }
@@ -4046,31 +4252,44 @@ export function plaintextMatch(text: SQLWrapper): SQL {
     sql` or `,
   )})`
 }
-const PLAINTEXT_MATCH = plaintextMatch(memories.content)
+// 列表与待处理统计直接查写入或回扫时落库的布尔标记，不再实时在 SQL 里跑大正则
+const HAS_SENSITIVE = sql`(${memories.sensitiveCredential} or ${memories.sensitivePii})`
 // 提示被忽略了：存着的哈希和现在的正文对得上。判断只看这个比较，applyUpdate 在正文变化时清掉哈希只是不留着它。
 // 没有哈希的行不算哈希（case 里不会执行），开销只落在忽略过的那几条上
 const IGNORED_NOW = sql`(case when ${memories.plaintextIgnoredHash} is null then false
   else ${memories.plaintextIgnoredHash} = encode(sha256(convert_to(${memories.content}, 'UTF8')), 'hex') end)`
-const PLAINTEXT = sql`(${PLAINTEXT_MATCH} and not ${IGNORED_NOW})`
-const PLAINTEXT_IGNORED = sql`(${PLAINTEXT_MATCH} and ${IGNORED_NOW})`
+const PLAINTEXT = sql`(${HAS_SENSITIVE} and not ${IGNORED_NOW})`
+const PLAINTEXT_IGNORED = sql`(${HAS_SENSITIVE} and ${IGNORED_NOW})`
 
 // 和上面 SQL 里的哈希相同的算法，忽略时写进去、读的时候比对
 const contentHash = (content: string) => createHash('sha256').update(content, 'utf8').digest('hex')
 
-// after 里检出的疑似明文有没有原来（before）就检出过的值：不是这次新增的
-function hasExistingPlaintext(before: string, after: string): boolean {
-  const found = findPlaintextCredentials(after)
+// after 里检出的疑似凭据有没有原来（before）就检出过的值：不是这次新增的
+function hasExistingPlaintext(
+  privacy: SpacePrivacySettings,
+  before: string,
+  after: string,
+): boolean {
+  const opts = {
+    credentials: privacy.credentials,
+    pii: false,
+    customRules: privacy.customRules,
+    allowlist: privacy.allowlist,
+  }
+  const found = evaluateSensitiveContent(after, { ...privacy, pii: false }).matches
   if (!found.length) return false
-  const added = new Set(addedPlaintextCredentials(before, after).map((m) => m.start))
+  const added = new Set(addedSensitiveContent(before, after, opts).map((m) => m.start))
   return found.some((m) => !added.has(m.start))
 }
 
 // PLAINTEXT_IGNORED 的 JS 版本，给读到的那一行用
-function plaintextIgnored(row: Pick<MemoryRow, 'content' | 'plaintextIgnoredHash'>): boolean {
+function plaintextIgnored(
+  row: Pick<MemoryRow, 'content' | 'plaintextIgnoredHash' | 'sensitiveCredential' | 'sensitivePii'>,
+): boolean {
   return (
     row.plaintextIgnoredHash !== null &&
     row.content !== null &&
-    looksLikePlaintextCredential(row.content) &&
+    (row.sensitiveCredential || row.sensitivePii) &&
     row.plaintextIgnoredHash === contentHash(row.content)
   )
 }

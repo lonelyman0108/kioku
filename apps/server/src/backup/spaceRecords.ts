@@ -13,6 +13,7 @@ import {
   Sensitivity,
   Slug,
   SpaceAdvanced,
+  SpacePrivacySettings,
   SubjectKind,
   VaultCredentialFields,
   VaultEmail,
@@ -90,6 +91,7 @@ export const SpaceExportHeader = z.object({
     extractionMonthlyTokens: ExtractionBudget.shape.monthlyTokens,
     extractionDailyWrites: ExtractionBudget.shape.dailyWritesPerSubject,
     advanced: SpaceAdvanced,
+    privacy: SpacePrivacySettings.optional(),
   }),
 })
 export type SpaceExportHeader = z.infer<typeof SpaceExportHeader>

@@ -16,6 +16,7 @@ import {
   VAULT_ERROR_KINDS,
   type CredentialField,
   type KeyScopes,
+  type StoredSensitiveFinding,
 } from '@kioku/contracts'
 import { sql } from 'drizzle-orm'
 import {
@@ -97,6 +98,9 @@ export const spaces = pgTable('spaces', {
   extractionDailyWrites: integer().notNull().default(DEFAULT_EXTRACTION_DAILY_WRITES),
   // 高级设置里空间这一级的覆盖（contracts 的 SpaceAdvanced）：只存覆盖了的项，缺省沿用实例
   advanced: jsonb().$type<Record<string, unknown>>().notNull().default({}),
+  // 空间级的敏感内容识别与脱敏设置（contracts 的 SpacePrivacySettings）；revision 变更后触发后台回扫
+  privacy: jsonb().$type<Record<string, unknown>>().notNull().default({}),
+  privacyRevision: integer().notNull().default(1),
   createdAt: createdAt(),
 })
 
@@ -488,6 +492,11 @@ export const memories = pgTable(
     // 不进事件快照，也不随空间导出（历史不跟着走，到了那边查不到是谁忽略的）；
     // 正文变化、改成 secret 时清掉：它是含旧值的正文的哈希，能离线猜解，密文的哈希也不能留在明文列里
     plaintextIgnoredHash: text(),
+    // 写入或回扫时由服务端完整引擎计算的敏感命中结果（只存类别与行号摘要，绝不存明文值）
+    sensitiveRevision: integer().notNull().default(0),
+    sensitiveCredential: boolean().notNull().default(false),
+    sensitivePii: boolean().notNull().default(false),
+    sensitiveFindings: jsonb().$type<StoredSensitiveFinding[]>().notNull().default([]),
     priority: integer().notNull().default(2),
     disclosure: text(),
     validFrom: timestamp({ withTimezone: true }).notNull().defaultNow(),
@@ -524,6 +533,9 @@ export const memories = pgTable(
     index('memories_key_id_idx')
       .on(t.spaceId, t.keyId)
       .where(sql`${t.wrappedKey} is not null`),
+    index('memories_sensitive_idx')
+      .on(t.spaceId, t.sensitiveCredential, t.sensitivePii)
+      .where(sql`${t.deletedAt} is null`),
     unique().on(t.spaceId, t.id),
     foreignKey({
       columns: [t.spaceId, t.personaId],
@@ -1253,6 +1265,8 @@ export const dreamSuggestions = pgTable(
     disclosure: text(),
     // 审核：confirm | delete
     verdict: text(),
+    // 晋升：目标优先级（0 为加入启动加载，1 为高优先级）
+    targetPriority: integer(),
     reason: text().notNull(),
     fingerprint: text().notNull(),
     // pending | applied | rejected
@@ -1265,7 +1279,10 @@ export const dreamSuggestions = pgTable(
     uniqueIndex('dream_suggestions_fingerprint_idx').on(t.spaceId, t.fingerprint),
     // 待审里按状态与时间翻页
     index().on(t.spaceId, t.status, t.createdAt),
-    check('dream_suggestions_kind', sql`${t.kind} in ('merge', 'distill', 'stale', 'review')`),
+    check(
+      'dream_suggestions_kind',
+      sql`${t.kind} in ('merge', 'distill', 'stale', 'review', 'promote')`,
+    ),
     check('dream_suggestions_status', sql`${t.status} in ('pending', 'applied', 'rejected')`),
     check(
       'dream_suggestions_memories',

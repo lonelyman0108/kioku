@@ -57,6 +57,13 @@
       "when": 1794472645286,
       "tag": "0007_device_grant_platforms",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1794883585741,
+      "tag": "0008_sensitive_privacy",
+      "breakpoints": true
     }
   ]
 }
