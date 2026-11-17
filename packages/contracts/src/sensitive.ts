@@ -1247,6 +1247,10 @@ function insideSpans(spans: readonly [number, number][], start: number, end: num
   return false
 }
 
+function buildAllowSet(allowlist?: readonly string[]): Set<string> {
+  return new Set((allowlist ?? []).map((w) => w.trim().toLowerCase()).filter((w) => w.length >= 2))
+}
+
 export function scanSensitiveContent(
   text: string,
   options: SensitiveScanOptions = {},
@@ -1257,9 +1261,7 @@ export function scanSensitiveContent(
     ...DEFAULT_PII_KINDS,
     ...(options.piiKinds ?? {}),
   }
-  const allowSet = new Set(
-    (options.allowlist ?? []).map((w) => w.trim().toLowerCase()).filter((w) => w.length >= 2),
-  )
+  const allowSet = buildAllowSet(options.allowlist)
 
   const protectedSpans = collectPlaceholderSpans(text)
   const raw: Omit<SensitiveMatch, 'line'>[] = []
@@ -1709,6 +1711,14 @@ export function maskSensitiveContent(
   extraSpans: readonly { start: number; end: number; kind: string }[] = [],
 ): string {
   const matches = scanSensitiveContent(text, { ...options, overlapping: true })
+  const allowSet = buildAllowSet(options.allowlist)
+  const protectedSpans = extraSpans.length ? collectPlaceholderSpans(text) : []
+  const filteredExtra = extraSpans.filter((s) => {
+    if (s.start < 0 || s.end > text.length || s.start >= s.end) return false
+    if (insideSpans(protectedSpans, s.start, s.end)) return false
+    const val = text.slice(s.start, s.end).trim().toLowerCase()
+    return !allowSet.has(val)
+  })
   const spans: { start: number; end: number; tag: string; wrap: boolean }[] = [
     ...matches.map((m) => ({
       start: m.start,
@@ -1716,7 +1726,7 @@ export function maskSensitiveContent(
       tag: (m.label ?? m.kind).toUpperCase(),
       wrap: m.category === 'credential',
     })),
-    ...extraSpans.map((s) => ({
+    ...filteredExtra.map((s) => ({
       start: s.start,
       end: s.end,
       tag: s.kind.toUpperCase(),

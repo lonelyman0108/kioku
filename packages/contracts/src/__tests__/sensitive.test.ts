@@ -201,6 +201,21 @@ describe('自定义规则、白名单与打码', () => {
     expect(tagged).toBe('key=[REDACTED:CORP_KEY] phone=13800138000 other=[REDACTED:PHONE]')
     const starred = maskSensitiveContent('电话 13900139000 和 {{cred:wifi}}', opts, 'stars')
     expect(starred).toBe('电话 *** 和 {{cred:wifi}}')
+
+    // 模型额外识别片段同样遵循占位符保护与白名单放行
+    const modelInput = '联系人 张三，白名单 13800138000，凭据 {{cred:alice#token}}'
+    const spanOf = (sub: string, kind: string) => {
+      const start = modelInput.indexOf(sub)
+      return { start, end: start + sub.length, kind }
+    }
+    const extraSpans = [
+      spanOf('张三', 'person'),
+      spanOf('13800138000', 'account'),
+      spanOf('alice#token', 'account'),
+    ]
+    expect(maskSensitiveContent(modelInput, opts, 'tag', extraSpans)).toBe(
+      '联系人 [REDACTED:PERSON]，白名单 13800138000，凭据 {{cred:alice#token}}',
+    )
   })
 
   it('addedSensitiveContent 对比新增项', () => {
