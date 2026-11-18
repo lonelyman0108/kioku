@@ -28,7 +28,8 @@ COPY --from=build /out ./server
 COPY --from=build /src/apps/web/dist ./web/dist
 # 数据目录：初始化页保存的数据库连接（kioku.json）放在这里，部署时挂成持久的卷
 ENV KIOKU_DATA_DIR=/data
-RUN mkdir -p /data && chown node:node /data && chmod 700 /data
+RUN mkdir -p /data && chown node:node /data && chmod 700 /data && \
+    chmod +x /app/server/bin/kioku-ctl && ln -s /app/server/bin/kioku-ctl /usr/local/bin/kioku-ctl
 USER node
 EXPOSE 18920
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
