@@ -1,26 +1,26 @@
 import { and, asc, eq, isNotNull, isNull, lt, ne } from 'drizzle-orm'
 
 import type { MasterKey } from '../crypto/keyring'
-import { withSpace, type Db } from '../db/client'
-import { memories, spaces } from '../db/schema'
+import { withCircle, type Db } from '../db/client'
+import { circles, entries, entryVariants } from '../db/schema'
 import {
   detectWithPrivacyModel,
   evaluateSensitiveContent,
+  loadCirclePrivacy,
   loadPrivacyModelConfig,
-  loadSpacePrivacy,
   type ModelEntitySpan,
   type PrivacyModelConfig,
 } from './privacy'
 
 const RESCAN_BATCH = 100
 
-// 按空间分批异步回扫非机密记忆的敏感命中结果：先读正文，外部模型调用在事务外完成，写回时核对正文未变
-export async function rescanSpaceSensitive(
+// 按记忆圈分批异步回扫非机密变体切片的敏感命中结果；外部模型调用在事务外完成，写回时核对切片正文未变
+export async function rescanCircleSensitive(
   db: Db,
   masterKey: MasterKey | null,
-  spaceId: string,
+  circleId: string,
 ): Promise<number> {
-  const { settings, revision } = await loadSpacePrivacy(db, spaceId)
+  const { settings, revision } = await loadCirclePrivacy(db, circleId)
   let modelConfig: PrivacyModelConfig | null = null
   if (settings.pii && settings.usePrivacyModel) {
     try {
@@ -32,30 +32,30 @@ export async function rescanSpaceSensitive(
 
   let updated = 0
   for (;;) {
-    const batch = await withSpace(db, spaceId, (tx) =>
+    const batch = await withCircle(db, circleId, (tx) =>
       tx
         .select({
-          id: memories.id,
-          content: memories.content,
-          version: memories.version,
+          variantId: entryVariants.id,
+          content: entryVariants.content,
         })
-        .from(memories)
+        .from(entryVariants)
+        .innerJoin(entries, eq(entries.id, entryVariants.entryId))
         .where(
           and(
-            isNull(memories.deletedAt),
-            isNotNull(memories.content),
-            ne(memories.sensitivity, 'secret'),
-            lt(memories.sensitiveRevision, revision),
+            isNull(entries.deletedAt),
+            isNotNull(entryVariants.content),
+            ne(entryVariants.sensitivity, 'secret'),
+            lt(entryVariants.sensitiveRevision, revision),
           ),
         )
-        .orderBy(asc(memories.id))
+        .orderBy(asc(entryVariants.id))
         .limit(RESCAN_BATCH),
     )
     if (!batch.length) break
 
     const results: {
-      id: string
-      version: number
+      variantId: string
+      content: string
       hasCredential: boolean
       hasPii: boolean
       findings: ReturnType<typeof evaluateSensitiveContent>['findings']
@@ -73,18 +73,18 @@ export async function rescanSpaceSensitive(
       }
       const outcome = evaluateSensitiveContent(text, settings, modelSpans)
       results.push({
-        id: row.id,
-        version: row.version,
+        variantId: row.variantId,
+        content: text,
         hasCredential: outcome.hasCredential,
         hasPii: outcome.hasPii,
         findings: outcome.findings,
       })
     }
 
-    await withSpace(db, spaceId, async (tx) => {
+    await withCircle(db, circleId, async (tx) => {
       for (const r of results) {
         await tx
-          .update(memories)
+          .update(entryVariants)
           .set({
             sensitiveRevision: revision,
             sensitiveCredential: r.hasCredential,
@@ -93,9 +93,9 @@ export async function rescanSpaceSensitive(
           })
           .where(
             and(
-              eq(memories.id, r.id),
-              eq(memories.version, r.version),
-              lt(memories.sensitiveRevision, revision),
+              eq(entryVariants.id, r.variantId),
+              eq(entryVariants.content, r.content),
+              lt(entryVariants.sensitiveRevision, revision),
             ),
           )
       }
@@ -105,15 +105,15 @@ export async function rescanSpaceSensitive(
   return updated
 }
 
-// 引擎升级后回扫所有空间
-export async function rescanAllSpacesSensitive(
+// 引擎升级后回扫所有记忆圈
+export async function rescanAllCirclesSensitive(
   db: Db,
   masterKey: MasterKey | null,
 ): Promise<number> {
-  const all = await db.select({ id: spaces.id }).from(spaces)
+  const all = await db.select({ id: circles.id }).from(circles)
   let total = 0
   for (const { id } of all) {
-    total += await rescanSpaceSensitive(db, masterKey, id)
+    total += await rescanCircleSensitive(db, masterKey, id)
   }
   return total
 }

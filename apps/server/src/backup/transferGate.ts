@@ -1,4 +1,4 @@
-import { MemoryError } from '../memory/service'
+import { MemoryError } from '../memory/errors'
 
 // 空间的导出、检查与导入：整个操作占一个名额，做完才放。这几样都要大块内存（口令派生上百 MiB、
 // 解密与解压最多 128 MiB 再逐行解析、导出的文件攒在内存里直到发完），又是很少用的管理操作：

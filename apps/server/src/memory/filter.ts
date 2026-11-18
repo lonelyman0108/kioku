@@ -1,7 +1,6 @@
 import {
-  BOOT_ENTRY_KINDS,
   ENTRY_KINDS,
-  REVIEW_ENTRY_KINDS,
+  REVIEW_KINDS,
   SENSITIVITIES,
   bootEligible,
   type EntryKind,
@@ -29,7 +28,7 @@ export function stillValid(at?: Date): SQL {
 
 export const STILL_VALID = stillValid()
 
-export { BOOT_ENTRY_KINDS, bootEligible }
+export { bootEligible }
 
 // 会进启动加载的词条：受信来源的正式词条，且 priority = 0
 export const BOOT_ELIGIBLE = and(
@@ -240,7 +239,7 @@ export function readableConditions(
 export function pendingReview(access: Access, now?: Date): SQL {
   return and(
     eq(entries.provenance, 'untrusted'),
-    inArray(entries.kind, [...REVIEW_ENTRY_KINDS]),
+    inArray(entries.kind, [...REVIEW_KINDS]),
     readableConditions(access, { ...(now ? { now } : {}) }),
   )!
 }

@@ -1,8 +1,8 @@
 import { LORE_BACKUP_FORMAT } from '@kioku/contracts'
 import { z } from 'zod'
 
-import { describeIssue, Text, Time } from '../backup/spaceRecords'
-import { MemoryError } from '../memory/service'
+import { describeIssue, Text, Time } from '../backup/circleRecords'
+import { MemoryError } from '../memory/errors'
 import { formatUri } from '../memory/uri'
 import type { LoreNode, LoreSnapshot } from './lore'
 

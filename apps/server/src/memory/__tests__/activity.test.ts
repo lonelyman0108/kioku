@@ -1,6 +1,24 @@
+import type { EntrySnapshot } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
-import { knownTimeZone, lineChanges } from '../activity'
+import { changedFields, fieldChanges, knownTimeZone, lineChanges } from '../activity'
+
+const snap = (overrides: Partial<EntrySnapshot> = {}): EntrySnapshot => ({
+  shortId: 'm-234567',
+  title: '网络配置',
+  kind: 'entry',
+  sensitivity: 'internal',
+  priority: 2,
+  disclosure: '网络与端口',
+  topics: ['network'],
+  realms: ['home'],
+  glossary: ['路由器'],
+  variants: [{ when: {}, content: '第一行\n第二行' }],
+  version: 1,
+  deleted: false,
+  validTo: null,
+  ...overrides,
+})
 
 describe('正文增删的行数', () => {
   it('按行做多重集合的差：改了一行算加一删一，加在末尾只算加', () => {
@@ -20,6 +38,50 @@ describe('正文增删的行数', () => {
     const start = performance.now()
     expect(lineChanges(before, after)).toEqual({ added: 20_000, removed: 20_000 })
     expect(performance.now() - start).toBeLessThan(200)
+  })
+})
+
+describe('多变体快照字段对比', () => {
+  it('准确识别变体集合增删、共有切片正文行数差与基础字段变更', () => {
+    const before = snap({
+      variants: [
+        { when: { env: ['mac'] }, content: 'brew install foo\nline2' },
+        { when: { env: ['linux'] }, content: 'apt install foo' },
+      ],
+      topics: ['network', 'old'],
+    })
+    const after = snap({
+      title: '开发环境',
+      priority: 0,
+      topics: ['network', 'dev'],
+      variants: [
+        { when: { env: ['mac'] }, content: 'brew install foo\nline2-edited\nline3' },
+        { when: { env: ['win'] }, content: 'winget install foo' },
+      ],
+    })
+    const fields = changedFields(before, after)
+    expect(fields).toEqual(['title', 'priority', 'topics', 'variants', 'content'])
+    expect(fieldChanges(before, after, fields)).toEqual([
+      { field: 'title', before: '网络配置', after: '开发环境' },
+      { field: 'priority', before: 2, after: 0 },
+      { field: 'topics', added: ['dev'], removed: ['old'] },
+      { field: 'variants', added: 1, removed: 1, modified: 1 },
+      { field: 'content', added: 2, removed: 1 },
+    ])
+  })
+
+  it('任意一侧为 secret 时正文与切片内容变动隐藏具体行数', () => {
+    const before = snap({
+      sensitivity: 'private',
+      variants: [{ when: {}, content: 'secret-text' }],
+    })
+    const after = snap({ sensitivity: 'secret', variants: [{ when: {}, content: null }] })
+    const fields = changedFields(before, after)
+    expect(fields).toContain('sensitivity')
+    expect(fields).toContain('content')
+    expect(fieldChanges(before, after, ['content'])).toEqual([
+      { field: 'content', added: null, removed: null },
+    ])
   })
 })
 

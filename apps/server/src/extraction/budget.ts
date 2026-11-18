@@ -1,41 +1,37 @@
 import type { ExtractionBudget, ExtractionUsage } from '@kioku/contracts'
 import { and, count, eq, gte, inArray, sql, type SQL } from 'drizzle-orm'
 
-import { withSpace, type Db, type Tx } from '../db/client'
-import { dreamRuns, extractionRuns, memories, spaces } from '../db/schema'
+import { withCircle, type Db, type Tx } from '../db/client'
+import { circles, dreamRuns, entries, extractionRuns } from '../db/schema'
 
-// 预算按 UTC 的自然月、自然日算，和服务器所在的时区无关。本月用量是本月抽取记录与 Dream 运行记录的用量之和，
-// 保留期的清理据此留着本月的这两种记录
+// 预算按 UTC 的自然月、自然日算，与服务器所在时区无关
 export const monthStart = (at: SQL): SQL => sql`date_trunc('month', ${at}, 'UTC')`
 const MONTH_START = monthStart(sql`now()`)
 const DAY_START = sql`date_trunc('day', now(), 'UTC')`
 
-// 这个空间的抽取预算与本月用掉的 token：抽取记录与 Dream 的运行记录里的用量之和（两者共用一份预算），
-// 解析失败、写入失败的那几次也算（token 已经花出去了）；请求模型失败时拿不到用量，记的是 0。
-// 预算是软上限：同时在跑的几批各自检查，可能一起超出一点
-export async function extractionUsage(db: Db, spaceId: string): Promise<ExtractionUsage> {
-  const [space] = await db
+// 读取指定记忆圈的抽取预算与本月 token 累计用量（抽取记录与 Dream 运行记录共用）
+export async function extractionUsage(db: Db, circleId: string): Promise<ExtractionUsage> {
+  const [circle] = await db
     .select({
-      monthlyTokens: spaces.extractionMonthlyTokens,
-      dailyWritesPerSubject: spaces.extractionDailyWrites,
+      monthlyTokens: circles.extractionMonthlyTokens,
+      dailyWritesPerSubject: circles.extractionDailyWrites,
     })
-    .from(spaces)
-    .where(eq(spaces.id, spaceId))
-  const [row] = await withSpace(db, spaceId, (tx) =>
+    .from(circles)
+    .where(eq(circles.id, circleId))
+  const [row] = await withCircle(db, circleId, (tx) =>
     tx
       .select({
         used: sql<string>`coalesce(sum(${extractionRuns.promptTokens} + ${extractionRuns.completionTokens}), 0)::bigint`,
         dream: sql<string>`(select coalesce(sum(${dreamRuns.promptTokens} + ${dreamRuns.completionTokens}), 0)::bigint
           from ${dreamRuns} where ${gte(dreamRuns.createdAt, MONTH_START)})`,
-        // 按秒数取出，不经过文本：文本格式随数据库的 DateStyle 变
         periodStart: sql<number>`extract(epoch from ${MONTH_START})::float8`,
       })
       .from(extractionRuns)
       .where(gte(extractionRuns.createdAt, MONTH_START)),
   )
   return {
-    monthlyTokens: space!.monthlyTokens,
-    dailyWritesPerSubject: space!.dailyWritesPerSubject,
+    monthlyTokens: circle!.monthlyTokens,
+    dailyWritesPerSubject: circle!.dailyWritesPerSubject,
     usedTokens: Number(row?.used ?? 0) + Number(row?.dream ?? 0),
     periodStart: new Date(Number(row!.periodStart) * 1000).toISOString(),
   }
@@ -43,35 +39,34 @@ export async function extractionUsage(db: Db, spaceId: string): Promise<Extracti
 
 export async function saveExtractionBudget(
   db: Db,
-  spaceId: string,
+  circleId: string,
   budget: ExtractionBudget,
 ): Promise<void> {
   await db
-    .update(spaces)
+    .update(circles)
     .set({
       extractionMonthlyTokens: budget.monthlyTokens,
       extractionDailyWrites: budget.dailyWritesPerSubject,
     })
-    .where(eq(spaces.id, spaceId))
+    .where(eq(circles.id, circleId))
 }
 
-// 这些对象今天已经由抽取写下了几条事实（推翻旧事实写下的新一条也算）
+// 统计指定联系人今天已由抽取写入的事实条数（包含推翻旧事实写下的新一条）
 export async function writesToday(
   tx: Tx,
   subjectIds: readonly string[],
 ): Promise<Map<string, number>> {
   if (!subjectIds.length) return new Map()
   const rows = await tx
-    .select({ subjectId: memories.subjectId, n: count() })
-    .from(memories)
+    .select({ subjectId: entries.subjectId, n: count() })
+    .from(entries)
     .where(
       and(
-        eq(memories.form, 'extracted'),
-        eq(memories.layer, 'subject'),
-        inArray(memories.subjectId, [...subjectIds]),
-        gte(memories.createdAt, DAY_START),
+        eq(entries.kind, 'fact'),
+        inArray(entries.subjectId, [...subjectIds]),
+        gte(entries.createdAt, DAY_START),
       ),
     )
-    .groupBy(memories.subjectId)
+    .groupBy(entries.subjectId)
   return new Map(rows.map((r) => [r.subjectId!, r.n]))
 }

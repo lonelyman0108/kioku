@@ -299,6 +299,8 @@ async function writeSections(
   for (const [sequence, max] of maxima) {
     await tx.execute(sql`select setval(${sequence}::regclass, ${max.toString()}::bigint)`)
   }
+  // 刷清延迟约束触发器队列（如 entry_variants_state_fk），否则 Postgres 拒绝在同一事务里启用触发器
+  await tx.execute(sql`set constraints all immediate`)
   for (const table of tables) {
     await tx.execute(sql`alter table ${tableRef(table)} enable trigger user`)
   }

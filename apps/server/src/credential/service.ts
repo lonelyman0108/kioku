@@ -54,23 +54,24 @@ import {
 } from 'drizzle-orm'
 
 import { canUseCredential, credentialDenial, type Access } from '../access/access'
+import { normalizeRealms } from '../access/realms'
 import { decryptSecret, encryptSecret } from '../crypto/envelope'
 import { decryptionKey, encryptionKey, type MasterKey } from '../crypto/keyring'
-import { isUniqueViolation, logInternalError, withSpace, type Db, type Tx } from '../db/client'
+import { isUniqueViolation, logInternalError, withCircle, type Db, type Tx } from '../db/client'
 import {
   accounts,
   apiKeys,
-  apps,
+  clients,
   credentialEvents,
   credentials,
-  memories,
-  memoryCredentialRefs,
+  entries,
+  entryCredentialRefs,
   vaultConnections,
 } from '../db/schema'
 import { stillValid } from '../memory/filter'
+import { MemoryError, versionConflict } from '../memory/errors'
 import { hasMaskedText } from '../memory/masked'
-import { benchMarkReader, MemoryError, versionConflict } from '../memory/service'
-import { formatUri } from '../memory/uri'
+import { benchMarkReader } from '../memory/service'
 import { inlineText } from '../recall/text'
 import {
   VaultError,
@@ -97,8 +98,8 @@ import { unavailableVaultClient } from './vaultClient'
 
 export interface CredentialContext {
   db: Db
-  spaceId: string
-  // 凭据按这次访问代表的成员找：管理界面是成员本人，Key 是应用所有者
+  circleId: string
+  // 凭据按这次访问代表的成员找：管理界面是成员本人，Key 是接入实例所有者
   access: Access
   masterKey: MasterKey | null
   vault?: VaultClient | undefined
@@ -115,7 +116,7 @@ export interface CredentialContext {
 const MASKED_TEXT_WRITTEN = '值含测试台的占位文字，并非真实内容。如需修改，请到凭据页操作。'
 
 // 取用经由哪里，记在访问事件里
-export type CredentialVia = 'kioku_credential' | 'rest' | 'run' | 'console' | 'space_export'
+export type CredentialVia = 'kioku_credential' | 'rest' | 'run' | 'console' | 'circle_export'
 
 // kioku_get 末尾列出的一条凭据：只说能不能取用，不给值，也不记访问
 export interface PlaceholderCredential {
@@ -128,10 +129,18 @@ export interface PlaceholderCredential {
 }
 
 type CredentialRow = typeof credentials.$inferSelect
+type CredentialScopeFilter = { clientIds: string[] | null; allowedRealms: string[] | null }
 
 // 改了凭据的哪些部分，记在修改事件里（不含任何值）
 type CredentialChange =
-  'name' | 'description' | 'values' | 'fields' | 'appIds' | 'expiresAt' | 'needsRotation'
+  | 'name'
+  | 'description'
+  | 'values'
+  | 'fields'
+  | 'clientIds'
+  | 'allowedRealms'
+  | 'expiresAt'
+  | 'needsRotation'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 
@@ -152,24 +161,26 @@ export const CREDENTIAL_ATTENTION: SQL = sql`(${credentials.rotationRequestedAt}
 type ValueRevision = { valueVersion: number } | { itemRevision: string }
 
 // 修改凭据的请求：管理界面的整个请求，Key 的少了字段对应、限定的应用与需要轮换
-type ModifyInput = Omit<UpdateCredentialRequest, 'appIds'> & {
-  appIds?: string[] | null | undefined
+type ModifyInput = Omit<UpdateCredentialRequest, 'clientIds' | 'allowedRealms'> & {
+  clientIds?: string[] | null | undefined
+  allowedRealms?: string[] | null | undefined
 }
 
-// 一次列出的凭据上限，个人用的空间远到不了
+// 一次列出的凭据上限，个人用的圈远到不了
 const LIST_LIMIT = 1000
-// 凭据详情里最多列出这么多条引用它的记忆
+// 凭据详情里最多列出这么多条引用它的词条
 const REFERENCE_LIMIT = 200
 
-// 算数的引用：凭据所有者本人的记忆里没删除、不是 secret、仍有效的（索引按正文重写，状态在这里判断）。
+// 算数的引用：凭据所有者个人圈的正式词条里没删除、不是 secret、仍有效的（索引按正文重写，状态在这里判断）。
 // 有效期按所在事务开头取的数据库时间（见 momentSql），同一个事务里几条语句一致
 const effectiveRef = (ownerAccountId: string) =>
   and(
-    eq(memories.id, memoryCredentialRefs.memoryId),
-    eq(memories.ownerAccountId, ownerAccountId),
-    eq(memories.layer, 'user'),
-    isNull(memories.deletedAt),
-    ne(memories.sensitivity, 'secret'),
+    eq(entries.id, entryCredentialRefs.entryId),
+    eq(entries.ownerAccountId, ownerAccountId),
+    eq(entries.circleKind, 'personal'),
+    eq(entries.kind, 'entry'),
+    isNull(entries.deletedAt),
+    ne(entries.sensitivity, 'secret'),
     stillValid(),
   )
 const EVENT_ID = /^\d{1,15}$/
@@ -234,7 +245,7 @@ function denialError(
 ) {
   switch (reason) {
     case 'capability':
-      if (!viaKey) return new MemoryError(403, '仅空间所有者可管理凭据与密码库连接')
+      if (!viaKey) return new MemoryError(403, '仅记忆圈所有者可管理凭据与密码库连接')
       return new MemoryError(
         403,
         need === 'use'
@@ -245,8 +256,8 @@ function denialError(
       return new MemoryError(
         403,
         need === 'use'
-          ? '凭据需要可读本人（user）、敏感级上限不低于私密（private）的访问密钥'
-          : '管理凭据需要可读写本人（user）、敏感级上限不低于私密（private）的访问密钥',
+          ? '凭据需要可读正式词条（entry）、敏感级上限不低于私密（private）的访问密钥'
+          : '管理凭据需要可读写正式词条（entry）、敏感级上限不低于私密（private）的访问密钥',
       )
     case 'context':
       return new MemoryError(403, '带会话上下文（群聊、私聊、定时任务、子 agent）时不能使用凭据')
@@ -329,26 +340,51 @@ export class CredentialService {
   constructor(private readonly ctx: CredentialContext) {
     this.vault = new VaultConnections({
       db: ctx.db,
-      spaceId: ctx.spaceId,
+      circleId: ctx.circleId,
       ownerAccountId: ctx.access.ownerAccountId,
       masterKey: ctx.masterKey,
       client: ctx.vault ?? FALLBACK_CLIENT,
     })
   }
 
-  // 这次是不是接入方通过 Key 来的：管理界面不代表某个应用，appId 为 null
+  // 这次是不是接入方通过 Key 来的：管理界面不代表某个接入实例，clientId 为 null
   private get viaKey(): boolean {
-    return this.ctx.access.appId !== null
+    return this.ctx.access.clientId !== null
   }
 
   private get owner(): string {
     return this.ctx.access.ownerAccountId
   }
 
+  private preFlightRealms(): string[] | null {
+    const { allowedRealms, staticContextRealms } = this.ctx.access
+    if (allowedRealms !== null) return [...allowedRealms]
+    if (staticContextRealms.size > 0) return [...staticContextRealms]
+    return null
+  }
+
+  private preFlightFacts() {
+    return {
+      circleId: this.ctx.circleId,
+      clientIds: null,
+      allowedRealms: this.preFlightRealms(),
+    }
+  }
+
+  private keyCreateAllowedRealms(): string[] | null {
+    const { allowedRealms, staticContextRealms } = this.ctx.access
+    if (allowedRealms !== null && staticContextRealms.size > 0) {
+      return [...allowedRealms].filter((r) => staticContextRealms.has(r)).sort()
+    }
+    if (allowedRealms !== null) return [...allowedRealms].sort()
+    if (staticContextRealms.size > 0) return [...staticContextRealms].sort()
+    return null
+  }
+
   // 标识冲突由唯一索引判断（同一成员的有效凭据里唯一），在这里转成 409
   private async run<T>(fn: (tx: Tx) => Promise<T>, conflict?: string): Promise<T> {
     try {
-      return await withSpace(this.ctx.db, this.ctx.spaceId, fn)
+      return await withCircle(this.ctx.db, this.ctx.circleId, fn)
     } catch (err) {
       if (isUniqueViolation(err, 'credentials_identifier_live_idx')) {
         throw new MemoryError(409, conflict ?? '标识已被占用或不可用')
@@ -362,13 +398,13 @@ export class CredentialService {
 
   // 列出、取用：凭据能力至少是取用。不看凭据存不存在，没有权限时一律 403
   requireUse(): void {
-    const denial = credentialDenial(this.ctx.access, { appIds: null }, 'use')
+    const denial = credentialDenial(this.ctx.access, this.preFlightFacts(), 'use')
     if (denial) throw denialError(denial, 'use', '', this.viaKey)
   }
 
   // 新建、修改、删除凭据，连接密码库，管理界面里查看值：凭据能力是管理
   requireManage(): void {
-    const denial = credentialDenial(this.ctx.access, { appIds: null }, 'manage')
+    const denial = credentialDenial(this.ctx.access, this.preFlightFacts(), 'manage')
     if (denial) throw denialError(denial, 'manage', '', this.viaKey)
   }
 
@@ -398,7 +434,7 @@ export class CredentialService {
     context: Record<string, unknown> = {},
   ): Promise<void> {
     await tx.insert(credentialEvents).values({
-      spaceId: this.ctx.spaceId,
+      circleId: this.ctx.circleId,
       credentialId,
       eventType,
       actorKeyId: this.ctx.actor.keyId ?? null,
@@ -450,7 +486,8 @@ export class CredentialService {
         row.source === 'vault'
           ? { connectionId: row.vaultConnectionId!, itemId: row.vaultItemId! }
           : null,
-      appIds: row.appIds,
+      clientIds: row.clientIds,
+      allowedRealms: row.allowedRealms,
       deletedAt: row.deletedAt?.toISOString() ?? null,
       // 引用按标识解析到有效的那一条；已删除的这条不算被谁引用（同名的有效凭据可能正被引用着）
       referenceCount: row.deletedAt ? 0 : (references.get(row.identifier) ?? 0),
@@ -459,15 +496,15 @@ export class CredentialService {
     }
   }
 
-  // 各标识被多少条记忆引用（只算 effectiveRef 的）
+  // 各标识被多少条词条引用（只算 effectiveRef 的）
   private async referenceCounts(tx: Tx, identifiers: string[]): Promise<Map<string, number>> {
     if (!identifiers.length) return new Map()
     const rows = await tx
-      .select({ identifier: memoryCredentialRefs.identifier, n: count() })
-      .from(memoryCredentialRefs)
-      .innerJoin(memories, effectiveRef(this.owner))
-      .where(inArray(memoryCredentialRefs.identifier, [...new Set(identifiers)]))
-      .groupBy(memoryCredentialRefs.identifier)
+      .select({ identifier: entryCredentialRefs.identifier, n: count() })
+      .from(entryCredentialRefs)
+      .innerJoin(entries, effectiveRef(this.owner))
+      .where(inArray(entryCredentialRefs.identifier, [...new Set(identifiers)]))
+      .groupBy(entryCredentialRefs.identifier)
     return new Map(rows.map((r) => [r.identifier, r.n]))
   }
 
@@ -563,7 +600,7 @@ export class CredentialService {
     input: Pick<KeyCreateCredentialRequest, 'identifier' | 'name' | 'description' | 'values'> & {
       expiresAt?: string | null | undefined
     },
-    appIds: string[] | null,
+    scope: CredentialScopeFilter,
   ): Promise<CredentialRow> {
     this.requireManage()
     const id = randomUUID()
@@ -572,14 +609,15 @@ export class CredentialService {
       .insert(credentials)
       .values({
         id,
-        spaceId: this.ctx.spaceId,
+        circleId: this.ctx.circleId,
         ownerAccountId: this.owner,
         identifier: input.identifier,
         name: input.name,
         description: input.description ?? null,
         source: 'hosted',
         ...columns,
-        appIds,
+        clientIds: scope.clientIds,
+        allowedRealms: scope.allowedRealms,
         expiresAt: input.expiresAt ? new Date(input.expiresAt) : null,
         valueChangedAt: new Date(),
       })
@@ -601,9 +639,12 @@ export class CredentialService {
     if (input.fields !== undefined && input.values !== undefined) {
       throw new MemoryError(400, '字段对应与值请分两次修改')
     }
-    // 被诱导的 agent 不能给自己放宽，也不能替所有者清掉提醒
-    if (input.appIds !== undefined && this.viaKey) {
-      throw new MemoryError(403, '限定的应用只能在管理界面修改')
+    // 被诱导的 agent 不能给自己放宽实例/场域范围，也不能替所有者清掉提醒
+    if (input.clientIds !== undefined && this.viaKey) {
+      throw new MemoryError(403, '限定的接入实例只能在管理界面修改')
+    }
+    if (input.allowedRealms !== undefined && this.viaKey) {
+      throw new MemoryError(403, '允许的场域范围只能在管理界面修改')
     }
     if (input.needsRotation !== undefined && this.viaKey) {
       throw new MemoryError(403, '「需要轮换」只能在管理界面修改')
@@ -647,11 +688,19 @@ export class CredentialService {
       set.fields = input.fields
       changes.push('fields')
     }
-    if (input.appIds !== undefined) {
-      const appIds = input.appIds === null ? null : [...new Set(input.appIds)].sort()
-      if (!sameJson(appIds, before.appIds)) {
-        set.appIds = appIds
-        changes.push('appIds')
+    if (input.clientIds !== undefined) {
+      const clientIds = input.clientIds === null ? null : [...new Set(input.clientIds)].sort()
+      if (!sameJson(clientIds, before.clientIds)) {
+        set.clientIds = clientIds
+        changes.push('clientIds')
+      }
+    }
+    if (input.allowedRealms !== undefined) {
+      const allowedRealms =
+        input.allowedRealms === null ? null : normalizeRealms(input.allowedRealms).sort()
+      if (!sameJson(allowedRealms, before.allowedRealms)) {
+        set.allowedRealms = allowedRealms
+        changes.push('allowedRealms')
       }
     }
     if (input.expiresAt !== undefined) {
@@ -1023,8 +1072,14 @@ export class CredentialService {
 
   async create(input: CreateCredentialRequest): Promise<CreatedCredential> {
     this.requireManage()
-    // 在管理界面新建的默认不限定应用，由所有者决定
-    const appIds = input.appIds ? [...new Set(input.appIds)].sort() : null
+    // 在管理界面新建的默认不限定接入实例与场域，由所有者决定
+    const scope: CredentialScopeFilter = {
+      clientIds: input.clientIds ? [...new Set(input.clientIds)].sort() : null,
+      allowedRealms:
+        input.allowedRealms === undefined || input.allowedRealms === null
+          ? null
+          : normalizeRealms(input.allowedRealms).sort(),
+    }
     const { source } = input
     if (source.kind === 'new') {
       const created = await this.createNew(
@@ -1036,7 +1091,7 @@ export class CredentialService {
           url: source.url,
           expiresAt: input.expiresAt,
         },
-        appIds,
+        scope,
       )
       const view = await this.run((tx) => this.consoleViewOf(tx, created.row))
       return { ...view, storedIn: created.storedIn }
@@ -1096,7 +1151,7 @@ export class CredentialService {
           revision: item.revisionDate,
           expiresAt: input.expiresAt ?? null,
         },
-        appIds,
+        scope,
         ITEM_BOUND_CREATE,
       )
       // 刚才那次取条目是成功的：和插入放在一个事务里更新连接
@@ -1107,11 +1162,11 @@ export class CredentialService {
     })
   }
 
-  // 在调用方的事务里新建一条托管的凭据，返回 id（转存为凭据：和改记忆放在一个事务里）。
+  // 在调用方的事务里新建一条托管的凭据，返回 id（转存为凭据：和改词条放在一个事务里）。
   // 标识冲突在这里转成 409：调用方的事务随这个错误整个回滚
   async createHostedIn(tx: Tx, input: NewCredentialInput): Promise<string> {
     try {
-      return (await this.insertHosted(tx, input, null)).id
+      return (await this.insertHosted(tx, input, { clientIds: null, allowedRealms: null })).id
     } catch (err) {
       if (isUniqueViolation(err, 'credentials_identifier_live_idx')) {
         throw new MemoryError(409, `标识已被占用或不可用：${input.identifier}`)
@@ -1126,19 +1181,19 @@ export class CredentialService {
   // 写进密码库之后建凭据失败时，条目留在集合里，错误带上它（orphaned）
   private async createNew(
     input: NewCredentialInput,
-    appIds: string[] | null,
+    scope: CredentialScopeFilter,
   ): Promise<{ row: CredentialRow; storedIn: CredentialStoredIn }> {
     const plan = await this.planNew(input)
     if (plan.kind === 'hosted') {
       const row = await this.run(
-        (tx) => this.insertHosted(tx, input, appIds),
+        (tx) => this.insertHosted(tx, input, scope),
         `标识已被占用或不可用：${input.identifier}`,
       )
       return { row, storedIn: { kind: 'hosted', bench: plan.bench } }
     }
     try {
       const row = await this.run(async (tx) =>
-        this.ownById(tx, await plan.insert(tx, appIds, ITEM_BOUND_CREATE)),
+        this.ownById(tx, await plan.insert(tx, scope, ITEM_BOUND_CREATE)),
       )
       return { row, storedIn: plan.storedIn }
     } catch (err) {
@@ -1211,7 +1266,7 @@ export class CredentialService {
       kind: 'vault',
       storedIn: { kind: 'vault', collectionName },
       orphan,
-      insert: (tx, appIds, boundText) =>
+      insert: (tx, scope, boundText) =>
         this.insertVault(
           tx,
           {
@@ -1225,7 +1280,7 @@ export class CredentialService {
             expiresAt: input.expiresAt ?? null,
             storedIn: 'vault',
           },
-          appIds,
+          scope,
           boundText,
         ),
     }
@@ -1640,7 +1695,7 @@ export class CredentialService {
       orphan: plan.orphan,
       apply: async (tx) => {
         try {
-          return await plan.insert(tx, null, ITEM_BOUND_CREATE)
+          return await plan.insert(tx, { clientIds: null, allowedRealms: null }, ITEM_BOUND_CREATE)
         } catch (err) {
           if (isUniqueViolation(err, 'credentials_identifier_live_idx')) {
             throw new MemoryError(409, `标识已被占用或不可用：${target.identifier}`)
@@ -1769,7 +1824,7 @@ export class CredentialService {
             fields,
             revision: item.revisionDate,
           },
-          null,
+          { clientIds: null, allowedRealms: null },
           ITEM_BOUND,
         ),
     }
@@ -1836,7 +1891,7 @@ export class CredentialService {
       // 新建时写进了密码库（记进新建事件）；给已有的条目起标识时不给
       storedIn?: 'vault'
     },
-    appIds: string[] | null,
+    scope: CredentialScopeFilter,
     // 同一个条目已有有效凭据时的说法：新建与转存给的下一步不同
     boundText: string,
   ): Promise<string> {
@@ -1844,7 +1899,7 @@ export class CredentialService {
     try {
       await tx.insert(credentials).values({
         id,
-        spaceId: this.ctx.spaceId,
+        circleId: this.ctx.circleId,
         ownerAccountId: this.owner,
         identifier: input.identifier,
         name: input.name,
@@ -1853,7 +1908,8 @@ export class CredentialService {
         vaultConnectionId: input.connectionId,
         vaultItemId: input.itemId,
         fields: input.fields,
-        appIds,
+        clientIds: scope.clientIds,
+        allowedRealms: scope.allowedRealms,
         vaultRevision: input.revision,
         valueChangedAt: revisionDate(input.revision),
         expiresAt: input.expiresAt ? new Date(input.expiresAt) : null,
@@ -1959,23 +2015,22 @@ export class CredentialService {
       if (row.deletedAt) return { items: [], truncated: false }
       const rows = await tx
         .select({
-          id: memories.id,
-          domain: memories.domain,
-          path: memories.path,
-          title: memories.title,
-          sensitivity: memories.sensitivity,
-          updatedAt: memories.updatedAt,
+          id: entries.id,
+          shortId: entries.shortId,
+          title: entries.title,
+          sensitivity: entries.sensitivity,
+          updatedAt: entries.updatedAt,
         })
-        .from(memoryCredentialRefs)
-        .innerJoin(memories, effectiveRef(this.owner))
-        .where(eq(memoryCredentialRefs.identifier, row.identifier))
-        .orderBy(desc(memories.updatedAt), asc(memories.id))
+        .from(entryCredentialRefs)
+        .innerJoin(entries, effectiveRef(this.owner))
+        .where(eq(entryCredentialRefs.identifier, row.identifier))
+        .orderBy(desc(entries.updatedAt), asc(entries.id))
         .limit(REFERENCE_LIMIT + 1)
       return {
         items: rows.slice(0, REFERENCE_LIMIT).map((r) => ({
           id: r.id,
-          uri: formatUri(r.domain!, r.path!),
-          title: r.title!,
+          shortId: r.shortId,
+          title: r.title,
           sensitivity: r.sensitivity,
           updatedAt: r.updatedAt.toISOString(),
         })),
@@ -2011,18 +2066,18 @@ export class CredentialService {
       const current = currentValueRevision(credential)
       const keyVisible = this.ctx.access.admin
         ? sql`true`
-        : sql`${apps.ownerAccountId} = ${this.owner}`
+        : sql`${clients.ownerAccountId} = ${this.owner}`
       const rows = await tx
         .select({
           event: credentialEvents,
           accountName: accounts.displayName,
           keyName: sql<string | null>`case when ${keyVisible} then ${apiKeys.name} end`,
-          appName: apps.name,
+          clientName: clients.name,
         })
         .from(credentialEvents)
         .leftJoin(accounts, eq(accounts.id, credentialEvents.actorAccountId))
         .leftJoin(apiKeys, eq(apiKeys.id, credentialEvents.actorKeyId))
-        .leftJoin(apps, eq(apps.id, apiKeys.appId))
+        .leftJoin(clients, eq(clients.id, apiKeys.clientId))
         .where(
           and(
             eq(credentialEvents.credentialId, id),
@@ -2049,7 +2104,7 @@ export class CredentialService {
             id: r.event.id,
             type: r.event.eventType,
             createdAt: r.event.createdAt.toISOString(),
-            actor: { accountName: r.accountName, keyName: r.keyName, appName: r.appName },
+            actor: { accountName: r.accountName, keyName: r.keyName, clientName: r.clientName },
             via: text(c.via),
             fields: list(c.fields),
             purpose: text(c.purpose),
@@ -2098,7 +2153,7 @@ export class CredentialService {
   ): Promise<UseCheck> {
     // 同一个字段要了几次（kioku run 里几个变量取同一个字段）只算一次
     fieldNames = fieldNames && [...new Set(fieldNames)]
-    const denial = credentialDenial(this.ctx.access, row ?? { appIds: null }, 'use')
+    const denial = credentialDenial(this.ctx.access, row ?? this.preFlightFacts(), 'use')
     if (denial) {
       if (row) {
         await this.accessEvent(tx, row.id, {
@@ -2259,7 +2314,7 @@ export class CredentialService {
           case 'denied':
             fail(
               head.index,
-              check.reason === 'app'
+              check.reason === 'client' || check.reason === 'circle' || check.reason === 'realm'
                 ? new MemoryError(404, `${refText(head.ref)}：凭据不存在`)
                 : refError(head.ref, denialError(check.reason, 'use', identifier)),
             )
@@ -2396,7 +2451,7 @@ export class CredentialService {
       state: 'unavailable',
       name: null,
     })
-    if (!wanted.length || credentialDenial(this.ctx.access, { appIds: null }, 'use')) {
+    if (!wanted.length || credentialDenial(this.ctx.access, this.preFlightFacts(), 'use')) {
       return wanted.map(unavailable)
     }
     // 密码库的凭据连上连接的状态：不请求密码库，连不上这类要到取用时才知道
@@ -2422,11 +2477,14 @@ export class CredentialService {
     })
   }
 
-  // 通过 Key 新建的只给这个应用用：被诱导的 agent 建的凭据不会被别的应用拿去用。
+  // 通过 Key 新建的只给这个接入实例用并继承密钥允许的场域范围：被诱导的 agent 建的凭据不会被别的接入实例拿去用。
   // 写到哪里由成员的去处决定（有去处写进密码库，没有时托管）
   async keyCreate(input: KeyCreateCredentialRequest): Promise<KeyCreatedCredential> {
     this.requireManage()
-    const { row, storedIn } = await this.createNew(input, [this.ctx.access.appId!])
+    const { row, storedIn } = await this.createNew(input, {
+      clientIds: [this.ctx.access.clientId!],
+      allowedRealms: this.keyCreateAllowedRealms(),
+    })
     return { ...this.summary(row), storedIn }
   }
 
@@ -2566,7 +2624,7 @@ type NewPlan =
       kind: 'vault'
       storedIn: CredentialStoredIn
       orphan: OrphanVaultItem
-      insert: (tx: Tx, appIds: string[] | null, boundText: string) => Promise<string>
+      insert: (tx: Tx, scope: CredentialScopeFilter, boundText: string) => Promise<string>
     }
 
 export const BENCH_VAULT_WRITE =

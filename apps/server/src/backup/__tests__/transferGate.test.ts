@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { MemoryError } from '../../memory/service'
+import { MemoryError } from '../../memory/errors'
 import { acquireTransferSlot, queuedTransfers, withTransferSlot } from '../transferGate'
 
 const busy = (p: Promise<unknown>) =>

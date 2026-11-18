@@ -1,4 +1,4 @@
-import type { DreamScopeKind, OriginScope, SubjectKind } from '@kioku/contracts'
+import type { DreamScope, OriginScope, SubjectKind } from '@kioku/contracts'
 import { and, eq, inArray, isNull, sql, type SQL } from 'drizzle-orm'
 
 import type { Tx } from '../db/client'
@@ -65,7 +65,7 @@ export const DREAM_SCOPE_KEY = sql<string>`(case
     then 'local:' || ${entries.conversationId}::text end)`
 
 export interface ParsedDreamScope {
-  kind: DreamScopeKind
+  kind: DreamScope['kind']
   id: string | null
   origin: string | null
 }
