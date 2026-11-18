@@ -82,22 +82,30 @@ curl -fsS -X POST http://127.0.0.1:18920/v1/setup \
 
 在「设置 › 实例 › 模型」里配。一个模型可以配几个渠道（同一个模型的不同接口），按顺序请求，前一个出错时换下一个；服务商给模型改了名，只改渠道里「请求用的模型名」，不用重新生成向量。换成别的模型用「换模型」：填新模型的标识与渠道，后台为全部记忆生成新模型的向量，召回在补齐之前一直用原来的模型，补齐后自动切过去、删掉旧的向量；补不上时可以不等补齐直接切换，也可以放弃。整个过程不用改数据库。向量固定 1024 维，换的模型要能按 `dimensions` 参数输出 1024 维（「测试连通」会检查）。
 
+## 运维自检
+
+在服务端容器里运行 `kioku-ctl status` 可以只读检查数据库连接、应用角色是否受行级安全约束、`vector` 与 `zhparser` 扩展、待执行迁移以及主密钥是否与库内加密数据匹配（加 `--json` 输出结构化结果，不含密码与密钥）：
+
+```bash
+docker compose exec kioku kioku-ctl status
+```
+
 ## 测试台
 
 管理界面的「测试台」不接任何客户端，按一个访问密钥模拟应用的调用：调工具、发生命周期事件（可选私聊、群聊上下文）、回放场景与断言，配了抽取模型时还能接真实模型跑一段对话，看它会不会按指引调工具。默认放进事务、结束时回滚，并列出真实执行时的改动；切到真实执行要确认。只给应用所有者，模型对话还要实例管理员。同一份场景也能用真实 HTTP 与真实访问密钥跑（这是真实调用，写操作要加 `--allow-writes`，会记召回事件）：
 
 ```bash
 docker compose exec -e KIOKU_BENCH_KEY=<访问密钥> kioku \
-  node server/dist/bench.mjs --url http://localhost:18920
+  kioku-ctl bench --url http://127.0.0.1:18920
 ```
 
 ## 备份
 
-在「设置 › 实例 › 数据与保留」的备份里配一个 S3 兼容的对象存储（MinIO、Cloudflare R2、Backblaze B2 等），每天定时把整个实例加密备份上去、只留最近几份；失败时设置和概览里都会提示原因。也可以用命令把整个实例导出成一个加密的文件，服务运行时也可以做。文件用主密钥派生的密钥加密，`KIOKU_MASTER_KEY` 另外保存（丢了它，备份和机密级记忆都无法解密）。备份里没有会话与登录计数、对话缓冲和向量，其余全在。备份文件不要放在仓库目录里，构建镜像时会被带进构建上下文。
+在「设置 › 实例 › 数据与保留」的备份里配一个兼容S3的对象存储（MinIO、Cloudflare R2、Backblaze B2 等），每天定时把整个实例加密备份上去、只留最近几份；失败时设置和概览里都会提示原因。也可以用命令把整个实例导出成一个加密的文件，服务运行时也可以做。文件用主密钥派生的密钥加密，`KIOKU_MASTER_KEY` 另外保存（丢了它，备份和机密级记忆都无法解密）。备份里没有会话与登录计数、对话缓冲和向量，其余全在。备份文件不要放在仓库目录里，构建镜像时会被带进构建上下文。
 
 ```bash
 mkdir -p ~/kioku-backup
-docker compose exec -T kioku node server/dist/backup.mjs --out - > ~/kioku-backup/kioku-$(date +%F-%H%M%S).backup
+docker compose exec -T kioku kioku-ctl backup --out - > ~/kioku-backup/kioku-$(date +%F-%H%M%S).backup
 ```
 
 ## 恢复到新实例
@@ -106,15 +114,15 @@ docker compose exec -T kioku node server/dist/backup.mjs --out - > ~/kioku-backu
 
 ```bash
 docker compose pull
-docker compose run --rm -T kioku node server/dist/restore.mjs --file - < ~/kioku-backup/<备份>.backup
+docker compose run --rm -T kioku kioku-ctl restore --file - < ~/kioku-backup/<备份>.backup
 docker compose up -d
 ```
 
-定时备份传到了 S3 兼容存储时，也可以直接从存储桶取最新的一份恢复：先在当前终端里 `export AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=…`（区域不是 `us-east-1` 时再加 `AWS_REGION`，临时凭据再加 `AWS_SESSION_TOKEN`），再把上面的 `restore.mjs --file -` 一行换成：
+定时备份传到了兼容S3存储时，也可以直接从存储桶取最新的一份恢复：先在当前终端里 `export AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=…`（区域不是 `us-east-1` 时再加 `AWS_REGION`，临时凭据再加 `AWS_SESSION_TOKEN`），再把上面的 `restore --file -` 一行换成：
 
 ```bash
 docker compose run --rm -T -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN -e AWS_REGION kioku \
-  node server/dist/restore.mjs --s3-endpoint https://s3.example.com --s3-bucket <存储桶> --s3-prefix <前缀>
+  kioku-ctl restore --s3-endpoint https://s3.example.com --s3-bucket <存储桶> --s3-prefix <前缀>
 ```
 
 恢复时会清掉备份存储的设置，免得试恢复的实例和正在用的实例往同一个目录写、互相删掉对方的备份；确认新实例要接着用之后，在实例设置里重新配备份。

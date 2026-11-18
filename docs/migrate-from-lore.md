@@ -58,14 +58,14 @@ Lore 里常有直接写在正文里的密码与令牌。Kioku 里推荐把值放
 
    ```bash
    export DATABASE_URL=<Kioku 的连接串> LORE_DATABASE_URL=<Lore 的连接串> KIOKU_MASTER_KEY=<与服务相同>
-   node apps/server/dist/import-lore.mjs --account <用户名> --secret infra://office_network/credentials
+   node apps/server/dist/ctl.mjs import-lore --account <用户名> --secret infra://office_network/credentials
    ```
 
    用 Docker 部署时在服务容器里执行（从源码构建的在 `docker compose` 后面加 `-f docker-compose.build.yml`），Lore 的库要能从容器里访问（例如 `docker network connect` 把服务容器接到 Lore 所在的网络）：
 
    ```bash
    docker compose exec -e LORE_DATABASE_URL=<Lore 的连接串> \
-     kioku node server/dist/import-lore.mjs --account <用户名>
+     kioku kioku-ctl import-lore --account <用户名>
    ```
 
 3. 检查计划里的「提醒」：路径、正文、触发场景或关键词里疑似有密码、令牌的节点会列出来。命令行不会把值换成占位符，要换就用管理界面导入（见「明文凭据」）。也可以标为机密（`--secret <Lore 的 URI>`，可重复，对已导入的节点不生效）：正文加密存储，召回和启动加载都不再返回它，只有最高敏感级为机密的访问密钥显式读取时才能看到。节点里大部分是普通说明时，更合适的做法是照原样导入，再到「待处理 › 疑似明文凭据」里转存为凭据，正文只留占位符。

@@ -3,9 +3,13 @@
   "private": true,
   "type": "module",
   "files": [
+    "bin",
     "dist",
     "migrations"
   ],
+  "bin": {
+    "kioku-ctl": "bin/kioku-ctl"
+  },
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.mjs",
