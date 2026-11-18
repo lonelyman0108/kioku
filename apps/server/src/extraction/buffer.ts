@@ -12,6 +12,7 @@ import type { KeySession } from '../access/session'
 import { withCircle, type Db, type Tx } from '../db/client'
 import { circles, conversationTurns } from '../db/schema'
 import type { Deps, KeyPrincipal } from '../http/env'
+import { normalizeProjectSlug } from '../memory/facets'
 import { loadCircleSettings } from '../settings/advanced'
 import { hasExtractionModel } from './settings'
 
@@ -23,6 +24,27 @@ export const BUFFER_IDLE_HOURS = 24
 // 无上下文缓冲作用域按 JSON 数组编码，避免用户名/设备/项目名内包含冒号导致冲突
 export function noContextScope(ownerAccountId: string, deviceKey = '', projectSlug = ''): string {
   return JSON.stringify(['none', ownerAccountId, deviceKey, projectSlug])
+}
+
+export function parseNoContextScope(
+  scope: string,
+): { ownerAccountId: string; deviceKey: string; projectSlug: string } | null {
+  try {
+    const parsed: unknown = JSON.parse(scope)
+    if (
+      !Array.isArray(parsed) ||
+      parsed.length !== 4 ||
+      parsed[0] !== 'none' ||
+      typeof parsed[1] !== 'string' ||
+      typeof parsed[2] !== 'string' ||
+      typeof parsed[3] !== 'string'
+    ) {
+      return null
+    }
+    return { ownerAccountId: parsed[1], deviceKey: parsed[2], projectSlug: parsed[3] }
+  } catch {
+    return null
+  }
 }
 
 export interface BufferedSession {
@@ -54,7 +76,7 @@ export async function bufferTurn(
   if (!(await hasExtractionModel(deps.db))) return
   const { context } = session
   const deviceKey = (input.deviceKey ?? '').trim()
-  const projectSlug = (input.project?.repoName ?? input.project?.dirName ?? '').trim()
+  const projectSlug = normalizeProjectSlug(input.project) ?? ''
   const scope = !context.chatType
     ? noContextScope(key.client.ownerAccountId, deviceKey, projectSlug)
     : context.groupSubjectId

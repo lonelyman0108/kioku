@@ -1,33 +1,33 @@
-import { maskSensitiveContent, TUNING_DEFAULTS } from '@kioku/contracts'
+import { maskSensitiveContent, normalizeWhen, TUNING_DEFAULTS } from '@kioku/contracts'
 import { and, asc, eq, inArray, sql } from 'drizzle-orm'
 
 import type { Access, SessionContext } from '../access/access'
 import { ensureConversation, findConversation, type ConversationRef } from '../access/conversations'
-import { groupPersona, type KeySession } from '../access/session'
+import { accessForKey, groupPersona, type KeySession } from '../access/session'
 import { principalForKeyId } from '../auth/middleware'
 import { mentionsPlaceholder } from '../credential/placeholders'
 import {
   evaluateSensitiveContent,
+  loadCirclePrivacy,
   loadOutboundRedactor,
-  loadSpacePrivacy,
 } from '../credential/privacy'
 import type { MasterKey } from '../crypto/keyring'
-import { errorText, withSpace, type Db, type Tx } from '../db/client'
+import { errorText, withCircle, type Db, type Tx } from '../db/client'
 import {
   conversationTurns,
+  entries,
+  entryVariants,
   extractionRuns,
-  memories,
   subjectIdentities,
   subjects as subjectTable,
 } from '../db/schema'
 import type { KeyPrincipal } from '../http/env'
-import { accessForKey } from '../memory/context'
 import { readableConditions } from '../memory/filter'
-import { MemoryService, type ExtractedWrite } from '../memory/service'
+import { EntryService, type ExtractedWrite } from '../memory/service'
 import { oneLine } from '../recall/recall'
 import { readableSubjectFacts } from '../recall/subjects'
-import { loadSpaceSettings } from '../settings/advanced'
-import { canWriteTurns, type BufferedSession } from './buffer'
+import { loadCircleSettings } from '../settings/advanced'
+import { canWriteTurns, parseNoContextScope, type BufferedSession } from './buffer'
 import { extractionUsage, writesToday } from './budget'
 import {
   extractionMessages,
@@ -38,16 +38,11 @@ import {
 } from './prompt'
 import type { ChatModel } from './provider'
 
-// 服务端自己判断出的失败原因，不带模型接口或数据库的原文，对象页里所有成员都看得到
 export const NO_USABLE_KEY = '写入这一批的访问密钥均已吊销、作废或无权写入联系人的事实与会话摘要'
 export const BUDGET_NO_SUMMARY = '本月的抽取预算已用完，这一批的访问密钥也无权写入会话摘要'
-
-// 抽取期间这一批对话被合并到了别的对象：这一批不写，交给合并后的批次
 export const BATCH_MOVED = '抽取期间联系人已被合并，这一批将由合并后的批次重新抽取'
 class BatchMoved extends Error {}
 
-// 上面三个原因历次的写法，第一项是现在的。抽取记录存的是写入时的文字，旧版本写下的记录要按现在的写法显示、
-// 照样给所有成员看：改措辞时把旧句子留在这里，不要删
 export const RUN_ERROR_WORDINGS: readonly (readonly [string, ...string[]])[] = [
   [
     NO_USABLE_KEY,
@@ -62,25 +57,21 @@ export const RUN_ERROR_WORDINGS: readonly (readonly [string, ...string[]])[] = [
   ],
   [BATCH_MOVED, '抽取期间对象被合并，这一批交给合并后的批次重新抽取'],
 ]
-// 存下的失败原因是不是服务端自己判断出的：是的话返回现在的写法，否则返回 null
+
 export function plainRunError(stored: string): string | null {
   return RUN_ERROR_WORDINGS.find((wordings) => wordings.includes(stored))?.[0] ?? null
 }
 
-// 会话摘要默认留这么多天；按空间的高级设置
 export const EPISODE_TTL_DAYS = TUNING_DEFAULTS['extraction.episodeTtlDays']
-// 每个对象给模型看最近这么多条已有事实，用来判断是新的、更新还是已经记过
 const EXISTING_FACTS_PER_SUBJECT = 30
-// 一条事实、一段摘要最多这么多字：更长的不像一条事实，多半是模型把原话抄了进来
 export const MAX_FACT_CHARS = 200
-const MAX_SUMMARY_CHARS = 500
+export const MAX_SUMMARY_CHARS = 500
 
 type RunFields = Omit<
   typeof extractionRuns.$inferInsert,
-  'id' | 'spaceId' | 'appId' | 'scope' | 'subjectIds' | 'turns' | 'createdAt'
+  'id' | 'circleId' | 'clientId' | 'scope' | 'subjectIds' | 'turns' | 'createdAt'
 >
 
-// 一轮对话现在所在的作用域与对象
 const placeColumns = {
   id: conversationTurns.id,
   scope: conversationTurns.scope,
@@ -93,39 +84,47 @@ type Place = Pick<
   'id' | 'scope' | 'senderSubjectId' | 'groupSubjectId' | 'ownerAccountId'
 >
 
-// 一轮对话所在的会话：群聊、频道按群，私聊按发言人，不带会话上下文的按所属成员
 function conversationOfTurn(turn: Place): ConversationRef {
   if (turn.groupSubjectId) return { kind: 'group', subjectId: turn.groupSubjectId }
   if (turn.senderSubjectId) return { kind: 'direct', subjectId: turn.senderSubjectId }
-  return { kind: 'none', ownerAccountId: turn.ownerAccountId! }
+  const decoded = parseNoContextScope(turn.scope)
+  return decoded
+    ? {
+        kind: 'none',
+        ownerAccountId: decoded.ownerAccountId,
+        deviceKey: decoded.deviceKey,
+        projectSlug: decoded.projectSlug,
+      }
+    : {
+        kind: 'none',
+        ownerAccountId: turn.ownerAccountId!,
+        deviceKey: '',
+        projectSlug: '',
+      }
 }
 
-// 抽取一批缓冲：让模型按 JSON 给出候选事实，与相关对象已有的事实比对后写成联系人的事实，会话摘要挂在会话上，
-// 记一条抽取记录，删掉用过的缓冲（抽取期间新进来的留着，由它们排的任务处理）。写入、抽取记录与删缓冲
-// 在同一个事务里，中途失败整批回滚，重试不会重复写入。
-// 每一轮按写入它的 Key 现在的上限与这一批的会话上下文重新确认：Key 吊销、作废，或写不了联系人的事实与会话摘要的那几轮
-// 不给模型看，随这一批删掉；一轮都不剩时不请求模型。写入用最后一轮还有效的 Key。
-// 请求模型失败时记下原因并抛出，交给后台任务重试，缓冲留着；模型的输出解析不了时记下原因、丢掉这一批：
-// 同样的输入多半还是解析不了，重试只会白花 token
 export async function extractBatch(
   db: Db,
   masterKey: MasterKey | null,
   model: ChatModel,
   target: BufferedSession,
+  onFactCreated?: (circleId: string, entryId: string) => void,
 ): Promise<void> {
-  const all = await withSpace(db, target.spaceId, (tx) =>
+  const all = await withCircle(db, target.circleId, (tx) =>
     tx
       .select()
       .from(conversationTurns)
       .where(
-        and(eq(conversationTurns.appId, target.appId), eq(conversationTurns.scope, target.scope)),
+        and(
+          eq(conversationTurns.clientId, target.clientId),
+          eq(conversationTurns.scope, target.scope),
+        ),
       )
       .orderBy(asc(conversationTurns.id)),
   )
   const last = all.at(-1)
   if (!last) return
   const groupId = last.groupSubjectId
-  // 不带会话上下文的一批（例如本机的 Claude Code）：只写会话摘要，摘要归所属成员、私密，不记联系人的事实
   const noContext = last.chatType === 'none'
   const owner = noContext ? last.ownerAccountId! : null
   const context: SessionContext = noContext
@@ -138,39 +137,39 @@ export async function extractBatch(
   const principals = (await Promise.all(keyIds.map((id) => principalForKeyId(db, id)))).filter(
     (key): key is KeyPrincipal => key !== null,
   )
-  // 同一批的 Key 都属于这个应用，按群换人格的规则只用查一次
   const personaId = !principals[0]
     ? null
     : groupId
-      ? await withSpace(db, target.spaceId, (tx) => groupPersona(tx, principals[0]!, groupId))
-      : principals[0].app.defaultPersonaId
+      ? await withCircle(db, target.circleId, (tx) => groupPersona(tx, principals[0]!, groupId))
+      : (principals[0].personaOverrideId ?? principals[0].client.defaultPersonaId)
+
   const writers = new Map<string, { key: KeyPrincipal; session: KeySession; access: Access }>()
   for (const key of principals) {
     const session: KeySession = { context, personaId, subjects: [] }
     const access = accessForKey(key, session)
-    // 来源作用域由会话上下文算出，和缓冲分批用的是同一个。写不写得下和缓冲时同一条规则（canWriteTurns），
-    // 不带会话上下文的几轮还要是应用现在的所有者的
+    const primaryGrant = access.circles.get(target.circleId)
     const writable =
-      canWriteTurns(access, !noContext) && (!noContext || key.app.ownerAccountId === owner)
-    if (access.writeOriginScope === target.scope && writable) {
+      Boolean(primaryGrant && canWriteTurns(primaryGrant, !noContext)) &&
+      (!noContext || key.client.ownerAccountId === owner)
+    if (writable && (noContext || access.writeOriginScope === target.scope)) {
       writers.set(key.keyId, { key, session, access })
     }
   }
   const turns = all.filter(
     (t) => writers.has(t.keyId) && (!noContext || t.ownerAccountId === owner),
   )
-  // 这一批的内容只写进每一轮的 Key 都写得了的归属：只能写会话摘要的 Key 说的话，不能借别的 Key 写成联系人的事实
-  const used = [...new Set(turns.map((t) => t.keyId))].map((id) => writers.get(id)!.access)
+
+  const usedGrants = [...new Set(turns.map((t) => t.keyId))].map((id) =>
+    writers.get(id)!.access.circles.get(target.circleId)!,
+  )
   const layers = {
-    subject: !noContext && used.every((a) => a.writeLayers.has('subject')),
-    episode: used.every((a) => a.writeLayers.has('episode')),
+    fact: !noContext && usedGrants.every((c) => c.writeKinds.has('fact')),
+    episode: usedGrants.every((c) => c.writeKinds.has('episode')),
   }
-  // 私聊、群聊与频道的轮次都带着发言人；不带会话上下文的没有联系人
   const senderIds = noContext ? [] : [...new Set(turns.map((t) => t.senderSubjectId!))]
   const subjectIds = groupId ? [...senderIds, groupId] : senderIds
-  // 抽取记录挂在这一批对话现在所在的作用域与对象上：模型还在算时对象被合并，对话跟着换了过去，
-  // 记录也跟过去，合并后的对象页才看得到
   const before = new Map(all.map((t) => [t.id, t]))
+
   const runOf = (
     fields: RunFields,
     now: Place[],
@@ -187,8 +186,8 @@ export async function extractBatch(
       }
     }
     return {
-      spaceId: target.spaceId,
-      appId: target.appId,
+      circleId: target.circleId,
+      clientId: target.clientId,
       scope: now[0]?.scope ?? target.scope,
       conversationId,
       subjectIds: [...new Set(subjectIds.map((id) => moved.get(id) ?? id))],
@@ -197,24 +196,21 @@ export async function extractBatch(
       ...fields,
     }
   }
+
   const batch = and(
-    eq(conversationTurns.appId, target.appId),
+    eq(conversationTurns.clientId, target.clientId),
     inArray(conversationTurns.id, [...before.keys()]),
   )
-  // 抽取记录挂在这一批现在所在的会话上：合并之后跟着换过去。只找已有的，不建（写失败、联系人已经合并掉时也记得下）
   const conversationNow = (tx: Tx, now: Place[]) =>
-    findConversation(tx, target.appId, conversationOfTurn(now[0] ?? last))
+    findConversation(tx, target.clientId, conversationOfTurn(now[0] ?? last))
   const record = async (tx: Tx, fields: RunFields) => {
     const now = await tx.select(placeColumns).from(conversationTurns).where(batch)
     await tx.insert(extractionRuns).values(runOf(fields, now, await conversationNow(tx, now)))
   }
-  // 记一条抽取记录，并删掉这一批读到的那几轮：抽取期间合并移进这个批次的对话还没抽取，留着
   const close = async (tx: Tx, fields: RunFields) => {
     const now = await tx.delete(conversationTurns).where(batch).returning(placeColumns)
     await tx.insert(extractionRuns).values(runOf(fields, now, await conversationNow(tx, now)))
   }
-  // 写之前锁住这一批涉及的对象、确认都还在：抽取期间被合并掉的对象已经删了，写下的东西会挂在它们上面。
-  // 和合并一样先按 id 的顺序锁对象，两边不会互相等成死锁；锁住之后合并要等这一批写完
   const stillHere = async (tx: Tx) => {
     if (!subjectIds.length) return
     const rows = await tx
@@ -225,19 +221,18 @@ export async function extractBatch(
       .for('key share')
     if (rows.length < subjectIds.length) throw new BatchMoved()
   }
+
   const writer = turns.length ? writers.get(turns.at(-1)!.keyId) : undefined
-  if (!writer || (!layers.subject && !layers.episode)) {
-    await withSpace(db, target.spaceId, (tx) => close(tx, { error: NO_USABLE_KEY }))
+  if (!writer || (!layers.fact && !layers.episode)) {
+    await withCircle(db, target.circleId, (tx) => close(tx, { error: NO_USABLE_KEY }))
     return
   }
-  // 本月的 token 预算用完了就只要会话摘要，不再抽取事实，下个月恢复；连摘要也写不了时不请求模型。
-  // 不带会话上下文的一批本来就只要摘要，用量同样计入月度预算
-  const budget = await extractionUsage(db, target.spaceId)
-  // 抽取记录里的 summaryOnly 只说预算用完了（界面据此提示）；不带会话上下文的一批照常只要摘要，不算降级
+
+  const budget = await extractionUsage(db, target.circleId)
   const overBudget = budget.usedTokens >= budget.monthlyTokens
   const summaryOnly = noContext || overBudget
   if (summaryOnly && !layers.episode) {
-    await withSpace(db, target.spaceId, (tx) =>
+    await withCircle(db, target.circleId, (tx) =>
       close(tx, {
         summaryOnly: overBudget,
         error: BUDGET_NO_SUMMARY,
@@ -246,15 +241,15 @@ export async function extractBatch(
     return
   }
 
-  // 对象与它们读得到的、最近的几条有效事实（给模型看；只要摘要时不用）。
-  // 发言人用这一批里最后报上来的名字，群用平台上的名字
-  const { facts, groupName } = await withSpace(db, target.spaceId, async (tx) => {
+  // 自动抽取读取已有事实一律锁死当前本 origin_scope，绝不跨群混入或被跨群事实覆写
+  const { facts, groupName } = await withCircle(db, target.circleId, async (tx) => {
     if (summaryOnly) return { facts: [], groupName: null }
     const facts = await readableSubjectFacts(
       tx,
       writer.access,
       subjectIds,
       EXISTING_FACTS_PER_SUBJECT,
+      { localOriginScope: target.scope },
     )
     const [identity] = groupId
       ? await tx
@@ -266,7 +261,8 @@ export async function extractBatch(
       : []
     return { facts, groupName: identity?.name ?? null }
   })
-  const subjects: (PromptSubject & { id: string })[] = [
+
+  const promptSubjects: (PromptSubject & { id: string })[] = [
     ...senderIds.map((id, i) => ({
       id,
       handle: `M${i + 1}`,
@@ -278,20 +274,18 @@ export async function extractBatch(
       ? [{ id: groupId, handle: 'G', role: 'group' as const, name: groupName, facts: [] }]
       : []),
   ]
-  const { settings: spacePrivacy } = await loadSpacePrivacy(db, target.spaceId)
-  const redactForLlm = await loadOutboundRedactor(db, masterKey, target.spaceId)
+  const { settings: circlePrivacy } = await loadCirclePrivacy(db, target.circleId)
+  const redactForLlm = await loadOutboundRedactor(db, masterKey, target.circleId)
 
-  // 给模型看的事实：句柄对应哪一条、模型看到的是哪一版（推翻时按版本核对，见 writeExtraction）
   const shown = new Map<string, { id: string; subjectId: string; version: number }>()
-  for (const subject of subjects) {
+  for (const subject of promptSubjects) {
     for (const fact of facts.filter((f) => f.subjectId === subject.id)) {
       const handle = `F${shown.size + 1}`
       shown.set(handle, { id: fact.id, subjectId: subject.id, version: fact.version })
       subject.facts.push({ handle, content: await redactForLlm(fact.content) })
     }
   }
-  const handleOf = new Map(subjects.map((s) => [s.id, s.handle]))
-  // 按发言人代号保存原始与脱敏后的用户发言，供后续验证抽取结果的 quote 是否真实出自对应发言人
+  const handleOf = new Map(promptSubjects.map((s) => [s.id, s.handle]))
   const speakerTexts = new Map<string, string[]>()
   const allUserTexts: string[] = []
   const transcript = await Promise.all(
@@ -312,18 +306,18 @@ export async function extractBatch(
     }),
   )
   if (groupId) speakerTexts.set('G', allUserTexts)
-  // 会话摘要的有效天数与抽取规则的补充按空间的设置（实例与空间两级）
-  const settings = await loadSpaceSettings(db, target.spaceId)
+
+  const settings = await loadCircleSettings(db, target.circleId)
   const rules = settings.prompts.extractionRules
   const messages = summaryOnly
     ? summaryMessages(transcript, rules)
-    : extractionMessages(subjects, transcript, rules)
+    : extractionMessages(promptSubjects, transcript, rules)
 
   let completion
   try {
     completion = await model.complete(messages)
   } catch (err) {
-    await withSpace(db, target.spaceId, (tx) =>
+    await withCircle(db, target.circleId, (tx) =>
       record(tx, { model: model.model, error: (err as Error).message }),
     )
     throw err
@@ -337,18 +331,18 @@ export async function extractBatch(
   try {
     parsed = parseExtraction(completion.content)
   } catch (err) {
-    await withSpace(db, target.spaceId, (tx) =>
+    await withCircle(db, target.circleId, (tx) =>
       close(tx, { ...usage, error: (err as Error).message }),
     )
     return
   }
 
-  // 挑出要写的候选：对象不对、格式不对、太长、像明文凭据、带凭据占位符的丢掉；这一批的 Key 写不了联系人的事实时
-  // 事实一条都不写，写不了会话摘要时不写摘要。和这一批里已经要写的一字不差的（不计大小写与空白）算已经记过
   const counts = { unchanged: 0, dropped: 0, limited: 0 }
-  const proposed: Extract<ExtractedWrite, { layer: 'subject' }>[] = []
-  const bySubjectHandle = new Map(subjects.map((s) => [s.handle, s]))
+  const proposed: Extract<ExtractedWrite, { kind: 'fact' }>[] = []
+  const bySubjectHandle = new Map(promptSubjects.map((s) => [s.handle, s]))
   const pending = new Set<string>()
+  const factFacets = normalizeWhen(writer.key.contextFacets)
+
   for (const candidate of summaryOnly ? [] : parsed.candidates) {
     const subject = candidate && bySubjectHandle.get(candidate.subject.trim().toUpperCase())
     const op = candidate?.op.trim().toLowerCase()
@@ -361,10 +355,10 @@ export async function extractBatch(
       continue
     }
     const content = oneLine(candidate.content ?? '')
-    const sensitive = evaluateSensitiveContent(content, spacePrivacy)
+    const sensitive = evaluateSensitiveContent(content, circlePrivacy)
     const quotedOk = quoteMatchesSpeaker(candidate.quote, speakerTexts.get(subject.handle) ?? [])
     if (
-      !layers.subject ||
+      !layers.fact ||
       (op !== 'add' && op !== 'update') ||
       !content ||
       [...content].length > MAX_FACT_CHARS ||
@@ -383,25 +377,27 @@ export async function extractBatch(
       continue
     }
     pending.add(key)
-    // 要推翻的那条不属于这个对象时当作新的事实，免得把别人的事实改掉
     const old =
       op === 'update' && candidate.replaces
         ? shown.get(candidate.replaces.trim().toUpperCase())
         : undefined
     proposed.push({
-      layer: 'subject',
+      kind: 'fact',
       subjectId: subject.id,
+      subjectKind: subject.role === 'group' ? 'group' : 'person',
+      originScope: target.scope,
       content,
+      when: factFacets,
       replaces:
         old && old.subjectId === subject.id ? { id: old.id, version: old.version } : undefined,
     })
   }
-  // 和这个对象已有的有效事实一字不差的（不只是给模型看的那些）也算已经记过：按正文去库里查，不必把全部事实读出来
-  // 每个对象每天最多写这么多条（推翻旧事实写下的新一条也算），写满了的这次不写
-  const { existing, today } = await withSpace(db, target.spaceId, async (tx) => ({
-    existing: await knownFacts(tx, writer.access, proposed),
+
+  const { existing, today } = await withCircle(db, target.circleId, async (tx) => ({
+    existing: await knownFacts(tx, writer.access, proposed, target.scope),
     today: await writesToday(tx, subjectIds),
   }))
+
   const writes: ExtractedWrite[] = proposed.filter((f) => {
     if (existing.has(`${f.subjectId}|${f.content.toLowerCase()}`)) {
       counts.unchanged++
@@ -415,14 +411,15 @@ export async function extractBatch(
     today.set(f.subjectId, written + 1)
     return true
   })
+
   const summary = maskSensitiveContent(
     oneLine(parsed.summary),
     {
-      credentials: spacePrivacy.credentials,
-      pii: spacePrivacy.pii,
-      piiKinds: spacePrivacy.piiKinds,
-      customRules: spacePrivacy.customRules,
-      allowlist: spacePrivacy.allowlist,
+      credentials: circlePrivacy.credentials,
+      pii: circlePrivacy.pii,
+      piiKinds: circlePrivacy.piiKinds,
+      customRules: circlePrivacy.customRules,
+      allowlist: circlePrivacy.allowlist,
     },
     'stars',
   )
@@ -433,75 +430,75 @@ export async function extractBatch(
     !mentionsPlaceholder(summary)
   ) {
     writes.push({
-      layer: 'episode',
+      kind: 'episode',
+      originScope: target.scope,
       content: summary,
       ttlDays: settings.values['extraction.episodeTtlDays'],
       ownerAccountId: owner,
     })
   }
 
-  const service = new MemoryService({
+  const service = new EntryService({
     db,
-    spaceId: target.spaceId,
     access: writer.access,
-    personaId: writer.session.personaId,
     masterKey,
     actor: { keyId: writer.key.keyId },
+    ...(onFactCreated ? { onChanged: onFactCreated } : {}),
   })
-  // 写下的事实与摘要挂在这一批的会话上：确认联系人都还在之后找会话，没有就建
+
   try {
     await service.writeExtraction(
       writes,
       { source: 'extraction' },
       (tx, outcomes) => {
-        const count = (layer: ExtractedWrite['layer'], outcome: string) =>
-          outcomes.filter((o, i) => writes[i]!.layer === layer && o === outcome).length
+        const countOf = (kind: ExtractedWrite['kind'], outcome: string) =>
+          outcomes.filter((o, i) => writes[i]!.kind === kind && o === outcome).length
         return close(tx, {
           ...usage,
-          added: count('subject', 'added'),
-          updated: count('subject', 'updated'),
+          added: countOf('fact', 'added'),
+          updated: countOf('fact', 'updated'),
           unchanged: counts.unchanged,
-          dropped: counts.dropped + count('subject', 'skipped'),
-          summarized: count('episode', 'added') > 0,
+          dropped: counts.dropped + countOf('fact', 'skipped'),
+          summarized: countOf('episode', 'added') > 0,
           summaryOnly: overBudget,
           limited: counts.limited,
         })
       },
       async (tx) => {
         await stillHere(tx)
-        return ensureConversation(tx, target.spaceId, target.appId, conversationOfTurn(last))
+        return ensureConversation(tx, target.circleId, target.clientId, conversationOfTurn(last))
       },
     )
   } catch (err) {
     if (err instanceof BatchMoved) {
-      await withSpace(db, target.spaceId, (tx) => record(tx, { ...usage, error: BATCH_MOVED }))
+      await withCircle(db, target.circleId, (tx) => record(tx, { ...usage, error: BATCH_MOVED }))
       return
     }
-    // 整批已经回滚：单独记下原因再抛出，交给后台任务重试，缓冲留着
-    await withSpace(db, target.spaceId, (tx) =>
+    await withCircle(db, target.circleId, (tx) =>
       record(tx, { ...usage, error: `写入失败：${errorText(err)}` }),
     )
     throw err
   }
 }
 
-// 候选里哪些和对象已有的有效事实一字不差（不计大小写；正文写入时已经压过空白），返回「对象|小写正文」
 async function knownFacts(
   tx: Tx,
   access: Access,
   facts: readonly { subjectId: string; content: string }[],
+  originScope: string,
 ): Promise<Set<string>> {
   if (!facts.length) return new Set()
   const rows = await tx
-    .select({ subjectId: memories.subjectId, content: sql<string>`lower(${memories.content})` })
-    .from(memories)
+    .select({ subjectId: entries.subjectId, content: sql<string>`lower(${entryVariants.content})` })
+    .from(entries)
+    .innerJoin(entryVariants, eq(entryVariants.entryId, entries.id))
     .where(
       and(
-        readableConditions(access, { personaIds: [] }),
-        eq(memories.layer, 'subject'),
-        eq(memories.form, 'extracted'),
-        inArray(memories.subjectId, [...new Set(facts.map((f) => f.subjectId))]),
-        inArray(sql`lower(${memories.content})`, [
+        readableConditions(access),
+        eq(entries.kind, 'fact'),
+        eq(entries.originScope, originScope),
+        inArray(entries.subjectId, [...new Set(facts.map((f) => f.subjectId))]),
+        inArray(sql`lower(${entryVariants.content})`, [
           ...new Set(facts.map((f) => f.content.toLowerCase())),
         ]),
       ),

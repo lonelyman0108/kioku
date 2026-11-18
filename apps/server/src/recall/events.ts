@@ -1,30 +1,26 @@
 import type { RecallSource } from '@kioku/contracts'
+import { sql } from 'drizzle-orm'
 
 import { maskPlaintextCredentials } from '../credential/placeholders'
-import { loggableError, withSpace } from '../db/client'
-import { recallEventHits, recallEvents } from '../db/schema'
+import { loggableError, withCircles } from '../db/client'
+import { entries, entryRecallStats, recallEventHits, recallEvents } from '../db/schema'
 import type { Deps, KeyPrincipal } from '../http/env'
 import { CANDIDATE_ID, normalizeQuery, type RecordableCandidate } from './recall'
 
-// 召回事件里最多存提示语的这么多字
 export const RECALL_QUERY_CHARS = 200
 
-// 存下来的提示语：整段先打码再截断（先截的话，截在值的中间就认不出来了；打码之后文字变短，
-// 后面的内容也会挪进保留的范围）；应用关掉了记录提示语时为空
 export function storedQuery(query: string, recordPrompt: boolean | undefined): string | null {
   if (recordPrompt === false) return null
   return maskPlaintextCredentials(query).slice(0, RECALL_QUERY_CHARS)
 }
 
-// 还没写完的召回事件：服务退出前、测试清库前等它们写完，免得写到一半被打断，或和清库互相等锁
 const pending = new Set<Promise<void>>()
 
 export async function settleRecallEvents(): Promise<void> {
   await Promise.all([...pending])
 }
 
-// 记一条召回事件，调用方不等它写完：失败只记日志，不影响这次召回的结果。
-// 记下事件发生时的应用主人，明细只给他看
+// 主响应外异步记录主场圈召回事件与命中明细，并在同一多圈写事务内直接累加各目标圈 entry_recall_stats
 export function recordRecall(
   deps: Deps,
   key: KeyPrincipal,
@@ -32,33 +28,60 @@ export function recordRecall(
   query: string,
   hits: readonly RecordableCandidate[],
 ): Promise<void> {
-  // 只有空白的查询不会召回，也就不记；接入方的几处都经过这里
   if (!normalizeQuery(query)) return Promise.resolve()
-  // 打码在事务外算好，不占着连接
-  const stored = storedQuery(query, key.app.config.recordPrompt)
-  const write = withSpace(deps.db, key.spaceId, async (tx) => {
+  const stored = storedQuery(query, key.client.config.recordPrompt)
+  const dedupedHits: RecordableCandidate[] = []
+  const seenEntries = new Set<string>()
+  for (const h of hits) {
+    const eid = h[CANDIDATE_ID]
+    if (seenEntries.has(eid)) continue
+    seenEntries.add(eid)
+    dedupedHits.push(h)
+  }
+
+  const allCircles = [...new Set([key.circleId, ...dedupedHits.map((h) => h.circleId)])]
+
+  const write = withCircles(deps.db, { read: allCircles, write: allCircles }, async (tx, now) => {
     const [event] = await tx
       .insert(recallEvents)
       .values({
-        spaceId: key.spaceId,
-        appId: key.app.id,
+        circleId: key.circleId,
+        clientId: key.client.id,
         keyId: key.keyId,
-        ownerAccountId: key.app.ownerAccountId,
+        ownerAccountId: key.client.ownerAccountId,
         source,
         query: stored,
       })
       .returning({ id: recallEvents.id })
-    if (!hits.length) return
+
+    if (!dedupedHits.length) return
+
     await tx.insert(recallEventHits).values(
-      hits.map((h, i) => ({
+      dedupedHits.map((h, i) => ({
         eventId: event!.id,
-        spaceId: key.spaceId,
-        memoryId: h[CANDIDATE_ID],
+        circleId: key.circleId,
+        targetCircleId: h.circleId,
+        entryId: h[CANDIDATE_ID],
+        shortId: h.shortId,
         rank: i + 1,
         score: h.score,
         via: h.via,
       })),
     )
+
+    const idsSql = sql.join(
+      dedupedHits.map((h) => sql`${h[CANDIDATE_ID]}::uuid`),
+      sql`, `,
+    )
+    await tx.execute(sql`
+        insert into ${entryRecallStats} (entry_id, circle_id, count, last_recalled_at)
+        select e.id, e.circle_id, 1, ${now.toISOString()}::timestamptz
+        from ${entries} e
+        where e.id in (${idsSql})
+          and e.deleted_at is null
+        on conflict (entry_id) do update
+        set count = ${entryRecallStats.count} + 1,
+            last_recalled_at = greatest(${entryRecallStats.lastRecalledAt}, excluded.last_recalled_at)`)
   })
     .catch((err: unknown) => console.warn('记录召回事件失败', loggableError(err)))
     .finally(() => pending.delete(write))

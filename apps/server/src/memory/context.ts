@@ -1,91 +1,80 @@
-import { DEFAULT_SPACE_PRIVACY, type MemberRole, type RecallCandidate } from '@kioku/contracts'
-import { and, eq, inArray } from 'drizzle-orm'
+import {
+  DEFAULT_CIRCLE_PRIVACY,
+  normalizeWhen,
+  type LifecycleProject,
+  type RecallCandidate,
+  type WhenCondition,
+} from '@kioku/contracts'
+import { and, eq, inArray, or } from 'drizzle-orm'
 
-import { consoleAccess, resolveAccess, type Access, type ConsoleRole } from '../access/access'
+import type { Access } from '../access/access'
 import { conversationRefOf, latestSummaries } from '../access/conversations'
-import { defaultSession, type KeySession } from '../access/session'
-import { memberRole } from '../auth/middleware'
+import { accessForKey, defaultSession, type KeySession } from '../access/session'
 import { loadOutboundRedactor, maskForOutbound } from '../credential/privacy'
-import { loggableError, withSpace, type Tx } from '../db/client'
-import { apps, memories } from '../db/schema'
+import { loggableError, withCircles, type Tx } from '../db/client'
+import { entries, entryVariants } from '../db/schema'
 import type { Embedder } from '../embedding/provider'
 import type { Deps, KeyPrincipal } from '../http/env'
 import { CHAT_FAMILIES } from '../lifecycle/lifecycle'
 import type { RecallScope } from '../lifecycle/scope'
-import { boot, recentMemories } from '../recall/boot'
+import { boot, recentEntries } from '../recall/boot'
 import { recordRecall } from '../recall/events'
-import { subjectFacts } from '../recall/subjects'
 import {
+  DEFAULT_MIN_SCORE,
+  DEFAULT_RELEVANCE_FLOOR,
   embedQuery,
   normalizeQuery,
   publicCandidate,
   recall,
-  scoreRecall,
   type QueryVector,
 } from '../recall/recall'
+import { subjectFacts } from '../recall/subjects'
 import {
-  loadAppSettings,
+  loadClientSettings,
   loadInstanceSettings,
   weightsOf,
   type EffectiveSettings,
 } from '../settings/advanced'
+import {
+  consoleCircleFor,
+  consoleMemberFor,
+  consoleRoleFor,
+  entryServiceForConsole,
+  entryServiceForKey,
+} from './entryContext'
+import {
+  ensureProjectTerm,
+  loadCircleVocabularies,
+  normalizeProjectSlug,
+  synthesizePresenceFocus,
+} from './facets'
 import { readableConditions } from './filter'
-import { runInSpace } from './personas'
-import { MemoryError, MemoryService, type MemoryContext } from './service'
 
-// 管理界面的搜索等嵌入接口最多这么久，超时就只走全文与关键词，界面不必一直等
+export {
+  accessForKey,
+  consoleCircleFor,
+  consoleMemberFor,
+  consoleRoleFor,
+  entryServiceForConsole,
+  entryServiceForKey,
+}
+
 const CONSOLE_SEMANTIC_TIMEOUT_MS = 2_000
 
-// 会话由 resolveKeySession 从接入方上报的会话上下文解析出来；不带上下文时按应用的默认人格、不收紧
-export function accessForKey(key: KeyPrincipal, session: KeySession = defaultSession(key)): Access {
-  return resolveAccess(
-    key.scopes,
-    {
-      appId: key.app.id,
-      ownerAccountId: key.app.ownerAccountId,
-      personaId: session.personaId,
-      ...(key.app.config.elevateOwnerDirect
-        ? { elevateOwnerDirect: key.app.config.elevateOwnerDirect }
-        : {}),
-    },
-    session.context,
-  )
+export interface RecallScopeOptions {
+  deviceKey?: string | undefined
+  project?: LifecycleProject | undefined
+  facets?: WhenCondition | undefined
+  crossCircle?: boolean | undefined
+  recordEvents?: boolean | undefined
 }
 
-// 空间里的应用，只要知道主人是谁
-type AppOwner = { id: string; ownerAccountId: string }
-
-// 管理界面里成员本人的权限；editor 只能写自己是所有者的应用的记忆，要先查出这些应用。
-// 调用方已经读出了空间里的全部应用时传进来（spaceApps），从里面挑，不再查一次
-async function accessForConsole(
-  deps: Deps,
-  spaceId: string,
-  accountId: string,
-  role: ConsoleRole,
-  spaceApps?: readonly AppOwner[],
-): Promise<Access> {
-  const owned =
-    role !== 'editor'
-      ? []
-      : spaceApps
-        ? spaceApps.filter((a) => a.ownerAccountId === accountId)
-        : await withSpace(deps.db, spaceId, (tx) =>
-            tx.select({ id: apps.id }).from(apps).where(eq(apps.ownerAccountId, accountId)),
-          )
-  return consoleAccess(
-    role,
-    accountId,
-    owned.map((a) => a.id),
-  )
-}
-
-// 查询向量：嵌入设置读不出来（例如主密钥不对）时记录原因、不用向量。
-// 给了时限就最多等这么久，读嵌入设置的时间也算在内
+// 计算请求向量：嵌入设置不可用或超时时退化为 null，只走全文与关键词
 export async function semanticFor(
   deps: Deps,
   query: string,
   timeoutMs?: number,
-  spaceId?: string,
+  circleId?: string,
 ): Promise<QueryVector | null> {
   const budgetSignal = timeoutMs !== undefined ? AbortSignal.timeout(timeoutMs) : undefined
   const compute = async () => {
@@ -93,15 +82,14 @@ export async function semanticFor(
       console.warn('读取嵌入设置失败，本次召回不使用向量', loggableError(err))
       return null
     })
-    const redactor = spaceId
-      ? await loadOutboundRedactor(deps.db, deps.masterKey ?? null, spaceId, budgetSignal).catch(
-          () => (text: string) => maskForOutbound(text, DEFAULT_SPACE_PRIVACY),
+    const redactor = circleId
+      ? await loadOutboundRedactor(deps.db, deps.masterKey ?? null, circleId, budgetSignal).catch(
+          () => (text: string) => maskForOutbound(text, DEFAULT_CIRCLE_PRIVACY),
         )
-      : DEFAULT_SPACE_PRIVACY
+      : DEFAULT_CIRCLE_PRIVACY
     return embedQuery(embedder, query, redactor)
   }
   if (timeoutMs === undefined) return compute()
-  // 先返回的一方胜出后清掉计时器，不留着它等到点
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
     return await Promise.race([
@@ -115,80 +103,9 @@ export async function semanticFor(
   }
 }
 
-// 管理界面的请求先确认是空间成员，不是就 403；返回他的角色。各个管理界面接口都经过这里
-export async function consoleRoleFor(
-  deps: Deps,
-  spaceId: string,
-  accountId: string,
-): Promise<MemberRole> {
-  const role = await memberRole(deps, spaceId, accountId)
-  if (!role) throw new MemoryError(403, '无权访问此空间')
-  return role
-}
-
-// 管理界面的请求：先确认是空间成员（不是就 403），再按他的角色建记忆服务。
-// 概览本来就要读全部应用，分成 consoleRoleFor 与 memoryServiceForConsole 两步做，应用表只读一次
-export async function consoleMemberFor(
-  deps: Deps,
-  spaceId: string,
-  accountId: string,
-): Promise<{ role: MemberRole; service: MemoryService }> {
-  const role = await consoleRoleFor(deps, spaceId, accountId)
-  return { role, service: await memoryServiceForConsole(deps, spaceId, accountId, role) }
-}
-
-// options 给测试台：打码与事件的标记
-export function memoryServiceForKey(
-  deps: Deps,
-  key: KeyPrincipal,
-  session: KeySession = defaultSession(key),
-  options: Pick<MemoryContext, 'maskSecret' | 'eventContext'> = {},
-): MemoryService {
-  return new MemoryService({
-    db: deps.db,
-    spaceId: key.spaceId,
-    access: accessForKey(key, session),
-    personaId: session.personaId,
-    masterKey: deps.masterKey,
-    actor: { keyId: key.keyId },
-    onChanged: (memoryId) => deps.jobs?.enqueueEmbed(key.spaceId, memoryId),
-    secretRead: 'audited',
-    ...options,
-  })
-}
-
-// 管理界面：按成员角色给权限，能看到空间里全部人格与应用的记忆，本人的记忆只看得到自己的；
-// editor 只能写自己是所有者的应用的记忆。能显式读 secret 的成员在树与列表里也看得到 secret 记忆，
-// 正文要显式查看（reveal）才给。
-// 调用方已经读出了空间里的全部应用时传进 spaceApps，不再为 editor 查一次
-export async function memoryServiceForConsole(
-  deps: Deps,
-  spaceId: string,
-  accountId: string,
-  role: ConsoleRole,
-  spaceApps?: readonly AppOwner[],
-): Promise<MemoryService> {
-  const access = await accessForConsole(deps, spaceId, accountId, role, spaceApps)
-  return new MemoryService({
-    db: deps.db,
-    spaceId,
-    access,
-    personaId: 'all',
-    masterKey: deps.masterKey,
-    actor: { accountId },
-    onChanged: (memoryId) => deps.jobs?.enqueueEmbed(spaceId, memoryId),
-    listSecret: access.canReadSecret,
-    secretRead: 'explicit',
-    spaceOwner: role === 'owner',
-  })
-}
-
-// 管理界面的搜索候选：和接入方的召回同一套打分，按成员本人的权限，看得到所有人格与应用的记忆。
-// 召回永远不含 secret；最低分放到 0，弱一些的命中也列出来，由人来判断
-// access 取自同一个请求里的管理界面记忆服务，权限只算一次
 export async function recallForConsole(
   deps: Deps,
-  spaceId: string,
+  circleId: string,
   access: Access,
   rawQuery: string,
   limit: number,
@@ -196,81 +113,150 @@ export async function recallForConsole(
   const query = normalizeQuery(rawQuery)
   if (!query) return []
   const [semantic, settings] = await Promise.all([
-    semanticFor(deps, query, CONSOLE_SEMANTIC_TIMEOUT_MS, spaceId),
+    semanticFor(deps, query, CONSOLE_SEMANTIC_TIMEOUT_MS, circleId),
     loadInstanceSettings(deps.db),
   ])
   const weights = weightsOf(settings.values)
-  return runInSpace(deps.db, spaceId, 'all', (tx, personaIds) =>
-    recall(tx, access, semantic, query, { limit, minScore: 0, personaIds, weights }),
+  const readIds = [...access.circles.keys()]
+  return withCircles(deps.db, { read: readIds }, (tx) =>
+    recall(tx, access, semantic, query, { limit, minScore: 0, relevanceFloor: 0, weights }),
   )
+}
+
+export async function resolveScopeFocusIn(
+  tx: Tx,
+  key: KeyPrincipal,
+  access: Access,
+  options: {
+    project?: LifecycleProject | undefined
+    explicitFacets?: WhenCondition | undefined
+    canWritePrimary?: boolean
+  } = {},
+): Promise<WhenCondition> {
+  const projectSlug = await ensureProjectTerm(
+    tx,
+    key.circleId,
+    options.project,
+    options.canWritePrimary ?? false,
+  )
+  const vocabs = await loadCircleVocabularies(tx, [key.circleId])
+  const primaryVocab = vocabs.get(key.circleId)
+  return synthesizePresenceFocus({
+    contextFacets: key.contextFacets,
+    runtimeFamily: key.client.runtimeFamily,
+    projectSlug,
+    ...(options.explicitFacets ? { explicitFacets: options.explicitFacets } : {}),
+    ...(primaryVocab ? { primaryDefaultFacets: primaryVocab.defaultFacets } : {}),
+    primaryTerms: primaryVocab?.terms ?? [],
+  })
 }
 
 export function recallScopeForKey(
   deps: Deps,
   key: KeyPrincipal,
   session: KeySession = defaultSession(key),
+  options: RecallScopeOptions = {},
 ): RecallScope {
   const access = accessForKey(key, session)
-  const run = <T>(fn: (tx: Tx, personaIds: string[]) => Promise<T>) =>
-    runInSpace(deps.db, key.spaceId, session.personaId, fn)
-  // 经 deps 在 withSpace 里读：测试台的回滚模式下读的是同一个事务。第一次用到时读，之后用同一份。
-  // 召回、启动加载与对象直连在自己本来就开的事务里先读（settingsIn），不为设置多开一个串行的事务；
-  // 别处（会话开始的附加块、指引、调试）在那之后取，用的是已经读到的那份
-  // 只记读成了的结果：在别人的事务里读、那个事务又出了错（连接断开）时，不能连累这边健康的事务，
-  // 各自在自己的事务里重读。并行的两个事务可能各读一次，用先读到的那份
+  const readIds = [...access.circles.keys()]
+  const primaryWriteAllowed = (access.circles.get(key.circleId)?.writeKinds.size ?? 0) > 0
+  const shouldRegisterProject = Boolean(
+    primaryWriteAllowed && normalizeProjectSlug(options.project) && !session.context.chatType,
+  )
+  const circleScope = shouldRegisterProject
+    ? { read: readIds, write: [key.circleId] }
+    : { read: readIds }
+
   let loaded: EffectiveSettings | undefined
-  const chat = CHAT_FAMILIES.has(key.app.runtimeFamily)
+  let resolvedFocus: WhenCondition | undefined
+  const chat = CHAT_FAMILIES.has(key.client.runtimeFamily)
   const settingsIn = async (tx: Tx) => {
     if (loaded) return loaded
-    const read = await loadAppSettings(tx, key.spaceId, key.app.id, chat)
+    const read = await loadClientSettings(tx, key.circleId, key.client.id, chat)
     return (loaded ??= read)
   }
-  const settings = async () => loaded ?? withSpace(deps.db, key.spaceId, (tx) => settingsIn(tx))
+  const focusIn = async (tx: Tx, overrideFacets?: WhenCondition) => {
+    if (!resolvedFocus) {
+      resolvedFocus = await resolveScopeFocusIn(tx, key, access, {
+        project: options.project,
+        explicitFacets: options.facets,
+        canWritePrimary: shouldRegisterProject,
+      })
+    }
+    if (!overrideFacets) return resolvedFocus
+    const vocabs = await loadCircleVocabularies(tx, [key.circleId])
+    const primaryVocab = vocabs.get(key.circleId)
+    return synthesizePresenceFocus({
+      contextFacets: key.contextFacets,
+      runtimeFamily: key.client.runtimeFamily,
+      projectSlug: normalizeProjectSlug(options.project),
+      explicitFacets: overrideFacets,
+      ...(primaryVocab ? { primaryDefaultFacets: primaryVocab.defaultFacets } : {}),
+      primaryTerms: primaryVocab?.terms ?? [],
+    })
+  }
+  const settings = async () => loaded ?? withCircles(deps.db, circleScope, (tx) => settingsIn(tx))
+  const focus = async () => resolvedFocus ?? withCircles(deps.db, circleScope, (tx) => focusIn(tx))
+
   return {
+    primaryCircleId: key.circleId,
+    focus,
     settings,
-    async recall(rawQuery, { semantic: useSemantic = true, semanticTimeoutMs, ...options }) {
+    async recall(rawQuery, { semantic: useSemantic = true, semanticTimeoutMs, ...recallOpts }) {
       const query = normalizeQuery(rawQuery)
       if (!query) return []
-      // 嵌入接口慢时不拖住整个召回：到时间就放弃向量这一路
       const semantic = useSemantic
-        ? await semanticFor(deps, query, semanticTimeoutMs, key.spaceId)
+        ? await semanticFor(deps, query, semanticTimeoutMs, key.circleId)
         : null
-      const scored = await run(async (tx, personaIds) => {
-        const { values } = await settingsIn(tx)
-        return scoreRecall(tx, access, semantic, query, {
-          ...options,
-          limit: options.limit ?? values['recall.limit'],
-          minScore: options.minScore ?? values['recall.minScore'],
+      const scored = await withCircles(deps.db, circleScope, async (tx) => {
+        const [{ values }, currentFocus] = await Promise.all([
+          settingsIn(tx),
+          focusIn(tx, recallOpts.facets),
+        ])
+        const crossCircle = recallOpts.crossCircle ?? options.crossCircle ?? true
+        return recall(tx, access, semantic, query, {
+          ...recallOpts,
+          crossCircle,
+          focus: normalizeWhen(currentFocus),
+          limit: recallOpts.limit ?? values['recall.limit'],
+          minScore: recallOpts.minScore ?? values['recall.minScore'] ?? DEFAULT_MIN_SCORE,
+          relevanceFloor:
+            recallOpts.relevanceFloor ?? values['recall.relevanceFloor'] ?? DEFAULT_RELEVANCE_FLOOR,
           weights: weightsOf(values),
-          personaIds,
-          inheritance: true,
         })
       })
-      return scored.map(publicCandidate)
+      return scored
     },
     boot: (budget) =>
-      run(async (tx, personaIds) => {
-        const current = await settingsIn(tx)
+      withCircles(deps.db, circleScope, async (tx) => {
+        const [current, currentFocus] = await Promise.all([settingsIn(tx), focusIn(tx)])
         const charBudget =
           typeof budget === 'function'
             ? budget(current)
             : (budget ?? current.values['boot.charBudget'])
-        return boot(tx, access, { personaIds, inheritance: true }, charBudget)
+        return boot(tx, access, {
+          personaId: session.personaId,
+          focus: currentFocus,
+          budget: charBudget,
+        })
       }),
     recent: (limit) =>
-      run((tx, personaIds) => recentMemories(tx, access, { personaIds, inheritance: true }, limit)),
+      withCircles(deps.db, { read: readIds }, (tx) => recentEntries(tx, access, limit)),
     summaries: async (limit) => {
-      const ref = conversationRefOf(session.context, key.app.ownerAccountId)
-      if (ref?.kind !== 'none') return []
-      return withSpace(deps.db, key.spaceId, (tx) =>
-        latestSummaries(tx, access, key.app.id, ref, limit),
+      const projectSlug = normalizeProjectSlug(options.project) ?? ''
+      const ref = conversationRefOf(session.context, key.client.ownerAccountId, {
+        ...(options.deviceKey !== undefined ? { deviceKey: options.deviceKey } : {}),
+        projectSlug,
+      })
+      if (!ref) return []
+      return withCircles(deps.db, { read: [key.circleId] }, (tx) =>
+        latestSummaries(tx, access, key.client.id, ref, limit),
       )
     },
-    // 联系人的事实不用人格链，不经过 run。对象直连只是附加的线索：读取失败时记日志、返回空，不影响召回本身
     subjects: async () => {
       if (!session.subjects.length) return []
       try {
-        return await withSpace(deps.db, key.spaceId, async (tx) => {
+        return await withCircles(deps.db, { read: [key.circleId] }, async (tx) => {
           const perSubject = (await settingsIn(tx)).values['recall.subjectFacts']
           return perSubject ? subjectFacts(tx, access, session.subjects, perSubject) : []
         })
@@ -281,20 +267,35 @@ export function recallScopeForKey(
     },
     contents: async (ids) => {
       if (!ids.length) return new Map()
-      const rows = await run((tx, personaIds) =>
+      const rows = await withCircles(deps.db, { read: readIds }, (tx, now) =>
         tx
-          .select({ id: memories.id, content: memories.content })
-          .from(memories)
+          .select({
+            variantId: entryVariants.id,
+            entryId: entryVariants.entryId,
+            content: entryVariants.content,
+          })
+          .from(entryVariants)
+          .innerJoin(entries, eq(entries.id, entryVariants.entryId))
           .where(
             and(
-              inArray(memories.id, [...ids]),
-              eq(memories.form, 'curated'),
-              readableConditions(access, { personaIds }),
+              or(inArray(entryVariants.id, [...ids]), inArray(entryVariants.entryId, [...ids])),
+              readableConditions(access, { now }),
             ),
           ),
       )
-      return new Map(rows.map((r) => [r.id, r.content ?? '']))
+      const map = new Map<string, string>()
+      for (const r of rows) {
+        if (r.content === null) continue
+        map.set(r.variantId, r.content)
+        if (!map.has(r.entryId)) map.set(r.entryId, r.content)
+      }
+      return map
     },
-    record: (source, query, hits) => void recordRecall(deps, key, source, query, hits),
+    record: (source, query, hits) => {
+      if (options.recordEvents === false) return
+      void recordRecall(deps, key, source, query, hits)
+    },
   }
 }
+
+export { publicCandidate }

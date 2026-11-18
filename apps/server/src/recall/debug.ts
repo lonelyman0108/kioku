@@ -1,160 +1,188 @@
 import { randomUUID } from 'node:crypto'
 
-import type { BootPreview, BootPreviewRequest, RecallDebug } from '@kioku/contracts'
-import { and, inArray, not } from 'drizzle-orm'
+import type {
+  BootPreview,
+  BootPreviewRequest,
+  LifecycleProject,
+  RecallDebug,
+  RecallDebugRequest,
+  SessionContextInput,
+} from '@kioku/contracts'
+import { eq, inArray } from 'drizzle-orm'
 
 import { readDenial, type Access } from '../access/access'
-import { nowOf, type Tx } from '../db/client'
-import { memories } from '../db/schema'
+import { defaultSession, resolveKeySession } from '../access/session'
+import { nowOf, withCircles, type Tx } from '../db/client'
+import { circles, entries } from '../db/schema'
 import type { Deps, KeyPrincipal } from '../http/env'
 import { PROMPT_SEMANTIC_TIMEOUT_MS, recallBlock, sessionStart } from '../lifecycle/lifecycle'
 import { accessForKey, recallScopeForKey, semanticFor } from '../memory/context'
-import { personaOverride, runInSpace } from '../memory/personas'
-import { formatUri } from '../memory/uri'
+import { visibleCircleSlug } from '../memory/links'
+import { parseEntryFacts } from '../memory/service'
+import { loadClientSettings, weightsOf } from '../settings/advanced'
+import { CHAT_FAMILIES } from '../lifecycle/lifecycle'
 import { bootEntryChars, bootHeading, OMITTED_TITLES } from './boot'
-import { weightsOf } from '../settings/advanced'
-import { normalizeQuery, publicCandidate, scoreRecall, type ScoredCandidate } from './recall'
+import {
+  normalizeQuery,
+  publicCandidate,
+  scoreRecall,
+  scoreRecallWithMeta,
+  type ScoredCandidate,
+} from './recall'
 
-// 调试台多看一些候选：没注入的（包括低于最低分的，界面拖动最低分与条数时就地重算）、
-// 以及管理界面搜得到这把 Key 却读不到的，都从这么多条里找。比每轮召回条数的上限多
 const DEBUG_LIMIT = 30
 
-// 启动预览：按一把 Key 走一遍会话开始，和生命周期端点用同一段代码，看到的就是宿主收到的
 export async function bootPreview(
   deps: Deps,
   key: KeyPrincipal,
   request: BootPreviewRequest,
+  options: { context?: SessionContextInput } = {},
 ): Promise<BootPreview> {
-  const start = await sessionStart(recallScopeForKey(deps, key), key.app.runtimeFamily, {
+  const session = options.context
+    ? await resolveKeySession(deps, key, options.context)
+    : defaultSession(key)
+  const scope = recallScopeForKey(deps, key, session, {
+    ...(request.deviceKey !== undefined ? { deviceKey: request.deviceKey } : {}),
+    ...(request.project !== undefined ? { project: request.project } : {}),
+    recordEvents: false,
+  })
+  const start = await sessionStart(scope, key.client.runtimeFamily, {
     project: request.project,
     sessionId: request.sessionId ?? randomUUID(),
   })
+  const resolvedFacets = await scope.focus()
   return {
-    runtimeFamily: key.app.runtimeFamily,
+    runtimeFamily: key.client.runtimeFamily,
     limit: start.limit,
     context: start.context,
+    resolvedFacets,
+    personaTraits: start.boot.personaTraits,
     entries: start.boot.entries.map((e) => ({
-      uri: e.uri,
+      shortId: e.shortId,
       title: e.title,
-      layer: e.layer,
-      chars: bootEntryChars(bootHeading(e.uri, e.title), e.content),
+      circleId: e.circleId,
+      circleSlug: e.circleSlug,
+      chars: bootEntryChars(bootHeading(e.shortId, e.title), e.content),
     })),
-    omitted: start.boot.omitted.map((uri, i) => ({
-      uri,
+    omitted: start.boot.omitted.map((shortId, i) => ({
+      shortId,
       title: start.boot[OMITTED_TITLES][i] ?? '',
     })),
     summaries: start.summaries,
     recent: start.recent,
-    // Symbol 键上的记忆 id 序列化时带不出去
     related: start.related,
     dropped: start.dropped,
   }
 }
 
-// 召回调试台：按一把 Key 模拟每轮输入时的召回，列出各路得分；再用管理界面的权限（member，查看者本人，
-// 也就是应用主人）搜一遍，列出搜得到、这把 Key 却读不到的记忆与原因。
-// 最低分、条数与权重按这把 Key 的应用生效的设置，和每轮输入读的是同一份；trial 给了最低分或条数时按给的试算
 export async function recallDebug(
   deps: Deps,
   key: KeyPrincipal,
-  member: Access,
-  rawQuery: string,
-  trial: { minScore?: number | undefined; limit?: number | undefined } = {},
+  memberAccess: Access,
+  request: RecallDebugRequest,
+  options: { project?: LifecycleProject; context?: SessionContextInput } = {},
 ): Promise<RecallDebug> {
-  const query = normalizeQuery(rawQuery)
-  const keyAccess = accessForKey(key)
-  const scope = recallScopeForKey(deps, key)
-  const { values } = await scope.settings()
-  const minScore = trial.minScore ?? values['recall.minScore']
-  const limit = trial.limit ?? values['recall.limit']
+  const query = normalizeQuery(request.query)
+  const session = options.context
+    ? await resolveKeySession(deps, key, options.context)
+    : defaultSession(key)
+  const keyAccess = accessForKey(key, session)
+  const scope = recallScopeForKey(deps, key, session, {
+    ...(options.project !== undefined ? { project: options.project } : {}),
+    ...(request.facets !== undefined ? { facets: request.facets } : {}),
+    crossCircle: request.crossCircle,
+    recordEvents: false,
+  })
+
+  const chat = CHAT_FAMILIES.has(key.client.runtimeFamily)
+  const { values } = await withCircles(deps.db, { read: [key.circleId] }, (tx) =>
+    loadClientSettings(tx, key.circleId, key.client.id, chat),
+  )
+  const minScore = request.minScore ?? values['recall.minScore']
+  const limit = request.limit ?? values['recall.limit']
+  const relevanceFloor = values['recall.relevanceFloor']
   const weights = weightsOf(values)
-  // 向量只算一次，两边共用；和每轮输入时一样有时限
-  const semantic = await semanticFor(deps, query, PROMPT_SEMANTIC_TIMEOUT_MS, key.spaceId)
-  // 管理界面看得到全部人格，不按继承覆盖，和管理界面的搜索一样
-  const visible = await runInSpace(deps.db, key.spaceId, 'all', (tx, personaIds) =>
-    scoreRecall(tx, member, semantic, query, {
+
+  const [semantic, baseFocus] = await Promise.all([
+    semanticFor(deps, query, PROMPT_SEMANTIC_TIMEOUT_MS, key.circleId),
+    scope.focus(),
+  ])
+
+  const readIds = [...new Set([...memberAccess.circles.keys(), ...keyAccess.circles.keys()])]
+  const { visible, meta, filtered } = await withCircles(deps.db, { read: readIds }, async (tx) => {
+    const visible = await scoreRecall(tx, memberAccess, semantic, query, {
       limit: DEBUG_LIMIT,
       minScore: 0,
-      personaIds,
+      relevanceFloor: 0,
+      crossCircle: request.crossCircle,
       weights,
-    }),
-  )
-  const { scored, filtered } = await runInSpace(
-    deps.db,
-    key.spaceId,
-    key.app.defaultPersonaId,
-    async (tx, chain) => {
-      const scored = await scoreRecall(tx, keyAccess, semantic, query, {
-        limit: DEBUG_LIMIT,
-        minScore: 0,
-        personaIds: chain,
-        inheritance: true,
-        weights,
-      })
-      // 按记忆 id 比对：同一个坐标上可能还有别的记录（例如别的成员的本人记忆），按坐标会找错
-      const seen = new Set(scored.map((c) => c.id))
-      const missing = visible.filter((c) => !seen.has(c.id)).map((c) => c.id)
-      return { scored, filtered: await explainHidden(tx, keyAccess, chain, missing) }
-    },
-  )
-  const injected = scored.filter((c) => c.rawScore >= minScore).slice(0, limit)
-  const shown = new Set(injected.map((c) => c.id))
+    })
+    const meta = await scoreRecallWithMeta(tx, keyAccess, semantic, query, {
+      limit: DEBUG_LIMIT,
+      minScore: 0,
+      relevanceFloor,
+      crossCircle: request.crossCircle,
+      focus: baseFocus,
+      weights,
+    })
+    const seen = new Set(meta.candidates.map((c) => c.entryId))
+    const missing = visible.filter((c) => !seen.has(c.entryId)).map((c) => c.entryId)
+    return { visible, meta, filtered: await explainHidden(tx, keyAccess, missing) }
+  })
+
+  void visible
+  const injected = meta.candidates.filter((c) => c.rawScore >= minScore).slice(0, limit)
+  const shown = new Set(injected.map((c) => c.entryId))
   const toDebug = (c: ScoredCandidate) => ({
     ...publicCandidate(c),
     breakdown: c.breakdown,
     rawScore: c.rawScore,
   })
+
   return {
     injected: injected.map(toDebug),
-    others: scored.filter((c) => !shown.has(c.id)).map(toDebug),
+    others: meta.candidates.filter((c) => !shown.has(c.entryId)).map(toDebug),
     minScore,
     limit,
-    // 和每轮输入用同一段代码，群聊 bot 的召回块同样带正文。调试台按无上下文模拟，也没有会话标识
-    block: await recallBlock(scope, key.app.runtimeFamily, injected.map(publicCandidate)),
+    block: await recallBlock(scope, key.client.runtimeFamily, injected.map(publicCandidate)),
     semantic: semantic !== null,
+    resolvedFacets: meta.resolvedFacets,
+    flippedTerms: meta.flippedTerms,
     filtered,
   }
 }
 
-// 查看者搜得到的这些记忆，这把 Key 为什么读不到：读权限的原因，或被继承链上更近的人格覆盖。
-// 读得到又没被覆盖的只是分数排在后面，不算被过滤。顺序与管理界面的搜索结果一致
 async function explainHidden(
   tx: Tx,
   keyAccess: Access,
-  chain: string[],
   ids: string[],
 ): Promise<RecallDebug['filtered']> {
   if (!ids.length) return []
-  const rows = await tx.select().from(memories).where(inArray(memories.id, ids))
   const now = nowOf(tx)
-  const override = personaOverride(keyAccess, { personaIds: chain, inheritance: true }, now)
-  const overridden = new Set(
-    override
-      ? (
-          await tx
-            .select({ id: memories.id })
-            .from(memories)
-            .where(and(inArray(memories.id, ids), not(override)))
-        ).map((r) => r.id)
-      : [],
-  )
-  const byId = new Map(rows.map((row) => [row.id, row]))
+  const rows = await tx
+    .select({
+      entry: entries,
+      circleSlug: circles.slug,
+    })
+    .from(entries)
+    .innerJoin(circles, eq(circles.id, entries.circleId))
+    .where(inArray(entries.id, ids))
+
+  const byId = new Map(rows.map((r) => [r.entry.id, r]))
   return ids.flatMap((id) => {
-    const row = byId.get(id)
-    if (!row) return []
-    const reason =
-      readDenial(keyAccess, row, { personaIds: chain, now }) ??
-      (overridden.has(id) ? ('override' as const) : null)
-    return reason
-      ? [
-          {
-            uri: formatUri(row.domain!, row.path!),
-            title: row.title!,
-            layer: row.layer,
-            sensitivity: row.sensitivity,
-            reason,
-          },
-        ]
-      : []
+    const item = byId.get(id)
+    if (!item) return []
+    const reason = readDenial(keyAccess, parseEntryFacts(item.entry), { now })
+    if (!reason) return []
+    return [
+      {
+        shortId: item.entry.shortId,
+        title: item.entry.title,
+        circleSlug: visibleCircleSlug(keyAccess, item.entry.circleId, item.circleSlug),
+        kind: item.entry.kind,
+        sensitivity: item.entry.sensitivity,
+        reason,
+      },
+    ]
   })
 }

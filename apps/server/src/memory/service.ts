@@ -65,6 +65,7 @@ import type {
   ReviewResult,
   Sensitivity,
   StoredSensitiveFinding,
+  SubjectKind,
   TransferEntryRequest,
   UndeleteRequest,
   UpdateEntryRequest,
@@ -78,6 +79,7 @@ import {
   desc,
   eq,
   exists,
+  gt,
   ilike,
   inArray,
   isNotNull,
@@ -238,6 +240,24 @@ export type UpdateInput = (
 
 export type EntryRow = typeof entries.$inferSelect
 export type VariantRow = typeof entryVariants.$inferSelect
+
+export type ExtractedWrite =
+  | {
+      kind: 'fact'
+      subjectId: string
+      subjectKind: SubjectKind
+      originScope: string
+      content: string
+      when?: WhenCondition
+      replaces?: { id: string; version: number } | undefined
+    }
+  | {
+      kind: 'episode'
+      originScope: string
+      content: string
+      ttlDays: number
+      ownerAccountId: string | null
+    }
 
 export type SuggestionAction =
   | { kind: 'merge'; keepId: string; content: string }
@@ -531,7 +551,7 @@ async function syncCredentialRefs(
     .onConflictDoNothing()
 }
 
-function parseEntryFacts(row: EntryRow): EntryFacts {
+export function parseEntryFacts(row: EntryRow): EntryFacts {
   return {
     circleId: row.circleId,
     kind: row.kind,
@@ -4529,5 +4549,239 @@ export class EntryService {
       }
       await mark(tx)
     })
+  }
+
+  async writeExtraction(
+    items: readonly ExtractedWrite[],
+    eventMeta: Record<string, unknown>,
+    onSettled: (tx: Tx, outcomes: ('added' | 'updated' | 'skipped')[]) => Promise<void>,
+    resolveConversation: (tx: Tx) => Promise<string>,
+  ): Promise<void> {
+    const circleId = this.ctx.access.primaryCircleId
+    const circleKind: CircleKind = this.ctx.access.circles.get(circleId)?.circleKind ?? 'shared'
+    const embedEntryIds: string[] = []
+
+    await withCircle(this.ctx.db, circleId, async (tx, now) => {
+      const conversationId = await resolveConversation(tx)
+      const { settings: privacy } = await loadCirclePrivacy(tx, circleId)
+      const outcomes: ('added' | 'updated' | 'skipped')[] = []
+
+      for (const item of items) {
+        if (item.kind === 'fact') {
+          const sensitivity: Sensitivity = 'public'
+          const provenance: Provenance = 'untrusted'
+          if (!canWrite(this.ctx.access, { circleId, kind: 'fact', sensitivity })) {
+            outcomes.push('skipped')
+            continue
+          }
+
+          let replaced = false
+          if (item.replaces) {
+            const [oldRow] = await tx
+              .select()
+              .from(entries)
+              .where(
+                and(
+                  eq(entries.id, item.replaces.id),
+                  eq(entries.kind, 'fact'),
+                  eq(entries.subjectId, item.subjectId),
+                  eq(entries.originScope, item.originScope),
+                  isNull(entries.deletedAt),
+                  or(isNull(entries.validTo), gt(entries.validTo, now)),
+                ),
+              )
+              .for('update')
+              .limit(1)
+            if (
+              oldRow &&
+              oldRow.version === item.replaces.version &&
+              canModify(this.ctx.access, oldRow)
+            ) {
+              const oldVariants = await tx
+                .select()
+                .from(entryVariants)
+                .where(eq(entryVariants.entryId, oldRow.id))
+                .orderBy(asc(entryVariants.sortOrder))
+              const [superseded] = await tx
+                .update(entries)
+                .set({ validTo: now, version: oldRow.version + 1, updatedAt: now })
+                .where(eq(entries.id, oldRow.id))
+                .returning()
+              await tx.delete(entryEmbeddings).where(eq(entryEmbeddings.entryId, oldRow.id))
+              await tx.delete(entryLinks).where(eq(entryLinks.sourceEntryId, oldRow.id))
+              const storedOldVariants = oldVariants.map((v) => ({
+                when: normalizeWhen(v.when),
+                content: v.content,
+              }))
+              await this.writeEvent(tx, {
+                circleId,
+                entryId: oldRow.id,
+                type: 'update',
+                provenance: this.ctx.access.writeProvenance,
+                before: toStoredSnapshot(oldRow, storedOldVariants, []),
+                after: toStoredSnapshot(superseded!, storedOldVariants, []),
+                context: eventMeta,
+              })
+              replaced = true
+            }
+          }
+
+          const when = normalizeWhen(item.when ?? {})
+          const realms = normalizeRealms(when.realm ?? [])
+          const { value: inserted } = await insertWithAllocatedShortId(tx, async (sp, shortId) => {
+            const title = deriveEntryTitle(
+              undefined,
+              [{ content: item.content }],
+              shortId,
+              sensitivity,
+            )
+            const [row] = await sp
+              .insert(entries)
+              .values({
+                circleId,
+                shortId,
+                circleKind,
+                kind: 'fact',
+                ownerAccountId: null,
+                clientId: this.ctx.access.clientId,
+                subjectId: item.subjectId,
+                subjectKind: item.subjectKind,
+                conversationId,
+                provenance,
+                originScope: item.originScope,
+                title,
+                sensitivity,
+                priority: 2,
+                disclosure: null,
+                topics: [],
+                realms,
+                validFrom: now,
+                version: 1,
+              })
+              .returning()
+            const header = buildSearchHeader({
+              sensitivity,
+              title,
+              topics: [],
+              disclosure: null,
+              glossary: [],
+            })
+            const outcome = evaluateSensitiveContent(item.content, privacy)
+            await sp.insert(entryVariants).values({
+              circleId,
+              entryId: row!.id,
+              kind: 'fact',
+              sensitivity,
+              when,
+              whenSignature: whenSignature(when),
+              sortOrder: 0,
+              content: item.content,
+              searchHeader: header,
+              sensitiveCredential: outcome.hasCredential,
+              sensitivePii: outcome.hasPii,
+              sensitiveFindings: outcome.findings,
+            })
+            return row!
+          })
+
+          await this.writeEvent(tx, {
+            circleId,
+            entryId: inserted.id,
+            type: 'create',
+            provenance,
+            before: null,
+            after: toStoredSnapshot(inserted, [{ when, content: item.content }], []),
+            context: eventMeta,
+          })
+          embedEntryIds.push(inserted.id)
+          outcomes.push(replaced ? 'updated' : 'added')
+          continue
+        }
+
+        const isNoContext = item.ownerAccountId !== null
+        const sensitivity: Sensitivity = isNoContext ? 'private' : 'public'
+        const provenance: Provenance = isNoContext ? 'agent' : 'untrusted'
+        const originScope = isNoContext ? `client:${this.ctx.access.clientId}` : item.originScope
+        if (!canWrite(this.ctx.access, { circleId, kind: 'episode', sensitivity })) {
+          outcomes.push('skipped')
+          continue
+        }
+
+        const expiresAt = new Date(now.getTime() + item.ttlDays * 86_400_000)
+        const { value: inserted } = await insertWithAllocatedShortId(tx, async (sp, shortId) => {
+          const title = deriveEntryTitle(
+            undefined,
+            [{ content: item.content }],
+            shortId,
+            sensitivity,
+          )
+          const [row] = await sp
+            .insert(entries)
+            .values({
+              circleId,
+              shortId,
+              circleKind,
+              kind: 'episode',
+              ownerAccountId: item.ownerAccountId,
+              clientId: this.ctx.access.clientId,
+              subjectId: null,
+              subjectKind: null,
+              conversationId,
+              provenance,
+              originScope,
+              title,
+              sensitivity,
+              priority: 2,
+              disclosure: null,
+              topics: [],
+              realms: [],
+              validFrom: now,
+              expiresAt,
+              version: 1,
+            })
+            .returning()
+          const header = buildSearchHeader({
+            sensitivity,
+            title,
+            topics: [],
+            disclosure: null,
+            glossary: [],
+          })
+          const outcome = evaluateSensitiveContent(item.content, privacy)
+          await sp.insert(entryVariants).values({
+            circleId,
+            entryId: row!.id,
+            kind: 'episode',
+            sensitivity,
+            when: {},
+            whenSignature: '{}',
+            sortOrder: 0,
+            content: item.content,
+            searchHeader: header,
+            sensitiveCredential: outcome.hasCredential,
+            sensitivePii: outcome.hasPii,
+            sensitiveFindings: outcome.findings,
+          })
+          return row!
+        })
+
+        await this.writeEvent(tx, {
+          circleId,
+          entryId: inserted.id,
+          type: 'create',
+          provenance,
+          before: null,
+          after: toStoredSnapshot(inserted, [{ when: {}, content: item.content }], []),
+          context: eventMeta,
+        })
+        outcomes.push('added')
+      }
+
+      await onSettled(tx, outcomes)
+    })
+
+    for (const id of embedEntryIds) {
+      this.ctx.onChanged?.(circleId, id)
+    }
   }
 }

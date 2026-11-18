@@ -1,9 +1,9 @@
+import { normalizeWhen } from '@kioku/contracts'
 import { and, asc, eq, gt, inArray, isNull, notInArray, sql } from 'drizzle-orm'
 
-import { loadSpacePrivacy, maskForOutbound } from '../credential/privacy'
-import { withSpace, type Db, type Tx } from '../db/client'
-import { memories, memoryEmbeddings, memoryGlossary, spaces } from '../db/schema'
-import { formatUri } from '../memory/uri'
+import { loadCirclePrivacy, maskForOutbound } from '../credential/privacy'
+import { withCircle, type Db, type Tx } from '../db/client'
+import { circles, entries, entryEmbeddings, entryGlossary, entryVariants } from '../db/schema'
 import { EMBEDDABLE } from './coverage'
 import type { Embedder } from './provider'
 import { lockEmbeddingModels } from './settings'
@@ -12,15 +12,14 @@ import { embeddingText, textHash } from './text'
 // 一次请求嵌入接口最多带这么多条文本
 export const EMBED_BATCH = 32
 const PAGE = EMBED_BATCH * 4
-// 整批失败后逐条再试时，最短的这么多条都失败，就当作接口（或渠道）不可用，不再一条条请求（见 embedBatch）
+// 整批失败后逐条再试时，最短的这么多条都失败，就当作接口（或渠道）不可用，不再一条条请求
 const GIVE_UP_AFTER = 3
 
-// 判断记忆有没有被改过用 PostgreSQL 的 xmin（最后一次修改这一行的事务号）：每次 UPDATE 都会变，
-// 不像 updated_at 依赖应用写入的时间戳（只有毫秒精度，同一毫秒内的两次修改分不出来）
-const stamp = sql<string>`memories.xmin::text`
+const entryStampSql = sql<string>`${entries}.xmin::text`
+const variantStampSql = sql<string>`${entryVariants}.xmin::text`
 
 // 接口不可用（逐条再试时最短的几条都失败）时 syncRows 抛出它：已经拿到的向量写回了，
-// unfinished 是这一组里还没生成向量的那几条，调用方只把它们按出错处理
+// unfinished 是这一组里还没生成向量的词条 id
 export class EmbedUnavailable extends Error {
   readonly unfinished: string[]
   constructor(cause: Error, unfinished: string[]) {
@@ -30,35 +29,28 @@ export class EmbedUnavailable extends Error {
 }
 
 export interface SyncHooks {
-  // 写回时正被别的事务锁着、这次没处理的记忆，交给调用方稍后重试；返回 Promise 时等它做完再往下
+  // 写回时正被别的事务锁着、这次没处理的词条，交给调用方稍后重试
   onSkipped?: ((ids: string[]) => void | Promise<void>) | undefined
-  // 逐条再试时这一条失败（例如正文超过模型的长度上限）：跳过它，别的照常写
-  onFailed?: ((memoryId: string, message: string) => void) | undefined
-  // 处理时间用完了、服务要停（signal）：还没请求的不再请求，正在请求的取消；写回已经拿到的向量，
-  // 没生成的（不含被锁着、已经交给 onSkipped 的）交给调用方按出错处理
+  // 逐条再试时某词条的切片失败（例如正文超过模型长度上限）：跳过它，别的照常写
+  onFailed?: ((entryId: string, message: string) => void) | undefined
+  // 处理时间用完了、服务要停（signal）：还没请求的不再请求，写回已拿到的向量，其余交 onDeferred
   signal?: AbortSignal | undefined
   onDeferred?: ((ids: string[]) => void) | undefined
 }
 
-// 还要留着向量的模型：写回时按设置里正在用的与正在换过去的算（锁住设置到写完），不用任务开始时的：
-// 期间换模型被放弃、已经切走或换成了别的，旧的判断会写下没人用的向量，或者删掉新模型刚写的。
-// 还没配置嵌入模型时（命令行工具、测试直接给模型）只认这次写的模型
 async function keptModels(tx: Tx, embedder: Embedder): Promise<string[]> {
   const { active, next } = await lockEmbeddingModels(tx)
   const kept = [active, next].flatMap((s) => (s ? [s.model] : []))
   return kept.length ? kept : [embedder.model]
 }
 
-// 一批文本的向量。整批失败时逐条再试，先试短的：单条被拒多半是因为太长，先试短的能尽早确认接口是好的。
-// 最短的 GIVE_UP_AFTER 条都失败，本身就说明接口或渠道有问题（例如渠道的模型名写错了，每个请求都回 400）：
-// 停下来报给调用方（broken），不再一条条请求，这几条也不另算各自的失败，整组按一次接口失败处理。
-// 其中有一条成功了，失败的就只算那几条。不到 GIVE_UP_AFTER 条时一律只算这几条失败。
-// 处理时间用完了、服务要停时也停下：没拿到的不在结果里、也不报失败，还在试最短的几条时已经失败的也一样
-// （试到一半说明不了是这几条的问题还是接口的问题）。已经拿到的向量不论怎样都交回去
 async function embedBatch(
   embedder: Embedder,
   batch: { id: string; text: string }[],
-  hooks: SyncHooks,
+  hooks: {
+    signal?: AbortSignal | undefined
+    onFailed?: ((id: string, message: string) => void) | undefined
+  },
 ): Promise<{ vectors: Map<string, number[]>; broken: Error | null }> {
   const { signal, onFailed } = hooks
   const options = signal ? { signal } : {}
@@ -72,13 +64,11 @@ async function embedBatch(
     return { vectors, broken: null }
   } catch (err) {
     if (signal?.aborted) return { vectors, broken: null }
-    // 只有一条：整批就是它，不用再请求一次
     if (batch.length === 1) {
       onFailed?.(batch[0]!.id, (err as Error).message)
       return { vectors, broken: null }
     }
   }
-  // 最短的几条还没有一条成功时，失败的先记着：都失败就是接口不可用，有一条成功才各算各的
   let probing = batch.length >= GIVE_UP_AFTER
   const held: { id: string; message: string }[] = []
   for (const item of [...batch].sort((a, b) => a.text.length - b.text.length)) {
@@ -104,85 +94,140 @@ async function embedBatch(
   return { vectors, broken: null }
 }
 
-// 为一批记忆生成或刷新这个模型的向量；不该有向量的（EMBEDDABLE 之外的：已删除、过期、secret、没有正文，
-// 以及抽取的记忆：召回与 Dream 都不用它们的向量）删掉向量。嵌入文本没变就跳过。
-// 分三步：短事务读出要处理的内容 → 事务外请求嵌入接口 → 短事务写回。
-// 请求外部接口时不占着数据库连接和事务；写回前锁住这些行并核对 xmin，期间被改过的不写回，
-// 交给那次修改触发的任务处理，避免旧内容的向量覆盖新状态（例如刚改成 secret 的记忆又被写上明文向量）。
-// 这些记忆别的模型的向量（不再留着的）顺手删掉
+interface PendingVariant {
+  variantId: string
+  entryId: string
+  text: string
+  hash: string
+}
+
+function variantSignature(stamps: ReadonlyMap<string, string>): string {
+  return [...stamps.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([id, s]) => `${id}:${s}`)
+    .join('|')
+}
+
+// 为一批词条生成或刷新此模型的所有合资格（entry + fact）变体切片向量；
+// 三段式执行：短事务读出 → 事务外请求嵌入接口 → 短事务校验 xmin 后写回并清理无效与过期模型向量
 async function syncRows(
   db: Db,
   embedder: Embedder,
-  spaceId: string,
-  ids: string[],
+  circleId: string,
+  entryIds: string[],
   hooks: SyncHooks,
 ): Promise<number> {
-  if (!ids.length) return 0
+  if (!entryIds.length) return 0
 
-  const { stale, pending, readAt } = await withSpace(db, spaceId, async (tx) => {
-    const { settings: privacy } = await loadSpacePrivacy(tx, spaceId)
-    // 按 id 排：一批里请求的顺序固定，出问题时好重现
-    const rows = await tx
-      .select({ row: memories, stamp, embeddable: sql<boolean>`coalesce(${EMBEDDABLE}, false)` })
-      .from(memories)
-      .where(inArray(memories.id, ids))
-      .orderBy(asc(memories.id))
-    const glossaryRows = await tx
-      .select()
-      .from(memoryGlossary)
-      .where(inArray(memoryGlossary.memoryId, ids))
-    const existing = await tx
-      .select({ memoryId: memoryEmbeddings.memoryId, contentHash: memoryEmbeddings.contentHash })
-      .from(memoryEmbeddings)
-      .where(
-        and(inArray(memoryEmbeddings.memoryId, ids), eq(memoryEmbeddings.model, embedder.model)),
-      )
-    const hashes = new Map(existing.map((e) => [e.memoryId, e.contentHash]))
-    const stale: string[] = []
-    const pending: { id: string; text: string; hash: string }[] = []
-    for (const { row, embeddable } of rows) {
-      // 正文与 URI 在 EMBEDDABLE 里已经保证有，这里再判断一次只是让类型收窄
-      if (!embeddable || !row.content || !row.domain || !row.path) {
-        // 只有确实有向量的才需要删，没有的不必为它锁行
-        if (hashes.has(row.id)) stale.push(row.id)
-        continue
+  const { stale, pending, readEntryStamps, readVariantStamps } = await withCircle(
+    db,
+    circleId,
+    async (tx) => {
+      const { settings: privacy } = await loadCirclePrivacy(tx, circleId)
+      const rows = await tx
+        .select({
+          entry: entries,
+          variant: entryVariants,
+          entryStamp: entryStampSql,
+          variantStamp: variantStampSql,
+          embeddable: sql<boolean>`coalesce(${EMBEDDABLE}, false)`,
+        })
+        .from(entryVariants)
+        .innerJoin(entries, eq(entries.id, entryVariants.entryId))
+        .where(inArray(entries.id, entryIds))
+        .orderBy(asc(entries.id), asc(entryVariants.id))
+
+      const [glossaryRows, existing] = await Promise.all([
+        tx.select().from(entryGlossary).where(inArray(entryGlossary.entryId, entryIds)),
+        tx
+          .select({
+            variantId: entryEmbeddings.variantId,
+            entryId: entryEmbeddings.entryId,
+            contentHash: entryEmbeddings.contentHash,
+          })
+          .from(entryEmbeddings)
+          .where(
+            and(
+              inArray(entryEmbeddings.entryId, entryIds),
+              eq(entryEmbeddings.model, embedder.model),
+            ),
+          ),
+      ])
+
+      const glossaryByEntry = new Map<string, string[]>()
+      for (const g of glossaryRows) {
+        const list = glossaryByEntry.get(g.entryId) ?? []
+        list.push(maskForOutbound(g.keyword, privacy))
+        glossaryByEntry.set(g.entryId, list)
       }
-      const text = embeddingText({
-        uri: maskForOutbound(formatUri(row.domain, row.path), privacy),
-        disclosure: row.disclosure ? maskForOutbound(row.disclosure, privacy) : null,
-        glossary: glossaryRows
-          .filter((g) => g.memoryId === row.id)
-          .map((g) => maskForOutbound(g.keyword, privacy))
-          .sort(),
-        content: maskForOutbound(row.content, privacy),
-      })
-      const hash = textHash(embedder.model, text)
-      if (hashes.get(row.id) !== hash) pending.push({ id: row.id, text, hash })
-    }
-    return { stale, pending, readAt: new Map(rows.map((r) => [r.row.id, r.stamp])) }
-  })
+      for (const list of glossaryByEntry.values()) list.sort()
 
-  // 别的模型（不再留着的）的向量：只删自己锁到的记忆的。正被别的事务锁着的记忆（例如每小时的清理正删着它们的向量）
-  // 不碰它们的向量行，免得两边在向量行的锁上互相等待；留下的等下一次处理或换模型之后的清理
-  const otherModels = (locked: string[], keep: string[]) =>
-    and(inArray(memoryEmbeddings.memoryId, locked), notInArray(memoryEmbeddings.model, keep))
-  // 没有要写的也没有要删的：只剩换模型后的旧向量清理。只锁真有别的模型的向量的那几条，大多数时候一条都没有。
-  // 和写回时一样只删向量、不改记忆这一行，锁用 FOR NO KEY UPDATE（见下面写回的那一段）
+      const existingByVariant = new Map(existing.map((e) => [e.variantId, e]))
+      const readEntryStamps = new Map<string, string>()
+      const readVariantStamps = new Map<string, Map<string, string>>()
+      const seenVariants = new Set<string>()
+      const stale: { variantId: string; entryId: string }[] = []
+      const pending: PendingVariant[] = []
+
+      for (const { entry, variant, entryStamp, variantStamp, embeddable } of rows) {
+        readEntryStamps.set(entry.id, entryStamp)
+        let vMap = readVariantStamps.get(entry.id)
+        if (!vMap) {
+          vMap = new Map()
+          readVariantStamps.set(entry.id, vMap)
+        }
+        vMap.set(variant.id, variantStamp)
+        seenVariants.add(variant.id)
+
+        if (!embeddable || !variant.content) {
+          if (existingByVariant.has(variant.id)) {
+            stale.push({ variantId: variant.id, entryId: entry.id })
+          }
+          continue
+        }
+
+        const text = embeddingText({
+          title: maskForOutbound(entry.title, privacy),
+          topics: entry.topics.map((t) => maskForOutbound(t, privacy)),
+          when: normalizeWhen(variant.when),
+          disclosure: entry.disclosure ? maskForOutbound(entry.disclosure, privacy) : null,
+          glossary: glossaryByEntry.get(entry.id) ?? [],
+          content: maskForOutbound(variant.content, privacy),
+        })
+        const hash = textHash(embedder.model, text)
+        if (existingByVariant.get(variant.id)?.contentHash !== hash) {
+          pending.push({ variantId: variant.id, entryId: entry.id, text, hash })
+        }
+      }
+
+      for (const e of existing) {
+        if (!seenVariants.has(e.variantId)) {
+          stale.push({ variantId: e.variantId, entryId: e.entryId })
+        }
+      }
+
+      return { stale, pending, readEntryStamps, readVariantStamps }
+    },
+  )
+
+  const otherModels = (lockedEntryIds: string[], keep: string[]) =>
+    and(inArray(entryEmbeddings.entryId, lockedEntryIds), notInArray(entryEmbeddings.model, keep))
+
   if (!pending.length && !stale.length) {
-    await withSpace(db, spaceId, async (tx) => {
+    await withCircle(db, circleId, async (tx) => {
       const keep = await keptModels(tx, embedder)
       const locked = await tx
-        .select({ id: memories.id })
-        .from(memories)
+        .select({ id: entries.id })
+        .from(entries)
         .where(
           and(
-            inArray(memories.id, ids),
-            sql`exists (select 1 from ${memoryEmbeddings} where ${memoryEmbeddings.memoryId} = ${memories.id} and ${notInArray(memoryEmbeddings.model, keep)})`,
+            inArray(entries.id, entryIds),
+            sql`exists (select 1 from ${entryEmbeddings} where ${entryEmbeddings.entryId} = ${entries.id} and ${notInArray(entryEmbeddings.model, keep)})`,
           ),
         )
         .for('no key update', { skipLocked: true })
       if (locked.length) {
-        await tx.delete(memoryEmbeddings).where(
+        await tx.delete(entryEmbeddings).where(
           otherModels(
             locked.map((r) => r.id),
             keep,
@@ -194,64 +239,100 @@ async function syncRows(
   }
 
   const vectors = new Map<string, number[]>()
-  const failed = new Set<string>()
-  const batchHooks: SyncHooks = {
-    ...hooks,
-    onFailed: (memoryId, message) => {
-      failed.add(memoryId)
-      hooks.onFailed?.(memoryId, message)
-    },
-  }
-  // 接口不可用时停下，不再请求后面的；已经拿到的向量照样写回，下次只请求剩下的
+  const variantToEntry = new Map(pending.map((p) => [p.variantId, p.entryId]))
+  const failedVariants = new Set<string>()
+  const failedNotified = new Set<string>()
   let broken: Error | null = null
   for (let i = 0; i < pending.length && !broken; i += EMBED_BATCH) {
     if (hooks.signal?.aborted) break
-    const out = await embedBatch(embedder, pending.slice(i, i + EMBED_BATCH), batchHooks)
-    for (const [id, vector] of out.vectors) vectors.set(id, vector)
+    const out = await embedBatch(
+      embedder,
+      pending.slice(i, i + EMBED_BATCH).map((p) => ({ id: p.variantId, text: p.text })),
+      {
+        signal: hooks.signal,
+        onFailed: (variantId, message) => {
+          failedVariants.add(variantId)
+          const entryId = variantToEntry.get(variantId)
+          if (entryId && !failedNotified.has(entryId)) {
+            failedNotified.add(entryId)
+            hooks.onFailed?.(entryId, message)
+          }
+        },
+      },
+    )
+    for (const [variantId, vector] of out.vectors) vectors.set(variantId, vector)
     broken = out.broken
   }
 
-  const { written, skipped } = await withSpace(db, spaceId, async (tx) => {
-    // 这个模型已经不用了（换模型被放弃、已经切走）就不写它的向量，只做清理
+  const touchedEntryIds = [
+    ...new Set([...stale.map((s) => s.entryId), ...pending.map((p) => p.entryId)]),
+  ]
+
+  const { written, skipped } = await withCircle(db, circleId, async (tx) => {
     const keep = await keptModels(tx, embedder)
-    // 正被别的事务锁着的行跳过，不等它：移动记忆、让出 URI 会按自己的顺序锁多行，
-    // 在这里等锁可能和它们互相等待成死锁。那些行如果被改了，修改本身会再触发向量任务；
-    // 没改的由调用方稍后重试。
-    // 这里只写向量表，不改记忆这一行（更不改它的键列），所以锁用 FOR NO KEY UPDATE：别的事务往事件、关键词、
-    // 向量表写指向它的外键时只在这一行上加 KEY SHARE，和它不冲突，不会被当成锁住而跳过；
-    // 改这一行本身（UPDATE、DELETE）的事务照样和它冲突，读到之后到写完之间它不会被改
-    const current = await tx
-      .select({ id: memories.id, stamp })
-      .from(memories)
-      .where(inArray(memories.id, ids))
+    const currentEntries = await tx
+      .select({ id: entries.id, stamp: entryStampSql })
+      .from(entries)
+      .where(inArray(entries.id, entryIds))
       .for('no key update', { skipLocked: true })
-    const locked = new Set(current.map((c) => c.id))
-    const skipped = [...stale, ...pending.map((p) => p.id)].filter((id) => !locked.has(id))
-    const unchanged = new Set(current.filter((c) => c.stamp === readAt.get(c.id)).map((c) => c.id))
-    const staleNow = stale.filter((id) => unchanged.has(id))
-    if (staleNow.length) {
-      await tx.delete(memoryEmbeddings).where(inArray(memoryEmbeddings.memoryId, staleNow))
+    const lockedIds = currentEntries.map((c) => c.id)
+    const lockedSet = new Set(lockedIds)
+    const skipped = touchedEntryIds.filter((id) => !lockedSet.has(id))
+
+    const currentVariants = lockedIds.length
+      ? await tx
+          .select({
+            id: entryVariants.id,
+            entryId: entryVariants.entryId,
+            stamp: variantStampSql,
+          })
+          .from(entryVariants)
+          .where(inArray(entryVariants.entryId, lockedIds))
+      : []
+
+    const currentVariantMap = new Map<string, Map<string, string>>()
+    for (const v of currentVariants) {
+      let map = currentVariantMap.get(v.entryId)
+      if (!map) {
+        map = new Map()
+        currentVariantMap.set(v.entryId, map)
+      }
+      map.set(v.id, v.stamp)
     }
+
+    const unchanged = new Set<string>()
+    for (const row of currentEntries) {
+      if (row.stamp !== readEntryStamps.get(row.id)) continue
+      const beforeSig = variantSignature(readVariantStamps.get(row.id) ?? new Map())
+      const afterSig = variantSignature(currentVariantMap.get(row.id) ?? new Map())
+      if (beforeSig === afterSig) unchanged.add(row.id)
+    }
+
+    const staleNow = stale.filter((s) => unchanged.has(s.entryId)).map((s) => s.variantId)
+    if (staleNow.length) {
+      await tx.delete(entryEmbeddings).where(inArray(entryEmbeddings.variantId, staleNow))
+    }
+
     const writes = keep.includes(embedder.model)
       ? pending
-          .filter((item) => unchanged.has(item.id) && vectors.has(item.id))
-          .map((item) => ({ item, vector: vectors.get(item.id)! }))
+          .filter((item) => unchanged.has(item.entryId) && vectors.has(item.variantId))
+          .map((item) => ({ item, vector: vectors.get(item.variantId)! }))
       : []
     if (writes.length) {
-      // 一条多行 upsert 写完，缩短锁住这些行的时间
       await tx
-        .insert(memoryEmbeddings)
+        .insert(entryEmbeddings)
         .values(
           writes.map(({ item, vector }) => ({
-            spaceId,
-            memoryId: item.id,
+            circleId,
+            variantId: item.variantId,
+            entryId: item.entryId,
             model: embedder.model,
             contentHash: item.hash,
             embedding: vector,
           })),
         )
         .onConflictDoUpdate({
-          target: [memoryEmbeddings.memoryId, memoryEmbeddings.model],
+          target: [entryEmbeddings.variantId, entryEmbeddings.model],
           set: {
             contentHash: sql`excluded.content_hash`,
             embedding: sql`excluded.embedding`,
@@ -259,43 +340,47 @@ async function syncRows(
           },
         })
     }
-    // 换过模型后，旧模型的向量不再参与检索，顺手清掉（只清锁到的这些）
-    if (locked.size) await tx.delete(memoryEmbeddings).where(otherModels([...locked], keep))
+
+    if (lockedIds.length) {
+      await tx.delete(entryEmbeddings).where(otherModels(lockedIds, keep))
+    }
     return { written: writes.length, skipped }
   })
+
   if (skipped.length) await hooks.onSkipped?.(skipped)
-  // 没生成向量、也没算失败、也没因为被锁着交给 onSkipped 的：接口不可用时随错误交给调用方（写好的不在里面），
-  // 处理时间用完了、服务要停时交给 onDeferred
+
   const later = new Set(skipped)
-  const unfinished = pending
-    .map((p) => p.id)
-    .filter((id) => !vectors.has(id) && !failed.has(id) && !later.has(id))
+  const unfinished = [
+    ...new Set(
+      pending
+        .filter(
+          (p) =>
+            !vectors.has(p.variantId) && !failedVariants.has(p.variantId) && !later.has(p.entryId),
+        )
+        .map((p) => p.entryId),
+    ),
+  ]
   if (broken) throw new EmbedUnavailable(broken, unfinished)
   if (unfinished.length) hooks.onDeferred?.(unfinished)
   return written
 }
 
-// 同一个空间的几条记忆一起处理：一起读、合起来请求嵌入接口、一起写回。返回写下了几条向量。
-// id 先去重：调用方可能把同一条记忆传了几次（同一条连着改了几次会排几个任务），每条只处理一次
-export async function embedMemories(
+export async function embedEntries(
   db: Db,
   embedder: Embedder,
-  spaceId: string,
-  memoryIds: string[],
+  circleId: string,
+  entryIds: string[],
   hooks: SyncHooks = {},
 ): Promise<number> {
-  return syncRows(db, embedder, spaceId, [...new Set(memoryIds)], hooks)
+  return syncRows(db, embedder, circleId, [...new Set(entryIds)], hooks)
 }
 
 export interface BackfillOptions {
-  // 见 SyncHooks 的 onSkipped
-  onSkipped?: (spaceId: string, ids: string[]) => void | Promise<void>
+  onSkipped?: (circleId: string, entryIds: string[]) => void | Promise<void>
   onFailed?: SyncHooks['onFailed']
-  // 每补一页之前问一次，返回 false 就停下（例如换模型被放弃了，不再请求它的接口）
   shouldContinue?: () => Promise<boolean>
 }
 
-// 全量补齐：逐个空间、按 id 分页检查所有记忆，用于首次配置或换模型
 export async function backfillEmbeddings(
   db: Db,
   embedder: Embedder,
@@ -303,26 +388,32 @@ export async function backfillEmbeddings(
 ): Promise<number> {
   const { onSkipped, onFailed, shouldContinue } = options
   let total = 0
-  for (const { id: spaceId } of await db.select({ id: spaces.id }).from(spaces)) {
+  for (const { id: circleId } of await db.select({ id: circles.id }).from(circles)) {
     let after: string | null = null
     for (;;) {
       if (shouldContinue && !(await shouldContinue())) return total
       const cursor: string | null = after
-      const page: { id: string }[] = await withSpace(db, spaceId, (tx) =>
+      const page: { id: string }[] = await withCircle(db, circleId, (tx) =>
         tx
-          .select({ id: memories.id })
-          .from(memories)
-          .where(and(isNull(memories.deletedAt), cursor ? gt(memories.id, cursor) : undefined))
-          .orderBy(asc(memories.id))
+          .select({ id: entries.id })
+          .from(entries)
+          .where(
+            and(
+              isNull(entries.deletedAt),
+              inArray(entries.kind, ['entry', 'fact']),
+              cursor ? gt(entries.id, cursor) : undefined,
+            ),
+          )
+          .orderBy(asc(entries.id))
           .limit(PAGE),
       )
       if (!page.length) break
       total += await syncRows(
         db,
         embedder,
-        spaceId,
+        circleId,
         page.map((r) => r.id),
-        { onSkipped: onSkipped && ((ids) => onSkipped(spaceId, ids)), onFailed },
+        { onSkipped: onSkipped && ((ids) => onSkipped(circleId, ids)), onFailed },
       )
       after = page[page.length - 1]!.id
     }
@@ -330,45 +421,41 @@ export async function backfillEmbeddings(
   return total
 }
 
-// 删掉不在 keep 里的模型的向量：切换或放弃换模型之后，没被改过的记忆还留着另一个模型的向量。
-// keep 为空时什么都不删（还没配置嵌入模型，不知道该留哪个）
 export async function pruneEmbeddings(db: Db, keep: string[]): Promise<number> {
   if (!keep.length) return 0
   let total = 0
-  for (const { id: spaceId } of await db.select({ id: spaces.id }).from(spaces)) {
-    const removed = await withSpace(db, spaceId, (tx) =>
+  for (const { id: circleId } of await db.select({ id: circles.id }).from(circles)) {
+    const removed = await withCircle(db, circleId, (tx) =>
       tx
-        .delete(memoryEmbeddings)
-        .where(notInArray(memoryEmbeddings.model, keep))
-        .returning({ id: memoryEmbeddings.memoryId }),
+        .delete(entryEmbeddings)
+        .where(notInArray(entryEmbeddings.model, keep))
+        .returning({ variantId: entryEmbeddings.variantId }),
     )
     total += removed.length
   }
   return total
 }
 
-// 清理时一批最多删这么多条向量，每批一个短事务
 const DROP_BATCH = 500
 
-// 不该有向量（EMBEDDABLE 之外）却还留着的向量删掉。按时间过期的记忆没有写入，不会触发向量任务，
-// 由每小时的清理来删；删除、改成 secret 时没处理到的也一起清掉。逐个空间分批，每批一个短事务。
-// 从向量表出发联记忆表，只看真有向量的记忆。先锁记忆、在锁到的那一版上判断：正被别的事务改着的（例如正在重新生效）
-// 这次跳过，不会把它刚生成的向量删掉；向量行正被别的事务锁着的（例如换模型之后删旧向量）也跳过。
-// 两样都不等锁，所以不会和向量任务互相等待，跳过的下一个小时再看。返回删了几条向量
+// 删掉不再符合嵌入条件（已删除、过期、被取代、secret 或空正文）的切片向量，逐圈短事务分批清理
 export async function dropIneligibleEmbeddings(db: Db): Promise<number> {
   let total = 0
-  for (const { id: spaceId } of await db.select({ id: spaces.id }).from(spaces)) {
+  for (const { id: circleId } of await db.select({ id: circles.id }).from(circles)) {
     for (;;) {
-      const gone = await withSpace(db, spaceId, (tx) =>
+      const gone = await withCircle(db, circleId, (tx) =>
         tx.execute(sql`
-          delete from ${memoryEmbeddings}
-          where (${memoryEmbeddings.memoryId}, ${memoryEmbeddings.model}) in (
-            select ${memoryEmbeddings.memoryId}, ${memoryEmbeddings.model}
-            from ${memoryEmbeddings} join ${memories} on ${memories.id} = ${memoryEmbeddings.memoryId}
+          delete from ${entryEmbeddings}
+          where (${entryEmbeddings.variantId}, ${entryEmbeddings.model}) in (
+            select ${entryEmbeddings.variantId}, ${entryEmbeddings.model}
+            from ${entryEmbeddings}
+            join ${entryVariants} on ${entryVariants.id} = ${entryEmbeddings.variantId}
+            join ${entries} on ${entries.id} = ${entryVariants.entryId}
             where not coalesce(${EMBEDDABLE}, false)
             limit ${DROP_BATCH}
-            for no key update of ${memories} skip locked
-            for update of ${memoryEmbeddings} skip locked
+            for no key update of ${entries} skip locked
+            for no key update of ${entryVariants} skip locked
+            for update of ${entryEmbeddings} skip locked
           ) returning 1`),
       )
       total += gone.length

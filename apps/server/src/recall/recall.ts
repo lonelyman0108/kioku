@@ -1,60 +1,82 @@
 import {
-  DEFAULT_SPACE_PRIVACY,
+  DEFAULT_CIRCLE_PRIVACY,
   TUNING_DEFAULTS,
+  normalizeWhen,
+  type CirclePrivacySettings,
   type DebugCandidate,
-  type Layer,
+  type EntryKind,
+  type FacetMatchMode,
+  type FlippedTerm,
   type RecallCandidate,
   type RecallVia,
-  type SpacePrivacySettings,
+  type SubjectKind,
+  type WhenCondition,
 } from '@kioku/contracts'
-import { and, desc, eq, inArray, ne, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, inArray, ne, sql } from 'drizzle-orm'
 
 import type { Access } from '../access/access'
 import { maskForOutbound } from '../credential/privacy'
 import { nowOf, type Tx } from '../db/client'
-import { memories, memoryEmbeddings, memoryGlossary } from '../db/schema'
+import { circles, entries, entryEmbeddings, entryGlossary, entryVariants } from '../db/schema'
 import type { Embedder } from '../embedding/provider'
+import {
+  evaluateVariantFocus,
+  loadCircleVocabularies,
+  scanQueryIntentFlipping,
+  type CircleVocabulary,
+  type VariantEvaluation,
+} from '../memory/facets'
 import { readableConditions } from '../memory/filter'
-import { personaOverride, type PersonaSelection } from '../memory/personas'
-import { formatUri } from '../memory/uri'
+import { expandOneHopNeighbors, visibleCircleSlug, type OneHopSeed } from '../memory/links'
 import { weightsOf, type RecallWeights } from '../settings/advanced'
 import { clipChars, inlineText, titleSuffix } from './text'
 
 export { clipChars, inlineText, oneLine, titleSuffix } from './text'
 
-// 多路召回：向量相似度、中文全文检索、glossary 关键词命中。三路都先套同一套读权限过滤，
-// 再按加权分数合并。权重是经验值，实例的高级设置里可以改（见 settings/advanced.ts）。
-// 内置的权重下单独一路命中就应当能过内置的阈值：一个 glossary 关键词 0.3、全文命中查询里最具体的那个词约 0.21、
-// 相似度 0.4 以上的向量命中
 const DEFAULT_WEIGHTS = weightsOf(TUNING_DEFAULTS)
 const PER_PATH_LIMIT = 24
 export const DEFAULT_MIN_SCORE = TUNING_DEFAULTS['recall.minScore']
-// 全文按 BM25 打分：k1 让同一个词出现多次的加分逐渐饱和，b 让长正文不因为词多而占便宜（长度按不同词的个数算）。
-// 库里记忆太少时每个词都显得常见、idf 分不出高低，可读记忆不到 minDocs 条时按 minDocs 条算
+export const DEFAULT_RELEVANCE_FLOOR = TUNING_DEFAULTS['recall.relevanceFloor']
+const LINK_SEED_LIMIT = 3
+const LINK_DECAY = 0.55
+
 const BM25 = { k1: 1.2, b: 0.75, minDocs: 20 }
-// 召回只需要提示语的主要内容；过长的输入会超出嵌入模型的 token 上限，也让全文分词变慢
 export const MAX_QUERY_CHARS = 2000
-// HNSW 先取近邻、再套权限与空间过滤；开启迭代扫描并放大候选数，过滤后仍能取够结果
 const HNSW_EF_SEARCH = 200
-// 关键词转成单词边界正则用的片段；作为绑定参数传给 PostgreSQL，避免在 SQL 模板里写反斜杠转义
 const WORD_START = '\\m'
 const WORD_END = '\\M'
 const REGEX_META = '([.^$*+?()\\[\\]{}|\\\\-])'
 const ESCAPE_MATCH = '\\\\\\1'
 
-// 人格按 PersonaSelection 挑选（人格的过滤与继承覆盖）；召回永远不返回 secret
-export interface RecallOptions extends PersonaSelection {
+export interface RecallOptions {
   limit: number
   minScore?: number
-  // 只收受信来源（不含 untrusted 写入的）
+  relevanceFloor?: number
   trustedOnly?: boolean
-  // 只收这些归属
-  layers?: Layer[]
-  // 不给时用内置的权重
+  kinds?: EntryKind[]
+  crossCircle?: boolean
+  focus?: WhenCondition
   weights?: RecallWeights
+  disableFlipping?: boolean
 }
 
-interface Hit {
+interface VariantHitRow {
+  variantId: string
+  entryId: string
+  circleId: string
+  circleSlug: string
+  shortId: string
+  title: string
+  kind: EntryKind
+  originScope: string
+  subjectKind: SubjectKind | null
+  priority: number
+  disclosure: string | null
+  when: WhenCondition
+}
+
+interface HitAccumulator {
+  row: VariantHitRow
   semantic: number
   fulltext: number
   cues: Set<string>
@@ -70,29 +92,23 @@ export function normalizeQuery(query: string): string {
   return query.trim().slice(0, MAX_QUERY_CHARS)
 }
 
-// 「帮」「上」「做」这类单字几乎每条正文都有，留着只会带进不相关的记忆；查询里还有更长的词时去掉
 export function searchTerms(lexemes: string[]): string[] {
   const longer = lexemes.filter((t) => [...t].length > 1)
   return longer.length ? longer : lexemes
 }
 
-// 任一词命中即可的 tsquery。词里可能有单引号（例如 o'reilly），引号与反斜杠都要转义
 export function anyTermQuery(terms: string[]): string {
   return terms.map((t) => `'${t.replace(/\\/g, '\\\\').replace(/'/g, "''")}'`).join(' | ')
 }
 
-// 召回时算查询向量最多等这么久，每个渠道最多等一部分：一个渠道卡住时还来得及换下一个，
-// 几个渠道依次超时也不会让召回等上几倍的时间
 const QUERY_EMBED_TIMEOUT_MS = 30_000
 const QUERY_EMBED_CHANNEL_TIMEOUT_MS = 10_000
 
-// 查询向量在数据库事务之外算好，避免事务等待外部接口时一直占着连接。
-// 嵌入服务不可用时返回 null，召回退化为全文与关键词，不让整个召回失败
 export async function embedQuery(
   embedder: Embedder | null,
   query: string,
   redactor:
-    SpacePrivacySettings | ((text: string) => Promise<string> | string) = DEFAULT_SPACE_PRIVACY,
+    CirclePrivacySettings | ((text: string) => Promise<string> | string) = DEFAULT_CIRCLE_PRIVACY,
 ): Promise<QueryVector | null> {
   if (!embedder) return null
   try {
@@ -112,29 +128,56 @@ export async function embedQuery(
   }
 }
 
-// 打过分的候选：调试台要看各路的得分（breakdown）、取整前的总分（rawScore）与记忆 id
 export interface ScoredCandidate extends DebugCandidate {
-  id: string
+  variantId: string
 }
 
-// 召回候选对应的记忆 id，记召回事件要用。放在 Symbol 键上：JSON 序列化时不会带出去，
-// 候选交给接入方时不会把内部的 id 一起发出去
-export const CANDIDATE_ID = Symbol('recall candidate memory id')
-export type RecordableCandidate = RecallCandidate & { readonly [CANDIDATE_ID]: string }
+export interface RecallScoreMeta {
+  candidates: ScoredCandidate[]
+  resolvedFacets: WhenCondition
+  flippedTerms: FlippedTerm[]
+}
 
-// 给接入方的候选只有这些字段（加上 Symbol 键上的记忆 id）
+export const CANDIDATE_ID = Symbol('recall candidate entry id')
+export const CANDIDATE_VARIANT_ID = Symbol('recall candidate variant id')
+export type RecordableCandidate = RecallCandidate & {
+  readonly [CANDIDATE_ID]: string
+  readonly [CANDIDATE_VARIANT_ID]: string
+}
+
 export function publicCandidate(c: ScoredCandidate): RecordableCandidate {
   return {
-    uri: c.uri,
+    entryId: c.entryId,
+    shortId: c.shortId,
     title: c.title,
-    layer: c.layer,
+    circleId: c.circleId,
+    circleSlug: c.circleSlug,
+    kind: c.kind,
+    matchedWhen: c.matchedWhen,
+    otherVariantsCount: c.otherVariantsCount,
+    ...(c.crossGroup ? { crossGroup: true } : {}),
     priority: c.priority,
     disclosure: c.disclosure,
     score: c.score,
     via: c.via,
     cues: c.cues,
-    [CANDIDATE_ID]: c.id,
+    [CANDIDATE_ID]: c.entryId,
+    [CANDIDATE_VARIANT_ID]: c.variantId,
   }
+}
+
+function isCrossGroupFact(
+  access: Access,
+  row: { kind: EntryKind; subjectKind: SubjectKind | null; originScope: string },
+): boolean {
+  return (
+    row.kind === 'fact' &&
+    row.subjectKind === 'person' &&
+    row.originScope.startsWith('group:') &&
+    access.baseOriginScopes !== null &&
+    !access.baseOriginScopes.has(row.originScope) &&
+    access.crossGroupPersonScopes.has(row.originScope)
+  )
 }
 
 export async function recall(
@@ -143,7 +186,7 @@ export async function recall(
   semantic: QueryVector | null,
   rawQuery: string,
   options: RecallOptions,
-): Promise<RecallCandidate[]> {
+): Promise<RecordableCandidate[]> {
   return (await scoreRecall(tx, access, semantic, rawQuery, options)).map(publicCandidate)
 }
 
@@ -154,43 +197,74 @@ export async function scoreRecall(
   rawQuery: string,
   options: RecallOptions,
 ): Promise<ScoredCandidate[]> {
+  return (await scoreRecallWithMeta(tx, access, semantic, rawQuery, options)).candidates
+}
+
+export async function scoreRecallWithMeta(
+  tx: Tx,
+  access: Access,
+  semantic: QueryVector | null,
+  rawQuery: string,
+  options: RecallOptions,
+): Promise<RecallScoreMeta> {
   const query = normalizeQuery(rawQuery)
-  if (!query) return []
-  // 召回只面向有坐标的记忆（目录里的四类）；来自对话的记忆另有展示方式，不能在各路里占掉名额。
-  // 各路都按事务开头取的数据库时间判断有效期，召回调试说明为什么读不到时也用它
+  const baseFocus = normalizeWhen(options.focus ?? {})
+  if (!query) {
+    return { candidates: [], resolvedFacets: baseFocus, flippedTerms: [] }
+  }
+
   const now = nowOf(tx)
+  const visibleCircleIds =
+    options.crossCircle === false ? [access.primaryCircleId] : [...access.circles.keys()]
+  const vocabularies = await loadCircleVocabularies(tx, visibleCircleIds)
+
+  const flip =
+    options.focus !== undefined && !options.disableFlipping
+      ? scanQueryIntentFlipping(query, baseFocus, access, vocabularies)
+      : {
+          queryFocus: baseFocus,
+          flippedTerms: [],
+          flippedCircleIds: new Set<string>(),
+          flippedRealms: new Set<string>(),
+        }
+
+  const kinds = options.kinds?.length ? options.kinds : (['entry', 'fact'] as EntryKind[])
   const readable = and(
-    readableConditions(access, { personaIds: options.personaIds, now }),
-    personaOverride(access, options, now),
-    eq(memories.form, 'curated'),
-    options.trustedOnly ? ne(memories.provenance, 'untrusted') : undefined,
-    options.layers ? inArray(memories.layer, options.layers) : undefined,
-  )
-  // 各路都直接取出展示要用的字段，合并时不必再查一次库
+    readableConditions(access, { now }),
+    inArray(entries.kind, kinds),
+    options.trustedOnly ? ne(entries.provenance, 'untrusted') : undefined,
+    options.crossCircle === false ? eq(entries.circleId, access.primaryCircleId) : undefined,
+  )!
+
   const fields = {
-    id: memories.id,
-    domain: memories.domain,
-    path: memories.path,
-    title: memories.title,
-    layer: memories.layer,
-    priority: memories.priority,
-    disclosure: memories.disclosure,
+    variantId: entryVariants.id,
+    entryId: entries.id,
+    circleId: entries.circleId,
+    circleSlug: circles.slug,
+    shortId: entries.shortId,
+    title: entries.title,
+    kind: entries.kind,
+    originScope: entries.originScope,
+    subjectKind: entries.subjectKind,
+    priority: entries.priority,
+    disclosure: entries.disclosure,
+    when: entryVariants.when,
   }
-  type Row = {
-    id: string
-    domain: string | null
-    path: string | null
-    title: string | null
-    layer: Layer
-    priority: number
-    disclosure: string | null
-  }
-  const hits = new Map<string, Hit & { row: Row }>()
-  const hit = (row: Row) => {
-    let h = hits.get(row.id)
-    if (!h)
-      hits.set(row.id, (h = { row, semantic: 0, fulltext: 0, cues: new Set(), via: new Set() }))
-    return h
+
+  const hits = new Map<string, HitAccumulator>()
+  const hit = (row: VariantHitRow) => {
+    let acc = hits.get(row.variantId)
+    if (!acc) {
+      acc = {
+        row: { ...row, when: normalizeWhen(row.when) },
+        semantic: 0,
+        fulltext: 0,
+        cues: new Set(),
+        via: new Set(),
+      }
+      hits.set(row.variantId, acc)
+    }
+    return acc
   }
 
   if (semantic) {
@@ -200,23 +274,22 @@ export async function scoreRecall(
     const rows = await tx
       .select({
         ...fields,
-        similarity: sql<number>`1 - (${memoryEmbeddings.embedding} <=> ${literal}::vector)`,
+        similarity: sql<number>`1 - (${entryEmbeddings.embedding} <=> ${literal}::vector)`,
       })
-      .from(memoryEmbeddings)
-      .innerJoin(memories, eq(memories.id, memoryEmbeddings.memoryId))
-      .where(and(readable, eq(memoryEmbeddings.model, semantic.model)))
-      .orderBy(sql`${memoryEmbeddings.embedding} <=> ${literal}::vector`)
-      .limit(PER_PATH_LIMIT)
+      .from(entryEmbeddings)
+      .innerJoin(entryVariants, eq(entryVariants.id, entryEmbeddings.variantId))
+      .innerJoin(entries, eq(entries.id, entryVariants.entryId))
+      .innerJoin(circles, eq(circles.id, entries.circleId))
+      .where(and(readable, eq(entryEmbeddings.model, semantic.model)))
+      .orderBy(sql`${entryEmbeddings.embedding} <=> ${literal}::vector`)
+      .limit(PER_PATH_LIMIT * 2)
     for (const r of rows) {
-      const h = hit(r)
-      h.semantic = Math.max(0, Number(r.similarity))
-      h.via.add('semantic')
+      const acc = hit(r)
+      acc.semantic = Math.max(0, Number(r.similarity))
+      acc.via.add('semantic')
     }
   }
 
-  // 全文：查询切出的词任一命中即可（整句全部命中几乎不可能），按 BM25 打分。
-  // 不用 ts_rank_cd：它随命中次数一直涨，长正文反复出现几个常见词就排到前面，压到 0–1 时又都封顶，分不出高低。
-  // BM25 的 idf 让少见的词更重；词的出现次数（df）从命中的记忆里数，任何含这个词的可读记忆都会命中
   const [lexemes] = await tx.execute<{ terms: string[] }>(
     sql`select tsvector_to_array(to_tsvector('kioku_zh', ${query})) as terms`,
   )
@@ -224,113 +297,415 @@ export async function scoreRecall(
   if (terms.length) {
     const k1 = sql`${BM25.k1}::float8`
     const b = sql`${BM25.b}::float8`
-    const ftsRows = await tx.execute<Row & { score: string; scale: string }>(sql`
+    const ftsRows = await tx.execute<{
+      variant_id: string
+      entry_id: string
+      circle_id: string
+      circle_slug: string
+      short_id: string
+      title: string
+      kind: EntryKind
+      origin_scope: string
+      subject_kind: SubjectKind | null
+      priority: number
+      disclosure: string | null
+      variant_when: WhenCondition
+      score: string
+      scale: string
+    }>(sql`
       with cand as (
-        select ${memories.id} as id, ${memories.domain} as domain, ${memories.path} as path,
-          ${memories.title} as title, ${memories.layer} as layer, ${memories.priority} as priority,
-          ${memories.disclosure} as disclosure, ${memories.fts} as fts, length(${memories.fts}) as dl
-        from ${memories}
-        where ${readable} and ${memories.fts} @@ ${anyTermQuery(terms)}::tsquery
+        select ${entryVariants.id} as variant_id, ${entries.id} as entry_id,
+          ${entries.circleId} as circle_id, ${circles.slug} as circle_slug,
+          ${entries.shortId} as short_id, ${entries.title} as title,
+          ${entries.kind} as kind, ${entries.originScope} as origin_scope,
+          ${entries.subjectKind} as subject_kind, ${entries.priority} as priority,
+          ${entries.disclosure} as disclosure, ${entryVariants.when} as variant_when,
+          ${entryVariants.fts} as fts, length(${entryVariants.fts}) as dl
+        from ${entryVariants}
+        join ${entries} on ${entries.id} = ${entryVariants.entryId}
+        join ${circles} on ${circles.id} = ${entries.circleId}
+        where ${readable} and ${entryVariants.fts} @@ ${anyTermQuery(terms)}::tsquery
       ),
       tf as (
-        select c.id, u.lexeme, coalesce(array_length(u.positions, 1), 1) as n
+        select c.variant_id, u.lexeme, coalesce(array_length(u.positions, 1), 1) as n
         from cand c, unnest(c.fts) u
         where u.lexeme in (select json_array_elements_text(${JSON.stringify(terms)}::json))
       ),
       idf as (
         select lexeme,
-          ln(1 + (greatest((select count(*) from ${memories} where ${readable}), ${BM25.minDocs}::int) - count(*) + 0.5) / (count(*) + 0.5)) as w
+          ln(1 + (greatest((select count(*) from ${entryVariants} join ${entries} on ${entries.id} = ${entryVariants.entryId} where ${readable}), ${BM25.minDocs}::int) - count(*) + 0.5) / (count(*) + 0.5)) as w
         from tf group by lexeme
       )
-      select c.id, c.domain, c.path, c.title, c.layer, c.priority, c.disclosure,
-        sum(idf.w * tf.n * (${k1} + 1) / (tf.n + ${k1} * (1 - ${b} + ${b} * c.dl / (select avg(dl) from cand)))) as score,
+      select c.variant_id, c.entry_id, c.circle_id, c.circle_slug, c.short_id, c.title,
+        c.kind, c.origin_scope, c.subject_kind, c.priority, c.disclosure, c.variant_when,
+        sum(idf.w * tf.n * (${k1} + 1) / (tf.n + ${k1} * (1 - ${b} + ${b} * c.dl / greatest(nullif((select avg(dl) from cand), 0), 1)))) as score,
         (select max(w) from idf) as scale
-      from cand c join tf on tf.id = c.id join idf on idf.lexeme = tf.lexeme
-      group by c.id, c.domain, c.path, c.title, c.layer, c.priority, c.disclosure
-      order by score desc, c.priority, c.id
-      limit ${PER_PATH_LIMIT}`)
+      from cand c join tf on tf.variant_id = c.variant_id join idf on idf.lexeme = tf.lexeme
+      group by c.variant_id, c.entry_id, c.circle_id, c.circle_slug, c.short_id, c.title,
+        c.kind, c.origin_scope, c.subject_kind, c.priority, c.disclosure, c.variant_when
+      order by score desc, c.priority, c.entry_id, c.variant_id
+      limit ${PER_PATH_LIMIT * 2}`)
     for (const r of ftsRows) {
-      const h = hit(r)
-      // 压到 0–1：只命中查询里最具体的那个词一次约 0.59，单独这一路刚好过阈值；命中的具体词越多越接近 1，不封顶。
-      // 尺度是这个词的 idf，分数不随库里记忆的多少整体变高变低；至少按出现在一成记忆里的词算（ln 10），
-      // 查询里全是常见词时不会把只命中常见词的记忆抬上来
+      const acc = hit({
+        variantId: r.variant_id,
+        entryId: r.entry_id,
+        circleId: r.circle_id,
+        circleSlug: r.circle_slug,
+        shortId: r.short_id,
+        title: r.title,
+        kind: r.kind,
+        originScope: r.origin_scope,
+        subjectKind: r.subject_kind,
+        priority: r.priority,
+        disclosure: r.disclosure,
+        when: r.variant_when,
+      })
       const score = Number(r.score)
-      h.fulltext = score / (score + 0.7 * Math.max(Math.LN10, Number(r.scale)))
-      h.via.add('fulltext')
+      acc.fulltext = score / (score + 0.7 * Math.max(Math.LN10, Number(r.scale)))
+      acc.via.add('fulltext')
     }
   }
 
-  // 关键词按子串匹配，中文没有词边界只能这样；纯 ASCII 的关键词要求按单词边界匹配，
-  // 否则 AI 会命中 said、go 会命中 good。长的关键词优先，命中多时保留更具体的
-  const keyword = memoryGlossary.keyword
+  const keyword = entryGlossary.keyword
   const glossaryMatch = sql`case when ${keyword} ~ '^[[:ascii:]]+$'
     then lower(${query}) ~ (${WORD_START} || regexp_replace(lower(${keyword}), ${REGEX_META}, ${ESCAPE_MATCH}, 'g') || ${WORD_END})
     else position(lower(${keyword}) in lower(${query})) > 0 end`
   const glossaryRows = await tx
     .select({ ...fields, keyword })
-    .from(memoryGlossary)
-    .innerJoin(memories, eq(memories.id, memoryGlossary.memoryId))
+    .from(entryGlossary)
+    .innerJoin(entries, eq(entries.id, entryGlossary.entryId))
+    .innerJoin(entryVariants, eq(entryVariants.entryId, entries.id))
+    .innerJoin(circles, eq(circles.id, entries.circleId))
     .where(and(readable, glossaryMatch))
-    .orderBy(desc(sql`length(${keyword})`), keyword)
+    .orderBy(desc(sql`length(${keyword})`), keyword, asc(entryVariants.sortOrder))
     .limit(PER_PATH_LIMIT * 4)
   for (const r of glossaryRows) {
-    const h = hit(r)
-    h.cues.add(r.keyword)
-    h.via.add('glossary')
+    const acc = hit(r)
+    acc.cues.add(r.keyword)
+    acc.via.add('glossary')
+  }
+
+  const hitEntryIds = [...new Set([...hits.values()].map((h) => h.row.entryId))]
+  const variantCountMap = new Map<string, number>()
+  if (hitEntryIds.length) {
+    const countRows = await tx
+      .select({ entryId: entryVariants.entryId, n: sql<number>`count(*)::int` })
+      .from(entryVariants)
+      .where(inArray(entryVariants.entryId, hitEntryIds))
+      .groupBy(entryVariants.entryId)
+    for (const r of countRows) variantCountMap.set(r.entryId, Number(r.n))
   }
 
   const minScore = options.minScore ?? DEFAULT_MIN_SCORE
+  const relevanceFloor = options.relevanceFloor ?? DEFAULT_RELEVANCE_FLOOR
   const weights = options.weights ?? DEFAULT_WEIGHTS
-  return (
-    [...hits.values()]
-      .map((h) => {
-        // 各路加到总分上的分数，四项相加就是总分
-        const parts = {
-          semantic: weights.semantic * h.semantic,
-          fulltext: weights.fulltext * h.fulltext,
-          glossary: h.cues.size
-            ? weights.glossaryFirst + (h.cues.size > 1 ? weights.glossaryMore : 0)
-            : 0,
-          priority: (weights.priority * Math.max(0, 3 - h.row.priority)) / 3,
-        }
-        return {
-          h,
-          parts,
-          score: parts.semantic + parts.fulltext + parts.glossary + parts.priority,
-        }
+  const emptyDims = new Map<string, FacetMatchMode>()
+
+  const bestByEntry = new Map<string, { cand: ScoredCandidate; hasConflict: boolean }>()
+  for (const h of hits.values()) {
+    const semanticPart = weights.semantic * h.semantic
+    const fulltextPart = weights.fulltext * h.fulltext
+    const glossaryPart = h.cues.size
+      ? weights.glossaryFirst + (h.cues.size > 1 ? weights.glossaryMore : 0)
+      : 0
+    const sBase = semanticPart + fulltextPart + glossaryPart
+    const priorityPart = (weights.priority * Math.max(0, 3 - h.row.priority)) / 3
+    const crossGroup = isCrossGroupFact(access, h.row)
+
+    let facetPart = 0
+    let hasConflict = false
+    if (options.focus !== undefined) {
+      const vocab = vocabularies.get(h.row.circleId)
+      const ev = evaluateVariantFocus({
+        when: h.row.when,
+        circleDefaults: vocab?.defaultFacets ?? {},
+        focus: flip.queryFocus,
+        customDimensions: vocab?.dimensions ?? emptyDims,
+        awayCircle: h.row.circleId !== access.primaryCircleId,
+        flippedCircle: flip.flippedCircleIds.has(h.row.circleId),
+        flippedRealms: flip.flippedRealms,
+        crossGroup,
       })
-      // 用未取整的分数和阈值比较，取整只用于展示
-      .filter(({ score }) => score >= minScore)
-      .sort((a, b) => b.score - a.score || a.h.row.priority - b.h.row.priority)
-      .slice(0, options.limit)
-      .map(({ h, parts, score }) => ({
-        id: h.row.id,
-        uri: formatUri(h.row.domain!, h.row.path!),
-        title: h.row.title!,
-        layer: h.row.layer,
-        priority: h.row.priority,
-        disclosure: h.row.disclosure,
-        score: round(score),
-        via: [...h.via],
-        cues: [...h.cues].sort(),
-        breakdown: {
-          semantic: round(parts.semantic),
-          fulltext: round(parts.fulltext),
-          glossary: round(parts.glossary),
-          priority: round(parts.priority),
-        },
-        rawScore: score,
-      }))
-  )
+      hasConflict = ev.hasConflict
+      facetPart = sBase >= relevanceFloor ? ev.delta : crossGroup ? -0.06 : 0
+    } else if (crossGroup) {
+      facetPart = -0.06
+    }
+
+    const rawScore = sBase + priorityPart + facetPart
+    const totalVariants = variantCountMap.get(h.row.entryId) ?? 1
+    const candidate: ScoredCandidate = {
+      entryId: h.row.entryId,
+      variantId: h.row.variantId,
+      shortId: h.row.shortId,
+      title: h.row.title,
+      circleId: h.row.circleId,
+      circleSlug: visibleCircleSlug(access, h.row.circleId, h.row.circleSlug),
+      kind: h.row.kind,
+      matchedWhen: h.row.when,
+      otherVariantsCount: Math.max(0, totalVariants - 1),
+      ...(crossGroup ? { crossGroup: true } : {}),
+      priority: h.row.priority,
+      disclosure: h.row.disclosure,
+      score: round(rawScore),
+      via: [...h.via],
+      cues: [...h.cues].sort(),
+      breakdown: {
+        semantic: round(semanticPart),
+        fulltext: round(fulltextPart),
+        glossary: round(glossaryPart),
+        priority: round(priorityPart),
+        facet: round(facetPart),
+        link: 0,
+      },
+      rawScore,
+    }
+
+    const prev = bestByEntry.get(h.row.entryId)
+    if (
+      !prev ||
+      rawScore > prev.cand.rawScore ||
+      (rawScore === prev.cand.rawScore && prev.hasConflict && !hasConflict)
+    ) {
+      bestByEntry.set(h.row.entryId, { cand: candidate, hasConflict })
+    }
+  }
+
+  const finalMap = new Map<string, ScoredCandidate>()
+  for (const { cand } of bestByEntry.values()) {
+    if (cand.rawScore >= minScore) finalMap.set(cand.entryId, cand)
+  }
+
+  const seedsSorted = [...finalMap.values()]
+    .sort(
+      (a, b) =>
+        b.rawScore - a.rawScore || a.priority - b.priority || a.shortId.localeCompare(b.shortId),
+    )
+    .slice(0, LINK_SEED_LIMIT)
+
+  if (seedsSorted.length > 0 && options.limit > 0) {
+    const seedIds = seedsSorted.map((s) => s.entryId)
+    const seedVariantRows = await tx
+      .select({
+        id: entryVariants.id,
+        entryId: entryVariants.entryId,
+        circleId: entryVariants.circleId,
+        when: entryVariants.when,
+      })
+      .from(entryVariants)
+      .where(inArray(entryVariants.entryId, seedIds))
+
+    const activeByEntry = new Map<string, string[]>()
+    for (const v of seedVariantRows) {
+      const vocab = vocabularies.get(v.circleId)
+      if (options.focus !== undefined) {
+        const ev = evaluateVariantFocus({
+          when: normalizeWhen(v.when),
+          circleDefaults: vocab?.defaultFacets ?? {},
+          focus: flip.queryFocus,
+          customDimensions: vocab?.dimensions ?? emptyDims,
+          awayCircle: false,
+          flippedCircle: false,
+          flippedRealms: new Set(),
+          crossGroup: false,
+        })
+        if (ev.hasConflict) continue
+      }
+      const list = activeByEntry.get(v.entryId) ?? []
+      list.push(v.id)
+      activeByEntry.set(v.entryId, list)
+    }
+
+    const combinedCustomDims = new Map<string, FacetMatchMode>()
+    for (const vocab of vocabularies.values()) {
+      for (const [k, mode] of vocab.dimensions) combinedCustomDims.set(k, mode)
+    }
+
+    const oneHopSeeds: OneHopSeed[] = seedsSorted.map((s) => ({
+      entryId: s.entryId,
+      shortId: s.shortId,
+      activeVariantIds: activeByEntry.get(s.entryId) ?? [s.variantId],
+      score: s.rawScore,
+    }))
+
+    const neighbors = await expandOneHopNeighbors(tx, access, oneHopSeeds, {
+      decay: LINK_DECAY,
+      now,
+      ...(options.focus !== undefined
+        ? {
+            variantAllowed: (when, defaults) =>
+              !evaluateVariantFocus({
+                when: normalizeWhen(when),
+                circleDefaults: normalizeWhen(defaults),
+                focus: flip.queryFocus,
+                customDimensions: combinedCustomDims,
+                awayCircle: false,
+                flippedCircle: false,
+                flippedRealms: new Set(),
+                crossGroup: false,
+              }).hasConflict,
+          }
+        : {}),
+    })
+
+    const eligibleNeighbors = neighbors.filter(
+      (n) =>
+        (options.crossCircle !== false || n.circleId === access.primaryCircleId) &&
+        kinds.includes(n.kind) &&
+        n.score >= minScore,
+    )
+
+    if (eligibleNeighbors.length) {
+      const nEntryIds = eligibleNeighbors.map((n) => n.entryId)
+      const missingCircleIds = eligibleNeighbors
+        .map((n) => n.circleId)
+        .filter((id) => !vocabularies.has(id))
+      const [nVariantRows, nMetaRows, extraVocabs] = await Promise.all([
+        tx
+          .select({
+            id: entryVariants.id,
+            entryId: entryVariants.entryId,
+            when: entryVariants.when,
+            sortOrder: entryVariants.sortOrder,
+          })
+          .from(entryVariants)
+          .where(inArray(entryVariants.entryId, nEntryIds))
+          .orderBy(asc(entryVariants.sortOrder), asc(entryVariants.id)),
+        tx
+          .select({
+            id: entries.id,
+            subjectKind: entries.subjectKind,
+          })
+          .from(entries)
+          .where(inArray(entries.id, nEntryIds)),
+        missingCircleIds.length
+          ? loadCircleVocabularies(tx, missingCircleIds)
+          : Promise.resolve(new Map<string, CircleVocabulary>()),
+      ])
+
+      for (const [k, v] of extraVocabs) vocabularies.set(k, v)
+      const subjectKindByEntry = new Map(nMetaRows.map((m) => [m.id, m.subjectKind]))
+      const variantsByNeighbor = new Map<string, (typeof nVariantRows)[number][]>()
+      for (const v of nVariantRows) {
+        const list = variantsByNeighbor.get(v.entryId) ?? []
+        list.push(v)
+        variantsByNeighbor.set(v.entryId, list)
+      }
+
+      const hasActiveFocus = Object.keys(flip.queryFocus).length > 0
+
+      for (const n of eligibleNeighbors) {
+        const nVariants = variantsByNeighbor.get(n.entryId) ?? []
+        if (!nVariants.length) continue
+
+        const vocab = vocabularies.get(n.circleId)
+        const subjectKind = subjectKindByEntry.get(n.entryId) ?? null
+        const crossGroup = isCrossGroupFact(access, {
+          kind: n.kind,
+          subjectKind,
+          originScope: n.originScope,
+        })
+
+        let chosen: {
+          variant: (typeof nVariantRows)[number]
+          eval: VariantEvaluation
+        } | null = null
+
+        for (const v of nVariants) {
+          const ev = evaluateVariantFocus({
+            when: normalizeWhen(v.when),
+            circleDefaults: vocab?.defaultFacets ?? {},
+            focus: flip.queryFocus,
+            customDimensions: vocab?.dimensions ?? emptyDims,
+            awayCircle: n.circleId !== access.primaryCircleId,
+            flippedCircle: flip.flippedCircleIds.has(n.circleId),
+            flippedRealms: flip.flippedRealms,
+            crossGroup,
+          })
+          if (options.focus !== undefined && ev.hasConflict) continue
+          const resonates =
+            options.focus === undefined ||
+            !hasActiveFocus ||
+            ev.kHit >= 1 ||
+            (Object.keys(ev.effectiveWhen).length === 0 && n.priority <= 2)
+          if (!resonates) continue
+
+          if (
+            !chosen ||
+            ev.kHit > chosen.eval.kHit ||
+            (ev.kHit === chosen.eval.kHit && v.sortOrder < chosen.variant.sortOrder)
+          ) {
+            chosen = { variant: v, eval: ev }
+          }
+        }
+
+        if (!chosen) continue
+
+        const cue = `关联自 [[${n.seedShortId}]]`
+        const existing = finalMap.get(n.entryId)
+        if (existing) {
+          if (!existing.via.includes('link')) existing.via.push('link')
+          existing.breakdown.link = round(n.score)
+          if (n.score > existing.rawScore) {
+            existing.rawScore = n.score
+            existing.score = round(n.score)
+          }
+          if (!existing.cues.includes(cue)) existing.cues.push(cue)
+          continue
+        }
+
+        const primaryBefore = bestByEntry.get(n.entryId)?.cand
+        const rawScore = n.score
+        const matchedWhen = normalizeWhen(chosen.variant.when)
+        const entry: ScoredCandidate = {
+          entryId: n.entryId,
+          variantId: chosen.variant.id,
+          shortId: n.shortId,
+          title: n.title,
+          circleId: n.circleId,
+          circleSlug: n.circleSlug,
+          kind: n.kind,
+          matchedWhen,
+          otherVariantsCount: Math.max(0, nVariants.length - 1),
+          ...(crossGroup ? { crossGroup: true } : {}),
+          priority: n.priority,
+          disclosure: n.disclosure,
+          score: round(rawScore),
+          via: primaryBefore ? [...new Set([...primaryBefore.via, 'link' as const])] : ['link'],
+          cues: primaryBefore ? [...new Set([...primaryBefore.cues, cue])] : [cue],
+          breakdown: {
+            semantic: primaryBefore?.breakdown.semantic ?? 0,
+            fulltext: primaryBefore?.breakdown.fulltext ?? 0,
+            glossary: primaryBefore?.breakdown.glossary ?? 0,
+            priority: primaryBefore?.breakdown.priority ?? 0,
+            facet: primaryBefore?.breakdown.facet ?? 0,
+            link: round(n.score),
+          },
+          rawScore,
+        }
+        finalMap.set(n.entryId, entry)
+      }
+    }
+  }
+
+  const finalCandidates = [...finalMap.values()]
+    .sort(
+      (a, b) =>
+        b.rawScore - a.rawScore || a.priority - b.priority || a.shortId.localeCompare(b.shortId),
+    )
+    .slice(0, options.limit)
+
+  return {
+    candidates: finalCandidates,
+    resolvedFacets: flip.queryFocus,
+    flippedTerms: flip.flippedTerms,
+  }
 }
 
 const round = (n: number) => Math.round(n * 100) / 100
 
-// 带正文时每条默认最多这么多字
 const INLINE_CONTENT_CHARS = TUNING_DEFAULTS['recall.chatInlineChars']
 
-// 正文的开头，压成单行、去掉尖括号。正文可能很长，先粗截一段再处理；截掉了内容就接上省略号。
-// 处理完是空的返回空串，由调用方退回线索
 function contentHead(content: string, chars: number): string {
   const head = clipChars(content, chars * 4)
   const text = clipChars(inlineText(head), chars, '…')
@@ -338,23 +713,27 @@ function contentHead(content: string, chars: number): string {
   return head !== content && !text.endsWith('…') ? `${text}…` : text
 }
 
-// 与 Lore 的 <recall> 块格式一致：每行「分数 | URI | 线索」。contents（URI → 正文）给了时第三栏换成正文的开头，
-// 每条最多 inlineChars 字：给读不了正文的宿主（例如不能调记忆工具的群聊 bot）用；正文处理完是空的就仍给线索
 export function formatRecallBlock(
   candidates: RecallCandidate[],
   sessionId?: string,
   contents?: ReadonlyMap<string, string>,
   inlineChars = INLINE_CONTENT_CHARS,
+  primaryCircleId?: string,
 ): string {
   if (!candidates.length) return ''
   const safeSession = sessionId?.replace(/[^A-Za-z0-9._:-]/g, '').slice(0, 128)
   const open = safeSession ? `<recall session_id="${safeSession}">` : '<recall>'
   const lines = candidates.map((c) => {
-    const content = contents?.get(c.uri)
+    const content = contents?.get(c.entryId) ?? contents?.get(c.shortId)
     const cues =
       (content && contentHead(content, inlineChars)) ||
       inlineText(c.cues.length ? c.cues.join(' · ') : (c.disclosure ?? ''))
-    return `${c.score.toFixed(2)} | ${c.uri}${titleSuffix(c.uri, c.title)}${cues ? ` | ${cues}` : ''}`
+    const circleTag =
+      c.circleSlug && (!primaryCircleId || c.circleId !== primaryCircleId)
+        ? ` [${c.circleSlug}]`
+        : ''
+    const crossTag = c.crossGroup ? ' [其他群印象]' : ''
+    return `${c.score.toFixed(2)} | ${c.shortId}${titleSuffix(c.shortId, c.title)}${circleTag}${crossTag}${cues ? ` | ${cues}` : ''}`
   })
   return [open, ...lines, '</recall>'].join('\n')
 }

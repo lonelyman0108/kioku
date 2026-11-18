@@ -5,7 +5,7 @@ import type {
   ExtractionRunInfo,
   SessionSummary,
 } from '@kioku/contracts'
-import { and, desc, eq, exists, inArray, isNull, ne, or, sql, type SQL } from 'drizzle-orm'
+import { and, asc, desc, eq, exists, inArray, isNull, ne, or, sql, type SQL } from 'drizzle-orm'
 
 import { nowOf, type Tx } from '../db/client'
 import { microsOf } from '../db/paging'
@@ -241,7 +241,7 @@ export async function conversationDetail(
       .orderBy(desc(entries.createdAt), desc(entries.id))
       .limit(DETAIL_SUMMARIES),
     tx
-      .select({
+      .selectDistinctOn([entries.id], {
         fact: entries,
         content: entryVariants.content,
         subjectKind: subjects.kind,
@@ -249,12 +249,9 @@ export async function conversationDetail(
       })
       .from(entries)
       .innerJoin(subjects, eq(subjects.id, entries.subjectId))
-      .innerJoin(
-        entryVariants,
-        and(eq(entryVariants.entryId, entries.id), eq(entryVariants.whenSignature, '{}')),
-      )
+      .innerJoin(entryVariants, eq(entryVariants.entryId, entries.id))
       .where(and(eq(entries.conversationId, id), factsOf(access)))
-      .orderBy(desc(entries.updatedAt), desc(entries.id))
+      .orderBy(entries.id, asc(entryVariants.sortOrder))
       .limit(DETAIL_FACTS),
     tx
       .select({ run: extractionRuns, clientName: clients.name })
@@ -421,7 +418,7 @@ export async function latestSummaries(
       entryVariants,
       and(eq(entryVariants.entryId, entries.id), eq(entryVariants.whenSignature, '{}')),
     )
-    .where(and(refMatch(clientId, ref), summariesOf(access), ne(entries.provenance, 'untrusted')))
+    .where(and(refMatch(clientId, ref), summariesOf(access)))
     .orderBy(desc(entries.createdAt), desc(entries.id))
     .limit(limit)
   return rows.map((r) => ({
