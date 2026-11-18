@@ -23,6 +23,7 @@ export interface EntryContext {
   secretRead?: 'explicit' | 'audited'
   eventContext?: Record<string, unknown>
   circleOwner?: boolean
+  takeReplayShortId?: (() => string | undefined) | undefined
 }
 
 export interface ConsoleCircleAccess {
@@ -83,7 +84,10 @@ export function entryServiceForKey(
   deps: Pick<Deps, 'db' | 'masterKey' | 'jobs'>,
   key: KeyPrincipal,
   session: KeySession = defaultSession(key),
-  options: Pick<EntryContext, 'maskSecret' | 'eventContext' | 'allowCredentialRefs'> = {},
+  options: Pick<
+    EntryContext,
+    'maskSecret' | 'eventContext' | 'allowCredentialRefs' | 'takeReplayShortId'
+  > = {},
 ): EntryService {
   return new EntryService({
     db: deps.db,

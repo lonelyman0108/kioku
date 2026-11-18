@@ -6,15 +6,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { CreateMemoryRequest } from '@kioku/contracts'
+import { ConsoleCreateEntryRequest } from '@kioku/contracts'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
-import { consoleAccess } from '../../access/access'
 import { createApp } from '../../app'
 import type { Database } from '../../db/client'
 import { settings } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
-import { MemoryService } from '../../memory/service'
+import { entryServiceForConsole } from '../../memory/context'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { bootstrap, type Workspace } from '../../testing/fixtures'
 
@@ -108,17 +107,14 @@ describe.skipIf(!testDatabaseUrl)('服务端统一运维命令行 kioku-ctl', ()
       expect(missing.code).toBe(1)
       expect(missing.stdout).toContain('未配置')
 
-      const service = new MemoryService({
-        db: database.db,
-        spaceId: ws.spaceId,
-        access: consoleAccess('owner', ws.accountId),
-        personaId: 'all',
-        masterKey,
-        actor: { accountId: ws.accountId },
-      })
+      const service = await entryServiceForConsole(
+        { db: database.db, masterKey, jobs: null },
+        ws.circleId,
+        ws.accountId,
+      )
       await service.create(
-        CreateMemoryRequest.parse({
-          uri: 'core://kb/ctl-secret',
+        ConsoleCreateEntryRequest.parse({
+          title: 'ctl-secret',
           content: '测试机密内容',
           sensitivity: 'secret',
         }),
@@ -148,14 +144,14 @@ describe.skipIf(!testDatabaseUrl)('服务端统一运维命令行 kioku-ctl', ()
       expect(ok.code).toBe(0)
       const okJson = JSON.parse(ok.stdout) as {
         ready: boolean
-        database: { ready: boolean; pendingMigrations: number; accounts: number; spaces: number }
+        database: { ready: boolean; pendingMigrations: number; accounts: number; circles: number }
         masterKey: { configured: boolean; matched: boolean }
       }
       expect(okJson.ready).toBe(true)
       expect(okJson.database.ready).toBe(true)
       expect(okJson.database.pendingMigrations).toBe(0)
       expect(okJson.database.accounts).toBe(1)
-      expect(okJson.database.spaces).toBe(1)
+      expect(okJson.database.circles).toBe(2)
       expect(okJson.masterKey.configured).toBe(true)
       expect(okJson.masterKey.matched).toBe(true)
       expect(ok.stdout).not.toContain(masterKeyBase64)
@@ -187,17 +183,14 @@ describe.skipIf(!testDatabaseUrl)('服务端统一运维命令行 kioku-ctl', ()
   it(
     'backup 与 restore 经统一入口可执行完整往返，且 --out - 时标准输出只含备份密文',
     async () => {
-      const service = new MemoryService({
-        db: database.db,
-        spaceId: ws.spaceId,
-        access: consoleAccess('owner', ws.accountId),
-        personaId: 'all',
-        masterKey,
-        actor: { accountId: ws.accountId },
-      })
+      const service = await entryServiceForConsole(
+        { db: database.db, masterKey, jobs: null },
+        ws.circleId,
+        ws.accountId,
+      )
       await service.create(
-        CreateMemoryRequest.parse({
-          uri: 'core://kb/ctl-roundtrip',
+        ConsoleCreateEntryRequest.parse({
+          title: 'ctl-roundtrip',
           content: '备份往返内容',
         }),
       )

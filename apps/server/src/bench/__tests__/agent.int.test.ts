@@ -19,8 +19,8 @@ import { eq } from 'drizzle-orm'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../../app'
-import { withSpace, type Database } from '../../db/client'
-import { accounts, memories, settings } from '../../db/schema'
+import { withCircle, type Database } from '../../db/client'
+import { accounts, entries, settings } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import { saveExtractionConfig } from '../../extraction/settings'
 import type { Deps } from '../../http/env'
@@ -46,9 +46,10 @@ const USER = { role: 'user', content: '你好' }
 // 等着模型的用例：里面按断言等几秒，要比这些等待长，等不到时才是断言失败而不是用例超时
 const WAITING_TIMEOUT = 15_000
 const MEMBER_SCOPES = {
-  readLayers: ['user'],
-  writeLayers: ['user'],
+  readKinds: ['entry'],
+  writeKinds: ['entry'],
   maxSensitivity: 'private',
+  allowedRealms: null,
   admin: false,
 }
 
@@ -66,7 +67,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
   let deps: Deps
   let app: ReturnType<typeof createApp>
   let ws: Workspace
-  let appId: string
+  let clientId: string
   let keyId: string
   let plainKey: string
   const masterKey = randomBytes(32)
@@ -86,8 +87,8 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
     })
     return server
   }
-  const benchPath = (appId_ = appId, keyId_ = keyId) =>
-    `/v1/spaces/${ws.spaceId}/apps/${appId_}/keys/${keyId_}/bench`
+  const benchPath = (clientId_ = clientId, keyId_ = keyId) =>
+    `/v1/circles/${ws.circleId}/clients/${clientId_}/keys/${keyId_}/bench`
   const postTurn = (body: unknown, cookie = ws.cookie, path = benchPath(), target = app) =>
     target.request(`${path}/agent/turn`, jsonRequest('POST', body, { cookie }))
   const getInfo = (cookie = ws.cookie, path = benchPath(), target = app) =>
@@ -132,15 +133,15 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
     }
     return { text: result.content[0]!.text, isError: result.isError === true }
   }
-  // 成员自己的应用与 Key，返回测试台的路径
-  const memberApp = async (cookie: string, slug = 'member-app') => {
+  // 成员自己的接入实例与 Key，返回测试台的路径
+  const memberClient = async (cookie: string, slug = 'member-client') => {
     const created = await app.request(
-      `/v1/spaces/${ws.spaceId}/apps`,
+      `/v1/circles/${ws.circleId}/clients`,
       jsonRequest('POST', { slug, name: slug, runtimeFamily: 'claudecode' }, { cookie }),
     )
     const { id } = (await created.json()) as { id: string }
     const key = await app.request(
-      `/v1/spaces/${ws.spaceId}/apps/${id}/keys`,
+      `/v1/circles/${ws.circleId}/clients/${id}/keys`,
       jsonRequest('POST', { name: 'k', scopes: MEMBER_SCOPES }, { cookie }),
     )
     return benchPath(id, ((await key.json()) as { id: string }).id)
@@ -166,8 +167,8 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
     await resetDatabase(database)
     await database.db.delete(settings)
     ws = await bootstrap(app)
-    appId = (await ws.createApp('cc', { runtimeFamily: 'claudecode' })).id
-    const created = await ws.createKey(appId)
+    clientId = (await ws.createClient('cc', { runtimeFamily: 'claudecode' })).id
+    const created = await ws.createKey(clientId)
     keyId = created.id
     plainKey = created.key
   })
@@ -176,9 +177,9 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
   })
 
   describe('权限', () => {
-    it('应用主人不是实例管理员：请求模型 403；查情况不是 403，给原因，不透露配没配', async () => {
-      const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
-      const path = await memberApp(bob.cookie)
+    it('接入实例主人不是实例管理员：请求模型 403；查情况不是 403，给原因，不透露配没配', async () => {
+      const bob = await addMember(database.db, ws.circleId, 'bob', 'editor')
+      const path = await memberClient(bob.cookie)
       const unavailable = {
         available: false,
         reason: 'notAdmin',
@@ -203,9 +204,9 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       expect(await (await getInfo(bob.cookie, path)).json()).toEqual(unavailable)
     })
 
-    it('实例管理员不是应用主人：两个接口都 403', async () => {
-      const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
-      const path = await memberApp(bob.cookie)
+    it('实例管理员不是接入实例主人：两个接口都 403', async () => {
+      const bob = await addMember(database.db, ws.circleId, 'bob', 'editor')
+      const path = await memberClient(bob.cookie)
       const server = await startModel(() => '不该请求到这里')
       const res = await postTurn({ messages: [USER] }, ws.cookie, path)
       expect(res.status).toBe(403)
@@ -214,8 +215,8 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       expect(server.requests).toHaveLength(0)
     })
 
-    it('editor 既不是实例管理员也不是这个应用的主人：两个接口都 403', async () => {
-      const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    it('editor 既不是实例管理员也不是这个接入实例的主人：两个接口都 403', async () => {
+      const bob = await addMember(database.db, ws.circleId, 'bob', 'editor')
       const server = await startModel(() => '不该请求到这里')
       const res = await postTurn({ messages: [USER] }, bob.cookie)
       expect(res.status).toBe(403)
@@ -224,13 +225,13 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       expect(server.requests).toHaveLength(0)
     })
 
-    it('实例管理员又是应用主人才能用，空间里的角色不影响', async () => {
-      const carol = await addMember(database.db, ws.spaceId, 'carol', 'editor')
+    it('实例管理员又是接入实例主人才能用，记忆圈里的角色不影响', async () => {
+      const carol = await addMember(database.db, ws.circleId, 'carol', 'editor')
       await database.db
         .update(accounts)
         .set({ isAdmin: true })
         .where(eq(accounts.id, carol.accountId))
-      const path = await memberApp(carol.cookie)
+      const path = await memberClient(carol.cookie)
       const server = await startModel(() => '好')
       expect((await postTurn({ messages: [USER] }, carol.cookie, path)).status).toBe(200)
       expect(await (await getInfo(carol.cookie, path)).json()).toMatchObject({
@@ -256,9 +257,12 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       ).toBe(401)
       expect((await app.request(`${benchPath()}/agent`)).status).toBe(401)
 
-      const revoked = await app.request(`/v1/spaces/${ws.spaceId}/apps/${appId}/keys/${keyId}`, {
-        ...jsonRequest('DELETE', {}, { cookie: ws.cookie }),
-      })
+      const revoked = await app.request(
+        `/v1/circles/${ws.circleId}/clients/${clientId}/keys/${keyId}`,
+        {
+          ...jsonRequest('DELETE', {}, { cookie: ws.cookie }),
+        },
+      )
       expect(revoked.ok).toBe(true)
       expect((await postTurn(body)).status).toBe(404)
       expect((await getInfo()).status).toBe(404)
@@ -432,9 +436,9 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
     })
 
     it('聊天类运行时不给工具，请求里也没有 tools', async () => {
-      const chatApp = (await ws.createApp('bot', { runtimeFamily: 'astrbot' })).id
-      const key = await ws.createKey(chatApp)
-      const path = benchPath(chatApp, key.id)
+      const chatClient = (await ws.createClient('bot', { runtimeFamily: 'astrbot' })).id
+      const key = await ws.createKey(chatClient)
+      const path = benchPath(chatClient, key.id)
       const server = await startModel(() => '好')
       const res = await postTurn({ messages: [USER] }, ws.cookie, path)
       expect(res.status).toBe(200)
@@ -452,7 +456,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
     ])(
       '%s：循环是 %s，给不给工具 %s、回复后发不发 turn.end %s，和实际请求一致',
       async (runtimeFamily, loop, tools, turnEnd) => {
-        const created = (await ws.createApp(`app-${runtimeFamily}`, { runtimeFamily })).id
+        const created = (await ws.createClient(`client-${runtimeFamily}`, { runtimeFamily })).id
         const key = await ws.createKey(created)
         const path = benchPath(created, key.id)
         const server = await startModel(() => '好')
@@ -477,7 +481,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         content: null,
         reasoning_content: '让我想想该调哪个工具',
         future_field: { nested: [1, { a: 'b' }] },
-        tool_calls: [toolCall('call-1', 'kioku_list', {})],
+        tool_calls: [toolCall('call-1', 'kioku_browse', {})],
       }
       const server = await startModel((messages) =>
         messages.some((m) => m.role === 'tool') ? '列完了' : assistant,
@@ -500,11 +504,11 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         tool_calls: [
           toolCall('empty', 'kioku_boot', ''),
           toolCall('blank', 'kioku_boot', ' \n\t'),
-          toolCall('good', 'kioku_get', { uri: 'core://agent' }),
-          toolCall('bad', 'kioku_get', '{"uri":'),
+          toolCall('good', 'kioku_get', { id: 'm-234567' }),
+          toolCall('bad', 'kioku_get', '{"id":'),
           toolCall('array', 'kioku_get', '[1]'),
           toolCall('null', 'kioku_get', 'null'),
-          toolCall('text', 'kioku_get', '"core://agent"'),
+          toolCall('text', 'kioku_get', '"m-234567"'),
         ],
       }))
       const { toolCalls } = await turn({ messages: [USER] })
@@ -513,13 +517,13 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       expect(toolCalls).toEqual([
         { id: 'empty', name: 'kioku_boot', arguments: {}, parseError: null },
         { id: 'blank', name: 'kioku_boot', arguments: {}, parseError: null },
-        { id: 'good', name: 'kioku_get', arguments: { uri: 'core://agent' }, parseError: null },
+        { id: 'good', name: 'kioku_get', arguments: { id: 'm-234567' }, parseError: null },
         {
           id: 'bad',
           name: 'kioku_get',
           arguments: null,
           parseError: notJson,
-          rawArguments: '{"uri":',
+          rawArguments: '{"id":',
         },
         {
           id: 'array',
@@ -534,7 +538,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
           name: 'kioku_get',
           arguments: null,
           parseError: notObject,
-          rawArguments: '"core://agent"',
+          rawArguments: '"m-234567"',
         },
       ])
     })
@@ -574,23 +578,23 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       await startModel(() => ({
         raw: `{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[${[
           // 换行在参数的 JSON 结构之间，是合法的空白
-          call('space', '{\n\\"uri\\":\\"core://agent\\"}'),
+          call('space', '{\n\\"id\\":\\"m-234567\\"}'),
           // 换行在参数的字符串里：还原之后参数本身有没转义的换行
-          call('inner', '{\\"uri\\":\\"core\n//agent\\"}'),
+          call('inner', '{\\"id\\":\\"a\nb\\"}'),
           // 容忍之后还是不合法的，才报错
-          call('broken', '{\\"uri\\":\\"core\n//agent'),
+          call('broken', '{\\"id\\":\\"a\nb'),
         ].join(',')}]}}]}`,
       }))
       const { toolCalls } = await turn({ messages: [USER] })
       expect(toolCalls).toEqual([
-        { id: 'space', name: 'kioku_get', arguments: { uri: 'core://agent' }, parseError: null },
-        { id: 'inner', name: 'kioku_get', arguments: { uri: 'core\n//agent' }, parseError: null },
+        { id: 'space', name: 'kioku_get', arguments: { id: 'm-234567' }, parseError: null },
+        { id: 'inner', name: 'kioku_get', arguments: { id: 'a\nb' }, parseError: null },
         {
           id: 'broken',
           name: 'kioku_get',
           arguments: null,
           parseError: '工具参数不是合法的 JSON',
-          rawArguments: '{"uri":"core\n//agent',
+          rawArguments: '{"id":"a\nb',
         },
       ])
     })
@@ -676,7 +680,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         {
           id: 'object-args',
           type: 'function',
-          function: { name: 'kioku_get', arguments: { uri: 'core://agent' } },
+          function: { name: 'kioku_get', arguments: { id: 'm-234567' } },
         },
         { id: 'no-function', type: 'function' },
         { id: 'null-function', type: 'function', function: null },
@@ -716,7 +720,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         {
           id: 'object-args',
           type: 'function',
-          function: { name: 'kioku_get', arguments: '{"uri":"core://agent"}' },
+          function: { name: 'kioku_get', arguments: '{"id":"m-234567"}' },
         },
         { id: 'no-function', type: 'function', function: placeholder },
         { id: 'null-function', type: 'function', function: placeholder },
@@ -738,7 +742,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         {
           id: 'object-args',
           name: 'kioku_get',
-          arguments: { uri: 'core://agent' },
+          arguments: { id: 'm-234567' },
           parseError: null,
         },
         { id: 'no-function', ...noName },
@@ -785,11 +789,11 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
 
     it('工具参数解析失败或靠容忍才解析得过：原文不再重发，下一轮校验 JSON 的上游也接受', async () => {
       const raw = [
-        ['broken', '{"uri":'],
-        ['tolerated', '{"uri":"core\n//agent"}'],
+        ['broken', '{"id":'],
+        ['tolerated', '{"id":"a\nb"}'],
         ['empty', ''],
         ['blank', ' \n'],
-        ['strict', ' {"uri": "core://agent"} '],
+        ['strict', ' {"id": "m-234567"} '],
       ] as const
       const calls = raw.map(([id, args]) => toolCall(id, 'kioku_get', args))
       // 前提：这些参数原样放回去，校验 JSON 的上游不收（严格解析得过的那个除外）
@@ -806,13 +810,13 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       const first = await turn({ messages: [USER] })
       expect(first.toolCalls.map((c) => [c.id, c.arguments, c.parseError])).toEqual([
         ['broken', null, '工具参数不是合法的 JSON'],
-        ['tolerated', { uri: 'core\n//agent' }, null],
+        ['tolerated', { id: 'a\nb' }, null],
         ['empty', {}, null],
         ['blank', {}, null],
-        ['strict', { uri: 'core://agent' }, null],
+        ['strict', { id: 'm-234567' }, null],
       ])
       // 界面还看得到模型写了什么
-      expect(first.toolCalls[0]!.rawArguments).toBe('{"uri":')
+      expect(first.toolCalls[0]!.rawArguments).toBe('{"id":')
 
       const history = [USER, first.message, ...raw.map(([id]) => toolMessage(id, '结果'))]
       const second = await turn({ messages: history })
@@ -821,10 +825,10 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       const sent = server.requests[1]![1]!.tool_calls as { function: { arguments: string } }[]
       expect(sent.map((call) => call.function.arguments)).toEqual([
         '{}',
-        '{"uri":"core\\n//agent"}',
+        '{"id":"a\\nb"}',
         '{}',
         '{}',
-        ' {"uri": "core://agent"} ',
+        ' {"id": "m-234567"} ',
       ])
     })
 
@@ -1036,12 +1040,12 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       await startModel(() => ({
         content: null,
         reasoning_content: '想',
-        tool_calls: [toolCall('c', 'kioku_create', { uri: 'user://notes/x', content: '不会写' })],
+        tool_calls: [toolCall('c', 'kioku_create', { title: 'x', content: '不会写' })],
       }))
-      const before = await tableDigests(database, ws.spaceId)
+      const before = await tableDigests(database, ws.circleId)
       await turn({ messages: [USER] })
       await postTurn({ messages: [USER] })
-      expect(await tableDigests(database, ws.spaceId)).toEqual(before)
+      expect(await tableDigests(database, ws.circleId)).toEqual(before)
     })
   })
 
@@ -1090,13 +1094,13 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
   describe('和运行接口串起来', () => {
     const seedSecrets = async () => {
       const created = await realTool('kioku_create', {
-        uri: 'user://notes/safe',
+        title: 'safe',
         content: SECRET_BODY,
         sensitivity: 'secret',
       })
       expect(created.isError).toBe(false)
       const credential = await app.request(
-        `/v1/spaces/${ws.spaceId}/credentials`,
+        `/v1/circles/${ws.circleId}/credentials`,
         jsonRequest(
           'POST',
           {
@@ -1109,9 +1113,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       )
       expect(credential.ok).toBe(true)
       // 对照：真实的接口读得到明文，下面没有明文不是因为没读到
-      expect((await realTool('kioku_get', { uri: 'user://notes/safe' })).text).toContain(
-        SECRET_BODY,
-      )
+      expect((await realTool('kioku_get', { id: 'safe' })).text).toContain(SECRET_BODY)
       expect((await realTool('kioku_credential', { identifier: 'nas' })).text).toContain(
         HOSTED_VALUE,
       )
@@ -1127,7 +1129,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
             : {
                 content: null,
                 tool_calls: [
-                  toolCall('get', 'kioku_get', { uri: 'user://notes/safe' }),
+                  toolCall('get', 'kioku_get', { id: 'safe' }),
                   toolCall('cred', 'kioku_credential', { identifier: 'nas' }),
                 ],
               },
@@ -1144,7 +1146,8 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         expect(output).not.toContain(HOSTED_VALUE)
         // 工具确实跑了，结果是打过码的
         expect(result.steps[0]!.text).toContain('敏感级: secret')
-        expect(result.steps[0]!.text).toContain('user://notes/safe')
+        expect(result.steps[0]!.text).toContain('标题: safe')
+        expect(result.steps[0]!.shortIds).toHaveLength(1)
         expect(result.steps[1]!.text).toContain('password')
 
         const history = [
@@ -1161,34 +1164,38 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       },
     )
 
-    it('回滚模式跨轮：第一轮写的，第二轮带重放读得到，模型收到结果，库里没有留下', async () => {
-      const uri = 'user://notes/agent-made'
+    it('回滚模式跨轮：第一轮写的，第二轮带重放按 shortId 读得到，模型收到结果，库里没有留下', async () => {
+      const title = 'agent-made'
       const body = '模型第一轮写下的内容'
       const server = await startModel((messages) => {
-        const answered = messages.filter((m) => m.role === 'tool').length
-        if (answered === 0) {
+        const toolReplies = messages.filter((m) => m.role === 'tool')
+        if (toolReplies.length === 0) {
           return {
             content: null,
-            tool_calls: [toolCall('create', 'kioku_create', { uri, content: body })],
+            tool_calls: [toolCall('create', 'kioku_create', { title, content: body })],
           }
         }
-        if (answered === 1) {
-          return { content: null, tool_calls: [toolCall('get', 'kioku_get', { uri })] }
+        if (toolReplies.length === 1) {
+          const text = String(toolReplies[0]!.content ?? '')
+          const shortId = /^ID: (m-[2-9a-hjkmnp-tv-z]{6,8})/m.exec(text)![1]!
+          return { content: null, tool_calls: [toolCall('get', 'kioku_get', { id: shortId })] }
         }
         return '记下了'
       })
-      const before = await tableDigests(database, ws.spaceId)
+      const before = await tableDigests(database, ws.circleId)
 
       const first = await turn({ messages: [USER] })
       const created = await run({ steps: toolSteps(first.toolCalls) })
       expect(created.ok).toBe(true)
-      const replay = created.steps[0]!.replay
+      const replay = created.steps[0]!.replay!
       expect(replay).toMatchObject({ kind: 'tool', tool: 'kioku_create' })
+      const shortId = replay.kind === 'tool' ? replay.shortId! : ''
+      expect(shortId).toMatch(/^m-/)
       const afterFirst = [USER, first.message, toolMessage('create', created.steps[0]!.text)]
 
       const second = await turn({ messages: afterFirst })
       expect(second.toolCalls.map((call) => call.name)).toEqual(['kioku_get'])
-      // 不带重放读不到：事务已经回滚了，读得到全靠重放
+      // 不带重放读不到：事务已经回滚了，读得到全靠带原 shortId 重放
       const alone = await run({ steps: toolSteps(second.toolCalls) })
       expect(alone.steps[0]!.isError).toBe(true)
       const got = await run({ steps: toolSteps(second.toolCalls), replay: [replay] })
@@ -1204,11 +1211,11 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       expect(JSON.stringify(server.requests[2])).toContain(body)
 
       expect(
-        await withSpace(database.db, ws.spaceId, (tx) => tx.select().from(memories)),
+        await withCircle(database.db, ws.circleId, (tx) => tx.select().from(entries)),
       ).toHaveLength(0)
-      expect(await tableDigests(database, ws.spaceId)).toEqual(before)
+      expect(await tableDigests(database, ws.circleId)).toEqual(before)
       // 最后才调：真实的调用会更新 Key 的最后使用时间
-      expect((await realTool('kioku_get', { uri })).isError).toBe(true)
+      expect((await realTool('kioku_get', { id: shortId })).isError).toBe(true)
     })
   })
 })

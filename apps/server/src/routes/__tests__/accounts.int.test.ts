@@ -1,7 +1,8 @@
 import { randomBytes } from 'node:crypto'
 
 import {
-  SpaceName,
+  CIRCLE_NAME_MAX,
+  CircleName,
   type AccountLink,
   type AdminAccount,
   type AdminAccountList,
@@ -19,7 +20,7 @@ import { createApp } from '../../app'
 import { isTrustedDevice } from '../../auth/deviceCookie'
 import { USER_AGENT_MAX_LENGTH } from '../../auth/session'
 import type { Database } from '../../db/client'
-import { accountLinks, accounts, sessions, spaceMembers, spaces } from '../../db/schema'
+import { accountLinks, accounts, circleMembers, circles, sessions } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import type { Deps } from '../../http/env'
 import { cleanupExpired } from '../../jobs/cleanup'
@@ -105,7 +106,7 @@ describe.skipIf(!testDatabaseUrl)('账号、一次性链接与登录设备', () 
 
   describe('实例管理员的接口', () => {
     it('非管理员一律 403', async () => {
-      const member = await addMember(database.db, ws.spaceId, 'bob', 'owner')
+      const member = await addMember(database.db, ws.circleId, 'bob', 'owner')
       expect(
         (await send('GET', '/v1/instance/accounts', undefined, as(member.cookie))).status,
       ).toBe(403)
@@ -149,8 +150,15 @@ describe.skipIf(!testDatabaseUrl)('账号、一次性链接与登录设备', () 
         lastActiveAt: null,
         pendingLink: { purpose: 'setup', expiresAt: created.link.expiresAt },
       })
-      expect(created.account.spaces).toEqual([
-        { id: expect.any(String), name: 'BOB的空间', role: 'owner', soleActiveOwner: true },
+      expect(created.account.circles).toEqual([
+        {
+          id: expect.any(String),
+          slug: expect.any(String),
+          name: 'BOB的个人圈',
+          kind: 'personal',
+          role: 'owner',
+          soleActiveOwner: true,
+        },
       ])
       // 库里只存令牌的哈希
       const [row] = await database.db.select().from(accountLinks)
@@ -177,11 +185,11 @@ describe.skipIf(!testDatabaseUrl)('账号、一次性链接与登录设备', () 
       expect(await res.json()).toEqual({ error: '用户名或密码错误' })
     })
 
-    it('账号列表：所在空间与角色、最近活动、待用的链接', async () => {
+    it('账号列表：所在记忆圈与角色、最近活动、待用的链接', async () => {
       const created = await createAccount('bob')
       await database.db
-        .insert(spaceMembers)
-        .values({ spaceId: ws.spaceId, accountId: created.account.id, role: 'viewer' })
+        .insert(circleMembers)
+        .values({ circleId: ws.circleId, accountId: created.account.id, role: 'viewer' })
       const list = await ok<AdminAccountList>(
         await send('GET', '/v1/instance/accounts', undefined, as(ws.cookie)),
       )
@@ -189,13 +197,20 @@ describe.skipIf(!testDatabaseUrl)('账号、一次性链接与登录设备', () 
       const [alice, bob] = list.accounts as [AdminAccount, AdminAccount]
       expect(alice).toMatchObject({ isAdmin: true, passwordSet: true, pendingLink: null })
       expect(alice.lastActiveAt).not.toBeNull()
-      expect(alice.spaces).toEqual([
-        { id: ws.spaceId, name: '家', role: 'owner', soleActiveOwner: true },
-      ])
-      expect(bob.spaces.map((s) => [s.name, s.role, s.soleActiveOwner])).toEqual([
-        ['家', 'viewer', false],
-        ['BOB的空间', 'owner', true],
-      ])
+      expect(alice.circles.find((c) => c.id === ws.circleId)).toEqual({
+        id: ws.circleId,
+        slug: expect.any(String),
+        name: '家',
+        kind: 'shared',
+        role: 'owner',
+        soleActiveOwner: true,
+      })
+      expect(bob.circles.map((s) => [s.name, s.role, s.soleActiveOwner]).sort()).toEqual(
+        [
+          ['家', 'viewer', false],
+          ['BOB的个人圈', 'owner', true],
+        ].sort(),
+      )
       expect(bob.pendingLink?.purpose).toBe('setup')
       expect(JSON.stringify(list)).not.toContain(created.link.token)
     })
@@ -203,9 +218,9 @@ describe.skipIf(!testDatabaseUrl)('账号、一次性链接与登录设备', () 
     it('账号列表标出唯一没停用的所有者：另有没停用的所有者时不标，停用的所有者不算', async () => {
       const bob = await createAccount('bob')
       const carol = await createAccount('carol')
-      await database.db.insert(spaceMembers).values([
-        { spaceId: ws.spaceId, accountId: bob.account.id, role: 'owner' },
-        { spaceId: ws.spaceId, accountId: carol.account.id, role: 'owner' },
+      await database.db.insert(circleMembers).values([
+        { circleId: ws.circleId, accountId: bob.account.id, role: 'owner' },
+        { circleId: ws.circleId, accountId: carol.account.id, role: 'owner' },
       ])
       const home = async () => {
         const list = await ok<AdminAccountList>(
@@ -214,7 +229,7 @@ describe.skipIf(!testDatabaseUrl)('账号、一次性链接与登录设备', () 
         return Object.fromEntries(
           list.accounts.map((a) => [
             a.username,
-            a.spaces.find((s) => s.id === ws.spaceId)?.soleActiveOwner,
+            a.circles.find((s) => s.id === ws.circleId)?.soleActiveOwner,
           ]),
         )
       }
@@ -225,9 +240,9 @@ describe.skipIf(!testDatabaseUrl)('账号、一次性链接与登录设备', () 
         .where(eq(accounts.id, carol.account.id))
       expect(await home()).toEqual({ alice: false, bob: false, carol: false })
       await database.db
-        .update(spaceMembers)
+        .update(circleMembers)
         .set({ role: 'editor' })
-        .where(eq(spaceMembers.accountId, ws.accountId))
+        .where(eq(circleMembers.accountId, ws.accountId))
       // 只剩 bob 一个没停用的所有者；停用的 carol 不标
       expect(await home()).toEqual({ alice: false, bob: true, carol: false })
     })
@@ -355,7 +370,7 @@ describe.skipIf(!testDatabaseUrl)('账号、一次性链接与登录设备', () 
       const res = await usePasswordLink(created.link.token)
       const me = await ok<Me>(res)
       expect(me).toMatchObject({ username: 'bob', isAdmin: false })
-      expect(me.spaces[0]?.name).toBe('BOB的空间')
+      expect(me.circles[0]?.name).toBe('BOB的个人圈')
       const cookies = cookiesOf(res)
       expect(cookies.kioku_session).toBeTruthy()
       expect(cookies.kioku_device).toBeTruthy()
@@ -511,16 +526,16 @@ describe.skipIf(!testDatabaseUrl)('账号、一次性链接与登录设备', () 
       expect((await usePasswordLink(created.link.token)).status).toBe(404)
     })
 
-    it('应用所有者停用后，他的访问密钥在各个接口都作废；启用后恢复', async () => {
+    it('接入实例所有者停用后，他的访问密钥在各个接口都作废；启用后恢复', async () => {
       const bob = await activeAccount('bob', true)
       await database.db
-        .insert(spaceMembers)
-        .values({ spaceId: ws.spaceId, accountId: bob.id, role: 'owner' })
-      // Bob 建应用、签发 Key
-      const bobApp = await ok<{ id: string }>(
+        .insert(circleMembers)
+        .values({ circleId: ws.circleId, accountId: bob.id, role: 'owner' })
+      // Bob 建接入实例、签发 Key
+      const bobClient = await ok<{ id: string }>(
         await send(
           'POST',
-          `/v1/spaces/${ws.spaceId}/apps`,
+          `/v1/circles/${ws.circleId}/clients`,
           { slug: 'bob-agent', name: 'bob', runtimeFamily: 'mcp' },
           as(bob.cookie),
         ),
@@ -530,13 +545,14 @@ describe.skipIf(!testDatabaseUrl)('账号、一次性链接与登录设备', () 
         await ok<{ key: string }>(
           await send(
             'POST',
-            `/v1/spaces/${ws.spaceId}/apps/${bobApp.id}/keys`,
+            `/v1/circles/${ws.circleId}/clients/${bobClient.id}/keys`,
             {
               name: 'k',
               scopes: {
-                readLayers: ['core'],
-                writeLayers: ['core'],
+                readKinds: ['entry'],
+                writeKinds: ['entry'],
                 maxSensitivity: 'internal',
+                allowedRealms: null,
                 admin: false,
                 credentials: 'use',
               },
@@ -548,10 +564,10 @@ describe.skipIf(!testDatabaseUrl)('账号、一次性链接与登录设备', () 
       ).key
       const calls = () => [
         send('GET', '/v1/whoami', undefined, bearer(key)),
-        send('POST', '/v1/recall', { prompt: '你好' }, bearer(key)),
+        send('POST', '/v1/recall', { query: '你好' }, bearer(key)),
         send('GET', '/v1/boot', undefined, bearer(key)),
-        send('POST', '/v1/lifecycle/event', { event: 'session_start' }, bearer(key)),
-        send('POST', '/v1/memories', { uri: 'core://x', content: 'x' }, bearer(key)),
+        send('POST', '/v1/lifecycle/event', { event: 'session.start' }, bearer(key)),
+        send('POST', '/v1/entries', { title: 'x', content: 'x' }, bearer(key)),
         send('POST', '/v1/credentials/resolve', { refs: [] }, bearer(key)),
         send(
           'POST',
@@ -567,7 +583,7 @@ describe.skipIf(!testDatabaseUrl)('账号、一次性链接与登录设备', () 
       const keys = await ok<KeyInfo[]>(
         await send(
           'GET',
-          `/v1/spaces/${ws.spaceId}/apps/${bobApp.id}/keys`,
+          `/v1/circles/${ws.circleId}/clients/${bobClient.id}/keys`,
           undefined,
           as(ws.cookie),
         ),
@@ -720,7 +736,7 @@ describe.skipIf(!testDatabaseUrl)('账号、一次性链接与登录设备', () 
     })
   })
 
-  it('个人空间名按码点截断', async () => {
+  it('个人记忆圈名按码点截断', async () => {
     const created = await ok<CreatedAccount>(
       await send(
         'POST',
@@ -730,11 +746,11 @@ describe.skipIf(!testDatabaseUrl)('账号、一次性链接与登录设备', () 
       ),
       201,
     )
-    const [space] = await database.db
+    const [circle] = await database.db
       .select()
-      .from(spaces)
-      .where(eq(spaces.id, created.account.spaces[0]!.id))
-    expect(space!.name).toBe(`${'😀'.repeat(61)}的空间`)
-    expect(SpaceName.safeParse(space!.name).success).toBe(true)
+      .from(circles)
+      .where(eq(circles.id, created.account.circles[0]!.id))
+    expect(circle!.name).toBe(`${'😀'.repeat(CIRCLE_NAME_MAX - 4)}的个人圈`)
+    expect(CircleName.safeParse(circle!.name).success).toBe(true)
   })
 })

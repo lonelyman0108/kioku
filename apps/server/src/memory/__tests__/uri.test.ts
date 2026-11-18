@@ -1,14 +1,16 @@
+import { deriveEntryTitle, firstMarkdownHeading } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
-import { deriveTitle, firstHeading } from '../uri'
+describe('不给标题时的标题提取', () => {
+  const title = (content: string) =>
+    deriveEntryTitle(undefined, [{ content }], 'm-router', 'private')
 
-describe('不给标题时的标题', () => {
-  const title = (content: string) => deriveTitle(content, 'notes/router', 'private')
-
-  it('取正文第一个 # 标题，没有就用标识；机密只用标识', () => {
+  it('取正文第一个 # 标题，没有就用短 ID 兜底；机密只用短 ID', () => {
     expect(title('说明\n## 家里的路由器 ##\n# 别的')).toBe('家里的路由器')
-    expect(title('没有标题')).toBe('router')
-    expect(deriveTitle('# 家里的路由器', 'notes/router', 'secret')).toBe('router')
+    expect(title('没有标题')).toBe('m-router')
+    expect(deriveEntryTitle(undefined, [{ content: '# 家里的路由器' }], 'm-router', 'secret')).toBe(
+      'm-router',
+    )
   })
 
   it('Windows 的换行：行尾的 \\r 先去掉再认', () => {
@@ -18,23 +20,17 @@ describe('不给标题时的标题', () => {
   })
 
   it('代码块照 CommonMark：结束的围栏是同一种字符、不短于开头、后面没有信息串', () => {
-    // 比开头短的不结束
     expect(title('````md\n```\n# 代码里的\n````\n# 家里的路由器')).toBe('家里的路由器')
-    // 带信息串的不结束，是代码块里的一行
     expect(title('```js\n```python\n# 代码里的\n```\n# 家里的路由器')).toBe('家里的路由器')
-    // 另一种字符的不结束
     expect(title('~~~\n```\n# 代码里的\n~~~\n# 家里的路由器')).toBe('家里的路由器')
-    // 更长的、后面只有空白的、缩进不到四格的都结束
     expect(title('```\n# 代码里的\n`````  \n# 家里的路由器')).toBe('家里的路由器')
     expect(title('   ~~~\n# 代码里的\n  ~~~~\t\n# 家里的路由器')).toBe('家里的路由器')
-    // 没有结束的代码块到正文结尾为止
-    expect(title('```\n# 代码里的')).toBe('router')
-    // ` 的信息串里有 ` 的不是围栏
+    expect(title('```\n# 代码里的')).toBe('m-router')
     expect(title('``` a`b\n# 家里的路由器')).toBe('家里的路由器')
   })
 
   it('第一个 # 标题带凭据占位符时不取，也不往后找', () => {
-    expect(firstHeading('# 用 {{cred:vpn}} 登录\n# 别的')).toBeNull()
-    expect(title('# 用 {{cred:vpn}} 登录\n# 别的')).toBe('router')
+    expect(firstMarkdownHeading('# 用 {{cred:vpn}} 登录\n# 别的')).toBeNull()
+    expect(title('# 用 {{cred:vpn}} 登录\n# 别的')).toBe('m-router')
   })
 })

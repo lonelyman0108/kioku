@@ -82,7 +82,7 @@ export async function openSuggestionCount(tx: Tx, access: Access): Promise<numbe
   return row?.n ?? 0
 }
 
-async function resolveDreamScopes(
+export async function resolveDreamScopes(
   tx: Tx,
   circleId: string,
   circleName: string,

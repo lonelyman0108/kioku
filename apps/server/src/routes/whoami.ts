@@ -11,7 +11,7 @@ const whoami = createRoute({
   path: '/whoami',
   tags: ['auth'],
   summary:
-    '当前 API Key 对应的空间、应用与授权上限；能读本人归属的 Key 还带空间名与应用所有者的显示名',
+    '当前访问密钥对应的主场圈、关联客场圈、接入实例、人格、解析后的在场切面、可见词表与授权上限',
   security: [{ bearer: [] }],
   responses: {
     200: jsonResponse('Key 信息', WhoAmI),
@@ -22,5 +22,5 @@ const whoami = createRoute({
 export function whoamiRoutes(deps: Deps) {
   const app = router()
   app.use('/whoami', requireKey(deps))
-  return app.openapi(whoami, (c) => c.json(whoamiOf(c.get('key')), 200))
+  return app.openapi(whoami, async (c) => c.json(await whoamiOf(deps, c.get('key')), 200))
 }

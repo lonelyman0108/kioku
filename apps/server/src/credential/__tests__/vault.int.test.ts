@@ -17,7 +17,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 
 import { createApp } from '../../app'
 import { principalForKeyId } from '../../auth/middleware'
-import { withSpace, type Database } from '../../db/client'
+import { withCircle, type Database } from '../../db/client'
 import { vaultConnections } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
@@ -65,7 +65,7 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
       vault: vault.client,
     })
     ws = await bootstrap(app)
-    const created = await ws.createKey((await ws.createApp('agent')).id, FULL_SCOPES)
+    const created = await ws.createKey((await ws.createClient('agent')).id, FULL_SCOPES)
     key = created.key
     keyId = created.id
   })
@@ -83,7 +83,7 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
         : jsonRequest(method, body, headers),
     )
   const asMember = (method: string, path: string, body?: unknown) =>
-    send(method, `/v1/spaces/${ws.spaceId}${path}`, body, { cookie: ws.cookie })
+    send(method, `/v1/circles/${ws.circleId}${path}`, body, { cookie: ws.cookie })
   const ok = async <T>(res: Response, status = 200): Promise<T> => {
     if (res.status !== status) throw new Error(`HTTP ${res.status}: ${await res.text()}`)
     return (await res.json()) as T
@@ -118,7 +118,7 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
   const use = (query: string) => send('GET', `/v1/credentials?${query}`, undefined, bearer(key))
   const connectionRow = async (id: string) =>
     (
-      await withSpace(database.db, ws.spaceId, (tx) =>
+      await withCircle(database.db, ws.circleId, (tx) =>
         tx.select().from(vaultConnections).where(eq(vaultConnections.id, id)),
       )
     )[0]!
@@ -201,7 +201,7 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
       }),
     ).rejects.toMatchObject({ status: 400, message: PLAIN_HTTP_RULE })
     const connection = await connected()
-    await withSpace(database.db, ws.spaceId, (tx) =>
+    await withCircle(database.db, ws.circleId, (tx) =>
       tx
         .update(vaultConnections)
         .set({ serverUrl: 'http://0xc0a80101' })
@@ -504,7 +504,7 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
     vault.state.beforeSnapshot = async () => {
       vault.revokeToken(old)
       const sealed = sealVaultSecrets(masterKey, connection.id, vault.issueSecrets(EMAIL))
-      await withSpace(database.db, ws.spaceId, (tx) =>
+      await withCircle(database.db, ws.circleId, (tx) =>
         tx.update(vaultConnections).set(sealed).where(eq(vaultConnections.id, connection.id)),
       )
     }
@@ -549,7 +549,7 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
     const old = vault.refreshTokens.at(-1)!
     vault.state.beforeItem = async () => {
       vault.revokeToken(old)
-      await withSpace(database.db, ws.spaceId, (tx) =>
+      await withCircle(database.db, ws.circleId, (tx) =>
         tx
           .update(vaultConnections)
           .set(sealVaultSecrets(masterKey, connection.id, fresh))
@@ -722,7 +722,7 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
   const connectionsOf = () =>
     new VaultConnections({
       db: database.db,
-      spaceId: ws.spaceId,
+      circleId: ws.circleId,
       ownerAccountId: ws.accountId,
       masterKey,
       client: vault.client,
@@ -763,7 +763,8 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
     try {
       let pending!: Promise<Response>
       await side.begin(async (tx) => {
-        await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
+        await tx`select set_config('app.read_circles', ${ws.circleId}, true)`
+        await tx`select set_config('app.write_circles', ${ws.circleId}, true)`
         await tx`select id from vault_connections where id = ${connection.id} for update`
         const [{ pid }] = (await tx`select pg_backend_pid() as pid`) as unknown as [{ pid: number }]
         pending = Promise.resolve(
@@ -797,13 +798,13 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
       }),
     )
     expect(hasCachedSession(vault.client, connection.id)).toBe(true)
-    await withSpace(database.db, ws.spaceId, (tx) =>
+    await withCircle(database.db, ws.circleId, (tx) =>
       connectionsOf().record(tx, old, { kind: 'error', error: 'reauth_required' }),
     )
     expect(hasCachedSession(vault.client, connection.id)).toBe(true)
     // 密文没变，状态也不改
     expect((await connectionRow(connection.id)).status).toBe('ok')
-    await withSpace(database.db, ws.spaceId, async (tx) =>
+    await withCircle(database.db, ws.circleId, async (tx) =>
       connectionsOf().record(tx, (await connectionsOf().load(tx, connection.id))!, {
         kind: 'error',
         error: 'reauth_required',
@@ -827,7 +828,7 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
     const old = vault.refreshTokens.at(-1)!
     vault.state.beforeItem = async () => {
       vault.revokeToken(old)
-      await withSpace(database.db, ws.spaceId, (tx) =>
+      await withCircle(database.db, ws.circleId, (tx) =>
         tx
           .update(vaultConnections)
           .set({ ciphertext: randomBytes(80) })
@@ -851,7 +852,7 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
       { identifier: 'router', state: 'usable', name: '路由器' },
     ])
     for (const status of ['reauth_required', 'disabled'] as const) {
-      await withSpace(database.db, ws.spaceId, (tx) =>
+      await withCircle(database.db, ws.circleId, (tx) =>
         tx
           .update(vaultConnections)
           .set({
@@ -862,7 +863,7 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
       )
       expect((await service.forPlaceholders(['router']))[0]!.state).toBe(status)
     }
-    await withSpace(database.db, ws.spaceId, (tx) =>
+    await withCircle(database.db, ws.circleId, (tx) =>
       tx
         .update(vaultConnections)
         .set({ status: 'ok', disabledReason: null })
@@ -882,7 +883,7 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
     expect(await stamp()).toBe(first)
 
     const back = (minutes: number) =>
-      withSpace(database.db, ws.spaceId, (tx) =>
+      withCircle(database.db, ws.circleId, (tx) =>
         tx
           .update(vaultConnections)
           .set({ lastCheckedAt: sql`now() - make_interval(mins => ${minutes})` })
@@ -908,7 +909,7 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
     await ok(await asMember('POST', `/vault-connections/${connection.id}/disconnect`))
     const session = connectionsOf().session(stale)
     expect(hasCachedSession(vault.client, connection.id)).toBe(true)
-    await withSpace(database.db, ws.spaceId, (tx) =>
+    await withCircle(database.db, ws.circleId, (tx) =>
       connectionsOf().record(tx, stale, { kind: 'ok' }, session),
     )
     expect(hasCachedSession(vault.client, connection.id)).toBe(false)
@@ -989,7 +990,7 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
   it('最近检查时间按数据库的时钟写：应用的时钟快了，节流照样按数据库的时间算', async () => {
     const connection = await connected()
     await identify(connection.id, vault.addItem({ name: '路由器', values: routerValues }))
-    await withSpace(database.db, ws.spaceId, (tx) =>
+    await withCircle(database.db, ws.circleId, (tx) =>
       tx
         .update(vaultConnections)
         .set({ lastCheckedAt: sql`now() - interval '2 minutes'` })
@@ -1001,7 +1002,7 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
     } finally {
       vi.useRealTimers()
     }
-    const [{ lag }] = (await withSpace(database.db, ws.spaceId, (tx) =>
+    const [{ lag }] = (await withCircle(database.db, ws.circleId, (tx) =>
       tx.execute(
         sql`select extract(epoch from now() - last_checked_at)::float8 as lag from vault_connections where id = ${connection.id}`,
       ),

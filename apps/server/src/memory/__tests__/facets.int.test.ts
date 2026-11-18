@@ -6,7 +6,7 @@ import { resolveAccess } from '../../access/access'
 type CircleGrantInput = Parameters<typeof resolveAccess>[0]['grants'][number]
 import { createPersonalCircle, createSharedCircle } from '../../access/circles'
 import { withCircle, type Database, type Db } from '../../db/client'
-import { accounts, circles } from '../../db/schema'
+import { accounts } from '../../db/schema'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { MemoryError } from '../errors'
 import {

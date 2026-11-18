@@ -2,18 +2,17 @@ import { randomBytes } from 'node:crypto'
 
 import type {
   ActivityList,
-  DeletedMemoryList,
-  MemoryHistory,
-  MemoryView,
-  SpaceOverview,
+  ConsoleEntryView,
+  DeletedEntryList,
+  EntryHistory,
 } from '@kioku/contracts'
-import { eq, sql } from 'drizzle-orm'
+import { eq } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { canRead, consoleAccess, type Access } from '../../access/access'
 import { createApp } from '../../app'
-import { withSpace, type Database } from '../../db/client'
-import { memories, memoryEvents } from '../../db/schema'
+import { withCircle, type Database } from '../../db/client'
+import { entries, entryEvents, entryGlossary, entryVariants } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import { snapshotFacts } from '../../memory/filter'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
@@ -23,7 +22,7 @@ describe.skipIf(!testDatabaseUrl)('管理界面的历史、撤销删除与恢复
   let database: Database
   let app: ReturnType<typeof createApp>
   let ws: Workspace
-  // 记下排队生成向量的记忆，用来确认撤销删除之后会重新生成
+  // 记下排队生成向量的词条，用来确认撤销删除之后会重新生成
   const queued: string[] = []
 
   beforeAll(async () => {
@@ -34,7 +33,7 @@ describe.skipIf(!testDatabaseUrl)('管理界面的历史、撤销删除与恢复
       masterKey: randomBytes(32),
       embedder: staticEmbedderSource(null),
       jobs: {
-        enqueueEmbed: (_spaceId, memoryId) => void queued.push(memoryId),
+        enqueueEmbed: (_circleId, entryId) => void queued.push(entryId),
         enqueueBackfill: async () => true,
         enqueueSwitch: async () => true,
         enqueuePrune: async () => true,
@@ -56,71 +55,99 @@ describe.skipIf(!testDatabaseUrl)('管理界面的历史、撤销删除与恢复
     queued.length = 0
   })
 
-  const space = () => `/v1/spaces/${ws.spaceId}`
+  const circle = () => `/v1/circles/${ws.circleId}`
   const ok = async <T>(res: Response, status = 200) => {
-    expect(res.status).toBe(status)
+    expect(res.status, await res.clone().text()).toBe(status)
     return (await res.json()) as T
   }
   const create = async (cookie: string, body: Record<string, unknown>) =>
-    ok<MemoryView>(
-      await app.request(`${space()}/memories`, jsonRequest('POST', body, { cookie })),
+    ok<ConsoleEntryView>(
+      await app.request(`${circle()}/entries`, jsonRequest('POST', body, { cookie })),
       201,
     )
   const patch = async (cookie: string, body: Record<string, unknown>) =>
-    ok<MemoryView>(await app.request(`${space()}/memories`, jsonRequest('PATCH', body, { cookie })))
-  const reveal = async (cookie: string, memoryId: string) =>
-    ok<MemoryView>(
-      await app.request(
-        `${space()}/memories/reveal`,
-        jsonRequest('POST', { memoryId }, { cookie }),
-      ),
+    ok<ConsoleEntryView>(
+      await app.request(`${circle()}/entries`, jsonRequest('PATCH', body, { cookie })),
     )
-  const remove = async (cookie: string, m: MemoryView) => {
-    const query = `uri=${encodeURIComponent(m.uri)}&expectedId=${m.id}&expectedVersion=${m.version}`
-    const res = await app.request(`${space()}/memories?${query}`, {
+  const reveal = async (cookie: string, entryId: string) =>
+    ok<ConsoleEntryView>(
+      await app.request(`${circle()}/entries/reveal`, jsonRequest('POST', { entryId }, { cookie })),
+    )
+  const remove = async (cookie: string, m: ConsoleEntryView) => {
+    const query = `id=${encodeURIComponent(m.shortId)}&expectedVersion=${m.version}`
+    const res = await app.request(`${circle()}/entries?${query}`, {
       method: 'DELETE',
       headers: { cookie, 'sec-fetch-site': 'same-origin' },
     })
     expect(res.status).toBe(204)
   }
   const historyRes = (cookie: string, id: string) =>
-    app.request(`${space()}/memories/history?id=${id}`, { headers: { cookie } })
+    app.request(`${circle()}/entries/history?id=${id}`, { headers: { cookie } })
   const history = async (cookie: string, id: string) =>
-    ok<MemoryHistory>(await historyRes(cookie, id))
+    ok<EntryHistory>(await historyRes(cookie, id))
   const deleted = async (cookie: string, query = '') =>
-    ok<DeletedMemoryList>(
-      await app.request(`${space()}/memories/deleted${query ? `?${query}` : ''}`, {
+    ok<DeletedEntryList>(
+      await app.request(`${circle()}/entries/deleted${query ? `?${query}` : ''}`, {
         headers: { cookie },
       }),
     )
   const activity = async (cookie: string, query = '') =>
     ok<ActivityList>(
-      await app.request(`${space()}/activity${query ? `?${query}` : ''}`, { headers: { cookie } }),
+      await app.request(`${circle()}/activity${query ? `?${query}` : ''}`, {
+        headers: { cookie },
+      }),
     )
   const restoreRes = (cookie: string, body: Record<string, unknown>) =>
-    app.request(`${space()}/memories/restore`, jsonRequest('POST', body, { cookie }))
-  const undeleteRes = (cookie: string, memoryId: string) =>
-    app.request(`${space()}/memories/undelete`, jsonRequest('POST', { memoryId }, { cookie }))
+    app.request(`${circle()}/entries/restore`, jsonRequest('POST', body, { cookie }))
+  const undeleteRes = (cookie: string, entryId: string) =>
+    app.request(`${circle()}/entries/undelete`, jsonRequest('POST', { entryId }, { cookie }))
 
-  // 照着服务写事件时的样子，把一行记忆变成快照
+  // 照着服务写事件时的样子，构造一条完整的存储快照
   async function snapshotOf(id: string, overrides: Record<string, unknown> = {}) {
-    const [row] = await withSpace(database.db, ws.spaceId, (tx) =>
-      tx.select().from(memories).where(eq(memories.id, id)),
+    const [row] = await withCircle(database.db, ws.circleId, (tx) =>
+      tx.select().from(entries).where(eq(entries.id, id)),
     )
-    const rest: Record<string, unknown> = { ...row, glossary: [] }
-    delete rest.ciphertext
-    delete rest.wrappedKey
-    delete rest.keyId
-    delete rest.fts
-    return JSON.parse(JSON.stringify({ ...rest, ...overrides })) as Record<string, unknown>
+    const [variants, glossary] = await withCircle(database.db, ws.circleId, async (tx) => [
+      await tx.select().from(entryVariants).where(eq(entryVariants.entryId, id)),
+      await tx
+        .select({ keyword: entryGlossary.keyword })
+        .from(entryGlossary)
+        .where(eq(entryGlossary.entryId, id)),
+    ])
+    const r = row!
+    const snap: Record<string, unknown> = {
+      shortId: r.shortId,
+      title: r.title,
+      kind: r.kind,
+      sensitivity: r.sensitivity,
+      priority: r.priority,
+      disclosure: r.disclosure,
+      topics: r.topics,
+      realms: r.realms,
+      glossary: glossary.map((g) => g.keyword),
+      variants: variants.map((v) => ({ when: v.when, content: v.content })),
+      version: r.version,
+      deleted: r.deletedAt !== null,
+      validTo: r.validTo ? r.validTo.toISOString() : null,
+      circleId: r.circleId,
+      originScope: r.originScope,
+      clientId: r.clientId,
+      ownerAccountId: r.ownerAccountId,
+      subjectKind: r.subjectKind,
+      deletedAt: r.deletedAt ? r.deletedAt.toISOString() : null,
+      expiresAt: r.expiresAt ? r.expiresAt.toISOString() : null,
+    }
+    return JSON.parse(JSON.stringify({ ...snap, ...overrides })) as Record<string, unknown>
   }
-  async function insertEvent(memoryId: string, before: unknown, after: unknown) {
-    const [event] = await withSpace(database.db, ws.spaceId, (tx) =>
+
+  async function insertEvent(entryId: string, shortId: string, before: unknown, after: unknown) {
+    const [event] = await withCircle(database.db, ws.circleId, (tx) =>
       tx
-        .insert(memoryEvents)
+        .insert(entryEvents)
         .values({
-          spaceId: ws.spaceId,
-          memoryId,
+          circleId: ws.circleId,
+          entryId,
+          shortId,
           eventType: 'update',
           provenance: 'owner',
           before,
@@ -131,43 +158,39 @@ describe.skipIf(!testDatabaseUrl)('管理界面的历史、撤销删除与恢复
     return event!.id
   }
 
-  it('历史从早到晚列出新建、修改、移动，带操作者', async () => {
-    const m = await create(ws.cookie, { uri: 'user://notes/a', content: '第一版' })
-    await patch(ws.cookie, { uri: 'user://notes/a', content: '第二版' })
-    const moved = await app.request(
-      `${space()}/memories/move`,
-      jsonRequest('POST', { from: 'user://notes/a', to: 'user://notes/b' }, { cookie: ws.cookie }),
-    )
-    expect(moved.status).toBe(200)
-    const key = await ws.issueKey((await ws.createApp('agent')).id)
+  it('历史从近到远列出新建、修改，带操作者', async () => {
+    const m = await create(ws.cookie, { title: '笔记', content: '第一版' })
+    await patch(ws.cookie, { id: m.shortId, content: '第二版' })
+    const key = await ws.issueKey((await ws.createClient('agent')).id)
     const viaKey = await app.request(
-      '/v1/memories',
-      jsonRequest('PATCH', { uri: 'user://notes/b', content: '第三版' }, bearer(key)),
+      '/v1/entries',
+      jsonRequest('PATCH', { id: m.shortId, content: '第三版' }, bearer(key)),
     )
     expect(viaKey.status).toBe(200)
 
     const h = await history(ws.cookie, m.id)
-    expect(h.memory).toMatchObject({ id: m.id, uri: 'user://notes/b', version: 4, deletedAt: null })
-    expect(h.events.map((e) => e.type)).toEqual(['create', 'update', 'move', 'update'])
-    expect(h.events[0]!.before).toBeNull()
-    expect(h.events[0]!.after).toMatchObject({
-      uri: 'user://notes/a',
-      content: '第一版',
+    expect(h.entry).toMatchObject({ id: m.id, shortId: m.shortId, version: 3, deletedAt: null })
+    expect(h.events.map((e) => e.type)).toEqual(['update', 'update', 'create'])
+    const createdEvent = h.events[2]!
+    expect(createdEvent.before).toBeNull()
+    expect(createdEvent.after).toMatchObject({
+      shortId: m.shortId,
       version: 1,
     })
-    expect(h.events[2]!.after?.uri).toBe('user://notes/b')
-    expect(h.events[0]!.actor).toEqual({ accountName: 'alice', keyName: null, appName: null })
-    expect(h.events[3]!.actor).toEqual({ accountName: null, keyName: 'test', appName: 'agent' })
+    expect(createdEvent.after!.variants[0]!.content).toBe('第一版')
+    expect(createdEvent.actor).toEqual({ accountName: 'alice', keyName: null, clientName: null })
+    expect(h.events[0]!.actor).toEqual({ accountName: null, keyName: 'test', clientName: 'agent' })
   })
 
-  it('事件太多时历史保留最近的 500 个，按时间正序，并标出截断', async () => {
-    const m = await create(ws.cookie, { uri: 'user://notes/busy', content: '常改的' })
+  it('事件太多时历史保留最近的 500 个，按时间倒序，并标出截断', async () => {
+    const m = await create(ws.cookie, { title: 'busy', content: '常改的' })
     const snap = await snapshotOf(m.id)
-    await withSpace(database.db, ws.spaceId, (tx) =>
-      tx.insert(memoryEvents).values(
+    await withCircle(database.db, ws.circleId, (tx) =>
+      tx.insert(entryEvents).values(
         Array.from({ length: 505 }, () => ({
-          spaceId: ws.spaceId,
-          memoryId: m.id,
+          circleId: ws.circleId,
+          entryId: m.id,
+          shortId: m.shortId,
           eventType: 'update',
           provenance: 'owner' as const,
           before: snap,
@@ -178,503 +201,370 @@ describe.skipIf(!testDatabaseUrl)('管理界面的历史、撤销删除与恢复
     const h = await history(ws.cookie, m.id)
     expect(h.truncated).toBe(true)
     expect(h.events).toHaveLength(500)
-    // 最早的新建事件被截掉，留下的是最近的，从早到晚
+    // 最早的新建事件被截掉，留下的是最近的，从近到远
     expect(h.events.map((e) => e.type)).not.toContain('create')
     const ids = h.events.map((e) => e.id)
-    expect(ids).toEqual([...ids].sort((a, b) => a - b))
-    expect(
-      (
-        await history(
-          ws.cookie,
-          (await create(ws.cookie, { uri: 'user://notes/calm', content: '少改的' })).id,
-        )
-      ).truncated,
-    ).toBe(false)
+    expect(ids).toEqual([...ids].sort((a, b) => b - a))
+
+    const calm = await create(ws.cookie, { title: 'calm', content: '少改的' })
+    expect((await history(ws.cookie, calm.id)).truncated).toBe(false)
   })
 
-  it('别的成员看不到私人记忆的历史；secret 的历史只给 owner，快照里没有正文', async () => {
-    const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
-    const diary = await create(ws.cookie, { uri: 'user://home/diary', content: '私事' })
-    expect((await historyRes(editor.cookie, diary.id)).status).toBe(404)
-
+  it('secret 的历史只给 owner 看得到，快照里没有正文', async () => {
+    const editor = await addMember(database.db, ws.circleId, 'eve', 'editor')
     const wifi = await create(ws.cookie, {
-      uri: 'core://kb/wifi',
+      title: 'wifi',
       content: 'hunter2',
       sensitivity: 'secret',
     })
     const h = await history(ws.cookie, wifi.id)
-    expect(h.events.map((e) => e.after?.content)).toEqual([null])
+    expect(h.events.map((e) => e.after?.variants[0]?.content)).toEqual([null])
     expect((await historyRes(editor.cookie, wifi.id)).status).toBe(404)
-    // 现在是 secret 的记忆，editor 也恢复不了
-    const res = await restoreRes(editor.cookie, {
-      memoryId: wifi.id,
-      eventId: h.events[0]!.id,
-      expectedVersion: 1,
-    })
-    expect(res.status).toBe(404)
+    expect(
+      (
+        await restoreRes(editor.cookie, {
+          entryId: wifi.id,
+          eventId: h.events[0]!.id,
+          expectedVersion: 1,
+        })
+      ).status,
+    ).toBe(404)
   })
 
-  it('有一边快照看不到的事件整条不显示，也不能拿来恢复，活动里同样没有', async () => {
-    const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
-    const faq = await create(ws.cookie, { uri: 'core://kb/faq', content: '常见问题' })
-    // 还没有改层的接口，直接造一条「改前在主人私人层」的事件
-    const before = await snapshotOf(faq.id, {
-      layer: 'user',
-      ownerAccountId: ws.accountId,
-      content: '主人的私事',
+  it('历史中某版快照变为不可读时，editor 看到离开标记且 after 被隐藏', async () => {
+    const editor = await addMember(database.db, ws.circleId, 'eve', 'editor')
+    const faq = await create(ws.cookie, { title: 'faq', content: '常见问题' })
+    const secretAfter = await snapshotOf(faq.id, {
+      sensitivity: 'secret',
+      variants: [{ when: {}, content: null }],
     })
-    const hidden = await insertEvent(faq.id, before, await snapshotOf(faq.id))
+    const hiddenId = await insertEvent(faq.id, faq.shortId, await snapshotOf(faq.id), secretAfter)
 
-    expect((await history(editor.cookie, faq.id)).events.map((e) => e.id)).not.toContain(hidden)
-    expect((await history(ws.cookie, faq.id)).events.map((e) => e.id)).toContain(hidden)
-    const res = await restoreRes(editor.cookie, {
-      memoryId: faq.id,
-      eventId: hidden,
-      expectedVersion: 1,
+    const editorEvent = (await history(editor.cookie, faq.id)).events.find(
+      (e) => e.id === hiddenId,
+    )!
+    expect(editorEvent.left).toBe(true)
+    expect(editorEvent.after).toBeNull()
+    const ownerEvent = (await history(ws.cookie, faq.id)).events.find((e) => e.id === hiddenId)!
+    expect(ownerEvent.left).toBe(false)
+    expect(ownerEvent.after).not.toBeNull()
+
+    // 改前不可读、改后可读的事件对 editor 整条不可见，也不能恢复；只有接入实例主人或 owner 看得见 keyName
+    const secretBefore = await snapshotOf(faq.id, {
+      sensitivity: 'secret',
+      variants: [{ when: {}, content: null }],
     })
-    expect(res.status).toBe(404)
-    expect((await activity(editor.cookie)).items.map((i) => i.id)).not.toContain(hidden)
-    expect((await activity(ws.cookie)).items.map((i) => i.id)).toContain(hidden)
-  })
-
-  it('过期的记忆照样能看历史和恢复；人格删掉之后，它的旧快照照样看得到', async () => {
-    const m = await create(ws.cookie, { uri: 'user://notes/old', content: '第一版' })
-    const edited = await patch(ws.cookie, { uri: 'user://notes/old', content: '第二版' })
-    await withSpace(database.db, ws.spaceId, (tx) =>
-      tx
-        .update(memories)
-        .set({ validTo: new Date(Date.now() - 60_000) })
-        .where(eq(memories.id, m.id)),
+    const unreadableBeforeId = await insertEvent(
+      faq.id,
+      faq.shortId,
+      secretBefore,
+      await snapshotOf(faq.id),
     )
-    const normal = await app.request(`${space()}/memories?uri=${encodeURIComponent(m.uri)}`, {
-      headers: { cookie: ws.cookie },
+    expect((await history(editor.cookie, faq.id)).events.map((e) => e.id)).not.toContain(
+      unreadableBeforeId,
+    )
+    expect((await activity(editor.cookie)).items.map((i) => i.id)).not.toContain(unreadableBeforeId)
+    expect(
+      (
+        await restoreRes(editor.cookie, {
+          entryId: faq.id,
+          eventId: unreadableBeforeId,
+          expectedVersion: faq.version,
+        })
+      ).status,
+    ).toBe(404)
+
+    const ownerKey = await ws.issueKey((await ws.createClient('owner-bot')).id)
+    const viaKey = await ok<ConsoleEntryView>(
+      await app.request(
+        '/v1/entries',
+        jsonRequest('POST', { title: 'by-key', content: 'x' }, bearer(ownerKey)),
+      ),
+      201,
+    )
+    expect((await history(ws.cookie, viaKey.id)).events[0]!.actor).toEqual({
+      accountName: null,
+      keyName: 'test',
+      clientName: 'owner-bot',
     })
-    expect(normal.status).toBe(404)
+    expect((await history(editor.cookie, viaKey.id)).events[0]!.actor).toEqual({
+      accountName: null,
+      keyName: null,
+      clientName: 'owner-bot',
+    })
+  })
+
+  it('过期的词条照样能看历史和恢复', async () => {
+    const m = await create(ws.cookie, { title: 'old', content: '第一版' })
+    const edited = await patch(ws.cookie, { id: m.shortId, content: '第二版' })
+    await withCircle(database.db, ws.circleId, (tx) =>
+      tx
+        .update(entries)
+        .set({ validTo: new Date(Date.now() - 60_000) })
+        .where(eq(entries.id, m.id)),
+    )
+    expect(
+      (await app.request(`${circle()}/entries?id=${m.shortId}`, { headers: { cookie: ws.cookie } }))
+        .status,
+    ).toBe(404)
     const h = await history(ws.cookie, m.id)
-    expect(h.events.map((e) => e.type)).toEqual(['create', 'update'])
-    const restored = await ok<MemoryView>(
+    expect(h.events.map((e) => e.type)).toEqual(['update', 'create'])
+    const firstCreate = h.events.find((e) => e.type === 'create')!
+    const restored = await ok<ConsoleEntryView>(
       await restoreRes(ws.cookie, {
-        memoryId: m.id,
-        eventId: h.events[0]!.id,
+        entryId: m.id,
+        eventId: firstCreate.id,
         expectedVersion: edited.version,
       }),
     )
-    expect(restored.content).toBe('第一版')
-
-    const gone = '00000000-0000-4000-8000-000000000000'
-    const persona = await snapshotOf(m.id, {
-      layer: 'persona',
-      ownerAccountId: null,
-      personaId: gone,
-    })
-    const id = await insertEvent(m.id, persona, persona)
-    expect((await history(ws.cookie, m.id)).events.map((e) => e.id)).toContain(id)
+    expect(restored.variants[0]!.content).toBe('第一版')
   })
 
-  it('恢复到某一版：只改正文、disclosure、priority 与关键词，版本对不上返回 409', async () => {
+  it('恢复到某一版：还原变体正文、disclosure、priority 与关键词；版本对不上返回 409', async () => {
     const m = await create(ws.cookie, {
-      uri: 'user://notes/r',
+      title: '恢复验证',
       content: '第一版',
       disclosure: '最初',
       priority: 3,
       glossary: ['甲乙'],
     })
     const edited = await patch(ws.cookie, {
-      uri: 'user://notes/r',
+      id: m.shortId,
       content: '第二版',
       disclosure: '后来',
       priority: 1,
       glossaryAdd: ['丙丁'],
       glossaryRemove: ['甲乙'],
     })
-    const first = (await history(ws.cookie, m.id)).events[0]!
-    const restored = await ok<MemoryView>(
+    const first = (await history(ws.cookie, m.id)).events.find((e) => e.type === 'create')!
+    const restored = await ok<ConsoleEntryView>(
       await restoreRes(ws.cookie, {
-        memoryId: m.id,
+        entryId: m.id,
         eventId: first.id,
         expectedVersion: edited.version,
       }),
     )
     expect(restored).toMatchObject({
-      content: '第一版',
       disclosure: '最初',
       priority: 3,
       glossary: ['甲乙'],
       version: edited.version + 1,
     })
-    const stale = await restoreRes(ws.cookie, {
-      memoryId: m.id,
-      eventId: first.id,
-      expectedVersion: edited.version,
-    })
-    expect(stale.status).toBe(409)
+    expect(restored.variants[0]!.content).toBe('第一版')
+
+    expect(
+      (
+        await restoreRes(ws.cookie, {
+          entryId: m.id,
+          eventId: first.id,
+          expectedVersion: edited.version,
+        })
+      ).status,
+    ).toBe(409)
     expect((await history(ws.cookie, m.id)).events.map((e) => e.type)).toEqual([
-      'create',
-      'update',
       'restore',
+      'update',
+      'create',
     ])
-    // 别的记忆的事件不能拿来恢复这一条
-    const other = await create(ws.cookie, { uri: 'user://notes/other', content: '别的' })
+
+    // 别的词条的事件不能拿来恢复这一条
+    const other = await create(ws.cookie, { title: 'other', content: '别的' })
     const otherEvent = (await history(ws.cookie, other.id)).events[0]!
-    const mismatch = await restoreRes(ws.cookie, {
-      memoryId: m.id,
-      eventId: otherEvent.id,
-      expectedVersion: restored.version,
-    })
-    expect(mismatch.status).toBe(404)
+    expect(
+      (
+        await restoreRes(ws.cookie, {
+          entryId: m.id,
+          eventId: otherEvent.id,
+          expectedVersion: restored.version,
+        })
+      ).status,
+    ).toBe(404)
   })
 
-  it('从没有正文的快照恢复时正文不变；不能恢复到删除之后的那一版', async () => {
-    const m = await create(ws.cookie, { uri: 'user://notes/s', content: '明文', disclosure: '一' })
-    // 改成 secret 时，之前所有快照里的正文都被抹掉
-    const edited = await patch(ws.cookie, {
-      uri: 'user://notes/s',
+  it('机密词条或缺少明文正文的快照不支持回滚恢复，返回 400', async () => {
+    const m = await create(ws.cookie, { title: 's', content: '明文', disclosure: '一' })
+    const secret = await patch(ws.cookie, {
+      id: m.shortId,
       disclosure: '二',
       sensitivity: 'secret',
     })
     const h = await history(ws.cookie, m.id)
-    expect(h.events[0]!.after?.content).toBeNull()
-    const restored = await ok<MemoryView>(
-      await restoreRes(ws.cookie, {
-        memoryId: m.id,
-        eventId: h.events[0]!.id,
-        expectedVersion: edited.version,
-      }),
-    )
-    expect(restored).toMatchObject({ content: null, disclosure: '一', sensitivity: 'secret' })
-    expect((await reveal(ws.cookie, m.id)).content).toBe('明文')
-
-    await remove(ws.cookie, restored)
-    await ok<MemoryView>(await undeleteRes(ws.cookie, m.id))
-    const h2 = await history(ws.cookie, m.id)
-    const deleteEvent = h2.events.find((e) => e.type === 'delete')!
-    const res = await restoreRes(ws.cookie, {
-      memoryId: m.id,
-      eventId: deleteEvent.id,
-      expectedVersion: h2.memory.version,
-    })
-    expect(res.status).toBe(400)
-  })
-
-  // 这条记忆的标题、全文检索与全部事件快照里的标题
-  async function titlesOf(id: string) {
-    const [row] = await withSpace(database.db, ws.spaceId, (tx) =>
-      tx
-        .select({ title: memories.title, fts: sql<string>`${memories.fts}::text` })
-        .from(memories)
-        .where(eq(memories.id, id)),
-    )
-    const events = await withSpace(database.db, ws.spaceId, (tx) =>
-      tx.select().from(memoryEvents).where(eq(memoryEvents.memoryId, id)),
-    )
-    const snapshots = events.flatMap((e) => [e.before, e.after]).filter(Boolean)
-    return {
-      title: row!.title,
-      fts: row!.fts,
-      snapshots: snapshots.map((s) => (s as { title: unknown }).title),
-      events: JSON.stringify(events),
-    }
-  }
-
-  it('改成机密：从正文 # 标题取的标题换成标识，列、全文检索与历史快照里都不留，恢复此版本也带不回来', async () => {
-    const m = await create(ws.cookie, {
-      uri: 'user://notes/router',
-      content: '# 家里的路由器\n管理地址贴在背面',
-    })
-    expect(m.title).toBe('家里的路由器')
-    await patch(ws.cookie, { uri: m.uri, priority: 3 })
-    const secret = await patch(ws.cookie, { uri: m.uri, sensitivity: 'secret' })
-    expect(secret.title).toBe('router')
-    const after = await titlesOf(m.id)
-    expect(after.title).toBe('router')
-    expect(after.fts).not.toContain('路由器')
-    expect(after.snapshots).toEqual(Array(after.snapshots.length).fill('router'))
-    expect(after.events).not.toContain('家里的路由器')
-
-    // 恢复到改成机密之前的一版：快照里的标题已经换掉了，正文也没有
-    const h = await history(ws.cookie, m.id)
-    expect(h.events.map((e) => e.after?.title)).toEqual(['router', 'router', 'router'])
-    const restored = await ok<MemoryView>(
-      await restoreRes(ws.cookie, {
-        memoryId: m.id,
-        eventId: h.events[0]!.id,
-        expectedVersion: secret.version,
-      }),
-    )
-    expect(restored).toMatchObject({ title: 'router', priority: 2, content: null })
-    expect((await titlesOf(m.id)).events).not.toContain('家里的路由器')
-  })
-
-  it('改成机密：正文改过、标题还是之前那版正文的 # 标题的也换掉；明确给的别的标题照旧，等于正文 # 标题的照样换', async () => {
-    const vpn = await create(ws.cookie, { uri: 'user://notes/vpn', content: '# 旧的 VPN\n地址' })
-    await patch(ws.cookie, { uri: vpn.uri, content: '# 新的 VPN\n新地址' })
-    expect((await titlesOf(vpn.id)).title).toBe('旧的 VPN')
-    // 正文与敏感级一起改：标题是改之前那版正文的 # 标题
-    const both = await create(ws.cookie, { uri: 'user://notes/both', content: '# 甲\n一' })
     expect(
-      (await patch(ws.cookie, { uri: both.uri, content: '# 乙\n二', sensitivity: 'secret' })).title,
-    ).toBe('both')
-    expect((await patch(ws.cookie, { uri: vpn.uri, sensitivity: 'secret' })).title).toBe('vpn')
-    for (const id of [vpn.id, both.id]) {
-      const titles = await titlesOf(id)
-      for (const leaked of ['VPN', '甲', '乙']) expect(titles.events).not.toContain(leaked)
-    }
-
-    // 明确给的标题和正文的 # 标题不同：照旧，和触发场景、关键词一样是明文
-    const nas = await create(ws.cookie, {
-      uri: 'user://notes/nas',
-      title: '书房的存储',
-      content: '# NAS\n在书房',
-    })
-    const kept = await patch(ws.cookie, { uri: nas.uri, sensitivity: 'secret' })
-    expect(kept.title).toBe('书房的存储')
-    expect((await titlesOf(nas.id)).snapshots).toEqual(['书房的存储', '书房的存储', '书房的存储'])
-    // 机密记忆的标题写成正文的 # 标题：分不清是不是照抄正文，一样换成标识
-    expect((await patch(ws.cookie, { uri: nas.uri, title: 'NAS' })).title).toBe('nas')
-    const wifi = await create(ws.cookie, {
-      uri: 'user://notes/wifi',
-      title: '无线网络',
-      content: '# 无线网络\n密码在柜子里',
-      sensitivity: 'secret',
-    })
-    expect(wifi.title).toBe('wifi')
-    expect((await titlesOf(wifi.id)).events).not.toContain('无线网络')
+      (
+        await restoreRes(ws.cookie, {
+          entryId: m.id,
+          eventId: h.events.find((e) => e.type === 'create')!.id,
+          expectedVersion: secret.version,
+        })
+      ).status,
+    ).toBe(400)
   })
 
-  it('撤销删除：原样恢复（secret 的正文也在），版本加一，重新生成向量；URI 被占用时 409', async () => {
+  it('撤销删除：原样恢复（secret 的正文也在），版本加一，重新生成向量', async () => {
     const m = await create(ws.cookie, {
-      uri: 'core://kb/wifi',
+      title: 'wifi',
       content: 'hunter2',
       sensitivity: 'secret',
     })
     await remove(ws.cookie, m)
-    expect((await deleted(ws.cookie)).items.map((i) => i.uri)).toEqual(['core://kb/wifi'])
+    expect((await deleted(ws.cookie)).items.map((i) => i.shortId)).toEqual([m.shortId])
     queued.length = 0
 
-    const back = await ok<MemoryView>(await undeleteRes(ws.cookie, m.id))
-    expect(back).toMatchObject({ id: m.id, content: null, version: 2 })
-    expect((await reveal(ws.cookie, m.id)).content).toBe('hunter2')
+    const back = await ok<ConsoleEntryView>(await undeleteRes(ws.cookie, m.id))
+    expect(back).toMatchObject({ id: m.id, contentHidden: true, version: 3 })
+    expect(back.variants[0]!.content).toBeNull()
+    expect((await reveal(ws.cookie, m.id)).variants[0]!.content).toBe('hunter2')
     expect(queued).toContain(m.id)
     expect((await deleted(ws.cookie)).items).toEqual([])
     expect((await history(ws.cookie, m.id)).events.map((e) => e.type)).toEqual([
-      'create',
-      'delete',
-      'undelete',
       'access',
+      'undelete',
+      'delete',
+      'create',
     ])
-    expect((await undeleteRes(ws.cookie, m.id)).status).toBe(409)
-
-    // 删掉之后在同一个 URI 新建了一条，再撤销删除就撞上
-    await remove(ws.cookie, back)
-    await create(ws.cookie, { uri: 'core://kb/wifi', content: '新的' })
     expect((await undeleteRes(ws.cookie, m.id)).status).toBe(409)
   })
 
   it('已删除的列表只列成员读得到的，最近删除的在前，能翻页', async () => {
-    const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
+    const editor = await addMember(database.db, ws.circleId, 'eve', 'editor')
+    const created: ConsoleEntryView[] = []
     for (const name of ['one', 'two', 'three']) {
-      await remove(ws.cookie, await create(ws.cookie, { uri: `core://kb/${name}`, content: name }))
+      const e = await create(ws.cookie, { title: name, content: name })
+      await remove(ws.cookie, e)
+      created.push(e)
     }
-    await remove(
-      editor.cookie,
-      await create(editor.cookie, { uri: 'user://home/e', content: 'E 的' }),
-    )
-    await remove(
-      ws.cookie,
-      await create(ws.cookie, {
-        uri: 'core://kb/s',
-        content: 's',
-        sensitivity: 'secret',
-      }),
-    )
+    const sec = await create(ws.cookie, { title: 's', content: 's', sensitivity: 'secret' })
+    await remove(ws.cookie, sec)
 
-    const all = (await deleted(ws.cookie, 'limit=200')).items.map((i) => i.uri)
-    expect(all).toEqual(['core://kb/s', 'core://kb/three', 'core://kb/two', 'core://kb/one'])
+    const all = (await deleted(ws.cookie, 'limit=200')).items.map((i) => i.shortId)
+    expect(all).toEqual([
+      sec.shortId,
+      created[2]!.shortId,
+      created[1]!.shortId,
+      created[0]!.shortId,
+    ])
     const first = await deleted(ws.cookie, 'limit=3')
     const second = await deleted(ws.cookie, `limit=3&cursor=${first.nextCursor}`)
-    expect([...first.items, ...second.items].map((i) => i.uri)).toEqual(all)
+    expect([...first.items, ...second.items].map((i) => i.shortId)).toEqual(all)
     expect(second.nextCursor).toBeNull()
-    expect((await deleted(editor.cookie)).items.map((i) => i.uri)).toEqual([
-      'user://home/e',
-      'core://kb/three',
-      'core://kb/two',
-      'core://kb/one',
+    expect((await deleted(editor.cookie)).items.map((i) => i.shortId)).toEqual([
+      created[2]!.shortId,
+      created[1]!.shortId,
+      created[0]!.shortId,
     ])
-    // editor 撤销不了自己看不到的
-    const secretId = (await deleted(ws.cookie, 'limit=1')).items[0]!.id
-    expect((await undeleteRes(editor.cookie, secretId)).status).toBe(404)
-  })
-
-  it('恢复不把内容带到更宽的可见范围：敏感级比现在高、或归属不同的版本都被拒', async () => {
-    const m = await create(ws.cookie, {
-      uri: 'core://kb/notes',
-      content: '内部细节',
-      sensitivity: 'private',
-    })
-    const edited = await patch(ws.cookie, {
-      uri: 'core://kb/notes',
-      content: '可以公开的版本',
-      sensitivity: 'public',
-    })
-    const first = (await history(ws.cookie, m.id)).events[0]!
-    const res = await restoreRes(ws.cookie, {
-      memoryId: m.id,
-      eventId: first.id,
-      expectedVersion: edited.version,
-    })
-    expect(res.status).toBe(400)
-
-    // 归属不同（这一版在主人的私人层）：即使主人自己看得到，也不能恢复进共享层
-    const before = await snapshotOf(m.id, { layer: 'user', ownerAccountId: ws.accountId })
-    const event = await insertEvent(m.id, before, before)
-    const crossed = await restoreRes(ws.cookie, {
-      memoryId: m.id,
-      eventId: event,
-      expectedVersion: edited.version,
-    })
-    expect(crossed.status).toBe(400)
-  })
-
-  it('Key 的名字只给应用主人与空间 owner 看，别人只看到应用名', async () => {
-    const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
-    const key = await ws.issueKey((await ws.createApp('agent')).id)
-    const created = await app.request(
-      '/v1/memories',
-      jsonRequest('POST', { uri: 'core://kb/shared', content: '共享' }, bearer(key)),
-    )
-    const m = (await created.json()) as MemoryView
-    const actor = async (cookie: string) => (await history(cookie, m.id)).events[0]!.actor
-    expect(await actor(ws.cookie)).toEqual({ accountName: null, keyName: 'test', appName: 'agent' })
-    expect(await actor(editor.cookie)).toEqual({
-      accountName: null,
-      keyName: null,
-      appName: 'agent',
-    })
-    expect((await activity(editor.cookie)).items[0]!.actor.keyName).toBeNull()
-  })
-
-  it('过期之后被让出 URI 的不列在已删除里，也不能撤销删除', async () => {
-    const m = await create(ws.cookie, { uri: 'core://kb/stale', content: '旧的' })
-    await remove(ws.cookie, m)
-    // 有效到早于删除时间：删除时已经过期，和让出 URI 的记录一样（删掉之后才到期的见 validity.int.test.ts）
-    await withSpace(database.db, ws.spaceId, (tx) =>
-      tx
-        .update(memories)
-        .set({ validTo: new Date(Date.now() - 60_000) })
-        .where(eq(memories.id, m.id)),
-    )
-    expect((await deleted(ws.cookie)).items).toEqual([])
-    expect((await undeleteRes(ws.cookie, m.id)).status).toBe(409)
+    expect((await undeleteRes(editor.cookie, sec.id)).status).toBe(404)
   })
 
   it('viewer 看得到历史，但不能撤销删除，也不能恢复', async () => {
-    const viewer = await addMember(database.db, ws.spaceId, 'vic', 'viewer')
-    const m = await create(ws.cookie, { uri: 'core://kb/faq', content: '第一版' })
-    const edited = await patch(ws.cookie, { uri: 'core://kb/faq', content: '第二版' })
-    const first = (await history(viewer.cookie, m.id)).events[0]!
-    const res = await restoreRes(viewer.cookie, {
-      memoryId: m.id,
-      eventId: first.id,
-      expectedVersion: edited.version,
-    })
-    expect(res.status).toBe(403)
+    const viewer = await addMember(database.db, ws.circleId, 'vic', 'viewer')
+    const m = await create(ws.cookie, { title: 'faq', content: '第一版' })
+    const edited = await patch(ws.cookie, { id: m.shortId, content: '第二版' })
+    const first = (await history(viewer.cookie, m.id)).events.find((e) => e.type === 'create')!
+    expect(
+      (
+        await restoreRes(viewer.cookie, {
+          entryId: m.id,
+          eventId: first.id,
+          expectedVersion: edited.version,
+        })
+      ).status,
+    ).toBe(403)
     await remove(ws.cookie, edited)
     expect((await undeleteRes(viewer.cookie, m.id)).status).toBe(403)
   })
 
-  it('活动条目标出记忆现在是否已删除，撤销删除之后恢复', async () => {
-    const m = await create(ws.cookie, { uri: 'core://kb/gone', content: '一' })
-    const edited = await patch(ws.cookie, { uri: 'core://kb/gone', content: '二' })
+  it('活动条目标出词条现在是否已删除，撤销删除之后恢复', async () => {
+    const m = await create(ws.cookie, { title: 'gone', content: '一' })
+    const edited = await patch(ws.cookie, { id: m.shortId, content: '二' })
     await remove(ws.cookie, edited)
     const flags = async () =>
-      (await activity(ws.cookie)).items.filter((i) => i.memoryId === m.id).map((i) => i.deleted)
+      (await activity(ws.cookie)).items.filter((i) => i.entryId === m.id).map((i) => i.deleted)
     expect(await flags()).toEqual([true, true, true])
-    await ok<MemoryView>(await undeleteRes(ws.cookie, m.id))
+    await ok<ConsoleEntryView>(await undeleteRes(ws.cookie, m.id))
     expect(await flags()).toEqual([false, false, false, false])
   })
 
-  it('活动流：最新的在前，带 URI 与改了哪些字段，能翻页；概览里有最近的改动', async () => {
-    const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
-    await create(ws.cookie, { uri: 'core://kb/x', content: '一' })
-    await patch(ws.cookie, { uri: 'core://kb/x', content: '二', priority: 1 })
-    await create(editor.cookie, { uri: 'user://home/e', content: 'E 的' })
+  it('活动流：最新的在前，带短 ID 与改了哪些字段，能翻页', async () => {
+    const editor = await addMember(database.db, ws.circleId, 'eve', 'editor')
+    const x = await create(ws.cookie, { title: 'x', content: '一' })
+    await patch(ws.cookie, { id: x.shortId, content: '二', priority: 1 })
+    const y = await create(editor.cookie, { title: 'y', content: 'E 的' })
 
     const page = await activity(ws.cookie, 'limit=1')
-    expect(page.items[0]).toMatchObject({
+    expect(page.items[0]).toMatchObject({ type: 'create', shortId: y.shortId, changes: [] })
+    const page2 = await activity(ws.cookie, `limit=1&cursor=${page.nextCursor}`)
+    expect(page2.items[0]).toMatchObject({
       type: 'update',
-      uri: 'core://kb/x',
+      shortId: x.shortId,
       changes: ['priority', 'content'],
     })
-    const next = await activity(ws.cookie, `limit=1&cursor=${page.nextCursor}`)
-    expect(next.items[0]).toMatchObject({ type: 'create', uri: 'core://kb/x', changes: [] })
-    expect(next.nextCursor).toBeNull()
-    expect((await activity(editor.cookie)).items.map((i) => [i.type, i.uri])).toEqual([
-      ['create', 'user://home/e'],
-      ['update', 'core://kb/x'],
-      ['create', 'core://kb/x'],
-    ])
-    const bad = await app.request(`${space()}/activity?cursor=abc`, {
-      headers: { cookie: ws.cookie },
-    })
-    expect(bad.status).toBe(400)
+    const page3 = await activity(ws.cookie, `limit=1&cursor=${page2.nextCursor}`)
+    expect(page3.items[0]).toMatchObject({ type: 'create', shortId: x.shortId, changes: [] })
+    expect(page3.nextCursor).toBeNull()
 
-    const overview = await ok<SpaceOverview>(
-      await app.request(`${space()}/overview`, { headers: { cookie: ws.cookie } }),
-    )
-    expect(overview.recent.map((i) => i.type)).toEqual(['update', 'create'])
+    expect(
+      (await app.request(`${circle()}/activity?cursor=abc`, { headers: { cookie: ws.cookie } }))
+        .status,
+    ).toBe(400)
   })
 
-  it('活动与历史里每个事件看不看得到、是不是离开，和按 canRead 逐条算出来的一致', async () => {
-    const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
-    // 记忆现在的样子：共享的、共享的 secret、alice 的私人记忆、eve 的私人记忆
-    const memoriesNow = [
-      await create(ws.cookie, { uri: 'core://kb/shared', content: '共享' }),
-      await create(ws.cookie, {
-        uri: 'core://kb/secret',
-        content: '机密',
-        sensitivity: 'secret',
-      }),
-      await create(ws.cookie, { uri: 'user://notes/alice', content: 'alice 的' }),
-      await create(editor.cookie, { uri: 'user://notes/eve', content: 'eve 的' }),
-    ]
-    // 前后快照的几种样子，两两组合（两边都为空的除外），每条记忆各记一个事件
+  it('活动里每个事件看不看得到、是不是离开，和按 canRead 逐条算出来的一致', async () => {
+    const editor = await addMember(database.db, ws.circleId, 'eve', 'editor')
+    const shared = await create(ws.cookie, { title: 'shared', content: '共享' })
+    const secret = await create(ws.cookie, {
+      title: 'secret',
+      content: '机密',
+      sensitivity: 'secret',
+    })
+
     const variants: (Record<string, unknown> | null)[] = [
       null,
-      { layer: 'core', sensitivity: 'internal', ownerAccountId: null },
-      { layer: 'core', sensitivity: 'secret', ownerAccountId: null, content: null },
-      { layer: 'user', sensitivity: 'private', ownerAccountId: ws.accountId },
-      { layer: 'user', sensitivity: 'private', ownerAccountId: editor.accountId },
+      { sensitivity: 'internal' },
+      { sensitivity: 'secret', variants: [{ when: {}, content: null }] },
     ]
-    for (const m of memoriesNow) {
+    for (const m of [shared, secret]) {
       for (const before of variants) {
         for (const after of variants) {
           if (!before && !after) continue
           await insertEvent(
             m.id,
+            m.shortId,
             before && (await snapshotOf(m.id, before)),
             after && (await snapshotOf(m.id, after)),
           )
         }
       }
     }
-    const { rows, events } = await withSpace(database.db, ws.spaceId, async (tx) => ({
-      rows: await tx.select().from(memories),
-      events: await tx.select().from(memoryEvents),
+    const { rows, events } = await withCircle(database.db, ws.circleId, async (tx) => ({
+      rows: await tx.select().from(entries),
+      events: await tx.select().from(entryEvents),
     }))
     const rowById = new Map(rows.map((r) => [r.id, r]))
-    const management = { personaIds: [], management: true } as const
-    // 规则照设计逐条算：两边快照都看得到（为空的一边不参与），活动里还要记忆现在读得到；
-    // 离开是改前看得到、改后看不到，不看记忆现在的状态
-    const expected = (access: Access, list: typeof events, checkMemory: boolean) =>
-      list
+    const management = { management: true } as const
+    const expected = (access: Access) =>
+      events
         .flatMap((e) => {
           const shown = (snapshot: unknown) => {
             const facts = snapshot ? snapshotFacts(snapshot as Record<string, unknown>) : null
             return facts !== null && canRead(access, facts, management)
           }
           const left = shown(e.before) && e.after !== null && !shown(e.after)
+          const row = rowById.get(e.entryId!)!
+          const curFacts = {
+            circleId: row.circleId,
+            kind: row.kind,
+            sensitivity: row.sensitivity,
+            originScope: row.originScope,
+            clientId: row.clientId,
+            ownerAccountId: row.ownerAccountId,
+            subjectKind: row.subjectKind,
+            realms: row.realms,
+            validTo: row.validTo,
+            expiresAt: row.expiresAt,
+            deletedAt: row.deletedAt,
+          }
           const visible =
-            ((!checkMemory || canRead(access, rowById.get(e.memoryId!)!, management)) &&
+            (canRead(access, curFacts, management) &&
               (e.before === null || shown(e.before)) &&
               (e.after === null || shown(e.after))) ||
             left
@@ -685,24 +575,15 @@ describe.skipIf(!testDatabaseUrl)('管理界面的历史、撤销删除与恢复
       list.map((i) => [i.id, i.left] as const).sort((a, b) => a[0] - b[0])
 
     for (const [cookie, access] of [
-      [ws.cookie, consoleAccess('owner', ws.accountId)],
-      [editor.cookie, consoleAccess('editor', editor.accountId)],
+      [ws.cookie, consoleAccess(ws.circleId, 'shared', 'owner', ws.accountId)],
+      [editor.cookie, consoleAccess(ws.circleId, 'shared', 'editor', editor.accountId)],
     ] as const) {
-      const want = expected(access, events, true)
-      // 三种都有：看得到的、离开的、看不到的
-      expect(want.some(([, left]) => left)).toBe(true)
-      expect(want.some(([, left]) => !left)).toBe(true)
-      expect(want.length).toBeLessThan(events.length)
-      expect(byId((await activity(cookie, 'limit=200')).items)).toEqual(want)
-
-      for (const m of memoriesNow) {
-        if (!canRead(access, rowById.get(m.id)!, management)) {
-          expect((await historyRes(cookie, m.id)).status).toBe(404)
-          continue
-        }
-        const own = events.filter((e) => e.memoryId === m.id)
-        expect(byId((await history(cookie, m.id)).events)).toEqual(expected(access, own, false))
+      const want = expected(access)
+      if (cookie === editor.cookie) {
+        expect(want.some(([, left]) => left)).toBe(true)
+        expect(want.length).toBeLessThan(events.length)
       }
+      expect(byId((await activity(cookie, 'limit=200')).items)).toEqual(want)
     }
   })
 })

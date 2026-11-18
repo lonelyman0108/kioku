@@ -69,7 +69,7 @@ export interface StatusReport {
     problems: string[]
     pendingMigrations: number | null
     accounts: number | null
-    spaces: number | null
+    circles: number | null
     unrelatedTables: number
   } | null
   masterKey: {
@@ -126,7 +126,7 @@ export async function collectStatus(): Promise<StatusReport> {
         problems: [],
         pendingMigrations: null,
         accounts: null,
-        spaces: null,
+        circles: null,
         unrelatedTables: 0,
       },
       masterKey: {
@@ -197,7 +197,7 @@ export async function collectStatus(): Promise<StatusReport> {
       problems,
       pendingMigrations: pending,
       accounts: probe.accounts,
-      spaces: probe.spaces,
+      circles: probe.circles,
       unrelatedTables: probe.unrelatedTables,
     },
     masterKey: {
@@ -297,9 +297,9 @@ function renderStatusBox(report: StatusReport): string {
         }
       }
 
-      if (db.accounts !== null && db.spaces !== null) {
+      if (db.accounts !== null && db.circles !== null) {
         const extra = db.unrelatedTables > 0 ? `（另有 ${db.unrelatedTables} 张非 Kioku 表）` : ''
-        rows.push(['数据', `${db.accounts} 个账号 · ${db.spaces} 个空间${extra}`])
+        rows.push(['数据', `${db.accounts} 个账号 · ${db.circles} 个记忆圈${extra}`])
       }
     }
   }

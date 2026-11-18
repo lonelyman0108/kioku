@@ -3,15 +3,21 @@ import type { z } from 'zod'
 import { createHash, randomUUID } from 'node:crypto'
 
 import {
+  ActivityFieldFilter,
+  ActivityType,
   addedSensitiveContent,
   CONVERT_SCOPE_TEXT,
   DEFAULT_SENSITIVITY,
   deriveEntryTitle,
+  ENTRY_CONTENT_MAX,
+  EntryKind,
   hasHomogeneousRealms,
   isProtectedPersonalEntry,
+  markdownHeadingsOf,
   maskSensitiveContent,
   needsSensitiveInboxAlert,
   normalizeWhen,
+  PLAINTEXT_KIND_NAMES,
   PLAINTEXT_MASK,
   sensitivityAllowed,
   VARIANTS_MAX,
@@ -22,7 +28,6 @@ import type {
   ActivityDaysQuery,
   ActivityEvent,
   ActivityFacets,
-  ActivityField,
   ActivityFilter,
   ActivityItem,
   ActivityList,
@@ -36,12 +41,12 @@ import type {
   ConsoleUpdateEntryRequest,
   ConvertToCredentialRequest,
   CreateEntryRequest,
+  CredentialStoredIn,
   DeletedEntryList,
   EntryBrowseGroup,
   EntryBrowseItem,
   EntryBrowseResponse,
   EntryHistory,
-  EntryKind,
   EntryList,
   EntryListQuery,
   EntryMatch,
@@ -51,6 +56,7 @@ import type {
   ExpiredEntryList,
   GlossaryIndex,
   KindCount,
+  OtherVariantHint,
   PlaintextFinding,
   PlaintextIgnoreRequest,
   PlaintextKind,
@@ -84,8 +90,9 @@ import {
   inArray,
   isNotNull,
   isNull,
-  lt,
+  lte,
   ne,
+  notInArray,
   or,
   sql,
   type SQL,
@@ -95,6 +102,7 @@ import {
 import {
   canModify,
   canRead,
+  canUseCredential,
   canWrite,
   lapsed,
   type Access,
@@ -102,12 +110,11 @@ import {
 } from '../access/access'
 import { checkStaticRealmLock, normalizeRealms } from '../access/realms'
 import {
-  looksLikePlaintextCredential,
-  mentionsPlaceholder,
   placeholderAllowed,
   placeholderIdentifiers,
   replaceOutsidePlaceholders,
   scanPlaceholders,
+  type PlaceholderRef,
 } from '../credential/placeholders'
 import {
   detectWithPrivacyModel,
@@ -118,7 +125,7 @@ import {
 } from '../credential/privacy'
 import { decryptSecret, encryptSecret } from '../crypto/envelope'
 import { decryptionKey, encryptionKey, type MasterKey } from '../crypto/keyring'
-import { withCircle, withCircles, type Tx } from '../db/client'
+import { isUniqueViolation, withCircle, withCircles, type Tx } from '../db/client'
 import {
   decodeTimeCursor,
   encodeTimeCursor,
@@ -132,8 +139,11 @@ import {
 import {
   accounts,
   apiKeys,
+  circleMembers,
   circles,
   clients,
+  credentials,
+  dreamSuggestions,
   entries,
   entryCredentialRefs,
   entryEmbeddings,
@@ -147,6 +157,7 @@ import {
 } from '../db/schema'
 import { countEmbeddable } from '../embedding/coverage'
 import { loadEmbeddingModels } from '../embedding/settings'
+import { loadRecallWindow } from '../recall/retention'
 import {
   ACTOR_KEY,
   changedFields,
@@ -158,12 +169,15 @@ import {
 import type { EntryContext } from './entryContext'
 import { MemoryError, UnknownTimeZoneError, versionConflict } from './errors'
 import {
+  BOOT_CANDIDATE,
+  momentSql,
   pendingReview,
   readableConditions,
   snapshotColumns,
   snapshotFacts,
   stillValid,
 } from './filter'
+import { evaluateVariantFocus, loadCircleVocabularies } from './facets'
 import { resolveEntryNeighbors, syncEntryLinks, visibleCircleSlug } from './links'
 import { hasMaskedText } from './masked'
 import { kindWithValue, sensitivityWithValue } from './names'
@@ -174,7 +188,16 @@ export { MemoryError, UnknownTimeZoneError, versionConflict } from './errors'
 export type { EntryContext } from './entryContext'
 
 export type SecretVia =
-  'console' | 'export' | 'rest' | 'kioku_get' | 'kioku_list' | 'kioku_update' | 'kioku_transfer'
+  | 'console'
+  | 'export'
+  | 'rest'
+  | 'kioku_get'
+  | 'kioku_list'
+  | 'kioku_browse'
+  | 'kioku_update'
+  | 'kioku_transfer'
+
+export const UNTOUCHED_PLAINTEXT = Symbol('untouched plaintext')
 
 export type EventChanges = Pick<BenchChanges, 'entries' | 'hiddenOther'> & { lastId: number }
 
@@ -182,12 +205,40 @@ export const ACCESS_EVENT = 'access' as const
 const VALID_TO_MIN_AHEAD_MS = 60_000
 const HISTORY_LIMIT = 500
 const ACCESS_HISTORY_LIMIT = 100
-const ACTIVITY_FACET_CAP = 5000
 const GLOSSARY_CAP = 500
 const SHORT_ID_CURSOR = /^m-[0-9a-z]{6,8}$/
+const EVENT_ID = /^\d{1,15}$/
+const INT32_MIN = -2_147_483_648
+const INT32_MAX = 2_147_483_647
+// drizzle 遇到数字 0 不生成 offset，写成 SQL 防止 PostgreSQL 展开子查询导致重复计算可见性
+const OFFSET_ZERO = sql`0` as unknown as number
+
+const detoasted = (snapshot: SQLWrapper) =>
+  sql<unknown>`(case when jsonb_typeof(${snapshot}) = 'object' then ${snapshot} || '{}'::jsonb else ${snapshot} end)`.mapWith(
+    entryEvents.before,
+  )
+
+function fieldCondition(fields: SQL<string[]>, wanted: readonly ActivityFieldFilter[]): SQL {
+  const named = wanted.filter((f) => f !== 'none')
+  const list = sql.join(
+    named.map((f) => sql`${f}::text`),
+    sql`, `,
+  )
+  return or(
+    named.length ? sql`(${fields} && array[${list}]::text[])` : undefined,
+    wanted.includes('none') ? sql`(cardinality(${fields}) = 0)` : undefined,
+  )!
+}
+
+type FacetRow = { g: string; k: string | null; n: number }
+function sortByCount<T extends { count: number }>(items: T[]): T[] {
+  return items.sort((a, b) => b.count - a.count)
+}
 
 const IGNORED_NOW = sql`(case when ${entryVariants.plaintextIgnoredHash} is null then false
   else ${entryVariants.plaintextIgnoredHash} = encode(sha256(convert_to(${entryVariants.content}, 'UTF8')), 'hex') end)`
+
+const NEEDS_DISCLOSURE = sql`(${entries.kind} = 'entry' and (${entries.disclosure} is null or btrim(${entries.disclosure}) = '') and not (${BOOT_CANDIDATE}))`
 
 export interface EntryStats {
   counts: KindCount[]
@@ -308,14 +359,30 @@ function buildSearchHeader(input: {
     .join(' ')
 }
 
-function parseValidTo(raw: string | null | undefined, now: Date): Date | null | undefined {
+function sameValidTo(raw: string | null, stored: Date | null): boolean {
+  if (raw === null || stored === null) return raw === null && stored === null
+  return new Date(raw).getTime() === stored.getTime()
+}
+
+function updatedAtFor(at: Date): SQL {
+  return sql`greatest(${momentSql(at)}, ${entries.updatedAt})`
+}
+
+function parseValidTo(
+  raw: string | null | undefined,
+  now: Date,
+  validFrom?: Date,
+): Date | null | undefined {
   if (raw === undefined) return undefined
   if (raw === null) return null
   const date = new Date(raw)
   if (Number.isNaN(date.getTime())) {
     throw new MemoryError(400, '有效到（validTo）的日期格式不对')
   }
-  if (date.getTime() < now.getTime() + VALID_TO_MIN_AHEAD_MS) {
+  if (
+    date.getTime() < now.getTime() + VALID_TO_MIN_AHEAD_MS ||
+    (validFrom !== undefined && date.getTime() <= validFrom.getTime())
+  ) {
     throw new MemoryError(400, '有效到（validTo）要比当前时间至少晚一分钟')
   }
   return date
@@ -361,8 +428,8 @@ export function plaintextMatch(
   )
 }
 
-export function hasUntouchedPlaintext(content: string | null): boolean {
-  return content !== null && looksLikePlaintextCredential(content)
+export function hasUntouchedPlaintext(view: EntryView | ConsoleEntryView): boolean {
+  return Boolean((view as { [UNTOUCHED_PLAINTEXT]?: boolean })[UNTOUCHED_PLAINTEXT])
 }
 
 // 计算快照 jsonb：保留契约 EntrySnapshot 字段并附带 snapshotColumns / retention 所需头字段
@@ -444,6 +511,61 @@ function toPublicSnapshot(raw: Record<string, unknown> | null): EntrySnapshot | 
   }
 }
 
+function snapshotPlaintextContents(snap: Record<string, unknown> | null): string[] {
+  if (!snap || typeof snap !== 'object') return []
+  const out: string[] = []
+  if (typeof snap.content === 'string') out.push(snap.content)
+  if (Array.isArray(snap.variants)) {
+    for (const item of snap.variants) {
+      if (
+        item &&
+        typeof item === 'object' &&
+        typeof (item as { content?: unknown }).content === 'string'
+      ) {
+        out.push((item as { content: string }).content)
+      }
+    }
+  }
+  return out
+}
+
+function scrubSnapshotForSecret<T extends object>(
+  snap: T | null,
+  headings: ReadonlySet<string>,
+  fallbackShortId: string,
+): { next: T | null; changed: boolean } {
+  if (!snap || typeof snap !== 'object') return { next: snap, changed: false }
+  let changed = false
+  const copy: Record<string, unknown> = { ...(snap as Record<string, unknown>) }
+  if ('content' in copy) {
+    delete copy.content
+    changed = true
+  }
+  if ('fts' in copy) {
+    delete copy.fts
+    changed = true
+  }
+  if (Array.isArray(copy.variants)) {
+    let variantsChanged = false
+    const nextVariants = copy.variants.map((item) => {
+      if (item && typeof item === 'object' && (item as { content?: unknown }).content !== null) {
+        variantsChanged = true
+        return { ...(item as Record<string, unknown>), content: null }
+      }
+      return item
+    })
+    if (variantsChanged) {
+      copy.variants = nextVariants
+      changed = true
+    }
+  }
+  if (typeof copy.title === 'string' && headings.has(copy.title)) {
+    copy.title = typeof copy.shortId === 'string' ? copy.shortId : fallbackShortId
+    changed = true
+  }
+  return { next: copy as unknown as T, changed }
+}
+
 export function suggestionCurrent(
   ids: SQLWrapper,
   versions: SQLWrapper,
@@ -506,10 +628,25 @@ function checkPlaintextFlags(flags: PlaintextFlags, isConsole: boolean): void {
   }
 }
 
-function rejectMasked(text: string): void {
-  if (hasMaskedText(text)) {
+function rejectMasked(text: string, maskSecret: boolean | undefined): void {
+  if (maskSecret && hasMaskedText(text)) {
     throw new MemoryError(400, '正文包含测试台掩码占位文字，并非真实内容，拒绝写入')
   }
+}
+
+const PLAINTEXT_LISTED = 10
+
+function plaintextRejection(found: readonly PlaintextFinding[], viaKey: boolean): string {
+  const spots = found
+    .slice(0, PLAINTEXT_LISTED)
+    .map((m) => `第 ${m.line} 行（${PLAINTEXT_KIND_NAMES[m.kind]}）`)
+    .join('、')
+  const more = found.length > PLAINTEXT_LISTED ? `等 ${found.length} 处` : ''
+  const head = `正文里有新增的疑似明文凭据：${spots}${more}。`
+  return viaKey
+    ? `${head}凭据请先用 kioku_credential_save 存起来，正文里写成 {{cred:<标识>#<字段>}} 占位符；` +
+        '确实不是凭据时带上 plaintext_ok（REST 为 plaintextOk）再写，这条记忆会进待处理，由人看过'
+    : `${head}请逐处转存为凭据或标为不是凭据，也可以照样保存，这条记忆会进待处理`
 }
 
 function validateCredentialPlaceholders(
@@ -517,24 +654,29 @@ function validateCredentialPlaceholders(
   circleKind: CircleKind,
   kind: EntryKind,
   sensitivity: Sensitivity,
-  isNonTrusted: boolean,
-): Set<string> {
+  hideDetail = false,
+): { identifiers: Set<string>; refs: PlaceholderRef[] } {
   const allIdentifiers = new Set<string>()
-  const blocked = sensitivity === 'secret' || isNonTrusted
+  const allRefs: PlaceholderRef[] = []
   for (const content of texts) {
-    if (blocked && mentionsPlaceholder(content)) {
-      throw new MemoryError(400, '机密或未确认来源的内容中不能使用凭据占位符')
-    }
     const { refs, malformed } = scanPlaceholders(content)
     if (malformed.length) {
-      throw new MemoryError(400, `凭据占位符格式不正确：${malformed[0]}`)
+      throw new MemoryError(
+        400,
+        hideDetail
+          ? '凭据占位符格式错误：请使用 {{cred:<标识>}} 或 {{cred:<标识>#<字段>}}'
+          : `凭据占位符格式错误：${malformed[0]}，请使用 {{cred:<标识>}} 或 {{cred:<标识>#<字段>}}`,
+      )
     }
     if (refs.length && !placeholderAllowed(circleKind, kind, sensitivity)) {
       throw new MemoryError(400, CONVERT_SCOPE_TEXT)
     }
-    for (const r of refs) allIdentifiers.add(r.identifier)
+    for (const r of refs) {
+      allIdentifiers.add(r.identifier)
+      allRefs.push(r)
+    }
   }
-  return allIdentifiers
+  return { identifiers: allIdentifiers, refs: allRefs }
 }
 
 async function syncCredentialRefs(
@@ -584,6 +726,72 @@ export class EntryService {
 
   private get isConsole(): boolean {
     return this.ctx.secretRead === 'explicit'
+  }
+
+  private addsCredentialRefs(isNonTrusted = false): boolean {
+    if (isNonTrusted) return this.ctx.allowCredentialRefs === true
+    if (this.ctx.allowCredentialRefs !== undefined) return this.ctx.allowCredentialRefs
+    const provenance = this.ctx.access.writeProvenance
+    return provenance === 'owner' || provenance === 'agent'
+  }
+
+  private async verifyAddedCredentialRefs(
+    tx: Tx,
+    input: {
+      circleId: string
+      ownerAccountId: string | null
+      refs: readonly PlaceholderRef[]
+      baselineIdentifiers: ReadonlySet<string>
+      isNonTrusted?: boolean
+      hideDetail?: boolean
+      access?: Access
+    },
+  ): Promise<void> {
+    const added = input.refs.filter((r) => !input.baselineIdentifiers.has(r.identifier))
+    if (!added.length) return
+    if (!this.addsCredentialRefs(input.isNonTrusted ?? false)) {
+      throw new MemoryError(400, '来自对话或后台任务的写入不能新增凭据引用')
+    }
+    const identifiers = [...new Set(added.map((r) => r.identifier))]
+    if (!input.ownerAccountId) {
+      throw new MemoryError(
+        400,
+        input.hideDetail ? '正文引用的凭据不存在或不可用' : `凭据不存在或不可用：${identifiers[0]}`,
+      )
+    }
+    const rows = await tx
+      .select()
+      .from(credentials)
+      .where(
+        and(
+          eq(credentials.circleId, input.circleId),
+          eq(credentials.ownerAccountId, input.ownerAccountId),
+          inArray(credentials.identifier, identifiers),
+          isNull(credentials.deletedAt),
+        ),
+      )
+      .for('share')
+    const access = input.access ?? this.ctx.access
+    for (const identifier of identifiers) {
+      const row = rows.find((r) => r.identifier === identifier)
+      if (!row || !canUseCredential(access, row)) {
+        throw new MemoryError(
+          400,
+          input.hideDetail ? '正文引用的凭据不存在或不可用' : `凭据不存在或不可用：${identifier}`,
+        )
+      }
+      for (const ref of added) {
+        if (ref.identifier !== identifier || ref.field === null) continue
+        if (!row.fields.some((f) => f.name === ref.field)) {
+          throw new MemoryError(
+            400,
+            input.hideDetail
+              ? '正文引用的凭据没有此字段'
+              : `凭据 ${identifier} 没有字段 ${ref.field}`,
+          )
+        }
+      }
+    }
   }
 
   private async resolveTargetCircle(
@@ -761,7 +969,7 @@ export class EntryService {
   ): string {
     if (sensitivity !== 'secret') return row.content ?? ''
     if (!this.ctx.masterKey) {
-      throw new MemoryError(500, '尚未配置 KIOKU_MASTER_KEY，无法解密机密词条')
+      throw new MemoryError(400, '尚未配置 KIOKU_MASTER_KEY，无法解密机密词条')
     }
     return openVariantContent(this.ctx.masterKey, row.id, row)
   }
@@ -790,6 +998,7 @@ export class EntryService {
       sensitivePii: boolean
       sensitiveFindings: StoredSensitiveFinding[]
       plaintextIgnoredHash: string | null
+      survivingCredential: boolean
     }[]
   > {
     if (sensitivity === 'secret') {
@@ -802,6 +1011,7 @@ export class EntryService {
         sensitivePii: false,
         sensitiveFindings: [],
         plaintextIgnoredHash: null,
+        survivingCredential: false,
       }))
     }
 
@@ -812,19 +1022,38 @@ export class EntryService {
 
     const addedFindings: PlaintextFinding[] = []
     const bypass = Boolean(flags.plaintextOk || flags.allowPlaintext || flags.ignorePlaintext)
+    const credOpts = {
+      credentials: true,
+      pii: false,
+      customRules: privacy.customRules,
+      allowlist: privacy.allowlist,
+    }
+    const pendingOpts = {
+      credentials: privacy.credentials,
+      pii: privacy.pii,
+      piiKinds: privacy.piiKinds,
+      customRules: privacy.customRules,
+      allowlist: privacy.allowlist,
+    }
 
     const out = []
     for (const v of variants) {
+      let survivingCredential = false
+      let survivingPending = v.hadPendingBefore && v.beforeContent === v.content
       if (privacy.credentials) {
-        const added = addedSensitiveContent(v.beforeContent, v.content, {
-          credentials: true,
-          pii: false,
-          customRules: privacy.customRules,
-          allowlist: privacy.allowlist,
-        })
+        const added = addedSensitiveContent(v.beforeContent, v.content, credOpts)
         for (const m of added) {
           addedFindings.push({ line: m.line, kind: m.kind as PlaintextKind })
         }
+        if (v.beforeContent !== null) {
+          survivingCredential =
+            addedSensitiveContent(null, v.content, credOpts).length > added.length
+        }
+      }
+      if (v.hadPendingBefore && v.beforeContent !== null && !survivingPending) {
+        survivingPending =
+          addedSensitiveContent(null, v.content, pendingOpts).length >
+          addedSensitiveContent(v.beforeContent, v.content, pendingOpts).length
       }
       let modelSpans: ModelEntitySpan[] = []
       if (modelConfig && privacy.pii) {
@@ -832,7 +1061,7 @@ export class EntryService {
       }
       const outcome = evaluateSensitiveContent(v.content, privacy, modelSpans)
       const keepIgnored =
-        flags.ignorePlaintext && (outcome.hasCredential || outcome.hasPii) && !v.hadPendingBefore
+        flags.ignorePlaintext && (outcome.hasCredential || outcome.hasPii) && !survivingPending
           ? contentDigest(v.content)
           : v.beforeContent === v.content
             ? v.existingIgnoredHash
@@ -846,15 +1075,12 @@ export class EntryService {
         sensitivePii: outcome.hasPii,
         sensitiveFindings: outcome.findings,
         plaintextIgnoredHash: keepIgnored,
+        survivingCredential,
       })
     }
 
     if (addedFindings.length && !bypass) {
-      throw new MemoryError(
-        400,
-        '正文包含新增疑似明文凭据，请先通过凭据接口保存并改用 {{cred:标识}} 占位符',
-        addedFindings,
-      )
+      throw new MemoryError(400, plaintextRejection(addedFindings, !this.isConsole), addedFindings)
     }
 
     return out
@@ -897,6 +1123,8 @@ export class EntryService {
       circleKind: CircleKind
       revealContent: boolean
       allVariants?: boolean
+      otherVariants?: OtherVariantHint[]
+      untouchedPlaintext?: boolean
       allowedSourceVariantIds?: ReadonlySet<string>
       now?: Date
     },
@@ -927,22 +1155,11 @@ export class EntryService {
       variants.push(base)
       if (this.isConsole) {
         const ignored = variantIgnoredNow(v)
-        const showFindings =
-          !secret &&
-          !ignored &&
-          needsSensitiveInboxAlert({
-            circleKind: options.circleKind,
-            sensitivity: row.sensitivity,
-            provenance: row.provenance,
-            sensitiveCredential: v.sensitiveCredential,
-            sensitivePii: v.sensitivePii,
-            plaintextIgnored: ignored,
-          })
         consoleVariants.push({
           ...base,
           contentHidden: secret && !options.revealContent,
           plaintextIgnored: ignored,
-          ...(showFindings && v.sensitiveFindings.length
+          ...(!secret && v.sensitiveFindings.length
             ? { sensitiveFindings: v.sensitiveFindings }
             : {}),
         })
@@ -973,7 +1190,7 @@ export class EntryService {
       validTo: row.validTo ? row.validTo.toISOString() : null,
       version: row.version,
       variants,
-      otherVariants: [],
+      otherVariants: options.otherVariants ?? [],
       links,
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),
@@ -983,12 +1200,19 @@ export class EntryService {
       const anyIgnored = variantRows.every((v) => !v.sensitiveCredential && !v.sensitivePii)
         ? false
         : variantRows.some((v) => variantIgnoredNow(v))
-      return {
+      const consoleView: ConsoleEntryView = {
         ...baseView,
         contentHidden: secret && !options.revealContent,
         plaintextIgnored: anyIgnored,
         variants: consoleVariants,
       }
+      if (options.untouchedPlaintext) {
+        Object.defineProperty(consoleView, UNTOUCHED_PLAINTEXT, { value: true })
+      }
+      return consoleView
+    }
+    if (options.untouchedPlaintext) {
+      Object.defineProperty(baseView, UNTOUCHED_PLAINTEXT, { value: true })
     }
     return baseView
   }
@@ -1012,7 +1236,7 @@ export class EntryService {
             },
           ]
 
-    for (const v of rawVariants) rejectMasked(v.content)
+    for (const v of rawVariants) rejectMasked(v.content, this.ctx.maskSecret)
 
     const topics = cleanTopics(input.topics)
     const glossary = cleanGlossary(input.glossary)
@@ -1030,13 +1254,20 @@ export class EntryService {
         }
         const realms = this.assertSecretPolicy(circle, sensitivity, rawVariants)
         const validTo = parseValidTo(input.validTo, now) ?? null
-        const credIds = validateCredentialPlaceholders(
+        const ownerAccountId = circle.kind === 'personal' ? this.ctx.access.ownerAccountId : null
+        const validated = validateCredentialPlaceholders(
           rawVariants.map((v) => v.content),
           circle.kind,
           kind,
           sensitivity,
-          false,
         )
+        await this.verifyAddedCredentialRefs(tx, {
+          circleId: circle.id,
+          ownerAccountId,
+          refs: validated.refs,
+          baselineIdentifiers: new Set(),
+          isNonTrusted: this.ctx.access.writeProvenance === 'untrusted',
+        })
 
         const normalizedVariants = rawVariants.map((v) => ({
           when: v.when,
@@ -1055,7 +1286,7 @@ export class EntryService {
           raw,
         )
 
-        const { value: inserted } = await insertWithAllocatedShortId(tx, async (sp, shortId) => {
+        const insertAttempt = async (sp: Tx, shortId: string) => {
           const title = deriveEntryTitle(input.title, rawVariants, shortId, sensitivity)
           const [row] = await sp
             .insert(entries)
@@ -1113,7 +1344,22 @@ export class EntryService {
             insertedVariants.push(vRow!)
           }
           return { row: row!, variants: insertedVariants }
-        })
+        }
+
+        const replayShortId = this.ctx.takeReplayShortId?.()
+        let inserted: { row: EntryRow; variants: VariantRow[] }
+        if (replayShortId) {
+          try {
+            inserted = await tx.transaction((sp) => insertAttempt(sp, replayShortId))
+          } catch (err) {
+            if (isUniqueViolation(err, 'entries_short_id_unique')) {
+              throw new MemoryError(409, '重放冲突：短 ID 已被其他词条占用，请清空重放后重试')
+            }
+            throw err
+          }
+        } else {
+          inserted = (await insertWithAllocatedShortId(tx, insertAttempt)).value
+        }
 
         if (glossary.length) {
           await tx
@@ -1127,7 +1373,12 @@ export class EntryService {
             )
             .onConflictDoNothing()
         }
-        await syncCredentialRefs(tx, circle.id, inserted.row.id, credIds)
+        await syncCredentialRefs(
+          tx,
+          circle.id,
+          inserted.row.id,
+          sensitivity === 'secret' ? new Set() : validated.identifiers,
+        )
         await syncEntryLinks(tx, {
           circleId: circle.id,
           entryId: inserted.row.id,
@@ -1153,11 +1404,22 @@ export class EntryService {
           before: null,
           after: snapshot,
         })
+        if (raw.ignorePlaintext && scanned.some((v) => v.plaintextIgnoredHash !== null)) {
+          await this.writeEvent(tx, {
+            circleId: circle.id,
+            entryId: inserted.row.id,
+            type: 'ignore_plaintext',
+            provenance: inserted.row.provenance,
+            before: toStoredSnapshot(
+              inserted.row,
+              rawVariants.map((v) => ({ when: v.when, content: null })),
+              glossary,
+            ),
+            after: null,
+          })
+        }
 
         const reveal = !this.isConsole && sensitivity === 'secret'
-        if (reveal && !this.ctx.maskSecret) {
-          await this.auditSecretAccess(tx, inserted.row, 'rest')
-        }
 
         return {
           entryId: inserted.row.id,
@@ -1177,7 +1439,13 @@ export class EntryService {
   }
 
   async get(
-    query: { id: string; circle?: string; allVariants?: boolean },
+    query: {
+      id: string
+      circle?: string
+      allVariants?: boolean
+      variantFilter?: WhenCondition
+      focus?: WhenCondition
+    },
     via: SecretVia = 'kioku_get',
   ): Promise<EntryView | ConsoleEntryView> {
     const canAudit = this.ctx.secretRead === 'audited'
@@ -1206,20 +1474,66 @@ export class EntryService {
             .orderBy(asc(entryGlossary.keyword)),
         ])
         const circleMeta = circleMetaMap.get(row.circleId)!
+        const cleanFilter = query.variantFilter ? normalizeWhen(query.variantFilter) : undefined
+        const hasFilter = cleanFilter !== undefined && Object.keys(cleanFilter).length > 0
+
+        let visibleVariants = variantRows
+        let otherVariants: OtherVariantHint[] = []
+        if (!query.allVariants && (hasFilter || query.focus !== undefined)) {
+          const vocab = hasFilter
+            ? undefined
+            : (await loadCircleVocabularies(tx, [row.circleId])).get(row.circleId)
+          const emptyDims = new Map()
+          const kept: VariantRow[] = []
+          const excluded: OtherVariantHint[] = []
+          for (const v of variantRows) {
+            const w = normalizeWhen(v.when)
+            let matched: boolean
+            if (hasFilter) {
+              matched = Object.entries(cleanFilter!).every(([dim, slugs]) =>
+                Boolean(w[dim]?.some((s) => slugs.includes(s))),
+              )
+            } else {
+              const ev = evaluateVariantFocus({
+                when: w,
+                circleDefaults: {},
+                focus: query.focus ?? {},
+                customDimensions: vocab?.dimensions ?? emptyDims,
+                awayCircle: false,
+                flippedCircle: false,
+                flippedRealms: new Set(),
+                crossGroup: false,
+              })
+              matched = !ev.hasConflict
+            }
+            if (matched) kept.push(v)
+            else excluded.push({ when: w, whenSignature: v.whenSignature })
+          }
+          visibleVariants = kept
+          otherVariants = excluded
+        }
+
         const reveal = this.ctx.secretRead !== 'explicit'
-        if (row.sensitivity === 'secret' && canAudit && !this.ctx.maskSecret) {
+        if (
+          row.sensitivity === 'secret' &&
+          canAudit &&
+          !this.ctx.maskSecret &&
+          visibleVariants.length > 0
+        ) {
           await this.auditSecretAccess(tx, row, via)
         }
         return this.assembleEntryView(
           tx,
           row,
-          variantRows,
+          visibleVariants,
           glossaryRows.map((g) => g.keyword),
           {
             circleSlug: visibleCircleSlug(this.ctx.access, row.circleId, circleMeta.slug),
             circleKind: circleMeta.kind,
             revealContent: reveal,
             ...(query.allVariants !== undefined ? { allVariants: query.allVariants } : {}),
+            otherVariants,
+            allowedSourceVariantIds: new Set(visibleVariants.map((v) => v.id)),
             now,
           },
         )
@@ -1290,10 +1604,16 @@ export class EntryService {
         const nextSensitivity = raw.sensitivity ?? before.sensitivity
         if (nextSensitivity !== before.sensitivity) {
           if (
+            !sensitivityAllowed(before.circleKind, before.kind, nextSensitivity, before.provenance)
+          ) {
+            throw new MemoryError(400, '会话摘要与未确认来源的记录不支持设为机密（secret）')
+          }
+          if (
             !canWrite(this.ctx.access, {
               circleId: before.circleId,
               kind: before.kind,
               sensitivity: nextSensitivity,
+              provenance: before.provenance,
             })
           ) {
             throw new MemoryError(
@@ -1352,35 +1672,8 @@ export class EntryService {
         }))
 
         const downgradeFromSecret = before.sensitivity === 'secret' && nextSensitivity !== 'secret'
-        if (downgradeFromSecret) {
-          const canBypassDowngrade =
-            (this.isConsole &&
-              (Boolean(raw.allowPlaintext && this.ctx.circleOwner) ||
-                Boolean(raw.ignorePlaintext))) ||
-            (!this.isConsole && Boolean(raw.plaintextOk))
-          if (raw.allowPlaintext && !this.ctx.circleOwner) {
-            throw new MemoryError(403, '仅记忆圈所有者可使用 allowPlaintext 降级机密词条')
-          }
-          if (!canBypassDowngrade) {
-            const { settings: privacy } = await loadCirclePrivacy(tx, before.circleId)
-            if (privacy.credentials) {
-              for (const ev of existingDecrypted) {
-                const hits = addedSensitiveContent(null, ev.content, {
-                  credentials: true,
-                  pii: false,
-                  customRules: privacy.customRules,
-                  allowlist: privacy.allowlist,
-                })
-                if (hits.length) {
-                  throw new MemoryError(
-                    400,
-                    '机密词条中含疑似明文凭据，降级前请清理或使用 allowPlaintext/plaintextOk',
-                    hits.map((m) => ({ line: m.line, kind: m.kind as PlaintextKind })),
-                  )
-                }
-              }
-            }
-          }
+        if (downgradeFromSecret && raw.allowPlaintext && !this.ctx.circleOwner) {
+          throw new MemoryError(403, '仅记忆圈所有者可使用 allowPlaintext 降级机密词条')
         }
 
         // 计算更新后的变体全集
@@ -1399,7 +1692,7 @@ export class EntryService {
         let targetVariants: TargetVariant[]
 
         if (raw.variants !== undefined) {
-          for (const v of raw.variants) rejectMasked(v.content)
+          for (const v of raw.variants) rejectMasked(v.content, this.ctx.maskSecret)
           targetVariants = raw.variants.map((v, i) => {
             const norm = normalizeWhen(v.when)
             const sig = whenSignature(norm)
@@ -1438,7 +1731,7 @@ export class EntryService {
           }
           if (raw.upsertVariants) {
             for (const v of raw.upsertVariants) {
-              rejectMasked(v.content)
+              rejectMasked(v.content, this.ctx.maskSecret)
               const norm = normalizeWhen(v.when)
               const sig = whenSignature(norm)
               const prev = existingBySig.get(sig)
@@ -1455,7 +1748,7 @@ export class EntryService {
             }
           }
           if (raw.content !== undefined) {
-            rejectMasked(raw.content)
+            rejectMasked(raw.content, this.ctx.maskSecret)
             const norm = normalizeWhen(raw.when ?? {})
             const sig = whenSignature(norm)
             const prev = existingBySig.get(sig)
@@ -1486,6 +1779,29 @@ export class EntryService {
           throw new MemoryError(400, '会话摘要仅支持单个无条件（when: {}）切片')
         }
 
+        const canBypassDowngrade =
+          this.isConsole && Boolean(raw.allowPlaintext && this.ctx.circleOwner)
+        if (downgradeFromSecret && !canBypassDowngrade) {
+          const { settings: privacy } = await loadCirclePrivacy(tx, before.circleId)
+          if (privacy.credentials) {
+            for (const tv of targetVariants) {
+              const hits = addedSensitiveContent(null, tv.content, {
+                credentials: true,
+                pii: false,
+                customRules: privacy.customRules,
+                allowlist: privacy.allowlist,
+              })
+              if (hits.length) {
+                throw new MemoryError(
+                  400,
+                  '机密词条中含疑似明文凭据，降级前请先把值换成凭据占位符或由记忆圈所有者使用 allowPlaintext 确认',
+                  hits.map((m) => ({ line: m.line, kind: m.kind as PlaintextKind })),
+                )
+              }
+            }
+          }
+        }
+
         const realms = this.assertSecretPolicy(circle, nextSensitivity, targetVariants)
         const nextTopics = raw.topics !== undefined ? cleanTopics(raw.topics) : before.topics
         const nextDisclosure =
@@ -1496,7 +1812,9 @@ export class EntryService {
               : null
         const nextPriority = raw.priority ?? before.priority
         const nextValidTo =
-          raw.validTo === undefined ? before.validTo : (parseValidTo(raw.validTo, now) ?? null)
+          raw.validTo === undefined || sameValidTo(raw.validTo, before.validTo)
+            ? before.validTo
+            : (parseValidTo(raw.validTo, now, before.validFrom) ?? null)
 
         const glossarySet = new Set(existingGlossary)
         if (raw.glossaryAdd) {
@@ -1507,13 +1825,37 @@ export class EntryService {
         }
         const nextGlossary = [...glossarySet].sort()
 
-        const credIds = validateCredentialPlaceholders(
+        const hideDetail =
+          before.sensitivity === 'secret' &&
+          raw.content === undefined &&
+          raw.variants === undefined &&
+          raw.upsertVariants === undefined
+        const validated = validateCredentialPlaceholders(
           targetVariants.map((v) => v.content),
           circle.kind,
           before.kind,
           nextSensitivity,
-          before.provenance === 'untrusted',
+          hideDetail,
         )
+        const baselineIdentifiers = new Set<string>()
+        if (
+          circle.kind === 'personal' &&
+          before.ownerAccountId === this.ctx.access.ownerAccountId &&
+          placeholderAllowed(circle.kind, before.kind, before.sensitivity)
+        ) {
+          for (const ev of existingDecrypted) {
+            for (const id of placeholderIdentifiers(ev.content)) baselineIdentifiers.add(id)
+          }
+        }
+        await this.verifyAddedCredentialRefs(tx, {
+          circleId: before.circleId,
+          ownerAccountId: before.ownerAccountId,
+          refs: validated.refs,
+          baselineIdentifiers,
+          isNonTrusted:
+            before.provenance === 'untrusted' || this.ctx.access.writeProvenance === 'untrusted',
+          hideDetail,
+        })
 
         const scanned = await this.scanVariantsSensitive(
           tx,
@@ -1523,13 +1865,25 @@ export class EntryService {
           raw,
         )
 
+        const becameSecret = nextSensitivity === 'secret' && before.sensitivity !== 'secret'
+        const secretHeadings =
+          nextSensitivity === 'secret'
+            ? markdownHeadingsOf([
+                ...targetVariants.map((v) => v.content),
+                ...existingDecrypted.map((v) => v.content),
+                ...(becameSecret ? await this.loadHistoryPlaintextContents(tx, before.id) : []),
+              ])
+            : null
+
         const explicitTitle = raw.title === undefined ? before.title : raw.title
-        const nextTitle = deriveEntryTitle(
+        const derivedTitle = deriveEntryTitle(
           explicitTitle,
           targetVariants,
           before.shortId,
           nextSensitivity,
         )
+        const nextTitle =
+          secretHeadings && secretHeadings.has(derivedTitle) ? before.shortId : derivedTitle
 
         const [updatedEntry] = await tx
           .update(entries)
@@ -1542,10 +1896,19 @@ export class EntryService {
             realms,
             validTo: nextValidTo,
             version: before.version + 1,
-            updatedAt: now,
+            updatedAt: updatedAtFor(now),
           })
-          .where(eq(entries.id, before.id))
+          .where(
+            and(
+              eq(entries.id, before.id),
+              eq(entries.version, before.version),
+              isNull(entries.deletedAt),
+            ),
+          )
           .returning()
+        if (!updatedEntry) {
+          throw new MemoryError(409, '词条刚被其他请求修改，请重新读取')
+        }
 
         const header = buildSearchHeader({
           sensitivity: nextSensitivity,
@@ -1646,7 +2009,12 @@ export class EntryService {
           }
         }
 
-        await syncCredentialRefs(tx, before.circleId, before.id, credIds)
+        await syncCredentialRefs(
+          tx,
+          before.circleId,
+          before.id,
+          nextSensitivity === 'secret' ? new Set() : validated.identifiers,
+        )
         await syncEntryLinks(tx, {
           circleId: before.circleId,
           entryId: before.id,
@@ -1664,33 +2032,105 @@ export class EntryService {
           existingDecrypted.map((ev) => ({ when: ev.when, content: ev.content })),
           existingGlossary,
         )
+        const recordedBeforeSnap =
+          becameSecret && secretHeadings
+            ? scrubSnapshotForSecret(beforeSnap, secretHeadings, before.shortId).next!
+            : beforeSnap
         const afterSnap = toStoredSnapshot(
           updatedEntry!,
           scanned.map((v) => ({ when: v.when, content: v.content })),
           nextGlossary,
         )
+        if (becameSecret && secretHeadings) {
+          await this.scrubEntryHistoryForSecret(tx, before.id, before.shortId, secretHeadings)
+        }
         await this.writeEvent(tx, {
           circleId: before.circleId,
           entryId: before.id,
           type: 'update',
           provenance: this.ctx.access.writeProvenance,
-          before: beforeSnap,
+          before: recordedBeforeSnap,
           after: afterSnap,
         })
+        if (
+          raw.ignorePlaintext &&
+          scanned.some(
+            (v, i) =>
+              v.plaintextIgnoredHash !== null &&
+              v.plaintextIgnoredHash !== targetVariants[i]!.existingIgnoredHash,
+          )
+        ) {
+          await this.writeEvent(tx, {
+            circleId: before.circleId,
+            entryId: before.id,
+            type: 'ignore_plaintext',
+            provenance: updatedEntry!.provenance,
+            before: toStoredSnapshot(
+              updatedEntry!,
+              scanned.map((v) => ({ when: v.when, content: null })),
+              nextGlossary,
+            ),
+            after: null,
+          })
+        }
 
         const reveal = this.ctx.secretRead !== 'explicit'
-        if (reveal && nextSensitivity === 'secret' && !this.ctx.maskSecret) {
+        const hadContentWrite =
+          raw.variants !== undefined ||
+          raw.upsertVariants !== undefined ||
+          raw.content !== undefined
+
+        // 局部写入机密词条切片时，访问密钥调用仅回显本次传入的切片且不把未触碰存量解密回传
+        let visibleVariants = finalVariants
+        let otherVariants: OtherVariantHint[] = []
+        if (
+          !this.isConsole &&
+          before.sensitivity === 'secret' &&
+          nextSensitivity === 'secret' &&
+          raw.variants === undefined &&
+          (raw.upsertVariants !== undefined || raw.content !== undefined)
+        ) {
+          const touchedSigs = new Set<string>()
+          if (raw.upsertVariants) {
+            for (const v of raw.upsertVariants) touchedSigs.add(whenSignature(v.when))
+          }
+          if (raw.content !== undefined) touchedSigs.add(whenSignature(raw.when ?? {}))
+          visibleVariants = finalVariants.filter((v) => touchedSigs.has(v.whenSignature))
+          otherVariants = finalVariants
+            .filter((v) => !touchedSigs.has(v.whenSignature))
+            .map((v) => ({ when: normalizeWhen(v.when), whenSignature: v.whenSignature }))
+        }
+
+        const shouldAudit =
+          reveal &&
+          !this.ctx.maskSecret &&
+          before.sensitivity === 'secret' &&
+          nextSensitivity === 'secret' &&
+          !hadContentWrite &&
+          visibleVariants.length > 0
+        if (shouldAudit) {
           await this.auditSecretAccess(tx, updatedEntry!, via)
         }
+
+        const untouchedPlaintext = scanned.some(
+          (item, i) =>
+            item.sensitiveCredential &&
+            !item.plaintextIgnoredHash &&
+            item.survivingCredential &&
+            targetVariants[i]!.hadPendingBefore,
+        )
 
         return {
           entryId: updatedEntry!.id,
           circleId: updatedEntry!.circleId,
           secret: nextSensitivity === 'secret',
-          view: await this.assembleEntryView(tx, updatedEntry!, finalVariants, nextGlossary, {
+          view: await this.assembleEntryView(tx, updatedEntry!, visibleVariants, nextGlossary, {
             circleSlug: visibleCircleSlug(this.ctx.access, before.circleId, circle.slug),
             circleKind: circle.kind,
             revealContent: reveal,
+            otherVariants,
+            untouchedPlaintext,
+            allowedSourceVariantIds: new Set(visibleVariants.map((v) => v.id)),
             now,
           }),
         }
@@ -1738,9 +2178,18 @@ export class EntryService {
 
       const [after] = await tx
         .update(entries)
-        .set({ deletedAt: now, version: before.version + 1, updatedAt: now })
-        .where(eq(entries.id, before.id))
+        .set({ deletedAt: now, version: before.version + 1, updatedAt: updatedAtFor(now) })
+        .where(
+          and(
+            eq(entries.id, before.id),
+            eq(entries.version, before.version),
+            isNull(entries.deletedAt),
+          ),
+        )
         .returning()
+      if (!after) {
+        throw new MemoryError(409, '词条刚被其他请求修改，请重新读取')
+      }
 
       await tx.delete(entryEmbeddings).where(eq(entryEmbeddings.entryId, before.id))
       await tx.delete(entryLinks).where(eq(entryLinks.sourceEntryId, before.id))
@@ -1837,6 +2286,7 @@ export class EntryService {
             targetCircle.kind === 'personal' && sourceEntry.sensitivity === 'public'
               ? 'private'
               : sourceEntry.sensitivity,
+          provenance: sourceEntry.provenance,
         })
       ) {
         throw new MemoryError(403, '当前账号在目标记忆圈无权写入该敏感到或物种的词条')
@@ -1886,11 +2336,12 @@ export class EntryService {
         ? 'private'
         : before.sensitivity
     if (
-      !sensitivityAllowed(targetCircle.kind, before.kind, nextSensitivity) ||
+      !sensitivityAllowed(targetCircle.kind, before.kind, nextSensitivity, before.provenance) ||
       !canWrite(targetAccess, {
         circleId: targetCircle.id,
         kind: before.kind,
         sensitivity: nextSensitivity,
+        provenance: before.provenance,
       })
     ) {
       throw new MemoryError(403, `当前身份无权迁入记忆圈「${targetCircle.name}」`)
@@ -1932,6 +2383,25 @@ export class EntryService {
       this.assertSecretPolicy(targetCircle, nextSensitivity, decoded)
     }
 
+    const targetOwner = targetCircle.kind === 'personal' ? targetAccess.ownerAccountId : null
+    const hideTransferDetail = before.sensitivity === 'secret'
+    const transferValidated = validateCredentialPlaceholders(
+      decoded.map((v) => v.content),
+      targetCircle.kind,
+      before.kind,
+      nextSensitivity,
+      hideTransferDetail,
+    )
+    await this.verifyAddedCredentialRefs(tx, {
+      circleId: targetCircle.id,
+      ownerAccountId: targetOwner,
+      refs: transferValidated.refs,
+      baselineIdentifiers: new Set(),
+      isNonTrusted: before.provenance === 'untrusted',
+      hideDetail: hideTransferDetail,
+      access: targetAccess,
+    })
+
     // 1. 源圈记录 transfer_out（物理删除后 entry_id 会被外键自动置空，before 完整保留）
     await this.writeEvent(tx, {
       circleId: before.circleId,
@@ -1948,7 +2418,6 @@ export class EntryService {
 
     // 3. 目标圈以相同 short_id 重建（version = 1）
     const nextTitle = deriveEntryTitle(before.title, decoded, before.shortId, nextSensitivity)
-    const targetOwner = targetCircle.kind === 'personal' ? targetAccess.ownerAccountId : null
     const [inserted] = await tx
       .insert(entries)
       .values({
@@ -2038,6 +2507,9 @@ export class EntryService {
         .onConflictDoNothing()
     }
 
+    if (nextSensitivity !== 'secret' && transferValidated.identifiers.size > 0) {
+      await syncCredentialRefs(tx, targetCircle.id, inserted!.id, transferValidated.identifiers)
+    }
     await syncEntryLinks(tx, {
       circleId: targetCircle.id,
       entryId: inserted!.id,
@@ -2095,7 +2567,10 @@ export class EntryService {
           .from(entries)
           .where(
             and(
-              readableConditions(this.ctx.access, { now }),
+              readableConditions(this.ctx.access, {
+                now,
+                explicit: Boolean(this.ctx.listSecret),
+              }),
               this.ctx.listSecret ? undefined : ne(entries.sensitivity, 'secret'),
               scopedCircleId ? eq(entries.circleId, scopedCircleId) : undefined,
               query.kind ? eq(entries.kind, query.kind) : undefined,
@@ -2234,17 +2709,17 @@ export class EntryService {
         const circleKind: CircleKind = circleRow?.kind ?? 'shared'
 
         const filters: (SQL | undefined)[] = [
-          readableConditions(this.ctx.access, { now, management: this.isConsole }),
+          readableConditions(this.ctx.access, { now, explicit: Boolean(this.ctx.listSecret) }),
           this.ctx.listSecret ? undefined : ne(entries.sensitivity, 'secret'),
           query.kind ? eq(entries.kind, query.kind) : undefined,
           query.sensitivity ? eq(entries.sensitivity, query.sensitivity) : undefined,
           query.provenance ? eq(entries.provenance, query.provenance) : undefined,
           query.topic ? sql`${query.topic} = any(${entries.topics})` : undefined,
           query.updatedAfter
-            ? sql`${entries.updatedAt} >= ${new Date(query.updatedAfter).toISOString()}::timestamptz`
+            ? sql`${entries.updatedAt} >= ${query.updatedAfter}::timestamptz`
             : undefined,
           query.updatedBefore
-            ? sql`${entries.updatedAt} <= ${new Date(query.updatedBefore).toISOString()}::timestamptz`
+            ? sql`${entries.updatedAt} < ${query.updatedBefore}::timestamptz`
             : undefined,
         ]
 
@@ -2288,19 +2763,9 @@ export class EntryService {
         }
 
         if (query.missingDisclosure === 'true') {
-          filters.push(
-            and(
-              eq(entries.kind, 'entry'),
-              ne(entries.provenance, 'untrusted'),
-              ne(entries.sensitivity, 'secret'),
-              sql`${entries.priority} > 0`,
-              or(isNull(entries.disclosure), sql`btrim(${entries.disclosure}) = ''`),
-            ),
-          )
+          filters.push(NEEDS_DISCLOSURE)
         } else if (query.missingDisclosure === 'false') {
-          filters.push(
-            sql`not (${entries.kind} = 'entry' and ${entries.provenance} <> 'untrusted' and ${entries.sensitivity} <> 'secret' and ${entries.priority} > 0 and (${entries.disclosure} is null or btrim(${entries.disclosure}) = ''))`,
-          )
+          filters.push(sql`not ${NEEDS_DISCLOSURE}`)
         }
 
         const piiProtected =
@@ -2378,6 +2843,9 @@ export class EntryService {
               vals === 'invalid' ||
               vals.length !== 3 ||
               typeof vals[0] !== 'number' ||
+              !Number.isInteger(vals[0]) ||
+              vals[0] < INT32_MIN ||
+              vals[0] > INT32_MAX ||
               typeof vals[1] !== 'string' ||
               !SHORT_ID_CURSOR.test(vals[1]) ||
               typeof vals[2] !== 'string' ||
@@ -2514,7 +2982,7 @@ export class EntryService {
           .from(entries)
           .where(
             and(
-              readableConditions(this.ctx.access, { now, management: this.isConsole }),
+              readableConditions(this.ctx.access, { now, explicit: Boolean(this.ctx.listSecret) }),
               ne(entries.sensitivity, 'secret'),
               exists(
                 tx
@@ -2544,7 +3012,7 @@ export class EntryService {
     ignore: boolean,
   ): Promise<ConsoleEntryView> {
     const circleId = this.ctx.access.primaryCircleId
-    return withCircle(this.ctx.db, circleId, async (tx, now) => {
+    const view = await withCircle(this.ctx.db, circleId, async (tx, now) => {
       const [before] = await tx
         .select()
         .from(entries)
@@ -2553,6 +3021,7 @@ export class EntryService {
         .limit(1)
       if (
         !before ||
+        before.deletedAt !== null ||
         !canRead(this.ctx.access, parseEntryFacts(before), { now, management: true })
       ) {
         throw new MemoryError(404, '未找到词条')
@@ -2561,7 +3030,10 @@ export class EntryService {
         throw new MemoryError(403, '无权修改此词条')
       }
       checkExpected(before, request.expectedVersion)
-      const [variantRows, glossaryRows, circleMetaMap] = await Promise.all([
+      if (before.sensitivity === 'secret') {
+        throw new MemoryError(400, '机密词条的正文已加密，没有明文提示')
+      }
+      const [variantRows, glossaryRows, circleMetaMap, { settings: privacy }] = await Promise.all([
         tx
           .select()
           .from(entryVariants)
@@ -2572,40 +3044,66 @@ export class EntryService {
           .from(entryGlossary)
           .where(eq(entryGlossary.entryId, before.id)),
         this.loadCircleMetaMap(tx),
+        loadCirclePrivacy(tx, circleId),
       ])
+      const glossary = glossaryRows.map((g) => g.keyword)
+      const meta = circleMetaMap.get(circleId)!
       const targetVariants = request.variantId
         ? variantRows.filter((v) => v.id === request.variantId)
         : variantRows
       if (!targetVariants.length) throw new MemoryError(404, '未找到对应变体切片')
 
-      for (const v of targetVariants) {
+      const outcomes = targetVariants.map((v) => evaluateSensitiveContent(v.content ?? '', privacy))
+      if (
+        ignore &&
+        !targetVariants.some(
+          (v, i) =>
+            v.sensitiveCredential ||
+            v.sensitivePii ||
+            outcomes[i]!.hasCredential ||
+            outcomes[i]!.hasPii,
+        )
+      ) {
+        throw new MemoryError(400, '这条词条的正文没有疑似敏感内容，无需忽略')
+      }
+      if (targetVariants.every((v) => variantIgnoredNow(v) === ignore)) {
+        return (await this.assembleEntryView(tx, before, variantRows, glossary, {
+          circleSlug: meta.slug,
+          circleKind: meta.kind,
+          revealContent: false,
+          now,
+        })) as ConsoleEntryView
+      }
+
+      for (const [i, v] of targetVariants.entries()) {
+        const outcome = outcomes[i]!
         await tx
           .update(entryVariants)
           .set({
             plaintextIgnoredHash: ignore && v.content !== null ? contentDigest(v.content) : null,
-            updatedAt: now,
+            ...(ignore && (outcome.hasCredential || outcome.hasPii)
+              ? {
+                  sensitiveCredential: outcome.hasCredential || v.sensitiveCredential,
+                  sensitivePii: outcome.hasPii || v.sensitivePii,
+                  sensitiveFindings: outcome.findings.length
+                    ? outcome.findings
+                    : v.sensitiveFindings,
+                }
+              : {}),
           })
           .where(eq(entryVariants.id, v.id))
       }
-
-      const [updated] = await tx
-        .update(entries)
-        .set({ version: before.version + 1, updatedAt: now })
-        .where(eq(entries.id, before.id))
-        .returning()
 
       const updatedVariants = await tx
         .select()
         .from(entryVariants)
         .where(eq(entryVariants.entryId, before.id))
         .orderBy(asc(entryVariants.sortOrder))
-      const glossary = glossaryRows.map((g) => g.keyword)
-      const decoded = variantRows.map((v) => ({
-        when: normalizeWhen(v.when),
-        content: before.sensitivity === 'secret' ? null : (v.content ?? ''),
-      }))
-      const snap = toStoredSnapshot(before, decoded, glossary)
-      const afterSnap = toStoredSnapshot(updated!, decoded, glossary)
+      const snap = toStoredSnapshot(
+        before,
+        variantRows.map((v) => ({ when: normalizeWhen(v.when), content: null })),
+        glossary,
+      )
 
       await this.writeEvent(tx, {
         circleId,
@@ -2613,16 +3111,17 @@ export class EntryService {
         type: ignore ? 'ignore_plaintext' : 'unignore_plaintext',
         provenance: this.ctx.access.writeProvenance,
         before: snap,
-        after: afterSnap,
+        after: null,
       })
-      const meta = circleMetaMap.get(circleId)!
-      return (await this.assembleEntryView(tx, updated!, updatedVariants, glossary, {
+      return (await this.assembleEntryView(tx, before, updatedVariants, glossary, {
         circleSlug: meta.slug,
         circleKind: meta.kind,
         revealContent: false,
         now,
       })) as ConsoleEntryView
     })
+    this.ctx.onChanged?.(circleId, request.entryId)
+    return view
   }
 
   ignorePlaintext(request: PlaintextIgnoreRequest): Promise<ConsoleEntryView> {
@@ -2644,6 +3143,7 @@ export class EntryService {
         .limit(1)
       if (
         !before ||
+        before.deletedAt !== null ||
         !canRead(this.ctx.access, parseEntryFacts(before), { now, management: true })
       ) {
         throw new MemoryError(404, '未找到词条')
@@ -2707,7 +3207,7 @@ export class EntryService {
 
       const [updated] = await tx
         .update(entries)
-        .set({ version: before.version + 1, updatedAt: now })
+        .set({ version: before.version + 1, updatedAt: updatedAtFor(now) })
         .where(eq(entries.id, before.id))
         .returning()
 
@@ -2751,6 +3251,46 @@ export class EntryService {
     return res
   }
 
+  private async loadHistoryPlaintextContents(tx: Tx, entryId: string): Promise<string[]> {
+    const rows = await tx
+      .select({ before: entryEvents.before, after: entryEvents.after })
+      .from(entryEvents)
+      .where(eq(entryEvents.entryId, entryId))
+    return rows.flatMap((r) => [
+      ...snapshotPlaintextContents(r.before as Record<string, unknown> | null),
+      ...snapshotPlaintextContents(r.after as Record<string, unknown> | null),
+    ])
+  }
+
+  private async scrubEntryHistoryForSecret(
+    tx: Tx,
+    entryId: string,
+    shortId: string,
+    headings: ReadonlySet<string>,
+  ): Promise<void> {
+    const events = await tx
+      .select({ id: entryEvents.id, before: entryEvents.before, after: entryEvents.after })
+      .from(entryEvents)
+      .where(eq(entryEvents.entryId, entryId))
+    for (const ev of events) {
+      const b = scrubSnapshotForSecret(
+        ev.before as Record<string, unknown> | null,
+        headings,
+        shortId,
+      )
+      const a = scrubSnapshotForSecret(
+        ev.after as Record<string, unknown> | null,
+        headings,
+        shortId,
+      )
+      if (!b.changed && !a.changed) continue
+      await tx
+        .update(entryEvents)
+        .set({ before: b.next, after: a.next })
+        .where(eq(entryEvents.id, ev.id))
+    }
+  }
+
   async protect(request: ProtectEntryRequest): Promise<ConsoleEntryView> {
     const circleId = this.ctx.access.primaryCircleId
     const res = await withCircle(this.ctx.db, circleId, async (tx, now) => {
@@ -2762,6 +3302,7 @@ export class EntryService {
         .limit(1)
       if (
         !before ||
+        before.deletedAt !== null ||
         !canRead(this.ctx.access, parseEntryFacts(before), { now, management: true })
       ) {
         throw new MemoryError(404, '未找到词条')
@@ -2769,7 +3310,17 @@ export class EntryService {
       checkExpected(before, request.expectedVersion)
       const targetSensitivity: Sensitivity = request.target === 'secret' ? 'secret' : 'private'
       if (
-        !canWrite(this.ctx.access, { circleId, kind: before.kind, sensitivity: targetSensitivity })
+        !sensitivityAllowed(before.circleKind, before.kind, targetSensitivity, before.provenance)
+      ) {
+        throw new MemoryError(400, '会话摘要与未确认来源的记录不支持设为机密（secret）')
+      }
+      if (
+        !canWrite(this.ctx.access, {
+          circleId,
+          kind: before.kind,
+          sensitivity: targetSensitivity,
+          provenance: before.provenance,
+        })
       ) {
         throw new MemoryError(
           403,
@@ -2802,8 +3353,24 @@ export class EntryService {
         this.assertSecretPolicy(meta, 'secret', decoded)
       }
 
+      const becameSecret = targetSensitivity === 'secret' && before.sensitivity !== 'secret'
+      const secretHeadings =
+        targetSensitivity === 'secret'
+          ? markdownHeadingsOf([
+              ...decoded.map((v) => v.content),
+              ...(becameSecret ? await this.loadHistoryPlaintextContents(tx, before.id) : []),
+            ])
+          : null
+
       const glossary = glossaryRows.map((g) => g.keyword)
-      const nextTitle = deriveEntryTitle(before.title, decoded, before.shortId, targetSensitivity)
+      const derivedTitle = deriveEntryTitle(
+        before.title,
+        decoded,
+        before.shortId,
+        targetSensitivity,
+      )
+      const nextTitle =
+        secretHeadings && secretHeadings.has(derivedTitle) ? before.shortId : derivedTitle
       const nextHeader = buildSearchHeader({
         sensitivity: targetSensitivity,
         title: nextTitle,
@@ -2818,7 +3385,7 @@ export class EntryService {
           title: nextTitle,
           sensitivity: targetSensitivity,
           version: before.version + 1,
-          updatedAt: now,
+          updatedAt: updatedAtFor(now),
         })
         .where(eq(entries.id, before.id))
         .returning()
@@ -2856,12 +3423,20 @@ export class EntryService {
         await tx.delete(entryLinks).where(eq(entryLinks.sourceEntryId, before.id))
       }
 
+      if (becameSecret && secretHeadings) {
+        await this.scrubEntryHistoryForSecret(tx, before.id, before.shortId, secretHeadings)
+      }
+      const rawBeforeProtect = toStoredSnapshot(before, decoded, glossary)
+      const recordedBeforeProtect =
+        becameSecret && secretHeadings
+          ? scrubSnapshotForSecret(rawBeforeProtect, secretHeadings, before.shortId).next!
+          : rawBeforeProtect
       await this.writeEvent(tx, {
         circleId,
         entryId: before.id,
         type: 'protect',
         provenance: this.ctx.access.writeProvenance,
-        before: toStoredSnapshot(before, decoded, glossary),
+        before: recordedBeforeProtect,
         after: toStoredSnapshot(updated!, decoded, glossary),
       })
 
@@ -2876,7 +3451,81 @@ export class EntryService {
     return res
   }
 
-  async convertToCredential(
+  private async verifyConvertible(
+    tx: Tx,
+    now: Date,
+    request: Pick<ConvertToCredentialRequest, 'entryId' | 'expectedVersion' | 'value'>,
+    lock: boolean,
+  ): Promise<{ before: EntryRow; variantRows: VariantRow[] }> {
+    const query = tx.select().from(entries).where(eq(entries.id, request.entryId))
+    const [before] = await (lock ? query.for('update') : query).limit(1)
+    if (
+      !before ||
+      before.deletedAt !== null ||
+      !canRead(this.ctx.access, parseEntryFacts(before), { now, management: true })
+    ) {
+      throw new MemoryError(404, '未找到词条')
+    }
+    if (!canModify(this.ctx.access, before)) throw new MemoryError(403, '无权修改此词条')
+    if (before.sensitivity === 'secret') {
+      throw new MemoryError(400, '机密词条已加密保存，不能再转存凭据占位符')
+    }
+    if (!placeholderAllowed(before.circleKind, before.kind, before.sensitivity)) {
+      throw new MemoryError(400, CONVERT_SCOPE_TEXT)
+    }
+    checkExpected(before, request.expectedVersion)
+
+    const [variantRows, glossaryRows] = await Promise.all([
+      tx
+        .select()
+        .from(entryVariants)
+        .where(eq(entryVariants.entryId, before.id))
+        .orderBy(asc(entryVariants.sortOrder)),
+      tx
+        .select({ keyword: entryGlossary.keyword })
+        .from(entryGlossary)
+        .where(eq(entryGlossary.entryId, before.id)),
+    ])
+    if (
+      before.title.includes(request.value) ||
+      Boolean(before.disclosure?.includes(request.value)) ||
+      glossaryRows.some((g) => g.keyword.includes(request.value))
+    ) {
+      throw new MemoryError(
+        400,
+        '标题、触发场景或关键词中也有这段值。这些字段是明文，也不能放占位符。请先从这些字段去掉，再转存。',
+      )
+    }
+    const matchesAny = variantRows.some((v) => (v.content ?? '').includes(request.value))
+    if (!matchesAny) {
+      throw new MemoryError(400, '词条所有变体正文中都不含这段要转存的值')
+    }
+    const replaceable = variantRows.some(
+      (v) =>
+        replaceOutsidePlaceholders(v.content ?? '', request.value, '{{cred:c#f}}').replaced > 0,
+    )
+    if (!replaceable) {
+      throw new MemoryError(400, '该值只出现在已有占位符中，没有可替换的明文片段')
+    }
+    return { before, variantRows }
+  }
+
+  // 转存写入外部密码库之前在短事务内预检查，避免外部密码库留下孤立条目
+  async checkConvertible(
+    request: Pick<ConvertToCredentialRequest, 'entryId' | 'expectedVersion' | 'value'>,
+  ): Promise<void> {
+    const circleId = this.ctx.access.primaryCircleId
+    await withCircle(
+      this.ctx.db,
+      circleId,
+      async (tx, now) => {
+        await this.verifyConvertible(tx, now, request, false)
+      },
+      { accessMode: 'read only' },
+    )
+  }
+
+  async convertToCredential<TCredential = unknown>(
     request: ConvertToCredentialRequest,
     saveCredential: (
       tx: Tx,
@@ -2885,15 +3534,16 @@ export class EntryService {
     ) => Promise<{
       identifier: string
       field: string
-      credential: unknown
+      credential?: TCredential
+      loadCredential?: (tx: Tx) => Promise<TCredential>
       created: boolean
-      storedIn: 'hosted' | 'vault' | null
+      storedIn: CredentialStoredIn | null
     }>,
   ): Promise<{
     entry: ConsoleEntryView
-    credential: unknown
+    credential: TCredential
     created: boolean
-    storedIn: 'hosted' | 'vault' | null
+    storedIn: CredentialStoredIn | null
     field: string
     replaced: number
     scrubbedEvents: number
@@ -2901,209 +3551,341 @@ export class EntryService {
     otherEntries: number
   }> {
     const circleId = this.ctx.access.primaryCircleId
-    const out = await withCircle(this.ctx.db, circleId, async (tx, now) => {
-      const [before] = await tx
-        .select()
-        .from(entries)
-        .where(eq(entries.id, request.entryId))
-        .for('update')
-        .limit(1)
-      if (
-        !before ||
-        !canRead(this.ctx.access, parseEntryFacts(before), { now, management: true })
-      ) {
-        throw new MemoryError(404, '未找到词条')
-      }
-      if (!canModify(this.ctx.access, before)) throw new MemoryError(403, '无权修改此词条')
-      if (before.sensitivity === 'secret') {
-        throw new MemoryError(400, '机密词条已加密保存，不能再转存凭据占位符')
-      }
-      if (!placeholderAllowed(before.circleKind, before.kind, before.sensitivity)) {
-        throw new MemoryError(400, CONVERT_SCOPE_TEXT)
-      }
-      checkExpected(before, request.expectedVersion)
+    const memberRows = await this.ctx.db
+      .select({ circleId: circleMembers.circleId })
+      .from(circleMembers)
+      .where(eq(circleMembers.accountId, this.ctx.access.ownerAccountId))
+    const memberCircleIds = [...new Set([circleId, ...memberRows.map((r) => r.circleId)])]
+    const out = await withCircles(
+      this.ctx.db,
+      { read: memberCircleIds, write: [circleId] },
+      async (tx, now) => {
+        const { before, variantRows } = await this.verifyConvertible(tx, now, request, true)
 
-      const variantRows = await tx
-        .select()
-        .from(entryVariants)
-        .where(eq(entryVariants.entryId, before.id))
-        .orderBy(asc(entryVariants.sortOrder))
-      const matchesAny = variantRows.some((v) => (v.content ?? '').includes(request.value))
-      if (!matchesAny) {
-        throw new MemoryError(400, '词条所有变体正文中都不含这段要转存的值')
-      }
+        const saved = await saveCredential(tx, request.target, request.value)
+        const placeholder = `{{cred:${saved.identifier}#${saved.field}}}`
 
-      const saved = await saveCredential(tx, request.target, request.value)
-      const placeholder = `{{cred:${saved.identifier}#${saved.field}}}`
+        const [{ settings: privacy }, glossaryRows, circleMetaMap] = await Promise.all([
+          loadCirclePrivacy(tx, circleId),
+          tx
+            .select({ keyword: entryGlossary.keyword })
+            .from(entryGlossary)
+            .where(eq(entryGlossary.entryId, before.id)),
+          this.loadCircleMetaMap(tx),
+        ])
 
-      const [{ settings: privacy }, glossaryRows, circleMetaMap] = await Promise.all([
-        loadCirclePrivacy(tx, circleId),
-        tx
-          .select({ keyword: entryGlossary.keyword })
-          .from(entryGlossary)
-          .where(eq(entryGlossary.entryId, before.id)),
-        this.loadCircleMetaMap(tx),
-      ])
+        let totalReplaced = 0
+        const updatedVariants: VariantRow[] = []
+        const beforeVariants: { when: WhenCondition; content: string | null }[] = []
 
-      let totalReplaced = 0
-      const updatedVariants: VariantRow[] = []
-      const beforeVariants: { when: WhenCondition; content: string | null }[] = []
+        for (const v of variantRows) {
+          const plain = v.content ?? ''
+          beforeVariants.push({ when: normalizeWhen(v.when), content: plain })
+          const rep = replaceOutsidePlaceholders(plain, request.value, placeholder)
+          if (rep.text.length > ENTRY_CONTENT_MAX) {
+            throw new MemoryError(400, '替换占位符后超出正文长度上限')
+          }
+          totalReplaced += rep.replaced
+          const outcome = evaluateSensitiveContent(rep.text, privacy)
+          const [uRow] = await tx
+            .update(entryVariants)
+            .set({
+              content: rep.text,
+              sensitiveCredential: outcome.hasCredential,
+              sensitivePii: outcome.hasPii,
+              sensitiveFindings: outcome.findings,
+              plaintextIgnoredHash: null,
+              updatedAt: now,
+            })
+            .where(eq(entryVariants.id, v.id))
+            .returning()
+          updatedVariants.push(uRow!)
+        }
 
-      for (const v of variantRows) {
-        const plain = v.content ?? ''
-        beforeVariants.push({ when: normalizeWhen(v.when), content: plain })
-        const rep = replaceOutsidePlaceholders(plain, request.value, placeholder)
-        totalReplaced += rep.replaced
-        const outcome = evaluateSensitiveContent(rep.text, privacy)
-        const [uRow] = await tx
-          .update(entryVariants)
-          .set({
-            content: rep.text,
-            sensitiveCredential: outcome.hasCredential,
-            sensitivePii: outcome.hasPii,
-            sensitiveFindings: outcome.findings,
-            plaintextIgnoredHash: null,
-            updatedAt: now,
-          })
-          .where(eq(entryVariants.id, v.id))
+        if (totalReplaced === 0) {
+          throw new MemoryError(400, '该值只出现在已有占位符中，没有可替换的明文片段')
+        }
+
+        const allCreds = new Set<string>()
+        for (const v of updatedVariants) {
+          for (const id of placeholderIdentifiers(v.content ?? '')) allCreds.add(id)
+        }
+        await syncCredentialRefs(tx, circleId, before.id, allCreds)
+        await tx.delete(entryEmbeddings).where(eq(entryEmbeddings.entryId, before.id))
+
+        const [updated] = await tx
+          .update(entries)
+          .set({ version: before.version + 1, updatedAt: updatedAtFor(now) })
+          .where(eq(entries.id, before.id))
           .returning()
-        updatedVariants.push(uRow!)
-      }
 
-      if (totalReplaced === 0) {
-        throw new MemoryError(400, '该值只出现在已有占位符中，没有可替换的明文片段')
-      }
-
-      const allCreds = new Set<string>()
-      for (const v of updatedVariants) {
-        for (const id of placeholderIdentifiers(v.content ?? '')) allCreds.add(id)
-      }
-      await syncCredentialRefs(tx, circleId, before.id, allCreds)
-
-      const [updated] = await tx
-        .update(entries)
-        .set({ version: before.version + 1, updatedAt: now })
-        .where(eq(entries.id, before.id))
-        .returning()
-
-      // 清理本词条所有历史事件快照中的明文值（覆盖多变体与单正文快照）
-      const histEvents = await tx
-        .select()
-        .from(entryEvents)
-        .where(eq(entryEvents.entryId, before.id))
-      let scrubbedEvents = 0
-      const plaintextVersions = new Set<number>()
-      const scrubSnapshot = (
-        snap: Record<string, unknown> | null,
-      ): { next: Record<string, unknown> | null; changed: boolean } => {
-        if (!snap || typeof snap !== 'object') return { next: snap, changed: false }
-        let changed = false
-        const copy = { ...snap }
-        if (typeof copy.content === 'string' && copy.content.includes(request.value)) {
-          copy.content = copy.content.split(request.value).join(PLAINTEXT_MASK)
-          changed = true
-        }
-        if (Array.isArray(copy.variants)) {
-          copy.variants = copy.variants.map((item) => {
-            if (!item || typeof item !== 'object') return item
-            const rec = item as Record<string, unknown>
-            if (typeof rec.content === 'string' && rec.content.includes(request.value)) {
+        // 清理本词条所有历史事件快照中的明文值（跳过既有凭据占位符）
+        const histEvents = await tx
+          .select()
+          .from(entryEvents)
+          .where(eq(entryEvents.entryId, before.id))
+        let scrubbedEvents = 0
+        const plaintextVersions = new Set<number>()
+        const maskBody = (s: string) =>
+          replaceOutsidePlaceholders(s, request.value, PLAINTEXT_MASK).text
+        const scrubSnapshot = (
+          snap: Record<string, unknown> | null,
+        ): { next: Record<string, unknown> | null; changed: boolean } => {
+          if (!snap || typeof snap !== 'object') return { next: snap, changed: false }
+          let changed = false
+          const copy = { ...snap }
+          if ('fts' in copy) {
+            delete copy.fts
+            changed = true
+          }
+          if (typeof copy.title === 'string' && copy.title.includes(request.value)) {
+            copy.title = copy.title.split(request.value).join(PLAINTEXT_MASK)
+            changed = true
+          }
+          if (typeof copy.disclosure === 'string' && copy.disclosure.includes(request.value)) {
+            copy.disclosure = copy.disclosure.split(request.value).join(PLAINTEXT_MASK)
+            changed = true
+          }
+          if (Array.isArray(copy.glossary)) {
+            const nextGlossary = copy.glossary.filter(
+              (item) => !(typeof item === 'string' && item.includes(request.value)),
+            )
+            if (nextGlossary.length !== copy.glossary.length) {
+              copy.glossary = nextGlossary
               changed = true
-              return { ...rec, content: rec.content.split(request.value).join(PLAINTEXT_MASK) }
             }
-            return item
+          }
+          if (typeof copy.content === 'string') {
+            const masked = maskBody(copy.content)
+            if (masked !== copy.content) {
+              copy.content = masked
+              changed = true
+            }
+          }
+          if (Array.isArray(copy.variants)) {
+            copy.variants = copy.variants.map((item) => {
+              if (!item || typeof item !== 'object') return item
+              const rec = item as Record<string, unknown>
+              if (typeof rec.content === 'string') {
+                const masked = maskBody(rec.content)
+                if (masked !== rec.content) {
+                  changed = true
+                  return { ...rec, content: masked }
+                }
+              }
+              return item
+            })
+          }
+          if (typeof copy.version === 'number' && copy.version < before.version) {
+            const variantTexts: string[] = []
+            if (typeof copy.content === 'string') variantTexts.push(copy.content)
+            if (Array.isArray(copy.variants)) {
+              for (const item of copy.variants) {
+                if (item && typeof item === 'object') {
+                  const txt = (item as Record<string, unknown>).content
+                  if (typeof txt === 'string') variantTexts.push(txt)
+                }
+              }
+            }
+            if (variantTexts.some((txt) => evaluateSensitiveContent(txt, privacy).hasCredential)) {
+              plaintextVersions.add(copy.version)
+            }
+          }
+          return { next: copy, changed }
+        }
+
+        for (const ev of histEvents) {
+          const b = scrubSnapshot(ev.before as Record<string, unknown> | null)
+          const a = scrubSnapshot(ev.after as Record<string, unknown> | null)
+          if (b.changed || a.changed) {
+            scrubbedEvents++
+            await tx
+              .update(entryEvents)
+              .set({ before: b.next, after: a.next })
+              .where(eq(entryEvents.id, ev.id))
+          }
+        }
+
+        const optPlainMask = (text: string | null) =>
+          text === null || !text.includes(request.value)
+            ? text
+            : text.split(request.value).join(PLAINTEXT_MASK)
+        const optBodyMask = (text: string | null) => (text === null ? null : maskBody(text))
+        const suggRows = await tx
+          .select({
+            id: dreamSuggestions.id,
+            title: dreamSuggestions.title,
+            content: dreamSuggestions.content,
+            variants: dreamSuggestions.variants,
+            disclosure: dreamSuggestions.disclosure,
+            reason: dreamSuggestions.reason,
           })
-        }
-        if (changed && typeof copy.version === 'number') plaintextVersions.add(copy.version)
-        return { next: copy, changed }
-      }
-
-      for (const ev of histEvents) {
-        const b = scrubSnapshot(ev.before as Record<string, unknown> | null)
-        const a = scrubSnapshot(ev.after as Record<string, unknown> | null)
-        if (b.changed || a.changed) {
-          scrubbedEvents++
-          await tx
-            .update(entryEvents)
-            .set({ before: b.next, after: a.next })
-            .where(eq(entryEvents.id, ev.id))
-        }
-      }
-
-      const [otherRow] = await tx
-        .select({ n: count() })
-        .from(entries)
-        .where(
-          and(
-            readableConditions(this.ctx.access, { now, management: true }),
-            ne(entries.id, before.id),
-            ne(entries.sensitivity, 'secret'),
-            exists(
-              tx
-                .select({ one: sql`1` })
-                .from(entryVariants)
-                .where(
-                  and(
-                    eq(entryVariants.entryId, entries.id),
-                    sql`position(${request.value} in ${entryVariants.content}) > 0`,
-                  ),
-                ),
+          .from(dreamSuggestions)
+          .where(
+            and(
+              eq(dreamSuggestions.circleId, circleId),
+              sql`${before.id}::uuid = any(${dreamSuggestions.entryIds})`,
             ),
+          )
+        for (const s of suggRows) {
+          const nextTitleS = optPlainMask(s.title)
+          const nextDisclosureS = optPlainMask(s.disclosure)
+          const nextReasonS = s.reason.includes(request.value)
+            ? s.reason.split(request.value).join(PLAINTEXT_MASK)
+            : s.reason
+          const nextContentS = optBodyMask(s.content)
+          const nextVariantsS = s.variants
+            ? s.variants.map((v) => ({ ...v, content: maskBody(v.content) }))
+            : null
+          if (
+            nextTitleS !== s.title ||
+            nextDisclosureS !== s.disclosure ||
+            nextReasonS !== s.reason ||
+            nextContentS !== s.content ||
+            JSON.stringify(nextVariantsS) !== JSON.stringify(s.variants)
+          ) {
+            await tx
+              .update(dreamSuggestions)
+              .set({
+                title: nextTitleS,
+                disclosure: nextDisclosureS,
+                reason: nextReasonS,
+                content: nextContentS,
+                variants: nextVariantsS,
+              })
+              .where(eq(dreamSuggestions.id, s.id))
+          }
+        }
+
+        const candidateRows = await tx
+          .select({
+            id: entries.id,
+            title: entries.title,
+            disclosure: entries.disclosure,
+          })
+          .from(entries)
+          .where(
+            and(
+              inArray(entries.circleId, memberCircleIds),
+              or(
+                ne(entries.circleKind, 'personal'),
+                eq(entries.ownerAccountId, this.ctx.access.ownerAccountId),
+              ),
+              ne(entries.id, before.id),
+              ne(entries.sensitivity, 'secret'),
+              or(
+                sql`position(${request.value} in ${entries.title}) > 0`,
+                sql`position(${request.value} in coalesce(${entries.disclosure}, '')) > 0`,
+                exists(
+                  tx
+                    .select({ one: sql`1` })
+                    .from(entryGlossary)
+                    .where(
+                      and(
+                        eq(entryGlossary.entryId, entries.id),
+                        sql`position(${request.value} in ${entryGlossary.keyword}) > 0`,
+                      ),
+                    ),
+                ),
+                exists(
+                  tx
+                    .select({ one: sql`1` })
+                    .from(entryVariants)
+                    .where(
+                      and(
+                        eq(entryVariants.entryId, entries.id),
+                        sql`position(${request.value} in ${entryVariants.content}) > 0`,
+                      ),
+                    ),
+                ),
+              ),
+            ),
+          )
+        const matchedOtherIds = new Set<string>()
+        const remainingIds: string[] = []
+        for (const c of candidateRows) {
+          if (c.title.includes(request.value) || c.disclosure?.includes(request.value)) {
+            matchedOtherIds.add(c.id)
+          } else {
+            remainingIds.push(c.id)
+          }
+        }
+        if (remainingIds.length) {
+          const [remGlossary, remVariants] = await Promise.all([
+            tx
+              .select({ entryId: entryGlossary.entryId, keyword: entryGlossary.keyword })
+              .from(entryGlossary)
+              .where(inArray(entryGlossary.entryId, remainingIds)),
+            tx
+              .select({ entryId: entryVariants.entryId, content: entryVariants.content })
+              .from(entryVariants)
+              .where(inArray(entryVariants.entryId, remainingIds)),
+          ])
+          for (const g of remGlossary) {
+            if (g.keyword.includes(request.value)) matchedOtherIds.add(g.entryId)
+          }
+          for (const v of remVariants) {
+            if (replaceOutsidePlaceholders(v.content ?? '', request.value, '').replaced > 0) {
+              matchedOtherIds.add(v.entryId)
+            }
+          }
+        }
+
+        const glossary = glossaryRows.map((g) => g.keyword)
+        await syncEntryLinks(tx, {
+          circleId,
+          entryId: before.id,
+          shortId: before.shortId,
+          sensitivity: before.sensitivity,
+          provenance: before.provenance,
+          variants: updatedVariants.map((v) => ({ id: v.id, content: v.content })),
+        })
+
+        await this.writeEvent(tx, {
+          circleId,
+          entryId: before.id,
+          type: 'convert_credential',
+          provenance: this.ctx.access.writeProvenance,
+          before: toStoredSnapshot(
+            before,
+            beforeVariants.map((v) => ({
+              when: v.when,
+              content: v.content === null ? null : maskBody(v.content),
+            })),
+            glossary,
           ),
-        )
+          after: toStoredSnapshot(
+            updated!,
+            updatedVariants.map((v) => ({ when: normalizeWhen(v.when), content: v.content })),
+            glossary,
+          ),
+          context: { identifier: saved.identifier, field: saved.field },
+        })
 
-      const glossary = glossaryRows.map((g) => g.keyword)
-      await syncEntryLinks(tx, {
-        circleId,
-        entryId: before.id,
-        shortId: before.shortId,
-        sensitivity: before.sensitivity,
-        provenance: before.provenance,
-        variants: updatedVariants.map((v) => ({ id: v.id, content: v.content })),
-      })
+        const meta = circleMetaMap.get(circleId)!
+        const view = (await this.assembleEntryView(tx, updated!, updatedVariants, glossary, {
+          circleSlug: meta.slug,
+          circleKind: meta.kind,
+          revealContent: false,
+          now,
+        })) as ConsoleEntryView
 
-      await this.writeEvent(tx, {
-        circleId,
-        entryId: before.id,
-        type: 'convert_credential',
-        provenance: this.ctx.access.writeProvenance,
-        before: toStoredSnapshot(
-          before,
-          beforeVariants.map((v) => ({
-            when: v.when,
-            content:
-              v.content === null ? null : v.content.split(request.value).join(PLAINTEXT_MASK),
-          })),
-          glossary,
-        ),
-        after: toStoredSnapshot(
-          updated!,
-          updatedVariants.map((v) => ({ when: normalizeWhen(v.when), content: v.content })),
-          glossary,
-        ),
-        context: { identifier: saved.identifier, field: saved.field },
-      })
-
-      const meta = circleMetaMap.get(circleId)!
-      const view = (await this.assembleEntryView(tx, updated!, updatedVariants, glossary, {
-        circleSlug: meta.slug,
-        circleKind: meta.kind,
-        revealContent: false,
-        now,
-      })) as ConsoleEntryView
-
-      return {
-        entry: view,
-        credential: saved.credential,
-        created: saved.created,
-        storedIn: saved.storedIn,
-        field: saved.field,
-        replaced: totalReplaced,
-        scrubbedEvents,
-        plaintextVersions: plaintextVersions.size,
-        otherEntries: otherRow?.n ?? 0,
-      }
-    })
+        const credential = saved.loadCredential
+          ? await saved.loadCredential(tx)
+          : (saved.credential as TCredential)
+        return {
+          entry: view,
+          credential,
+          created: saved.created,
+          storedIn: saved.storedIn,
+          field: saved.field,
+          replaced: totalReplaced,
+          scrubbedEvents,
+          plaintextVersions: plaintextVersions.size,
+          otherEntries: matchedOtherIds.size,
+        }
+      },
+    )
     this.ctx.onChanged?.(circleId, request.entryId)
     return out
   }
@@ -3203,27 +3985,29 @@ export class EntryService {
 
   async review(request: ReviewRequest): Promise<ReviewResult> {
     const circleId = this.ctx.access.primaryCircleId
+    const seen = new Map(request.items.map((i) => [i.id, i.version]))
     const changed: string[] = []
     const res = await withCircle(this.ctx.db, circleId, async (tx, now) => {
-      const ids = request.items.map((i) => i.id)
       const rows = await tx
         .select()
         .from(entries)
-        .where(and(inArray(entries.id, ids), pendingReview(this.ctx.access, now)))
-        .for('update')
-      const byId = new Map(rows.map((r) => [r.id, r]))
-      const variantsAll = rows.length
-        ? await tx
-            .select()
-            .from(entryVariants)
-            .where(
-              inArray(
-                entryVariants.entryId,
-                rows.map((r) => r.id),
-              ),
-            )
-            .orderBy(asc(entryVariants.sortOrder))
-        : []
+        .where(and(inArray(entries.id, [...seen.keys()]), pendingReview(this.ctx.access, now)))
+        .orderBy(asc(entries.id))
+        .for('no key update', { skipLocked: true })
+      const targets = rows.filter((r) => seen.get(r.id) === r.version)
+      if (!targets.length) return { done: 0, skipped: seen.size }
+      for (const row of targets) {
+        if (!canModify(this.ctx.access, row)) {
+          throw new MemoryError(403, '无权处理该词条')
+        }
+      }
+
+      const targetIds = targets.map((r) => r.id)
+      const variantsAll = await tx
+        .select()
+        .from(entryVariants)
+        .where(inArray(entryVariants.entryId, targetIds))
+        .orderBy(asc(entryVariants.sortOrder))
       const vByEntry = new Map<string, VariantRow[]>()
       for (const v of variantsAll) {
         const list = vByEntry.get(v.entryId) ?? []
@@ -3231,21 +4015,14 @@ export class EntryService {
         vByEntry.set(v.entryId, list)
       }
 
-      let done = 0
-      let skipped = 0
-      for (const item of request.items) {
-        const before = byId.get(item.id)
-        if (!before || before.version !== item.version || !canModify(this.ctx.access, before)) {
-          skipped++
-          continue
-        }
+      for (const before of targets) {
         const vRows = vByEntry.get(before.id) ?? []
         const snapV = vRows.map((v) => ({ when: normalizeWhen(v.when), content: v.content ?? '' }))
 
         if (request.action === 'delete') {
           const [after] = await tx
             .update(entries)
-            .set({ deletedAt: now, version: before.version + 1, updatedAt: now })
+            .set({ deletedAt: now, version: before.version + 1, updatedAt: updatedAtFor(now) })
             .where(eq(entries.id, before.id))
             .returning()
           await tx.delete(entryEmbeddings).where(eq(entryEmbeddings.entryId, before.id))
@@ -3258,14 +4035,18 @@ export class EntryService {
             before: toStoredSnapshot(before, snapV, []),
             after: toStoredSnapshot(after!, snapV, []),
           })
-          done++
+          changed.push(before.id)
           continue
         }
 
         const nextProvenance: Provenance = this.isConsole ? 'owner' : 'agent'
         const [after] = await tx
           .update(entries)
-          .set({ provenance: nextProvenance, version: before.version + 1, updatedAt: now })
+          .set({
+            provenance: nextProvenance,
+            version: before.version + 1,
+            updatedAt: updatedAtFor(now),
+          })
           .where(eq(entries.id, before.id))
           .returning()
         await syncEntryLinks(tx, {
@@ -3285,9 +4066,8 @@ export class EntryService {
           after: toStoredSnapshot(after!, snapV, []),
         })
         changed.push(before.id)
-        done++
       }
-      return { done, skipped }
+      return { done: targets.length, skipped: seen.size - targets.length }
     })
     for (const entryId of changed) this.ctx.onChanged?.(circleId, entryId)
     return res
@@ -3315,7 +4095,7 @@ export class EntryService {
 
       const [after] = await tx
         .update(entries)
-        .set({ deletedAt: null, version: before.version + 1, updatedAt: now })
+        .set({ deletedAt: null, version: before.version + 1, updatedAt: updatedAtFor(now) })
         .where(eq(entries.id, before.id))
         .returning()
       const [vRows, glossaryRows, metaMap] = await Promise.all([
@@ -3383,10 +4163,21 @@ export class EntryService {
       if (before.deletedAt !== null) throw new MemoryError(409, '请先恢复已删除的词条')
       if (!canModify(this.ctx.access, before)) throw new MemoryError(403, '无权操作此词条')
       checkExpected(before, request.expectedVersion)
+      if (
+        (before.validTo === null || before.validTo > now) &&
+        (before.expiresAt === null || before.expiresAt > now)
+      ) {
+        throw new MemoryError(409, '词条当前仍有效')
+      }
 
       const [after] = await tx
         .update(entries)
-        .set({ validTo: null, version: before.version + 1, updatedAt: now })
+        .set({
+          validTo: null,
+          ...(before.expiresAt !== null && before.expiresAt <= now ? { expiresAt: null } : {}),
+          version: before.version + 1,
+          updatedAt: updatedAtFor(now),
+        })
         .where(eq(entries.id, before.id))
         .returning()
       const [vRows, glossaryRows, metaMap] = await Promise.all([
@@ -3427,6 +4218,130 @@ export class EntryService {
     return res
   }
 
+  async deleteFact(subjectId: string, factId: string, expectedVersion: number): Promise<void> {
+    const circleId = this.ctx.access.primaryCircleId
+    await withCircle(this.ctx.db, circleId, async (tx, now) => {
+      const [before] = await tx
+        .select()
+        .from(entries)
+        .where(
+          and(eq(entries.id, factId), eq(entries.kind, 'fact'), eq(entries.subjectId, subjectId)),
+        )
+        .for('update')
+        .limit(1)
+      if (
+        !before ||
+        before.deletedAt !== null ||
+        !canRead(this.ctx.access, parseEntryFacts(before), { now, management: true })
+      ) {
+        throw new MemoryError(404, '未找到事实')
+      }
+      if (!canModify(this.ctx.access, before)) throw new MemoryError(403, '无权删除此事实')
+      checkExpected(before, expectedVersion)
+
+      const [vRows, glossaryRows] = await Promise.all([
+        tx
+          .select()
+          .from(entryVariants)
+          .where(eq(entryVariants.entryId, before.id))
+          .orderBy(asc(entryVariants.sortOrder)),
+        tx
+          .select({ keyword: entryGlossary.keyword })
+          .from(entryGlossary)
+          .where(eq(entryGlossary.entryId, before.id)),
+      ])
+      const [after] = await tx
+        .update(entries)
+        .set({ deletedAt: now, version: before.version + 1, updatedAt: updatedAtFor(now) })
+        .where(
+          and(
+            eq(entries.id, before.id),
+            eq(entries.version, before.version),
+            isNull(entries.deletedAt),
+          ),
+        )
+        .returning()
+      if (!after) {
+        throw new MemoryError(409, '词条刚被其他请求修改，请重新读取')
+      }
+
+      await tx.delete(entryEmbeddings).where(eq(entryEmbeddings.entryId, before.id))
+      await tx.delete(entryLinks).where(eq(entryLinks.sourceEntryId, before.id))
+
+      const decoded = vRows.map((v) => ({
+        when: normalizeWhen(v.when),
+        content: before.sensitivity === 'secret' ? null : (v.content ?? ''),
+      }))
+      const glossary = glossaryRows.map((g) => g.keyword)
+      await this.writeEvent(tx, {
+        circleId,
+        entryId: before.id,
+        type: 'delete',
+        provenance: this.ctx.access.writeProvenance,
+        before: toStoredSnapshot(before, decoded, glossary),
+        after: toStoredSnapshot(after!, decoded, glossary),
+      })
+    })
+  }
+
+  async reactivateFact(subjectId: string, factId: string, expectedVersion: number): Promise<void> {
+    const circleId = this.ctx.access.primaryCircleId
+    await withCircle(this.ctx.db, circleId, async (tx, now) => {
+      const [before] = await tx
+        .select()
+        .from(entries)
+        .where(
+          and(eq(entries.id, factId), eq(entries.kind, 'fact'), eq(entries.subjectId, subjectId)),
+        )
+        .for('update')
+        .limit(1)
+      if (
+        !before ||
+        before.deletedAt !== null ||
+        !canRead(this.ctx.access, parseEntryFacts(before), { now, management: true })
+      ) {
+        throw new MemoryError(404, '未找到事实')
+      }
+      if (!canModify(this.ctx.access, before)) throw new MemoryError(403, '无权操作此事实')
+      checkExpected(before, expectedVersion)
+      if (before.validTo === null || before.validTo > now) {
+        throw new MemoryError(409, '该事实当前仍有效')
+      }
+
+      const [vRows, glossaryRows] = await Promise.all([
+        tx
+          .select()
+          .from(entryVariants)
+          .where(eq(entryVariants.entryId, before.id))
+          .orderBy(asc(entryVariants.sortOrder)),
+        tx
+          .select({ keyword: entryGlossary.keyword })
+          .from(entryGlossary)
+          .where(eq(entryGlossary.entryId, before.id)),
+      ])
+      const [after] = await tx
+        .update(entries)
+        .set({ validTo: null, version: before.version + 1, updatedAt: updatedAtFor(now) })
+        .where(eq(entries.id, before.id))
+        .returning()
+
+      const decoded = vRows.map((v) => ({
+        when: normalizeWhen(v.when),
+        content: before.sensitivity === 'secret' ? null : (v.content ?? ''),
+      }))
+      const glossary = glossaryRows.map((g) => g.keyword)
+      await this.writeEvent(tx, {
+        circleId,
+        entryId: before.id,
+        type: 'reactivate',
+        provenance: this.ctx.access.writeProvenance,
+        before: toStoredSnapshot(before, decoded, glossary),
+        after: toStoredSnapshot(after!, decoded, glossary),
+      })
+    })
+    this.ctx.onChanged?.(circleId, factId)
+  }
+
   async restore(request: RestoreRequest): Promise<ConsoleEntryView> {
     const circleId = this.ctx.access.primaryCircleId
     const res = await withCircle(this.ctx.db, circleId, async (tx, now) => {
@@ -3448,17 +4363,19 @@ export class EntryService {
       const [ev] = await tx
         .select()
         .from(entryEvents)
-        .where(and(eq(entryEvents.entryId, before.id), eq(entryEvents.id, request.eventId)))
+        .where(
+          and(
+            eq(entryEvents.entryId, before.id),
+            eq(entryEvents.id, request.eventId),
+            sql`(${this.eventVisibility(now)} is false)`,
+          ),
+        )
         .limit(1)
-      const targetSnap = toPublicSnapshot(
-        (ev?.before ?? ev?.after) as Record<string, unknown> | null,
-      )
-      if (
-        !ev ||
-        !targetSnap ||
-        targetSnap.sensitivity === 'secret' ||
-        before.sensitivity === 'secret'
-      ) {
+      if (!ev || !ev.after) {
+        throw new MemoryError(404, '此版本不存在')
+      }
+      const targetSnap = toPublicSnapshot(ev.after as Record<string, unknown>)
+      if (!targetSnap || targetSnap.sensitivity === 'secret' || before.sensitivity === 'secret') {
         throw new MemoryError(400, '该历史版本不完整或为机密版本，无法回滚恢复')
       }
 
@@ -3479,6 +4396,26 @@ export class EntryService {
       if (!targetVariants.length) {
         throw new MemoryError(400, '目标版本不含可恢复的明文变体')
       }
+
+      const validatedRestore = validateCredentialPlaceholders(
+        targetVariants.map((v) => v.content),
+        meta.kind,
+        before.kind,
+        targetSnap.sensitivity,
+      )
+      const restoreBaseline =
+        meta.kind === 'personal' &&
+        before.ownerAccountId === this.ctx.access.ownerAccountId &&
+        placeholderAllowed(meta.kind, before.kind, targetSnap.sensitivity)
+          ? validatedRestore.identifiers
+          : new Set<string>()
+      await this.verifyAddedCredentialRefs(tx, {
+        circleId,
+        ownerAccountId: before.ownerAccountId,
+        refs: validatedRestore.refs,
+        baselineIdentifiers: restoreBaseline,
+        isNonTrusted: before.provenance === 'untrusted',
+      })
 
       const realms = normalizeRealms(targetVariants.flatMap((v) => v.when.realm ?? []))
       const nextGlossary = cleanGlossary(targetSnap.glossary)
@@ -3509,7 +4446,7 @@ export class EntryService {
           validTo: targetSnap.validTo ? new Date(targetSnap.validTo) : null,
           deletedAt: null,
           version: before.version + 1,
-          updatedAt: now,
+          updatedAt: updatedAtFor(now),
         })
         .where(eq(entries.id, before.id))
         .returning()
@@ -3547,7 +4484,12 @@ export class EntryService {
           .insert(entryGlossary)
           .values(nextGlossary.map((keyword) => ({ circleId, entryId: before.id, keyword })))
       }
-      await syncCredentialRefs(tx, circleId, before.id, allCreds)
+      await syncCredentialRefs(
+        tx,
+        circleId,
+        before.id,
+        after!.sensitivity === 'secret' ? new Set() : allCreds,
+      )
       await syncEntryLinks(tx, {
         circleId,
         entryId: before.id,
@@ -3582,6 +4524,27 @@ export class EntryService {
     return res
   }
 
+  private snapshotShown(snapshot: SQLWrapper, now: Date): SQL {
+    return sql`(${snapshot} is not null and coalesce((${readableConditions(this.ctx.access, { now, management: true }, snapshotColumns(snapshot))}), false))`
+  }
+
+  private eventVisibility(now: Date, memoryOk?: SQL): SQL<boolean | null> {
+    const { before, after } = entryEvents
+    const beforeShown = this.snapshotShown(before, now)
+    const beforeOk = sql`(${before} is null or ${beforeShown})`
+    const afterOk = sql`(${after} is null or ${this.snapshotShown(after, now)})`
+    return sql<boolean | null>`(case
+      when ${memoryOk ?? sql`true`} then (case when ${afterOk} then (case when ${beforeOk} then false end) when ${beforeShown} then true end)
+      when ${beforeShown} and not ${afterOk} then true
+    end)`
+  }
+
+  private keyVisibleSql(): SQL {
+    return this.ctx.access.admin
+      ? sql`true`
+      : sql`${clients.ownerAccountId} = ${this.ctx.access.ownerAccountId}`
+  }
+
   async history(entryId: string): Promise<EntryHistory> {
     const circleId = this.ctx.access.primaryCircleId
     return withCircle(
@@ -3595,35 +4558,41 @@ export class EntryService {
         ) {
           throw new MemoryError(404, '未找到词条')
         }
-        const [changes, accessRows] = await Promise.all([
+        const visibility = this.eventVisibility(now)
+        const keyVisible = this.keyVisibleSql()
+        const selectEvent = () =>
           tx
             .select({
               event: entryEvents,
               accountName: accounts.displayName,
-              keyName: apiKeys.name,
+              keyName: sql<string | null>`case when ${keyVisible} then ${apiKeys.name} end`,
               clientName: clients.name,
+              left: sql<boolean>`${visibility}`,
             })
             .from(entryEvents)
             .leftJoin(accounts, eq(accounts.id, entryEvents.actorAccountId))
             .leftJoin(apiKeys, eq(apiKeys.id, entryEvents.actorKeyId))
             .leftJoin(clients, eq(clients.id, apiKeys.clientId))
-            .where(and(eq(entryEvents.entryId, entryId), ne(entryEvents.eventType, ACCESS_EVENT)))
+
+        const [changes, accessRows] = await Promise.all([
+          selectEvent()
+            .where(
+              and(
+                eq(entryEvents.entryId, entryId),
+                ne(entryEvents.eventType, ACCESS_EVENT),
+                sql`${visibility} is not null`,
+              ),
+            )
             .orderBy(desc(entryEvents.id))
             .limit(HISTORY_LIMIT + 1),
           entry.sensitivity === 'secret'
-            ? tx
-                .select({
-                  event: entryEvents,
-                  accountName: accounts.displayName,
-                  keyName: apiKeys.name,
-                  clientName: clients.name,
-                })
-                .from(entryEvents)
-                .leftJoin(accounts, eq(accounts.id, entryEvents.actorAccountId))
-                .leftJoin(apiKeys, eq(apiKeys.id, entryEvents.actorKeyId))
-                .leftJoin(clients, eq(clients.id, apiKeys.clientId))
+            ? selectEvent()
                 .where(
-                  and(eq(entryEvents.entryId, entryId), eq(entryEvents.eventType, ACCESS_EVENT)),
+                  and(
+                    eq(entryEvents.entryId, entryId),
+                    eq(entryEvents.eventType, ACCESS_EVENT),
+                    sql`${visibility} is not null`,
+                  ),
                 )
                 .orderBy(desc(entryEvents.id))
                 .limit(ACCESS_HISTORY_LIMIT + 1)
@@ -3648,9 +4617,7 @@ export class EntryService {
             validTo: entry.validTo ? entry.validTo.toISOString() : null,
           },
           events: combined.map((r) => {
-            const afterFacts = snapshotFacts(r.event.after as Record<string, unknown> | null)
-            const readableAfter =
-              !afterFacts || canRead(this.ctx.access, afterFacts, { now, management: true })
+            const left = Boolean(r.left)
             const ctxObj = r.event.context as Record<string, unknown> | null
             return {
               id: r.event.id,
@@ -3660,10 +4627,10 @@ export class EntryService {
               actor: { accountName: r.accountName, keyName: r.keyName, clientName: r.clientName },
               via: typeof ctxObj?.via === 'string' ? ctxObj.via : null,
               before: toPublicSnapshot(r.event.before as Record<string, unknown> | null),
-              after: readableAfter
-                ? toPublicSnapshot(r.event.after as Record<string, unknown> | null)
-                : null,
-              left: !readableAfter,
+              after: left
+                ? null
+                : toPublicSnapshot(r.event.after as Record<string, unknown> | null),
+              left,
             }
           }),
           truncated,
@@ -3673,122 +4640,187 @@ export class EntryService {
     )
   }
 
-  private activityWhere(filter: ActivityFilter, now: Date): SQL {
-    const canSee = readableConditions(this.ctx.access, { now, management: true })
-    const afterCol = snapshotColumns(entryEvents.after)
-    const afterOk = readableConditions(this.ctx.access, { now, management: true }, afterCol)
-    const beforeCol = snapshotColumns(entryEvents.before)
-    const beforeOk = readableConditions(this.ctx.access, { now, management: true }, beforeCol)
-
-    const changedSql = changedFieldsSql(entryEvents.before, entryEvents.after)
-    const conds: (SQL | undefined)[] = [
-      ne(entryEvents.eventType, ACCESS_EVENT),
-      or(canSee, and(beforeOk, afterOk), beforeOk),
-      filter.from
-        ? sql`${entryEvents.createdAt} >= ${new Date(filter.from).toISOString()}::timestamptz`
-        : undefined,
-      filter.to
-        ? sql`${entryEvents.createdAt} <= ${new Date(filter.to).toISOString()}::timestamptz`
-        : undefined,
-      filter.actor?.length ? inArray(ACTOR_KEY, filter.actor) : undefined,
-      filter.exceptActor?.length ? sql`not (${inArray(ACTOR_KEY, filter.exceptActor)})` : undefined,
-      filter.type?.length ? inArray(entryEvents.eventType, filter.type) : undefined,
-      filter.kind?.length ? inArray(entries.kind, filter.kind) : undefined,
-    ]
-    if (filter.field?.length) {
-      const wantsNone = filter.field.includes('none')
-      const named = filter.field.filter((f): f is ActivityField => f !== 'none')
-      const parts: SQL[] = []
-      if (wantsNone) parts.push(sql`coalesce(array_length(${changedSql}, 1), 0) = 0`)
-      if (named.length) parts.push(sql`${changedSql} && ${named}::text[]`)
-      conds.push(or(...parts))
-    }
-    if (filter.q) {
-      const pattern = `%${escapeLike(filter.q)}%`
-      conds.push(
-        or(
-          ilike(entries.title, pattern),
-          eq(entries.shortId, filter.q.toLowerCase()),
-          ilike(snapshotText(entryEvents.after, 'title'), pattern),
+  private activityEvents(
+    tx: Tx,
+    now: Date,
+    filter: Partial<ActivityFilter>,
+    options: { inner?: SQL | undefined; ordered?: boolean; eventFilters?: boolean } = {},
+  ) {
+    const keyVisible = this.keyVisibleSql()
+    const eventFilters = options.eventFilters ?? true
+    const pattern = filter.q ? `%${escapeLike(filter.q)}%` : undefined
+    const visibility = this.eventVisibility(
+      now,
+      readableConditions(this.ctx.access, { now, management: true }),
+    )
+    const query = tx
+      .select({
+        id: entryEvents.id,
+        type: entryEvents.eventType,
+        entryId: entryEvents.entryId,
+        before: detoasted(entryEvents.before).as('before'),
+        after: detoasted(entryEvents.after).as('after'),
+        context: entryEvents.context,
+        createdAt: entryEvents.createdAt,
+        createdMicros: sql<string>`${microsOf(entryEvents.createdAt)}::text`.as('created_micros'),
+        shortId: entries.shortId,
+        title: entries.title,
+        entryKind: sql<EntryKind>`${entries.kind}`.as('entry_kind'),
+        entrySensitivity: sql<Sensitivity>`${entries.sensitivity}`.as('entry_sensitivity'),
+        entryDeleted: sql<boolean>`(${entries.deletedAt} is not null)`.as('entry_deleted'),
+        entryExpired: sql<boolean>`(not ${stillValid(now)})`.as('entry_expired'),
+        actorKey: sql<string>`${ACTOR_KEY}`.as('actor_key'),
+        accountName: sql<string | null>`${accounts.displayName}`.as('account_name'),
+        keyName: sql<string | null>`case when ${keyVisible} then ${apiKeys.name} end`.as(
+          'key_name',
+        ),
+        clientName: sql<string | null>`${clients.name}`.as('client_name'),
+        vis: sql<boolean | null>`${visibility}`.as('vis'),
+      })
+      .from(entryEvents)
+      .innerJoin(entries, eq(entries.id, entryEvents.entryId))
+      .leftJoin(accounts, eq(accounts.id, entryEvents.actorAccountId))
+      .leftJoin(apiKeys, eq(apiKeys.id, entryEvents.actorKeyId))
+      .leftJoin(clients, eq(clients.id, apiKeys.clientId))
+      .where(
+        and(
+          ne(entryEvents.eventType, ACCESS_EVENT),
+          filter.from ? sql`${entryEvents.createdAt} >= ${filter.from}::timestamptz` : undefined,
+          filter.to ? sql`${entryEvents.createdAt} < ${filter.to}::timestamptz` : undefined,
+          eventFilters && filter.type ? inArray(entryEvents.eventType, filter.type) : undefined,
+          eventFilters && filter.actor ? inArray(ACTOR_KEY, filter.actor) : undefined,
+          eventFilters && filter.exceptActor
+            ? notInArray(ACTOR_KEY, filter.exceptActor)
+            : undefined,
+          pattern
+            ? or(
+                ilike(entries.title, pattern),
+                ilike(entries.shortId, pattern),
+                ilike(snapshotText(entryEvents.before, 'title'), pattern),
+                ilike(snapshotText(entryEvents.before, 'shortId'), pattern),
+              )
+            : undefined,
+          options.inner,
         ),
       )
+
+    const sub = (
+      options.ordered
+        ? query.orderBy(desc(entryEvents.createdAt), desc(entryEvents.id)).offset(OFFSET_ZERO)
+        : query.offset(OFFSET_ZERO)
+    ).as('activity_events')
+
+    const shown = {
+      kind: sql<string>`(case when ${sub.vis} then coalesce(${snapshotText(sub.before, 'kind')}, ${sub.entryKind}::text) else ${sub.entryKind}::text end)`,
+      title: sql<string>`(case when ${sub.vis} then coalesce(${snapshotText(sub.before, 'title')}, ${sub.title}) else ${sub.title} end)`,
+      shortId: sql<string>`(case when ${sub.vis} then coalesce(${snapshotText(sub.before, 'shortId')}, ${sub.shortId}) else ${sub.shortId} end)`,
+      fields: sql<
+        string[]
+      >`(case when ${sub.vis} is false then ${changedFieldsSql(sub.before, sub.after)} else '{}'::text[] end)`,
     }
-    return and(...conds)!
+
+    const conditions = {
+      visible: sql`(${sub.vis} is not null)`,
+      actor: and(
+        filter.actor ? inArray(sub.actorKey, filter.actor) : undefined,
+        filter.exceptActor ? notInArray(sub.actorKey, filter.exceptActor) : undefined,
+      ),
+      type: filter.type ? inArray(sub.type, filter.type) : undefined,
+      kind: filter.kind ? inArray(shown.kind, filter.kind) : undefined,
+      field: filter.field ? fieldCondition(shown.fields, filter.field) : undefined,
+      q: pattern ? or(ilike(shown.title, pattern), ilike(shown.shortId, pattern)) : undefined,
+    }
+    return { sub, shown, conditions }
+  }
+
+  private toActivityItem(
+    r: {
+      id: number
+      type: string
+      entryId: string | null
+      before: unknown
+      after: unknown
+      context: unknown
+      createdAt: Date
+      shortId: string
+      title: string
+      entryKind: EntryKind
+      entrySensitivity: Sensitivity
+      entryDeleted: boolean
+      entryExpired: boolean
+      actorKey: string
+      accountName: string | null
+      keyName: string | null
+      clientName: string | null
+      vis: boolean | null
+    },
+    benchReader: (context: unknown) => BenchMark | null,
+  ): ActivityItem {
+    const left = r.vis === true
+    const beforePub = toPublicSnapshot(r.before as Record<string, unknown> | null)
+    const afterPub = left ? null : toPublicSnapshot(r.after as Record<string, unknown> | null)
+    const fields = !left && beforePub && afterPub ? changedFields(beforePub, afterPub) : []
+    const fChanges =
+      !left && beforePub && afterPub && fields.length
+        ? fieldChanges(beforePub, afterPub, fields)
+        : []
+    return {
+      id: r.id,
+      type: r.type,
+      entryId: r.entryId!,
+      shortId: (left ? beforePub?.shortId : undefined) ?? r.shortId,
+      title: (left ? beforePub?.title : undefined) ?? r.title,
+      kind: (left ? beforePub?.kind : undefined) ?? r.entryKind,
+      sensitivity: (left ? beforePub?.sensitivity : undefined) ?? r.entrySensitivity,
+      createdAt: r.createdAt.toISOString(),
+      actor: { accountName: r.accountName, keyName: r.keyName, clientName: r.clientName },
+      actorKey: r.actorKey,
+      changes: fields,
+      fieldChanges: fChanges,
+      versionBefore: beforePub?.version ?? null,
+      versionAfter: afterPub?.version ?? null,
+      left,
+      deleted: !left && r.entryDeleted,
+      expired: !left && r.entryExpired,
+      bench: benchReader(r.context),
+    }
   }
 
   async activity(
     query: ActivityFilter & { cursor?: string; limit: number },
   ): Promise<ActivityList> {
     const circleId = this.ctx.access.primaryCircleId
-    const cursorId = query.cursor && /^\d{1,15}$/.test(query.cursor) ? Number(query.cursor) : null
-    if (query.cursor && cursorId === null) throw new MemoryError(400, INVALID_CURSOR)
+    const after = decodeTimeCursor(query.cursor, EVENT_ID)
+    if (after === 'invalid') throw new MemoryError(400, INVALID_CURSOR)
     return withCircle(
       this.ctx.db,
       circleId,
       async (tx, now) => {
-        const where = and(
-          this.activityWhere(query, now),
-          cursorId !== null ? lt(entryEvents.id, cursorId) : undefined,
-        )
+        const { sub, conditions } = this.activityEvents(tx, now, query, {
+          ordered: true,
+          inner: after
+            ? sql`(${entryEvents.createdAt} < ${fromMicros(after[0])} or (${entryEvents.createdAt} = ${fromMicros(after[0])} and ${entryEvents.id} < ${after[1]}::bigint))`
+            : undefined,
+        })
         const rows = await tx
-          .select({
-            event: entryEvents,
-            entry: entries,
-            accountName: accounts.displayName,
-            keyName: apiKeys.name,
-            clientName: clients.name,
-            actorKey: ACTOR_KEY,
-          })
-          .from(entryEvents)
-          .innerJoin(entries, eq(entries.id, entryEvents.entryId))
-          .leftJoin(accounts, eq(accounts.id, entryEvents.actorAccountId))
-          .leftJoin(apiKeys, eq(apiKeys.id, entryEvents.actorKeyId))
-          .leftJoin(clients, eq(clients.id, apiKeys.clientId))
-          .where(where)
-          .orderBy(desc(entryEvents.id))
+          .select()
+          .from(sub)
+          .where(and(...Object.values(conditions)))
+          .orderBy(desc(sub.createdAt), desc(sub.id))
           .limit(query.limit + 1)
 
         const slice = rows.slice(0, query.limit)
         const benchReader = await benchMarkReader(
           tx,
-          slice.map((r) => r.event.context),
+          slice.map((r) => r.context),
         )
-        const items: ActivityItem[] = slice.map((r) => {
-          const beforePub = toPublicSnapshot(r.event.before as Record<string, unknown> | null)
-          const afterPub = toPublicSnapshot(r.event.after as Record<string, unknown> | null)
-          const fields = beforePub && afterPub ? changedFields(beforePub, afterPub) : []
-          const fChanges =
-            beforePub && afterPub && fields.length ? fieldChanges(beforePub, afterPub, fields) : []
-          const afterFacts = snapshotFacts(r.event.after as Record<string, unknown> | null)
-          const left = Boolean(
-            afterFacts && !canRead(this.ctx.access, afterFacts, { now, management: true }),
-          )
-          const expired = Boolean(r.entry.validTo && r.entry.validTo <= now)
-          return {
-            id: r.event.id,
-            type: r.event.eventType,
-            entryId: r.entry.id,
-            shortId: r.entry.shortId,
-            title: r.entry.title,
-            kind: r.entry.kind,
-            sensitivity: r.entry.sensitivity,
-            createdAt: r.event.createdAt.toISOString(),
-            actor: { accountName: r.accountName, keyName: r.keyName, clientName: r.clientName },
-            actorKey: r.actorKey,
-            changes: fields,
-            fieldChanges: fChanges,
-            versionBefore: beforePub?.version ?? null,
-            versionAfter: afterPub?.version ?? null,
-            left,
-            deleted: r.entry.deletedAt !== null,
-            expired,
-            bench: benchReader(r.event.context),
-          }
-        })
         const last = slice.at(-1)
         return {
-          items,
-          nextCursor: rows.length > query.limit && last ? String(last.event.id) : null,
+          items: slice.map((r) => this.toActivityItem(r, benchReader)),
+          nextCursor:
+            rows.length > query.limit && last
+              ? encodeTimeCursor(last.createdMicros, String(last.id))
+              : null,
         }
       },
       { accessMode: 'read only' },
@@ -3801,63 +4833,91 @@ export class EntryService {
       this.ctx.db,
       circleId,
       async (tx, now) => {
-        const rows = await tx
-          .select({
-            actorKey: ACTOR_KEY,
-            eventType: entryEvents.eventType,
-            kind: entries.kind,
-            fields: changedFieldsSql(entryEvents.before, entryEvents.after),
-            accountName: accounts.displayName,
-            clientName: clients.name,
-          })
-          .from(entryEvents)
-          .innerJoin(entries, eq(entries.id, entryEvents.entryId))
-          .leftJoin(accounts, eq(accounts.id, entryEvents.actorAccountId))
-          .leftJoin(apiKeys, eq(apiKeys.id, entryEvents.actorKeyId))
-          .leftJoin(clients, eq(clients.id, apiKeys.clientId))
-          .where(this.activityWhere(filter, now))
-          .orderBy(desc(entryEvents.id))
-          .limit(ACTIVITY_FACET_CAP)
+        const { sub, shown, conditions } = this.activityEvents(tx, now, filter, {
+          eventFilters: false,
+        })
+        const ok = (condition: SQL | undefined) => condition ?? sql`true`
+        const base = sql`select ${sub.actorKey} as actor_key, ${sub.type} as type, ${shown.kind} as kind,
+          ${shown.fields} as fields, ${ok(conditions.actor)} as actor_ok, ${ok(conditions.type)} as type_ok,
+          ${ok(conditions.kind)} as kind_ok, ${ok(conditions.field)} as field_ok
+          from ${sub} where ${and(conditions.visible, conditions.q)}`
+        const rows = (await tx.execute(sql`with base as materialized (${base})
+          select 'total' as g, null::text as k, count(*)::int as n from base
+            where actor_ok and type_ok and kind_ok and field_ok
+          union all select 'actor', actor_key, count(*)::int from base
+            where type_ok and kind_ok and field_ok group by actor_key
+          union all select 'type', type, count(*)::int from base
+            where actor_ok and kind_ok and field_ok group by type
+          union all select 'kind', kind, count(*)::int from base
+            where actor_ok and type_ok and field_ok group by kind
+          union all select 'field', f.k, count(*)::int from base
+            cross join lateral unnest(case when cardinality(fields) = 0 then array['none']::text[] else fields end) as f(k)
+            where actor_ok and type_ok and kind_ok group by f.k`)) as unknown as FacetRow[]
 
-        const actorMap = new Map<
-          string,
-          { kind: 'account' | 'client' | 'bench' | 'unknown'; name: string | null; count: number }
-        >()
-        const typeMap = new Map<string, number>()
-        const kindMap = new Map<EntryKind, number>()
-        const fieldMap = new Map<ActivityFacets['fields'][number]['field'], number>()
-
-        for (const r of rows) {
-          const kind = r.actorKey.startsWith('account:')
+        const group = (g: string) =>
+          rows.flatMap((r) =>
+            r.g === g && r.k !== null && r.n > 0 ? [{ key: r.k, count: r.n }] : [],
+          )
+        const actorRows = group('actor')
+        const ids = (prefix: string) =>
+          actorRows.flatMap((r) => (r.key.startsWith(prefix) ? [r.key.slice(prefix.length)] : []))
+        const accountIds = ids('account:')
+        const clientIds = ids('client:')
+        const [accountNames, clientNames] = await Promise.all([
+          accountIds.length
+            ? tx
+                .select({ id: accounts.id, name: accounts.displayName })
+                .from(accounts)
+                .where(inArray(accounts.id, accountIds))
+            : [],
+          clientIds.length
+            ? tx
+                .select({ id: clients.id, name: clients.name })
+                .from(clients)
+                .where(inArray(clients.id, clientIds))
+            : [],
+        ])
+        const names = new Map<string, string>([
+          ...accountNames.map((r) => [`account:${r.id}`, r.name] as const),
+          ...clientNames.map((r) => [`client:${r.id}`, r.name] as const),
+        ])
+        const actorKindOf = (k: string): 'account' | 'client' | 'bench' | 'unknown' =>
+          k.startsWith('account:')
             ? 'account'
-            : r.actorKey.startsWith('client:')
+            : k.startsWith('client:')
               ? 'client'
-              : r.actorKey === 'bench'
+              : k === 'bench'
                 ? 'bench'
                 : 'unknown'
-          const name = kind === 'account' ? r.accountName : kind === 'client' ? r.clientName : null
-          const curA = actorMap.get(r.actorKey)
-          actorMap.set(r.actorKey, {
-            kind,
-            name: curA?.name ?? name,
-            count: (curA?.count ?? 0) + 1,
-          })
-          typeMap.set(r.eventType, (typeMap.get(r.eventType) ?? 0) + 1)
-          kindMap.set(r.kind, (kindMap.get(r.kind) ?? 0) + 1)
-          if (!r.fields.length) fieldMap.set('none', (fieldMap.get('none') ?? 0) + 1)
-          else
-            for (const f of r.fields as ActivityField[]) fieldMap.set(f, (fieldMap.get(f) ?? 0) + 1)
-        }
 
         return {
-          total: rows.length,
-          actors: [...actorMap.entries()].map(([key, v]) => ({ key, ...v })),
-          types: [...typeMap.entries()].map(([type, c]) => ({
-            type: type as ActivityFacets['types'][number]['type'],
-            count: c,
-          })),
-          kinds: [...kindMap.entries()].map(([kind, c]) => ({ kind, count: c })),
-          fields: [...fieldMap.entries()].map(([field, c]) => ({ field, count: c })),
+          total: rows.find((r) => r.g === 'total')?.n ?? 0,
+          actors: sortByCount(
+            actorRows.map((r) => ({
+              key: r.key,
+              kind: actorKindOf(r.key),
+              name: names.get(r.key) ?? null,
+              count: r.count,
+            })),
+          ),
+          types: sortByCount(
+            group('type').flatMap((r) => {
+              const type = ActivityType.safeParse(r.key)
+              return type.success ? [{ type: type.data, count: r.count }] : []
+            }),
+          ),
+          kinds: sortByCount(
+            group('kind').flatMap((r) => {
+              const kind = EntryKind.safeParse(r.key)
+              return kind.success ? [{ kind: kind.data, count: r.count }] : []
+            }),
+          ),
+          fields: sortByCount(
+            group('field').flatMap((r) => {
+              const field = ActivityFieldFilter.safeParse(r.key)
+              return field.success ? [{ field: field.data, count: r.count }] : []
+            }),
+          ),
         }
       },
       { accessMode: 'read only' },
@@ -3873,15 +4933,17 @@ export class EntryService {
         if (!(await knownTimeZone(tx, query.tz))) {
           throw new UnknownTimeZoneError(query.tz)
         }
-        const dayExpr = sql<string>`to_char(date_trunc('day', ${entryEvents.createdAt} at time zone ${query.tz}), 'YYYY-MM-DD')`
+        const { sub, conditions } = this.activityEvents(tx, now, query)
+        const dayExpr = sql`((${sub.createdAt} at time zone ${query.tz}::text)::date)`
         const rows = await tx
-          .select({ day: dayExpr, count: count() })
-          .from(entryEvents)
-          .innerJoin(entries, eq(entries.id, entryEvents.entryId))
-          .leftJoin(apiKeys, eq(apiKeys.id, entryEvents.actorKeyId))
-          .where(this.activityWhere(query, now))
-          .groupBy(dayExpr)
-          .orderBy(asc(dayExpr))
+          .select({
+            day: sql<string>`to_char(${dayExpr}, 'YYYY-MM-DD')`,
+            count: count(),
+          })
+          .from(sub)
+          .where(and(...Object.values(conditions)))
+          .groupBy(sql`1`)
+          .orderBy(sql`1`)
         return { days: rows.map((r) => ({ day: r.day, count: r.count })) }
       },
       { accessMode: 'read only' },
@@ -3894,58 +4956,24 @@ export class EntryService {
       this.ctx.db,
       circleId,
       async (tx, now) => {
-        const [r] = await tx
-          .select({
-            event: entryEvents,
-            entry: entries,
-            accountName: accounts.displayName,
-            keyName: apiKeys.name,
-            clientName: clients.name,
-            actorKey: ACTOR_KEY,
-          })
-          .from(entryEvents)
-          .innerJoin(entries, eq(entries.id, entryEvents.entryId))
-          .leftJoin(accounts, eq(accounts.id, entryEvents.actorAccountId))
-          .leftJoin(apiKeys, eq(apiKeys.id, entryEvents.actorKeyId))
-          .leftJoin(clients, eq(clients.id, apiKeys.clientId))
-          .where(and(eq(entryEvents.id, eventId), ne(entryEvents.eventType, ACCESS_EVENT)))
-          .limit(1)
-        if (!r || !canRead(this.ctx.access, parseEntryFacts(r.entry), { now, management: true })) {
+        const { sub, conditions } = this.activityEvents(
+          tx,
+          now,
+          {},
+          { inner: eq(entryEvents.id, eventId) },
+        )
+        const [r] = await tx.select().from(sub).where(conditions.visible).limit(1)
+        if (!r) {
           throw new MemoryError(404, '未找到变更记录')
         }
-        const benchReader = await benchMarkReader(tx, [r.event.context])
-        const beforePub = toPublicSnapshot(r.event.before as Record<string, unknown> | null)
-        const afterPub = toPublicSnapshot(r.event.after as Record<string, unknown> | null)
-        const fields = beforePub && afterPub ? changedFields(beforePub, afterPub) : []
-        const fChanges =
-          beforePub && afterPub && fields.length ? fieldChanges(beforePub, afterPub, fields) : []
-        const afterFacts = snapshotFacts(r.event.after as Record<string, unknown> | null)
-        const left = Boolean(
-          afterFacts && !canRead(this.ctx.access, afterFacts, { now, management: true }),
-        )
+        const benchReader = await benchMarkReader(tx, [r.context])
+        const beforePub = toPublicSnapshot(r.before as Record<string, unknown> | null)
+        const afterPub =
+          r.vis === true ? null : toPublicSnapshot(r.after as Record<string, unknown> | null)
         return {
-          item: {
-            id: r.event.id,
-            type: r.event.eventType,
-            entryId: r.entry.id,
-            shortId: r.entry.shortId,
-            title: r.entry.title,
-            kind: r.entry.kind,
-            sensitivity: r.entry.sensitivity,
-            createdAt: r.event.createdAt.toISOString(),
-            actor: { accountName: r.accountName, keyName: r.keyName, clientName: r.clientName },
-            actorKey: r.actorKey,
-            changes: fields,
-            fieldChanges: fChanges,
-            versionBefore: beforePub?.version ?? null,
-            versionAfter: afterPub?.version ?? null,
-            left,
-            deleted: r.entry.deletedAt !== null,
-            expired: Boolean(r.entry.validTo && r.entry.validTo <= now),
-            bench: benchReader(r.event.context),
-          },
+          item: this.toActivityItem(r, benchReader),
           before: beforePub,
-          after: left ? null : afterPub,
+          after: afterPub,
         }
       },
       { accessMode: 'read only' },
@@ -4062,7 +5090,10 @@ export class EntryService {
           .from(entryGlossary)
           .innerJoin(entries, eq(entries.id, entryGlossary.entryId))
           .where(
-            and(readableConditions(this.ctx.access, { now }), ne(entries.sensitivity, 'secret')),
+            and(
+              readableConditions(this.ctx.access, { now, explicit: Boolean(this.ctx.listSecret) }),
+              this.ctx.listSecret ? undefined : ne(entries.sensitivity, 'secret'),
+            ),
           )
           .orderBy(asc(entryGlossary.keyword), asc(entries.shortId))
           .limit(GLOSSARY_CAP + 1)
@@ -4098,7 +5129,10 @@ export class EntryService {
           .from(entries)
           .where(
             and(
-              readableConditions(this.ctx.access, { now, management: this.isConsole }),
+              readableConditions(this.ctx.access, {
+                now,
+                explicit: Boolean(this.ctx.listSecret),
+              }),
               this.ctx.listSecret ? undefined : ne(entries.sensitivity, 'secret'),
               or(
                 eq(entries.shortId, q.toLowerCase()),
@@ -4127,11 +5161,16 @@ export class EntryService {
 
   async stats(): Promise<EntryStats> {
     const circleId = this.ctx.access.primaryCircleId
+    const {
+      settings: { retentionDays },
+      recordingSince,
+    } = await loadRecallWindow(this.ctx.db, circleId)
     return withCircle(
       this.ctx.db,
       circleId,
       async (tx, now) => {
-        const readable = readableConditions(this.ctx.access, { now, management: this.isConsole })
+        const readable = readableConditions(this.ctx.access, { now, explicit: this.isConsole })
+        const cutoff = new Date(now.getTime() - retentionDays * 86_400_000)
         const [grouped, missingRow, neverRow, plaintextCredentials, coverage] = await Promise.all([
           tx
             .select({ kind: entries.kind, sensitivity: entries.sensitivity, n: count() })
@@ -4144,28 +5183,28 @@ export class EntryService {
             .where(
               and(
                 readable,
-                eq(entries.kind, 'entry'),
-                ne(entries.provenance, 'untrusted'),
-                ne(entries.sensitivity, 'secret'),
-                sql`${entries.priority} > 0`,
-                or(isNull(entries.disclosure), sql`btrim(${entries.disclosure}) = ''`),
+                this.ctx.listSecret ? undefined : ne(entries.sensitivity, 'secret'),
+                NEEDS_DISCLOSURE,
               ),
             ),
-          tx
-            .select({ n: count() })
-            .from(entries)
-            .leftJoin(entryRecallStats, eq(entryRecallStats.entryId, entries.id))
-            .where(
-              and(
-                readable,
-                eq(entries.kind, 'entry'),
-                ne(entries.provenance, 'untrusted'),
-                ne(entries.sensitivity, 'secret'),
-                sql`${entries.priority} > 0`,
-                or(isNull(entryRecallStats.count), eq(entryRecallStats.count, 0)),
-              ),
-            )
-            .then((r) => r[0]?.n ?? 0),
+          recordingSince.getTime() <= cutoff.getTime()
+            ? tx
+                .select({ n: count() })
+                .from(entries)
+                .leftJoin(entryRecallStats, eq(entryRecallStats.entryId, entries.id))
+                .where(
+                  and(
+                    readable,
+                    eq(entries.kind, 'entry'),
+                    ne(entries.provenance, 'untrusted'),
+                    ne(entries.sensitivity, 'secret'),
+                    sql`${entries.priority} > 0`,
+                    lte(entries.createdAt, cutoff),
+                    or(isNull(entryRecallStats.count), eq(entryRecallStats.count, 0)),
+                  ),
+                )
+                .then((r) => r[0]?.n ?? 0)
+            : Promise.resolve(0),
           this.plaintextCount(),
           loadEmbeddingModels(tx).then((models) => {
             const activeModel = models.active?.model
@@ -4206,17 +5245,49 @@ export class EntryService {
     mark: (tx: Tx) => Promise<void>,
     eventMeta: Record<string, unknown>,
   ): Promise<{ id: string; shortId: string; title: string } | null> {
+    if (!this.isConsole) throw new MemoryError(403, '整理建议只能由管理界面的成员处理')
     const circleId = this.ctx.access.primaryCircleId
     const affected: string[] = []
     const createdOrUpdated = await withCircle(this.ctx.db, circleId, async (tx, now) => {
       const suggestion = await lock(tx)
       if (!suggestion) throw new MemoryError(404, '未找到整理建议')
+      const ids = suggestion.entries.map((e) => e.id)
+      const uniqueIds = [...new Set(ids)]
+      const visibleRows = uniqueIds.length
+        ? await tx.select().from(entries).where(inArray(entries.id, uniqueIds))
+        : []
+      if (
+        visibleRows.length < uniqueIds.length ||
+        visibleRows.some(
+          (r) => !canRead(this.ctx.access, parseEntryFacts(r), { now, management: true }),
+        )
+      ) {
+        throw new MemoryError(404, '未找到整理建议')
+      }
       if (!suggestion.pending) throw new MemoryError(409, '这条建议已经处理过了')
 
-      const ids = suggestion.entries.map((e) => e.id)
-      const rows = ids.length
-        ? await tx.select().from(entries).where(inArray(entries.id, ids)).for('update')
+      const rows = uniqueIds.length
+        ? await tx
+            .select()
+            .from(entries)
+            .where(inArray(entries.id, uniqueIds))
+            .orderBy(asc(entries.id))
+            .for('no key update', { skipLocked: true })
         : []
+      if (rows.length < uniqueIds.length) {
+        const locked = new Set(rows.map((r) => r.id))
+        const missing = uniqueIds.filter((id) => !locked.has(id))
+        const [present] = await tx
+          .select({ n: count() })
+          .from(entries)
+          .where(inArray(entries.id, missing))
+        throw new MemoryError(
+          409,
+          (present?.n ?? 0) < missing.length
+            ? '涉及的词条已变动或过期，这条建议已作废'
+            : '涉及的词条正在被其他请求修改，请稍后再试',
+        )
+      }
       const byId = new Map(rows.map((r) => [r.id, r]))
       for (const req of suggestion.entries) {
         const row = byId.get(req.id)
@@ -4225,14 +5296,18 @@ export class EntryService {
           row.version !== req.version ||
           row.deletedAt !== null ||
           lapsed(row, now) ||
-          !canRead(this.ctx.access, parseEntryFacts(row), { now, management: true }) ||
-          !canModify(this.ctx.access, row)
+          !canRead(this.ctx.access, parseEntryFacts(row), { now, management: true })
         ) {
           throw new MemoryError(409, '涉及的词条已变动或过期，这条建议已作废')
         }
       }
 
       const sources = suggestion.entries.map((e) => byId.get(e.id)!)
+      for (const row of sources) {
+        if (!canModify(this.ctx.access, row)) {
+          throw new MemoryError(403, '无权修改该词条')
+        }
+      }
       const vRows = ids.length
         ? await tx
             .select()
@@ -4256,16 +5331,19 @@ export class EntryService {
       const { settings: privacy } = await loadCirclePrivacy(tx, circleId)
       let primaryResult: { id: string; shortId: string; title: string } | null = null
 
-      const softDeleteOthers = async (keepId: string) => {
+      const snapVariants = (list: readonly { when: unknown; content: string | null }[]) =>
+        list.map((v) => ({
+          when: normalizeWhen((v.when as Record<string, string[]>) ?? {}),
+          content: v.content,
+        }))
+
+      const softDeleteOthers = async (keepId: string, mergedInto?: string) => {
         for (const src of sources) {
           if (src.id === keepId) continue
-          const srcV = (vByEntry.get(src.id) ?? []).map((v) => ({
-            when: normalizeWhen(v.when),
-            content: v.content,
-          }))
+          const srcV = snapVariants(vByEntry.get(src.id) ?? [])
           const [del] = await tx
             .update(entries)
-            .set({ deletedAt: now, version: src.version + 1, updatedAt: now })
+            .set({ deletedAt: now, version: src.version + 1, updatedAt: updatedAtFor(now) })
             .where(eq(entries.id, src.id))
             .returning()
           await tx.delete(entryEmbeddings).where(eq(entryEmbeddings.entryId, src.id))
@@ -4277,8 +5355,9 @@ export class EntryService {
             provenance: this.ctx.access.writeProvenance,
             before: toStoredSnapshot(src, srcV, []),
             after: toStoredSnapshot(del!, srcV, []),
-            context: eventMeta,
+            context: mergedInto ? { ...eventMeta, mergedInto } : eventMeta,
           })
+          affected.push(src.id)
         }
       }
 
@@ -4286,6 +5365,7 @@ export class EntryService {
         const keep = byId.get(action.keepId)
         if (!keep) throw new MemoryError(409, '保留目标不存在')
         const keepVariants = vByEntry.get(keep.id) ?? []
+        const beforeSnap = toStoredSnapshot(keep, snapVariants(keepVariants), [])
         const firstV = keepVariants[0]
         if (firstV) {
           const outcome = evaluateSensitiveContent(action.content, privacy)
@@ -4296,13 +5376,15 @@ export class EntryService {
               sensitiveCredential: outcome.hasCredential,
               sensitivePii: outcome.hasPii,
               sensitiveFindings: outcome.findings,
+              plaintextIgnoredHash:
+                firstV.content === action.content ? firstV.plaintextIgnoredHash : null,
               updatedAt: now,
             })
             .where(eq(entryVariants.id, firstV.id))
         }
         const [uKeep] = await tx
           .update(entries)
-          .set({ version: keep.version + 1, updatedAt: now })
+          .set({ provenance: 'owner', version: keep.version + 1, updatedAt: updatedAtFor(now) })
           .where(eq(entries.id, keep.id))
           .returning()
         await syncEntryLinks(tx, {
@@ -4310,16 +5392,34 @@ export class EntryService {
           entryId: keep.id,
           shortId: keep.shortId,
           sensitivity: keep.sensitivity,
-          provenance: keep.provenance,
+          provenance: 'owner',
           variants: [{ id: firstV?.id ?? keep.id, content: action.content }],
         })
-        await softDeleteOthers(keep.id)
+        await softDeleteOthers(keep.id, keep.id)
+        const afterV = firstV
+          ? [
+              { when: normalizeWhen(firstV.when), content: action.content },
+              ...snapVariants(keepVariants.slice(1)),
+            ]
+          : [{ when: {}, content: action.content }]
+        await this.writeEvent(tx, {
+          circleId,
+          entryId: keep.id,
+          type: 'update',
+          provenance: this.ctx.access.writeProvenance,
+          before: beforeSnap,
+          after: toStoredSnapshot(uKeep!, afterV, []),
+          context: {
+            ...eventMeta,
+            mergedFrom: sources.filter((s) => s.id !== keep.id).map((s) => s.id),
+          },
+        })
         affected.push(keep.id)
-        primaryResult = { id: uKeep!.id, shortId: uKeep!.shortId, title: uKeep!.title }
       } else if (action.kind === 'merge_variants' || action.kind === 'generalize') {
         const targetId = action.kind === 'merge_variants' ? action.keepId : action.targetId
         const keep = byId.get(targetId)
         if (!keep) throw new MemoryError(409, '目标词条不存在')
+        const beforeSnap = toStoredSnapshot(keep, snapVariants(vByEntry.get(keep.id) ?? []), [])
         await tx.delete(entryVariants).where(eq(entryVariants.entryId, keep.id))
         const realms = normalizeRealms(
           action.variants.flatMap((v) => normalizeWhen(v.when).realm ?? []),
@@ -4357,7 +5457,12 @@ export class EntryService {
         }
         const [uKeep] = await tx
           .update(entries)
-          .set({ realms, version: keep.version + 1, updatedAt: now })
+          .set({
+            realms,
+            provenance: 'owner',
+            version: keep.version + 1,
+            updatedAt: updatedAtFor(now),
+          })
           .where(eq(entries.id, keep.id))
           .returning()
         await syncEntryLinks(tx, {
@@ -4365,12 +5470,26 @@ export class EntryService {
           entryId: keep.id,
           shortId: keep.shortId,
           sensitivity: keep.sensitivity,
-          provenance: keep.provenance,
+          provenance: 'owner',
           variants: createdV.map((v) => ({ id: v.id, content: v.content })),
         })
-        if (action.kind === 'merge_variants') await softDeleteOthers(keep.id)
+        if (action.kind === 'merge_variants') await softDeleteOthers(keep.id, keep.id)
+        await this.writeEvent(tx, {
+          circleId,
+          entryId: keep.id,
+          type: 'update',
+          provenance: this.ctx.access.writeProvenance,
+          before: beforeSnap,
+          after: toStoredSnapshot(uKeep!, snapVariants(createdV), []),
+          context:
+            action.kind === 'merge_variants'
+              ? {
+                  ...eventMeta,
+                  mergedFrom: sources.filter((s) => s.id !== keep.id).map((s) => s.id),
+                }
+              : eventMeta,
+        })
         affected.push(keep.id)
-        primaryResult = { id: uKeep!.id, shortId: uKeep!.shortId, title: uKeep!.title }
       } else if (action.kind === 'facet_tag') {
         const target = byId.get(action.targetId)
         if (!target) throw new MemoryError(409, '目标词条不存在')
@@ -4378,6 +5497,7 @@ export class EntryService {
         const sig = whenSignature(norm)
         const vRowsOf = vByEntry.get(target.id) ?? []
         if (vRowsOf.length === 1) {
+          const beforeSnap = toStoredSnapshot(target, snapVariants(vRowsOf), [])
           await tx
             .update(entryVariants)
             .set({ when: norm, whenSignature: sig, updatedAt: now })
@@ -4387,12 +5507,20 @@ export class EntryService {
             .set({
               realms: normalizeRealms(norm.realm ?? []),
               version: target.version + 1,
-              updatedAt: now,
+              updatedAt: updatedAtFor(now),
             })
             .where(eq(entries.id, target.id))
             .returning()
+          await this.writeEvent(tx, {
+            circleId,
+            entryId: target.id,
+            type: 'update',
+            provenance: this.ctx.access.writeProvenance,
+            before: beforeSnap,
+            after: toStoredSnapshot(uTarget!, [{ when: norm, content: vRowsOf[0]!.content }], []),
+            context: eventMeta,
+          })
           affected.push(target.id)
-          primaryResult = { id: uTarget!.id, shortId: uTarget!.shortId, title: uTarget!.title }
         }
       } else if (action.kind === 'distill' || action.kind === 'distill_episode') {
         const draft = action.draft
@@ -4479,7 +5607,7 @@ export class EntryService {
             draftVariants.map((v) => ({ when: normalizeWhen(v.when), content: v.content })),
             [],
           ),
-          context: eventMeta,
+          context: { ...eventMeta, distilledFrom: sources.map((s) => s.id) },
         })
         affected.push(inserted.row.id)
         primaryResult = {
@@ -4487,37 +5615,83 @@ export class EntryService {
           shortId: inserted.row.shortId,
           title: inserted.row.title,
         }
-      } else if (
-        action.kind === 'stale' ||
-        (action.kind === 'review' && action.verdict === 'delete')
-      ) {
-        await softDeleteOthers('__none__')
-      } else if (action.kind === 'review' && action.verdict === 'confirm') {
+      } else if (action.kind === 'stale') {
         for (const src of sources) {
-          await tx
+          const srcV = snapVariants(vByEntry.get(src.id) ?? [])
+          const [uRow] = await tx
             .update(entries)
-            .set({ provenance: 'owner', version: src.version + 1, updatedAt: now })
+            .set({ validTo: now, version: src.version + 1, updatedAt: updatedAtFor(now) })
             .where(eq(entries.id, src.id))
-          const vRows = vByEntry.get(src.id) ?? []
-          await syncEntryLinks(tx, {
+            .returning()
+          await tx.delete(entryEmbeddings).where(eq(entryEmbeddings.entryId, src.id))
+          await this.writeEvent(tx, {
             circleId,
             entryId: src.id,
-            shortId: src.shortId,
-            sensitivity: src.sensitivity,
-            provenance: 'owner',
-            variants: vRows.map((v) => ({ id: v.id, content: v.content })),
+            type: 'update',
+            provenance: this.ctx.access.writeProvenance,
+            before: toStoredSnapshot(src, srcV, []),
+            after: toStoredSnapshot(uRow!, srcV, []),
+            context: eventMeta,
           })
           affected.push(src.id)
         }
+      } else if (action.kind === 'review') {
+        if (sources.some((s) => s.provenance !== 'untrusted')) {
+          throw new MemoryError(409, '涉及的词条已变动或过期，这条建议已作废')
+        }
+        if (action.verdict === 'delete') {
+          await softDeleteOthers('__none__')
+        } else {
+          for (const src of sources) {
+            const vRows = vByEntry.get(src.id) ?? []
+            const srcV = snapVariants(vRows)
+            const [uRow] = await tx
+              .update(entries)
+              .set({ provenance: 'owner', version: src.version + 1, updatedAt: updatedAtFor(now) })
+              .where(eq(entries.id, src.id))
+              .returning()
+            await syncEntryLinks(tx, {
+              circleId,
+              entryId: src.id,
+              shortId: src.shortId,
+              sensitivity: src.sensitivity,
+              provenance: 'owner',
+              variants: vRows.map((v) => ({ id: v.id, content: v.content })),
+            })
+            await this.writeEvent(tx, {
+              circleId,
+              entryId: src.id,
+              type: 'confirm',
+              provenance: 'owner',
+              before: toStoredSnapshot(src, srcV, []),
+              after: toStoredSnapshot(uRow!, srcV, []),
+              context: eventMeta,
+            })
+            affected.push(src.id)
+          }
+        }
       } else if (action.kind === 'promote') {
         for (const src of sources) {
+          const srcV = snapVariants(vByEntry.get(src.id) ?? [])
           const [uRow] = await tx
             .update(entries)
-            .set({ priority: action.priority, version: src.version + 1, updatedAt: now })
+            .set({
+              priority: action.priority,
+              version: src.version + 1,
+              updatedAt: updatedAtFor(now),
+            })
             .where(eq(entries.id, src.id))
             .returning()
+          await this.writeEvent(tx, {
+            circleId,
+            entryId: src.id,
+            type: 'update',
+            provenance: this.ctx.access.writeProvenance,
+            before: toStoredSnapshot(src, srcV, []),
+            after: toStoredSnapshot(uRow!, srcV, []),
+            context: eventMeta,
+          })
           affected.push(src.id)
-          primaryResult ??= { id: uRow!.id, shortId: uRow!.shortId, title: uRow!.title }
         }
       }
 
@@ -4533,18 +5707,25 @@ export class EntryService {
     lock: (tx: Tx) => Promise<LockedSuggestion | null>,
     mark: (tx: Tx) => Promise<void>,
   ): Promise<void> {
+    if (!this.isConsole) throw new MemoryError(403, '整理建议只能由管理界面的成员处理')
     const circleId = this.ctx.access.primaryCircleId
     await withCircle(this.ctx.db, circleId, async (tx, now) => {
       const suggestion = await lock(tx)
       if (!suggestion) throw new MemoryError(404, '未找到整理建议')
+      const uniqueIds = [...new Set(suggestion.entries.map((e) => e.id))]
+      const rows = uniqueIds.length
+        ? await tx.select().from(entries).where(inArray(entries.id, uniqueIds))
+        : []
+      if (
+        rows.length < uniqueIds.length ||
+        rows.some((r) => !canRead(this.ctx.access, parseEntryFacts(r), { now, management: true }))
+      ) {
+        throw new MemoryError(404, '未找到整理建议')
+      }
       if (!suggestion.pending) throw new MemoryError(409, '这条建议已经处理过了')
-      const ids = suggestion.entries.map((e) => e.id)
-      const rows = ids.length ? await tx.select().from(entries).where(inArray(entries.id, ids)) : []
-      const byId = new Map(rows.map((r) => [r.id, r]))
-      for (const req of suggestion.entries) {
-        const row = byId.get(req.id)
-        if (!row || !canRead(this.ctx.access, parseEntryFacts(row), { now, management: true })) {
-          throw new MemoryError(404, '未找到整理建议')
+      for (const row of rows) {
+        if (!canModify(this.ctx.access, row)) {
+          throw new MemoryError(403, '无权处理该词条')
         }
       }
       await mark(tx)
@@ -4575,7 +5756,11 @@ export class EntryService {
             continue
           }
 
-          let replaced = false
+          let supersededInfo: {
+            oldRow: EntryRow
+            superseded: EntryRow
+            storedOldVariants: { when: WhenCondition; content: string | null }[]
+          } | null = null
           if (item.replaces) {
             const [oldRow] = await tx
               .select()
@@ -4604,7 +5789,7 @@ export class EntryService {
                 .orderBy(asc(entryVariants.sortOrder))
               const [superseded] = await tx
                 .update(entries)
-                .set({ validTo: now, version: oldRow.version + 1, updatedAt: now })
+                .set({ validTo: now, version: oldRow.version + 1, updatedAt: updatedAtFor(now) })
                 .where(eq(entries.id, oldRow.id))
                 .returning()
               await tx.delete(entryEmbeddings).where(eq(entryEmbeddings.entryId, oldRow.id))
@@ -4613,16 +5798,7 @@ export class EntryService {
                 when: normalizeWhen(v.when),
                 content: v.content,
               }))
-              await this.writeEvent(tx, {
-                circleId,
-                entryId: oldRow.id,
-                type: 'update',
-                provenance: this.ctx.access.writeProvenance,
-                before: toStoredSnapshot(oldRow, storedOldVariants, []),
-                after: toStoredSnapshot(superseded!, storedOldVariants, []),
-                context: eventMeta,
-              })
-              replaced = true
+              supersededInfo = { oldRow, superseded: superseded!, storedOldVariants }
             }
           }
 
@@ -4684,6 +5860,21 @@ export class EntryService {
             return row!
           })
 
+          if (supersededInfo) {
+            await this.writeEvent(tx, {
+              circleId,
+              entryId: supersededInfo.oldRow.id,
+              type: 'update',
+              provenance: this.ctx.access.writeProvenance,
+              before: toStoredSnapshot(supersededInfo.oldRow, supersededInfo.storedOldVariants, []),
+              after: toStoredSnapshot(
+                supersededInfo.superseded,
+                supersededInfo.storedOldVariants,
+                [],
+              ),
+              context: { ...eventMeta, supersededBy: inserted.id },
+            })
+          }
           await this.writeEvent(tx, {
             circleId,
             entryId: inserted.id,
@@ -4691,10 +5882,12 @@ export class EntryService {
             provenance,
             before: null,
             after: toStoredSnapshot(inserted, [{ when, content: item.content }], []),
-            context: eventMeta,
+            context: supersededInfo
+              ? { ...eventMeta, supersedes: supersededInfo.oldRow.id }
+              : eventMeta,
           })
           embedEntryIds.push(inserted.id)
-          outcomes.push(replaced ? 'updated' : 'added')
+          outcomes.push(supersededInfo ? 'updated' : 'added')
           continue
         }
 
@@ -4783,5 +5976,84 @@ export class EntryService {
     for (const id of embedEntryIds) {
       this.ctx.onChanged?.(circleId, id)
     }
+  }
+
+  async eventChanges(where: SQL): Promise<EventChanges> {
+    const readIds = [...this.ctx.access.circles.keys()]
+    return withCircles(this.ctx.db, { read: readIds }, async (tx, now) => {
+      const rows = await tx
+        .select({
+          id: entryEvents.id,
+          shortId: entryEvents.shortId,
+          eventType: entryEvents.eventType,
+          before: entryEvents.before,
+          after: entryEvents.after,
+          entry: entries,
+        })
+        .from(entryEvents)
+        .leftJoin(entries, eq(entries.id, entryEvents.entryId))
+        .where(where)
+        .orderBy(asc(entryEvents.id))
+
+      const out: EventChanges['entries'] = []
+      let hiddenOther = 0
+      let lastId = 0
+
+      for (const row of rows) {
+        if (row.id > lastId) lastId = row.id
+        const rawBefore = row.before as Record<string, unknown> | null
+        const rawAfter = row.after as Record<string, unknown> | null
+
+        if (row.eventType === ACCESS_EVENT && !rawBefore && !rawAfter) {
+          const readable = row.entry
+            ? canRead(this.ctx.access, parseEntryFacts(row.entry), { now, management: true })
+            : false
+          if (!readable) {
+            hiddenOther++
+            continue
+          }
+          out.push({
+            type: row.eventType,
+            shortId: row.shortId,
+            title: row.entry?.title ?? row.shortId,
+            fields: [],
+            left: false,
+            becameSecret: false,
+          })
+          continue
+        }
+
+        const beforeFacts = snapshotFacts(rawBefore)
+        const afterFacts = snapshotFacts(rawAfter)
+        const beforeReadable = beforeFacts
+          ? canRead(this.ctx.access, beforeFacts, { now, management: true })
+          : false
+        const afterReadable = afterFacts
+          ? canRead(this.ctx.access, afterFacts, { now, management: true })
+          : false
+
+        if (!beforeReadable && !afterReadable) {
+          hiddenOther++
+          continue
+        }
+
+        const beforePub = beforeReadable ? toPublicSnapshot(rawBefore) : null
+        const afterPub = afterReadable ? toPublicSnapshot(rawAfter) : null
+        const shown = afterPub ?? beforePub
+        const becameSecret =
+          beforePub?.sensitivity !== 'secret' && afterPub?.sensitivity === 'secret'
+        const fields = changedFields(beforePub, afterPub)
+        out.push({
+          type: row.eventType,
+          shortId: shown?.shortId ?? row.shortId,
+          title: shown?.title ?? row.shortId,
+          fields,
+          left: Boolean(beforeReadable && !afterReadable),
+          becameSecret,
+        })
+      }
+
+      return { entries: out, hiddenOther, lastId }
+    })
   }
 }

@@ -1,9 +1,9 @@
-import { resolveSpacePrivacy, type PlaintextKind } from '@kioku/contracts'
-import { eq } from 'drizzle-orm'
+import { resolveCirclePrivacy, type PlaintextKind } from '@kioku/contracts'
+import { and, eq } from 'drizzle-orm'
 
 import { currentRevision, evaluateSensitiveContent } from '../credential/privacy'
-import { withSpace, type Db } from '../db/client'
-import { memories, spaces } from '../db/schema'
+import { withCircle, type Db } from '../db/client'
+import { circles, entryVariants } from '../db/schema'
 
 // 每一类已知格式的令牌各一个样例，在运行时拼出来：仓库里不出现完整的令牌写法，免得被托管平台的密钥扫描拦下
 const join = (...parts: string[]) => parts.join('')
@@ -49,26 +49,31 @@ export const sampleToken = (kind: PlaintextKind): string =>
 // 不想多出 allowPlaintext 的写入记录）时用它。不经服务层，不记事件、不加版本
 export async function setPlaintextContent(
   db: Db,
-  spaceId: string,
-  memoryId: string,
+  circleId: string,
+  entryId: string,
   content: string,
+  variantId?: string,
 ): Promise<void> {
-  await withSpace(db, spaceId, async (tx) => {
-    const [space] = await tx
-      .select({ privacy: spaces.privacy, revision: spaces.privacyRevision })
-      .from(spaces)
-      .where(eq(spaces.id, spaceId))
-    const privacy = resolveSpacePrivacy((space?.privacy ?? {}) as Record<string, unknown>)
+  await withCircle(db, circleId, async (tx) => {
+    const [circle] = await tx
+      .select({ privacy: circles.privacy, revision: circles.privacyRevision })
+      .from(circles)
+      .where(eq(circles.id, circleId))
+    const privacy = resolveCirclePrivacy((circle?.privacy ?? {}) as Record<string, unknown>)
     const scan = evaluateSensitiveContent(content, privacy)
     await tx
-      .update(memories)
+      .update(entryVariants)
       .set({
         content,
-        sensitiveRevision: currentRevision(space?.revision ?? 1),
+        sensitiveRevision: currentRevision(circle?.revision ?? 1),
         sensitiveCredential: scan.hasCredential,
         sensitivePii: scan.hasPii,
         sensitiveFindings: scan.findings,
       })
-      .where(eq(memories.id, memoryId))
+      .where(
+        variantId
+          ? and(eq(entryVariants.entryId, entryId), eq(entryVariants.id, variantId))
+          : eq(entryVariants.entryId, entryId),
+      )
   })
 }

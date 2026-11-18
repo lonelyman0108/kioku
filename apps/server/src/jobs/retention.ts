@@ -40,6 +40,7 @@ import {
   entries,
   entryEvents,
   extractionRuns,
+  recallEventHits,
   recallEvents,
   settings,
   subjectBindings,
@@ -291,6 +292,7 @@ async function entryBatch(tx: Tx, where: SQL): Promise<number> {
   if (!rows.length) return 0
   const ids = rows.map((r) => r.id)
   await dropHistory(tx, inArray(entryEvents.entryId, ids))
+  await tx.delete(recallEventHits).where(inArray(recallEventHits.entryId, ids))
   await tx.delete(entries).where(inArray(entries.id, ids))
   return ids.length
 }

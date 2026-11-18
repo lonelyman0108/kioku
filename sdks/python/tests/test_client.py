@@ -6,10 +6,14 @@ import httpx
 
 from kioku_client import AuthenticatedClient
 from kioku_client.api.auth import get_v1_whoami
+from kioku_client.api.entries import get_v1_entries, post_v1_entries
 from kioku_client.api.lifecycle import post_v1_lifecycle_event
 from kioku_client.api.recall import post_v1_recall
 from kioku_client.models import (
     ChatType,
+    CreateEntryRequest,
+    CreateEntryRequestSensitivity,
+    EntryView,
     ErrorResponse,
     LifecycleResponse,
     PlatformRef,
@@ -23,6 +27,12 @@ from kioku_client.models import (
     WhoAmI,
 )
 from kioku_client.types import UNSET
+
+CIRCLE_ID = "00000000-0000-4000-8000-000000000001"
+CLIENT_ID = "00000000-0000-4000-8000-000000000002"
+ACCOUNT_ID = "00000000-0000-4000-8000-000000000003"
+ENTRY_ID = "00000000-0000-4000-8000-000000000004"
+VARIANT_ID = "00000000-0000-4000-8000-000000000005"
 
 
 def client_with(handler) -> AuthenticatedClient:
@@ -52,7 +62,7 @@ def test_prompt_submit_carries_key_and_context():
             200,
             json={
                 "hostOutput": {"mode": "return_value", "value": {"context": "<recall>…</recall>"}},
-                "nodeUris": ["core://rules"],
+                "shortIds": ["m-r23456"],
             },
         )
 
@@ -79,7 +89,7 @@ def test_prompt_submit_carries_key_and_context():
     }
     assert isinstance(result, LifecycleResponse)
     assert result.host_output.value["context"] == "<recall>…</recall>"
-    assert result.node_uris == ["core://rules"]
+    assert result.short_ids == ["m-r23456"]
 
 
 def test_turn_end_and_validation_error():
@@ -113,9 +123,14 @@ def test_recall_parses_candidates_and_subject_facts():
             json={
                 "candidates": [
                     {
-                        "uri": "core://rules",
+                        "entryId": ENTRY_ID,
+                        "shortId": "m-r23456",
                         "title": "群里的规则",
-                        "layer": "core",
+                        "circleId": CIRCLE_ID,
+                        "circleSlug": "home",
+                        "kind": "entry",
+                        "matchedWhen": {"realm": ["group"]},
+                        "otherVariantsCount": 0,
                         "priority": 0,
                         "disclosure": None,
                         "score": 0.5,
@@ -138,29 +153,42 @@ def test_recall_parses_candidates_and_subject_facts():
         body=RecallRequest(query="规则", context=group_context()),
     )
     assert isinstance(result, RecallResponse)
-    assert result.candidates[0].uri == "core://rules"
+    assert result.candidates[0].short_id == "m-r23456"
     assert result.candidates[0].title == "群里的规则"
+    assert result.candidates[0].circle_slug == "home"
     assert result.subjects[0].name is None
     assert result.subjects[0].facts[0].content == "在学日语"
 
 
-def whoami_body(**names) -> dict:
+def whoami_body(**extra) -> dict:
     return {
-        "spaceId": "00000000-0000-4000-8000-000000000001",
-        **names,
-        "app": {
-            "id": "00000000-0000-4000-8000-000000000002",
+        "primaryCircle": {
+            "id": CIRCLE_ID,
+            "slug": "home",
+            "name": "家",
+            "kind": "shared",
+        },
+        "linkedCircles": [],
+        **extra,
+        "client": {
+            "id": CLIENT_ID,
+            "circleId": CIRCLE_ID,
             "slug": "codex",
             "name": "Codex",
             "runtimeFamily": "codex",
-            "ownerAccountId": "00000000-0000-4000-8000-000000000003",
+            "ownerAccountId": ACCOUNT_ID,
             "defaultPersonaId": None,
-            "config": {},
+            "config": {"personMemoryMode": "strict"},
         },
+        "persona": None,
+        "contextFacets": {},
+        "resolvedFacets": {"runtime": ["codex"]},
+        "vocabulary": [],
         "scopes": {
-            "readLayers": ["core"],
-            "writeLayers": [],
+            "readKinds": ["entry"],
+            "writeKinds": [],
             "maxSensitivity": "private",
+            "allowedRealms": None,
             "admin": False,
             "credentials": "none",
         },
@@ -168,16 +196,75 @@ def whoami_body(**names) -> dict:
 
 
 def test_whoami_carries_names():
-    body = whoami_body(spaceName="家", accountName="Alice")
+    body = whoami_body(accountName="Alice")
     result = get_v1_whoami.sync(client=client_with(lambda _: httpx.Response(200, json=body)))
     assert isinstance(result, WhoAmI)
-    assert result.space_name == "家"
+    assert result.primary_circle.name == "家"
     assert result.account_name == "Alice"
+    assert result.resolved_facets.to_dict() == {"runtime": ["codex"]}
 
 
-def test_whoami_without_names_from_older_server():
+def test_whoami_without_account_name():
     body = whoami_body()
     result = get_v1_whoami.sync(client=client_with(lambda _: httpx.Response(200, json=body)))
     assert isinstance(result, WhoAmI)
-    assert result.space_name is UNSET
     assert result.account_name is UNSET
+
+
+def test_entries_create_and_get():
+    now = "2026-10-26T08:00:00.000Z"
+    sample_entry = {
+        "id": ENTRY_ID,
+        "shortId": "m-abc234",
+        "circleId": CIRCLE_ID,
+        "circleSlug": "home",
+        "kind": "entry",
+        "title": "群规",
+        "sensitivity": "internal",
+        "provenance": "agent",
+        "originScope": "global",
+        "topics": ["rules"],
+        "realms": [],
+        "priority": 1,
+        "disclosure": None,
+        "glossary": [],
+        "validFrom": now,
+        "validTo": None,
+        "version": 1,
+        "variants": [
+            {
+                "id": VARIANT_ID,
+                "when": {},
+                "whenSignature": "{}",
+                "sortOrder": 0,
+                "content": "文明发言",
+                "updatedAt": now,
+            }
+        ],
+        "otherVariants": [],
+        "links": [],
+        "createdAt": now,
+        "updatedAt": now,
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(201, json=sample_entry)
+        return httpx.Response(200, json=sample_entry)
+
+    client = client_with(handler)
+    created = post_v1_entries.sync(
+        client=client,
+        body=CreateEntryRequest(
+            title="群规",
+            content="文明发言",
+            sensitivity=CreateEntryRequestSensitivity.INTERNAL,
+        ),
+    )
+    assert isinstance(created, EntryView)
+    assert created.short_id == "m-abc234"
+    assert created.variants[0].content == "文明发言"
+
+    fetched = get_v1_entries.sync(client=client, id="m-abc234")
+    assert isinstance(fetched, EntryView)
+    assert fetched.title == "群规"

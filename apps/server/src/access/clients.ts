@@ -4,7 +4,7 @@ import {
   type ClientGroupRuleView,
   type ClientInfo,
 } from '@kioku/contracts'
-import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm'
+import { and, asc, eq, inArray, isNull, notInArray, sql } from 'drizzle-orm'
 
 import type { Tx } from '../db/client'
 import {
@@ -198,13 +198,13 @@ export async function listClientGroupRules(
     .from(clientGroupRules)
     .innerJoin(subjects, eq(subjects.id, clientGroupRules.groupSubjectId))
     .where(eq(clientGroupRules.clientId, clientId))
-    .orderBy(asc(subjects.displayName), asc(clientGroupRules.groupSubjectId))
+    .orderBy(asc(clientGroupRules.createdAt), asc(clientGroupRules.groupSubjectId))
   return rows
 }
 
 export type ReplaceGroupRulesResult =
   | { ok: true; rules: ClientGroupRuleView[] }
-  | { ok: false; reason: 'no-client' | 'duplicate-group' | 'no-group' | 'no-persona' }
+  | { ok: false; reason: 'no-client' | 'duplicate-group' | 'no-group' | 'not-group' | 'no-persona' }
 
 export async function replaceClientGroupRules(
   tx: Tx,
@@ -225,12 +225,16 @@ export async function replaceClientGroupRules(
   }
 
   if (groupIds.length) {
-    const validGroups = await tx
-      .select({ id: subjects.id })
+    const foundGroups = await tx
+      .select({ id: subjects.id, kind: subjects.kind })
       .from(subjects)
-      .where(and(inArray(subjects.id, groupIds), eq(subjects.kind, 'group')))
-    if (validGroups.length !== groupIds.length) {
+      .where(inArray(subjects.id, groupIds))
+      .for('key share')
+    if (foundGroups.length !== groupIds.length) {
       return { ok: false, reason: 'no-group' }
+    }
+    if (foundGroups.some((g) => g.kind !== 'group')) {
+      return { ok: false, reason: 'not-group' }
     }
   }
 
@@ -242,22 +246,41 @@ export async function replaceClientGroupRules(
       .select({ id: personas.id })
       .from(personas)
       .where(inArray(personas.id, personaIds))
+      .for('key share')
     if (validPersonas.length !== personaIds.length) {
       return { ok: false, reason: 'no-persona' }
     }
   }
 
-  await tx.delete(clientGroupRules).where(eq(clientGroupRules.clientId, clientId))
-  if (rules.length) {
-    await tx.insert(clientGroupRules).values(
-      rules.map((r) => ({
-        circleId,
-        clientId,
-        groupSubjectId: r.groupSubjectId,
-        personaId: r.personaId,
-        isolateGroupMemory: r.isolateGroupMemory,
-      })),
+  await tx
+    .delete(clientGroupRules)
+    .where(
+      and(
+        eq(clientGroupRules.clientId, clientId),
+        groupIds.length ? notInArray(clientGroupRules.groupSubjectId, groupIds) : undefined,
+      ),
     )
+  if (rules.length) {
+    await tx
+      .insert(clientGroupRules)
+      .values(
+        rules.map((r) => ({
+          circleId,
+          clientId,
+          groupSubjectId: r.groupSubjectId,
+          personaId: r.personaId,
+          isolateGroupMemory: r.isolateGroupMemory,
+        })),
+      )
+      .onConflictDoUpdate({
+        target: [clientGroupRules.clientId, clientGroupRules.groupSubjectId],
+        set: {
+          personaId: sql`excluded.persona_id`,
+          isolateGroupMemory: sql`excluded.isolate_group_memory`,
+          updatedAt: new Date(),
+        },
+        setWhere: sql`${clientGroupRules.personaId} is distinct from excluded.persona_id or ${clientGroupRules.isolateGroupMemory} is distinct from excluded.isolate_group_memory`,
+      })
   }
 
   return { ok: true, rules: (await listClientGroupRules(tx, circleId, clientId)) ?? [] }

@@ -58,6 +58,37 @@ describe('步骤的契约', () => {
       false,
     )
   })
+
+  it('shortIds / notShortIds 支持规范短 ID 与 capture 变量引用，拒绝非法格式与内置变量', () => {
+    expect(
+      BenchStep.safeParse({
+        kind: 'tool',
+        tool: 'kioku_search',
+        expect: { shortIds: ['m-234567', '${id}'], notShortIds: ['${other}'] },
+      }).success,
+    ).toBe(true)
+    expect(
+      BenchStep.safeParse({
+        kind: 'tool',
+        tool: 'kioku_search',
+        expect: { shortIds: ['not-an-id'] },
+      }).success,
+    ).toBe(false)
+    expect(
+      BenchStep.safeParse({
+        kind: 'tool',
+        tool: 'kioku_search',
+        expect: { shortIds: ['${run}'] },
+      }).success,
+    ).toBe(false)
+    expect(
+      BenchStep.safeParse({
+        kind: 'tool',
+        tool: 'kioku_get',
+        requires: { circleKind: 'personal' },
+      }).success,
+    ).toBe(true)
+  })
 })
 
 describe('运行请求', () => {
@@ -201,6 +232,15 @@ describe('isReplayStep：只有写工具与 turn.end', () => {
   it('重放日志里的步骤也认得', () => {
     const entry: BenchReplayStep = { kind: 'tool', tool: 'kioku_transfer', arguments: {} }
     expect(isReplayStep(entry)).toBe(true)
+    const created: BenchReplayStep = {
+      kind: 'tool',
+      tool: 'kioku_create',
+      arguments: { content: 'x' },
+      shortId: 'm-234567',
+    }
+    expect(
+      BenchRunRequest.safeParse({ steps: [{ kind: 'whoami' }], replay: [created] }).success,
+    ).toBe(true)
   })
 })
 

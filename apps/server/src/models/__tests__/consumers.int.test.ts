@@ -5,11 +5,11 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 
 import { createApp } from '../../app'
 import { detectWithPrivacyModel, loadPrivacyModelConfig } from '../../credential/privacy'
-import { withSpace, type Database } from '../../db/client'
-import { conversationTurns, dreamRuns, extractionRuns, memories, settings } from '../../db/schema'
+import { withCircle, type Database } from '../../db/client'
+import { conversationTurns, dreamRuns, entries, extractionRuns, settings } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import { type BufferedSession } from '../../extraction/buffer'
-import { dreamSpace } from '../../extraction/dream'
+import { dreamCircle } from '../../extraction/dream'
 import { processSession } from '../../extraction/worker'
 import type { Jobs } from '../../jobs/queue'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
@@ -26,7 +26,7 @@ describe.skipIf(!testDatabaseUrl)('模型消费者（抽取、整理、隐私识
   let database: Database
   let app: ReturnType<typeof createApp>
   let ws: Workspace
-  let appId: string
+  let clientId: string
   let key: string
   const masterKey = randomBytes(32)
   const servers: FakeChatServer[] = []
@@ -63,8 +63,8 @@ describe.skipIf(!testDatabaseUrl)('模型消费者（抽取、整理、隐私识
     await resetDatabase(database)
     await database.db.delete(settings)
     ws = await bootstrap(app)
-    appId = (await ws.createApp('qq-bot', { runtimeFamily: 'astrbot' })).id
-    key = await ws.issueKey(appId)
+    clientId = (await ws.createClient('qq-bot', { runtimeFamily: 'astrbot' })).id
+    key = await ws.issueKey(clientId)
   })
 
   async function addChatProvider(name: string, baseUrl: string, model: string, apiKey: string) {
@@ -107,10 +107,10 @@ describe.skipIf(!testDatabaseUrl)('模型消费者（抽取、整理、隐私识
       ),
     )
     expect(res.status).toBe(200)
-    const turns = await withSpace(database.db, ws.spaceId, (tx) =>
+    const turns = await withCircle(database.db, ws.circleId, (tx) =>
       tx.select().from(conversationTurns).orderBy(asc(conversationTurns.id)),
     )
-    const target: BufferedSession = { spaceId: ws.spaceId, appId, scope: turns[0]!.scope }
+    const target: BufferedSession = { circleId: ws.circleId, clientId, scope: turns[0]!.scope }
     return target
   }
 
@@ -134,7 +134,7 @@ describe.skipIf(!testDatabaseUrl)('模型消费者（抽取、整理、隐私识
     expect(primary.requests).toHaveLength(1)
     expect(backup.requests).toHaveLength(1)
 
-    const runs = await withSpace(database.db, ws.spaceId, (tx) =>
+    const runs = await withCircle(database.db, ws.circleId, (tx) =>
       tx.select().from(extractionRuns).orderBy(asc(extractionRuns.id)),
     )
     expect(runs).toHaveLength(1)
@@ -159,7 +159,7 @@ describe.skipIf(!testDatabaseUrl)('模型消费者（抽取、整理、隐私识
     expect(primary.requests).toHaveLength(1)
     expect(backup.requests).toHaveLength(0)
 
-    const runs = await withSpace(database.db, ws.spaceId, (tx) =>
+    const runs = await withCircle(database.db, ws.circleId, (tx) =>
       tx.select().from(extractionRuns).orderBy(asc(extractionRuns.id)),
     )
     expect(runs).toHaveLength(1)
@@ -184,18 +184,14 @@ describe.skipIf(!testDatabaseUrl)('模型消费者（抽取、整理、隐私识
     // 写入几条同范围的记忆以触发 Dream
     for (let i = 0; i < 3; i++) {
       const res = await app.request(
-        '/v1/memories',
-        jsonRequest(
-          'POST',
-          { uri: `core://note-${i}`, content: `整理待评估记录 ${i}` },
-          bearer(key),
-        ),
+        '/v1/entries',
+        jsonRequest('POST', { title: `note-${i}`, content: `整理待评估记录 ${i}` }, bearer(key)),
       )
       expect(res.status).toBe(201)
     }
 
-    const inheritOutcome = await dreamSpace(database.db, masterKey, {
-      spaceId: ws.spaceId,
+    const inheritOutcome = await dreamCircle(database.db, masterKey, {
+      circleId: ws.circleId,
       runId: '11111111-1111-1111-1111-111111111111',
       trigger: 'manual',
     })
@@ -204,7 +200,7 @@ describe.skipIf(!testDatabaseUrl)('模型消费者（抽取、整理、隐私识
     expect(extractFallback.requests).toHaveLength(1)
     expect(dreamCustom.requests).toHaveLength(0)
 
-    let dRuns = await withSpace(database.db, ws.spaceId, (tx) =>
+    let dRuns = await withCircle(database.db, ws.circleId, (tx) =>
       tx.select().from(dreamRuns).orderBy(asc(dreamRuns.createdAt)),
     )
     expect(dRuns.some((r) => r.model === 'ext-fb')).toBe(true)
@@ -212,24 +208,20 @@ describe.skipIf(!testDatabaseUrl)('模型消费者（抽取、整理、隐私识
     // 再新增一条记忆并切换为自定义整理模型
     await saveDreamBinding(database.db, { mode: 'custom', profileIds: [dp] })
     const res4 = await app.request(
-      '/v1/memories',
-      jsonRequest(
-        'POST',
-        { uri: 'core://note-next', content: '新增记忆触发第二次整理' },
-        bearer(key),
-      ),
+      '/v1/entries',
+      jsonRequest('POST', { title: 'note-next', content: '新增记忆触发第二次整理' }, bearer(key)),
     )
     expect(res4.status).toBe(201)
 
-    const customOutcome = await dreamSpace(database.db, masterKey, {
-      spaceId: ws.spaceId,
+    const customOutcome = await dreamCircle(database.db, masterKey, {
+      circleId: ws.circleId,
       runId: '22222222-2222-2222-2222-222222222222',
       trigger: 'manual',
     })
     expect(customOutcome).toEqual({ outcome: 'done', reason: null })
     expect(dreamCustom.requests).toHaveLength(1)
 
-    dRuns = await withSpace(database.db, ws.spaceId, (tx) =>
+    dRuns = await withCircle(database.db, ws.circleId, (tx) =>
       tx
         .select()
         .from(dreamRuns)
@@ -237,7 +229,7 @@ describe.skipIf(!testDatabaseUrl)('模型消费者（抽取、整理、隐私识
     )
     expect(dRuns.some((r) => r.model === 'dream-only')).toBe(true)
     expect(
-      await withSpace(database.db, ws.spaceId, (tx) => tx.select().from(memories)),
+      await withCircle(database.db, ws.circleId, (tx) => tx.select().from(entries)),
     ).toHaveLength(4)
   })
 

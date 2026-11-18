@@ -143,7 +143,7 @@ export async function openCircleExport(
   }
   const salt = file.subarray(at, (at += SALT_LENGTH))
   const iv = file.subarray(at, (at += IV_LENGTH))
-  const expectedCheck = file.subarray(at, (at += CHECK_LENGTH))
+  const expectedCheck = file.subarray(at, at + CHECK_LENGTH)
 
   const { encryptionKey, checkValue } = await deriveExportKey(passphrase, salt, kdf)
   if (!timingSafeEqual(checkValue, expectedCheck)) {

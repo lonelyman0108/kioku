@@ -624,6 +624,18 @@ export async function importCircle(
           ...e.realms,
           ...rewrittenVariants.flatMap((v) => v.when.realm ?? []),
         ])
+        const rawValidFrom = new Date(e.validFrom)
+        const rawCreatedAt = new Date(e.createdAt)
+        const rawUpdatedAt = new Date(e.updatedAt)
+        const parsedValidTo = e.validTo ? new Date(e.validTo) : null
+        const notAfterNow = (d: Date) => (d.getTime() > now.getTime() ? now : d)
+        const clampedValidFrom = notAfterNow(rawValidFrom)
+        const clampedCreatedAt = notAfterNow(rawCreatedAt)
+        const clampedUpdatedAt = notAfterNow(rawUpdatedAt)
+        const finalValidFrom =
+          parsedValidTo && parsedValidTo.getTime() < clampedValidFrom.getTime()
+            ? parsedValidTo
+            : clampedValidFrom
 
         const [inserted] = await cTx
           .insert(entries)
@@ -644,12 +656,12 @@ export async function importCircle(
             disclosure: e.disclosure,
             topics: e.topics,
             realms,
-            validFrom: new Date(e.validFrom),
-            validTo: e.validTo ? new Date(e.validTo) : null,
+            validFrom: finalValidFrom,
+            validTo: parsedValidTo,
             expiresAt: e.expiresAt ? new Date(e.expiresAt) : null,
             version: 1,
-            createdAt: new Date(e.createdAt),
-            updatedAt: new Date(e.updatedAt),
+            createdAt: clampedCreatedAt,
+            updatedAt: clampedUpdatedAt,
           })
           .returning()
 
@@ -787,7 +799,15 @@ export async function importCircle(
             deletedAt: null,
             expiresAt: row.expiresAt ? row.expiresAt.toISOString() : null,
           },
-          context: { source: 'circle-export' },
+          context: {
+            source: 'circle-export',
+            ...(rawCreatedAt.getTime() > now.getTime()
+              ? { sourceCreatedAt: rawCreatedAt.toISOString() }
+              : {}),
+            ...(rawUpdatedAt.getTime() > now.getTime()
+              ? { sourceUpdatedAt: rawUpdatedAt.toISOString() }
+              : {}),
+          },
         })
       }
     })

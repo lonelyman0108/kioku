@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-import { ALLOWED_REALMS_MAX, Slug } from './auth'
+import { ALLOWED_REALMS_MAX } from './auth'
 import { BenchMark, DeletionRetention, EventActor, PageQuery } from './console'
 import { ConsoleEntryView } from './entries'
 import { FacetTermSlug } from './facets'

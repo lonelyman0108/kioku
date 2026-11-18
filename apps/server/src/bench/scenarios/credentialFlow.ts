@@ -1,16 +1,16 @@
 import type { BenchScenarioInput } from '@kioku/contracts'
 
-import { CREDENTIAL_MANAGE, EXPIRES, runUri } from './shared'
+import { CREDENTIAL_MANAGE, EXPIRES, PERSONAL_CREDENTIAL_REF, runTitle } from './shared'
 
 const IDENTIFIER = 'bench-${run}'
-const LOGIN = runUri('login')
 
 // 凭据流程：只有凭据能力为「管理」的 Key 能通过 Key 管理凭据。只断言报错与否和元数据，不断言值：
-// 进程内一律不给值，命令行取值是一次真实调用
+// 进程内一律不给值，命令行取值是一次真实调用；占位符引用仅在个人圈（personal）执行
 export const credentialFlow: BenchScenarioInput = {
   id: 'credential-flow',
   title: '凭据流程',
-  description: '新建托管的凭据、列出、取用、在记忆里引用，被引用时不能删，去掉引用之后修改并删除。',
+  description:
+    '新建托管的凭据、列出、取用、在个人圈词条里引用（被引用时不能删），去掉引用之后修改并删除。',
   steps: [
     {
       kind: 'tool',
@@ -43,23 +43,25 @@ export const credentialFlow: BenchScenarioInput = {
     },
     {
       kind: 'tool',
-      label: '在记忆里引用',
+      label: '在词条里引用',
       tool: 'kioku_create',
       arguments: {
-        uri: LOGIN,
+        title: runTitle('登录凭据引用'),
         content: `测试台的登录说明，密码 {{cred:${IDENTIFIER}#password}}。`,
+        sensitivity: 'private',
         priority: 2,
         valid_to: EXPIRES,
       },
-      requires: CREDENTIAL_MANAGE,
+      requires: PERSONAL_CREDENTIAL_REF,
       expect: { error: false },
+      capture: { loginId: 'ID: ' },
     },
     {
       kind: 'tool',
-      label: '读记忆时列出引用的凭据',
+      label: '读词条时列出引用的凭据',
       tool: 'kioku_get',
-      arguments: { uri: LOGIN },
-      requires: CREDENTIAL_MANAGE,
+      arguments: { id: '${loginId}' },
+      requires: PERSONAL_CREDENTIAL_REF,
       expect: {
         error: false,
         contains: ['正文里引用的凭据', `${IDENTIFIER}（测试台的凭据）：可以取用`],
@@ -70,15 +72,15 @@ export const credentialFlow: BenchScenarioInput = {
       label: '被引用时不能删',
       tool: 'kioku_credential_delete',
       arguments: { identifier: IDENTIFIER },
-      requires: CREDENTIAL_MANAGE,
+      requires: PERSONAL_CREDENTIAL_REF,
       expect: { error: true, contains: ['引用'] },
     },
     {
       kind: 'tool',
-      label: '删掉引用它的记忆',
+      label: '删掉引用它的词条',
       tool: 'kioku_delete',
-      arguments: { uri: LOGIN },
-      requires: CREDENTIAL_MANAGE,
+      arguments: { id: '${loginId}' },
+      requires: PERSONAL_CREDENTIAL_REF,
       expect: { error: false },
     },
     {

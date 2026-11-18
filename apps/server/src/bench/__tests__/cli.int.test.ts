@@ -8,12 +8,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import type { EntryView } from '@kioku/contracts'
 import { serve } from '@hono/node-server'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
-import { withSpace, type Database } from '../../db/client'
-import { apiKeys, memories, recallEvents, settings, subjects } from '../../db/schema'
+import { withCircle, type Database } from '../../db/client'
+import { apiKeys, entries, recallEvents, settings, subjects } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import type { Deps } from '../../http/env'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
@@ -76,15 +77,16 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
     await writeFile(path, JSON.stringify({ id: 'mine', title: '我的场景', steps, ...extra }))
     return path
   }
-  const realCreate = async (body: Record<string, unknown>) => {
+  const realCreate = async (body: Record<string, unknown>): Promise<EntryView> => {
     const res = await app.request(
-      '/v1/memories',
+      '/v1/entries',
       jsonRequest('POST', { priority: 2, ...body }, bearer(key)),
     )
     if (res.status !== 201) throw new Error(await res.text())
+    return (await res.json()) as EntryView
   }
-  const count = (table: typeof memories | typeof subjects | typeof recallEvents) =>
-    withSpace(database.db, ws.spaceId, async (tx) => (await tx.select().from(table)).length)
+  const count = (table: typeof entries | typeof subjects | typeof recallEvents) =>
+    withCircle(database.db, ws.circleId, async (tx) => (await tx.select().from(table)).length)
 
   beforeAll(async () => {
     database = await openTestDatabase()
@@ -119,8 +121,8 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
     await resetDatabase(database)
     await database.db.delete(settings)
     ws = await bootstrap(app)
-    const appId = (await ws.createApp('cc', { runtimeFamily: 'claudecode' })).id
-    key = await ws.issueKey(appId)
+    const clientId = (await ws.createClient('cc', { runtimeFamily: 'claudecode' })).id
+    key = await ws.issueKey(clientId)
     dir = await mkdtemp(join(tmpdir(), 'kioku-bench-'))
   })
   afterEach(async () => {
@@ -131,13 +133,13 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
     it(
       '全部通过时退出码 0，默认只输出步骤名与通过与否，不打印正文；--show-output 才打印',
       async () => {
-        await realCreate({ uri: 'user://notes/x', content: BODY })
+        const entry = await realCreate({ title: 'cli-note', content: BODY })
         const file = await scenarioFile([
           {
             kind: 'tool',
             label: '读那条记忆',
             tool: 'kioku_get',
-            arguments: { uri: 'user://notes/x' },
+            arguments: { id: entry.shortId },
             expect: { error: false, contains: [BODY] },
           },
         ])
@@ -160,13 +162,13 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
     it(
       '有失败时退出码 1，只输出失败的断言，不打印实际结果',
       async () => {
-        await realCreate({ uri: 'user://notes/x', content: BODY })
+        const entry = await realCreate({ title: 'cli-fail', content: BODY })
         const file = await scenarioFile([
           {
             kind: 'tool',
             label: '断言不成立',
             tool: 'kioku_get',
-            arguments: { uri: 'user://notes/x' },
+            arguments: { id: entry.shortId },
             expect: { contains: ['没有这句话'] },
           },
           { kind: 'whoami', label: '后面照常跑' },
@@ -207,7 +209,7 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
             arguments: { query: '${pw}' },
             expect: {
               contains: ['没有这句 ${pw}'],
-              uris: ['fake://x/${pw}'],
+              shortIds: ['${pw}'],
             },
           },
           {
@@ -223,7 +225,7 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
         expect(code).toBe(1)
         expect(stdout).toContain('失败  拿 ${pw} 当查询')
         expect(stdout).toContain('应包含「没有这句 ${pw}」')
-        expect(stdout).toContain('URI 列表应有 fake://x/${pw}')
+        expect(stdout).toContain('短 ID 列表应有 ${pw}')
         expect(stdout).toContain('失败  回显的不能有 ${pw}')
         expect(stdout).toContain('不应包含「${pw}」')
         expect(stdout).not.toContain(VALUE)
@@ -269,11 +271,13 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
     it(
       '跳过不算失败',
       async () => {
-        const low = await ws.createKey((await ws.createApp('low')).id, {
-          readLayers: ['core'],
-          writeLayers: [],
+        const low = await ws.createKey((await ws.createClient('low')).id, {
+          readKinds: ['entry'],
+          writeKinds: [],
           maxSensitivity: 'public',
+          allowedRealms: null,
           admin: false,
+          credentials: 'none',
         })
         const file = await scenarioFile([
           { kind: 'whoami' },
@@ -289,18 +293,20 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
     it(
       '权限探测只列结果：被拒的步骤显示报错，不显示通过，也不算进通过；退出码 0',
       async () => {
-        const low = await ws.createKey((await ws.createApp('low')).id, {
-          readLayers: ['core'],
-          writeLayers: [],
+        const low = await ws.createKey((await ws.createClient('low')).id, {
+          readKinds: ['entry'],
+          writeKinds: [],
           maxSensitivity: 'public',
+          allowedRealms: null,
           admin: false,
+          credentials: 'none',
         })
         const { code, stdout } = await bench(['--scenario', 'permission-probe', '--allow-writes'], {
           KIOKU_BENCH_KEY: low.key,
         })
         expect(code).toBe(0)
         expect(stdout).toContain('成功  当前访问密钥的上限')
-        expect(stdout).toContain('报错  写机密级')
+        expect(stdout).toContain('报错  写机密词条')
         expect(stdout).not.toContain('通过  ')
         expect(stdout).not.toMatch(/通过 \d/)
         expect(stdout).toMatch(/成功 \d+，报错 [1-9]\d*，失败 0，跳过 0，没有执行 0/)
@@ -310,7 +316,7 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
         // 同一个场景，能写的 Key 这一步就是成功
         const full = await bench(['--scenario', 'permission-probe', '--allow-writes'])
         expect(full.code).toBe(0)
-        expect(full.stdout).toContain('成功  写机密级')
+        expect(full.stdout).toContain('成功  写机密词条')
         expect(full.stdout).not.toContain('测试台的权限探测写下的')
       },
       PROCESS_TIMEOUT,
@@ -402,7 +408,7 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
     it(
       '场景里有写操作时不加就拒绝，退出码 2，一步也不执行',
       async () => {
-        const memoriesBefore = await count(memories)
+        const entriesBefore = await count(entries)
         const cases: [string[], string][] = [
           [['--scenario', 'memory-crud'], '新建'],
           // 带群聊上下文的读也算：第一次见到的账号会新建对象
@@ -419,7 +425,7 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
           expect(requests.some((r) => r.path === '/v1/mcp')).toBe(false)
           expect(requests.map((r) => r.path)).toEqual(['/v1/whoami'])
         }
-        expect(await count(memories)).toBe(memoriesBefore)
+        expect(await count(entries)).toBe(entriesBefore)
         expect(await count(subjects)).toBe(0)
       },
       PROCESS_TIMEOUT,
@@ -430,7 +436,7 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
       async () => {
         const reading = await scenarioFile([
           { kind: 'boot' },
-          { kind: 'tool', tool: 'kioku_list' },
+          { kind: 'tool', tool: 'kioku_browse' },
           { kind: 'tool', tool: 'kioku_credential' },
           { kind: 'recall', body: { query: '随便' } },
           { kind: 'recall', body: { query: '随便', context: { chatType: 'cron' } } },
@@ -458,13 +464,16 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
     describe('运行前判不出来的：event、chatType 写成变量', () => {
       // 只读的一步取到变量；group 的上下文第一次见到时新建对象，能看出真的写了
       const scenario = async (step: unknown) => {
-        await realCreate({ uri: 'user://notes/vars', content: '事件: turn.end\n会话: group' })
+        const created = await realCreate({
+          title: 'cli-vars',
+          content: '事件: turn.end\n会话: group',
+        })
         return scenarioFile([
           {
             kind: 'tool',
             label: '取变量',
             tool: 'kioku_get',
-            arguments: { uri: 'user://notes/vars' },
+            arguments: { id: created.shortId },
             capture: { e: '事件: ', c: '会话: ' },
           },
           step,
@@ -534,12 +543,12 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
       it(
         '展开之后不写的照常执行：cron 上下文',
         async () => {
-          await realCreate({ uri: 'user://notes/vars', content: '会话: cron' })
+          const created = await realCreate({ title: 'cli-cron', content: '会话: cron' })
           const file = await scenarioFile([
             {
               kind: 'tool',
               tool: 'kioku_get',
-              arguments: { uri: 'user://notes/vars' },
+              arguments: { id: created.shortId },
               capture: { c: '会话: ' },
             },
             {
@@ -565,14 +574,14 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
         expect(stderr).toBe('')
         expect(code).toBe(0)
         expect(stdout).toContain('Claude Code 一次会话（claude-code-session）')
-        expect(stdout).toContain('记忆增删改查（memory-crud）')
+        expect(stdout).toContain('词条增删改查（memory-crud）')
         expect(stdout).toContain('权限探测（permission-probe）')
         expect(stdout).toContain('凭据流程（credential-flow）')
         expect(stdout).not.toContain('bench-not-a-real-value')
         expect(stdout).not.toContain('失败  ')
         expect(stdout).toContain('没有失败的步骤')
         // 走的是真实接口：写下的都软删除了，也记了召回事件
-        expect(await count(memories)).toBeGreaterThan(0)
+        expect(await count(entries)).toBeGreaterThan(0)
         await expect.poll(() => count(recallEvents)).toBeGreaterThan(0)
       },
       PROCESS_TIMEOUT,

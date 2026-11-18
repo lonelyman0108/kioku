@@ -2,7 +2,7 @@ import { z } from 'zod'
 
 import { LensKeyScopes, WhoAmI } from './auth'
 import { ShortId } from './links'
-import { CredentialCapability, EntryKind, Sensitivity, SubjectKind } from './memory'
+import { CircleKind, CredentialCapability, EntryKind, Sensitivity, SubjectKind } from './memory'
 import { ModelFormat, ThinkingLevel } from './models'
 import { SessionExtra, TurnEndEvent } from './recall'
 
@@ -29,12 +29,21 @@ export const BENCH_MAX_REPLAY_BYTES = 512 * 1024
 export const BENCH_MAX_REQUEST_BYTES = 2 * 1024 * 1024
 
 const AssertedText = z.string().min(1).max(2000)
+const ShortIdCaptureRef = z
+  .string()
+  .regex(
+    /^\$\{(?!(?:run|expires)\})[A-Za-z_][A-Za-z0-9_]{0,63}\}$/,
+    '只能填规范短 ID 或 capture 变量（例如 ${id}）',
+  )
+export const ShortIdAssertion = z.union([ShortId, ShortIdCaptureRef])
+export type ShortIdAssertion = z.infer<typeof ShortIdAssertion>
+
 export const BenchExpect = z.strictObject({
   error: z.boolean().optional(),
   contains: z.array(AssertedText).max(20).optional(),
   notContains: z.array(AssertedText).max(20).optional(),
-  shortIds: z.array(ShortId).max(50).optional(),
-  notShortIds: z.array(ShortId).max(50).optional(),
+  shortIds: z.array(ShortIdAssertion).max(50).optional(),
+  notShortIds: z.array(ShortIdAssertion).max(50).optional(),
 })
 export type BenchExpect = z.infer<typeof BenchExpect>
 
@@ -48,6 +57,7 @@ export const BenchCapture = z.record(CaptureName, z.string().min(1).max(200))
 export type BenchCapture = z.infer<typeof BenchCapture>
 
 export const BenchRequires = z.strictObject({
+  circleKind: CircleKind.optional(),
   readKinds: z.array(EntryKind).optional(),
   writeKinds: z.array(EntryKind).optional(),
   maxSensitivity: Sensitivity.optional(),
@@ -98,6 +108,7 @@ export const BenchReplayStep = z.discriminatedUnion('kind', [
     kind: z.literal('tool'),
     tool: z.enum(BENCH_WRITE_TOOLS),
     arguments: ToolArguments,
+    shortId: ShortId.optional(),
   }),
   z.strictObject({ kind: z.literal('lifecycle'), body: TurnEndEvent }),
 ])

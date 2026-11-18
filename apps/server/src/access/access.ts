@@ -554,13 +554,23 @@ export interface WriteIntent {
   circleId: string
   kind: EntryKind
   sensitivity: Sensitivity
+  provenance?: Provenance
 }
 
 export function canWrite(access: Access, intent: WriteIntent): boolean {
   const circle = access.circles.get(intent.circleId)
   if (!circle) return false
   if (!circle.writeKinds.has(intent.kind)) return false
-  if (!sensitivityAllowed(circle.circleKind, intent.kind, intent.sensitivity)) return false
+  if (
+    !sensitivityAllowed(
+      circle.circleKind,
+      intent.kind,
+      intent.sensitivity,
+      intent.provenance ?? access.writeProvenance,
+    )
+  ) {
+    return false
+  }
   if (intent.sensitivity === 'secret') return circle.canReadSecret
   return sensitivityRank(intent.sensitivity) <= sensitivityRank(circle.maxSensitivity)
 }

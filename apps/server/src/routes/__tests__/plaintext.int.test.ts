@@ -1,11 +1,18 @@
 import { randomBytes } from 'node:crypto'
 
-import { PLAINTEXT_CREDENTIAL, type MemoryList, type SpaceOverview } from '@kioku/contracts'
+import {
+  DEFAULT_CIRCLE_PRIVACY,
+  findPlaintextCredentials,
+  PLAINTEXT_CREDENTIAL,
+  type CircleOverview,
+  type ConsoleEntryView,
+  type EntryList,
+} from '@kioku/contracts'
 import { sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
-import { plaintextMatch } from '../../memory/service'
+import { evaluateSensitiveContent } from '../../credential/privacy'
 import type { Database } from '../../db/client'
 import { staticEmbedderSource } from '../../embedding/source'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
@@ -260,58 +267,63 @@ describe.skipIf(!testDatabaseUrl)('明文凭据提醒', () => {
     ws = await bootstrap(app)
   })
 
-  const space = () => `/v1/spaces/${ws.spaceId}`
+  const personal = () => `/v1/circles/${ws.personalCircleId}`
   const create = async (body: Record<string, unknown>) => {
     const res = await app.request(
-      `${space()}/memories`,
+      `${personal()}/entries`,
       jsonRequest('POST', { ...body, allowPlaintext: true }, { cookie: ws.cookie }),
     )
     expect(res.status).toBe(201)
+    return (await res.json()) as ConsoleEntryView
   }
   const get = async <T>(path: string) => {
-    const res = await app.request(`${space()}${path}`, { headers: { cookie: ws.cookie } })
+    const res = await app.request(`${personal()}${path}`, { headers: { cookie: ws.cookie } })
     expect(res.status).toBe(200)
     return (await res.json()) as T
   }
 
-  it('数据库里的判断与 JS 的规则一致', async () => {
-    const rows = await database.db.execute<{ s: string; hit: boolean; whole: boolean }>(sql`
-      select s, ${plaintextMatch(sql.raw('s'))} as hit, s ~* ${PLAINTEXT_CREDENTIAL.source} as whole
+  it('数据库里的正则与 JS 的规则一致', async () => {
+    const rows = await database.db.execute<{ s: string; whole: boolean }>(sql`
+      select s, s ~* ${PLAINTEXT_CREDENTIAL.source} as whole
       from (values ${sql.join(
         SAMPLES.map((s) => sql`(${s}::text)`),
         sql`, `,
       )}) as t(s)`)
-    // 服务端用的是拆开的几条（plaintextMatch），合起来的一整条也要一样
-    expect(rows.map((r) => [r.s, r.hit, r.whole])).toEqual(
-      SAMPLES.map((s) => [s, PLAINTEXT_CREDENTIAL.test(s), PLAINTEXT_CREDENTIAL.test(s)]),
+    expect(rows.map((r) => [r.s, r.whole])).toEqual(
+      SAMPLES.map((s) => [s, PLAINTEXT_CREDENTIAL.test(s)]),
     )
+    for (const s of SAMPLES) {
+      expect(evaluateSensitiveContent(s, DEFAULT_CIRCLE_PRIVACY).hasCredential, s).toBe(
+        findPlaintextCredentials(s).length > 0,
+      )
+    }
   })
 
   it('遮盖符开头的真密码挡得住降级；整段是遮盖符的不挡', async () => {
-    const lower = async (uri: string, content: string) => {
-      await create({ uri, content, sensitivity: 'secret' })
+    const lower = async (title: string, content: string) => {
+      const created = await create({ title, content, sensitivity: 'secret' })
       return app.request(
-        `${space()}/memories`,
-        jsonRequest('PATCH', { uri, sensitivity: 'private' }, { cookie: ws.cookie }),
+        `${personal()}/entries`,
+        jsonRequest('PATCH', { id: created.id, sensitivity: 'private' }, { cookie: ws.cookie }),
       )
     }
-    expect((await lower('user://notes/real', '密码：***hunter2***')).status).toBe(400)
-    expect((await lower('user://notes/prefix', '密码：***x')).status).toBe(400)
-    expect((await lower('user://notes/masked', '密码：***')).status).toBe(200)
-    expect((await lower('user://notes/quoted', 'password: "***"')).status).toBe(200)
+    expect((await lower('real', '密码：***hunter2***')).status).toBe(400)
+    expect((await lower('prefix', '密码：***x')).status).toBe(400)
+    expect((await lower('masked', '密码：***')).status).toBe(200)
+    expect((await lower('quoted', 'password: "***"')).status).toBe(200)
   })
 
-  it('概览数出像有明文凭据的记忆，列表能按它筛选；secret 的正文是密文，不算', async () => {
-    await create({ uri: 'user://notes/wifi', content: '访客网络密码：guest-1234' })
-    await create({ uri: 'core://api', content: 'token = abc123' })
-    await create({ uri: 'user://notes/ok', content: '密码放在密码库里，用到时再取' })
-    await create({ uri: 'user://notes/vault', content: '密码：hunter2', sensitivity: 'secret' })
+  it('概览数出像有明文凭据的词条，列表能按它筛选；secret 的正文是密文，不算', async () => {
+    await create({ title: 'wifi', content: '访客网络密码：guest-1234' })
+    await create({ title: 'api', content: 'token = abc123' })
+    await create({ title: 'ok', content: '密码放在密码库里，用到时再取' })
+    await create({ title: 'vault', content: '密码：hunter2', sensitivity: 'secret' })
 
-    const overview = await get<SpaceOverview>('/overview')
+    const overview = await get<CircleOverview>('/overview')
     expect(overview.plaintextCredentials).toBe(2)
-    const hits = await get<MemoryList>('/memories/list?plaintext=true&sort=uri')
-    expect(hits.items.map((m) => m.uri)).toEqual(['core://api', 'user://notes/wifi'])
-    const rest = await get<MemoryList>('/memories/list?plaintext=false&sort=uri')
-    expect(rest.items.map((m) => m.uri)).toEqual(['user://notes/ok', 'user://notes/vault'])
+    const hits = await get<EntryList>('/entries/list?plaintext=true')
+    expect(hits.items.map((m) => m.title).sort()).toEqual(['api', 'wifi'])
+    const rest = await get<EntryList>('/entries/list?plaintext=false')
+    expect(rest.items.map((m) => m.title).sort()).toEqual(['ok', 'vault'])
   })
 })

@@ -6,13 +6,21 @@ import postgres from 'postgres'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
-import { withSpace, type Database } from '../../db/client'
-import { conversationTurns, memories, memoryEvents, settings, spaces } from '../../db/schema'
+import { withCircle, type Database } from '../../db/client'
+import {
+  circles,
+  conversationTurns,
+  entries,
+  entryEvents,
+  entryVariants,
+  settings,
+} from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import type { ChatModel } from '../../extraction/provider'
 import { saveExtractionConfig } from '../../extraction/settings'
 import { processSession } from '../../extraction/worker'
 import type { Jobs } from '../../jobs/queue'
+import { generateShortId } from '../../memory/shortId'
 import {
   openTestDatabase,
   resetDatabase,
@@ -32,7 +40,7 @@ describe.skipIf(!testDatabaseUrl)('待审队列', () => {
   let database: Database
   let app: ReturnType<typeof createApp>
   let ws: Workspace
-  let appId: string
+  let clientId: string
   let key: string
   const masterKey = randomBytes(32)
   const jobs: Jobs = {
@@ -65,8 +73,8 @@ describe.skipIf(!testDatabaseUrl)('待审队列', () => {
   beforeEach(async () => {
     await resetDatabase(database)
     ws = await bootstrap(app)
-    appId = (await ws.createApp('qq-bot', { runtimeFamily: 'astrbot' })).id
-    key = await ws.issueKey(appId)
+    clientId = (await ws.createClient('qq-bot', { runtimeFamily: 'astrbot' })).id
+    key = await ws.issueKey(clientId)
     await saveExtractionConfig(database.db, masterKey, {
       baseUrl: 'https://llm.example.com/v1',
       model: 'm',
@@ -75,7 +83,7 @@ describe.skipIf(!testDatabaseUrl)('待审队列', () => {
 
   const api = (method: string, path: string, body?: unknown, cookie = ws.cookie) =>
     app.request(
-      `/v1/spaces/${ws.spaceId}${path}`,
+      `/v1/circles/${ws.circleId}${path}`,
       method === 'GET' ? { headers: { cookie } } : jsonRequest(method, body, { cookie }),
     )
   const queue = async (query = '', cookie = ws.cookie) => {
@@ -114,85 +122,105 @@ describe.skipIf(!testDatabaseUrl)('待审队列', () => {
       ),
     )
     expect(res.status).toBe(200)
-    const [turn] = await withSpace(database.db, ws.spaceId, (tx) =>
+    const [turn] = await withCircle(database.db, ws.circleId, (tx) =>
       tx.select().from(conversationTurns).orderBy(asc(conversationTurns.id)).limit(1),
     )
     await processSession(
       database.db,
       masterKey,
-      { spaceId: ws.spaceId, appId, scope: turn!.scope },
+      { circleId: ws.circleId, clientId, scope: turn!.scope },
       () => fakeModel(reply),
     )
   }
   const rowsOf = (ids: string[]) =>
-    withSpace(database.db, ws.spaceId, (tx) =>
-      tx.select().from(memories).where(inArray(memories.id, ids)),
+    withCircle(database.db, ws.circleId, (tx) =>
+      tx.select().from(entries).where(inArray(entries.id, ids)),
     )
   const eventsOf = (ids: string[]) =>
-    withSpace(database.db, ws.spaceId, (tx) =>
+    withCircle(database.db, ws.circleId, (tx) =>
       tx
-        .select({ type: memoryEvents.eventType, accountId: memoryEvents.actorAccountId })
-        .from(memoryEvents)
-        .where(and(inArray(memoryEvents.memoryId, ids), eq(memoryEvents.eventType, 'confirm'))),
+        .select({ type: entryEvents.eventType, accountId: entryEvents.actorAccountId })
+        .from(entryEvents)
+        .where(and(inArray(entryEvents.entryId, ids), eq(entryEvents.eventType, 'confirm'))),
     )
 
-  it('列出不可信来源写进对象层与情节层的、现在有效的记忆，带对象与来源；能按层筛选', async () => {
+  it('列出不可信来源写进联系人事实与会话摘要的、现在有效的词条，带对象与来源；能按种类筛选', async () => {
     await chatInGroup()
     const all = await queue()
     expect(all.total).toBe(3)
-    expect(all.items.map((i) => [i.layer, i.content]).sort()).toEqual([
+    expect(all.items.map((i) => [i.kind, i.content]).sort()).toEqual([
       ['episode', '群里聊了学日语'],
-      ['subject', '在学日语'],
-      ['subject', '是个读书会'],
+      ['fact', '在学日语'],
+      ['fact', '是个读书会'],
     ])
     const fact = all.items.find((i) => i.content === '在学日语')!
     expect(fact).toMatchObject({
-      uri: null,
+      shortId: expect.stringMatching(/^m-/),
       subject: { kind: 'person', displayName: '小明' },
       scope: { kind: 'group', name: '读书会' },
     })
-    expect((await queue('?layer=episode')).items.map((i) => i.content)).toEqual(['群里聊了学日语'])
+    expect((await queue('?kind=episode')).items.map((i) => i.content)).toEqual(['群里聊了学日语'])
 
+    const clubFact = all.items.find((i) => i.content === '是个读书会')!
     // 失效的不在队列里
-    await withSpace(database.db, ws.spaceId, (tx) =>
+    await withCircle(database.db, ws.circleId, (tx) =>
       tx
-        .update(memories)
+        .update(entries)
         // 读取按服务的时间判断，数据库容器的时钟可能快几毫秒：设成一秒前才算已失效
         .set({ validTo: sql`now() - interval '1 second'` })
-        .where(eq(memories.content, '是个读书会')),
+        .where(eq(entries.id, clubFact.id)),
     )
     expect((await queue()).total).toBe(2)
     expect((await api('GET', '/review?cursor=abc')).status).toBe(400)
 
     // 每页 50 条；总数只在第一页给
-    await withSpace(database.db, ws.spaceId, async (tx) => {
-      const conversationId = await summaryConversation(tx, ws.spaceId)
-      await tx.insert(memories).values(
-        Array.from({ length: 55 }, (_, i) => ({
-          spaceId: ws.spaceId,
-          form: 'extracted' as const,
-          layer: 'episode' as const,
+    await withCircle(database.db, ws.circleId, async (tx) => {
+      const conversationId = await summaryConversation(tx, ws.circleId)
+      const inserted = await tx
+        .insert(entries)
+        .values(
+          Array.from({ length: 55 }, (_, i) => ({
+            circleId: ws.circleId,
+            shortId: generateShortId(),
+            circleKind: 'shared' as const,
+            kind: 'episode' as const,
+            ownerAccountId: null,
+            originScope: 'global',
+            title: `摘要${i}`,
+            sensitivity: 'public' as const,
+            provenance: 'untrusted' as const,
+            priority: 2,
+            conversationId,
+            expiresAt: new Date(Date.now() + 86_400_000),
+          })),
+        )
+        .returning({ id: entries.id, title: entries.title })
+      await tx.insert(entryVariants).values(
+        inserted.map((row) => ({
+          circleId: ws.circleId,
+          entryId: row.id,
+          kind: 'episode' as const,
           sensitivity: 'public' as const,
-          provenance: 'untrusted' as const,
-          originScope: 'global',
-          conversationId,
-          content: `摘要${i}`,
-          expiresAt: new Date(Date.now() + 86_400_000),
+          when: {},
+          whenSignature: '{}',
+          sortOrder: 0,
+          content: row.title,
+          searchHeader: row.title,
         })),
       )
     })
-    const first = await queue('?layer=episode')
+    const first = await queue('?kind=episode')
     expect([first.items.length, first.total]).toEqual([50, 56])
-    const second = await queue(`?layer=episode&cursor=${first.nextCursor}`)
+    const second = await queue(`?kind=episode&cursor=${first.nextCursor}`)
     expect([second.items.length, second.total, second.nextCursor]).toEqual([6, null, null])
   })
 
-  it('确认：来源改成主人、记一条确认事件，离开队列；删除和删记忆一样；处理过的再处理就跳过', async () => {
+  it('确认：来源改成所有者、记一条确认事件，离开队列；删除和删词条一样；处理过的再处理就跳过', async () => {
     await chatInGroup()
     const items = (await queue()).items
-    const facts = items.filter((i) => i.layer === 'subject')
+    const facts = items.filter((i) => i.kind === 'fact')
     const factIds = facts.map((f) => f.id)
-    const summary = items.find((i) => i.layer === 'episode')!
+    const summary = items.find((i) => i.kind === 'episode')!
 
     // 同一条出现两次的请求不收
     expect((await act('confirm', [...facts, facts[0]!])).status).toBe(400)
@@ -230,7 +258,7 @@ describe.skipIf(!testDatabaseUrl)('待审队列', () => {
 
   it('确认过的事实不会被群里的抽取推翻：模型说要更新它时，当作一条新的待审事实', async () => {
     await chatInGroup()
-    const fact = (await queue('?layer=subject')).items.find((i) => i.content === '在学日语')!
+    const fact = (await queue('?kind=fact')).items.find((i) => i.content === '在学日语')!
     expect((await act('confirm', [fact])).body.done).toBe(1)
 
     // 抽取时给模型看的已有事实里，确认过的这条是 F1
@@ -241,17 +269,18 @@ describe.skipIf(!testDatabaseUrl)('待审队列', () => {
     })
     const [kept] = await rowsOf([fact.id])
     expect([kept!.provenance, kept!.validTo]).toEqual(['owner', null])
-    expect((await queue('?layer=subject')).items.map((i) => i.content)).toContain('在学韩语')
+    expect((await queue('?kind=fact')).items.map((i) => i.content)).toContain('在学韩语')
   })
 
   it('正在被别的写入改着的行不等锁，直接跳过', async () => {
     await chatInGroup()
-    const [first, second] = (await queue('?layer=subject')).items
+    const [first, second] = (await queue('?kind=fact')).items
     const side = postgres(testDatabaseUrl!, { max: 1, onnotice: () => {} })
     try {
       await side.begin(async (tx) => {
-        await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
-        await tx`select id from memories where id = ${first!.id} for update`
+        await tx`select set_config('app.read_circles', ${ws.circleId}, true)`
+        await tx`select set_config('app.write_circles', ${ws.circleId}, true)`
+        await tx`select id from entries where id = ${first!.id} for update`
         // 锁还在的时候处理：被锁住的那条跳过，另一条照常确认，请求不会卡住
         expect(await act('confirm', [first!, second!])).toEqual({
           status: 200,
@@ -261,18 +290,19 @@ describe.skipIf(!testDatabaseUrl)('待审队列', () => {
     } finally {
       await side.end()
     }
-    expect((await queue('?layer=subject')).items.map((i) => i.id)).toEqual([first!.id])
+    expect((await queue('?kind=fact')).items.map((i) => i.id)).toEqual([first!.id])
   })
 
-  it('别的表正往这条记忆上挂记录（外键检查加的 KEY SHARE 锁）时不算正在改：照常处理，不跳过', async () => {
+  it('别的表正往这条词条上挂记录（外键检查加的 KEY SHARE 锁）时不算正在改：照常处理，不跳过', async () => {
     await chatInGroup()
-    const [first, second] = (await queue('?layer=subject')).items
+    const [first, second] = (await queue('?kind=fact')).items
     const side = postgres(testDatabaseUrl!, { max: 1, onnotice: () => {} })
     try {
       await side.begin(async (tx) => {
-        await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
-        // 插入事件、关键词与向量时，外键检查在记忆行上加的就是这把锁
-        await tx`select id from memories where id = ${first!.id} for key share`
+        await tx`select set_config('app.read_circles', ${ws.circleId}, true)`
+        await tx`select set_config('app.write_circles', ${ws.circleId}, true)`
+        // 插入事件、关键词与向量时，外键检查在词条行上加的就是这把锁
+        await tx`select id from entries where id = ${first!.id} for key share`
         expect(await act('confirm', [first!, second!])).toEqual({
           status: 200,
           body: { done: 2, skipped: 0 },
@@ -281,26 +311,29 @@ describe.skipIf(!testDatabaseUrl)('待审队列', () => {
     } finally {
       await side.end()
     }
-    expect((await queue('?layer=subject')).total).toBe(0)
+    expect((await queue('?kind=fact')).total).toBe(0)
     expect((await rowsOf([first!.id, second!.id])).map((r) => r.provenance)).toEqual([
       'owner',
       'owner',
     ])
   })
 
-  it('viewer 只能看；别的空间的记忆碰不到', async () => {
+  it('viewer 只能看；别的记忆圈的词条碰不到', async () => {
     await chatInGroup()
-    const carol = await addMember(database.db, ws.spaceId, 'carol', 'viewer')
+    const carol = await addMember(database.db, ws.circleId, 'carol', 'viewer')
     const seen = (await queue('', carol.cookie)).items
     expect(seen).toHaveLength(3)
     expect((await act('confirm', seen, carol.cookie)).status).toBe(403)
     expect((await queue()).total).toBe(3)
 
-    // 另一个空间的同一批 id 读不到，当作不在队列里
-    const [other] = await database.db.insert(spaces).values({ name: '别人家' }).returning()
+    // 另一个记忆圈的同一批 id 读不到，当作不在队列里
+    const [other] = await database.db
+      .insert(circles)
+      .values({ slug: 'other-home', name: '别人家', kind: 'shared' })
+      .returning()
     const outsider = await addMember(database.db, other!.id, 'dave', 'owner')
     const res = await app.request(
-      `/v1/spaces/${other!.id}/review`,
+      `/v1/circles/${other!.id}/review`,
       jsonRequest(
         'POST',
         { action: 'delete', items: seen.map(({ id, version }) => ({ id, version })) },

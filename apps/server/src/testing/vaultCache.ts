@@ -7,7 +7,7 @@ import type { Db } from '../db/client'
 export function hasCachedSession(client: VaultClient, connectionId: string): boolean {
   const connections = new VaultConnections({
     db: null as unknown as Db,
-    spaceId: '',
+    circleId: '',
     ownerAccountId: '',
     masterKey: null,
     client,

@@ -1,122 +1,279 @@
 import type { HttpBindings } from '@hono/node-server'
 import { createRoute, z } from '@hono/zod-openapi'
 import {
-  AddMemberRequest,
-  CreatedSpace,
-  CreateSpaceRequest,
-  DeleteSpaceRequest,
+  AddCircleMemberRequest,
+  AdminCircleList,
+  CIRCLE_EXPORT_MAX_BYTES,
+  CircleDetail,
+  CircleExportRequest,
+  CircleImportForm,
+  CircleImportInspectForm,
+  CircleImportPreview,
+  CircleImportResult,
+  CircleInfo,
+  CircleLimitSettings,
+  CircleLimitView,
+  CircleMember,
+  CircleMemberList,
+  CirclePrivacySettings,
+  CreateCircleRequest,
+  CreatedCircle,
+  CreateFacetDimensionRequest,
+  CreateFacetTermRequest,
   DEPARTURE_RETENTION_DAYS,
+  DeleteCircleRequest,
   ErrorResponse,
   ExtractionBudget,
   ExtractionUsage,
-  InstanceSpace,
-  RenameSpaceRequest,
-  SPACE_EXPORT_MAX_BYTES,
-  SpaceDetail,
-  SpaceInfo,
-  SpaceLimitPolicy,
-  SpaceLimitView,
-  SpaceMember,
-  SpacePrivacySettings,
-  TransferOwnershipRequest,
-  UpdateMemberRequest,
-  UpdateSpacePrivacySettings,
-  SpaceExportRequest,
-  SpaceImportForm,
-  SpaceImportInspectForm,
-  SpaceImportPreview,
-  SpaceImportResult,
+  FacetDimensionKey,
+  FacetDimensionView,
+  FacetTermView,
+  FacetVocabularyView,
+  TransferCircleOwnershipRequest,
+  UpdateCircleMemberRequest,
+  UpdateCirclePrivacySettings,
+  UpdateCircleRequest,
+  UpdateFacetDimensionRequest,
+  UpdateFacetTermRequest,
 } from '@kioku/contracts'
-import { bodyLimit } from 'hono/body-limit'
 import type { Context, MiddlewareHandler } from 'hono'
+import { bodyLimit } from 'hono/body-limit'
 
 import {
   addMember,
-  createSpace,
-  deleteSpace,
-  instanceSpaces,
+  adminCircles,
+  circleDetail,
+  circleLimitReached,
+  circleLimitView,
+  createSharedCircle,
+  deleteSharedCircle,
   listMembers,
   removeMember,
-  renameSpace,
-  saveSpaceLimit,
-  spaceDetail,
-  spaceLimitReached,
-  spaceLimitView,
+  saveCircleLimit,
   transferOwnership,
+  updateCircle,
   updateMemberRole,
   type MemberRejection,
-} from '../access/spaces'
+} from '../access/circles'
 import {
   isInstanceAdmin,
+  lockAsAdmin,
   memberRole,
   requireConsole,
-  lockAsAdmin,
   requireInstanceAdmin,
 } from '../auth/middleware'
-import { exportSpace, type SpaceExport } from '../backup/spaceExport'
-import { importSpace, inspectSpaceImport } from '../backup/spaceImport'
+import { exportCircle, type CircleExportResult } from '../backup/circleExport'
+import { importCircle, inspectCircleImport } from '../backup/circleImport'
 import { acquireTransferSlot, acquireUploadSlot, withTransferSlot } from '../backup/transferGate'
-import { bumpSpacePrivacyRevision, loadSpacePrivacy, saveSpacePrivacy } from '../credential/privacy'
-import { rescanSpaceSensitive } from '../credential/rescan'
+import {
+  bumpCirclePrivacyRevision,
+  loadCirclePrivacy,
+  saveCirclePrivacy,
+} from '../credential/privacy'
+import { rescanCircleSensitive } from '../credential/rescan'
+import { withCircle } from '../db/client'
 import { extractionUsage, saveExtractionBudget } from '../extraction/budget'
 import type { AppEnv, Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
+import { consoleRoleFor } from '../memory/context'
+import {
+  createDimension,
+  createTerm,
+  deleteDimension,
+  deleteTerm,
+  listVocabulary,
+  updateDimension,
+  updateTerm,
+} from '../memory/facets'
 import { SettingsInputError } from '../settings/endpoint'
 
-const params = z.object({ spaceId: z.uuid() })
+const params = z.object({ circleId: z.uuid() })
+const memberParams = z.object({ circleId: z.uuid(), accountId: z.uuid() })
+const dimParams = z.object({ circleId: z.uuid(), key: FacetDimensionKey })
+const termParams = z.object({ circleId: z.uuid(), termId: z.uuid() })
+
 const forbidden = jsonResponse('没有权限', ErrorResponse)
-// 导出、检查与导入同时只做一个、排队有上限、每个账号同时最多占一个：满了就是这个
 const busy = jsonResponse('导出导入正忙，稍后再试', ErrorResponse)
+const badRequest = jsonResponse('请求不合法', ErrorResponse)
+const notMember = { error: '无权访问此记忆圈' }
+const conflict = jsonResponse(
+  '冲突（已是成员、记忆圈至少要有一个所有者、对方拥有的记忆圈已达上限）',
+  ErrorResponse,
+)
+
+const memberErrors = {
+  400: badRequest,
+  403: forbidden,
+  404: jsonResponse('账号或成员不存在', ErrorResponse),
+  409: conflict,
+}
+
+const createCircleRoute = createRoute({
+  method: 'post',
+  path: '/circles',
+  tags: ['console'],
+  summary: '新建共享记忆圈（个人圈在建账号时自动创建，无需调用）',
+  request: { body: jsonBody(CreateCircleRequest) },
+  responses: {
+    201: jsonResponse('已新建', CreatedCircle),
+    400: badRequest,
+    403: forbidden,
+    404: jsonResponse('账号不存在', ErrorResponse),
+    409: jsonResponse('账号已停用、标识被占用，或拥有的共享记忆圈已达上限', ErrorResponse),
+  },
+})
+
+const circleView = createRoute({
+  method: 'get',
+  path: '/circles/{circleId}',
+  tags: ['console'],
+  summary: '记忆圈概况：标识、名称、类型、默认切面、当前账号的角色与成员数',
+  request: { params },
+  responses: { 200: jsonResponse('记忆圈', CircleDetail), 403: forbidden },
+})
+
+const updateCircleRoute = createRoute({
+  method: 'patch',
+  path: '/circles/{circleId}',
+  tags: ['console'],
+  summary: '修改记忆圈名称或默认切面（只有记忆圈所有者）',
+  request: { params, body: jsonBody(UpdateCircleRequest) },
+  responses: { 200: jsonResponse('记忆圈', CircleInfo), ...memberErrors },
+})
+
+const deleteCircleRoute = createRoute({
+  method: 'delete',
+  path: '/circles/{circleId}',
+  tags: ['console'],
+  summary: '删除共享记忆圈（个人圈禁止删除；需逐字确认记忆圈名称）',
+  request: { params, body: jsonBody(DeleteCircleRequest) },
+  responses: { 204: { description: '已删除' }, ...memberErrors },
+})
+
+function instanceListRoute(deps: Deps) {
+  return createRoute({
+    method: 'get',
+    path: '/instance/circles',
+    tags: ['settings'],
+    summary: '实例里的全部记忆圈（只有实例管理员）：不含正文',
+    middleware: [requireConsole(deps), requireInstanceAdmin(deps)],
+    responses: { 200: jsonResponse('记忆圈列表', AdminCircleList), 403: forbidden },
+  })
+}
+
+function limitViewRoute(deps: Deps) {
+  return createRoute({
+    method: 'get',
+    path: '/instance/circle-limit',
+    tags: ['settings'],
+    summary: '共享记忆圈数量上限及当前账号已拥有数量（个人圈不占配额）',
+    middleware: [requireConsole(deps)],
+    responses: { 200: jsonResponse('上限', CircleLimitView) },
+  })
+}
+
+function limitUpdateRoute(deps: Deps) {
+  return createRoute({
+    method: 'put',
+    path: '/instance/circle-limit',
+    tags: ['settings'],
+    summary: '修改共享记忆圈数量上限（只有实例管理员）',
+    middleware: [requireConsole(deps), requireInstanceAdmin(deps)],
+    request: { body: jsonBody(CircleLimitSettings) },
+    responses: { 200: jsonResponse('上限', CircleLimitView), 400: badRequest, 403: forbidden },
+  })
+}
+
+const membersRoute = createRoute({
+  method: 'get',
+  path: '/circles/{circleId}/members',
+  tags: ['console'],
+  summary: '记忆圈成员：账号、角色、加入时间与拥有的接入实例数',
+  request: { params },
+  responses: { 200: jsonResponse('成员列表', CircleMemberList), 403: forbidden },
+})
+
+const addMemberRoute = createRoute({
+  method: 'post',
+  path: '/circles/{circleId}/members',
+  tags: ['console'],
+  summary: '按用户名添加共享记忆圈成员（只有记忆圈所有者）',
+  request: { params, body: jsonBody(AddCircleMemberRequest) },
+  responses: { 201: jsonResponse('已添加', CircleMember), ...memberErrors },
+})
+
+const updateMemberRoute = createRoute({
+  method: 'patch',
+  path: '/circles/{circleId}/members/{accountId}',
+  tags: ['console'],
+  summary: '改成员在共享记忆圈中的角色（只有记忆圈所有者）',
+  request: { params: memberParams, body: jsonBody(UpdateCircleMemberRequest) },
+  responses: { 200: jsonResponse('成员', CircleMember), ...memberErrors },
+})
+
+const removeMemberRoute = createRoute({
+  method: 'delete',
+  path: '/circles/{circleId}/members/{accountId}',
+  tags: ['console'],
+  summary: `移除成员或离开共享记忆圈（个人数据保留 ${DEPARTURE_RETENTION_DAYS} 天）`,
+  request: { params: memberParams },
+  responses: { 204: { description: '已移除' }, ...memberErrors },
+})
+
+const transferRoute = createRoute({
+  method: 'post',
+  path: '/circles/{circleId}/transfer-ownership',
+  tags: ['console'],
+  summary: '转让共享记忆圈所有者（只有记忆圈所有者）',
+  request: { params, body: jsonBody(TransferCircleOwnershipRequest) },
+  responses: { 200: jsonResponse('转让之后的成员信息', CircleMemberList), ...memberErrors },
+})
 
 const budget = createRoute({
   method: 'get',
-  path: '/spaces/{spaceId}/extraction-budget',
+  path: '/circles/{circleId}/extraction-budget',
   tags: ['console'],
-  summary: '抽取预算与本月用量：每月的 token 上限、每个对象每天最多写几条事实',
+  summary: '抽取预算与本月用量',
   request: { params },
   responses: { 200: jsonResponse('预算与用量', ExtractionUsage), 403: forbidden },
 })
 
 const saveBudget = createRoute({
   method: 'put',
-  path: '/spaces/{spaceId}/extraction-budget',
+  path: '/circles/{circleId}/extraction-budget',
   tags: ['console'],
-  summary: '修改抽取预算（只有空间 owner）：用完之后只写会话摘要，下个月恢复',
+  summary: '修改抽取预算（只有记忆圈所有者）',
   request: { params, body: jsonBody(ExtractionBudget) },
-  responses: {
-    200: jsonResponse('预算与用量', ExtractionUsage),
-    400: jsonResponse('请求不合法', ErrorResponse),
-    403: forbidden,
-  },
+  responses: { 200: jsonResponse('预算与用量', ExtractionUsage), 400: badRequest, 403: forbidden },
 })
 
 const privacyView = createRoute({
   method: 'get',
-  path: '/spaces/{spaceId}/privacy',
+  path: '/circles/{circleId}/privacy',
   tags: ['console'],
-  summary: '空间隐私与敏感内容识别设置',
+  summary: '记忆圈隐私与敏感内容识别设置',
   request: { params },
-  responses: { 200: jsonResponse('空间隐私设置', SpacePrivacySettings), 403: forbidden },
+  responses: { 200: jsonResponse('隐私设置', CirclePrivacySettings), 403: forbidden },
 })
 
 const savePrivacy = createRoute({
   method: 'put',
-  path: '/spaces/{spaceId}/privacy',
+  path: '/circles/{circleId}/privacy',
   tags: ['console'],
-  summary: '修改空间隐私与敏感内容识别设置（仅空间所有者），保存后触发后台回扫',
-  request: { params, body: jsonBody(UpdateSpacePrivacySettings) },
+  summary: '修改记忆圈隐私设置（仅所有者），保存后触发回扫',
+  request: { params, body: jsonBody(UpdateCirclePrivacySettings) },
   responses: {
-    200: jsonResponse('空间隐私设置', SpacePrivacySettings),
-    400: jsonResponse('请求不合法', ErrorResponse),
+    200: jsonResponse('隐私设置', CirclePrivacySettings),
+    400: badRequest,
     403: forbidden,
   },
 })
 
 const rescanPrivacy = createRoute({
   method: 'post',
-  path: '/spaces/{spaceId}/privacy/rescan',
+  path: '/circles/{circleId}/privacy/rescan',
   tags: ['console'],
-  summary: '手动触发空间敏感内容回扫（仅空间所有者）',
+  summary: '手动触发记忆圈敏感内容回扫（仅所有者）',
   request: { params },
   responses: {
     200: jsonResponse(
@@ -127,166 +284,105 @@ const rescanPrivacy = createRoute({
   },
 })
 
-const notMember = { error: '无权访问此空间' }
-const badRequest = jsonResponse('请求不合法', ErrorResponse)
-const conflict = jsonResponse(
-  '冲突（已是成员、空间至少要有一个所有者、对方拥有的空间已达上限）',
-  ErrorResponse,
-)
-const memberParams = z.object({ spaceId: z.uuid(), accountId: z.uuid() })
-// memberError 会给出的几种回应
-const memberErrors = {
-  400: badRequest,
-  403: forbidden,
-  404: jsonResponse('账号或成员不存在', ErrorResponse),
-  409: conflict,
-}
-
-const createSpaceRoute = createRoute({
-  method: 'post',
-  path: '/spaces',
+const facetsView = createRoute({
+  method: 'get',
+  path: '/circles/{circleId}/facets',
   tags: ['console'],
-  summary:
-    '新建空间：登录的账号都可以，所有者是当前账号；拥有的空间达到实例的空间数量上限时不能再建',
-  request: { body: jsonBody(CreateSpaceRequest) },
+  summary: '查看记忆圈的切面词表（四大内置维度、自定义维度与词条）',
+  request: { params },
+  responses: { 200: jsonResponse('切面词表', FacetVocabularyView), 403: forbidden },
+})
+
+const createFacetDim = createRoute({
+  method: 'post',
+  path: '/circles/{circleId}/facets/dimensions',
+  tags: ['console'],
+  summary: '新建自定义切面维度',
+  request: { params, body: jsonBody(CreateFacetDimensionRequest) },
   responses: {
-    201: jsonResponse('已新建', CreatedSpace),
+    201: jsonResponse('已创建维度', FacetDimensionView),
     400: badRequest,
     403: forbidden,
-    404: jsonResponse('账号不存在', ErrorResponse),
-    409: jsonResponse('账号已停用，或拥有的空间已达上限', ErrorResponse),
+    409: jsonResponse('维度已存在', ErrorResponse),
   },
 })
 
-const spaceView = createRoute({
-  method: 'get',
-  path: '/spaces/{spaceId}',
-  tags: ['console'],
-  summary: '空间概况：名字、建立时间、当前账号的角色与成员数（成员都能看）',
-  request: { params },
-  responses: { 200: jsonResponse('空间', SpaceDetail), 403: forbidden },
-})
-
-const renameRoute = createRoute({
+const updateFacetDim = createRoute({
   method: 'patch',
-  path: '/spaces/{spaceId}',
+  path: '/circles/{circleId}/facets/dimensions/{key}',
   tags: ['console'],
-  summary: '改空间名（只有空间所有者）',
-  request: { params, body: jsonBody(RenameSpaceRequest) },
-  responses: { 200: jsonResponse('空间', SpaceInfo), ...memberErrors },
-})
-
-const deleteRoute = createRoute({
-  method: 'delete',
-  path: '/spaces/{spaceId}',
-  tags: ['console'],
-  summary:
-    '删除空间（空间所有者或实例管理员）：请求里带上现在的空间名确认，空间里的全部内容一起删除，无法恢复',
-  request: { params, body: jsonBody(DeleteSpaceRequest) },
-  responses: { 204: { description: '已删除' }, ...memberErrors },
-})
-
-// 实例级的接口不在 /spaces/* 下，会话鉴权挂在每个路由上
-function instanceListRoute(deps: Deps) {
-  return createRoute({
-    method: 'get',
-    path: '/instance/spaces',
-    tags: ['settings'],
-    summary: '实例里的全部空间（只有实例管理员）：名字、建立时间、所有者与成员数，不含内容',
-    middleware: [requireConsole(deps), requireInstanceAdmin(deps)],
-    responses: { 200: jsonResponse('空间列表', z.array(InstanceSpace)), 403: forbidden },
-  })
-}
-
-function limitViewRoute(deps: Deps) {
-  return createRoute({
-    method: 'get',
-    path: '/instance/space-limit',
-    tags: ['settings'],
-    summary: '空间数量上限（每个账号最多拥有几个空间），以及当前账号拥有几个、还能不能新建或导入',
-    middleware: [requireConsole(deps)],
-    responses: { 200: jsonResponse('上限', SpaceLimitView) },
-  })
-}
-
-function limitUpdateRoute(deps: Deps) {
-  return createRoute({
-    method: 'put',
-    path: '/instance/space-limit',
-    tags: ['settings'],
-    summary: '修改空间数量上限（只有实例管理员）：调低之后已经超出的账号不受影响，只是不能再多拥有',
-    middleware: [requireConsole(deps), requireInstanceAdmin(deps)],
-    request: { body: jsonBody(SpaceLimitPolicy) },
-    responses: { 200: jsonResponse('上限', SpaceLimitView), 400: badRequest, 403: forbidden },
-  })
-}
-
-const members = createRoute({
-  method: 'get',
-  path: '/spaces/{spaceId}/members',
-  tags: ['console'],
-  summary: '空间成员：账号、角色、加入时间与拥有的应用数（成员都能看）',
-  request: { params },
-  responses: { 200: jsonResponse('成员列表', z.array(SpaceMember)), 403: forbidden },
-})
-
-const addMemberRoute = createRoute({
-  method: 'post',
-  path: '/spaces/{spaceId}/members',
-  tags: ['console'],
-  summary:
-    '按用户名添加成员（只有空间所有者，精确匹配）。离开的成员在清除开始之前重新加入，本人记忆与凭据照旧可见；清除开始后要等完成才能重新加入',
-  request: { params, body: jsonBody(AddMemberRequest) },
+  summary: '修改自定义切面维度（内置维度不可修改）',
+  request: { params: dimParams, body: jsonBody(UpdateFacetDimensionRequest) },
   responses: {
-    201: jsonResponse('已添加', SpaceMember),
-    ...memberErrors,
+    200: jsonResponse('已修改维度', FacetDimensionView),
+    400: badRequest,
+    403: forbidden,
+    404: jsonResponse('维度不存在', ErrorResponse),
   },
 })
 
-const updateMemberRoute = createRoute({
+const deleteFacetDim = createRoute({
+  method: 'delete',
+  path: '/circles/{circleId}/facets/dimensions/{key}',
+  tags: ['console'],
+  summary: '删除自定义切面维度及其词条（其他维度词条蕴含引用时返回 409）',
+  request: { params: dimParams },
+  responses: {
+    204: { description: '已删除' },
+    400: badRequest,
+    403: forbidden,
+    404: jsonResponse('维度不存在', ErrorResponse),
+    409: jsonResponse('仍被其他切面词条引用', ErrorResponse),
+  },
+})
+
+const createFacetTerm = createRoute({
+  method: 'post',
+  path: '/circles/{circleId}/facets/terms',
+  tags: ['console'],
+  summary: '新增或转正切面词条，支持触发词别名与蕴含关系',
+  request: { params, body: jsonBody(CreateFacetTermRequest) },
+  responses: {
+    201: jsonResponse('已创建词条', FacetTermView),
+    400: badRequest,
+    403: forbidden,
+    409: jsonResponse('词条已存在', ErrorResponse),
+  },
+})
+
+const updateFacetTerm = createRoute({
   method: 'patch',
-  path: '/spaces/{spaceId}/members/{accountId}',
+  path: '/circles/{circleId}/facets/terms/{termId}',
   tags: ['console'],
-  summary: '改成员的角色（只有空间所有者）：空间至少要有一个所有者；升为所有者占对方的一个空间名额',
-  request: { params: memberParams, body: jsonBody(UpdateMemberRequest) },
+  summary: '修改切面词条的名称、蕴含关系或触发词别名',
+  request: { params: termParams, body: jsonBody(UpdateFacetTermRequest) },
   responses: {
-    200: jsonResponse('成员', SpaceMember),
-    ...memberErrors,
+    200: jsonResponse('已修改词条', FacetTermView),
+    400: badRequest,
+    403: forbidden,
+    404: jsonResponse('词条不存在', ErrorResponse),
   },
 })
 
-const removeMemberRoute = createRoute({
+const deleteFacetTerm = createRoute({
   method: 'delete',
-  path: '/spaces/{spaceId}/members/{accountId}',
+  path: '/circles/{circleId}/facets/terms/{termId}',
   tags: ['console'],
-  summary: `移除成员（空间所有者移除别人），或离开空间（成员移除自己）。他的应用的访问密钥立即吊销；本人记忆、凭据与密码库连接保留 ${DEPARTURE_RETENTION_DAYS} 天，期间重新加入就恢复，到期删除。最后一个所有者要先转让`,
-  request: { params: memberParams },
+  summary: '删除切面词条',
+  request: { params: termParams },
   responses: {
-    204: { description: '已移除' },
-    ...memberErrors,
-  },
-})
-
-const transferRoute = createRoute({
-  method: 'post',
-  path: '/spaces/{spaceId}/transfer-ownership',
-  tags: ['console'],
-  summary:
-    '转让所有者（只有空间所有者）：对方成为所有者，当前账号改为编辑者。占对方的一个空间名额，对方已达上限时不能转让',
-  request: { params, body: jsonBody(TransferOwnershipRequest) },
-  responses: {
-    200: jsonResponse('对方与当前账号转让之后的成员信息', z.array(SpaceMember)),
-    ...memberErrors,
+    204: { description: '已删除' },
+    403: forbidden,
+    404: jsonResponse('词条不存在', ErrorResponse),
   },
 })
 
 const exportRoute = createRoute({
   method: 'post',
-  path: '/spaces/{spaceId}/export',
+  path: '/circles/{circleId}/export',
   tags: ['console'],
-  summary:
-    '导出这个空间（只有空间 owner）：共享的内容加上自己的本人记忆与凭据，用口令加密成一个文件，可以导入到另一个实例的新空间',
-  request: { params, body: jsonBody(SpaceExportRequest) },
+  summary: '按圈导出（仅记忆圈所有者）：加密打包词条、切片、人格、接入实例与凭据',
+  request: { params, body: jsonBody(CircleExportRequest) },
   responses: {
     200: {
       description: '导出文件',
@@ -296,35 +392,21 @@ const exportRoute = createRoute({
         },
       },
     },
-    400: jsonResponse('导出不了（例如超过导入的大小上限）', ErrorResponse),
+    400: badRequest,
     403: forbidden,
-    409: jsonResponse('有导出了也导入不了、或者解不开的内容（点名是哪一条）', ErrorResponse),
+    409: jsonResponse('无法导出或需要主密钥', ErrorResponse),
     429: busy,
   },
 })
 
-// 读上传的表单的时限：到点还没收完就断开连接、放掉上传名额。文件最大 32 MiB，一分钟收完要每秒 560 KB 左右
 const UPLOAD_READ_MS = 60_000
 
-// 上传导出文件的两个接口共用，登录的账号都能用（会话鉴权在 /spaces/* 上，先于这里）。顺序：
-// 导入先粗看一次名额（已达上限的直接 409，不必上传；准的那次在写入的事务里）→ 看大小（太大的文件不读进内存）→
-// 拿上传名额（每个账号同时一个、整个实例有上限，见 transferGate.ts）读表单，读完就放。
-// 上传名额只管「正在收」的这一段，而且有时限：登录的账号都能用，慢慢发的几个上传不能把名额一直占着。
-// 读完之后表单在内存里排队等导出导入的名额，那边每个账号一个、排队有上限，占的内存也就有上限。
-// 上限按文件算，表单里的口令、名字与分隔行另外留一点余量。读到的内容留在请求的缓存里，后面的校验直接用
-function uploadMiddleware(deps: Deps, seat: boolean): MiddlewareHandler<AppEnv>[] {
+function uploadMiddleware(): MiddlewareHandler<AppEnv>[] {
   return [
-    async (c, next) => {
-      if (seat) {
-        const view = await spaceLimitView(deps.db, c.get('console').accountId)
-        if (!view.canCreate) return c.json({ error: spaceLimitReached(view.maxOwnedSpaces) }, 409)
-      }
-      await next()
-    },
     bodyLimit({
-      maxSize: SPACE_EXPORT_MAX_BYTES + 64 * 1024,
+      maxSize: CIRCLE_EXPORT_MAX_BYTES + 64 * 1024,
       onError: (c) =>
-        c.json({ error: `文件超过 ${SPACE_EXPORT_MAX_BYTES / 1024 / 1024} MB 的上限` }, 413),
+        c.json({ error: `文件超过 ${CIRCLE_EXPORT_MAX_BYTES / 1024 / 1024} MB 的上限` }, 413),
     }),
     async (c, next) => {
       const release = acquireUploadSlot(c.get('console').accountId)
@@ -335,7 +417,6 @@ function uploadMiddleware(deps: Deps, seat: boolean): MiddlewareHandler<AppEnv>[
         })
         const read = c.req.arrayBuffer().then(() => 'read' as const)
         if ((await Promise.race([read, late])) === 'late') {
-          // 还在收的请求体没人要了：断开连接，不让它继续往内存里读
           read.catch(() => undefined)
           ;(c.env as Partial<HttpBindings> | undefined)?.outgoing?.destroy()
           return c.json({ error: '上传超时' }, 408)
@@ -348,121 +429,50 @@ function uploadMiddleware(deps: Deps, seat: boolean): MiddlewareHandler<AppEnv>[
     },
   ]
 }
+
 const uploadErrors = {
-  400: jsonResponse('导入不了（口令不对、文件被改过、内容对不上、没配主密钥等）', ErrorResponse),
+  400: badRequest,
   403: forbidden,
   408: jsonResponse('上传超时', ErrorResponse),
   413: jsonResponse('文件太大', ErrorResponse),
   429: busy,
 }
 
-function inspectRoute(deps: Deps) {
-  return createRoute({
-    method: 'post',
-    path: '/spaces/import/inspect',
-    tags: ['console'],
-    summary:
-      '导入之前先检查导出文件：是谁导出的、有多少，导入后哪些归导入人；导入会遇到的问题这一步就报出来，不写库',
-    middleware: uploadMiddleware(deps, false),
-    request: {
-      body: {
-        required: true,
-        content: { 'multipart/form-data': { schema: SpaceImportInspectForm } },
-      },
+const inspectRoute = createRoute({
+  method: 'post',
+  path: '/circles/import/inspect',
+  tags: ['console'],
+  summary: '预检导入包：查看导出者、记忆圈类型与各实体数量',
+  middleware: uploadMiddleware(),
+  request: {
+    body: {
+      required: true,
+      content: { 'multipart/form-data': { schema: CircleImportInspectForm } },
     },
-    responses: { 200: jsonResponse('文件的内容', SpaceImportPreview), ...uploadErrors },
-  })
-}
+  },
+  responses: { 200: jsonResponse('导入包内容概览', CircleImportPreview), ...uploadErrors },
+})
 
-function importRoute(deps: Deps) {
-  return createRoute({
-    method: 'post',
-    path: '/spaces/import',
-    tags: ['console'],
-    summary:
-      '把导出文件导入成一个新空间：导入人是新空间的 owner、占一个空间名额，导出人的本人记忆与凭据都归导入人；Key 不在文件里，要重新签发',
-    middleware: uploadMiddleware(deps, true),
-    request: {
-      body: { required: true, content: { 'multipart/form-data': { schema: SpaceImportForm } } },
-    },
-    responses: {
-      201: jsonResponse('已导入', SpaceImportResult),
-      ...uploadErrors,
-      409: jsonResponse('拥有的空间已达上限', ErrorResponse),
-    },
-  })
-}
+const importRoute = createRoute({
+  method: 'post',
+  path: '/circles/import',
+  tags: ['console'],
+  summary: '按圈导入：个人圈包合并到当前账号的个人圈，共享圈包导入为新共享圈',
+  middleware: uploadMiddleware(),
+  request: {
+    body: { required: true, content: { 'multipart/form-data': { schema: CircleImportForm } } },
+  },
+  responses: {
+    201: jsonResponse('已导入', CircleImportResult),
+    ...uploadErrors,
+    409: jsonResponse('冲突或名称已被占用', ErrorResponse),
+  },
+})
 
-// 导出的文件发送的时限。客户端不断开、却一直不读响应时，node 与 @hono/node-server 都没有发送的时限，
-// 名额会一直占到连接关闭，别的导出导入只能排着：
-// - 空闲：这么久没有进度（客户端没有读走下一块）就断开、放掉名额。慢网络上正常在读的下载每读一块重新计时，不会被掐断；
-// - 总时限：一直在读、但慢到这么久还没发完的也断开。导出导入全实例只有一个名额，不能让谁慢慢读就占着它太久；
-//   文件最大 32 MiB，30 分钟发完要每秒 18 KB 左右
 const EXPORT_SEND_IDLE_MS = 2 * 60_000
 const EXPORT_SEND_TOTAL_MS = 30 * 60_000
-
-// 整个导出占一个名额：文件攒在内存里，要等发给浏览器之后才释放。名额只在 settle 里放、只放一次，放的时候移除断开的监听
-// 与发送时限；哪种情况先到都走它：导出出错或停下、文件发完、发送途中响应流被取消、文件做好之后客户端断开、
-// 到了发送时限（先断开连接）。导出期间不靠断开的监听放：客户端断开时 exportSpace 在下一个检查点自己停下，停下之后才放，
-// 名额不会在它还在派生、读库时就让给别人。文件做好之后、开始发之前就断开的，node 的服务端既不读这个响应流、
-// 也不取消它，只能在断开时放。
-// 到了时限直接断开这个请求的连接（disconnect），客户端只看到连接断了：不让响应流出错，否则 @hono/node-server 会往
-// 发了一半的文件后面写一段错误文本、再打一段调用栈。拿不到底层连接时（进程内调用 app.request）才让响应流出错
-async function exportHoldingSlot(
-  accountId: string,
-  signal: AbortSignal,
-  limits: { idleMs: number; totalMs: number },
-  disconnect: () => boolean,
-  run: () => Promise<SpaceExport>,
-): Promise<{ exported: SpaceExport; body: ReadableStream<Uint8Array> }> {
-  const release = await acquireTransferSlot(accountId, signal)
-  let settled = false
-  let idle: NodeJS.Timeout | undefined
-  let total: NodeJS.Timeout | undefined
-  const settle = () => {
-    if (settled) return
-    settled = true
-    clearTimeout(idle)
-    clearTimeout(total)
-    signal.removeEventListener('abort', settle)
-    release()
-  }
-  let exported: SpaceExport
-  try {
-    exported = await run()
-  } catch (err) {
-    settle()
-    throw err
-  }
-  const body = fileBody(exported.file, settle, () => progressed())
-  // 每读走一块重新计空闲时限。两个时限都只是兜底，unref 不让进程为它们留着
-  function progressed() {
-    if (settled) return
-    clearTimeout(idle)
-    idle = setTimeout(() => stop('发送时太久没有进度'), limits.idleMs).unref()
-  }
-  function stop(why: string) {
-    if (settled) return
-    console.warn(`导出的文件${why}，断开连接、放掉名额`)
-    if (!disconnect()) body.abort(new Error(`导出的文件${why}，中止发送`))
-    settle()
-  }
-  if (signal.aborted) {
-    settle()
-  } else {
-    signal.addEventListener('abort', settle, { once: true })
-    progressed()
-    total = setTimeout(() => stop('过了发送的总时限还没发完'), limits.totalMs).unref()
-  }
-  return { exported, body: body.stream }
-}
-
-// 每次交给响应流的字节数
 const CHUNK = 64 * 1024
 
-// 响应流：文件分块交出去，读一块才给下一块（不预先排一块），读完或者被取消时调 done，所以文件真的发出去了才算发完。
-// 一次交出整个文件的话，node 的服务端拿到就整个收进连接的写缓冲，马上算发完、放掉名额，客户端不读时文件却一直在内存里。
-// 每次被读（pull）调 progressed；abort 让响应流出错，也调 done
 function fileBody(
   file: Uint8Array,
   done: () => void,
@@ -500,20 +510,67 @@ function fileBody(
   }
 }
 
-// 下载的文件名：空间名加导出时间（UTC）。空间名里放不进文件名的字符换成 _，另给一个只有 ASCII 的备用名
-function attachment(spaceName: string, createdAt: string): string {
-  const stamp = createdAt.replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')
-  const safe = spaceName.replace(/[\\/:*?"<>|\p{Cc}\p{Cf}]/gu, '_').trim() || 'space'
-  const fallback = `kioku-space-${stamp}.kioku-space`
-  return `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(`${safe}-${stamp}.kioku-space`)}`
+async function exportHoldingSlot(
+  accountId: string,
+  signal: AbortSignal,
+  limits: { idleMs: number; totalMs: number },
+  disconnect: () => boolean,
+  run: () => Promise<CircleExportResult>,
+): Promise<{ exported: CircleExportResult; body: ReadableStream<Uint8Array> }> {
+  const release = await acquireTransferSlot(accountId, signal)
+  let settled = false
+  let idle: NodeJS.Timeout | undefined
+  let total: NodeJS.Timeout | undefined
+  const settle = () => {
+    if (settled) return
+    settled = true
+    clearTimeout(idle)
+    clearTimeout(total)
+    signal.removeEventListener('abort', settle)
+    release()
+  }
+  let exported: CircleExportResult
+  try {
+    exported = await run()
+  } catch (err) {
+    settle()
+    throw err
+  }
+  const body = fileBody(exported.buffer, settle, () => progressed())
+  function progressed() {
+    if (settled) return
+    clearTimeout(idle)
+    idle = setTimeout(() => stop('发送时太久没有进度'), limits.idleMs).unref()
+  }
+  function stop(why: string) {
+    if (settled) return
+    console.warn(`导出的文件${why}，断开连接、放掉名额`)
+    if (!disconnect()) body.abort(new Error(`导出的文件${why}，中止发送`))
+    settle()
+  }
+  if (signal.aborted) {
+    settle()
+  } else {
+    signal.addEventListener('abort', settle, { once: true })
+    progressed()
+    total = setTimeout(() => stop('过了发送的总时限还没发完'), limits.totalMs).unref()
+  }
+  return { exported, body: body.stream }
 }
 
-// 成员与空间操作被拒的回应。不是成员（包括空间不存在）一律和别的空间接口一样回 403；ownerOnly 是不是所有者时的说明
+function attachment(filename: string): string {
+  const safe = filename.replace(/[\\/:*?"<>|\p{Cc}\p{Cf}]/gu, '_').trim() || 'circle.kioku-circle'
+  const ascii = safe.replace(/[^\x20-\x7e]/gu, '_')
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(safe)}`
+}
+
 function memberError(c: Context<AppEnv>, rejection: MemberRejection, ownerOnly: string) {
   switch (rejection.reason) {
-    case 'no-space':
+    case 'no-circle':
     case 'not-member':
       return c.json(notMember, 403)
+    case 'personal-circle':
+      return c.json({ error: '个人记忆圈不支持此成员或删除操作' }, 400)
     case 'forbidden':
       return c.json({ error: ownerOnly }, 403)
     case 'no-account':
@@ -521,67 +578,119 @@ function memberError(c: Context<AppEnv>, rejection: MemberRejection, ownerOnly: 
     case 'no-target':
       return c.json({ error: '成员不存在' }, 404)
     case 'already-member':
-      return c.json({ error: '已是此空间的成员' }, 409)
+      return c.json({ error: '已是此记忆圈的成员' }, 409)
     case 'last-owner':
       return c.json(
         {
           error:
-            '空间至少要有一个未停用的所有者：先把所有者转让给未停用的成员，或请实例管理员启用另一个所有者',
+            '共享记忆圈至少要有一个未停用的所有者：请先转让给未停用的成员，或请实例管理员启用另一位所有者',
         },
         409,
       )
     case 'self':
       return c.json({ error: '不能转让给自己' }, 400)
+    case 'slug-taken':
+      return c.json({ error: '记忆圈标识已被占用' }, 409)
     case 'disabled':
       return c.json({ error: '账号已停用' }, 409)
     case 'departure-purging':
-      return c.json({ error: '离开后的本人记忆与凭据已开始清除，清除完成后才能重新加入' }, 409)
+      return c.json({ error: '离开后的数据已开始清除，完成后才可重新加入' }, 409)
     case 'owner-busy':
-      return c.json({ error: '对方正在新建或导入空间，稍后再试' }, 409)
+      return c.json({ error: '对方正在新建或导入共享记忆圈，稍后再试' }, 409)
     case 'owner-limit':
       return c.json(
-        { error: `对方拥有的空间已达上限（每个账号最多 ${rejection.limit} 个），不能再成为所有者` },
+        {
+          error: `对方拥有的共享记忆圈已达上限（每个账号最多 ${rejection.limit} 个），不能再成为所有者`,
+        },
         409,
       )
   }
 }
 
-// 实例级的空间管理：空间列表与空间数量上限
 export function instanceSpaceRoutes(deps: Deps) {
   return router()
-    .openapi(instanceListRoute(deps), async (c) => c.json(await instanceSpaces(deps.db), 200))
+    .openapi(instanceListRoute(deps), async (c) =>
+      c.json({ circles: await adminCircles(deps.db) }, 200),
+    )
     .openapi(limitViewRoute(deps), async (c) =>
-      c.json(await spaceLimitView(deps.db, c.get('console').accountId), 200),
+      c.json(await circleLimitView(deps.db, c.get('console').accountId), 200),
     )
     .openapi(limitUpdateRoute(deps), async (c) => {
       const actor = c.get('console').accountId
-      // 和别的管理员写操作一样先过 lockAsAdmin：中间件查过之后才被停用、降级的管理员改不了
       const saved = await deps.db.transaction(async (tx) => {
         if (!(await lockAsAdmin(tx, actor))) return false
-        await saveSpaceLimit(tx, c.req.valid('json'))
+        await saveCircleLimit(tx, c.req.valid('json'))
         return true
       })
       if (!saved) return c.json({ error: '需要实例管理员' }, 403)
-      return c.json(await spaceLimitView(deps.db, actor), 200)
+      return c.json(await circleLimitView(deps.db, actor), 200)
     })
 }
 
-// 空间级的设置。spaces 是身份表，不在 RLS 里，按成员关系自己检查权限
 export function spaceRoutes(deps: Deps) {
+  const requireFacetEditor = async (circleId: string, accountId: string) => {
+    const role = await consoleRoleFor(deps, accountId, circleId)
+    return role === 'owner' || role === 'editor'
+  }
+
   return router()
-    .openapi(exportRoute, async (c) => {
-      const { spaceId } = c.req.valid('param')
+    .openapi(inspectRoute, async (c) => {
+      const form = c.req.valid('form')
+      const preview = await withTransferSlot(
+        c.get('console').accountId,
+        c.req.raw.signal,
+        async () =>
+          inspectCircleImport(Buffer.from(await form.file.arrayBuffer()), form.passphrase),
+      )
+      return c.json(preview, 200)
+    })
+    .openapi(importRoute, async (c) => {
+      const form = c.req.valid('form')
       const accountId = c.get('console').accountId
-      const role = await memberRole(deps, spaceId, accountId)
+      const result = await withTransferSlot(accountId, c.req.raw.signal, async () =>
+        importCircle(deps, accountId, {
+          file: Buffer.from(await form.file.arrayBuffer()),
+          passphrase: form.passphrase,
+          ...(form.name !== undefined ? { name: form.name } : {}),
+          ...(form.intoPersonalCircle !== undefined
+            ? { intoPersonalCircle: form.intoPersonalCircle }
+            : {}),
+        }),
+      )
+      void deps.jobs?.enqueueBackfill()
+      return c.json(result, 201)
+    })
+    .openapi(createCircleRoute, async (c) => {
+      const accountId = c.get('console').accountId
+      const body = c.req.valid('json')
+      const res = await createSharedCircle(deps.db, {
+        name: body.name,
+        ...(body.slug !== undefined ? { slug: body.slug } : {}),
+        defaultFacets: body.defaultFacets,
+        ownerAccountId: accountId,
+      })
+      if (!res.ok) {
+        if (res.reason === 'owner-limit') {
+          return c.json({ error: circleLimitReached(res.limit) }, 409)
+        }
+        if (res.reason === 'slug-taken') return c.json({ error: '记忆圈标识已被占用' }, 409)
+        return res.reason === 'disabled'
+          ? c.json({ error: '账号已停用' }, 409)
+          : c.json({ error: '账号不存在' }, 404)
+      }
+      return c.json(res.value, 201)
+    })
+    .openapi(exportRoute, async (c) => {
+      const { circleId } = c.req.valid('param')
+      const accountId = c.get('console').accountId
+      const role = await memberRole(deps, circleId, accountId)
       if (!role) return c.json(notMember, 403)
-      // 文件里有 secret 与托管的凭据值，和读写它们一样只给空间 owner
-      if (role !== 'owner') return c.json({ error: '仅空间所有者可导出空间' }, 403)
+      if (role !== 'owner') return c.json({ error: '仅记忆圈所有者可导出记忆圈' }, 403)
       const signal = c.req.raw.signal
       const limits = deps.exportSendLimits ?? {
         idleMs: EXPORT_SEND_IDLE_MS,
         totalMs: EXPORT_SEND_TOTAL_MS,
       }
-      // @hono/node-server 把底层的请求与响应放在 env 里，断开连接要用；进程内调用 app.request 时没有
       const outgoing = (c.env as Partial<HttpBindings> | undefined)?.outgoing
       const disconnect = () => {
         if (!outgoing) return false
@@ -593,186 +702,134 @@ export function spaceRoutes(deps: Deps) {
         signal,
         limits,
         disconnect,
-        () =>
-          exportSpace(deps.db, deps.masterKey, {
-            spaceId,
-            accountId,
-            passphrase: c.req.valid('json').passphrase,
-            signal,
-          }),
+        () => exportCircle(deps, circleId, accountId, c.req.valid('json').passphrase),
       )
       return c.body(body, 200, {
         'content-type': 'application/octet-stream',
-        'content-length': String(exported.file.length),
-        'content-disposition': attachment(exported.spaceName, exported.createdAt),
+        'content-length': String(exported.buffer.length),
+        'content-disposition': attachment(exported.filename),
         'cache-control': 'no-store',
       })
     })
-    .openapi(inspectRoute(deps), async (c) => {
-      const form = c.req.valid('form')
-      // 表单读完了才拿名额：解密、解压与解析都占着它
-      const preview = await withTransferSlot(
-        c.get('console').accountId,
-        c.req.raw.signal,
-        async () =>
-          inspectSpaceImport(deps.db, deps.masterKey, {
-            file: Buffer.from(await form.file.arrayBuffer()),
-            passphrase: form.passphrase,
-          }),
-      )
-      return c.json(preview, 200)
-    })
-    .openapi(importRoute(deps), async (c) => {
-      const form = c.req.valid('form')
-      const accountId = c.get('console').accountId
-      // 表单读完了才拿名额：解密、解压、解析与写库都占着它
-      const result = await withTransferSlot(accountId, c.req.raw.signal, async () =>
-        importSpace(deps.db, deps.masterKey, {
-          accountId,
-          file: Buffer.from(await form.file.arrayBuffer()),
-          passphrase: form.passphrase,
-          name: form.name,
-        }),
-      )
-      // 向量不在文件里，按这个实例的嵌入设置重新生成
-      void deps.jobs?.enqueueBackfill()
-      return c.json(result, 201)
-    })
-    .openapi(members, async (c) => {
-      const { spaceId } = c.req.valid('param')
-      if (!(await memberRole(deps, spaceId, c.get('console').accountId))) {
-        return c.json(notMember, 403)
-      }
-      return c.json(await listMembers(deps.db, spaceId), 200)
-    })
-    .openapi(addMemberRoute, async (c) => {
-      const { spaceId } = c.req.valid('param')
-      const body = c.req.valid('json')
-      const result = await addMember(deps.db, {
-        spaceId,
-        actor: c.get('console').accountId,
-        username: body.username,
-        role: body.role,
-      })
-      if (!result.ok) return memberError(c, result, '仅空间所有者可添加成员')
-      return c.json(result.value, 201)
-    })
-    .openapi(updateMemberRoute, async (c) => {
-      const { spaceId, accountId } = c.req.valid('param')
-      const result = await updateMemberRole(deps.db, {
-        spaceId,
-        actor: c.get('console').accountId,
-        target: accountId,
-        role: c.req.valid('json').role,
-      })
-      if (!result.ok) return memberError(c, result, '仅空间所有者可修改成员角色')
-      return c.json(result.value, 200)
-    })
-    .openapi(removeMemberRoute, async (c) => {
-      const { spaceId, accountId } = c.req.valid('param')
-      const result = await removeMember(deps.db, {
-        spaceId,
-        actor: c.get('console').accountId,
-        target: accountId,
-      })
-      if (!result.ok) return memberError(c, result, '仅空间所有者可移除其他成员')
-      return c.body(null, 204)
-    })
-    .openapi(transferRoute, async (c) => {
-      const { spaceId } = c.req.valid('param')
-      const result = await transferOwnership(deps.db, {
-        spaceId,
-        actor: c.get('console').accountId,
-        target: c.req.valid('json').accountId,
-      })
-      if (!result.ok) return memberError(c, result, '仅空间所有者可转让所有者')
-      return c.json(result.value, 200)
-    })
-    .openapi(createSpaceRoute, async (c) => {
-      const accountId = c.get('console').accountId
-      const space = await createSpace(deps.db, {
-        name: c.req.valid('json').name,
-        ownerAccountId: accountId,
-      })
-      if (!space.ok) {
-        if (space.reason === 'owner-limit') {
-          return c.json({ error: spaceLimitReached(space.limit) }, 409)
-        }
-        return space.reason === 'disabled'
-          ? c.json({ error: '账号已停用' }, 409)
-          : c.json({ error: '账号不存在' }, 404)
-      }
-      return c.json({ ...space.value, ownerAccountId: accountId }, 201)
-    })
-    .openapi(spaceView, async (c) => {
-      const { spaceId } = c.req.valid('param')
-      const detail = await spaceDetail(deps.db, spaceId, c.get('console').accountId)
+    .openapi(circleView, async (c) => {
+      const { circleId } = c.req.valid('param')
+      const detail = await circleDetail(deps.db, circleId, c.get('console').accountId)
       if (!detail) return c.json(notMember, 403)
       return c.json(detail, 200)
     })
-    .openapi(renameRoute, async (c) => {
-      const { spaceId } = c.req.valid('param')
-      const result = await renameSpace(deps.db, {
-        spaceId,
+    .openapi(updateCircleRoute, async (c) => {
+      const { circleId } = c.req.valid('param')
+      const body = c.req.valid('json')
+      const result = await updateCircle(deps.db, {
+        circleId,
         actor: c.get('console').accountId,
-        name: c.req.valid('json').name,
+        ...(body.name !== undefined ? { name: body.name } : {}),
+        ...(body.defaultFacets !== undefined ? { defaultFacets: body.defaultFacets } : {}),
       })
-      if (!result.ok) return memberError(c, result, '仅空间所有者可修改空间名')
+      if (!result.ok) return memberError(c, result, '仅记忆圈所有者可修改记忆圈')
       return c.json(result.value, 200)
     })
-    .openapi(deleteRoute, async (c) => {
-      const { spaceId } = c.req.valid('param')
+    .openapi(deleteCircleRoute, async (c) => {
+      const { circleId } = c.req.valid('param')
       const accountId = c.get('console').accountId
       const admin = await isInstanceAdmin(deps.db, accountId)
-      const result = await deleteSpace(deps.db, {
-        spaceId,
+      const result = await deleteSharedCircle(deps.db, {
+        circleId,
         actor: accountId,
         admin,
         confirmName: c.req.valid('json').confirmName,
       })
       if (!result.ok) {
-        if (result.reason === 'name-mismatch') return c.json({ error: '空间名不一致' }, 400)
-        // 别人探不出空间在不在：不存在与不是成员一样回 403，只有实例管理员看得到 404
-        if (result.reason === 'no-space' && admin) return c.json({ error: '空间不存在' }, 404)
-        return memberError(c, result, '仅空间所有者或实例管理员可删除空间')
+        if (result.reason === 'name-mismatch') return c.json({ error: '记忆圈名称不一致' }, 400)
+        if (result.reason === 'no-circle' && admin) return c.json({ error: '记忆圈不存在' }, 404)
+        return memberError(c, result, '仅记忆圈所有者或实例管理员可删除共享记忆圈')
       }
       return c.body(null, 204)
     })
-    .openapi(budget, async (c) => {
-      const { spaceId } = c.req.valid('param')
-      if (!(await memberRole(deps, spaceId, c.get('console').accountId))) {
+    .openapi(membersRoute, async (c) => {
+      const { circleId } = c.req.valid('param')
+      if (!(await memberRole(deps, circleId, c.get('console').accountId))) {
         return c.json(notMember, 403)
       }
-      return c.json(await extractionUsage(deps.db, spaceId), 200)
+      return c.json({ members: await listMembers(deps.db, circleId) }, 200)
+    })
+    .openapi(addMemberRoute, async (c) => {
+      const { circleId } = c.req.valid('param')
+      const body = c.req.valid('json')
+      const result = await addMember(deps.db, {
+        circleId,
+        actor: c.get('console').accountId,
+        username: body.username,
+        role: body.role,
+      })
+      if (!result.ok) return memberError(c, result, '仅记忆圈所有者可添加成员')
+      return c.json(result.value, 201)
+    })
+    .openapi(updateMemberRoute, async (c) => {
+      const { circleId, accountId } = c.req.valid('param')
+      const result = await updateMemberRole(deps.db, {
+        circleId,
+        actor: c.get('console').accountId,
+        target: accountId,
+        role: c.req.valid('json').role,
+      })
+      if (!result.ok) return memberError(c, result, '仅记忆圈所有者可修改成员角色')
+      return c.json(result.value, 200)
+    })
+    .openapi(removeMemberRoute, async (c) => {
+      const { circleId, accountId } = c.req.valid('param')
+      const result = await removeMember(deps.db, {
+        circleId,
+        actor: c.get('console').accountId,
+        target: accountId,
+      })
+      if (!result.ok) return memberError(c, result, '仅记忆圈所有者可移除其他成员')
+      return c.body(null, 204)
+    })
+    .openapi(transferRoute, async (c) => {
+      const { circleId } = c.req.valid('param')
+      const result = await transferOwnership(deps.db, {
+        circleId,
+        actor: c.get('console').accountId,
+        target: c.req.valid('json').accountId,
+      })
+      if (!result.ok) return memberError(c, result, '仅记忆圈所有者可转让所有权')
+      return c.json({ members: result.value }, 200)
+    })
+    .openapi(budget, async (c) => {
+      const { circleId } = c.req.valid('param')
+      if (!(await memberRole(deps, circleId, c.get('console').accountId))) {
+        return c.json(notMember, 403)
+      }
+      return c.json(await extractionUsage(deps.db, circleId), 200)
     })
     .openapi(saveBudget, async (c) => {
-      const { spaceId } = c.req.valid('param')
-      // 预算管的是花钱的事，和 domain 默认层一样只有空间 owner 能改
-      if ((await memberRole(deps, spaceId, c.get('console').accountId)) !== 'owner') {
-        return c.json({ error: '仅空间所有者可修改抽取预算' }, 403)
+      const { circleId } = c.req.valid('param')
+      if ((await memberRole(deps, circleId, c.get('console').accountId)) !== 'owner') {
+        return c.json({ error: '仅记忆圈所有者可修改抽取预算' }, 403)
       }
-      await saveExtractionBudget(deps.db, spaceId, c.req.valid('json'))
-      return c.json(await extractionUsage(deps.db, spaceId), 200)
+      await saveExtractionBudget(deps.db, circleId, c.req.valid('json'))
+      return c.json(await extractionUsage(deps.db, circleId), 200)
     })
     .openapi(privacyView, async (c) => {
-      const { spaceId } = c.req.valid('param')
-      if (!(await memberRole(deps, spaceId, c.get('console').accountId))) {
+      const { circleId } = c.req.valid('param')
+      if (!(await memberRole(deps, circleId, c.get('console').accountId))) {
         return c.json(notMember, 403)
       }
-      const { settings } = await loadSpacePrivacy(deps.db, spaceId)
+      const { settings } = await loadCirclePrivacy(deps.db, circleId)
       return c.json(settings, 200)
     })
     .openapi(savePrivacy, async (c) => {
-      const { spaceId } = c.req.valid('param')
-      if ((await memberRole(deps, spaceId, c.get('console').accountId)) !== 'owner') {
-        return c.json({ error: '仅空间所有者可修改隐私设置' }, 403)
+      const { circleId } = c.req.valid('param')
+      if ((await memberRole(deps, circleId, c.get('console').accountId)) !== 'owner') {
+        return c.json({ error: '仅记忆圈所有者可修改隐私设置' }, 403)
       }
       try {
-        const { settings } = await saveSpacePrivacy(deps.db, spaceId, c.req.valid('json'))
+        const { settings } = await saveCirclePrivacy(deps.db, circleId, c.req.valid('json'))
         if (deps.jobs?.enqueueSensitiveRescan) {
-          void deps.jobs.enqueueSensitiveRescan(spaceId)
+          void deps.jobs.enqueueSensitiveRescan(circleId)
         } else {
-          await rescanSpaceSensitive(deps.db, deps.masterKey, spaceId)
+          await rescanCircleSensitive(deps.db, deps.masterKey, circleId)
         }
         return c.json(settings, 200)
       } catch (err) {
@@ -781,16 +838,81 @@ export function spaceRoutes(deps: Deps) {
       }
     })
     .openapi(rescanPrivacy, async (c) => {
-      const { spaceId } = c.req.valid('param')
-      if ((await memberRole(deps, spaceId, c.get('console').accountId)) !== 'owner') {
-        return c.json({ error: '仅空间所有者可触发回扫' }, 403)
+      const { circleId } = c.req.valid('param')
+      if ((await memberRole(deps, circleId, c.get('console').accountId)) !== 'owner') {
+        return c.json({ error: '仅记忆圈所有者可触发回扫' }, 403)
       }
-      await bumpSpacePrivacyRevision(deps.db, spaceId)
+      await bumpCirclePrivacyRevision(deps.db, circleId)
       if (deps.jobs?.enqueueSensitiveRescan) {
-        const queued = await deps.jobs.enqueueSensitiveRescan(spaceId)
+        const queued = await deps.jobs.enqueueSensitiveRescan(circleId)
         return c.json({ queued }, 200)
       }
-      const updated = await rescanSpaceSensitive(deps.db, deps.masterKey, spaceId)
+      const updated = await rescanCircleSensitive(deps.db, deps.masterKey, circleId)
       return c.json({ queued: false, updated }, 200)
+    })
+    .openapi(facetsView, async (c) => {
+      const { circleId } = c.req.valid('param')
+      await consoleRoleFor(deps, c.get('console').accountId, circleId)
+      return c.json(await withCircle(deps.db, circleId, (tx) => listVocabulary(tx, circleId)), 200)
+    })
+    .openapi(createFacetDim, async (c) => {
+      const { circleId } = c.req.valid('param')
+      if (!(await requireFacetEditor(circleId, c.get('console').accountId))) {
+        return c.json({ error: '需要记忆圈所有者或编辑者角色' }, 403)
+      }
+      const body = c.req.valid('json')
+      return c.json(
+        await withCircle(deps.db, circleId, (tx) => createDimension(tx, circleId, body)),
+        201,
+      )
+    })
+    .openapi(updateFacetDim, async (c) => {
+      const { circleId, key } = c.req.valid('param')
+      if (!(await requireFacetEditor(circleId, c.get('console').accountId))) {
+        return c.json({ error: '需要记忆圈所有者或编辑者角色' }, 403)
+      }
+      const body = c.req.valid('json')
+      return c.json(
+        await withCircle(deps.db, circleId, (tx) => updateDimension(tx, circleId, key, body)),
+        200,
+      )
+    })
+    .openapi(deleteFacetDim, async (c) => {
+      const { circleId, key } = c.req.valid('param')
+      if (!(await requireFacetEditor(circleId, c.get('console').accountId))) {
+        return c.json({ error: '需要记忆圈所有者或编辑者角色' }, 403)
+      }
+      await withCircle(deps.db, circleId, (tx) => deleteDimension(tx, circleId, key))
+      return c.body(null, 204)
+    })
+    .openapi(createFacetTerm, async (c) => {
+      const { circleId } = c.req.valid('param')
+      if (!(await requireFacetEditor(circleId, c.get('console').accountId))) {
+        return c.json({ error: '需要记忆圈所有者或编辑者角色' }, 403)
+      }
+      const body = c.req.valid('json')
+      return c.json(
+        await withCircle(deps.db, circleId, (tx) => createTerm(tx, circleId, body)),
+        201,
+      )
+    })
+    .openapi(updateFacetTerm, async (c) => {
+      const { circleId, termId } = c.req.valid('param')
+      if (!(await requireFacetEditor(circleId, c.get('console').accountId))) {
+        return c.json({ error: '需要记忆圈所有者或编辑者角色' }, 403)
+      }
+      const body = c.req.valid('json')
+      return c.json(
+        await withCircle(deps.db, circleId, (tx) => updateTerm(tx, circleId, termId, body)),
+        200,
+      )
+    })
+    .openapi(deleteFacetTerm, async (c) => {
+      const { circleId, termId } = c.req.valid('param')
+      if (!(await requireFacetEditor(circleId, c.get('console').accountId))) {
+        return c.json({ error: '需要记忆圈所有者或编辑者角色' }, 403)
+      }
+      await withCircle(deps.db, circleId, (tx) => deleteTerm(tx, circleId, termId))
+      return c.body(null, 204)
     })
 }

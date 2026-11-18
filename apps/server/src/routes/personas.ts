@@ -4,40 +4,52 @@ import {
   ErrorResponse,
   PersonaDetail,
   PersonaInfo,
+  PersonaTrait,
+  TraitKey,
   UpdatePersonaRequest,
+  UpsertPersonaTraitRequest,
+  type ResolvedPersonaTrait,
 } from '@kioku/contracts'
 import { and, asc, count, eq, inArray, sql } from 'drizzle-orm'
 
 import { memberRole } from '../auth/middleware'
-import { withSpace, type Tx } from '../db/client'
-import { appGroupPersonas, apps, memories, personas } from '../db/schema'
+import { withCircle, type Tx } from '../db/client'
+import { clientGroupRules, clients, personaTraits, personas } from '../db/schema'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
-import { consoleMemberFor } from '../memory/context'
-import { readableConditions } from '../memory/filter'
-import { MAX_PERSONA_DEPTH, overriddenBy, personaChain } from '../memory/personas'
-import { formatUri } from '../memory/uri'
+import { consoleRoleFor } from '../memory/context'
+import { MAX_PERSONA_DEPTH, personaChain } from '../memory/personas'
 
-const SpaceParams = z.object({ spaceId: z.uuid() })
-const PersonaParams = SpaceParams.extend({ personaId: z.uuid() })
+const CircleParams = z.object({ circleId: z.uuid() })
+const PersonaParams = CircleParams.extend({ personaId: z.uuid() })
+const TraitParams = PersonaParams.extend({ traitKey: TraitKey })
 
 const forbidden = jsonResponse('没有权限', ErrorResponse)
 const notFound = jsonResponse('不存在', ErrorResponse)
 
 const toInfo = (row: typeof personas.$inferSelect) => ({
   id: row.id,
+  circleId: row.circleId,
   slug: row.slug,
   name: row.name,
   extendsId: row.extendsId,
   description: row.description,
 })
 
+const toTrait = (row: typeof personaTraits.$inferSelect): PersonaTrait => ({
+  traitKey: row.traitKey,
+  title: row.title,
+  content: row.content,
+  sortOrder: row.sortOrder,
+  updatedAt: row.updatedAt.toISOString(),
+})
+
 const list = createRoute({
   method: 'get',
-  path: '/spaces/{spaceId}/personas',
+  path: '/circles/{circleId}/personas',
   tags: ['personas'],
-  summary: '列出空间里的人格',
-  request: { params: SpaceParams },
+  summary: '列出记忆圈里的人格',
+  request: { params: CircleParams },
   responses: {
     200: jsonResponse('人格列表', z.array(PersonaInfo)),
     403: forbidden,
@@ -46,13 +58,13 @@ const list = createRoute({
 
 const create = createRoute({
   method: 'post',
-  path: '/spaces/{spaceId}/personas',
+  path: '/circles/{circleId}/personas',
   tags: ['personas'],
-  summary: '新建人格，可以继承另一个人格',
-  request: { params: SpaceParams, body: jsonBody(CreatePersonaRequest) },
+  summary: '新建人格，可继承另一个人格并带入初始设定段',
+  request: { params: CircleParams, body: jsonBody(CreatePersonaRequest) },
   responses: {
     201: jsonResponse('已创建', PersonaInfo),
-    400: jsonResponse('继承链太长', ErrorResponse),
+    400: jsonResponse('继承链太长或设定键重复', ErrorResponse),
     403: forbidden,
     404: jsonResponse('被继承的人格不存在', ErrorResponse),
     409: jsonResponse('标识已被占用', ErrorResponse),
@@ -61,18 +73,18 @@ const create = createRoute({
 
 const detail = createRoute({
   method: 'get',
-  path: '/spaces/{spaceId}/personas/{personaId}',
+  path: '/circles/{circleId}/personas/{personaId}',
   tags: ['personas'],
-  summary: '人格详情：继承链、自己的与继承来的节点（标出被覆盖的）、用它的应用',
+  summary: '人格详情：继承链、自身与继承的设定段（标出覆盖者）与使用该人格的接入实例',
   request: { params: PersonaParams },
   responses: { 200: jsonResponse('人格详情', PersonaDetail), 403: forbidden, 404: notFound },
 })
 
 const update = createRoute({
   method: 'patch',
-  path: '/spaces/{spaceId}/personas/{personaId}',
+  path: '/circles/{circleId}/personas/{personaId}',
   tags: ['personas'],
-  summary: '修改人格的名称、说明或继承；标识不能改',
+  summary: '修改人格的名称、说明或继承关系；标识不能改',
   request: { params: PersonaParams, body: jsonBody(UpdatePersonaRequest) },
   responses: {
     200: jsonResponse('已修改', PersonaInfo),
@@ -84,9 +96,9 @@ const update = createRoute({
 
 const remove = createRoute({
   method: 'delete',
-  path: '/spaces/{spaceId}/personas/{personaId}',
+  path: '/circles/{circleId}/personas/{personaId}',
   tags: ['personas'],
-  summary: '删除人格：有应用在用、被别的人格继承、或还有这个人格的记忆（含已删除的）时不能删',
+  summary: '删除人格：有接入实例或按群规则在用、或被其他人格继承时不能删',
   request: { params: PersonaParams },
   responses: {
     204: { description: '已删除' },
@@ -96,13 +108,40 @@ const remove = createRoute({
   },
 })
 
-// 继承关系的改动（新建时指定继承、改继承、删除）在一个空间里串行执行：
+const upsertTrait = createRoute({
+  method: 'put',
+  path: '/circles/{circleId}/personas/{personaId}/traits',
+  tags: ['personas'],
+  summary: '新增或按设定键覆盖人格的设定段',
+  request: { params: PersonaParams, body: jsonBody(UpsertPersonaTraitRequest) },
+  responses: {
+    200: jsonResponse('已保存', PersonaTrait),
+    403: forbidden,
+    404: notFound,
+  },
+})
+
+const deleteTrait = createRoute({
+  method: 'delete',
+  path: '/circles/{circleId}/personas/{personaId}/traits/{traitKey}',
+  tags: ['personas'],
+  summary: '删除人格自身的某条设定段（保留祖先同键设定）',
+  request: { params: TraitParams },
+  responses: {
+    204: { description: '已删除' },
+    403: forbidden,
+    404: notFound,
+  },
+})
+
+// 继承关系的改动（新建时指定继承、改继承、删除）在一个记忆圈里串行执行：
 // 两个请求各自检查都不成环，合起来却可能成环
-async function lockPersonaGraph(tx: Tx, spaceId: string): Promise<void> {
-  await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`personas:${spaceId}`}, 0))`)
+async function lockPersonaGraph(tx: Tx, circleId: string): Promise<void> {
+  await tx.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`personas:${circleId}`}, 0))`,
+  )
 }
 
-// 以这个人格为根的子树有几层（只有自己时是 1）；层数上限防止数据里意外出现的环让查询停不下来
 async function subtreeHeight(tx: Tx, personaId: string): Promise<number> {
   const [row] = await tx.execute<{ height: number }>(sql`
     with recursive sub(id, depth) as (
@@ -115,13 +154,11 @@ async function subtreeHeight(tx: Tx, personaId: string): Promise<number> {
   return row?.height ?? 0
 }
 
-// 让 personaId 继承 parentId 之后的问题：父人格不存在、成环、或最深的继承链超过上限
 async function inheritanceProblem(
   tx: Tx,
   personaId: string | null,
   parentId: string,
 ): Promise<'missing' | string | null> {
-  // 外键检查不受 RLS 约束，被继承的人格必须在 RLS 下可见，也就是同一空间
   const [parent] = await tx
     .select({ id: personas.id })
     .from(personas)
@@ -138,39 +175,53 @@ async function inheritanceProblem(
 
 export function personaRoutes(deps: Deps) {
   const app = router()
-  const canManage = async (spaceId: string, accountId: string) => {
-    const role = await memberRole(deps, spaceId, accountId)
+  const canManage = async (circleId: string, accountId: string) => {
+    const role = await memberRole(deps, circleId, accountId)
     return role === 'owner' || role === 'editor'
   }
   return app
     .openapi(list, async (c) => {
-      const { spaceId } = c.req.valid('param')
-      if (!(await memberRole(deps, spaceId, c.get('console').accountId))) {
-        return c.json({ error: '无权访问此空间' }, 403)
-      }
-      const rows = await withSpace(deps.db, spaceId, (tx) =>
+      const { circleId } = c.req.valid('param')
+      await consoleRoleFor(deps, c.get('console').accountId, circleId)
+      const rows = await withCircle(deps.db, circleId, (tx) =>
         tx.select().from(personas).orderBy(asc(personas.createdAt)),
       )
       return c.json(rows.map(toInfo), 200)
     })
     .openapi(create, async (c) => {
-      const { spaceId } = c.req.valid('param')
-      if (!(await canManage(spaceId, c.get('console').accountId))) {
-        return c.json({ error: '需要空间所有者或编辑者角色' }, 403)
+      const { circleId } = c.req.valid('param')
+      if (!(await canManage(circleId, c.get('console').accountId))) {
+        return c.json({ error: '需要记忆圈所有者或编辑者角色' }, 403)
       }
-      const body = c.req.valid('json')
-      const result = await withSpace(deps.db, spaceId, async (tx) => {
+      const { traits, ...body } = c.req.valid('json')
+      if (traits && new Set(traits.map((t) => t.traitKey)).size !== traits.length) {
+        return c.json({ error: '同一人格下设定键不能重复' }, 400)
+      }
+      const result = await withCircle(deps.db, circleId, async (tx) => {
         if (body.extendsId) {
-          await lockPersonaGraph(tx, spaceId)
+          await lockPersonaGraph(tx, circleId)
           const problem = await inheritanceProblem(tx, null, body.extendsId)
           if (problem) return problem
         }
         const [row] = await tx
           .insert(personas)
-          .values({ spaceId, ...body })
+          .values({ circleId, ...body })
           .onConflictDoNothing()
           .returning()
-        return row ?? ('taken' as const)
+        if (!row) return 'taken' as const
+        if (traits?.length) {
+          await tx.insert(personaTraits).values(
+            traits.map((t) => ({
+              circleId,
+              personaId: row.id,
+              traitKey: t.traitKey,
+              title: t.title,
+              content: t.content,
+              sortOrder: t.sortOrder,
+            })),
+          )
+        }
+        return row
       })
       if (result === 'missing') return c.json({ error: '被继承的人格不存在' }, 404)
       if (result === 'taken') return c.json({ error: '人格标识已被占用' }, 409)
@@ -178,15 +229,13 @@ export function personaRoutes(deps: Deps) {
       return c.json(toInfo(result), 201)
     })
     .openapi(detail, async (c) => {
-      const { spaceId, personaId } = c.req.valid('param')
-      // 节点按查看者在管理界面里的读权限算，与记忆页一致
-      const { service } = await consoleMemberFor(deps, spaceId, c.get('console').accountId)
-      const access = service.access
-      const result = await withSpace(deps.db, spaceId, async (tx) => {
+      const { circleId, personaId } = c.req.valid('param')
+      await consoleRoleFor(deps, c.get('console').accountId, circleId)
+      const result = await withCircle(deps.db, circleId, async (tx) => {
         const [row] = await tx.select().from(personas).where(eq(personas.id, personaId))
         if (!row) return null
         const chain = await personaChain(tx, personaId)
-        const [related, children, users, nodes, [stored]] = await Promise.all([
+        const [related, children, userClients, traitRows] = await Promise.all([
           tx.select().from(personas).where(inArray(personas.id, chain)),
           tx
             .select()
@@ -194,80 +243,74 @@ export function personaRoutes(deps: Deps) {
             .where(eq(personas.extendsId, personaId))
             .orderBy(asc(personas.createdAt)),
           tx
-            .select({ id: apps.id, slug: apps.slug, name: apps.name })
-            .from(apps)
-            .where(eq(apps.defaultPersonaId, personaId))
-            .orderBy(asc(apps.createdAt)),
+            .select({ id: clients.id, slug: clients.slug, name: clients.name })
+            .from(clients)
+            .where(eq(clients.defaultPersonaId, personaId))
+            .orderBy(asc(clients.createdAt)),
           tx
-            .select({
-              domain: memories.domain,
-              path: memories.path,
-              title: memories.title,
-              personaId: memories.personaId,
-              priority: memories.priority,
-              sensitivity: memories.sensitivity,
-              disclosure: memories.disclosure,
-              overriddenBy: overriddenBy(access, chain),
-            })
-            .from(memories)
-            .where(
-              and(
-                eq(memories.layer, 'persona'),
-                eq(memories.form, 'curated'),
-                readableConditions(access, { personaIds: chain, explicit: true }),
-              ),
-            )
-            .orderBy(asc(memories.path)),
-          // 只数查看者用管理读取看得到的（含已删除、已过期的），看不到的 secret 不透露条数
-          tx
-            .select({ n: count() })
-            .from(memories)
-            .where(
-              and(
-                eq(memories.personaId, personaId),
-                readableConditions(access, { personaIds: [], management: true }),
-              ),
-            ),
+            .select()
+            .from(personaTraits)
+            .where(inArray(personaTraits.personaId, chain))
+            .orderBy(asc(personaTraits.sortOrder), asc(personaTraits.traitKey)),
         ])
         const byId = new Map(related.map((p) => [p.id, p]))
-        const toNode = (n: (typeof nodes)[number]) => ({
-          uri: formatUri(n.domain!, n.path!),
-          title: n.title!,
-          personaId: n.personaId!,
-          priority: n.priority,
-          sensitivity: n.sensitivity,
-          disclosure: n.disclosure,
-          overriddenBy: n.overriddenBy,
-        })
-        // 继承来的节点按继承链的远近排：直接继承的那个人格在前
-        const rank = (id: string | null) => chain.indexOf(id ?? '')
+        const rank = (id: string) => {
+          const idx = chain.indexOf(id)
+          return idx < 0 ? 999 : idx
+        }
+        // 每个 traitKey 在继承链上最近的提供者（index 最小）即为生效覆盖者
+        const winnerByKey = new Map<string, string>()
+        for (const t of traitRows) {
+          const cur = winnerByKey.get(t.traitKey)
+          if (!cur || rank(t.personaId) < rank(cur)) {
+            winnerByKey.set(t.traitKey, t.personaId)
+          }
+        }
+        const ownTraits: ResolvedPersonaTrait[] = traitRows
+          .filter((t) => t.personaId === personaId)
+          .map((t) => ({
+            ...toTrait(t),
+            personaId: t.personaId,
+            overriddenBy: null,
+          }))
+        const inheritedTraits: ResolvedPersonaTrait[] = traitRows
+          .filter((t) => t.personaId !== personaId)
+          .sort(
+            (a, b) =>
+              rank(a.personaId) - rank(b.personaId) ||
+              a.sortOrder - b.sortOrder ||
+              a.traitKey.localeCompare(b.traitKey),
+          )
+          .map((t) => {
+            const winner = winnerByKey.get(t.traitKey)
+            return {
+              ...toTrait(t),
+              personaId: t.personaId,
+              overriddenBy: winner && rank(winner) < rank(t.personaId) ? winner : null,
+            }
+          })
         return {
           ...toInfo(row),
           ancestors: chain.slice(1).flatMap((id) => (byId.has(id) ? [toInfo(byId.get(id)!)] : [])),
           children: children.map(toInfo),
-          own: nodes.filter((n) => n.personaId === personaId).map(toNode),
-          inherited: nodes
-            .filter((n) => n.personaId !== personaId)
-            .sort((a, b) => rank(a.personaId) - rank(b.personaId))
-            .map(toNode),
-          apps: users,
-          storedMemories: stored!.n,
+          ownTraits,
+          inheritedTraits,
+          clients: userClients,
         }
       })
       if (!result) return c.json({ error: '人格不存在' }, 404)
       return c.json(result, 200)
     })
     .openapi(update, async (c) => {
-      const { spaceId, personaId } = c.req.valid('param')
-      if (!(await canManage(spaceId, c.get('console').accountId))) {
-        return c.json({ error: '需要空间所有者或编辑者角色' }, 403)
+      const { circleId, personaId } = c.req.valid('param')
+      if (!(await canManage(circleId, c.get('console').accountId))) {
+        return c.json({ error: '需要记忆圈所有者或编辑者角色' }, 403)
       }
       const body = c.req.valid('json')
-      const result = await withSpace(deps.db, spaceId, async (tx) => {
-        if (body.extendsId !== undefined) await lockPersonaGraph(tx, spaceId)
+      const result = await withCircle(deps.db, circleId, async (tx) => {
+        if (body.extendsId !== undefined) await lockPersonaGraph(tx, circleId)
         const [row] = await tx.select().from(personas).where(eq(personas.id, personaId))
         if (!row) return 'missing' as const
-        // 继承没变时不重新检查：上限加上之前建出的更深的链，照样能改名称与说明
         if (body.extendsId && body.extendsId !== row.extendsId) {
           const problem = await inheritanceProblem(tx, personaId, body.extendsId)
           if (problem === 'missing') return 'missing-parent' as const
@@ -278,7 +321,6 @@ export function personaRoutes(deps: Deps) {
           .set({ ...body, updatedAt: new Date() })
           .where(eq(personas.id, personaId))
           .returning()
-        // 只改名称与说明时不加锁，读出之后被并发删除的就当作不存在
         return updated ?? ('missing' as const)
       })
       if (result === 'missing') return c.json({ error: '人格不存在' }, 404)
@@ -287,36 +329,30 @@ export function personaRoutes(deps: Deps) {
       return c.json(toInfo(result), 200)
     })
     .openapi(remove, async (c) => {
-      const { spaceId, personaId } = c.req.valid('param')
-      if (!(await canManage(spaceId, c.get('console').accountId))) {
-        return c.json({ error: '需要空间所有者或编辑者角色' }, 403)
+      const { circleId, personaId } = c.req.valid('param')
+      if (!(await canManage(circleId, c.get('console').accountId))) {
+        return c.json({ error: '需要记忆圈所有者或编辑者角色' }, 403)
       }
-      const result = await withSpace(deps.db, spaceId, async (tx) => {
-        await lockPersonaGraph(tx, spaceId)
-        // 锁住这一行：把应用、人格或记忆指向它的写入，外键检查都要等这把锁，
-        // 检查之后不会再冒出一个被连带清空或删掉的引用
+      const result = await withCircle(deps.db, circleId, async (tx) => {
+        await lockPersonaGraph(tx, circleId)
         const [row] = await tx
           .select({ id: personas.id })
           .from(personas)
           .where(eq(personas.id, personaId))
           .for('update')
         if (!row) return null
-        const [[users], [rules], [heirs], [stored]] = await Promise.all([
-          tx.select({ n: count() }).from(apps).where(eq(apps.defaultPersonaId, personaId)),
+        const [[users], [rules], [heirs]] = await Promise.all([
+          tx.select({ n: count() }).from(clients).where(eq(clients.defaultPersonaId, personaId)),
           tx
             .select({ n: count() })
-            .from(appGroupPersonas)
-            .where(eq(appGroupPersonas.personaId, personaId)),
+            .from(clientGroupRules)
+            .where(eq(clientGroupRules.personaId, personaId)),
           tx.select({ n: count() }).from(personas).where(eq(personas.extendsId, personaId)),
-          // 这个人格的记忆会被连带硬删除，已删除、还能撤销删除的也算
-          tx.select({ n: count() }).from(memories).where(eq(memories.personaId, personaId)),
         ])
         const reasons = [
-          users!.n ? `${users!.n} 个应用将其设为默认人格` : '',
-          rules!.n ? `${rules!.n} 条按群换人格的规则使用此人格` : '',
+          users!.n ? `${users!.n} 个接入实例将其设为默认人格` : '',
+          rules!.n ? `${rules!.n} 条按群规则使用此人格` : '',
           heirs!.n ? `${heirs!.n} 个人格继承此人格` : '',
-          // 不给条数：里面可能有查看者读不到的 secret 记忆
-          stored!.n ? '仍有这个人格的记忆（含已删除但可恢复的）' : '',
         ].filter(Boolean)
         if (reasons.length) return reasons
         await tx.delete(personas).where(eq(personas.id, personaId))
@@ -324,6 +360,66 @@ export function personaRoutes(deps: Deps) {
       })
       if (!result) return c.json({ error: '人格不存在' }, 404)
       if (result.length) return c.json({ error: `无法删除：${result.join('；')}` }, 409)
+      return c.body(null, 204)
+    })
+    .openapi(upsertTrait, async (c) => {
+      const { circleId, personaId } = c.req.valid('param')
+      if (!(await canManage(circleId, c.get('console').accountId))) {
+        return c.json({ error: '需要记忆圈所有者或编辑者角色' }, 403)
+      }
+      const body = c.req.valid('json')
+      const saved = await withCircle(deps.db, circleId, async (tx) => {
+        const [persona] = await tx
+          .select({ id: personas.id })
+          .from(personas)
+          .where(eq(personas.id, personaId))
+          .limit(1)
+        if (!persona) return null
+        const [row] = await tx
+          .insert(personaTraits)
+          .values({
+            circleId,
+            personaId,
+            traitKey: body.traitKey,
+            title: body.title,
+            content: body.content,
+            sortOrder: body.sortOrder,
+          })
+          .onConflictDoUpdate({
+            target: [personaTraits.personaId, personaTraits.traitKey],
+            set: {
+              title: body.title,
+              content: body.content,
+              sortOrder: body.sortOrder,
+              updatedAt: new Date(),
+            },
+          })
+          .returning()
+        return row ?? null
+      })
+      if (!saved) return c.json({ error: '人格不存在' }, 404)
+      return c.json(toTrait(saved), 200)
+    })
+    .openapi(deleteTrait, async (c) => {
+      const { circleId, personaId, traitKey } = c.req.valid('param')
+      if (!(await canManage(circleId, c.get('console').accountId))) {
+        return c.json({ error: '需要记忆圈所有者或编辑者角色' }, 403)
+      }
+      const outcome = await withCircle(deps.db, circleId, async (tx) => {
+        const [persona] = await tx
+          .select({ id: personas.id })
+          .from(personas)
+          .where(eq(personas.id, personaId))
+          .limit(1)
+        if (!persona) return 'no-persona' as const
+        const gone = await tx
+          .delete(personaTraits)
+          .where(and(eq(personaTraits.personaId, personaId), eq(personaTraits.traitKey, traitKey)))
+          .returning({ traitKey: personaTraits.traitKey })
+        return gone.length ? ('deleted' as const) : ('no-trait' as const)
+      })
+      if (outcome === 'no-persona') return c.json({ error: '人格不存在' }, 404)
+      if (outcome === 'no-trait') return c.json({ error: '未找到该人格设定' }, 404)
       return c.body(null, 204)
     })
 }

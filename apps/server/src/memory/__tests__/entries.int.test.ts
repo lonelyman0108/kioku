@@ -388,7 +388,7 @@ describe.skipIf(!testDatabaseUrl)('词条多变体 CRUD、机密防旁路、凭�
           field: target.field,
           credential: view,
           created: true,
-          storedIn: 'hosted',
+          storedIn: { kind: 'hosted', bench: false },
         }
       },
     )

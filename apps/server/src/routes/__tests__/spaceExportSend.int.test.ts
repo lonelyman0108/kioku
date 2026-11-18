@@ -15,13 +15,12 @@ import { bootstrap, type Workspace } from '../../testing/fixtures'
 // 这里测的是导出的文件在真的连接上怎么发，导出本身换成直接给一个大文件：要比连接两头的缓冲大得多，
 // 客户端不读时才发不完
 const { FILE_BYTES } = vi.hoisted(() => ({ FILE_BYTES: 24 * 1024 * 1024 }))
-vi.mock('../../backup/spaceExport', async () => {
+vi.mock('../../backup/circleExport', async () => {
   const { randomBytes } = await import('node:crypto')
   return {
-    exportSpace: async () => ({
-      file: randomBytes(FILE_BYTES),
-      spaceName: '家',
-      createdAt: new Date().toISOString(),
+    exportCircle: async () => ({
+      buffer: randomBytes(FILE_BYTES),
+      filename: '家.kioku-circle',
     }),
   }
 })
@@ -94,7 +93,7 @@ describe.skipIf(!testDatabaseUrl)('导出的文件在真的连接上发送', () 
     await once(socket, 'connect')
     socket.write(
       [
-        `POST /v1/spaces/${ws.spaceId}/export HTTP/1.1`,
+        `POST /v1/circles/${ws.circleId}/export HTTP/1.1`,
         'host: 127.0.0.1',
         `cookie: ${ws.cookie}`,
         'sec-fetch-site: same-origin',
@@ -186,7 +185,7 @@ describe.skipIf(!testDatabaseUrl)('导出的文件在真的连接上发送', () 
 
   it('读响应的客户端拿到完整的文件，发完就放掉名额', async () => {
     const { port } = await serveWith({ idleMs: 1000, totalMs: 60_000 })
-    const res = await fetch(`http://127.0.0.1:${port}/v1/spaces/${ws.spaceId}/export`, {
+    const res = await fetch(`http://127.0.0.1:${port}/v1/circles/${ws.circleId}/export`, {
       method: 'POST',
       headers: {
         cookie: ws.cookie,

@@ -122,7 +122,13 @@ describe.skipIf(!testDatabaseUrl)('记忆圈配额、成员生命周期与接入
     )
     expect(setupRes.status).toBe(201)
     const adminCookie = extractSessionCookie(setupRes)
-    const setupMe = await setupRes.json()
+    const setupMe = (await setupRes.json()) as {
+      id: string
+      personalCircleId: string
+      circles: unknown[]
+      ownedSharedCircles: number
+      maxOwnedCircles: number
+    }
     expect(setupMe.personalCircleId).toBeTruthy()
     expect(setupMe.circles).toHaveLength(2)
     expect(setupMe.ownedSharedCircles).toBe(1)
@@ -148,11 +154,13 @@ describe.skipIf(!testDatabaseUrl)('记忆圈配额、成员生命周期与接入
       ),
     )
     expect(createRes.status).toBe(201)
-    const createdAccount = await createRes.json()
+    const createdAccount = (await createRes.json()) as {
+      account: { id: string; circles: Array<{ kind: string }> }
+    }
     expect(createdAccount.account.circles).toHaveLength(1)
-    expect(createdAccount.account.circles[0].kind).toBe('personal')
+    expect(createdAccount.account.circles[0]?.kind).toBe('personal')
 
-    const bobId = createdAccount.account.id as string
+    const bobId = createdAccount.account.id
     const bobMe = await loadSessionUser(database.db, bobId)
     expect(bobMe?.ownedSharedCircles).toBe(0)
 
@@ -364,7 +372,8 @@ describe.skipIf(!testDatabaseUrl)('记忆圈配额、成员生命周期与接入
       expect(upd.ok).toBe(true)
 
       const [clientRow] = await tx.select().from(clients).where(eq(clients.id, clientId))
-      const storedAdv = (clientRow?.config as Record<string, Record<string, unknown>>).advanced
+      const storedAdv = (clientRow?.config as unknown as Record<string, Record<string, unknown>>)
+        .advanced
       expect(storedAdv?.['prompts.guidance']).toBeUndefined()
       expect(storedAdv?.['recall.limit']).toBe(12)
 

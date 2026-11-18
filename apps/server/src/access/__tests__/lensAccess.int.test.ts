@@ -198,7 +198,7 @@ describe.skipIf(!testDatabaseUrl)('透镜密钥鉴权、无缝轮换与设备授
       }),
     )
     expect(okRes.status).toBe(200)
-    const probe = await okRes.json()
+    const probe = (await okRes.json()) as { staticRealms: string[]; grants: unknown[] }
     expect(probe.staticRealms).toEqual(['work'])
     expect(probe.grants).toHaveLength(3)
 
@@ -437,9 +437,9 @@ describe.skipIf(!testDatabaseUrl)('透镜密钥鉴权、无缝轮换与设备授
       }),
     )
     expect(tok1.status).toBe(200)
-    const body1 = await tok1.json()
+    const body1 = (await tok1.json()) as { status: string; keys: Array<{ status: string }> }
     expect(body1.status).toBe('approved')
-    expect(body1.keys[0].status).toBe('issued')
+    expect(body1.keys[0]?.status).toBe('issued')
 
     // 场景 B：确认后在取走前将确认人在客场家庭圈降级为 viewer，取走 read_write 客场授权应被 DEVICE_KEY_DENIALS.linked 拒绝
     const g2 = await startGrant()
@@ -480,7 +480,7 @@ describe.skipIf(!testDatabaseUrl)('透镜密钥鉴权、无缝轮换与设备授
       }),
     )
     expect(tok2.status).toBe(200)
-    const body2 = await tok2.json()
+    const body2 = (await tok2.json()) as { status: string; keys: Array<Record<string, unknown>> }
     expect(body2.status).toBe('approved')
     expect(body2.keys[0]).toEqual({
       runtimeFamily: 'claudecode',

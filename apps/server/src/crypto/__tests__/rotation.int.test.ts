@@ -1,13 +1,13 @@
 import { randomBytes } from 'node:crypto'
 
-import type { CredentialValues, MasterKeyStatus, MemoryView } from '@kioku/contracts'
+import type { CredentialValues, EntryView, MasterKeyStatus } from '@kioku/contracts'
 import { eq, sql } from 'drizzle-orm'
 import postgres from 'postgres'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
-import { withSpace, type Database } from '../../db/client'
-import { credentials, memories, settings, vaultConnections } from '../../db/schema'
+import { withCircle, type Database, type Tx } from '../../db/client'
+import { credentials, entries, entryVariants, settings, vaultConnections } from '../../db/schema'
 import { loadEmbeddingSetups } from '../../embedding/settings'
 import { staticEmbedderSource } from '../../embedding/source'
 import { loadExtractionConfig } from '../../extraction/settings'
@@ -51,7 +51,7 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
     await resetDatabase(database)
     await database.db.delete(settings)
     ws = await bootstrap(appWith(oldKey))
-    key = await ws.issueKey((await ws.createApp('agent')).id)
+    key = await ws.issueKey((await ws.createClient('agent')).id)
   })
 
   const send = (
@@ -67,57 +67,53 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
         ? { method, headers: { 'sec-fetch-site': 'same-origin', ...headers } }
         : jsonRequest(method, body, headers),
     )
-  const secret = async (app: ReturnType<typeof createApp>, uri: string, content: string) => {
+  const secret = async (app: ReturnType<typeof createApp>, title: string, content: string) => {
     const res = await send(
       app,
       'POST',
-      '/v1/memories',
-      { uri, content, sensitivity: 'secret' },
+      '/v1/entries',
+      { title, content, sensitivity: 'secret' },
       bearer(key),
     )
     expect(res.status).toBe(201)
-    return ((await res.json()) as MemoryView).id
+    return ((await res.json()) as EntryView).id
   }
-  const read = async (app: ReturnType<typeof createApp>, uri: string) => {
+  const read = async (app: ReturnType<typeof createApp>, title: string) => {
     const res = await send(
       app,
       'GET',
-      `/v1/memories?uri=${encodeURIComponent(uri)}`,
+      `/v1/entries?id=${encodeURIComponent(title)}`,
       undefined,
       bearer(key),
     )
     expect(res.status).toBe(200)
-    return ((await res.json()) as MemoryView).content
+    return ((await res.json()) as EntryView).variants[0]!.content
+  }
+  const entryIdByTitle = async (tx: Tx, title: string) => {
+    const [row] = await tx.select({ id: entries.id }).from(entries).where(eq(entries.title, title))
+    return row!.id
   }
   const keyIds = () =>
-    withSpace(database.db, ws.spaceId, async (tx) => [
+    withCircle(database.db, ws.circleId, async (tx) => [
       ...(await tx
-        .select({ keyId: memories.keyId })
-        .from(memories)
-        .where(sql`${memories.wrappedKey} is not null`)),
+        .select({ keyId: entryVariants.keyId })
+        .from(entryVariants)
+        .where(sql`${entryVariants.wrappedKey} is not null`)),
       ...(await tx.select({ keyId: credentials.keyId }).from(credentials)),
     ])
 
   // 每一处加密的数据都有：两条 secret 记忆（一条删掉了）、一条托管的凭据、嵌入渠道与抽取模型的 Key
   async function seed() {
     const app = appWith(oldKey)
-    await secret(app, 'user://home/wifi', '无线密码 hunter2')
-    await secret(app, 'user://home/old', '删掉的旧密码')
+    await secret(app, 'home/wifi', '无线密码 hunter2')
+    await secret(app, 'home/old', '删掉的旧密码')
     expect(
-      (
-        await send(
-          app,
-          'DELETE',
-          '/v1/memories?uri=user%3A%2F%2Fhome%2Fold',
-          undefined,
-          bearer(key),
-        )
-      ).status,
+      (await send(app, 'DELETE', '/v1/entries?id=home%2Fold', undefined, bearer(key))).status,
     ).toBe(204)
     const cred = await send(
       app,
       'POST',
-      `/v1/spaces/${ws.spaceId}/credentials`,
+      `/v1/circles/${ws.circleId}/credentials`,
       {
         identifier: 'nas',
         name: 'NAS',
@@ -169,10 +165,10 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
     }
     // 密码库连接保存的令牌与账户密钥，和托管的值一样要换包装
     const connectionId = crypto.randomUUID()
-    await withSpace(database.db, ws.spaceId, (tx) =>
+    await withCircle(database.db, ws.circleId, (tx) =>
       tx.insert(vaultConnections).values({
         id: connectionId,
-        spaceId: ws.spaceId,
+        circleId: ws.circleId,
         ownerAccountId: ws.accountId,
         serverUrl: 'https://vault.example.com',
         email: 'agent@example.com',
@@ -196,8 +192,9 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
     ])
 
     // 加上标识之前写下的记录：启动时按解得开的主密钥补上
-    await withSpace(database.db, ws.spaceId, async (tx) => {
-      await tx.update(memories).set({ keyId: null }).where(eq(memories.path, 'home/wifi'))
+    await withCircle(database.db, ws.circleId, async (tx) => {
+      const wifiId = await entryIdByTitle(tx, 'home/wifi')
+      await tx.update(entryVariants).set({ keyId: null }).where(eq(entryVariants.entryId, wifiId))
       await tx.update(credentials).set({ keyId: null })
     })
     await database.db.execute(
@@ -224,16 +221,16 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
       configured: true,
       currentId: keyIdOf(newKey),
       previousId: keyIdOf(oldKey),
-      remaining: { memories: 2, credentials: 1, vaultConnections: 1, settings: 2 },
+      remaining: { entries: 2, credentials: 1, vaultConnections: 1, settings: 2 },
       lastError: null,
     })
     // 轮换期间新写下的用新密钥
-    expect(await read(appWith(rotating), 'user://home/wifi')).toBe('无线密码 hunter2')
-    await secret(appWith(rotating), 'user://home/new', '轮换时写下的')
+    expect(await read(appWith(rotating), 'home/wifi')).toBe('无线密码 hunter2')
+    await secret(appWith(rotating), 'home/new', '轮换时写下的')
 
     expect(await rotateMasterKey(database.db, rotating)).toEqual({ rewrapped: 6, remaining: 0 })
     expect((await masterKeyStatus(database.db, rotating)).remaining).toEqual({
-      memories: 0,
+      entries: 0,
       credentials: 0,
       vaultConnections: 0,
       settings: 0,
@@ -242,12 +239,12 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
     // 换完之后只配新的那把：都解得开，删掉的恢复之后也解得开
     await prepareMasterKey(database.db, newKey)
     const app = appWith(newKey)
-    expect(await read(app, 'user://home/wifi')).toBe('无线密码 hunter2')
-    expect(await read(app, 'user://home/new')).toBe('轮换时写下的')
+    expect(await read(app, 'home/wifi')).toBe('无线密码 hunter2')
+    expect(await read(app, 'home/new')).toBe('轮换时写下的')
     const revealed = await send(
       app,
       'POST',
-      `/v1/spaces/${ws.spaceId}/credentials/${credentialId}/reveal`,
+      `/v1/circles/${ws.circleId}/credentials/${credentialId}/reveal`,
       undefined,
       { cookie: ws.cookie },
     )
@@ -256,11 +253,14 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
       'sk-embed',
     )
     expect((await loadExtractionConfig(database.db, newKey))?.[0]?.apiKey).toBe('sk-extract')
-    const deleted = await withSpace(database.db, ws.spaceId, (tx) =>
-      tx.select().from(memories).where(eq(memories.path, 'home/old')),
+    const deleted = await withCircle(database.db, ws.circleId, async (tx) =>
+      tx
+        .select()
+        .from(entryVariants)
+        .where(eq(entryVariants.entryId, await entryIdByTitle(tx, 'home/old'))),
     )
     expect(deleted[0]?.keyId).toBe(keyIdOf(newKey))
-    const [connection] = await withSpace(database.db, ws.spaceId, (tx) =>
+    const [connection] = await withCircle(database.db, ws.circleId, (tx) =>
       tx.select().from(vaultConnections).where(eq(vaultConnections.id, connectionId)),
     )
     expect(connection!.keyId).toBe(keyIdOf(newKey))
@@ -276,13 +276,13 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
 
   it('别的事务只是往这一行上挂记录（外键检查加的 KEY SHARE）时照常换；锁着要改的行这次跳过，之后再换', async () => {
     const app = appWith(oldKey)
-    await secret(app, 'user://home/wifi', '无线密码')
-    await secret(app, 'user://home/door', '门锁密码')
+    await secret(app, 'home/wifi', '无线密码')
+    await secret(app, 'home/door', '门锁密码')
     const hosted = async (identifier: string) => {
       const res = await send(
         app,
         'POST',
-        `/v1/spaces/${ws.spaceId}/credentials`,
+        `/v1/circles/${ws.circleId}/credentials`,
         { identifier, name: identifier, source: { kind: 'new', values: { password: 'p' } } },
         { cookie: ws.cookie },
       )
@@ -295,18 +295,22 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
     const side = postgres(testDatabaseUrl!, { max: 1, onnotice: () => {} })
     try {
       await side.begin(async (tx) => {
-        await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
-        // 插入事件、关键词与向量时，外键检查在记忆行上加的就是这把锁
-        await tx`select id from memories where path = 'home/wifi' for key share`
+        await tx`select set_config('app.read_circles', ${ws.circleId}, true)`
+        await tx`select set_config('app.write_circles', ${ws.circleId}, true)`
+        // 插入事件、关键词与向量时，外键检查在变体切片行上加的就是这把锁
+        await tx`select v.id from entry_variants v join entries e on e.id = v.entry_id where e.title = 'home/wifi' for key share of v`
         // 取用凭据时写下一条事件，还没提交：外键检查在凭据行上加 KEY SHARE
-        await tx`insert into credential_events (space_id, credential_id, event_type)
-          values (${ws.spaceId}, ${nas}, 'access')`
+        await tx`insert into credential_events (circle_id, credential_id, event_type)
+          values (${ws.circleId}, ${nas}, 'access')`
         // 正要改的行
-        await tx`select id from memories where path = 'home/door' for update`
+        await tx`select v.id from entry_variants v join entries e on e.id = v.entry_id where e.title = 'home/door' for update of v`
         await tx`select id from credentials where id = ${router} for update`
         expect(await rotateMasterKey(database.db, rotating)).toEqual({ rewrapped: 2, remaining: 2 })
         const rows = (await tx`
-          select title as name, key_id from memories where path in ('home/wifi', 'home/door')
+          select substring(e.title from '[^/]+$') as name, v.key_id
+          from entry_variants v
+          join entries e on e.id = v.entry_id
+          where e.title in ('home/wifi', 'home/door')
           union all
           select identifier, key_id from credentials where id in (${nas}, ${router})
           order by name`) as unknown as { name: string; key_id: string }[]
@@ -322,13 +326,13 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
     }
     expect(await rotateMasterKey(database.db, rotating)).toEqual({ rewrapped: 2, remaining: 0 })
     const after = appWith(newKey)
-    expect(await read(after, 'user://home/wifi')).toBe('无线密码')
-    expect(await read(after, 'user://home/door')).toBe('门锁密码')
+    expect(await read(after, 'home/wifi')).toBe('无线密码')
+    expect(await read(after, 'home/door')).toBe('门锁密码')
     for (const id of [nas, router]) {
       const revealed = await send(
         after,
         'POST',
-        `/v1/spaces/${ws.spaceId}/credentials/${id}/reveal`,
+        `/v1/circles/${ws.circleId}/credentials/${id}/reveal`,
         undefined,
         { cookie: ws.cookie },
       )
@@ -337,16 +341,16 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
   })
 
   it('有一行用旧主密钥也解不开：跳过它、记下原因，不拦住别的', async () => {
-    await secret(appWith(oldKey), 'user://home/wifi', '无线密码')
-    await secret(appWith(oldKey), 'user://home/broken', '坏掉的那条')
-    await withSpace(database.db, ws.spaceId, (tx) =>
+    await secret(appWith(oldKey), 'home/wifi', '无线密码')
+    await secret(appWith(oldKey), 'home/broken', '坏掉的那条')
+    await withCircle(database.db, ws.circleId, async (tx) =>
       tx
-        .update(memories)
+        .update(entryVariants)
         .set({ wrappedKey: randomBytes(60) })
-        .where(eq(memories.path, 'home/broken')),
+        .where(eq(entryVariants.entryId, await entryIdByTitle(tx, 'home/broken'))),
     )
     expect(await rotateMasterKey(database.db, rotating)).toEqual({ rewrapped: 1, remaining: 1 })
-    expect(await read(appWith(newKey), 'user://home/wifi')).toBe('无线密码')
+    expect(await read(appWith(newKey), 'home/wifi')).toBe('无线密码')
     expect((await masterKeyStatus(database.db, rotating)).lastError).toMatchObject({
       message: expect.stringContaining('1 条用旧主密钥也无法解密'),
     })
@@ -354,15 +358,21 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
 
   it('只核对不写库：没记标识的认得出就通过但不补，认不出的和启动检查一样报错', async () => {
     await seed()
-    await withSpace(database.db, ws.spaceId, (tx) =>
-      tx.update(memories).set({ keyId: null }).where(eq(memories.path, 'home/wifi')),
+    await withCircle(database.db, ws.circleId, async (tx) =>
+      tx
+        .update(entryVariants)
+        .set({ keyId: null })
+        .where(eq(entryVariants.entryId, await entryIdByTitle(tx, 'home/wifi'))),
     )
     await database.db.execute(
       sql`update settings set value = jsonb_set(value, '{providers,1,apiKey}', (value#>'{providers,1,apiKey}') - 'keyId') where key = 'model-providers'`,
     )
     await checkMasterKey(database.db, oldKey)
-    const [wifi] = await withSpace(database.db, ws.spaceId, (tx) =>
-      tx.select({ keyId: memories.keyId }).from(memories).where(eq(memories.path, 'home/wifi')),
+    const [wifi] = await withCircle(database.db, ws.circleId, async (tx) =>
+      tx
+        .select({ keyId: entryVariants.keyId })
+        .from(entryVariants)
+        .where(eq(entryVariants.entryId, await entryIdByTitle(tx, 'home/wifi'))),
     )
     expect(wifi?.keyId).toBeNull()
     const [providersRow] = await database.db
@@ -380,7 +390,7 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
   })
 
   it('还没换完就去掉了旧的那把：拒绝启动，并说清要配回去', async () => {
-    await secret(appWith(oldKey), 'user://home/wifi', '无线密码')
+    await secret(appWith(oldKey), 'home/wifi', '无线密码')
     await expect(prepareMasterKey(database.db, newKey)).rejects.toThrow('KIOKU_MASTER_KEY_PREVIOUS')
   })
 
@@ -394,7 +404,8 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
     let pending: Promise<Response> | undefined
     try {
       await side.begin(async (tx) => {
-        await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
+        await tx`select set_config('app.read_circles', ${ws.circleId}, true)`
+        await tx`select set_config('app.write_circles', ${ws.circleId}, true)`
         await lock(tx)
         const [{ pid }] = (await tx`select pg_backend_pid() as pid`) as unknown as [{ pid: number }]
         pending = Promise.resolve(request())
@@ -423,7 +434,7 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
         send(
           appWith(rotating),
           'PATCH',
-          `/v1/spaces/${ws.spaceId}/credentials/${credentialId}`,
+          `/v1/circles/${ws.circleId}/credentials/${credentialId}`,
           { expectedVersion: 1, name: 'NAS 2', source: { kind: 'new', values: {} } },
           { cookie: ws.cookie },
         ),
@@ -436,7 +447,7 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
         await tx`update credentials set wrapped_key = ${wrapped}, key_id = ${keyIdOf(newKey)} where id = ${credentialId}`
       },
     )
-    const [row] = await withSpace(database.db, ws.spaceId, (tx) =>
+    const [row] = await withCircle(database.db, ws.circleId, (tx) =>
       tx.select().from(credentials).where(eq(credentials.id, credentialId)),
     )
     expect(row).toMatchObject({ name: 'NAS 2', keyId: keyIdOf(newKey) })
@@ -489,10 +500,10 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
 
   it('轮换任务：只剩密码库连接还用旧主密钥时也接着换，换完再来一次什么都不做', async () => {
     const connectionId = crypto.randomUUID()
-    await withSpace(database.db, ws.spaceId, (tx) =>
+    await withCircle(database.db, ws.circleId, (tx) =>
       tx.insert(vaultConnections).values({
         id: connectionId,
-        spaceId: ws.spaceId,
+        circleId: ws.circleId,
         ownerAccountId: ws.accountId,
         serverUrl: 'https://vault.example.com',
         email: 'agent@example.com',
@@ -505,7 +516,7 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
       }),
     )
     expect((await masterKeyStatus(database.db, rotating)).remaining).toEqual({
-      memories: 0,
+      entries: 0,
       credentials: 0,
       vaultConnections: 1,
       settings: 0,
@@ -516,7 +527,7 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
   })
 
   it('主密钥状态只给实例管理员', async () => {
-    const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
+    const editor = await addMember(database.db, ws.circleId, 'eve', 'editor')
     const app = appWith(oldKey)
     expect(
       (await send(app, 'GET', '/v1/settings/master-key', undefined, { cookie: editor.cookie }))
@@ -530,7 +541,7 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
       configured: true,
       currentId: keyIdOf(oldKey),
       previousId: null,
-      remaining: { memories: 0, credentials: 0, vaultConnections: 0, settings: 0 },
+      remaining: { entries: 0, credentials: 0, vaultConnections: 0, settings: 0 },
       lastError: null,
     })
   })

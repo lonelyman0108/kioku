@@ -246,7 +246,7 @@ export async function prepareQueryVectors(
   deps: Deps,
   queries: readonly BenchQuery[],
   budgetMs: number,
-  spaceId?: string,
+  circleId?: string,
 ): Promise<QueryVectors> {
   // 顺带预热：嵌入设置的缓存为空时要读库，事务开着时这要第二条连接
   const embedder = await deps.embedder.get().catch((err: unknown) => {
@@ -284,7 +284,7 @@ export async function prepareQueryVectors(
       capturingDeps,
       query,
       Math.min(timeoutMs ?? left, left),
-      spaceId,
+      circleId,
     )
     if (found) {
       vectors.set(query, found.vector)

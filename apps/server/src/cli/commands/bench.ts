@@ -21,7 +21,7 @@ export const BENCH_HELP = `用真实 HTTP 与真实 Key 跑测试台的场景，
 用法：KIOKU_BENCH_KEY=<Key> kioku-ctl bench --url <服务地址> [选项]
       KIOKU_BENCH_KEY=<Key> node dist/bench.mjs --url <服务地址> [选项]
 
-不指定场景时跑这把 Key 的应用的运行时类型适用的全部内置预设。
+不指定场景时跑这把 Key 的接入实例的运行时类型适用的全部内置预设。
 
   --url <地址>        服务地址，也可以用环境变量 KIOKU_BENCH_URL
   --scenario <id>     跑这个内置预设，可以写多次
@@ -157,7 +157,7 @@ async function benchMain(argv: string[]): Promise<number> {
   let ok = true
   try {
     const whoami = await executor.whoami()
-    const scenarios = chosen.length ? chosen : scenariosForRuntime(whoami.app.runtimeFamily)
+    const scenarios = chosen.length ? chosen : scenariosForRuntime(whoami.client.runtimeFamily)
 
     // 第一步之前就拒绝，不会只跑了一半
     if (!values['allow-writes']) {
@@ -177,7 +177,7 @@ async function benchMain(argv: string[]): Promise<number> {
     const problem = handshakeProblem(server)
     if (problem) throw new Error(problem)
     console.log(`握手：${server.name} ${server.version}，${server.tools.length} 个工具`)
-    console.log(`应用：${whoami.app.name}（${whoami.app.runtimeFamily}）`)
+    console.log(`接入实例：${whoami.client.name}（${whoami.client.runtimeFamily}）`)
 
     // 上面看的是展开之前的步骤：event、chatType 写成变量时看不出来，执行时按展开后的再判一次
     const refuse = (step: BenchStep) =>

@@ -4,13 +4,13 @@ import { eq, sql } from 'drizzle-orm'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../../app'
-import { connect, withSpace, type Database, type Db, type Tx } from '../../db/client'
+import { connect, withCircle, type Database, type Db, type Tx } from '../../db/client'
 import { settings, subjects } from '../../db/schema'
 import type { Embedder } from '../../embedding/provider'
 import { staticEmbedderSource } from '../../embedding/source'
 import type { Deps } from '../../http/env'
 import { semanticFor } from '../../memory/context'
-import { MemoryError } from '../../memory/service'
+import { MemoryError } from '../../memory/errors'
 import {
   backendOf,
   killDuring,
@@ -38,11 +38,11 @@ describe.skipIf(!testDatabaseUrl)('回滚事务与串行化的代理', () => {
   let ws: Workspace
   const limited = (limits: Partial<BenchLimits>): Deps => ({ ...deps, benchLimits: limits })
   const addSubject = (db: Db, displayName: string) =>
-    withSpace(db, ws.spaceId, (tx) =>
-      tx.insert(subjects).values({ spaceId: ws.spaceId, kind: 'person', displayName }),
+    withCircle(db, ws.circleId, (tx) =>
+      tx.insert(subjects).values({ circleId: ws.circleId, kind: 'person', displayName }),
     )
   const subjectNames = (db: Db) =>
-    withSpace(db, ws.spaceId, async (tx) =>
+    withCircle(db, ws.circleId, async (tx) =>
       (await tx.select({ name: subjects.displayName }).from(subjects)).map((r) => r.name).sort(),
     )
   // 另一条连接拿着 settings 的表锁，直到调用返回的函数；plain 的读也会被它挡住
@@ -115,9 +115,9 @@ describe.skipIf(!testDatabaseUrl)('回滚事务与串行化的代理', () => {
     const seen = await inRollback(deps, NO_VECTORS, async (scoped) => {
       const results = await Promise.allSettled([
         addSubject(scoped.db, '先结束的'),
-        withSpace(scoped.db, ws.spaceId, async (tx) => {
+        withCircle(scoped.db, ws.circleId, async (tx) => {
           await tx.insert(subjects).values({
-            spaceId: ws.spaceId,
+            circleId: ws.circleId,
             kind: 'person',
             displayName: '出错的',
           })
@@ -153,15 +153,15 @@ describe.skipIf(!testDatabaseUrl)('回滚事务与串行化的代理', () => {
     expect(await subjectNames(database.db)).toEqual([])
   })
 
-  describe('app.space_id', () => {
-    it('每个顶层事务结束后清掉：根事务上不经 withSpace 查内容表返回空，和真实一样', async () => {
+  describe('app.read_circles / app.write_circles', () => {
+    it('每个顶层事务结束后清掉：根事务上不经 withCircle 查内容表返回空，和真实一样', async () => {
       await addSubject(database.db, '已有的')
-      // 真实路径：withSpace 结束之后设置就失效了
+      // 真实路径：withCircle 结束之后设置就失效了
       await expect(database.db.select().from(subjects)).resolves.toEqual([])
       await inRollback(deps, NO_VECTORS, async (scoped) => {
         await addSubject(scoped.db, '这次写的')
         await expect(scoped.db.select().from(subjects)).resolves.toEqual([])
-        // withSpace 里照常读得到
+        // withCircle 里照常读得到
         expect(await subjectNames(scoped.db)).toEqual(['已有的', '这次写的'].sort())
         await expect(scoped.db.select().from(subjects)).resolves.toEqual([])
       })
@@ -171,7 +171,7 @@ describe.skipIf(!testDatabaseUrl)('回滚事务与串行化的代理', () => {
       await addSubject(database.db, '已有的')
       await inRollback(deps, NO_VECTORS, async (scoped, run) => {
         await expect(
-          withSpace(scoped.db, ws.spaceId, async () => {
+          withCircle(scoped.db, ws.circleId, async () => {
             throw new Error('这个事务出错了')
           }),
         ).rejects.toThrow('这个事务出错了')
@@ -181,10 +181,10 @@ describe.skipIf(!testDatabaseUrl)('回滚事务与串行化的代理', () => {
       })
     })
 
-    it('嵌套的事务结束时不清：外层的 withSpace 还在里面', async () => {
+    it('嵌套的事务结束时不清：外层的 withCircle 还在里面', async () => {
       await addSubject(database.db, '已有的')
       await inRollback(deps, NO_VECTORS, async (scoped) => {
-        const seen = await withSpace(scoped.db, ws.spaceId, async (tx) => {
+        const seen = await withCircle(scoped.db, ws.circleId, async (tx) => {
           await scoped.db.transaction(async () => {})
           return (await tx.select({ name: subjects.displayName }).from(subjects)).map((r) => r.name)
         })
@@ -289,30 +289,35 @@ describe.skipIf(!testDatabaseUrl)('回滚事务与串行化的代理', () => {
   const SOMEONE = { kind: 'person', displayName: '不该写' } as const
 
   it('运行关闭之后内层的事务句柄也不能再用：任何属性访问都拒绝，里面再开的事务也一样', async () => {
-    const outcomes = await inRollback(deps, NO_VECTORS, async (scoped, run) =>
-      withSpace(scoped.db, ws.spaceId, (tx) =>
-        tx.transaction((inner) =>
-          inner.transaction(async (deep) => {
-            // 关闭之前都照常能用，隔着几层也一样
-            await tx.execute(sql`select 1`)
-            await deep.insert(subjects).values({ spaceId: ws.spaceId, ...SOMEONE })
-            await expect(deep.select().from(subjects)).resolves.toHaveLength(1)
+    let outcomes: string[] = []
+    await expect(
+      inRollback(deps, NO_VECTORS, async (scoped, run) =>
+        withCircle(scoped.db, ws.circleId, (tx) =>
+          tx.transaction((inner) =>
+            inner.transaction(async (deep) => {
+              // 关闭之前都照常能用，隔着几层也一样
+              await tx.execute(sql`select 1`)
+              await deep.insert(subjects).values({ circleId: ws.circleId, ...SOMEONE })
+              await expect(deep.select().from(subjects)).resolves.toHaveLength(1)
 
-            run.close()
-            const handles: Tx[] = [tx, inner, deep]
-            return Promise.all(
-              handles.flatMap((handle) => [
-                attempt(() => handle.execute(sql`select 1`)),
-                attempt(() => handle.select().from(subjects)),
-                attempt(() => handle.insert(subjects).values({ spaceId: ws.spaceId, ...SOMEONE })),
-                attempt(() => handle.transaction(async () => {})),
-                attempt(() => withSpace(handle as unknown as Db, ws.spaceId, async () => {})),
-              ]),
-            )
-          }),
+              run.close()
+              const handles: Tx[] = [tx, inner, deep]
+              outcomes = await Promise.all(
+                handles.flatMap((handle) => [
+                  attempt(() => handle.execute(sql`select 1`)),
+                  attempt(() => handle.select().from(subjects)),
+                  attempt(() =>
+                    handle.insert(subjects).values({ circleId: ws.circleId, ...SOMEONE }),
+                  ),
+                  attempt(() => handle.transaction(async () => {})),
+                  attempt(() => withCircle(handle as unknown as Db, ws.circleId, async () => {})),
+                ]),
+              )
+            }),
+          ),
         ),
       ),
-    )
+    ).rejects.toThrow('已结束')
     expect(outcomes).toHaveLength(15)
     for (const outcome of outcomes) expect(outcome).toContain('已结束')
     expect(await subjectNames(database.db)).toEqual([])
@@ -362,11 +367,11 @@ describe.skipIf(!testDatabaseUrl)('回滚事务与串行化的代理', () => {
     const callback = deferred()
     const after = deferred<string[]>()
     const running = inRollback(deps, NO_VECTORS, (scoped) =>
-      withSpace(scoped.db, ws.spaceId, async (tx) => {
+      withCircle(scoped.db, ws.circleId, async (tx) => {
         entered.resolve(await backendOf(tx))
         await callback.promise
         after.resolve([
-          await attempt(() => tx.insert(subjects).values({ spaceId: ws.spaceId, ...SOMEONE })),
+          await attempt(() => tx.insert(subjects).values({ circleId: ws.circleId, ...SOMEONE })),
           await attempt(() => tx.transaction(async () => {})),
         ])
       }),
@@ -436,7 +441,12 @@ describe.skipIf(!testDatabaseUrl)('回滚事务与串行化的代理', () => {
     it('事务里只查这张表：查得到就用，查不到走现有的回退并标明，不再请求嵌入接口', async () => {
       const embedder = fakeEmbedder()
       const source = withEmbedder(embedder)
-      const vectors = await prepareQueryVectors(source, [{ text: '  算好的查询 ' }], 1000)
+      const vectors = await prepareQueryVectors(
+        source,
+        [{ text: '  算好的查询 ' }],
+        1000,
+        ws.circleId,
+      )
       expect(embedder.calls).toEqual([['算好的查询']])
       await inRollback(source, vectors, async (scoped, run) => {
         const hit = await semanticFor(scoped, '算好的查询')
@@ -502,8 +512,11 @@ describe.skipIf(!testDatabaseUrl)('回滚事务与串行化的代理', () => {
     await addSubject(database.db, '被锁的')
     const release = deferred()
     const held = deferred()
-    const hold = withSpace(other.db, ws.spaceId, async (tx) => {
-      await tx.update(subjects).set({ displayName: '占着' }).where(eq(subjects.spaceId, ws.spaceId))
+    const hold = withCircle(other.db, ws.circleId, async (tx) => {
+      await tx
+        .update(subjects)
+        .set({ displayName: '占着' })
+        .where(eq(subjects.circleId, ws.circleId))
       held.resolve()
       await release.promise
     })
@@ -512,8 +525,11 @@ describe.skipIf(!testDatabaseUrl)('回滚事务与串行化的代理', () => {
       limited({ lockTimeoutMs: 1500 }),
       NO_VECTORS,
       async (scoped, run) => {
-        const write = withSpace(scoped.db, ws.spaceId, (tx) =>
-          tx.update(subjects).set({ displayName: '想改' }).where(eq(subjects.spaceId, ws.spaceId)),
+        const write = withCircle(scoped.db, ws.circleId, (tx) =>
+          tx
+            .update(subjects)
+            .set({ displayName: '想改' })
+            .where(eq(subjects.circleId, ws.circleId)),
         )
         await expect(write).rejects.toMatchObject({ cause: { code: '55P03' } })
         return run.takeDetail()

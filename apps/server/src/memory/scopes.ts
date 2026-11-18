@@ -3,7 +3,7 @@ import { and, eq, inArray, isNull, sql, type SQL } from 'drizzle-orm'
 
 import type { Tx } from '../db/client'
 import { UUID } from '../db/paging'
-import { clients, entries, subjects } from '../db/schema'
+import { clients, conversations, entries, subjects } from '../db/schema'
 
 // 对象自己的来源作用域：群里的，或和这个人的私聊里的
 export function subjectScope(kind: SubjectKind, id: string): string {
@@ -87,6 +87,46 @@ export function parseDreamScope(key: string): ParsedDreamScope | null {
 export function dreamScopeOwner(key: string): string | null {
   const parsed = parseDreamScope(key)
   return parsed?.kind === 'personal' ? parsed.id : null
+}
+
+// 解析整理作用域对应的所属成员账号（个人圈取个人账号，共享圈/个人圈下的本机摘要按 conversations 查对应所有者）
+export async function resolveDreamScopeOwners(
+  tx: Tx,
+  keys: readonly string[],
+): Promise<Map<string, string | null>> {
+  const out = new Map<string, string | null>()
+  const convIds: string[] = []
+  const convKeys = new Map<string, string[]>()
+
+  for (const key of keys) {
+    const parsed = parseDreamScope(key)
+    if (!parsed) {
+      out.set(key, null)
+    } else if (parsed.kind === 'personal') {
+      out.set(key, parsed.id)
+    } else if (parsed.kind === 'local_session' && parsed.id) {
+      convIds.push(parsed.id)
+      const list = convKeys.get(parsed.id) ?? []
+      list.push(key)
+      convKeys.set(parsed.id, list)
+    } else {
+      out.set(key, null)
+    }
+  }
+
+  if (convIds.length) {
+    const rows = await tx
+      .select({ id: conversations.id, ownerAccountId: conversations.ownerAccountId })
+      .from(conversations)
+      .where(inArray(conversations.id, [...new Set(convIds)]))
+    const ownerByConv = new Map(rows.map((r) => [r.id, r.ownerAccountId ?? null]))
+    for (const [convId, bucket] of convKeys) {
+      const owner = ownerByConv.get(convId) ?? null
+      for (const k of bucket) out.set(k, owner)
+    }
+  }
+
+  return out
 }
 
 export function dreamScopeCondition(scope: ParsedDreamScope): SQL {

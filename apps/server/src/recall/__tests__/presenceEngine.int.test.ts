@@ -676,7 +676,7 @@ describe.skipIf(!testDatabaseUrl)(
       }
       const sessionA = await resolveKeySession(deps, principal1, groupACtx)
       const sessionB = await resolveKeySession(deps, principal1, groupBCtx)
-      const sessionDM = await resolveKeySession(deps, principal1, dmCtx)
+      await resolveKeySession(deps, principal1, dmCtx)
       const otherBotSessionA = await resolveKeySession(deps, principal2, groupACtx)
 
       const gAId = sessionA.context.groupSubjectId!

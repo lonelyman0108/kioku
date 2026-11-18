@@ -1,15 +1,15 @@
 import {
   CREDENTIAL_ACCESS_REASON_NAMES,
   CREDENTIAL_EXPIRY_NAMES,
-  LAYER_NAMES,
+  normalizeWhen,
   type CredentialAccess,
   type CredentialStoredIn,
   type CredentialSummary,
-  type CuratedLayer,
-  type DomainSummary,
+  type EntryBrowseResponse,
+  type EntryLinkNeighbor,
+  type EntryView,
   type KeyCredentialList,
-  type MemoryChildren,
-  type MemoryView,
+  type WhenCondition,
 } from '@kioku/contracts'
 
 import type { PlaceholderCredential } from '../credential/service'
@@ -19,44 +19,127 @@ import { inlineText, titleSuffix } from '../recall/text'
 // 工具里的非业务错误只回这句，和 REST 一致。测试台也按它认内部错误
 export const TOOL_INTERNAL_ERROR = '服务内部错误'
 
-// MCP 工具结果给模型读，用紧凑的文本而不是 JSON
-export function formatMemory(m: MemoryView): string {
-  const lines = [
-    `URI: ${m.uri}`,
-    `标题: ${inlineText(m.title)}`,
-    `归属: ${m.layer}，敏感级: ${m.sensitivity}，priority: ${m.priority}，版本: ${m.version}`,
-  ]
-  if (m.validTo) lines.push(`有效到: ${m.validTo}（到期后不再召回）`)
-  if (m.disclosure) lines.push(`Disclosure: ${m.disclosure}`)
-  if (m.glossary.length) lines.push(`Glossary: ${m.glossary.join(', ')}`)
-  lines.push('', m.content ?? MASKED_SECRET_CONTENT)
+const INLINE_WIKI_LINK = /\[\[(m-[2-9a-hjkmnp-tv-z]{6,8})(?:\|([^\]\n]+))?\]\]/gi
+
+export function formatWhenTag(when: WhenCondition): string {
+  const clean = normalizeWhen(when)
+  const parts = Object.entries(clean).map(([dim, slugs]) => `${dim}=${slugs.join(',')}`)
+  return parts.length ? parts.join(', ') : '通用'
+}
+
+// 仅给当前可读的出向目标双链实时注上最新标题；无权查看、机密或悬空目标保持原样不泄露存在性
+function annotateReadableLinks(text: string, links: readonly EntryLinkNeighbor[]): string {
+  const titleByShort = new Map<string, string>()
+  for (const link of links) {
+    if (link.direction === 'outgoing') {
+      titleByShort.set(link.shortId.toLowerCase(), inlineText(link.title))
+    }
+  }
+  if (!titleByShort.size) return text
+  return text.replace(INLINE_WIKI_LINK, (full, rawId: string, alias?: string) => {
+    const shortId = rawId.toLowerCase()
+    if (alias !== undefined) return `[[${shortId}|${alias}]]`
+    const title = titleByShort.get(shortId)
+    return title ? `[[${shortId}|${title}]]` : full
+  })
+}
+
+// MCP 工具结果给模型读，用紧凑的文本而不是 JSON；版本字段留在所属行尾以兼容结构化提取
+export function formatEntry(view: EntryView, options: { requestedId?: string } = {}): string {
+  const lines: string[] = []
+  const req = options.requestedId?.trim().toLowerCase()
+  if (req && req !== view.shortId) {
+    lines.push(`提示: 已解析到规范短 ID ${view.shortId}（后续请直接使用此短 ID 读写）`)
+  }
+  lines.push(
+    `ID: ${view.shortId}`,
+    `标题: ${inlineText(view.title)}`,
+    `记忆圈: ${view.circleSlug ?? '当前圈'}，物种: ${view.kind}，敏感级: ${view.sensitivity}，priority: ${view.priority}，版本: ${view.version}`,
+  )
+  if (view.topics.length) lines.push(`主题: ${view.topics.join(', ')}`)
+  if (view.realms.length) lines.push(`场域: ${view.realms.join(', ')}`)
+  if (view.validTo) lines.push(`有效到: ${view.validTo}（到期后不再召回）`)
+  if (view.disclosure) lines.push(`Disclosure: ${inlineText(view.disclosure)}`)
+  if (view.glossary.length) lines.push(`Glossary: ${view.glossary.map(inlineText).join(', ')}`)
+  if (view.otherVariants.length) {
+    lines.push(
+      `其余可用切片（传 all_variants: true 查看全量）: ${view.otherVariants
+        .map((o) => `[${formatWhenTag(o.when)}]`)
+        .join('、')}`,
+    )
+  }
+  if (view.links.length) {
+    const linkList = view.links
+      .map(
+        (l) =>
+          `${l.direction === 'outgoing' ? '->' : '<-'} [[${l.shortId}]]「${inlineText(l.title)}」${
+            l.circleSlug ? ` [${l.circleSlug}]` : ''
+          }`,
+      )
+      .join('；')
+    lines.push(`关联词条: ${linkList}`)
+  }
+
+  if (!view.variants.length) {
+    lines.push(
+      '',
+      '（当前切面条件下无匹配切片；请传 all_variants: true 或调整 variant_filter 查看其余切片）',
+    )
+    return lines.join('\n')
+  }
+
+  const singleBase =
+    view.variants.length === 1 && Object.keys(normalizeWhen(view.variants[0]!.when)).length === 0
+  if (singleBase) {
+    const raw = view.variants[0]!.content
+    const body =
+      raw === null
+        ? MASKED_SECRET_CONTENT
+        : view.sensitivity === 'secret'
+          ? raw
+          : annotateReadableLinks(raw, view.links)
+    lines.push('', body)
+    return lines.join('\n')
+  }
+
+  for (const variant of view.variants) {
+    const raw = variant.content
+    const body =
+      raw === null
+        ? MASKED_SECRET_CONTENT
+        : view.sensitivity === 'secret'
+          ? raw
+          : annotateReadableLinks(raw, view.links)
+    lines.push('', `### 切片 [${formatWhenTag(variant.when)}]`, body)
+  }
   return lines.join('\n')
 }
 
-export function formatChildren(result: MemoryChildren): string {
-  const head = result.parent ? `${formatMemory(result.parent)}\n\n` : ''
-  if (!result.children.length) return `${head}子节点：无`
-  const rows = result.children.map((c) => {
-    const below = c.childCount ? `，${c.childCount} 个子节点` : ''
-    if (!c.exists) return `- ${c.uri}（路径本身没有记忆${below}）`
-    const title = c.title ? titleSuffix(c.uri, c.title) : ''
-    return `- ${c.uri}${title}（${c.layer}，priority ${c.priority}${below}）${c.disclosure ? `：${c.disclosure}` : ''}`
-  })
-  const more = result.truncated
-    ? '\n（这一级太多，只列出了前面的一部分，用 kioku_search 查找其余的）'
-    : ''
-  return `${head}子节点：\n${rows.join('\n')}${more}`
-}
-
-// 有记忆的开头，各带归属的中文名
-export function formatDomains(domains: DomainSummary[]): string {
-  if (!domains.length) return '还没有可见的记忆'
-  return domains
-    .map((d) => {
-      const name = LAYER_NAMES[d.domain as CuratedLayer] ?? d.domain
-      return `- ${d.domain}://（${name}，${d.count} 个节点）`
+export function formatBrowse(result: EntryBrowseResponse): string {
+  if (!result.groups.length) return '还没有可见的记忆词条'
+  const sections = result.groups.map((group) => {
+    const headerLabel =
+      group.key && group.key !== group.label
+        ? `${inlineText(group.label)}（${group.key}，${group.count}）`
+        : `${inlineText(group.label)}（${group.count}）`
+    const items = group.items.map((item) => {
+      const circleTag = item.circleSlug ? ` [${item.circleSlug}]` : ''
+      const tags = item.variantsSummary
+        .map((w) => `[${formatWhenTag(w)}]`)
+        .filter((t) => t !== '[通用]')
+      const tagStr = tags.length ? `，切面 ${tags.join(' / ')}` : ''
+      return `- ${item.shortId}${titleSuffix(item.shortId, item.title)}${circleTag}（${item.kind}，${item.sensitivity}，priority ${item.priority}${tagStr}）${
+        item.disclosure ? `：${inlineText(item.disclosure)}` : ''
+      }`
     })
-    .join('\n')
+    return [`## ${headerLabel}`, ...items].join('\n')
+  })
+  if (result.truncated) {
+    sections.push(
+      '（结果较多，只列出了前面的一部分，可加 query/topic/facets 缩小范围或改用 kioku_search）',
+    )
+  }
+  return sections.join('\n\n')
 }
 
 const sourceLabel = (c: CredentialSummary) => (c.source === 'hosted' ? 'Kioku 托管' : '密码库')

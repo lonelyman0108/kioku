@@ -1,26 +1,31 @@
 import { randomBytes } from 'node:crypto'
 
-import type { CreatedKey, MemoryChildren, MemoryView } from '@kioku/contracts'
+import {
+  ENTRY_CONTENT_MAX,
+  type EntryBrowseResponse,
+  type EntryView,
+  type IssuedKey,
+} from '@kioku/contracts'
 import { and, eq, isNull } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
 import { hashPassword } from '../../auth/password'
-import { withSpace, type Database } from '../../db/client'
+import { withCircle, type Database } from '../../db/client'
 import {
   accounts,
   apiKeys,
+  circleMembers,
+  entries,
+  entryEmbeddings,
+  entryEvents,
   loginAttempts,
-  memories,
-  memoryEmbeddings,
-  memoryEvents,
   settings,
-  spaceMembers,
 } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
-import { embedMemories } from '../../embedding/worker'
-import { fakeEmbedder } from '../../testing/fakeEmbedder'
+import { embedEntries } from '../../embedding/worker'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
+import { fakeEmbedder } from '../../testing/fakeEmbedder'
 import {
   addMember,
   bearer,
@@ -57,110 +62,138 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
     ws = await bootstrap(app)
   })
 
-  const appAs = async (cookie: string, slug: string) => {
+  const clientAs = async (cookie: string, slug: string) => {
     const res = await app.request(
-      `/v1/spaces/${ws.spaceId}/apps`,
+      `/v1/circles/${ws.circleId}/clients`,
       jsonRequest('POST', { slug, name: slug, runtimeFamily: 'mcp' }, { cookie }),
     )
     return ((await res.json()) as { id: string }).id
   }
-  const keyAs = async (cookie: string, appId: string) =>
+  const keyAs = async (
+    cookie: string,
+    clientId: string,
+    linkedCircles: { circleId: string; mode: 'read' | 'read_write' }[] = [],
+  ) =>
     app.request(
-      `/v1/spaces/${ws.spaceId}/apps/${appId}/keys`,
+      `/v1/circles/${ws.circleId}/clients/${clientId}/keys`,
       // editor 能签发的最高敏感级是 private
       jsonRequest(
         'POST',
-        { name: 'k', scopes: { ...FULL_SCOPES, maxSensitivity: 'private', credentials: 'none' } },
+        {
+          name: 'k',
+          linkedCircles,
+          scopes: { ...FULL_SCOPES, maxSensitivity: 'private', credentials: 'none' },
+        },
         { cookie },
       ),
     )
   const create = (key: string, body: Record<string, unknown>) =>
-    app.request('/v1/memories', jsonRequest('POST', body, bearer(key)))
-  const get = (key: string, uri: string) =>
-    app.request(`/v1/memories?uri=${encodeURIComponent(uri)}`, { headers: bearer(key) })
+    app.request('/v1/entries', jsonRequest('POST', body, bearer(key)))
+  const get = (key: string, id: string) =>
+    app.request(`/v1/entries?id=${encodeURIComponent(id)}`, { headers: bearer(key) })
 
-  it('同一空间的两个成员各有自己的本人坐标', async () => {
-    const b = await addMember(database.db, ws.spaceId, 'bob', 'editor')
-    const keyA = ws.issueKey((await ws.createApp('a-agent')).id)
-    const keyB = (
-      (await (await keyAs(b.cookie, await appAs(b.cookie, 'b-agent'))).json()) as CreatedKey
+  it('两个成员各有自己的个人圈：同名词条互相隔离且不可跨人读取', async () => {
+    const b = await addMember(database.db, ws.circleId, 'bob', 'editor')
+    const ka = (
+      (await (
+        await keyAs(ws.cookie, (await ws.createClient('a-agent')).id, [
+          { circleId: ws.personalCircleId, mode: 'read_write' },
+        ])
+      ).json()) as IssuedKey
     ).key
-    const ka = await keyA
-    expect(
-      (
-        await create(ka, {
-          uri: 'user://preferences/user',
-          sensitivity: 'internal',
-          content: 'A 的偏好',
-        })
-      ).status,
-    ).toBe(201)
-    expect(
-      (
-        await create(keyB, {
-          uri: 'user://preferences/user',
-          sensitivity: 'internal',
-          content: 'B 的偏好',
-        })
-      ).status,
-    ).toBe(201)
-    expect(((await (await get(ka, 'user://preferences/user')).json()) as MemoryView).content).toBe(
-      'A 的偏好',
-    )
-    expect(
-      ((await (await get(keyB, 'user://preferences/user')).json()) as MemoryView).content,
-    ).toBe('B 的偏好')
+    const kb = (
+      (await (
+        await keyAs(b.cookie, await clientAs(b.cookie, 'b-agent'), [
+          { circleId: b.personalCircleId, mode: 'read_write' },
+        ])
+      ).json()) as IssuedKey
+    ).key
+
+    const resA = await create(ka, {
+      circle: ws.personalCircleId,
+      title: 'user-pref',
+      sensitivity: 'internal',
+      content: 'A 的偏好',
+    })
+    expect(resA.status).toBe(201)
+    const idA = ((await resA.json()) as EntryView).shortId
+
+    const resB = await create(kb, {
+      circle: b.personalCircleId,
+      title: 'user-pref',
+      sensitivity: 'internal',
+      content: 'B 的偏好',
+    })
+    expect(resB.status).toBe(201)
+    const idB = ((await resB.json()) as EntryView).shortId
+
+    expect(((await (await get(ka, idA)).json()) as EntryView).variants[0]?.content).toBe('A 的偏好')
+    expect(((await (await get(kb, idB)).json()) as EntryView).variants[0]?.content).toBe('B 的偏好')
+    expect((await get(ka, idB)).status).toBe(404)
+    expect((await get(kb, idA)).status).toBe(404)
   })
 
-  it('空间 owner 不能给别的成员的应用签发 Key，但可以吊销', async () => {
-    const b = await addMember(database.db, ws.spaceId, 'bob', 'editor')
-    const bApp = await appAs(b.cookie, 'b-agent')
-    expect((await keyAs(ws.cookie, bApp)).status).toBe(403)
-    const bKey = (await (await keyAs(b.cookie, bApp)).json()) as CreatedKey
-    const revoke = await app.request(`/v1/spaces/${ws.spaceId}/apps/${bApp}/keys/${bKey.id}`, {
-      method: 'DELETE',
-      headers: { cookie: ws.cookie, 'sec-fetch-site': 'same-origin' },
-    })
+  it('记忆圈 owner 不能给别的成员的接入实例签发 Key，但可以吊销', async () => {
+    const b = await addMember(database.db, ws.circleId, 'bob', 'editor')
+    const bClient = await clientAs(b.cookie, 'b-agent')
+    expect((await keyAs(ws.cookie, bClient)).status).toBe(403)
+    const bKey = (await (await keyAs(b.cookie, bClient)).json()) as IssuedKey
+    const revoke = await app.request(
+      `/v1/circles/${ws.circleId}/clients/${bClient}/keys/${bKey.id}`,
+      {
+        method: 'DELETE',
+        headers: { cookie: ws.cookie, 'sec-fetch-site': 'same-origin' },
+      },
+    )
     expect(revoke.status).toBe(204)
   })
 
-  it('editor 不能修改别人的应用', async () => {
-    const b = await addMember(database.db, ws.spaceId, 'bob', 'editor')
-    const aApp = (await ws.createApp('a-bot')).id
+  it('editor 不能修改别人的接入实例', async () => {
+    const b = await addMember(database.db, ws.circleId, 'bob', 'editor')
+    const aClient = (await ws.createClient('a-bot')).id
     const res = await app.request(
-      `/v1/spaces/${ws.spaceId}/apps/${aApp}`,
+      `/v1/circles/${ws.circleId}/clients/${aClient}`,
       jsonRequest('PATCH', { config: { elevateOwnerDirect: 'internal' } }, { cookie: b.cookie }),
     )
     expect(res.status).toBe(403)
   })
 
   it('改成 secret 后历史事件里不再有明文', async () => {
-    const key = await ws.issueKey((await ws.createApp('agent')).id)
-    await create(key, { uri: 'user://home/router', content: '管理密码 hunter2' })
+    const key = await ws.issueKey((await ws.createClient('agent')).id)
+    const created = (await (
+      await create(key, { title: 'router', content: '管理密码 hunter2' })
+    ).json()) as EntryView
     await app.request(
-      '/v1/memories',
-      jsonRequest('PATCH', { uri: 'user://home/router', sensitivity: 'secret' }, bearer(key)),
+      '/v1/entries',
+      jsonRequest('PATCH', { id: created.shortId, sensitivity: 'secret' }, bearer(key)),
     )
-    const events = await withSpace(database.db, ws.spaceId, (tx) => tx.select().from(memoryEvents))
+    const events = await withCircle(database.db, ws.circleId, (tx) => tx.select().from(entryEvents))
     expect(events).toHaveLength(2)
     expect(JSON.stringify(events)).not.toContain('hunter2')
   })
 
-  it('已失效的记忆让出 URI', async () => {
-    const key = await ws.issueKey((await ws.createApp('agent')).id)
-    await create(key, { uri: 'user://home/ip', content: '旧地址' })
-    await withSpace(database.db, ws.spaceId, (tx) =>
+  it('已失效的词条不再占用或被召回读取，新写入同类词条正常可用', async () => {
+    const key = await ws.issueKey((await ws.createClient('agent')).id)
+    const first = (await (
+      await create(key, { title: 'router-ip', content: '旧地址' })
+    ).json()) as EntryView
+    await withCircle(database.db, ws.circleId, (tx) =>
       tx
-        .update(memories)
+        .update(entries)
         .set({ validTo: new Date(Date.now() - 1000) })
-        .where(eq(memories.path, 'home/ip')),
+        .where(eq(entries.id, first.id)),
     )
-    expect((await create(key, { uri: 'user://home/ip', content: '新地址' })).status).toBe(201)
-    expect(((await (await get(key, 'user://home/ip')).json()) as MemoryView).content).toBe('新地址')
+    expect((await get(key, first.shortId)).status).toBe(404)
+    const secondRes = await create(key, { title: 'router-ip', content: '新地址' })
+    expect(secondRes.status).toBe(201)
+    const second = (await secondRes.json()) as EntryView
+    expect(
+      ((await (await get(key, second.shortId)).json()) as EntryView).variants[0]?.content,
+    ).toBe('新地址')
   })
 
   it('换了服务商的接口主机必须重新说明 Key 怎么处理', async () => {
-    const create = await app.request(
+    const res = await app.request(
       '/v1/settings/models/providers',
       jsonRequest(
         'POST',
@@ -174,8 +207,8 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
         { cookie: ws.cookie },
       ),
     )
-    expect(create.status).toBe(201)
-    const provider = (await create.json()) as {
+    expect(res.status).toBe(201)
+    const provider = (await res.json()) as {
       id: string
       hasApiKey: boolean
       profiles: { id: string }[]
@@ -198,14 +231,14 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
     expect(await (await update({ baseUrl: 'https://e.example.com/v2' })).json()).toMatchObject({
       hasApiKey: true,
     })
-    const moved = await update({ baseUrl: 'https://other.example.net/v1' })
+    const moved = await update({ baseUrl: 'https://other.example.com/v1' })
     expect(moved.status).toBe(400)
     expect(await moved.json()).toEqual({
       error:
         '接口主机已变更，已保存的 Key 不会发送给新主机。请重新填写；新接口不需要 Key 时，请清除已保存的 Key。',
     })
     expect(
-      await (await update({ baseUrl: 'https://other.example.net/v1', apiKey: null })).json(),
+      await (await update({ baseUrl: 'https://other.example.com/v1', apiKey: null })).json(),
     ).toMatchObject({ hasApiKey: false })
   })
 
@@ -225,7 +258,9 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
   })
 
   it('MCP 与 REST 用同一套长度限制', async () => {
-    const key = await ws.issueKey((await ws.createApp('agent')).id)
+    const key = await ws.issueKey((await ws.createClient('agent')).id)
+    const tooLong = 'x'.repeat(ENTRY_CONTENT_MAX + 1)
+    expect((await create(key, { title: 'big-rest', content: tooLong })).status).toBe(400)
     const res = await app.request('/v1/mcp', {
       method: 'POST',
       headers: {
@@ -239,19 +274,21 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
         method: 'tools/call',
         params: {
           name: 'kioku_create',
-          arguments: { uri: 'core://big', content: 'x'.repeat(20_001) },
+          arguments: { title: 'big-mcp', content: tooLong },
         },
       }),
     })
     const body = (await res.json()) as { result?: { isError?: boolean }; error?: unknown }
     expect(body.error ?? body.result?.isError).toBeTruthy()
-    expect((await get(key, 'core://big')).status).toBe(404)
+    const list = await app.request('/v1/entries/browse?groupBy=topic', { headers: bearer(key) })
+    expect(((await list.json()) as EntryBrowseResponse).groups).toEqual([])
   })
+
   it('editor 不能签发 admin Key，普通 Key 可以', async () => {
-    const b = await addMember(database.db, ws.spaceId, 'bob', 'editor')
-    const bApp = await appAs(b.cookie, 'b-agent')
+    const b = await addMember(database.db, ws.circleId, 'bob', 'editor')
+    const bClient = await clientAs(b.cookie, 'b-agent')
     const admin = await app.request(
-      `/v1/spaces/${ws.spaceId}/apps/${bApp}/keys`,
+      `/v1/circles/${ws.circleId}/clients/${bClient}/keys`,
       jsonRequest(
         'POST',
         { name: 'k', scopes: { ...FULL_SCOPES, admin: true } },
@@ -259,126 +296,102 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
       ),
     )
     expect(admin.status).toBe(403)
-    expect((await keyAs(b.cookie, bApp)).status).toBe(201)
+    expect((await keyAs(b.cookie, bClient)).status).toBe(201)
   })
 
-  it('同一归属里坐标不重复：本人的按成员各自占用，共享的只能有一条', async () => {
-    const key = await ws.issueKey((await ws.createApp('agent')).id)
-    expect((await create(key, { uri: 'user://home/wifi', content: '本人的' })).status).toBe(201)
-    expect((await create(key, { uri: 'user://home/wifi', content: '又一条' })).status).toBe(409)
-    expect((await create(key, { uri: 'core://prefs/user', content: '共享' })).status).toBe(201)
-    const b = await addMember(database.db, ws.spaceId, 'bob', 'editor')
-    const bKey = (
-      (await (await keyAs(b.cookie, await appAs(b.cookie, 'b-agent'))).json()) as CreatedKey
-    ).key
-    expect((await create(bKey, { uri: 'user://home/wifi', content: 'bob 的' })).status).toBe(201)
-    expect((await create(bKey, { uri: 'core://prefs/user', content: '共享' })).status).toBe(409)
-  })
-
-  it('并发创建同一个 URI：一个成功，其余 409 而不是 500', async () => {
-    const key = await ws.issueKey((await ws.createApp('agent')).id)
+  it('并发创建词条：全部分配互不冲突的短 ID 而不是 500', async () => {
+    const key = await ws.issueKey((await ws.createClient('agent')).id)
     const results = await Promise.all(
-      Array.from({ length: 5 }, (_, i) => create(key, { uri: 'user://home/ip', content: `${i}` })),
+      Array.from({ length: 5 }, (_, i) => create(key, { title: 'home-ip', content: `${i}` })),
     )
-    expect(results.map((r) => r.status).sort()).toEqual([201, 409, 409, 409, 409])
+    expect(results.every((r) => r.status === 201)).toBe(true)
+    const views = await Promise.all(results.map((r) => r.json() as Promise<EntryView>))
+    expect(new Set(views.map((v) => v.shortId)).size).toBe(5)
   })
 
-  it('请求嵌入期间记忆改成了 secret，旧内容的向量不会写回', async () => {
-    const key = await ws.issueKey((await ws.createApp('agent')).id)
-    const res = await create(key, { uri: 'user://home/router', content: '管理密码 hunter2' })
-    const id = ((await res.json()) as { id: string }).id
+  it('请求嵌入期间词条改成了 secret，旧内容的向量不会写回', async () => {
+    const key = await ws.issueKey((await ws.createClient('agent')).id)
+    const res = await create(key, { title: 'router', content: '管理密码 hunter2' })
+    const created = (await res.json()) as EntryView
     const inner = fakeEmbedder()
     const racing = {
       model: inner.model,
       async embed(texts: string[]) {
-        // 模拟嵌入请求还没返回时，另一个请求把记忆改成了 secret
+        // 模拟嵌入请求还没返回时，另一个请求把词条改成了 secret
         await app.request(
-          '/v1/memories',
-          jsonRequest('PATCH', { uri: 'user://home/router', sensitivity: 'secret' }, bearer(key)),
+          '/v1/entries',
+          jsonRequest('PATCH', { id: created.shortId, sensitivity: 'secret' }, bearer(key)),
         )
         return inner.embed(texts)
       },
     }
-    await embedMemories(database.db, racing, ws.spaceId, [id])
-    const rows = await withSpace(database.db, ws.spaceId, (tx) =>
-      tx.select().from(memoryEmbeddings),
+    await embedEntries(database.db, racing, ws.circleId, [created.id])
+    const rows = await withCircle(database.db, ws.circleId, (tx) =>
+      tx.select().from(entryEmbeddings),
     )
     expect(rows).toHaveLength(0)
   })
-  const children = async (key: string, of: string) =>
+
+  const browse = async (key: string, params = 'groupBy=topic') =>
     (await (
-      await app.request(`/v1/memories/children?of=${encodeURIComponent(of)}`, {
-        headers: bearer(key),
-      })
-    ).json()) as MemoryChildren
+      await app.request(`/v1/entries/browse?${params}`, { headers: bearer(key) })
+    ).json()) as EntryBrowseResponse
 
-  it('父节点不存在时也能创建，并通过虚拟节点浏览到', async () => {
-    const key = await ws.issueKey((await ws.createApp('agent')).id)
-    expect((await create(key, { uri: 'user://projects/kioku/notes', content: 'x' })).status).toBe(
-      201,
-    )
-    const root = await children(key, 'user://projects')
-    expect(root.children).toMatchObject([
-      { uri: 'user://projects/kioku', exists: false, childCount: 1 },
-    ])
-    const level = await children(key, 'user://projects/kioku')
-    expect(level.parent).toBeNull()
-    expect(level.children).toMatchObject([{ uri: 'user://projects/kioku/notes', exists: true }])
-  })
-
-  it('读不到的记忆不出现，也不会产生虚拟节点', async () => {
-    const b = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+  it('浏览按维度聚合，读不到的词条不出现，删掉某条时其余同类词条仍在', async () => {
+    const b = await addMember(database.db, ws.circleId, 'bob', 'editor')
     const bKey = (
-      (await (await keyAs(b.cookie, await appAs(b.cookie, 'b-agent'))).json()) as CreatedKey
+      (await (
+        await keyAs(b.cookie, await clientAs(b.cookie, 'b-agent'), [
+          { circleId: b.personalCircleId, mode: 'read_write' },
+        ])
+      ).json()) as IssuedKey
     ).key
-    await create(bKey, { uri: 'user://home/lab/secret-project', content: 'B 的私事' })
-    const key = await ws.issueKey((await ws.createApp('agent')).id)
-    expect((await children(key, 'user')).children).toEqual([])
-    // 对 A 来说这个路径下什么都读不到，和不存在一样是 404
-    const lab = await app.request(
-      `/v1/memories/children?of=${encodeURIComponent('user://home/lab')}`,
-      {
-        headers: bearer(key),
-      },
-    )
-    expect(lab.status).toBe(404)
-    expect((await children(bKey, 'user://home')).children).toMatchObject([
-      { uri: 'user://home/lab', exists: false },
-    ])
-  })
+    await create(bKey, {
+      circle: b.personalCircleId,
+      title: 'secret-project',
+      topics: ['lab'],
+      content: 'B 的私事',
+    })
+    const key = await ws.issueKey((await ws.createClient('agent')).id)
+    expect((await browse(key)).groups).toEqual([])
+    expect((await browse(bKey)).groups).toMatchObject([{ key: 'lab', count: 1 }])
 
-  it('删除或移走父节点后，子节点仍然可以浏览到', async () => {
-    const key = await ws.issueKey((await ws.createApp('agent')).id)
-    await create(key, { uri: 'core://agent', content: 'x' })
-    await create(key, { uri: 'core://agent/codex', content: 'x' })
-    const del = await app.request('/v1/memories?uri=core%3A%2F%2Fagent', {
+    const one = (await (
+      await create(key, { title: 'agent-1', topics: ['kb'], content: 'x', priority: 2 })
+    ).json()) as EntryView
+    const two = (await (
+      await create(key, { title: 'agent-2', topics: ['kb'], content: 'y', priority: 0 })
+    ).json()) as EntryView
+    const ordered = await browse(key)
+    expect(ordered.groups[0]!.items.map((i) => i.shortId)).toEqual([two.shortId, one.shortId])
+
+    const del = await app.request(`/v1/entries?id=${encodeURIComponent(one.shortId)}`, {
       method: 'DELETE',
       headers: bearer(key),
     })
     expect(del.status).toBe(204)
-    expect((await children(key, 'core')).children).toMatchObject([
-      { uri: 'core://agent', exists: false },
-    ])
-    expect((await children(key, 'core://agent')).children).toMatchObject([
-      { uri: 'core://agent/codex' },
-    ])
+    expect((await browse(key)).groups[0]!.items.map((i) => i.shortId)).toEqual([two.shortId])
+    expect(
+      (await app.request('/v1/entries/browse?groupBy=invalid', { headers: bearer(key) })).status,
+    ).toBe(400)
   })
 
-  it('空间 owner 能看到成员应用的 Key 列表（用于吊销）', async () => {
-    const b = await addMember(database.db, ws.spaceId, 'bob', 'editor')
-    const bApp = await appAs(b.cookie, 'b-agent')
-    await keyAs(b.cookie, bApp)
-    const list = await app.request(`/v1/spaces/${ws.spaceId}/apps/${bApp}/keys`, {
+  it('记忆圈 owner 能看到成员接入实例的 Key 列表（用于吊销）', async () => {
+    const b = await addMember(database.db, ws.circleId, 'bob', 'editor')
+    const bClient = await clientAs(b.cookie, 'b-agent')
+    await keyAs(b.cookie, bClient)
+    const list = await app.request(`/v1/circles/${ws.circleId}/clients/${bClient}/keys`, {
       headers: { cookie: ws.cookie },
     })
     expect(list.status).toBe(200)
     expect(JSON.stringify(await list.json())).not.toContain('kioku_')
   })
+
   it('editor 不能签发 secret 级 Key', async () => {
-    const b = await addMember(database.db, ws.spaceId, 'bob', 'editor')
-    const bApp = await appAs(b.cookie, 'b-agent')
+    const b = await addMember(database.db, ws.circleId, 'bob', 'editor')
+    const bClient = await clientAs(b.cookie, 'b-agent')
     const res = await app.request(
-      `/v1/spaces/${ws.spaceId}/apps/${bApp}/keys`,
+      `/v1/circles/${ws.circleId}/clients/${bClient}/keys`,
       jsonRequest(
         'POST',
         { name: 'k', scopes: { ...FULL_SCOPES, maxSensitivity: 'secret' } },
@@ -388,43 +401,29 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
     expect(res.status).toBe(403)
   })
 
-  it('空间 owner 可以把成员的应用转给自己，之后能签发 Key', async () => {
-    const b = await addMember(database.db, ws.spaceId, 'bob', 'editor')
-    const bApp = await appAs(b.cookie, 'b-agent')
+  it('记忆圈 owner 可以把成员的接入实例转给自己，之后能签发 Key', async () => {
+    const b = await addMember(database.db, ws.circleId, 'bob', 'editor')
+    const bClient = await clientAs(b.cookie, 'b-agent')
     const patch = (body: Record<string, unknown>, cookie: string) =>
-      app.request(`/v1/spaces/${ws.spaceId}/apps/${bApp}`, jsonRequest('PATCH', body, { cookie }))
+      app.request(
+        `/v1/circles/${ws.circleId}/clients/${bClient}`,
+        jsonRequest('PATCH', body, { cookie }),
+      )
     expect((await patch({ ownerAccountId: ws.accountId }, b.cookie)).status).toBe(403)
     expect(
       (await patch({ ownerAccountId: '00000000-0000-4000-8000-000000000000' }, ws.cookie)).status,
     ).toBe(400)
     expect((await patch({ ownerAccountId: ws.accountId }, ws.cookie)).status).toBe(200)
-    expect((await keyAs(ws.cookie, bApp)).status).toBe(201)
+    expect((await keyAs(ws.cookie, bClient)).status).toBe(201)
   })
 
-  it('浏览结果按层聚合，每一级只出现一次', async () => {
-    const key = await ws.issueKey((await ws.createApp('agent')).id)
-    for (const uri of [
-      'user://kb/a',
-      'user://kb/a/x',
-      'user://kb/a/y',
-      'user://kb/a/y/z',
-      'user://kb/b/q',
-    ]) {
-      await create(key, { uri, content: uri })
-    }
-    const root = await children(key, 'user://kb')
-    expect(root.children.map((c) => [c.uri, c.exists, c.childCount])).toEqual([
-      ['user://kb/a', true, 2],
-      ['user://kb/b', false, 1],
-    ])
-  })
-  it('转移应用所有权会吊销旧 Key，且不能夹带别的修改', async () => {
-    const b = await addMember(database.db, ws.spaceId, 'bob', 'editor')
-    const bApp = await appAs(b.cookie, 'b-agent')
-    const oldKey = ((await (await keyAs(b.cookie, bApp)).json()) as CreatedKey).key
+  it('转移接入实例所有权会吊销旧 Key，且不能夹带别的修改', async () => {
+    const b = await addMember(database.db, ws.circleId, 'bob', 'editor')
+    const bClient = await clientAs(b.cookie, 'b-agent')
+    const oldKey = ((await (await keyAs(b.cookie, bClient)).json()) as IssuedKey).key
     const patch = (body: Record<string, unknown>) =>
       app.request(
-        `/v1/spaces/${ws.spaceId}/apps/${bApp}`,
+        `/v1/circles/${ws.circleId}/clients/${bClient}`,
         jsonRequest('PATCH', body, { cookie: ws.cookie }),
       )
     expect(
@@ -435,73 +434,39 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
     expect((await app.request('/v1/whoami', { headers: bearer(oldKey) })).status).toBe(401)
   })
 
-  it('数据库层也保证同一归属里坐标不重复', async () => {
-    const key = await ws.issueKey((await ws.createApp('agent')).id)
-    await create(key, { uri: 'user://home/wifi', content: '本人的' })
-    const row = (ownerAccountId: string) => ({
-      spaceId: ws.spaceId,
-      form: 'curated' as const,
-      layer: 'user' as const,
-      sensitivity: 'private' as const,
-      provenance: 'agent' as const,
-      ownerAccountId,
-      domain: 'user',
-      path: 'home/wifi',
-      title: 'wifi',
-      content: '绕过服务层',
-    })
+  it('数据库层保证全局短 ID 唯一与形制约束', async () => {
+    const key = await ws.issueKey((await ws.createClient('agent')).id)
+    const created = (await (
+      await create(key, { title: 'wifi', content: '共享词条' })
+    ).json()) as EntryView
     await expect(
-      withSpace(database.db, ws.spaceId, (tx) => tx.insert(memories).values(row(ws.accountId))),
+      withCircle(database.db, ws.circleId, (tx) =>
+        tx.insert(entries).values({
+          circleId: ws.circleId,
+          shortId: created.shortId,
+          circleKind: 'shared',
+          kind: 'entry',
+          sensitivity: 'internal',
+          provenance: 'agent',
+          title: 'dup',
+        }),
+      ),
     ).rejects.toThrow()
-    // 别的成员的本人里可以有同一个坐标
-    const b = await addMember(database.db, ws.spaceId, 'bob', 'editor')
-    await withSpace(database.db, ws.spaceId, (tx) => tx.insert(memories).values(row(b.accountId)))
-  })
-
-  it('别人的过期记录也会让出 URI', async () => {
-    const b = await addMember(database.db, ws.spaceId, 'bob', 'editor')
-    const bKey = (
-      (await (await keyAs(b.cookie, await appAs(b.cookie, 'b-agent'))).json()) as CreatedKey
-    ).key
-    await create(bKey, { uri: 'core://home/x', content: 'B 的旧事' })
-    await withSpace(database.db, ws.spaceId, (tx) =>
-      tx
-        .update(memories)
-        .set({ validTo: new Date(Date.now() - 1000) })
-        .where(eq(memories.path, 'home/x')),
-    )
-    const key = await ws.issueKey((await ws.createApp('agent')).id)
-    expect((await create(key, { uri: 'core://home/x', content: '共享' })).status).toBe(201)
-  })
-
-  it('写不了的过期共享记录留着：同一个共享坐标的写入照样冲突，本人的坐标不受影响', async () => {
-    const ownerKey = await ws.issueKey((await ws.createApp('agent')).id)
-    await create(ownerKey, {
-      uri: 'core://home/vault',
-      content: '旧密码',
-      sensitivity: 'secret',
-    })
-    await withSpace(database.db, ws.spaceId, (tx) =>
-      tx
-        .update(memories)
-        .set({ validTo: new Date(Date.now() - 1000) })
-        .where(eq(memories.path, 'home/vault')),
-    )
-    const b = await addMember(database.db, ws.spaceId, 'bob', 'editor')
-    const bKey = (
-      (await (await keyAs(b.cookie, await appAs(b.cookie, 'b-agent'))).json()) as CreatedKey
-    ).key
-    expect((await create(bKey, { uri: 'core://home/vault', content: '共享' })).status).toBe(409)
-    expect((await create(bKey, { uri: 'user://home/vault', content: 'bob 自己的' })).status).toBe(
-      201,
-    )
-    const rows = await withSpace(database.db, ws.spaceId, (tx) =>
-      tx.select().from(memories).where(eq(memories.path, 'home/vault')),
-    )
-    expect(rows.filter((r) => r.deletedAt === null)).toHaveLength(2)
-    expect(((await (await get(bKey, 'user://home/vault')).json()) as MemoryView).content).toBe(
-      'bob 自己的',
-    )
+    // 个人圈共享型条目（无 ownerAccountId）被 check 约束拦截
+    await expect(
+      withCircle(database.db, ws.personalCircleId, (tx) =>
+        tx.insert(entries).values({
+          circleId: ws.personalCircleId,
+          shortId: 'm-999999',
+          circleKind: 'personal',
+          kind: 'entry',
+          sensitivity: 'private',
+          provenance: 'agent',
+          ownerAccountId: null,
+          title: 'bad-personal',
+        }),
+      ),
+    ).rejects.toThrow()
   })
 
   it('超长用户名返回 400，不写入失败计数表', async () => {
@@ -512,52 +477,16 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
     expect(res.status).toBe(400)
   })
 
-  it('浏览时 priority 高的节点排在前面', async () => {
-    const key = await ws.issueKey((await ws.createApp('agent')).id)
-    await create(key, { uri: 'core://kb/aaa', content: 'x', priority: 2 })
-    await create(key, { uri: 'core://kb/zzz', content: 'x', priority: 0 })
-    expect((await children(key, 'core://kb')).children.map((c) => c.uri)).toEqual([
-      'core://kb/zzz',
-      'core://kb/aaa',
-    ])
-  })
-  it('应用只能转给 owner 或 editor', async () => {
-    const v = await addMember(database.db, ws.spaceId, 'victor', 'viewer')
-    const aApp = (await ws.createApp('a-bot')).id
+  it('接入实例只能转给 owner 或 editor', async () => {
+    const v = await addMember(database.db, ws.circleId, 'victor', 'viewer')
+    const aClient = (await ws.createClient('a-bot')).id
     const res = await app.request(
-      `/v1/spaces/${ws.spaceId}/apps/${aApp}`,
+      `/v1/circles/${ws.circleId}/clients/${aClient}`,
       jsonRequest('PATCH', { ownerAccountId: v.accountId }, { cookie: ws.cookie }),
     )
     expect(res.status).toBe(400)
   })
 
-  it('绕开服务层的写入撞上同一归属里过期的记录时，唯一索引照样拦下', async () => {
-    const key = await ws.issueKey((await ws.createApp('agent')).id)
-    await create(key, { uri: 'core://home/old', content: '旧' })
-    await withSpace(database.db, ws.spaceId, (tx) =>
-      tx
-        .update(memories)
-        .set({ validTo: new Date(Date.now() - 1000) })
-        .where(eq(memories.path, 'home/old')),
-    )
-    await expect(
-      withSpace(database.db, ws.spaceId, (tx) =>
-        tx.insert(memories).values({
-          spaceId: ws.spaceId,
-          form: 'curated',
-          layer: 'core',
-          sensitivity: 'public',
-          provenance: 'agent',
-          domain: 'core',
-          path: 'home/old',
-          title: 'old',
-          content: '新',
-        }),
-      ),
-    ).rejects.toThrow()
-    // 经过服务层就由 claimUri 先让出
-    expect((await create(key, { uri: 'core://home/old', content: '新' })).status).toBe(201)
-  })
   const proxiedApp = () =>
     createApp({
       db: database.db,
@@ -594,38 +523,45 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
       (await loginFrom(proxied, '198.51.100.99, 203.0.113.66', 'correct horse battery')).status,
     ).toBe(429)
   })
-  it('应用主人被降级后，他签的 Key 随之收紧；离开空间后 Key 作废', async () => {
-    const appId = (await ws.createApp('agent')).id
-    const key = await ws.issueKey(appId)
-    await create(key, { uri: 'user://home/wifi', content: 'hunter2', sensitivity: 'secret' })
-    expect((await get(key, 'user://home/wifi')).status).toBe(200)
+
+  it('接入实例主人被降级后，他签的 Key 随之收紧；离开记忆圈后 Key 作废', async () => {
+    const cid = (await ws.createClient('agent')).id
+    const key = await ws.issueKey(cid)
+    const created = (await (
+      await create(key, { title: 'wifi', content: 'hunter2', sensitivity: 'secret' })
+    ).json()) as EntryView
+    expect((await get(key, created.shortId)).status).toBe(200)
 
     // 另找一位 owner，再把原 owner 降成 editor
-    await addMember(database.db, ws.spaceId, 'olga', 'owner')
+    await addMember(database.db, ws.circleId, 'olga', 'owner')
     await database.db
-      .update(spaceMembers)
+      .update(circleMembers)
       .set({ role: 'editor' })
-      .where(and(eq(spaceMembers.spaceId, ws.spaceId), eq(spaceMembers.accountId, ws.accountId)))
-    expect((await get(key, 'user://home/wifi')).status).toBe(404)
+      .where(
+        and(eq(circleMembers.circleId, ws.circleId), eq(circleMembers.accountId, ws.accountId)),
+      )
+    expect((await get(key, created.shortId)).status).toBe(404)
     const who = (await (await app.request('/v1/whoami', { headers: bearer(key) })).json()) as {
       scopes: { maxSensitivity: string; admin: boolean }
     }
     expect(who.scopes).toMatchObject({ maxSensitivity: 'private', admin: false })
 
     await database.db
-      .delete(spaceMembers)
-      .where(and(eq(spaceMembers.spaceId, ws.spaceId), eq(spaceMembers.accountId, ws.accountId)))
+      .delete(circleMembers)
+      .where(
+        and(eq(circleMembers.circleId, ws.circleId), eq(circleMembers.accountId, ws.accountId)),
+      )
     expect((await app.request('/v1/whoami', { headers: bearer(key) })).status).toBe(401)
   })
 
   it('签发 Key 与转移所有权并发时，转移之后不会留下前任主人的有效 Key', async () => {
-    const b = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    const b = await addMember(database.db, ws.circleId, 'bob', 'editor')
     for (let round = 0; round < 6; round++) {
-      const bApp = await appAs(b.cookie, `b-agent-${round}`)
+      const bClient = await clientAs(b.cookie, `b-agent-${round}`)
       const [, transfer] = await Promise.all([
-        keyAs(b.cookie, bApp),
+        keyAs(b.cookie, bClient),
         app.request(
-          `/v1/spaces/${ws.spaceId}/apps/${bApp}`,
+          `/v1/circles/${ws.circleId}/clients/${bClient}`,
           jsonRequest('PATCH', { ownerAccountId: ws.accountId }, { cookie: ws.cookie }),
         ),
       ])
@@ -633,7 +569,7 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
       const live = await database.db
         .select({ id: apiKeys.id })
         .from(apiKeys)
-        .where(and(eq(apiKeys.appId, bApp), isNull(apiKeys.revokedAt)))
+        .where(and(eq(apiKeys.clientId, bClient), isNull(apiKeys.revokedAt)))
       expect(live).toEqual([])
     }
   })
@@ -644,22 +580,24 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
     expect((await loginFrom(proxied, '203.0.113.10', 'correct horse battery')).status).toBe(200)
   })
 
-  it('记忆改成 secret 时，它的向量在同一个事务里删除', async () => {
-    const key = await ws.issueKey((await ws.createApp('agent')).id)
-    const res = await create(key, { uri: 'user://home/router', content: '管理密码 hunter2' })
-    const id = ((await res.json()) as { id: string }).id
-    await embedMemories(database.db, fakeEmbedder(), ws.spaceId, [id])
+  it('词条改成 secret 时，它的向量在同一个事务里删除', async () => {
+    const key = await ws.issueKey((await ws.createClient('agent')).id)
+    const created = (await (
+      await create(key, { title: 'router', content: '管理密码 hunter2' })
+    ).json()) as EntryView
+    await embedEntries(database.db, fakeEmbedder(), ws.circleId, [created.id])
     expect(
-      await withSpace(database.db, ws.spaceId, (tx) => tx.select().from(memoryEmbeddings)),
+      await withCircle(database.db, ws.circleId, (tx) => tx.select().from(entryEmbeddings)),
     ).toHaveLength(1)
     await app.request(
-      '/v1/memories',
-      jsonRequest('PATCH', { uri: 'user://home/router', sensitivity: 'secret' }, bearer(key)),
+      '/v1/entries',
+      jsonRequest('PATCH', { id: created.shortId, sensitivity: 'secret' }, bearer(key)),
     )
     expect(
-      await withSpace(database.db, ws.spaceId, (tx) => tx.select().from(memoryEmbeddings)),
+      await withCircle(database.db, ws.circleId, (tx) => tx.select().from(entryEmbeddings)),
     ).toHaveLength(0)
   })
+
   it('别人从很多地址乱试密码，主人在登录过的设备上仍能登录', async () => {
     const proxied = proxiedApp()
     // 主人先在自己的设备上成功登录一次，拿到设备 Cookie
@@ -756,19 +694,20 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
     expect(forged.status).toBe(429)
   })
 
-  it('主人离开空间又被重新加入后，旧 Key 不会恢复', async () => {
-    const b = await addMember(database.db, ws.spaceId, 'bob', 'editor')
-    const bApp = await appAs(b.cookie, 'b-agent')
-    const oldKey = ((await (await keyAs(b.cookie, bApp)).json()) as CreatedKey).key
+  it('主人离开记忆圈又被重新加入后，旧 Key 不会恢复', async () => {
+    const b = await addMember(database.db, ws.circleId, 'bob', 'editor')
+    const bClient = await clientAs(b.cookie, 'b-agent')
+    const oldKey = ((await (await keyAs(b.cookie, bClient)).json()) as IssuedKey).key
     await database.db
-      .delete(spaceMembers)
-      .where(and(eq(spaceMembers.spaceId, ws.spaceId), eq(spaceMembers.accountId, b.accountId)))
+      .delete(circleMembers)
+      .where(and(eq(circleMembers.circleId, ws.circleId), eq(circleMembers.accountId, b.accountId)))
     await new Promise((r) => setTimeout(r, 5))
     await database.db
-      .insert(spaceMembers)
-      .values({ spaceId: ws.spaceId, accountId: b.accountId, role: 'editor' })
+      .insert(circleMembers)
+      .values({ circleId: ws.circleId, accountId: b.accountId, role: 'editor' })
     expect((await app.request('/v1/whoami', { headers: bearer(oldKey) })).status).toBe(401)
   })
+
   it('改了密码之后，之前发出的设备 Cookie 不再有效', async () => {
     const proxied = proxiedApp()
     const first = await loginFrom(proxied, '203.0.113.200', 'correct horse battery')
@@ -855,24 +794,5 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
       jsonRequest('POST', { username: 'nobody', password: 'x' }),
     )
     expect(res.status).toBe(429)
-  })
-
-  it('浏览一个不存在、下面也没有可读内容的路径返回 404', async () => {
-    const key = await ws.issueKey((await ws.createApp('agent')).id)
-    await create(key, { uri: 'core://agent', content: 'x' })
-    expect(
-      (
-        await app.request(`/v1/memories/children?of=${encodeURIComponent('core://agnet')}`, {
-          headers: bearer(key),
-        })
-      ).status,
-    ).toBe(404)
-    // 开头本身下面没有内容时是空的一级；不是四种开头之一的是格式错误
-    expect(
-      (await app.request('/v1/memories/children?of=user', { headers: bearer(key) })).status,
-    ).toBe(200)
-    expect(
-      (await app.request('/v1/memories/children?of=emptydomain', { headers: bearer(key) })).status,
-    ).toBe(400)
   })
 })

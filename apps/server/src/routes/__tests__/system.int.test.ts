@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto'
 
-import { SpaceOverview, SystemInfo } from '@kioku/contracts'
+import { CircleOverview, SystemInfo } from '@kioku/contracts'
 import { eq, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -63,10 +63,10 @@ describe.skipIf(!testDatabaseUrl)('系统信息', () => {
   const toggle = async (enabled: boolean, cookie = ws.cookie) =>
     app.request('/v1/instance/update-check', jsonRequest('PUT', { enabled }, { cookie }))
   const overview = async (cookie = ws.cookie) =>
-    SpaceOverview.parse(await (await get(`/spaces/${ws.spaceId}/overview`, cookie)).json())
+    CircleOverview.parse(await (await get(`/circles/${ws.circleId}/overview`, cookie)).json())
 
   it('只给实例管理员：别的成员 403', async () => {
-    const owner = await addMember(database.db, ws.spaceId, 'bob', 'owner')
+    const owner = await addMember(database.db, ws.circleId, 'bob', 'owner')
     expect((await get('/instance/system', owner.cookie)).status).toBe(403)
     expect((await toggle(true, owner.cookie)).status).toBe(403)
     expect(
@@ -155,7 +155,7 @@ describe.skipIf(!testDatabaseUrl)('系统信息', () => {
       available: notice,
     })
     expect((await overview()).update).toEqual(notice)
-    const viewer = await addMember(database.db, ws.spaceId, 'carol', 'viewer')
+    const viewer = await addMember(database.db, ws.circleId, 'carol', 'viewer')
     expect((await overview(viewer.cookie)).update).toBeNull()
     // 一天之内打开页面、概览都不再请求
     await info()

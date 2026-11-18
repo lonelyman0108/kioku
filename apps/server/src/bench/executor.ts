@@ -26,8 +26,8 @@ export interface StepOutcome {
   httpStatus: number | null
   text: string
   raw: unknown
-  // 结果里的 URI 列表。null 表示这种结果分不清，uris 与 notUris 断言直接算失败，不能当成「没有」
-  uris: string[] | null
+  // 结果里的短 ID 列表。null 表示这种结果分不清，shortIds 与 notShortIds 断言直接算失败，不能当成「没有」
+  shortIds: string[] | null
   session: BenchSessionStart | null
   vectorSkipped: boolean
   changes: BenchChanges | null
@@ -50,39 +50,36 @@ const OUTCOME_DEFAULTS = {
   changes: null,
 } as const
 
-// 工具结果里的结构行（见 mcp/format.ts 与 formatRecallBlock）。正则是写死的，不接受场景给的模式。
-// 坐标后面可能跟着「标题」（见 recall/text.ts 的 titleSuffix，标题里的「」已经去掉）
-const MEMORY_URI_LINE = /^URI: ([a-z][a-z0-9_]*:\/\/[a-z0-9_/-]+)$/
-const CHILD_ROW =
-  /^- ([a-z][a-z0-9_]*:\/\/[a-z0-9_/-]+)(?:「[^」\n]*」)?（(?:路径本身没有记忆|[a-z]+，priority -?\d+)(?:，\d+ 个子节点)?）/
-const RECALL_ROW = /^\d+\.\d+ \| ([a-z][a-z0-9_]*:\/\/[a-z0-9_/-]+)(?:「[^」\n]*」)?(?: \| |$)/
+// 工具结果里的结构行（见 mcp/format.ts 与 formatRecallBlock）。正则是写死的，不接受场景给的模式
+const ENTRY_ID_LINE = /^ID: (m-[2-9a-hjkmnp-tv-z]{6,8})$/
+const BROWSE_ROW =
+  /^- (m-[2-9a-hjkmnp-tv-z]{6,8})(?:「[^」\n]*」)?(?:\s+\[[^\n\]]+\])?（(?:entry|fact|episode)，(?:public|internal|private|secret)，priority -?\d+/
+const RECALL_ROW =
+  /^\d+\.\d+ \| (m-[2-9a-hjkmnp-tv-z]{6,8})(?:「[^」\n]*」)?(?:\s+\[[^\n\]]+\])?(?:\s+\[其他群印象\])?(?: \| |$)/
 
-const urisIn = (lines: readonly string[], row: RegExp) =>
+const shortIdsIn = (lines: readonly string[], row: RegExp) =>
   lines.flatMap((line) => {
-    const uri = row.exec(line)?.[1]
-    return uri === undefined ? [] : [uri]
+    const id = row.exec(line)?.[1]
+    return id === undefined ? [] : [id]
   })
 
-// 结果里的 URI，按工具只看结构行：正文是任意文字，可能写着和结构行一样的内容，扫全文会把它们也算进去
-function toolUris(tool: string, text: string): string[] | null {
+// 结果里的短 ID，按工具只看结构行：正文是任意文字，可能写着和结构行一样的内容，扫全文会把它们也算进去
+function toolShortIds(tool: string, text: string): string[] | null {
   const lines = text.split('\n')
   switch (tool) {
-    // 记忆视图：元数据在正文前面，第一行就是 URI
+    // 词条视图：第一行可能是重定向提示，按有没有提示取对应那一行
     case 'kioku_get':
     case 'kioku_create':
     case 'kioku_update':
-    case 'kioku_move':
-      return urisIn(lines.slice(0, 1), MEMORY_URI_LINE)
-    // 父节点的视图在列表前面，正文里也可能写着「子节点：」，所以从最后一个算起。
-    // 子节点的 disclosure 可以多行，里面写成这些行的样子时分不出来
-    case 'kioku_list': {
-      const head = lines.findLastIndex((line) => line === '子节点：' || line === '子节点：无')
-      return head < 0 ? [] : urisIn(lines.slice(head + 1), CHILD_ROW)
+    case 'kioku_transfer': {
+      const idLine = lines[0]?.startsWith('提示: ') ? lines[1] : lines[0]
+      return idLine === undefined ? [] : shortIdsIn([idLine], ENTRY_ID_LINE)
     }
-    // 整个结果就是 <recall> 块，线索都压成了单行
+    case 'kioku_browse':
+      return shortIdsIn(lines, BROWSE_ROW)
     case 'kioku_search':
-      return urisIn(lines, RECALL_ROW)
-    // 标题（「## …」）和正文写法相同，分不清哪些是节点。要看启动节点用 /boot 步骤，它有结构化的 entries
+      return shortIdsIn(lines, RECALL_ROW)
+    // 标题（「## …」）和正文写法相同，分不清哪些是词条。要看启动词条用 boot 步骤，它有结构化的 entries
     case 'kioku_boot':
       return null
     default:
@@ -110,7 +107,7 @@ export function toolOutcome(tool: string, result: ToolResult): StepOutcome {
     httpStatus: null,
     text,
     raw: result,
-    uris: isError ? [] : toolUris(tool, text),
+    shortIds: isError ? [] : toolShortIds(tool, text),
   }
 }
 
@@ -123,7 +120,7 @@ export function restFailure(status: number, message: string): StepOutcome {
     httpStatus: status,
     text: message,
     raw: { error: message },
-    uris: [],
+    shortIds: [],
   }
 }
 
@@ -167,15 +164,23 @@ export function restSuccess(kind: ResolvedStep['kind'], raw: unknown): StepOutco
         ...base,
         raw: response,
         text: hostText(response.hostOutput),
-        uris: response.nodeUris,
+        shortIds: response.shortIds,
         session: session ?? null,
       }
     }
     case 'recall':
-      return { ...base, text: json, uris: (raw as RecallResponse).candidates.map((c) => c.uri) }
+      return {
+        ...base,
+        text: json,
+        shortIds: (raw as RecallResponse).candidates.map((c) => c.shortId),
+      }
     case 'boot':
-      return { ...base, text: json, uris: (raw as BootResponse).entries.map((e) => e.uri) }
+      return {
+        ...base,
+        text: json,
+        shortIds: (raw as BootResponse).entries.map((e) => e.shortId),
+      }
     default:
-      return { ...base, text: json, uris: [] }
+      return { ...base, text: json, shortIds: [] }
   }
 }

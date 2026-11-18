@@ -97,12 +97,8 @@
           "name": "account_links_account_id_accounts_id_fk",
           "tableFrom": "account_links",
           "tableTo": "accounts",
-          "columnsFrom": [
-            "account_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["account_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -110,12 +106,8 @@
           "name": "account_links_created_by_accounts_id_fk",
           "tableFrom": "account_links",
           "tableTo": "accounts",
-          "columnsFrom": [
-            "created_by"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["created_by"],
+          "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         }
@@ -125,9 +117,7 @@
         "account_links_tokenHash_unique": {
           "name": "account_links_tokenHash_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "token_hash"
-          ]
+          "columns": ["token_hash"]
         }
       },
       "policies": {},
@@ -191,9 +181,7 @@
         "accounts_username_unique": {
           "name": "accounts_username_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "username"
-          ]
+          "columns": ["username"]
         }
       },
       "policies": {},
@@ -303,12 +291,8 @@
           "name": "api_keys_client_id_clients_id_fk",
           "tableFrom": "api_keys",
           "tableTo": "clients",
-          "columnsFrom": [
-            "client_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["client_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -316,12 +300,8 @@
           "name": "api_keys_persona_override_id_personas_id_fk",
           "tableFrom": "api_keys",
           "tableTo": "personas",
-          "columnsFrom": [
-            "persona_override_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["persona_override_id"],
+          "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         }
@@ -331,9 +311,7 @@
         "api_keys_prefix_unique": {
           "name": "api_keys_prefix_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "prefix"
-          ]
+          "columns": ["prefix"]
         }
       },
       "policies": {},
@@ -398,12 +376,8 @@
           "name": "circle_departures_circle_id_circles_id_fk",
           "tableFrom": "circle_departures",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -411,12 +385,8 @@
           "name": "circle_departures_account_id_accounts_id_fk",
           "tableFrom": "circle_departures",
           "tableTo": "accounts",
-          "columnsFrom": [
-            "account_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["account_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -424,10 +394,7 @@
       "compositePrimaryKeys": {
         "circle_departures_circle_id_account_id_pk": {
           "name": "circle_departures_circle_id_account_id_pk",
-          "columns": [
-            "circle_id",
-            "account_id"
-          ]
+          "columns": ["circle_id", "account_id"]
         }
       },
       "uniqueConstraints": {},
@@ -479,12 +446,8 @@
           "name": "circle_members_circle_id_circles_id_fk",
           "tableFrom": "circle_members",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -492,12 +455,8 @@
           "name": "circle_members_account_id_accounts_id_fk",
           "tableFrom": "circle_members",
           "tableTo": "accounts",
-          "columnsFrom": [
-            "account_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["account_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -505,10 +464,7 @@
       "compositePrimaryKeys": {
         "circle_members_circle_id_account_id_pk": {
           "name": "circle_members_circle_id_account_id_pk",
-          "columns": [
-            "circle_id",
-            "account_id"
-          ]
+          "columns": ["circle_id", "account_id"]
         }
       },
       "uniqueConstraints": {},
@@ -625,12 +581,8 @@
           "name": "circles_owner_account_id_accounts_id_fk",
           "tableFrom": "circles",
           "tableTo": "accounts",
-          "columnsFrom": [
-            "owner_account_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["owner_account_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -640,17 +592,12 @@
         "circles_slug_unique": {
           "name": "circles_slug_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "slug"
-          ]
+          "columns": ["slug"]
         },
         "circles_id_kind_unique": {
           "name": "circles_id_kind_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "id",
-            "kind"
-          ]
+          "columns": ["id", "kind"]
         }
       },
       "policies": {},
@@ -749,12 +696,8 @@
           "name": "client_group_rules_circle_id_circles_id_fk",
           "tableFrom": "client_group_rules",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -762,14 +705,8 @@
           "name": "client_group_rules_client_fk",
           "tableFrom": "client_group_rules",
           "tableTo": "clients",
-          "columnsFrom": [
-            "circle_id",
-            "client_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "client_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -777,14 +714,8 @@
           "name": "client_group_rules_subject_fk",
           "tableFrom": "client_group_rules",
           "tableTo": "subjects",
-          "columnsFrom": [
-            "circle_id",
-            "group_subject_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "group_subject_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -792,14 +723,8 @@
           "name": "client_group_rules_persona_fk",
           "tableFrom": "client_group_rules",
           "tableTo": "personas",
-          "columnsFrom": [
-            "circle_id",
-            "persona_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "persona_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         }
@@ -807,10 +732,7 @@
       "compositePrimaryKeys": {
         "client_group_rules_client_id_group_subject_id_pk": {
           "name": "client_group_rules_client_id_group_subject_id_pk",
-          "columns": [
-            "client_id",
-            "group_subject_id"
-          ]
+          "columns": ["client_id", "group_subject_id"]
         }
       },
       "uniqueConstraints": {},
@@ -915,12 +837,8 @@
           "name": "clients_circle_id_circles_id_fk",
           "tableFrom": "clients",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -928,12 +846,8 @@
           "name": "clients_owner_account_id_accounts_id_fk",
           "tableFrom": "clients",
           "tableTo": "accounts",
-          "columnsFrom": [
-            "owner_account_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["owner_account_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         },
@@ -941,14 +855,8 @@
           "name": "clients_default_persona_fk",
           "tableFrom": "clients",
           "tableTo": "personas",
-          "columnsFrom": [
-            "circle_id",
-            "default_persona_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "default_persona_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         }
@@ -958,10 +866,7 @@
         "clients_circle_id_unique": {
           "name": "clients_circle_id_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "circle_id",
-            "id"
-          ]
+          "columns": ["circle_id", "id"]
         }
       },
       "policies": {},
@@ -1092,12 +997,8 @@
           "name": "conversation_turns_circle_id_circles_id_fk",
           "tableFrom": "conversation_turns",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -1105,12 +1006,8 @@
           "name": "conversation_turns_key_id_api_keys_id_fk",
           "tableFrom": "conversation_turns",
           "tableTo": "api_keys",
-          "columnsFrom": [
-            "key_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["key_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -1118,12 +1015,8 @@
           "name": "conversation_turns_owner_account_id_accounts_id_fk",
           "tableFrom": "conversation_turns",
           "tableTo": "accounts",
-          "columnsFrom": [
-            "owner_account_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["owner_account_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -1131,14 +1024,8 @@
           "name": "conversation_turns_client_fk",
           "tableFrom": "conversation_turns",
           "tableTo": "clients",
-          "columnsFrom": [
-            "circle_id",
-            "client_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "client_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -1146,14 +1033,8 @@
           "name": "conversation_turns_group_fk",
           "tableFrom": "conversation_turns",
           "tableTo": "subjects",
-          "columnsFrom": [
-            "circle_id",
-            "group_subject_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "group_subject_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -1161,14 +1042,8 @@
           "name": "conversation_turns_sender_fk",
           "tableFrom": "conversation_turns",
           "tableTo": "subjects",
-          "columnsFrom": [
-            "circle_id",
-            "sender_subject_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "sender_subject_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -1354,12 +1229,8 @@
           "name": "conversations_circle_id_circles_id_fk",
           "tableFrom": "conversations",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -1367,12 +1238,8 @@
           "name": "conversations_owner_account_id_accounts_id_fk",
           "tableFrom": "conversations",
           "tableTo": "accounts",
-          "columnsFrom": [
-            "owner_account_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["owner_account_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -1380,14 +1247,8 @@
           "name": "conversations_client_fk",
           "tableFrom": "conversations",
           "tableTo": "clients",
-          "columnsFrom": [
-            "circle_id",
-            "client_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "client_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -1395,14 +1256,8 @@
           "name": "conversations_subject_fk",
           "tableFrom": "conversations",
           "tableTo": "subjects",
-          "columnsFrom": [
-            "circle_id",
-            "subject_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "subject_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -1412,10 +1267,7 @@
         "conversations_circle_id_unique": {
           "name": "conversations_circle_id_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "circle_id",
-            "id"
-          ]
+          "columns": ["circle_id", "id"]
         }
       },
       "policies": {},
@@ -1510,12 +1362,8 @@
           "name": "credential_events_circle_id_circles_id_fk",
           "tableFrom": "credential_events",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -1523,14 +1371,8 @@
           "name": "credential_events_credential_fk",
           "tableFrom": "credential_events",
           "tableTo": "credentials",
-          "columnsFrom": [
-            "circle_id",
-            "credential_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "credential_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -1791,12 +1633,8 @@
           "name": "credentials_circle_id_circles_id_fk",
           "tableFrom": "credentials",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -1804,12 +1642,8 @@
           "name": "credentials_owner_account_id_accounts_id_fk",
           "tableFrom": "credentials",
           "tableTo": "accounts",
-          "columnsFrom": [
-            "owner_account_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["owner_account_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -1817,16 +1651,8 @@
           "name": "credentials_vault_connection_fk",
           "tableFrom": "credentials",
           "tableTo": "vault_connections",
-          "columnsFrom": [
-            "circle_id",
-            "owner_account_id",
-            "vault_connection_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "owner_account_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "owner_account_id", "vault_connection_id"],
+          "columnsTo": ["circle_id", "owner_account_id", "id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -1836,10 +1662,7 @@
         "credentials_circle_id_unique": {
           "name": "credentials_circle_id_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "circle_id",
-            "id"
-          ]
+          "columns": ["circle_id", "id"]
         }
       },
       "policies": {},
@@ -2037,12 +1860,8 @@
           "name": "device_grants_approved_by_accounts_id_fk",
           "tableFrom": "device_grants",
           "tableTo": "accounts",
-          "columnsFrom": [
-            "approved_by"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["approved_by"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -2050,12 +1869,8 @@
           "name": "device_grants_circle_id_circles_id_fk",
           "tableFrom": "device_grants",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -2063,14 +1878,8 @@
           "name": "device_grants_circle_client_fk",
           "tableFrom": "device_grants",
           "tableTo": "clients",
-          "columnsFrom": [
-            "circle_id",
-            "client_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "client_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -2080,16 +1889,12 @@
         "device_grants_deviceHash_unique": {
           "name": "device_grants_deviceHash_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "device_hash"
-          ]
+          "columns": ["device_hash"]
         },
         "device_grants_userHash_unique": {
           "name": "device_grants_userHash_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "user_hash"
-          ]
+          "columns": ["user_hash"]
         }
       },
       "policies": {},
@@ -2130,12 +1935,8 @@
           "name": "dream_marks_circle_id_circles_id_fk",
           "tableFrom": "dream_marks",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -2143,14 +1944,8 @@
           "name": "dream_marks_entry_fk",
           "tableFrom": "dream_marks",
           "tableTo": "entries",
-          "columnsFrom": [
-            "circle_id",
-            "entry_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "entry_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -2311,12 +2106,8 @@
           "name": "dream_runs_circle_id_circles_id_fk",
           "tableFrom": "dream_runs",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -2324,12 +2115,8 @@
           "name": "dream_runs_owner_account_id_accounts_id_fk",
           "tableFrom": "dream_runs",
           "tableTo": "accounts",
-          "columnsFrom": [
-            "owner_account_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["owner_account_id"],
+          "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         }
@@ -2540,12 +2327,8 @@
           "name": "dream_suggestions_circle_id_circles_id_fk",
           "tableFrom": "dream_suggestions",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -2553,12 +2336,8 @@
           "name": "dream_suggestions_owner_account_id_accounts_id_fk",
           "tableFrom": "dream_suggestions",
           "tableTo": "accounts",
-          "columnsFrom": [
-            "owner_account_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["owner_account_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -2566,12 +2345,8 @@
           "name": "dream_suggestions_decided_by_accounts_id_fk",
           "tableFrom": "dream_suggestions",
           "tableTo": "accounts",
-          "columnsFrom": [
-            "decided_by"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["decided_by"],
+          "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         }
@@ -2854,12 +2629,8 @@
           "name": "entries_circle_id_circles_id_fk",
           "tableFrom": "entries",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -2867,12 +2638,8 @@
           "name": "entries_owner_account_id_accounts_id_fk",
           "tableFrom": "entries",
           "tableTo": "accounts",
-          "columnsFrom": [
-            "owner_account_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["owner_account_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -2880,14 +2647,8 @@
           "name": "entries_circle_kind_fk",
           "tableFrom": "entries",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id",
-            "circle_kind"
-          ],
-          "columnsTo": [
-            "id",
-            "kind"
-          ],
+          "columnsFrom": ["circle_id", "circle_kind"],
+          "columnsTo": ["id", "kind"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -2895,14 +2656,8 @@
           "name": "entries_client_fk",
           "tableFrom": "entries",
           "tableTo": "clients",
-          "columnsFrom": [
-            "circle_id",
-            "client_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "client_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         },
@@ -2910,16 +2665,8 @@
           "name": "entries_subject_fk",
           "tableFrom": "entries",
           "tableTo": "subjects",
-          "columnsFrom": [
-            "circle_id",
-            "subject_id",
-            "subject_kind"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id",
-            "kind"
-          ],
+          "columnsFrom": ["circle_id", "subject_id", "subject_kind"],
+          "columnsTo": ["circle_id", "id", "kind"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -2927,14 +2674,8 @@
           "name": "entries_conversation_fk",
           "tableFrom": "entries",
           "tableTo": "conversations",
-          "columnsFrom": [
-            "circle_id",
-            "conversation_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "conversation_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         }
@@ -2944,27 +2685,17 @@
         "entries_short_id_unique": {
           "name": "entries_short_id_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "short_id"
-          ]
+          "columns": ["short_id"]
         },
         "entries_circle_id_unique": {
           "name": "entries_circle_id_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "circle_id",
-            "id"
-          ]
+          "columns": ["circle_id", "id"]
         },
         "entries_circle_id_sens_kind_unique": {
           "name": "entries_circle_id_sens_kind_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "circle_id",
-            "id",
-            "sensitivity",
-            "kind"
-          ]
+          "columns": ["circle_id", "id", "sensitivity", "kind"]
         }
       },
       "policies": {},
@@ -3051,12 +2782,8 @@
           "name": "entry_credential_refs_circle_id_circles_id_fk",
           "tableFrom": "entry_credential_refs",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -3064,14 +2791,8 @@
           "name": "entry_credential_refs_entry_fk",
           "tableFrom": "entry_credential_refs",
           "tableTo": "entries",
-          "columnsFrom": [
-            "circle_id",
-            "entry_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "entry_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -3079,10 +2800,7 @@
       "compositePrimaryKeys": {
         "entry_credential_refs_entry_id_identifier_pk": {
           "name": "entry_credential_refs_entry_id_identifier_pk",
-          "columns": [
-            "entry_id",
-            "identifier"
-          ]
+          "columns": ["entry_id", "identifier"]
         }
       },
       "uniqueConstraints": {},
@@ -3182,12 +2900,8 @@
           "name": "entry_embeddings_circle_id_circles_id_fk",
           "tableFrom": "entry_embeddings",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -3195,14 +2909,8 @@
           "name": "entry_embeddings_variant_fk",
           "tableFrom": "entry_embeddings",
           "tableTo": "entry_variants",
-          "columnsFrom": [
-            "circle_id",
-            "variant_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "variant_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -3210,14 +2918,8 @@
           "name": "entry_embeddings_entry_fk",
           "tableFrom": "entry_embeddings",
           "tableTo": "entries",
-          "columnsFrom": [
-            "circle_id",
-            "entry_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "entry_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -3225,10 +2927,7 @@
       "compositePrimaryKeys": {
         "entry_embeddings_variant_id_model_pk": {
           "name": "entry_embeddings_variant_id_model_pk",
-          "columns": [
-            "variant_id",
-            "model"
-          ]
+          "columns": ["variant_id", "model"]
         }
       },
       "uniqueConstraints": {},
@@ -3392,12 +3091,8 @@
           "name": "entry_events_circle_id_circles_id_fk",
           "tableFrom": "entry_events",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -3405,12 +3100,8 @@
           "name": "entry_events_entry_id_entries_id_fk",
           "tableFrom": "entry_events",
           "tableTo": "entries",
-          "columnsFrom": [
-            "entry_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["entry_id"],
+          "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         }
@@ -3472,12 +3163,8 @@
           "name": "entry_glossary_circle_id_circles_id_fk",
           "tableFrom": "entry_glossary",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -3485,14 +3172,8 @@
           "name": "entry_glossary_entry_fk",
           "tableFrom": "entry_glossary",
           "tableTo": "entries",
-          "columnsFrom": [
-            "circle_id",
-            "entry_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "entry_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -3500,10 +3181,7 @@
       "compositePrimaryKeys": {
         "entry_glossary_entry_id_keyword_pk": {
           "name": "entry_glossary_entry_id_keyword_pk",
-          "columns": [
-            "entry_id",
-            "keyword"
-          ]
+          "columns": ["entry_id", "keyword"]
         }
       },
       "uniqueConstraints": {},
@@ -3590,12 +3268,8 @@
           "name": "entry_links_circle_id_circles_id_fk",
           "tableFrom": "entry_links",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -3603,14 +3277,8 @@
           "name": "entry_links_variant_fk",
           "tableFrom": "entry_links",
           "tableTo": "entry_variants",
-          "columnsFrom": [
-            "circle_id",
-            "source_variant_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "source_variant_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -3618,14 +3286,8 @@
           "name": "entry_links_entry_fk",
           "tableFrom": "entry_links",
           "tableTo": "entries",
-          "columnsFrom": [
-            "circle_id",
-            "source_entry_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "source_entry_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -3633,10 +3295,7 @@
       "compositePrimaryKeys": {
         "entry_links_source_variant_id_target_short_id_pk": {
           "name": "entry_links_source_variant_id_target_short_id_pk",
-          "columns": [
-            "source_variant_id",
-            "target_short_id"
-          ]
+          "columns": ["source_variant_id", "target_short_id"]
         }
       },
       "uniqueConstraints": {},
@@ -3684,12 +3343,8 @@
           "name": "entry_recall_stats_circle_id_circles_id_fk",
           "tableFrom": "entry_recall_stats",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -3697,14 +3352,8 @@
           "name": "entry_recall_stats_entry_fk",
           "tableFrom": "entry_recall_stats",
           "tableTo": "entries",
-          "columnsFrom": [
-            "circle_id",
-            "entry_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "entry_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -3971,12 +3620,8 @@
           "name": "entry_variants_circle_id_circles_id_fk",
           "tableFrom": "entry_variants",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -3984,14 +3629,8 @@
           "name": "entry_variants_entry_fk",
           "tableFrom": "entry_variants",
           "tableTo": "entries",
-          "columnsFrom": [
-            "circle_id",
-            "entry_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "entry_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -3999,18 +3638,8 @@
           "name": "entry_variants_state_fk",
           "tableFrom": "entry_variants",
           "tableTo": "entries",
-          "columnsFrom": [
-            "circle_id",
-            "entry_id",
-            "sensitivity",
-            "kind"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id",
-            "sensitivity",
-            "kind"
-          ],
+          "columnsFrom": ["circle_id", "entry_id", "sensitivity", "kind"],
+          "columnsTo": ["circle_id", "id", "sensitivity", "kind"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -4020,10 +3649,7 @@
         "entry_variants_circle_id_unique": {
           "name": "entry_variants_circle_id_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "circle_id",
-            "id"
-          ]
+          "columns": ["circle_id", "id"]
         }
       },
       "policies": {},
@@ -4240,12 +3866,8 @@
           "name": "extraction_runs_circle_id_circles_id_fk",
           "tableFrom": "extraction_runs",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -4253,14 +3875,8 @@
           "name": "extraction_runs_client_fk",
           "tableFrom": "extraction_runs",
           "tableTo": "clients",
-          "columnsFrom": [
-            "circle_id",
-            "client_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "client_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -4268,14 +3884,8 @@
           "name": "extraction_runs_conversation_fk",
           "tableFrom": "extraction_runs",
           "tableTo": "conversations",
-          "columnsFrom": [
-            "circle_id",
-            "conversation_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "conversation_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         }
@@ -4372,12 +3982,8 @@
           "name": "facet_dimensions_circle_id_circles_id_fk",
           "tableFrom": "facet_dimensions",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -4513,12 +4119,8 @@
           "name": "facet_terms_circle_id_circles_id_fk",
           "tableFrom": "facet_terms",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -4621,12 +4223,8 @@
           "name": "legacy_uris_circle_id_circles_id_fk",
           "tableFrom": "legacy_uris",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -4634,14 +4232,8 @@
           "name": "legacy_uris_entry_fk",
           "tableFrom": "legacy_uris",
           "tableTo": "entries",
-          "columnsFrom": [
-            "circle_id",
-            "entry_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "entry_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -4787,12 +4379,8 @@
           "name": "persona_traits_circle_id_circles_id_fk",
           "tableFrom": "persona_traits",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -4800,14 +4388,8 @@
           "name": "persona_traits_persona_fk",
           "tableFrom": "persona_traits",
           "tableTo": "personas",
-          "columnsFrom": [
-            "circle_id",
-            "persona_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "persona_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -4815,10 +4397,7 @@
       "compositePrimaryKeys": {
         "persona_traits_persona_id_trait_key_pk": {
           "name": "persona_traits_persona_id_trait_key_pk",
-          "columns": [
-            "persona_id",
-            "trait_key"
-          ]
+          "columns": ["persona_id", "trait_key"]
         }
       },
       "uniqueConstraints": {},
@@ -4910,12 +4489,8 @@
           "name": "personas_circle_id_circles_id_fk",
           "tableFrom": "personas",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -4923,12 +4498,8 @@
           "name": "personas_extends_id_personas_id_fk",
           "tableFrom": "personas",
           "tableTo": "personas",
-          "columnsFrom": [
-            "extends_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["extends_id"],
+          "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         }
@@ -4938,10 +4509,7 @@
         "personas_circle_id_unique": {
           "name": "personas_circle_id_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "circle_id",
-            "id"
-          ]
+          "columns": ["circle_id", "id"]
         }
       },
       "policies": {},
@@ -5029,12 +4597,8 @@
           "name": "recall_event_hits_event_id_recall_events_id_fk",
           "tableFrom": "recall_event_hits",
           "tableTo": "recall_events",
-          "columnsFrom": [
-            "event_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["event_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -5042,12 +4606,8 @@
           "name": "recall_event_hits_circle_id_circles_id_fk",
           "tableFrom": "recall_event_hits",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -5055,12 +4615,8 @@
           "name": "recall_event_hits_target_circle_id_circles_id_fk",
           "tableFrom": "recall_event_hits",
           "tableTo": "circles",
-          "columnsFrom": [
-            "target_circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["target_circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -5068,10 +4624,7 @@
       "compositePrimaryKeys": {
         "recall_event_hits_event_id_entry_id_pk": {
           "name": "recall_event_hits_event_id_entry_id_pk",
-          "columns": [
-            "event_id",
-            "entry_id"
-          ]
+          "columns": ["event_id", "entry_id"]
         }
       },
       "uniqueConstraints": {},
@@ -5215,12 +4768,8 @@
           "name": "recall_events_circle_id_circles_id_fk",
           "tableFrom": "recall_events",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -5228,12 +4777,8 @@
           "name": "recall_events_owner_account_id_accounts_id_fk",
           "tableFrom": "recall_events",
           "tableTo": "accounts",
-          "columnsFrom": [
-            "owner_account_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["owner_account_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -5322,12 +4867,8 @@
           "name": "sessions_account_id_accounts_id_fk",
           "tableFrom": "sessions",
           "tableTo": "accounts",
-          "columnsFrom": [
-            "account_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["account_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -5337,9 +4878,7 @@
         "sessions_tokenHash_unique": {
           "name": "sessions_tokenHash_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "token_hash"
-          ]
+          "columns": ["token_hash"]
         }
       },
       "policies": {},
@@ -5435,12 +4974,8 @@
           "name": "subject_bind_attempts_circle_id_circles_id_fk",
           "tableFrom": "subject_bind_attempts",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -5448,14 +4983,8 @@
           "name": "subject_bind_attempts_client_fk",
           "tableFrom": "subject_bind_attempts",
           "tableTo": "clients",
-          "columnsFrom": [
-            "circle_id",
-            "client_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "client_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -5463,10 +4992,7 @@
       "compositePrimaryKeys": {
         "subject_bind_attempts_client_id_key_pk": {
           "name": "subject_bind_attempts_client_id_key_pk",
-          "columns": [
-            "client_id",
-            "key"
-          ]
+          "columns": ["client_id", "key"]
         }
       },
       "uniqueConstraints": {},
@@ -5612,12 +5138,8 @@
           "name": "subject_bind_codes_circle_id_circles_id_fk",
           "tableFrom": "subject_bind_codes",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -5625,14 +5147,8 @@
           "name": "subject_bind_codes_client_fk",
           "tableFrom": "subject_bind_codes",
           "tableTo": "clients",
-          "columnsFrom": [
-            "circle_id",
-            "client_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "client_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -5640,14 +5156,8 @@
           "name": "subject_bind_codes_subject_fk",
           "tableFrom": "subject_bind_codes",
           "tableTo": "subjects",
-          "columnsFrom": [
-            "circle_id",
-            "subject_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "subject_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -5832,12 +5342,8 @@
           "name": "subject_bindings_circle_id_circles_id_fk",
           "tableFrom": "subject_bindings",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -5845,12 +5351,8 @@
           "name": "subject_bindings_account_id_accounts_id_fk",
           "tableFrom": "subject_bindings",
           "tableTo": "accounts",
-          "columnsFrom": [
-            "account_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["account_id"],
+          "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         },
@@ -5858,12 +5360,8 @@
           "name": "subject_bindings_decided_by_accounts_id_fk",
           "tableFrom": "subject_bindings",
           "tableTo": "accounts",
-          "columnsFrom": [
-            "decided_by"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["decided_by"],
+          "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         },
@@ -5871,14 +5369,8 @@
           "name": "subject_bindings_client_fk",
           "tableFrom": "subject_bindings",
           "tableTo": "clients",
-          "columnsFrom": [
-            "circle_id",
-            "client_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "client_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -5886,14 +5378,8 @@
           "name": "subject_bindings_subject_fk",
           "tableFrom": "subject_bindings",
           "tableTo": "subjects",
-          "columnsFrom": [
-            "circle_id",
-            "subject_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "subject_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -5901,14 +5387,8 @@
           "name": "subject_bindings_from_subject_fk",
           "tableFrom": "subject_bindings",
           "tableTo": "subjects",
-          "columnsFrom": [
-            "circle_id",
-            "from_subject_id"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id"
-          ],
+          "columnsFrom": ["circle_id", "from_subject_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -6035,12 +5515,8 @@
           "name": "subject_identities_circle_id_circles_id_fk",
           "tableFrom": "subject_identities",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -6048,16 +5524,8 @@
           "name": "subject_identities_subject_fk",
           "tableFrom": "subject_identities",
           "tableTo": "subjects",
-          "columnsFrom": [
-            "circle_id",
-            "subject_id",
-            "kind"
-          ],
-          "columnsTo": [
-            "circle_id",
-            "id",
-            "kind"
-          ],
+          "columnsFrom": ["circle_id", "subject_id", "kind"],
+          "columnsTo": ["circle_id", "id", "kind"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -6160,12 +5628,8 @@
           "name": "subjects_circle_id_circles_id_fk",
           "tableFrom": "subjects",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -6173,12 +5637,8 @@
           "name": "subjects_account_id_accounts_id_fk",
           "tableFrom": "subjects",
           "tableTo": "accounts",
-          "columnsFrom": [
-            "account_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["account_id"],
+          "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         }
@@ -6188,19 +5648,12 @@
         "subjects_circle_id_unique": {
           "name": "subjects_circle_id_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "circle_id",
-            "id"
-          ]
+          "columns": ["circle_id", "id"]
         },
         "subjects_circle_id_kind_unique": {
           "name": "subjects_circle_id_kind_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "circle_id",
-            "id",
-            "kind"
-          ]
+          "columns": ["circle_id", "id", "kind"]
         }
       },
       "policies": {},
@@ -6450,12 +5903,8 @@
           "name": "vault_connections_circle_id_circles_id_fk",
           "tableFrom": "vault_connections",
           "tableTo": "circles",
-          "columnsFrom": [
-            "circle_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -6463,12 +5912,8 @@
           "name": "vault_connections_owner_account_id_accounts_id_fk",
           "tableFrom": "vault_connections",
           "tableTo": "accounts",
-          "columnsFrom": [
-            "owner_account_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["owner_account_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -6478,11 +5923,7 @@
         "vault_connections_circle_owner_id_unique": {
           "name": "vault_connections_circle_owner_id_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "circle_id",
-            "owner_account_id",
-            "id"
-          ]
+          "columns": ["circle_id", "owner_account_id", "id"]
         }
       },
       "policies": {},
@@ -6511,108 +5952,62 @@
     "public.account_link_purpose": {
       "name": "account_link_purpose",
       "schema": "public",
-      "values": [
-        "setup",
-        "reset"
-      ]
+      "values": ["setup", "reset"]
     },
     "public.circle_kind": {
       "name": "circle_kind",
       "schema": "public",
-      "values": [
-        "personal",
-        "shared"
-      ]
+      "values": ["personal", "shared"]
     },
     "public.conversation_kind": {
       "name": "conversation_kind",
       "schema": "public",
-      "values": [
-        "group",
-        "direct",
-        "channel",
-        "none"
-      ]
+      "values": ["group", "direct", "channel", "none"]
     },
     "public.credential_source": {
       "name": "credential_source",
       "schema": "public",
-      "values": [
-        "hosted",
-        "vault"
-      ]
+      "values": ["hosted", "vault"]
     },
     "public.entry_kind": {
       "name": "entry_kind",
       "schema": "public",
-      "values": [
-        "entry",
-        "fact",
-        "episode"
-      ]
+      "values": ["entry", "fact", "episode"]
     },
     "public.facet_match_mode": {
       "name": "facet_match_mode",
       "schema": "public",
-      "values": [
-        "exclusive",
-        "additive"
-      ]
+      "values": ["exclusive", "additive"]
     },
     "public.member_role": {
       "name": "member_role",
       "schema": "public",
-      "values": [
-        "owner",
-        "editor",
-        "viewer"
-      ]
+      "values": ["owner", "editor", "viewer"]
     },
     "public.provenance": {
       "name": "provenance",
       "schema": "public",
-      "values": [
-        "owner",
-        "agent",
-        "untrusted",
-        "system"
-      ]
+      "values": ["owner", "agent", "untrusted", "system"]
     },
     "public.sensitivity": {
       "name": "sensitivity",
       "schema": "public",
-      "values": [
-        "public",
-        "internal",
-        "private",
-        "secret"
-      ]
+      "values": ["public", "internal", "private", "secret"]
     },
     "public.subject_kind": {
       "name": "subject_kind",
       "schema": "public",
-      "values": [
-        "person",
-        "group"
-      ]
+      "values": ["person", "group"]
     },
     "public.vault_connection_status": {
       "name": "vault_connection_status",
       "schema": "public",
-      "values": [
-        "ok",
-        "reauth_required",
-        "disabled",
-        "disconnected"
-      ]
+      "values": ["ok", "reauth_required", "disabled", "disconnected"]
     },
     "public.vault_disabled_reason": {
       "name": "vault_disabled_reason",
       "schema": "public",
-      "values": [
-        "personal_items",
-        "organization_role"
-      ]
+      "values": ["personal_items", "organization_role"]
     },
     "public.vault_error_kind": {
       "name": "vault_error_kind",

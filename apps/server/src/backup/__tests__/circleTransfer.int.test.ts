@@ -23,7 +23,6 @@ import {
   credentials,
   entries,
   entryEvents,
-  entryLinks,
   entryVariants,
   facetDimensions,
   facetTerms,

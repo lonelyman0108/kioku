@@ -56,7 +56,7 @@ export const text = (snapshot: SQLWrapper, key: string) =>
   sql`(case when jsonb_typeof(${snapshot} -> ${sql.raw(`'${key}'`)}) = 'string' then ${snapshot} ->> ${sql.raw(`'${key}'`)} end)`
 
 const priorityOf = (s: SQLWrapper) =>
-  sql`(case when jsonb_typeof(${s} -> 'priority') = 'number' then (${s} -> 'priority')::numeric else 0 end)`
+  sql`(case when jsonb_typeof(${s} -> 'priority') = 'number' then (${s} -> 'priority')::numeric else 2 end)`
 
 // 字符串列表（topics、glossary）：只留字符串，按数组先后用换行连起来对比
 const stringListOf = (s: SQLWrapper, key: string) =>

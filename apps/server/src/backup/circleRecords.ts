@@ -40,8 +40,8 @@ const UNSTORABLE = '包含数据库无法存放的字符'
 export const Text = z.string().refine(storable, UNSTORABLE)
 
 export const Time = z.iso.datetime({ offset: true }).refine((value) => {
-  const parsed = Date.parse(value)
-  return !Number.isNaN(parsed)
+  const at = new Date(value)
+  return !Number.isNaN(at.getTime()) && at.getUTCFullYear() >= 1
 }, '时间格式不对')
 
 export function describeIssue(error: z.ZodError): string {
