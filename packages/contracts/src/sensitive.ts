@@ -67,7 +67,7 @@ export const CustomSensitiveRule = z
   .refine((r) => Boolean(r.prefix) !== Boolean(r.regex), '自定义规则只能填写前缀或正则表达式之一')
 export type CustomSensitiveRule = z.infer<typeof CustomSensitiveRule>
 
-export const SpacePrivacySettings = z.object({
+export const CirclePrivacySettings = z.object({
   credentials: z.boolean().default(true),
   pii: z.boolean().default(true),
   piiKinds: z.record(ToggleablePiiKind, z.boolean()).default({ ...DEFAULT_PII_KINDS }),
@@ -75,7 +75,7 @@ export const SpacePrivacySettings = z.object({
   allowlist: z.array(z.string().trim().min(2).max(200)).max(ALLOWLIST_MAX).default([]),
   usePrivacyModel: z.boolean().default(false),
 })
-export type SpacePrivacySettings = z.infer<typeof SpacePrivacySettings>
+export type CirclePrivacySettings = z.infer<typeof CirclePrivacySettings>
 
 const PartialPiiKinds = z.object({
   phone: z.boolean().optional(),
@@ -89,7 +89,7 @@ const PartialPiiKinds = z.object({
   passport: z.boolean().optional(),
 })
 
-export const UpdateSpacePrivacySettings = z.object({
+export const UpdateCirclePrivacySettings = z.object({
   credentials: z.boolean().optional(),
   pii: z.boolean().optional(),
   piiKinds: PartialPiiKinds.optional(),
@@ -97,9 +97,9 @@ export const UpdateSpacePrivacySettings = z.object({
   allowlist: z.array(z.string().trim().min(2).max(200)).max(ALLOWLIST_MAX).optional(),
   usePrivacyModel: z.boolean().optional(),
 })
-export type UpdateSpacePrivacySettings = z.infer<typeof UpdateSpacePrivacySettings>
+export type UpdateCirclePrivacySettings = z.infer<typeof UpdateCirclePrivacySettings>
 
-export const DEFAULT_SPACE_PRIVACY: SpacePrivacySettings = {
+export const DEFAULT_CIRCLE_PRIVACY: CirclePrivacySettings = {
   credentials: true,
   pii: true,
   piiKinds: { ...DEFAULT_PII_KINDS },
@@ -108,9 +108,9 @@ export const DEFAULT_SPACE_PRIVACY: SpacePrivacySettings = {
   usePrivacyModel: false,
 }
 
-export function resolveSpacePrivacy(
-  raw?: Partial<SpacePrivacySettings> | null,
-): SpacePrivacySettings {
+export function resolveCirclePrivacy(
+  raw?: Partial<CirclePrivacySettings> | null,
+): CirclePrivacySettings {
   return {
     credentials: raw?.credentials ?? true,
     pii: raw?.pii ?? true,
@@ -134,42 +134,43 @@ export const REDACT_MODES = ['stars', 'tag'] as const
 export const RedactMode = z.enum(REDACT_MODES)
 export type RedactMode = z.infer<typeof RedactMode>
 
-export const RedactMemoryRequest = z.object({
-  memoryId: z.uuid(),
+export const RedactEntryRequest = z.object({
+  entryId: z.uuid(),
+  variantId: z.uuid().optional(),
   expectedVersion: z.number().int(),
   mode: RedactMode.default('stars'),
   categories: z.array(SensitiveCategory).min(1).max(2).optional(),
 })
-export type RedactMemoryRequest = z.infer<typeof RedactMemoryRequest>
+export type RedactEntryRequest = z.infer<typeof RedactEntryRequest>
 
-export const PROTECT_TARGETS = ['user_private', 'secret'] as const
+export const PROTECT_TARGETS = ['personal_private', 'secret'] as const
 export const ProtectTarget = z.enum(PROTECT_TARGETS)
 export type ProtectTarget = z.infer<typeof ProtectTarget>
 
-export const ProtectMemoryRequest = z.object({
-  memoryId: z.uuid(),
+export const ProtectEntryRequest = z.object({
+  entryId: z.uuid(),
   expectedVersion: z.number().int(),
   target: ProtectTarget,
 })
-export type ProtectMemoryRequest = z.infer<typeof ProtectMemoryRequest>
+export type ProtectEntryRequest = z.infer<typeof ProtectEntryRequest>
 
-// 本人私密且来源受信任的记忆：个人信息保留在个人边界内，不进待处理红点，外发模型前由出站脱敏保护
-export function isProtectedPersonalMemory(
-  layer: string,
+// 个人圈私密及以上且来源受信任的词条：个人信息保留在个人安全边界内，不进待处理红点，外发模型前自动脱敏
+export function isProtectedPersonalEntry(
+  circleKind: string,
   sensitivity: string,
   provenance: string,
 ): boolean {
   return (
-    layer === 'user' &&
+    circleKind === 'personal' &&
     (sensitivity === 'private' || sensitivity === 'secret') &&
     provenance !== 'untrusted'
   )
 }
 
 // 待处理 › 疑似敏感内容的判定口径（与服务端 SQL 条件一致）：
-// 非机密明文凭据始终提示；个人信息仅在未进入「本人私密且受信任」安全边界时提示
+// 非机密明文凭据始终提示；个人信息仅在未进入「个人圈私密及以上且来源受信」边界时提示
 export function needsSensitiveInboxAlert(input: {
-  layer: string
+  circleKind: string
   sensitivity: string
   provenance?: string | null
   sensitiveCredential?: boolean | null
@@ -179,7 +180,11 @@ export function needsSensitiveInboxAlert(input: {
   if (input.sensitivity === 'secret' || input.plaintextIgnored) return false
   if (input.sensitiveCredential) return true
   if (input.sensitivePii) {
-    return !isProtectedPersonalMemory(input.layer, input.sensitivity, input.provenance ?? 'owner')
+    return !isProtectedPersonalEntry(
+      input.circleKind,
+      input.sensitivity,
+      input.provenance ?? 'owner',
+    )
   }
   return false
 }

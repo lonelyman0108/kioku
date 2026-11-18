@@ -1,46 +1,51 @@
 import { z } from 'zod'
 
-import { Layer, Sensitivity } from './memory'
+import { WhenCondition } from './facets'
+import { ShortId } from './links'
+import { EntryKind, Sensitivity } from './memory'
 import { MinScoreSetting, RecallLimitSetting } from './settings'
 
-export const RECALL_VIAS = ['semantic', 'fulltext', 'glossary'] as const
+export const RECALL_VIAS = ['semantic', 'fulltext', 'glossary', 'link'] as const
 export const RecallVia = z.enum(RECALL_VIAS).meta({ id: 'RecallVia' })
 export type RecallVia = z.infer<typeof RecallVia>
 
 export const RecallCandidate = z
   .object({
-    uri: z.string(),
+    entryId: z.uuid(),
+    shortId: ShortId,
     title: z.string(),
-    layer: Layer,
+    circleId: z.uuid(),
+    // 受限会话上下文中隐藏客场记忆圈名称与标识，返回 null
+    circleSlug: z.string().nullable(),
+    kind: EntryKind,
+    matchedWhen: WhenCondition,
+    otherVariantsCount: z.number().int(),
+    crossGroup: z.boolean().optional(),
     priority: z.number().int(),
     disclosure: z.string().nullable(),
     score: z.number(),
     via: z.array(RecallVia),
-    // 命中的 glossary 关键词，展示给模型作为线索
     cues: z.array(z.string()),
   })
   .meta({ id: 'RecallCandidate' })
 export type RecallCandidate = z.infer<typeof RecallCandidate>
 
-// 各路的得分，调试台用：相似度与全文都已压到 0–1，关键词与 priority 是加上去的分
 export const RecallBreakdown = z.object({
   semantic: z.number(),
   fulltext: z.number(),
   glossary: z.number(),
   priority: z.number(),
+  facet: z.number(),
+  link: z.number(),
 })
 export type RecallBreakdown = z.infer<typeof RecallBreakdown>
 
-// 调试台的候选（只在管理界面）：各路得分，加上未取整的总分。score 取整到两位只用于展示，
-// 和最低分比较用 rawScore，管理界面试算时在本地重算，正好卡在阈值上的和服务端判断一致
 export const DebugCandidate = RecallCandidate.extend({
   breakdown: RecallBreakdown,
   rawScore: z.number(),
 })
 export type DebugCandidate = z.infer<typeof DebugCandidate>
 
-// 会话上下文：由接入方（插件）上报，只能收紧权限、不能放宽。平台账号原样上报，
-// 服务端按平台、种类（人或群）与账号解析成对象，没见过的就新建
 export const CHAT_TYPES = ['direct', 'group', 'channel', 'cron', 'subagent'] as const
 export const ChatType = z.enum(CHAT_TYPES).meta({ id: 'ChatType' })
 export type ChatType = z.infer<typeof ChatType>
@@ -48,8 +53,6 @@ export type ChatType = z.infer<typeof ChatType>
 export const PlatformRef = z
   .object({
     id: z.string().trim().min(1).max(200),
-    // 平台上的显示名，随上报更新；空字符串当作没带。服务端只记前 128 个字，这里只拒绝离谱的长度
-    // （上限按 UTF-16 码元算，放得很宽）：名字长导致整个请求被拒的话，插件只能放弃这一轮的召回
     name: z.string().trim().max(4000).optional(),
   })
   .meta({ id: 'PlatformRef' })
@@ -58,14 +61,11 @@ export type PlatformRef = z.infer<typeof PlatformRef>
 export const SessionContextInput = z
   .object({
     chatType: ChatType,
-    // 平台标识，例如 qq、telegram；带了群或发言人时必填。同一个人在不同平台的账号由管理界面合并
     platform: z
       .string()
       .regex(/^[a-z0-9][a-z0-9_.-]{0,31}$/, '平台标识只能包含小写字母、数字和 _.-')
       .optional(),
-    // 群聊、频道里必填；别的会话不看
     group: PlatformRef.optional(),
-    // 私聊里必填；群聊、频道里是这次发言的人，可以不带；定时任务与子 agent 不看
     sender: PlatformRef.optional(),
   })
   .superRefine((c, ctx) => {
@@ -82,25 +82,41 @@ export const SessionContextInput = z
   .meta({ id: 'SessionContext' })
 export type SessionContextInput = z.infer<typeof SessionContextInput>
 
+// 客户端当前所在项目与设备标识
+export const LifecycleProject = z
+  .object({
+    dirName: z.string().max(128).optional(),
+    repoName: z.string().max(128).optional(),
+  })
+  .meta({ id: 'LifecycleProject' })
+export type LifecycleProject = z.infer<typeof LifecycleProject>
+
 export const RecallRequest = z
   .object({
     query: z.string().min(1).max(4000),
-    // 不填时用设置里每轮召回的条数（应用、空间、实例逐级沿用，内置为 8）
     limit: z.number().int().min(1).max(50).optional(),
+    // 显式切面覆盖仅影响存在感排序，绝不放宽静态安全授权场域
+    facets: WhenCondition.optional(),
+    crossCircle: z.boolean().default(true),
+    includeSubjects: z.boolean().default(true),
+    project: LifecycleProject.optional(),
     context: SessionContextInput.optional(),
   })
   .meta({ id: 'RecallRequest' })
 export type RecallRequest = z.infer<typeof RecallRequest>
 
-// 联系人直连：当前发言人与本群的联系人身上抽取的事实，不看查询，直接带正文（抽取的事实没有坐标）。
-// 只在带了会话上下文时有；事实来自对话，可能是别人写进来的，只能当参考资料
 export const SubjectFacts = z
   .object({
-    // sender：当前发言人；group：本群
     role: z.enum(['sender', 'group']),
-    // 平台上的名字；不知道时为 null（不拿平台账号凑数）
     name: z.string().nullable(),
-    facts: z.array(z.object({ content: z.string(), updatedAt: z.string() })),
+    facts: z.array(
+      z.object({
+        shortId: ShortId.optional(),
+        content: z.string(),
+        crossGroup: z.boolean().optional(),
+        updatedAt: z.string(),
+      }),
+    ),
   })
   .meta({ id: 'SubjectFacts' })
 export type SubjectFacts = z.infer<typeof SubjectFacts>
@@ -113,24 +129,41 @@ export const RecallResponse = z
   .meta({ id: 'RecallResponse' })
 export type RecallResponse = z.infer<typeof RecallResponse>
 
-// 最近更新的记忆：只有坐标、标题与 disclosure，不含正文，会话开始时列给模型
-export const RecentMemory = z.object({
-  uri: z.string(),
+export const RecentEntry = z.object({
+  shortId: ShortId,
   title: z.string(),
+  circleSlug: z.string().nullable(),
   priority: z.number().int(),
   disclosure: z.string().nullable(),
   updatedAt: z.string(),
 })
-export type RecentMemory = z.infer<typeof RecentMemory>
+export type RecentEntry = z.infer<typeof RecentEntry>
+
+export const BootPersonaTrait = z.object({
+  traitKey: z.string(),
+  title: z.string(),
+  content: z.string(),
+})
+export type BootPersonaTrait = z.infer<typeof BootPersonaTrait>
 
 export const BootEntry = z
-  .object({ uri: z.string(), title: z.string(), layer: Layer, content: z.string() })
+  .object({
+    shortId: ShortId,
+    title: z.string(),
+    circleId: z.uuid(),
+    circleSlug: z.string().nullable(),
+    kind: EntryKind,
+    content: z.string(),
+  })
   .meta({ id: 'BootEntry' })
+export type BootEntry = z.infer<typeof BootEntry>
+
 export const BootResponse = z
   .object({
+    personaTraits: z.array(BootPersonaTrait).default([]),
     entries: z.array(BootEntry),
-    // 超出字数预算没放进来的节点，模型可以按需用 kioku_get 读取
-    omitted: z.array(z.string()),
+    // 超出字数预算未展开的词条短 ID 列表
+    omitted: z.array(ShortId),
   })
   .meta({ id: 'BootResponse' })
 export type BootResponse = z.infer<typeof BootResponse>
@@ -138,19 +171,11 @@ export type BootResponse = z.infer<typeof BootResponse>
 export const LIFECYCLE_EVENTS = ['session.start', 'prompt.submit', 'turn.end'] as const
 export const LifecycleEventName = z.enum(LIFECYCLE_EVENTS)
 
-// 宿主当前所在的项目：目录名与 git 仓库名。会话开始时用它们召回与当前项目相关的记忆
-export const LifecycleProject = z
-  .object({
-    dirName: z.string().max(128).optional(),
-    repoName: z.string().max(128).optional(),
-  })
-  .meta({ id: 'LifecycleProject' })
-export type LifecycleProject = z.infer<typeof LifecycleProject>
-
 export const SessionStartEvent = z
   .object({
     event: z.literal('session.start'),
     sessionId: z.string().max(200).optional(),
+    deviceKey: z.string().trim().max(128).optional(),
     context: SessionContextInput.optional(),
     project: LifecycleProject.optional(),
   })
@@ -160,19 +185,19 @@ export const PromptSubmitEvent = z
   .object({
     event: z.literal('prompt.submit'),
     sessionId: z.string().max(200).optional(),
+    deviceKey: z.string().trim().max(128).optional(),
+    project: LifecycleProject.optional(),
     context: SessionContextInput.optional(),
     prompt: z.string().min(1).max(20_000),
   })
   .meta({ id: 'PromptSubmitEvent' })
 
-// 一轮对话结束：用户说的话与回复进会话缓冲，攒批之后由后台任务抽取。缓冲私聊、群聊与频道，群里要带上这一轮的发言人
-// （事实要记到人身上）；不带会话上下文时（例如本机的 Claude Code）按应用与所属成员缓冲，只用来写会话摘要。
-// 定时任务与子 Agent 的对话不缓冲
 export const TurnEndEvent = z
   .object({
     event: z.literal('turn.end'),
-    // 插件用宿主的会话标识（例如 AstrBot 的 unified_msg_origin），只做记录：缓冲按应用与会话上下文分
     sessionId: z.string().min(1).max(200),
+    deviceKey: z.string().trim().max(128).optional(),
+    project: LifecycleProject.optional(),
     context: SessionContextInput.optional(),
     user: z.string().min(1).max(20_000),
     reply: z.string().max(20_000),
@@ -196,7 +221,6 @@ export const TurnEndEvent = z
   })
   .meta({ id: 'TurnEndEvent' })
 
-// 按事件区分字段：prompt.submit 缺 prompt 时直接 400，不让插件的字段错误变成悄无声息的「没有召回」
 export const LifecycleEvent = z.discriminatedUnion('event', [
   SessionStartEvent,
   PromptSubmitEvent,
@@ -207,7 +231,6 @@ export type TurnEndEvent = z.infer<typeof TurnEndEvent>
 
 export const HostOutput = z
   .object({
-    // stdout_json / stdout_text：插件原样写到标准输出；return_value：插件把 value 交给宿主 API
     mode: z.enum(['none', 'stdout_json', 'stdout_text', 'return_value']),
     value: z.unknown(),
   })
@@ -217,56 +240,60 @@ export type HostOutput = z.infer<typeof HostOutput>
 export const LifecycleResponse = z
   .object({
     hostOutput: HostOutput,
-    nodeUris: z.array(z.string()),
+    shortIds: z.array(ShortId),
   })
   .meta({ id: 'LifecycleResponse' })
 export type LifecycleResponse = z.infer<typeof LifecycleResponse>
 
-// 一条记忆这次读不到的原因：deleted、expired 已删除或失效；layer 归属不在可读范围；sensitivity 超出最高敏感级；
-// secret 只能按坐标显式读取；origin 来源作用域不在范围；owner 别的成员的本人记忆或会话摘要；persona 不在人格继承链上；
-// app 别的应用的记忆；override 被继承链上更近的人格同一相对路径的节点覆盖
 export const READ_DENIALS = [
   'deleted',
   'expired',
-  'layer',
+  'kind',
+  'circle',
   'sensitivity',
   'secret',
+  'realm',
+  'client',
   'origin',
   'owner',
+  'group_lock',
   'persona',
-  'app',
-  'override',
 ] as const
 export const ReadDenial = z.enum(READ_DENIALS)
 export type ReadDenial = z.infer<typeof ReadDenial>
 
-// minScore 与 limit 只用来试算：不填时用这把 Key 的应用实际生效的设置
 export const RecallDebugRequest = z.object({
   query: z.string().trim().min(1).max(4000),
   minScore: MinScoreSetting.optional(),
   limit: RecallLimitSetting.optional(),
+  facets: WhenCondition.optional(),
+  crossCircle: z.boolean().default(true),
 })
 export type RecallDebugRequest = z.infer<typeof RecallDebugRequest>
 
-// 召回调试台：按一把 Key 模拟每轮输入时的召回
+export const FlippedTerm = z.object({
+  dimensionKey: z.string(),
+  slug: z.string(),
+  label: z.string(),
+  alias: z.string(),
+})
+export type FlippedTerm = z.infer<typeof FlippedTerm>
+
 export const RecallDebug = z.object({
-  // 会注入的：和每轮输入时一样，过了阈值的前几条
   injected: z.array(DebugCandidate),
-  // 没注入的：没过阈值或排在后面的
   others: z.array(DebugCandidate),
-  // 这次用的最低分与条数：请求里给了就是给的，否则是生效的设置
   minScore: z.number(),
   limit: z.number().int(),
-  // 注入的 <recall> 块，原样就是宿主收到的文字
   block: z.string(),
-  // 这次有没有走向量这一路（嵌入接口没配、出错或超时时没有）
   semantic: z.boolean(),
-  // 管理界面里搜得到、这把 Key 却读不到的记忆，以及原因
+  resolvedFacets: WhenCondition,
+  flippedTerms: z.array(FlippedTerm),
   filtered: z.array(
     z.object({
-      uri: z.string(),
+      shortId: ShortId,
       title: z.string(),
-      layer: Layer,
+      circleSlug: z.string().nullable(),
+      kind: EntryKind,
       sensitivity: Sensitivity,
       reason: ReadDenial,
     }),
@@ -276,47 +303,45 @@ export type RecallDebug = z.infer<typeof RecallDebug>
 
 export const BootPreviewRequest = z.object({
   project: LifecycleProject.optional(),
-  // 会话 id 会写进召回块：不给时用一个随机的 UUID，长度和真实会话差不多，临近字数上限时预览才准
+  deviceKey: z.string().trim().max(128).optional(),
   sessionId: z.string().max(200).optional(),
 })
 export type BootPreviewRequest = z.infer<typeof BootPreviewRequest>
 
-// 会话开始时附在启动加载后面的几块：同一会话最近的会话摘要（只有不带会话上下文的会话有）、近期更新的记忆、
-// 与当前项目相关的召回。字数不够时依次放不下的不附
 export const SESSION_EXTRAS = ['summaries', 'recent', 'related'] as const
 export const SessionExtra = z.enum(SESSION_EXTRAS)
 export type SessionExtra = z.infer<typeof SessionExtra>
 
-// 不带会话上下文的会话开始时附上的一段会话摘要：同一会话最近的几段，新的在前
 export const SessionSummary = z.object({
+  shortId: ShortId.optional(),
   content: z.string(),
   createdAt: z.iso.datetime(),
 })
 export type SessionSummary = z.infer<typeof SessionSummary>
 
-// 启动预览：按一把 Key 模拟会话开始时注入的内容
 export const BootPreview = z.object({
   runtimeFamily: z.string(),
-  // 宿主能完整接收的字数；没有限制的宿主为 null
   limit: z.number().int().nullable(),
-  // 原样就是宿主收到的文字
   context: z.string(),
-  // 展开的启动节点与各自占的字数（含标题）
+  resolvedFacets: WhenCondition,
+  personaTraits: z.array(BootPersonaTrait),
   entries: z.array(
-    z.object({ uri: z.string(), title: z.string(), layer: Layer, chars: z.number().int() }),
+    z.object({
+      shortId: ShortId,
+      title: z.string(),
+      circleId: z.uuid(),
+      circleSlug: z.string().nullable(),
+      chars: z.number().int(),
+    }),
   ),
-  // 超出预算、只列出坐标的启动节点（标题给界面显示，宿主收到的只有坐标）
-  omitted: z.array(z.object({ uri: z.string(), title: z.string() })),
-  // 同一会话最近的会话摘要：只有不带会话上下文的会话有，群聊、私聊的摘要来自未确认来源，不进启动加载
+  omitted: z.array(z.object({ shortId: ShortId, title: z.string() })),
   summaries: z.array(SessionSummary),
-  recent: z.array(RecentMemory),
+  recent: z.array(RecentEntry),
   related: z.array(RecallCandidate),
-  // 放不下、没有附上的附加块
   dropped: z.array(SessionExtra),
 })
 export type BootPreview = z.infer<typeof BootPreview>
 
-// 召回事件的来路：会话开始的项目召回、每轮输入的召回、MCP 搜索、REST 召回。管理界面里的搜索与调试不记
 export const RECALL_SOURCES = [
   'session.start',
   'prompt.submit',
@@ -326,73 +351,63 @@ export const RECALL_SOURCES = [
 export const RecallSource = z.enum(RECALL_SOURCES)
 export type RecallSource = z.infer<typeof RecallSource>
 
-// 一条记忆被召回的次数：recent 是保留期内的明细里的次数，total 再加上清理时并入的累计
-export const MemoryRecallStat = z.object({
+export const EntryRecallStat = z.object({
   recent: z.number().int(),
   total: z.number().int(),
-  // 最后一次被召回的时间；从没被召回时为 null
   lastRecalledAt: z.string().nullable(),
 })
-export type MemoryRecallStat = z.infer<typeof MemoryRecallStat>
+export type EntryRecallStat = z.infer<typeof EntryRecallStat>
 
-export const RecalledMemory = MemoryRecallStat.extend({
+export const RecalledEntry = EntryRecallStat.extend({
   id: z.uuid(),
-  uri: z.string(),
+  shortId: ShortId,
   title: z.string(),
-  layer: Layer,
+  kind: EntryKind,
   sensitivity: Sensitivity,
 })
-export type RecalledMemory = z.infer<typeof RecalledMemory>
+export type RecalledEntry = z.infer<typeof RecalledEntry>
 
-export const NeverRecalledMemory = z.object({
+export const NeverRecalledEntry = z.object({
   id: z.uuid(),
-  uri: z.string(),
+  shortId: ShortId,
   title: z.string(),
-  layer: Layer,
+  kind: EntryKind,
   sensitivity: Sensitivity,
   createdAt: z.string(),
 })
-export type NeverRecalledMemory = z.infer<typeof NeverRecalledMemory>
+export type NeverRecalledEntry = z.infer<typeof NeverRecalledEntry>
 
-// 一个应用在保留期内的召回次数，按来路分；应用已经删掉时 name 为 null
-export const AppRecallVolume = z.object({
-  appId: z.uuid(),
+export const ClientRecallVolume = z.object({
+  clientId: z.uuid(),
   name: z.string().nullable(),
   total: z.number().int(),
   sources: z.array(z.object({ source: RecallSource, count: z.number().int() })),
 })
-export type AppRecallVolume = z.infer<typeof AppRecallVolume>
+export type ClientRecallVolume = z.infer<typeof ClientRecallVolume>
 
-// 召回分析：记忆按查看者在管理界面里看得到的算，累计次数跟着记忆的可见性走；
-// 各应用的调用量只列查看者能管 Key 的应用（应用主人与空间 owner）
 export const RecallStats = z.object({
   retentionDays: z.number().int(),
-  // 开始记录召回事件的时间；之前的记忆没机会被记下召回，记录满保留天数之后才算「从没被召回」
   recordingSince: z.string(),
-  apps: z.array(AppRecallVolume),
-  // 被召回次数最多的
-  top: z.array(RecalledMemory),
-  // 从没被召回的，最早建的在前；neverTotal 是总数。不算 secret（不进召回）、会进启动上下文的节点
-  // （每次会话开始都注入），以及建了或开始记录都还不到保留天数的
-  never: z.array(NeverRecalledMemory),
+  clients: z.array(ClientRecallVolume),
+  top: z.array(RecalledEntry),
+  never: z.array(NeverRecalledEntry),
   neverTotal: z.number().int(),
 })
 export type RecallStats = z.infer<typeof RecallStats>
 
-// 召回事件的明细只给事件发生时的应用主人看
 export const RecallEventView = z.object({
   id: z.number().int(),
-  appId: z.uuid(),
-  appName: z.string().nullable(),
+  clientId: z.uuid(),
+  clientName: z.string().nullable(),
   keyName: z.string().nullable(),
   source: RecallSource,
-  // 打过码的提示语前 200 字；应用关掉了记录提示语时为 null
   query: z.string().nullable(),
   createdAt: z.string(),
-  // 命中的记忆；现在看不到了的（例如被移进别的成员的本人）uri 与 title 为 null
   hits: z.array(
     z.object({
-      uri: z.string().nullable(),
+      targetCircleId: z.uuid(),
+      targetCircleSlug: z.string().nullable(),
+      shortId: ShortId.nullable(),
       title: z.string().nullable(),
       rank: z.number().int(),
       score: z.number(),
@@ -403,8 +418,7 @@ export const RecallEventView = z.object({
 export type RecallEventView = z.infer<typeof RecallEventView>
 
 export const RecallEventQuery = z.object({
-  appId: z.uuid().optional(),
-  // 上一页最后一条的 id
+  clientId: z.uuid().optional(),
   cursor: z
     .string()
     .regex(/^\d{1,18}$/)
@@ -414,7 +428,6 @@ export type RecallEventQuery = z.infer<typeof RecallEventQuery>
 
 export const RecallEventList = z.object({
   items: z.array(RecallEventView),
-  // 为 null 表示已经是最后一页
   nextCursor: z.string().nullable(),
 })
 export type RecallEventList = z.infer<typeof RecallEventList>

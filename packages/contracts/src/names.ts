@@ -1,3 +1,5 @@
+import type { PersonMemoryMode, RuntimeFamily } from './auth'
+import type { ActivityField, ActivityType } from './console'
 import type {
   CredentialAccessReason,
   CredentialAccessResult,
@@ -7,9 +9,10 @@ import type {
   VaultDisabledReason,
   VaultErrorKind,
 } from './credentials'
+import type { DreamSuggestionKind } from './dream'
+import type { BuiltinFacetKey, FacetMatchMode } from './facets'
+import type { CircleKind, CredentialCapability, EntryKind, Sensitivity, StrataBand } from './memory'
 import type { PiiKind, SensitiveKind } from './sensitive'
-import type { RuntimeFamily } from './auth'
-import type { CredentialCapability, Layer, Sensitivity } from './memory'
 import type {
   DatabaseFailure,
   DatabaseProblem,
@@ -20,15 +23,26 @@ import type {
   ProvisionProblem,
 } from './setup'
 
-// 归属、敏感级、凭据能力、运行时、密码库连接状态与错误、凭据的到期与轮换、疑似明文类别的中文名，管理界面和服务端的错误信息共用一份，用词才不会分叉。
-// 契约只放 zod schema，这里是例外，和 bench.ts 的 isReplayStep、mayWrite 一样
-export const LAYER_NAMES: Record<Layer, string> = {
-  core: '通用',
-  persona: '人格',
-  app: '应用',
-  user: '本人',
-  subject: '联系人',
-  episode: '会话',
+// 全局统一的中文术语表：管理界面与服务端错误文案共用同一套映射
+
+export const CIRCLE_KIND_NAMES: Record<CircleKind, string> = {
+  personal: '个人圈',
+  shared: '共享圈',
+}
+
+export const ENTRY_KIND_NAMES: Record<EntryKind, string> = {
+  entry: '词条',
+  fact: '事实',
+  episode: '摘要',
+}
+
+export const STRATA_BAND_NAMES: Record<StrataBand, string> = {
+  episode: '会话摘要',
+  fact: '联系人事实',
+  personal: '个人圈词条',
+  'shared-away': '客场共享词条',
+  persona: '独立人格',
+  primary: '主场词条',
 }
 
 export const SENSITIVITY_NAMES: Record<Sensitivity, string> = {
@@ -44,7 +58,23 @@ export const CREDENTIAL_CAPABILITY_NAMES: Record<CredentialCapability, string> =
   manage: '管理',
 }
 
-// 各运行时的产品名：确认页的平台名、新建应用的默认名称，以及浏览器授权报错里指出是哪个平台
+export const PERSON_MEMORY_MODE_NAMES: Record<PersonMemoryMode, string> = {
+  persona_shared: '拟人跨群识人',
+  strict: '严格按群隔离',
+}
+
+export const FACET_MATCH_MODE_NAMES: Record<FacetMatchMode, string> = {
+  exclusive: '互斥聚焦',
+  additive: '叠加加权',
+}
+
+export const BUILTIN_FACET_NAMES: Record<BuiltinFacetKey, string> = {
+  realm: '场域',
+  env: '环境与设备',
+  runtime: '客户端',
+  project: '项目仓库',
+}
+
 export const RUNTIME_FAMILY_NAMES: Record<RuntimeFamily, string> = {
   claudecode: 'Claude Code',
   codex: 'Codex',
@@ -78,12 +108,13 @@ export const CREDENTIAL_ACCESS_RESULT_NAMES: Record<CredentialAccessResult, stri
   failed: '失败',
 }
 
-// 访问记录里的原因，也是取不到值时给调用方的说法
 export const CREDENTIAL_ACCESS_REASON_NAMES: Record<CredentialAccessReason, string> = {
   capability: '凭据能力不足',
   scope: '读取范围不足',
+  circle: '不在主场圈范围',
+  realm: '场域白名单不允许',
   context: '会话上下文不允许',
-  app: '限定给了别的应用',
+  client: '限定给了别的接入实例',
   item_unavailable: '条目不可用',
   field_missing: '条目里没有这个字段',
   reauth_required: '需要重新登录',
@@ -95,10 +126,6 @@ export const CREDENTIAL_ACCESS_REASON_NAMES: Record<CredentialAccessReason, stri
   internal_error: 'Kioku 内部出错',
 }
 
-// 和密码库通信失败的类别：连接的最近错误，也是写回失败（新建、修改条目）时给调用方的说法。
-// read_only、item_conflict 与 value_too_long 只在写回时出现：前两种服务端回 409，item_conflict 要先重新读取凭据再改；
-// value_too_long 回 400，可以改成托管或缩短值。
-// read_only 也用在集合不在同步结果里、组织密钥解不开时，所以说法两种情况都读得通
 export const VAULT_ERROR_KIND_NAMES: Record<VaultErrorKind, string> = {
   invalid_credentials: '邮箱或主密码错误',
   two_factor_invalid: '验证码错误',
@@ -119,13 +146,52 @@ export const CREDENTIAL_EXPIRY_NAMES: Record<CredentialExpiry, string> = {
   expired: '已到期',
 }
 
-// 凭据上「需要轮换」的标记，待处理与凭据详情共用
 export const CREDENTIAL_ROTATION_NAME = '需要轮换'
-
-// 新建凭据时值写到了哪里（CredentialStoredIn）：托管写「Kioku 托管」，密码库写集合的名称
 export const CREDENTIAL_HOSTED_NAME = 'Kioku 托管'
 
-// 疑似明文的类别：写入被拒时的说明与管理界面逐处处理时用
+export const ACTIVITY_TYPE_NAMES: Record<ActivityType, string> = {
+  create: '新建',
+  import: '导入',
+  sync: '同步',
+  update: '修改',
+  transfer_out: '迁出',
+  transfer_in: '迁入',
+  delete: '删除',
+  restore: '恢复此版',
+  undelete: '恢复',
+  reactivate: '恢复生效',
+  confirm: '确认来源',
+  convert_credential: '转存为凭据',
+  protect: '提高保护',
+  redact: '抹除敏感段',
+  ignore_plaintext: '忽略明文提示',
+  unignore_plaintext: '取消忽略提示',
+}
+
+export const ACTIVITY_FIELD_NAMES: Record<ActivityField, string> = {
+  content: '正文',
+  title: '标题',
+  variants: '切面切片',
+  topics: '主题',
+  disclosure: '触发场景',
+  priority: '优先级',
+  sensitivity: '敏感级',
+  glossary: '关键词',
+  validTo: '有效期',
+}
+
+export const DREAM_KIND_NAMES: Record<DreamSuggestionKind, string> = {
+  merge: '合并重复词条',
+  merge_variants: '合并为多变体词条',
+  facet_tag: '补充切面标签',
+  generalize: '跨项目共性去标上浮',
+  distill: '事实提炼为词条',
+  distill_episode: '摘要沉淀重要事件',
+  stale: '疑似过时失效',
+  review: '待确认内容审核',
+  promote: '高频词条提权',
+}
+
 export const PLAINTEXT_KIND_NAMES: Record<PlaintextKind, string> = {
   label: '标注的密码或令牌',
   sk: 'sk- 开头的密钥',
@@ -164,7 +230,6 @@ export const SENSITIVE_KIND_NAMES: Record<SensitiveKind, string> = {
   ...PII_KIND_NAMES,
 }
 
-// 初始化页与服务端日志共用：连不上数据库的原因只写类别
 export const DATABASE_FAILURE_NAMES: Record<DatabaseFailure, string> = {
   unreachable: '无法连接',
   host_not_found: '找不到主机',
@@ -194,7 +259,7 @@ export const EXISTING_DATA_NAMES: Record<ExistingData, string> = {
   empty: '空库',
   migrated: '空的 Kioku 库',
   kioku: '已有 Kioku 的数据',
-  pre_baseline: '记忆架构改版之前的结构',
+  pre_baseline: '记忆圈重构之前的库结构',
   newer: '更新的版本迁移过的结构',
 }
 
@@ -207,20 +272,18 @@ export const PROVISION_PROBLEM_NAMES: Record<ProvisionProblem, string> = {
   failed: '创建失败',
 }
 
-// 拦住接入的问题，服务端日志与初始化页的检查行共用
 export const DATABASE_PROBLEM_NAMES: Record<DatabaseProblemCode, string> = {
   connection: '无法连接',
   superuser: '角色是超级用户，会绕过行级安全',
   bypass_rls: '角色带 BYPASSRLS，会绕过行级安全',
   extension_not_installed: '库里尚未安装扩展',
   extension_missing: '服务器上缺少扩展',
-  pre_baseline: '库里是记忆架构改版之前的结构',
+  pre_baseline: '库里是记忆圈重构之前的结构',
   newer: '库里有这个版本不认识的迁移',
   insufficient_privilege: '角色对库里已有的表没有权限',
   inspect_failed: '读取库的结构失败',
 }
 
-// 一条问题的完整说法：扩展两类带上扩展名，连不上带上类别
 export function databaseProblemText(
   problem: DatabaseProblem,
   failure?: DatabaseFailure | null,

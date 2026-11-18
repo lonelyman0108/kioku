@@ -14,17 +14,17 @@ describe('变更记录的筛选', () => {
   it('多个值用逗号连在一个参数里，空段忽略', () => {
     const parsed = ActivityFilter.parse({
       type: 'create,update,',
-      layer: 'core,user',
-      field: 'content,none',
+      kind: 'entry,fact',
+      field: 'content,variants,none',
       actor: `account:${uuid},bench`,
-      exceptActor: `app:${uuid}`,
+      exceptActor: `client:${uuid}`,
     })
     expect(parsed).toEqual({
       type: ['create', 'update'],
-      layer: ['core', 'user'],
-      field: ['content', 'none'],
+      kind: ['entry', 'fact'],
+      field: ['content', 'variants', 'none'],
       actor: [`account:${uuid}`, 'bench'],
-      exceptActor: [`app:${uuid}`],
+      exceptActor: [`client:${uuid}`],
     })
   })
 
@@ -32,7 +32,7 @@ describe('变更记录的筛选', () => {
     for (const bad of [
       { type: 'access' },
       { type: ',' },
-      { layer: 'nope' },
+      { kind: 'nope' },
       { field: 'version' },
       { actor: 'key:1' },
       { actor: `account:${uuid.toUpperCase()}` },
@@ -42,7 +42,7 @@ describe('变更记录的筛选', () => {
   })
 
   it('操作者四种写法', () => {
-    for (const key of [`account:${uuid}`, `app:${uuid}`, 'bench', 'unknown']) {
+    for (const key of [`account:${uuid}`, `client:${uuid}`, 'bench', 'unknown']) {
       expect(ActivityActorKey.safeParse(key).success).toBe(true)
     }
     expect(ActivityActorKey.safeParse('benchmark').success).toBe(false)
@@ -73,11 +73,9 @@ describe('变更记录的筛选', () => {
     expect(ActivityDaysQuery.parse({ tz: 'Asia/Shanghai' }).tz).toBe('Asia/Shanghai')
     expect(ActivityDaysQuery.parse({ tz: 'UTC' }).tz).toBe('UTC')
     expect(ActivityDaysQuery.parse({ tz: 'America/Argentina/Buenos_Aires' }).tz).toBeTruthy()
-    // IANA 的 Etc 下的名字在浏览器与 PostgreSQL 里是同一个意思，照收
     for (const tz of ['Etc/GMT-8', 'Etc/GMT+8', 'Etc/UTC']) {
       expect(ActivityDaysQuery.parse({ tz }).tz).toBe(tz)
     }
-    // 名字认不认得由服务端按 PostgreSQL 的时区库查；这里只挡裸偏移写法
     for (const tz of ["UTC'; --", 'Asia/Shanghai '.repeat(10), '+08', 'UTC+8', 'GMT', 'EST']) {
       expect(ActivityDaysQuery.safeParse({ tz }).success, tz).toBe(false)
     }
@@ -85,7 +83,7 @@ describe('变更记录的筛选', () => {
 })
 
 describe('字段的前后值', () => {
-  it('正文给行数或两个都是 null，关键词给词，标量给前后', () => {
+  it('正文给行数或两个都是 null，关键词与主题给增删列表，切片给计数', () => {
     expect(ActivityFieldChange.safeParse({ field: 'content', added: 1, removed: 0 }).success).toBe(
       true,
     )
@@ -96,13 +94,21 @@ describe('字段的前后值', () => {
       ActivityFieldChange.safeParse({ field: 'glossary', added: ['甲方'], removed: [] }).success,
     ).toBe(true)
     expect(
+      ActivityFieldChange.safeParse({ field: 'topics', added: ['git'], removed: ['old'] }).success,
+    ).toBe(true)
+    expect(
+      ActivityFieldChange.safeParse({ field: 'variants', added: 1, removed: 0, modified: 1 })
+        .success,
+    ).toBe(true)
+    expect(
       ActivityFieldChange.safeParse({ field: 'title', before: null, after: '标题' }).success,
     ).toBe(true)
     expect(
       ActivityFieldChange.safeParse({ field: 'priority', before: '1', after: 2 }).success,
     ).toBe(false)
     expect(
-      ActivityFieldChange.safeParse({ field: 'layer', before: 'core', after: 'nope' }).success,
+      ActivityFieldChange.safeParse({ field: 'sensitivity', before: 'public', after: 'nope' })
+        .success,
     ).toBe(false)
   })
 })

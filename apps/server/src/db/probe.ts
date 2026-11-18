@@ -133,7 +133,7 @@ export interface DatabaseFacts {
   extensions: { name: DatabaseExtension; state: ExtensionState }[]
   existing: ExistingData
   accounts: number | null
-  spaces: number | null
+  circles: number | null
   unrelatedTables: number
 }
 
@@ -165,7 +165,7 @@ export function failedCheck(failure: DatabaseFailure): DatabaseCheck {
     extensions: [],
     existing: null,
     accounts: null,
-    spaces: null,
+    circles: null,
     unrelatedTables: 0,
     problems: [{ code: 'connection' }],
     ready: false,
@@ -259,7 +259,7 @@ async function gatherFacts(
     extensions,
     existing,
     accounts: content?.accounts ?? null,
-    spaces: content?.spaces ?? null,
+    circles: content?.circles ?? null,
     unrelatedTables,
   }
 }

@@ -32,34 +32,92 @@ export function connect(url: string, options: { max?: number } = {}): Database {
   return { db, url, close: () => client.end() }
 }
 
-// 每个 withSpace 事务开头取的数据库时间，见 withSpace 与 nowOf
+// 每个 withCircles 事务开头取的数据库时间，见 withCircles 与 nowOf
 const moments = new WeakMap<object, Date>()
 const STATEMENT_MICROS = microsOf(sql`statement_timestamp()`)
 
-// 内容表只能在这里面访问：事务内声明当前空间，RLS 据此过滤；事务结束后设置自动失效，不会串到连接池里的下一个请求。
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+export interface CircleScope {
+  read: readonly string[]
+  write?: readonly string[]
+}
+
+interface ActiveCircleScope {
+  readonly read: string
+  readonly write: string
+  hasWrites: boolean
+}
+
+const activeCircleScope = new AsyncLocalStorage<ActiveCircleScope>()
+
+function normalizeCircleIds(ids: readonly string[] | undefined): string[] {
+  if (!ids || ids.length === 0) return []
+  const seen = new Set<string>()
+  for (const id of ids) {
+    if (!UUID_RE.test(id)) throw new Error(`无效的记忆圈标识：${id}`)
+    seen.add(id.toLowerCase())
+  }
+  return [...seen]
+}
+
+// 内容表只能在这里面访问：事务内声明当前可读与可写的记忆圈，RLS 据此过滤；事务结束后设置自动失效，不会串到连接池里的下一个请求。
 // config 是事务的选项，例如导出时要一个可重复读的只读事务。
-// 有效期与更新时间只用数据库的钟：声明空间的那条语句顺带取一次数据库的时间（不多一次往返），作为这个事务里唯一的
+// 有效期与更新时间只用数据库的钟：声明记忆圈的那条语句顺带取一次数据库的时间（不多一次往返），作为这个事务里唯一的
 // 「现在」，交给 fn，也能用 nowOf(tx) 取；fn 里没有显式传时刻的有效期判断默认也用它（见 db/moment.ts）。取 statement_timestamp()（这条语句开始的时刻），不取 now()（事务开始的时刻）：
-// 测试台的回滚模式整个运行是一个根事务，now() 一直停在开始的时候，每个 withSpace 是其中的一个 savepoint，
+// 测试台的回滚模式整个运行是一个根事务，now() 一直停在开始的时候，每个 withCircles 是其中的一个 savepoint，
 // 这样各自取到当时的时刻；也不取 clock_timestamp()，同一条语句里它每次求值都不同。截到毫秒：JS 的 Date 只到毫秒，
-// SQL 条件与 JS 判断（canRead 等）拿同一个值比才一致
-export function withSpace<T>(
-  db: Db,
-  spaceId: string,
+// SQL 条件与 JS 判断拿同一个值比才一致。
+// 可写集自动并入可读集；最外层写作用域结束前立即校验一次 entry_variants_state_fk，确保 savepoint 内也当场暴露不一致
+export async function withCircles<T>(
+  db: Db | Tx,
+  scope: CircleScope,
   fn: (tx: Tx, now: Date) => Promise<T>,
   config?: PgTransactionConfig,
 ): Promise<T> {
+  const effectiveWrite = normalizeCircleIds(scope.write)
+  const effectiveRead = normalizeCircleIds([...scope.read, ...effectiveWrite])
+  const readStr = effectiveRead.join(',')
+  const writeStr = effectiveWrite.join(',')
+  const parent = activeCircleScope.getStore()
+  if (parent && effectiveWrite.length > 0) parent.hasWrites = true
+  const current: ActiveCircleScope = {
+    read: readStr,
+    write: writeStr,
+    hasWrites: effectiveWrite.length > 0,
+  }
   return db.transaction(async (tx) => {
     const [row] = await tx.execute<{ micros: string }>(
-      sql`select set_config('app.space_id', ${spaceId}, true), ${STATEMENT_MICROS}::text as micros`,
+      sql`select set_config('app.read_circles', ${readStr}, true), set_config('app.write_circles', ${writeStr}, true), ${STATEMENT_MICROS}::text as micros`,
     )
     const now = new Date(Number(BigInt(row!.micros) / 1000n))
     moments.set(tx, now)
-    return transactionMoment.run(now, () => fn(tx, now))
+    const result = await activeCircleScope.run(current, () =>
+      transactionMoment.run(now, () => fn(tx, now)),
+    )
+    if (!parent && current.hasWrites) {
+      await tx.execute(sql`set constraints entry_variants_state_fk immediate`)
+      await tx.execute(sql`set constraints entry_variants_state_fk deferred`)
+    }
+    if (parent) {
+      await tx.execute(
+        sql`select set_config('app.read_circles', ${parent.read}, true), set_config('app.write_circles', ${parent.write}, true)`,
+      )
+    }
+    return result
   }, config)
 }
 
-// 数据库现在的时间（截到毫秒），给不在 withSpace 里的地方用：保留期的清理这类后台任务默认按它算，
+export function withCircle<T>(
+  db: Db | Tx,
+  circleId: string,
+  fn: (tx: Tx, now: Date) => Promise<T>,
+  config?: PgTransactionConfig,
+): Promise<T> {
+  return withCircles(db, { read: [circleId], write: [circleId] }, fn, config)
+}
+
+// 数据库现在的时间（截到毫秒），给不在 withCircles 里的地方用：保留期的清理这类后台任务默认按它算，
 // 测试里要算「现在之后多久」也用它
 export async function databaseNow(db: Db | Tx): Promise<Date> {
   const [row] = await db.execute<{ micros: string }>(
@@ -68,29 +126,29 @@ export async function databaseNow(db: Db | Tx): Promise<Date> {
   return new Date(Number(BigInt(row!.micros) / 1000n))
 }
 
-// 这个事务开头取的数据库时间（见 withSpace）。判断或写入有效期、更新时间都用它，不用应用的 new Date()
+// 这个事务开头取的数据库时间（见 withCircles）。判断或写入有效期、更新时间都用它，不用应用的 new Date()
 export function nowOf(tx: Tx): Date {
   const now = moments.get(tx)
-  if (!now) throw new Error('nowOf 只能用在 withSpace 开的事务里')
+  if (!now) throw new Error('nowOf 只能用在 withCircles 开的事务里')
   return now
 }
 
-// 跨空间统计（实例的向量覆盖率、主密钥卡片的计数）整个进程里最多同时开几个空间的事务（服务只有一个连接池）：
-// 每个事务占一条连接，几处统计、几个页面同时数也合起来算。某个空间等锁卡住时最多卡住这几条，别的请求照常有连接用
-export const SPACE_SCAN_PARALLEL = 4
-const scanSlots = { free: SPACE_SCAN_PARALLEL, waiting: [] as (() => void)[] }
-// 正在 eachSpace 的 fn 里
+// 跨记忆圈统计（实例的向量覆盖率、主密钥卡片的计数）整个进程里最多同时开几个记忆圈的事务（服务只有一个连接池）：
+// 每个事务占一条连接，几处统计、几个页面同时数也合起来算。某个记忆圈等锁卡住时最多卡住这几条，别的请求照常有连接用
+export const CIRCLE_SCAN_PARALLEL = 4
+const scanSlots = { free: CIRCLE_SCAN_PARALLEL, waiting: [] as (() => void)[] }
+// 正在 eachCircle 的 fn 里
 const scanning = new AsyncLocalStorage<true>()
 
-// 对每个空间在它自己的事务里调用 fn（内容表开了 RLS，一个事务只看得到一个空间），几个空间同时数，不逐个排队。
-// 每数一个空间取一次名额、数完还回去，几处同时数时轮流用，谁也不用等别人整个数完。
-// 有一个空间出错就不再开始别的，等已经开始的都结束再抛出这个错误：返回或抛出之后不会还有空间的事务没结束。
-// 连接断开是例外：withSpace 立刻 reject，那个事务已经没了，fn 还在跑，到它的下一条语句报错才停（时间很短），
+// 对每个记忆圈在它自己的事务里调用 fn（内容表开了 RLS），几个记忆圈同时数，不逐个排队。
+// 每数一个记忆圈取一次名额、数完还回去，几处同时数时轮流用，谁也不用等别人整个数完。
+// 有一个记忆圈出错就不再开始别的，等已经开始的都结束再抛出这个错误：返回或抛出之后不会还有记忆圈的事务没结束。
+// 连接断开是例外：withCircle 立刻 reject，那个事务已经没了，fn 还在跑，到它的下一条语句报错才停（时间很短），
 // 所以这时返回或抛出之后 fn 可能还没跑完。
-// fn 里再调 eachSpace 直接报错：外层占着名额等里层，名额会被占满、互相等住
-export async function eachSpace(db: Db, fn: (tx: Tx) => Promise<void>): Promise<void> {
-  if (scanning.getStore()) throw new Error('eachSpace 不能嵌套调用')
-  const all = await db.select({ id: schema.spaces.id }).from(schema.spaces)
+// fn 里再调 eachCircle 直接报错：外层占着名额等里层，名额会被占满、互相等住
+export async function eachCircle(db: Db, fn: (tx: Tx) => Promise<void>): Promise<void> {
+  if (scanning.getStore()) throw new Error('eachCircle 不能嵌套调用')
+  const all = await db.select({ id: schema.circles.id }).from(schema.circles)
   let next = 0
   let failure: { error: unknown } | undefined
   const worker = async () => {
@@ -99,7 +157,7 @@ export async function eachSpace(db: Db, fn: (tx: Tx) => Promise<void>): Promise<
       if (scanSlots.free) scanSlots.free--
       else await new Promise<void>((resolve) => scanSlots.waiting.push(resolve))
       try {
-        if (!failure) await scanning.run(true, () => withSpace(db, id, fn))
+        if (!failure) await scanning.run(true, () => withCircle(db, id, fn))
       } catch (error) {
         failure ??= { error }
       } finally {
@@ -110,7 +168,7 @@ export async function eachSpace(db: Db, fn: (tx: Tx) => Promise<void>): Promise<
       }
     }
   }
-  await Promise.all(Array.from({ length: Math.min(SPACE_SCAN_PARALLEL, all.length) }, worker))
+  await Promise.all(Array.from({ length: Math.min(CIRCLE_SCAN_PARALLEL, all.length) }, worker))
   if (failure) throw failure.error
 }
 
@@ -181,7 +239,7 @@ export function isUniqueViolation(err: unknown, constraint: string): boolean {
   return pg.code === '23505' && pg.constraint_name === constraint
 }
 
-// 超级用户和 BYPASSRLS 角色会绕过行级安全，空间隔离就形同虚设，所以直接拒绝启动
+// 超级用户和 BYPASSRLS 角色会绕过行级安全，记忆圈隔离就形同虚设，所以直接拒绝启动
 export async function assertRuntimeRole(db: Db): Promise<void> {
   const rows = await db.execute<{ rolsuper: boolean; rolbypassrls: boolean; rolname: string }>(
     sql`select rolname, rolsuper, rolbypassrls from pg_roles where rolname = current_user`,
@@ -190,7 +248,7 @@ export async function assertRuntimeRole(db: Db): Promise<void> {
   if (!role) throw new Error('无法读取当前数据库角色')
   if (role.rolsuper || role.rolbypassrls) {
     throw new Error(
-      `数据库角色 ${role.rolname} 是超级用户或带 BYPASSRLS，会绕过空间隔离；请改用普通角色连接（见 docker/postgres/init）`,
+      `数据库角色 ${role.rolname} 是超级用户或带 BYPASSRLS，会绕过记忆圈隔离；请改用普通角色连接（见 docker/postgres/init）`,
     )
   }
 }

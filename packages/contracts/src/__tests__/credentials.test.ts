@@ -14,8 +14,8 @@ import {
   isNewerRevision,
   isVaultFieldRef,
   KeyCreateCredentialRequest,
-  KeyScopes,
   KeyUpdateCredentialRequest,
+  LensKeyScopes,
   sameRevision,
   SetVaultDestinationRequest,
   UpdateCredentialRequest,
@@ -148,12 +148,44 @@ describe('取用的用途', () => {
   })
 })
 
-describe('访问密钥的凭据能力', () => {
-  it('不给时是不可用', () => {
+describe('访问密钥的凭据能力与场域白名单', () => {
+  it('未传 credentials 时默认 none，allowedRealms 默认 null 且规整小写', () => {
+    const parsed = LensKeyScopes.parse({
+      readKinds: ['entry'],
+      writeKinds: [],
+      maxSensitivity: 'public',
+      admin: false,
+    })
+    expect(parsed.credentials).toBe('none')
+    expect(parsed.allowedRealms).toBeNull()
     expect(
-      KeyScopes.parse({ readLayers: [], writeLayers: [], maxSensitivity: 'public', admin: false })
-        .credentials,
-    ).toBe('none')
+      LensKeyScopes.parse({
+        readKinds: ['entry'],
+        writeKinds: ['entry'],
+        maxSensitivity: 'private',
+        allowedRealms: [' Work '],
+        admin: false,
+        credentials: 'use',
+      }).allowedRealms,
+    ).toEqual(['work'])
+  })
+
+  it('新建与更新凭据支持 clientIds 与 allowedRealms', () => {
+    const id = '00000000-0000-4000-8000-000000000001'
+    const created = CreateCredentialRequest.parse({
+      identifier: 'corp-db',
+      name: '公司库',
+      source: { kind: 'new', values: { password: 'secret' } },
+      clientIds: [id],
+      allowedRealms: ['Work'],
+    })
+    expect(created.clientIds).toEqual([id])
+    expect(created.allowedRealms).toEqual(['work'])
+    const updated = UpdateCredentialRequest.parse({
+      expectedVersion: 1,
+      allowedRealms: null,
+    })
+    expect(updated.allowedRealms).toBeNull()
   })
 })
 

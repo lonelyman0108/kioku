@@ -1,6 +1,20 @@
 import { z } from 'zod'
 
-import { CredentialCapability, KeyScopes, Layer, MemberRole, Sensitivity } from './memory'
+import { WhenCondition } from './facets'
+import {
+  CircleKind,
+  CredentialCapability,
+  ENTRY_KINDS,
+  EntryKind,
+  MemberRole,
+  Sensitivity,
+} from './memory'
+
+export const DISPLAY_NAME_MAX = 64
+export const CIRCLE_NAME_MAX = 64
+export const PERSONA_MAX_DEPTH = 8
+export const LINKED_CIRCLES_MAX = 32
+export const ALLOWED_REALMS_MAX = 32
 
 export const Username = z
   .string()
@@ -8,18 +22,28 @@ export const Username = z
 export const Password = z.string().min(10, '密码至少 10 位').max(256, '密码最多 256 位')
 export const Slug = z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/, '只能包含小写字母、数字和连字符')
 
-// 长度上限挡住超长输入：用户名会作为失败计数表的主键写入
 export const LoginRequest = z.object({
-  // 用户名只有小写（Username）：先去首尾空白、转小写，计数与匹配都用这个值
   username: z.string().trim().toLowerCase().min(1).max(64),
   password: z.string().max(256),
 })
 export type LoginRequest = z.infer<typeof LoginRequest>
 
-export const SpaceSummary = z.object({ id: z.uuid(), name: z.string(), role: MemberRole })
-export type SpaceSummary = z.infer<typeof SpaceSummary>
+export const AccountRef = z.object({
+  accountId: z.uuid(),
+  username: z.string(),
+  displayName: z.string(),
+})
+export type AccountRef = z.infer<typeof AccountRef>
 
-// 空间成员：成员之间互相看得到名字与角色（活动里本来就显示操作者）
+export const CircleSummary = z.object({
+  id: z.uuid(),
+  slug: z.string(),
+  name: z.string(),
+  kind: CircleKind,
+  role: MemberRole,
+})
+export type CircleSummary = z.infer<typeof CircleSummary>
+
 export const MemberInfo = z.object({
   accountId: z.uuid(),
   username: z.string(),
@@ -28,15 +52,21 @@ export const MemberInfo = z.object({
 })
 export type MemberInfo = z.infer<typeof MemberInfo>
 
-export const Me = z.object({
+export const SessionUser = z.object({
   id: z.uuid(),
   username: z.string(),
   displayName: z.string(),
-  // 实例管理员：能改嵌入模型等全实例设置
   isAdmin: z.boolean(),
-  spaces: z.array(SpaceSummary),
+  personalCircleId: z.uuid(),
+  circles: z.array(CircleSummary),
+  ownedSharedCircles: z.number().int(),
+  maxOwnedCircles: z.number().int(),
 })
-export type Me = z.infer<typeof Me>
+export type SessionUser = z.infer<typeof SessionUser>
+
+// 保留 Me 别名以保持接口语义一致
+export const Me = SessionUser
+export type Me = SessionUser
 
 export const RUNTIME_FAMILIES = [
   'claudecode',
@@ -55,36 +85,109 @@ export const RUNTIME_FAMILIES = [
 export const RuntimeFamily = z.enum(RUNTIME_FAMILIES)
 export type RuntimeFamily = z.infer<typeof RuntimeFamily>
 
-export const AppConfig = z
+// 聊天机器人跨群识人模式：
+// persona_shared：同一接入实例下非单群加锁的群之间可跨群召回个人印象并标注 [其他群印象]；
+// strict：所有群严格按各自来源作用域隔离
+export const PERSON_MEMORY_MODES = ['persona_shared', 'strict'] as const
+export const PersonMemoryMode = z.enum(PERSON_MEMORY_MODES)
+export type PersonMemoryMode = z.infer<typeof PersonMemoryMode>
+
+export const ClientConfig = z
   .object({
-    // 本人私聊时读取本人记忆：设了之后，应用所有者本人的私聊读得到本人的内部及以下；不设时和陌生人私聊一样
+    // 接入实例所有者的本人私聊提权至内部敏感级；不设时与外人私聊同级
     elevateOwnerDirect: z.literal('internal').optional(),
-    // 召回事件里记不记提示语（前 200 字，像凭据的片段打码）；不设时记
+    // 跨群识人开关，默认 strict
+    personMemoryMode: PersonMemoryMode.default('strict'),
+    // 召回事件是否记录提示语前 200 字，默认 true
     recordPrompt: z.boolean().optional(),
   })
-  .meta({ id: 'AppConfig' })
-export type AppConfig = z.infer<typeof AppConfig>
+  .meta({ id: 'ClientConfig' })
+export type ClientConfig = z.infer<typeof ClientConfig>
 
-export const CreateAppRequest = z.object({
+export const ClientRef = z.object({ id: z.uuid(), slug: z.string(), name: z.string() })
+export type ClientRef = z.infer<typeof ClientRef>
+
+export const ClientInfo = z
+  .object({
+    id: z.uuid(),
+    circleId: z.uuid(),
+    slug: z.string(),
+    name: z.string(),
+    runtimeFamily: z.string(),
+    ownerAccountId: z.uuid(),
+    defaultPersonaId: z.uuid().nullable(),
+    config: ClientConfig,
+  })
+  .meta({ id: 'ClientInfo' })
+export type ClientInfo = z.infer<typeof ClientInfo>
+
+export const CreateClientRequest = z.object({
   slug: Slug,
-  name: z.string().min(1).max(64),
+  name: z.string().trim().min(1).max(64),
   runtimeFamily: RuntimeFamily,
   defaultPersonaId: z.uuid().nullable().default(null),
-  config: AppConfig.default({}),
+  config: ClientConfig.default({ personMemoryMode: 'strict' }),
 })
-export type CreateAppRequest = z.infer<typeof CreateAppRequest>
+export type CreateClientRequest = z.infer<typeof CreateClientRequest>
 
-export const UpdateAppRequest = z.object({
-  name: z.string().min(1).max(64).optional(),
-  // 只有空间 owner 能改：把应用转给空间里的另一个成员
+export const UpdateClientRequest = z.object({
+  name: z.string().trim().min(1).max(64).optional(),
+  // 转发所有者时同步吊销该接入实例全部访问密钥
   ownerAccountId: z.uuid().optional(),
   defaultPersonaId: z.uuid().nullable().optional(),
-  config: AppConfig.optional(),
+  config: ClientConfig.optional(),
 })
-export type UpdateAppRequest = z.infer<typeof UpdateAppRequest>
+export type UpdateClientRequest = z.infer<typeof UpdateClientRequest>
+
+// 按群规则：可为指定群单独切换人格，并可设单群强隔离锁（阻止该群人物事实流出，也阻止跨群印象流入）
+export const ClientGroupRule = z
+  .object({
+    groupSubjectId: z.uuid(),
+    personaId: z.uuid().nullable().default(null),
+    isolateGroupMemory: z.boolean().default(false),
+  })
+  .refine(
+    (r) => r.personaId !== null || r.isolateGroupMemory,
+    '每条群规则须指定人格或开启单群隔离锁',
+  )
+export type ClientGroupRule = z.infer<typeof ClientGroupRule>
+
+export const ClientGroupRules = z.object({ rules: z.array(ClientGroupRule).max(500) })
+export type ClientGroupRules = z.infer<typeof ClientGroupRules>
+
+export const ClientGroupRuleView = ClientGroupRule.extend({ groupName: z.string() })
+export type ClientGroupRuleView = z.infer<typeof ClientGroupRuleView>
+
+export const ClientGroupRuleList = z.object({ rules: z.array(ClientGroupRuleView) })
+export type ClientGroupRuleList = z.infer<typeof ClientGroupRuleList>
+
+// 独立人格及其按 trait_key 覆盖的设定段
+export const TraitKey = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .regex(/^[a-z0-9][a-z0-9_-]{0,63}$/, '设定键只能包含小写字母、数字、_ 和 -')
+
+export const PersonaTrait = z.object({
+  traitKey: z.string(),
+  title: z.string(),
+  content: z.string(),
+  sortOrder: z.number().int(),
+  updatedAt: z.string(),
+})
+export type PersonaTrait = z.infer<typeof PersonaTrait>
+
+export const UpsertPersonaTraitRequest = z.object({
+  traitKey: TraitKey,
+  title: z.string().trim().min(1, '请填写设定标题').max(120),
+  content: z.string().min(1, '请填写设定正文').max(20_000),
+  sortOrder: z.number().int().min(0).max(999).default(0),
+})
+export type UpsertPersonaTraitRequest = z.infer<typeof UpsertPersonaTraitRequest>
 
 export const PersonaInfo = z.object({
   id: z.uuid(),
+  circleId: z.uuid(),
   slug: z.string(),
   name: z.string(),
   extendsId: z.uuid().nullable(),
@@ -94,157 +197,184 @@ export type PersonaInfo = z.infer<typeof PersonaInfo>
 
 export const CreatePersonaRequest = z.object({
   slug: Slug,
-  name: z.string().min(1).max(64),
+  name: z.string().trim().min(1).max(64),
   extendsId: z.uuid().nullable().default(null),
   description: z.string().max(500).nullable().default(null),
+  traits: z.array(UpsertPersonaTraitRequest).max(50).optional(),
 })
 export type CreatePersonaRequest = z.infer<typeof CreatePersonaRequest>
 
-// 标识不能改：人格的记忆的坐标（persona://<标识>/…）里写着它
 export const UpdatePersonaRequest = z.object({
-  name: z.string().min(1).max(64).optional(),
+  name: z.string().trim().min(1).max(64).optional(),
   description: z.string().max(500).nullable().optional(),
-  // 不能成环，继承链（含自己）最多 8 层
   extendsId: z.uuid().nullable().optional(),
 })
 export type UpdatePersonaRequest = z.infer<typeof UpdatePersonaRequest>
 
-// 人格详情里的一个节点（人格的记忆）
-export const PersonaNode = z.object({
-  uri: z.string(),
-  title: z.string(),
+export const ResolvedPersonaTrait = PersonaTrait.extend({
   personaId: z.uuid(),
-  priority: z.number().int(),
-  sensitivity: Sensitivity,
-  disclosure: z.string().nullable(),
-  // 被继承链上更近的人格的哪个节点覆盖（同一相对路径）；没被覆盖时为 null
   overriddenBy: z.string().nullable(),
 })
-export type PersonaNode = z.infer<typeof PersonaNode>
+export type ResolvedPersonaTrait = z.infer<typeof ResolvedPersonaTrait>
 
-export const AppRef = z.object({ id: z.uuid(), slug: z.string(), name: z.string() })
-export type AppRef = z.infer<typeof AppRef>
-
-// 节点按查看者在管理界面里读得到的算：secret 只给读得到的成员
 export const PersonaDetail = PersonaInfo.extend({
-  // 从直接继承的那个到最远的祖先
   ancestors: z.array(PersonaInfo),
-  // 直接继承它的人格
   children: z.array(PersonaInfo),
-  // 自己的节点
-  own: z.array(PersonaNode),
-  // 祖先的节点：overriddenBy 为 null 的继承下来，不为 null 的被覆盖
-  inherited: z.array(PersonaNode),
-  // 默认人格是它的应用
-  apps: z.array(AppRef),
-  // 查看者在管理界面里看得到的这个人格的记忆总数，含已删除、已过期的：删除人格会把它们连带硬删除，
-  // 所以有记忆时删不掉（删除时还会算上查看者读不到的）
-  storedMemories: z.number().int(),
+  ownTraits: z.array(ResolvedPersonaTrait),
+  inheritedTraits: z.array(ResolvedPersonaTrait),
+  clients: z.array(ClientRef),
 })
 export type PersonaDetail = z.infer<typeof PersonaDetail>
 
-export const AppInfo = z
-  .object({
-    id: z.uuid(),
-    slug: z.string(),
-    name: z.string(),
-    runtimeFamily: z.string(),
-    ownerAccountId: z.uuid(),
-    defaultPersonaId: z.uuid().nullable(),
-    config: AppConfig,
-  })
-  .meta({ id: 'AppInfo' })
-export type AppInfo = z.infer<typeof AppInfo>
+// 透镜访问密钥的关联客场圈配置：read 仅只读；read_write 允许显式指定 circleId 跨圈写入
+export const LINKED_CIRCLE_MODES = ['read', 'read_write'] as const
+export const LinkedCircleMode = z.enum(LINKED_CIRCLE_MODES)
+export type LinkedCircleMode = z.infer<typeof LinkedCircleMode>
 
-// 按群换人格：带着这个群（或频道）的会话上下文的请求用规则里的人格，boot、召回与写入都按它；
-// 没有规则的群、私聊与不带上下文的请求（GET /boot、MCP）用默认人格
-export const GroupPersonaRule = z.object({ subjectId: z.uuid(), personaId: z.uuid() })
-export type GroupPersonaRule = z.infer<typeof GroupPersonaRule>
+export const LinkedCircleGrant = z.object({
+  circleId: z.uuid(),
+  mode: LinkedCircleMode.default('read'),
+})
+export type LinkedCircleGrant = z.infer<typeof LinkedCircleGrant>
 
-// 整组替换：没列出的规则删掉
-export const GroupPersonaRules = z.object({ rules: z.array(GroupPersonaRule).max(200) })
-export type GroupPersonaRules = z.infer<typeof GroupPersonaRules>
-
-// 列出规则时带上群现在的名字，管理界面按名字显示
-export const GroupPersonaRuleView = GroupPersonaRule.extend({ groupName: z.string() })
-export type GroupPersonaRuleView = z.infer<typeof GroupPersonaRuleView>
-export const GroupPersonaRuleList = z.object({ rules: z.array(GroupPersonaRuleView) })
-export type GroupPersonaRuleList = z.infer<typeof GroupPersonaRuleList>
+// 访问密钥的静态透镜授权上限；allowedRealms 为 null 表示不按场域白名单额外收紧，
+// 非 null 时目标必须非空且与之有交集（客户端上报的 project 与提问触发词不能放宽此项）
+export const LensKeyScopes = z.object({
+  readKinds: z.array(EntryKind).max(ENTRY_KINDS.length),
+  writeKinds: z.array(EntryKind).max(ENTRY_KINDS.length),
+  maxSensitivity: Sensitivity,
+  allowedRealms: z
+    .array(z.string().trim().toLowerCase().min(1).max(64))
+    .max(ALLOWED_REALMS_MAX)
+    .nullable()
+    .default(null),
+  admin: z.boolean(),
+  credentials: CredentialCapability.default('none'),
+})
+export type LensKeyScopes = z.infer<typeof LensKeyScopes>
 
 export const CreateKeyRequest = z.object({
-  name: z.string().min(1).max(64),
-  scopes: KeyScopes,
+  name: z.string().trim().min(1).max(64),
+  linkedCircles: z
+    .array(LinkedCircleGrant)
+    .max(LINKED_CIRCLES_MAX)
+    .default([])
+    .refine(
+      (list) => new Set(list.map((i) => i.circleId)).size === list.length,
+      '关联记忆圈不能重复',
+    ),
+  contextFacets: WhenCondition.default({}),
+  personaOverrideId: z.uuid().nullable().default(null),
+  scopes: LensKeyScopes,
 })
 export type CreateKeyRequest = z.infer<typeof CreateKeyRequest>
 
+export const RotateKeyRequest = z.object({
+  name: z.string().trim().min(1).max(64).optional(),
+})
+export type RotateKeyRequest = z.infer<typeof RotateKeyRequest>
+
+// 单个记忆圈经成员当前角色计算后的有效授权状态
+export const CircleEffectiveGrant = z.object({
+  circleId: z.uuid(),
+  circleSlug: z.string(),
+  circleName: z.string(),
+  circleKind: CircleKind,
+  isPrimary: z.boolean(),
+  mode: LinkedCircleMode,
+  readKinds: z.array(EntryKind),
+  writeKinds: z.array(EntryKind),
+  maxSensitivity: Sensitivity,
+  credentials: CredentialCapability,
+  active: z.boolean(),
+})
+export type CircleEffectiveGrant = z.infer<typeof CircleEffectiveGrant>
+
 export const KeyInfo = z.object({
   id: z.uuid(),
+  clientId: z.uuid(),
   name: z.string(),
   prefix: z.string(),
-  // 签发上限
-  scopes: KeyScopes,
-  // 当前有效上限：签发上限按应用主人现在的角色收紧。Key 已吊销，或主人已经离开空间
-  // （离开后重新加入的，离开之前签发的 Key 不恢复）时为 null，Key 用不了
-  effectiveScopes: KeyScopes.nullable(),
+  linkedCircles: z.array(LinkedCircleGrant),
+  contextFacets: WhenCondition,
+  personaOverrideId: z.uuid().nullable(),
+  scopes: LensKeyScopes,
+  // 主场圈失效或所有者离开主场圈时为 null，整个访问密钥不可用
+  effectiveScopes: LensKeyScopes.nullable(),
+  circleGrants: z.array(CircleEffectiveGrant),
   createdAt: z.string(),
   lastUsedAt: z.string().nullable(),
   revokedAt: z.string().nullable(),
 })
 export type KeyInfo = z.infer<typeof KeyInfo>
 
-// 只在创建时返回一次明文
-export const CreatedKey = KeyInfo.extend({ key: z.string() })
-export type CreatedKey = z.infer<typeof CreatedKey>
+export const IssuedKey = KeyInfo.extend({ key: z.string() })
+export type IssuedKey = z.infer<typeof IssuedKey>
 
-// 权限矩阵的会话上下文：无上下文（本机 agent）、陌生人私聊、主人私聊、群聊、定时任务与子 agent
 export const ACCESS_CONTEXTS = ['none', 'direct', 'owner_direct', 'group', 'cron'] as const
 export const AccessContext = z.enum(ACCESS_CONTEXTS)
 export type AccessContext = z.infer<typeof AccessContext>
 
-// 一格：这一类归属、这一级的记忆。read 为 explicit 时只能按坐标显式读取（secret），recall 时也进召回与 boot。
-// 联系人与会话的 write 指对话抽取能写进去，它们没有坐标、不能直接写
 export const AccessCell = z.object({
   read: z.enum(['none', 'explicit', 'recall']),
   write: z.boolean(),
 })
 export type AccessCell = z.infer<typeof AccessCell>
 
-export const AccessMatrixRow = z.object({
-  layer: Layer,
+export const CircleAccessMatrixRow = z.object({
+  kind: EntryKind,
   cells: z.array(AccessCell.extend({ sensitivity: Sensitivity })),
 })
+export type CircleAccessMatrixRow = z.infer<typeof CircleAccessMatrixRow>
 
-// 一把 Key 在各种会话上下文下实际能读写什么，按当前有效上限与应用配置计算
+export const CircleAccessMatrix = z.object({
+  circleId: z.uuid(),
+  circleName: z.string(),
+  circleKind: CircleKind,
+  isPrimary: z.boolean(),
+  rows: z.array(CircleAccessMatrixRow),
+  credentials: CredentialCapability,
+})
+export type CircleAccessMatrix = z.infer<typeof CircleAccessMatrix>
+
 export const KeyAccessMatrix = z.object({
   contexts: z.array(
     z.object({
       context: AccessContext,
-      rows: z.array(AccessMatrixRow),
-      // 读得到哪些来源作用域写下的记忆：any 不限；app 只含全局与本应用写下的；
-      // group、direct 再加上本群、与此人的对话里写下的
-      originScope: z.enum(['any', 'app', 'group', 'direct']),
-      // 这个会话上下文下实际的凭据能力：要能读本人的私密记忆，所以只有不带会话上下文时可能不是 none
+      circles: z.array(CircleAccessMatrix),
+      originScope: z.enum(['any', 'client', 'group', 'direct']),
       credentials: CredentialCapability,
     }),
   ),
 })
 export type KeyAccessMatrix = z.infer<typeof KeyAccessMatrix>
 
-// 显示名与空间名的上限，按码点算（zod 的长度也按码点）
-export const DISPLAY_NAME_MAX = 64
-export const SPACE_NAME_MAX = 64
+export const WhoAmIVocabularyDimension = z.object({
+  key: z.string(),
+  name: z.string(),
+  matchMode: z.enum(['exclusive', 'additive']),
+  terms: z.array(z.object({ slug: z.string(), label: z.string() })),
+})
 
 export const WhoAmI = z
   .object({
-    spaceId: z.uuid(),
-    // 空间名与应用所有者的显示名：只给人看的标签（例如命令行的面板），按当前的值取，改名后跟着变。
-    // 只给能读本人归属的 Key（显示名属于应用所有者本人，群聊机器人这类 Key 不该拿到），读不到时省略；
-    // 去掉控制字符、压成一行，按上限截断。由成员填写，不当作指令放进给模型的上下文。
-    // 早先的服务端没有这两项，生成的客户端照常解析
-    spaceName: z.string().max(SPACE_NAME_MAX).optional(),
+    primaryCircle: z.object({ id: z.uuid(), slug: z.string(), name: z.string(), kind: CircleKind }),
+    linkedCircles: z.array(
+      z.object({
+        id: z.uuid(),
+        slug: z.string().nullable(),
+        name: z.string().nullable(),
+        kind: CircleKind,
+        mode: LinkedCircleMode,
+      }),
+    ),
     accountName: z.string().max(DISPLAY_NAME_MAX).optional(),
-    app: AppInfo,
-    scopes: KeyScopes,
+    client: ClientInfo,
+    persona: z.object({ id: z.uuid(), slug: z.string(), name: z.string() }).nullable(),
+    contextFacets: WhenCondition,
+    resolvedFacets: WhenCondition,
+    vocabulary: z.array(WhoAmIVocabularyDimension),
+    scopes: LensKeyScopes,
   })
   .meta({ id: 'WhoAmI' })
 export type WhoAmI = z.infer<typeof WhoAmI>

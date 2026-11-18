@@ -2,55 +2,73 @@ import { describe, expect, it } from 'vitest'
 
 import {
   bootEligible,
-  CURATED_LAYERS,
+  CIRCLE_KINDS,
+  CREDENTIAL_CAPABILITIES,
   DEFAULT_SENSITIVITY,
+  ENTRY_KINDS,
   isBootCandidate,
-  LAYERS,
+  minSensitivity,
   sensitivityAllowed,
+  sensitivityRank,
+  STRATA_BANDS,
 } from '../memory'
 
-describe('不给敏感级时的默认值', () => {
-  it('本人默认私密、应用默认内部、人格与通用默认公开，每一类的默认都是这一类收的', () => {
+describe('缺省敏感级与允许组合', () => {
+  it('个人圈默认私密、共享圈默认内部，个人圈允许显式设为公开', () => {
     expect(DEFAULT_SENSITIVITY).toEqual({
-      core: 'public',
-      persona: 'public',
-      app: 'internal',
-      user: 'private',
+      personal: 'private',
+      shared: 'internal',
     })
-    for (const layer of CURATED_LAYERS) {
-      expect(sensitivityAllowed(layer, DEFAULT_SENSITIVITY[layer]), layer).toBe(true)
+    for (const circleKind of CIRCLE_KINDS) {
+      expect(sensitivityAllowed(circleKind, 'entry', DEFAULT_SENSITIVITY[circleKind])).toBe(true)
     }
+    expect(sensitivityAllowed('personal', 'entry', 'public')).toBe(true)
+    expect(sensitivityAllowed('shared', 'entry', 'secret')).toBe(true)
+    expect(sensitivityAllowed('shared', 'episode', 'secret')).toBe(false)
+    expect(sensitivityAllowed('shared', 'fact', 'secret', 'untrusted')).toBe(false)
+  })
+
+  it('敏感级排序与取小值一致', () => {
+    expect(sensitivityRank('public')).toBeLessThan(sensitivityRank('secret'))
+    expect(minSensitivity('internal', 'private')).toBe('internal')
+    expect(minSensitivity('secret', 'public')).toBe('public')
+  })
+
+  it('地层 6 色带与凭据能力固定定义', () => {
+    expect(STRATA_BANDS).toEqual([
+      'episode',
+      'fact',
+      'personal',
+      'shared-away',
+      'persona',
+      'primary',
+    ])
+    expect(CREDENTIAL_CAPABILITIES).toEqual(['none', 'use', 'manage'])
   })
 })
 
-describe('够格进启动加载的记忆', () => {
+describe('启动加载筛选规则', () => {
   const base = {
-    form: 'curated',
-    layer: 'core',
+    kind: 'entry',
     priority: 0,
     provenance: 'owner',
     sensitivity: 'public',
   } as const
 
-  it('目录里的、归属与优先级够格、来源受信、不是机密才算', () => {
+  it('仅正式词条、受信来源、非机密且优先级为 0 进入启动加载', () => {
     expect(isBootCandidate(base)).toBe(true)
-    expect(isBootCandidate({ ...base, form: 'extracted' })).toBe(false)
     expect(isBootCandidate({ ...base, priority: 1 })).toBe(false)
-    expect(isBootCandidate({ ...base, layer: 'persona', priority: 1 })).toBe(true)
-    expect(isBootCandidate({ ...base, layer: 'user', sensitivity: 'private' })).toBe(true)
-    expect(isBootCandidate({ ...base, layer: 'subject' })).toBe(false)
+    expect(isBootCandidate({ ...base, kind: 'fact' })).toBe(false)
+    expect(isBootCandidate({ ...base, kind: 'episode' })).toBe(false)
     expect(isBootCandidate({ ...base, provenance: 'untrusted' })).toBe(false)
     expect(isBootCandidate({ ...base, sensitivity: 'secret' })).toBe(false)
   })
 
-  it('记下的四类 priority 0 都进，人格与应用放宽到 1，来自对话的两类不进', () => {
-    const eligible = LAYERS.map((layer) => [layer, bootEligible(layer, 0), bootEligible(layer, 1)])
+  it('bootEligible 仅对 priority === 0 的 entry 为真', () => {
+    const eligible = ENTRY_KINDS.map((kind) => [kind, bootEligible(kind, 0), bootEligible(kind, 1)])
     expect(eligible).toEqual([
-      ['core', true, false],
-      ['persona', true, true],
-      ['app', true, true],
-      ['user', true, false],
-      ['subject', false, false],
+      ['entry', true, false],
+      ['fact', false, false],
       ['episode', false, false],
     ])
   })

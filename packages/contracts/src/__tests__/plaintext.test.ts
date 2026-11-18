@@ -4,9 +4,9 @@ import {
   addedPlaintextCredentials,
   ConvertToCredentialRequest,
   CredentialFieldName,
+  EntryWriteError,
   findPlaintextCredentials,
   MatchCredentialValuesRequest,
-  MemoryWriteError,
   PLAINTEXT_CREDENTIAL,
   PLAINTEXT_KINDS,
   placeholderAllowed,
@@ -15,12 +15,12 @@ import {
 import { ErrorResponse } from '../auth'
 import { LoreImportApplyRequest, LorePlaintextSpot, LorePlanNode } from '../lore'
 import {
-  ConsoleCreateMemoryRequest,
-  ConsoleUpdateMemoryRequest,
-  CreateMemoryRequest,
-  UpdateMemoryRequest,
-} from '../memories'
-import { LAYERS, SENSITIVITIES } from '../memory'
+  ConsoleCreateEntryRequest,
+  ConsoleUpdateEntryRequest,
+  CreateEntryRequest,
+  UpdateEntryRequest,
+} from '../entries'
+import { CIRCLE_KINDS, ENTRY_KINDS, SENSITIVITIES } from '../memory'
 import { PLAINTEXT_KIND_NAMES } from '../names'
 
 // 令牌样例在运行时拼出来：仓库里不出现完整的令牌写法，免得被托管平台的密钥扫描拦下
@@ -419,7 +419,7 @@ describe('规则只用 PostgreSQL 也认的写法', () => {
 describe('转存为凭据的请求', () => {
   const created = { kind: 'new', identifier: 'wifi', name: '无线网络', field: 'password' }
   const base = {
-    memoryId: '00000000-0000-4000-8000-000000000000',
+    entryId: '00000000-0000-4000-8000-000000000000',
     expectedVersion: 1,
     target: created,
   }
@@ -506,7 +506,7 @@ describe('转存为凭据的请求', () => {
   it('不认识的去处与旧的写法都不收', () => {
     expect(parsed({ kind: 'other' }).success).toBe(false)
     const old = ConvertToCredentialRequest.safeParse({
-      memoryId: base.memoryId,
+      entryId: base.entryId,
       expectedVersion: 1,
       value: 'hunter2',
       identifier: 'wifi',
@@ -536,45 +536,54 @@ describe('按值查找的请求', () => {
 })
 
 describe('占位符能放在哪里', () => {
-  it('只有本人、敏感级不低于私密', () => {
-    for (const layer of LAYERS) {
-      for (const sensitivity of SENSITIVITIES) {
-        const expected = layer === 'user' && (sensitivity === 'private' || sensitivity === 'secret')
-        expect(placeholderAllowed(layer, sensitivity), `${layer} ${sensitivity}`).toBe(expected)
+  it('只有个人圈、正式词条且敏感级不低于私密', () => {
+    for (const circleKind of CIRCLE_KINDS) {
+      for (const kind of ENTRY_KINDS) {
+        for (const sensitivity of SENSITIVITIES) {
+          const expected =
+            circleKind === 'personal' &&
+            kind === 'entry' &&
+            (sensitivity === 'private' || sensitivity === 'secret')
+          expect(
+            placeholderAllowed(circleKind, kind, sensitivity),
+            `${circleKind} ${kind} ${sensitivity}`,
+          ).toBe(expected)
+        }
       }
     }
   })
 })
 
 describe('写入时放行的标记与拒绝时的错误', () => {
-  const create = { uri: 'user://notes/wifi', content: '密码：hunter2' }
+  const create = { content: '密码：hunter2' }
+  const id = 'm-234567'
 
   it('Key 的请求只收 plaintextOk，管理界面的只收另外两个；给错一边的去掉', () => {
     const all = { plaintextOk: true, ignorePlaintext: true, allowPlaintext: true }
-    expect(CreateMemoryRequest.parse({ ...create, ...all })).toMatchObject({ plaintextOk: true })
-    expect(CreateMemoryRequest.parse({ ...create, ...all })).not.toHaveProperty('ignorePlaintext')
-    expect(CreateMemoryRequest.parse({ ...create, ...all })).not.toHaveProperty('allowPlaintext')
-    expect(UpdateMemoryRequest.parse({ uri: create.uri, ...all })).toEqual({
-      uri: create.uri,
+    expect(CreateEntryRequest.parse({ ...create, ...all })).toMatchObject({ plaintextOk: true })
+    expect(CreateEntryRequest.parse({ ...create, ...all })).not.toHaveProperty('ignorePlaintext')
+    expect(CreateEntryRequest.parse({ ...create, ...all })).not.toHaveProperty('allowPlaintext')
+    expect(UpdateEntryRequest.parse({ id, ...all })).toEqual({
+      id,
       plaintextOk: true,
     })
-    const console = ConsoleCreateMemoryRequest.parse({ ...create, ...all })
-    expect(console).toMatchObject({ ignorePlaintext: true, allowPlaintext: true })
-    expect(console).not.toHaveProperty('plaintextOk')
-    expect(ConsoleUpdateMemoryRequest.parse({ uri: create.uri, ...all })).toEqual({
-      uri: create.uri,
+    const consoleReq = ConsoleCreateEntryRequest.parse({ ...create, ...all })
+    expect(consoleReq).toMatchObject({ ignorePlaintext: true, allowPlaintext: true })
+    expect(consoleReq).not.toHaveProperty('plaintextOk')
+    expect(ConsoleUpdateEntryRequest.parse({ id, ...all })).toEqual({
+      id,
       ignorePlaintext: true,
       allowPlaintext: true,
     })
   })
 
   it('错误体兼容只有 error 的写法，plaintext 只有行号与类别', () => {
-    expect(MemoryWriteError.parse({ error: '没有权限' })).toEqual({ error: '没有权限' })
+    expect(EntryWriteError.parse({ error: '没有权限' })).toEqual({ error: '没有权限' })
     const body = { error: '正文第 1 行疑似明文', plaintext: [{ line: 1, kind: 'label' }] }
-    expect(MemoryWriteError.parse(body)).toEqual(body)
+    expect(EntryWriteError.parse(body)).toEqual(body)
     expect(ErrorResponse.parse(body)).toEqual({ error: body.error })
     const bad = { ...body, plaintext: [{ line: 1, kind: 'x' }] }
-    expect(MemoryWriteError.safeParse(bad).success).toBe(false)
+    expect(EntryWriteError.safeParse(bad).success).toBe(false)
   })
 })
 

@@ -1,22 +1,28 @@
 import {
   ACCOUNT_LINK_PURPOSES,
+  CIRCLE_KINDS,
   CONVERSATION_KINDS,
-  CURATED_LAYERS,
+  CREDENTIAL_SOURCES,
   DEFAULT_EXTRACTION_DAILY_WRITES,
   DEFAULT_EXTRACTION_MONTHLY_TOKENS,
-  CREDENTIAL_SOURCES,
-  LAYERS,
+  ENTRY_KINDS,
+  FACET_MATCH_MODES,
   MEMBER_ROLES,
-  MEMORY_FORMS,
   PROVENANCES,
   SENSITIVITIES,
   SUBJECT_KINDS,
   VAULT_CONNECTION_STATUSES,
   VAULT_DISABLED_REASONS,
   VAULT_ERROR_KINDS,
+  type ClientConfig,
   type CredentialField,
-  type KeyScopes,
+  type DefaultFacets,
+  type FacetImplies,
+  type LensKeyScopes,
+  type LinkedCircleGrant,
   type StoredSensitiveFinding,
+  type VariantInput,
+  type WhenCondition,
 } from '@kioku/contracts'
 import { sql } from 'drizzle-orm'
 import {
@@ -43,23 +49,23 @@ import {
   type AnyPgColumn,
 } from 'drizzle-orm/pg-core'
 
-// 表分两类：身份表（accounts、sessions、account_links、login_attempts、spaces、space_members、api_keys）与实例设置（settings）在鉴权阶段就要跨空间查询，不开行级安全；
-// 其余内容表都带 space_id，由迁移里的 RLS 策略按会话变量 app.space_id 强制隔离。
-// 外键检查不受 RLS 约束，所以指向内容表的外键都带上 space_id（复合外键），保证不会关联到别的空间。
+// 表分两类：身份与路由表（accounts、settings、circles、circle_members、circle_departures、sessions、
+// account_links、login_attempts、api_keys、device_grants）不开行级安全；其余内容表全部带非空 circle_id，
+// 由迁移中的四命令 RLS 策略按会话变量 app.read_circles 与 app.write_circles 分别控制读与写。
 
 const bytea = customType<{ data: Buffer }>({ dataType: () => 'bytea' })
 const tsvector = customType<{ data: string }>({ dataType: () => 'tsvector' })
 
-// 整个实例只用一个嵌入模型和维度，向量才可比较。1024 维在 pgvector HNSW 索引的上限（2000）之内
+// 整个实例共用同一个向量维度（1024 维在 pgvector HNSW 索引上限 2000 之内）
 export const EMBEDDING_DIMENSIONS = 1024
 
 const createdAt = () => timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
 const updatedAt = () => timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
 
-export const memoryLayer = pgEnum('memory_layer', LAYERS)
+export const circleKind = pgEnum('circle_kind', CIRCLE_KINDS)
+export const entryKind = pgEnum('entry_kind', ENTRY_KINDS)
 export const sensitivity = pgEnum('sensitivity', SENSITIVITIES)
 export const provenance = pgEnum('provenance', PROVENANCES)
-export const memoryForm = pgEnum('memory_form', MEMORY_FORMS)
 export const memberRole = pgEnum('member_role', MEMBER_ROLES)
 export const subjectKind = pgEnum('subject_kind', SUBJECT_KINDS)
 export const credentialSource = pgEnum('credential_source', CREDENTIAL_SOURCES)
@@ -67,82 +73,88 @@ export const vaultConnectionStatus = pgEnum('vault_connection_status', VAULT_CON
 export const vaultDisabledReason = pgEnum('vault_disabled_reason', VAULT_DISABLED_REASONS)
 export const vaultErrorKind = pgEnum('vault_error_kind', VAULT_ERROR_KINDS)
 export const conversationKind = pgEnum('conversation_kind', CONVERSATION_KINDS)
+export const accountLinkPurpose = pgEnum('account_link_purpose', ACCOUNT_LINK_PURPOSES)
+export const facetMatchMode = pgEnum('facet_match_mode', FACET_MATCH_MODES)
 
-// ---- 身份表 ----
+// ---- 身份与系统表（不开 RLS）----
 
 export const accounts = pgTable('accounts', {
   id: uuid().primaryKey().defaultRandom(),
   username: text().notNull().unique(),
   displayName: text().notNull(),
-  // 管理员新建的账号在用一次性链接设置密码之前为空，这时登录不了
   passwordHash: text(),
-  // 实例管理员：能改嵌入模型等全实例设置；首次初始化创建的账号是管理员
   isAdmin: boolean().notNull().default(false),
-  // 停用：登录被拒（和密码错误一样的回应）、会话失效，应用的访问密钥作废
   disabledAt: timestamp({ withTimezone: true }),
   createdAt: createdAt(),
 })
 
-// 全实例设置（嵌入模型等），不属于任何空间
 export const settings = pgTable('settings', {
   key: text().primaryKey(),
   value: jsonb().notNull(),
   updatedAt: updatedAt(),
 })
 
-export const spaces = pgTable('spaces', {
-  id: uuid().primaryKey().defaultRandom(),
-  name: text().notNull(),
-  // 抽取预算：每月最多用多少 token（UTC 自然月），每个对象每天最多写几条事实
-  extractionMonthlyTokens: integer().notNull().default(DEFAULT_EXTRACTION_MONTHLY_TOKENS),
-  extractionDailyWrites: integer().notNull().default(DEFAULT_EXTRACTION_DAILY_WRITES),
-  // 高级设置里空间这一级的覆盖（contracts 的 SpaceAdvanced）：只存覆盖了的项，缺省沿用实例
-  advanced: jsonb().$type<Record<string, unknown>>().notNull().default({}),
-  // 空间级的敏感内容识别与脱敏设置（contracts 的 SpacePrivacySettings）；revision 变更后触发后台回扫
-  privacy: jsonb().$type<Record<string, unknown>>().notNull().default({}),
-  privacyRevision: integer().notNull().default(1),
-  createdAt: createdAt(),
-})
-
-export const spaceMembers = pgTable(
-  'space_members',
+// 记忆圈：personal 为每个账号唯一不可删的个人圈；shared 为共享圈（家庭、团队、机器人社交圈等）
+export const circles = pgTable(
+  'circles',
   {
-    spaceId: uuid()
+    id: uuid().primaryKey().defaultRandom(),
+    slug: text().notNull().unique(),
+    name: text().notNull(),
+    kind: circleKind().notNull(),
+    ownerAccountId: uuid().references(() => accounts.id, { onDelete: 'cascade' }),
+    defaultFacets: jsonb().$type<DefaultFacets>().notNull().default({}),
+    extractionMonthlyTokens: integer().notNull().default(DEFAULT_EXTRACTION_MONTHLY_TOKENS),
+    extractionDailyWrites: integer().notNull().default(DEFAULT_EXTRACTION_DAILY_WRITES),
+    advanced: jsonb().$type<Record<string, unknown>>().notNull().default({}),
+    privacy: jsonb().$type<Record<string, unknown>>().notNull().default({}),
+    privacyRevision: integer().notNull().default(1),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    unique('circles_id_kind_unique').on(t.id, t.kind),
+    uniqueIndex('circles_personal_owner_idx')
+      .on(t.ownerAccountId)
+      .where(sql`${t.kind} = 'personal'`),
+    check(
+      'circles_owner_by_kind',
+      sql`(${t.kind} = 'personal') = (${t.ownerAccountId} is not null)`,
+    ),
+  ],
+)
+
+export const circleMembers = pgTable(
+  'circle_members',
+  {
+    circleId: uuid()
       .notNull()
-      .references(() => spaces.id, { onDelete: 'cascade' }),
+      .references(() => circles.id, { onDelete: 'cascade' }),
     accountId: uuid()
       .notNull()
       .references(() => accounts.id, { onDelete: 'cascade' }),
     role: memberRole().notNull(),
-    // 让不让 Dream 整理这个成员的本人记忆（secret 本来就不读）：默认整理，只有本人能改。
-    // 关掉之后这些内容不发给抽取模型，整理标记也不前进，再打开时接着看关掉期间新增与改动的（见 extraction/dream.ts）
     dreamPrivate: boolean().notNull().default(true),
     createdAt: createdAt(),
   },
-  (t) => [primaryKey({ columns: [t.spaceId, t.accountId] })],
+  (t) => [primaryKey({ columns: [t.circleId, t.accountId] })],
 )
 
-// 离开空间的成员（被移除或自己离开）：他在这个空间的本人记忆、凭据与密码库连接留着、谁也看不到，
-// 期间重新加入就删掉这一行、照旧可见；满 DEPARTURE_RETENTION_DAYS 天由保留期的清理删掉这些数据和这一行（jobs/retention.ts）
-export const spaceDepartures = pgTable(
-  'space_departures',
+export const circleDepartures = pgTable(
+  'circle_departures',
   {
-    spaceId: uuid()
+    circleId: uuid()
       .notNull()
-      .references(() => spaces.id, { onDelete: 'cascade' }),
+      .references(() => circles.id, { onDelete: 'cascade' }),
     accountId: uuid()
       .notNull()
       .references(() => accounts.id, { onDelete: 'cascade' }),
     leftAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
-    // 离开时的成员设置，重新加入时照旧：关掉了 Dream 整理本人记忆的，回来之后还是关着
     dreamPrivate: boolean().notNull(),
-    // 保留期的清理开始删他的数据的时间：第一批在同一个事务里写上。开始之后到清理完成、这一行删掉之前不能重新加入
     purgeStartedAt: timestamp({ withTimezone: true }),
   },
-  (t) => [primaryKey({ columns: [t.spaceId, t.accountId] }), index().on(t.leftAt)],
+  (t) => [primaryKey({ columns: [t.circleId, t.accountId] }), index().on(t.leftAt)],
 )
 
-// 管理界面的登录会话；Cookie 里是随机令牌，库里只存它的 SHA-256
 export const sessions = pgTable(
   'sessions',
   {
@@ -151,21 +163,15 @@ export const sessions = pgTable(
       .notNull()
       .references(() => accounts.id, { onDelete: 'cascade' }),
     tokenHash: text().notNull().unique(),
-    // 登录时的客户端地址（按 KIOKU_TRUSTED_PROXIES 取）与 User-Agent（截断），只用于登录设备列表
     clientAddress: text(),
     userAgent: text(),
     createdAt: createdAt(),
-    // 最近活动：比上次晚 5 分钟以上才更新（见 auth/session.ts）
     lastActiveAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
     expiresAt: timestamp({ withTimezone: true }).notNull(),
   },
   (t) => [index().on(t.accountId)],
 )
 
-export const accountLinkPurpose = pgEnum('account_link_purpose', ACCOUNT_LINK_PURPOSES)
-
-// 一次性链接：设置或重置密码。令牌只在生成时返回一次，库里只存它的 SHA-256；
-// 只能用一次，同一账号再生成时作废之前没用过的。过期与用过的由定时任务清理（jobs/cleanup.ts）
 export const accountLinks = pgTable(
   'account_links',
   {
@@ -183,114 +189,25 @@ export const accountLinks = pgTable(
   (t) => [index().on(t.accountId), index().on(t.expiresAt)],
 )
 
-// 浏览器授权申请里的一个平台
-export interface DeviceGrantPlatform {
-  runtimeFamily: string
-  clientName: string | null
-}
-// 确认时一个平台的选择：跳过，或者用哪个应用、签发什么样的访问密钥
-export type DeviceGrantSelection =
-  | { runtimeFamily: string; skip: true }
-  | { runtimeFamily: string; appId: string; keyName: string; scopes: KeyScopes }
-
-// 浏览器授权的申请（routes/device.ts）：命令行申请，成员在管理界面的确认页确认，命令行凭设备码取走访问密钥。
-// 设备码与确认码都只存 SHA-256；访问密钥在取走的那一刻才生成，这里不存明文。
-// 确认时记下确认人、空间与每个平台的选择（应用、名称与权限范围），取走时照签发的规则再核对一遍。
-// 取走、拒绝之后这一行就删掉，过期的由定时任务清理（jobs/cleanup.ts）
-export const deviceGrants = pgTable(
-  'device_grants',
-  {
-    id: uuid().primaryKey().defaultRandom(),
-    deviceHash: text().notNull().unique(),
-    userHash: text().notNull().unique(),
-    // 单个平台的申请（runtimeFamily）与几个平台的申请（platforms）二选一，取走时按这个决定回哪种形状
-    runtimeFamily: text(),
-    platforms: jsonb().$type<DeviceGrantPlatform[]>(),
-    // 命令行自报的机器名，只在确认页显示
-    clientName: text(),
-    clientAddress: text(),
-    // 按客户端限制同时有多少条待确认的申请（http/clientIp.ts 的 clientKey）
-    clientKey: text().notNull(),
-    status: text({ enum: ['pending', 'approved', 'denied'] })
-      .notNull()
-      .default('pending'),
-    approvedBy: uuid().references(() => accounts.id, { onDelete: 'cascade' }),
-    // 确认时每个平台的选择，顺序和申请的一样
-    selections: jsonb().$type<DeviceGrantSelection[]>(),
-    // 取走时和确认人现在的成员关系比：确认之后离开过空间的不签发
-    approvedAt: timestamp({ withTimezone: true }),
-    spaceId: uuid().references(() => spaces.id, { onDelete: 'cascade' }),
-    // 单个平台的申请用的应用：应用删掉时，确认过、还没取走的申请一起删。
-    // 几个平台的不设它，删掉其中一个应用不连带别的平台，取走时这一项按应用不在了处理
-    appId: uuid(),
-    // 只在升级之前确认、还没取走的申请里有值；之后的选择都在 selections
-    keyName: text(),
-    scopes: jsonb().$type<KeyScopes>(),
-    createdAt: createdAt(),
-    expiresAt: timestamp({ withTimezone: true }).notNull(),
-    lastPolledAt: timestamp({ withTimezone: true }),
-  },
-  (t) => [
-    index().on(t.expiresAt),
-    index().on(t.clientKey),
-    foreignKey({ columns: [t.spaceId, t.appId], foreignColumns: [apps.spaceId, apps.id] }).onDelete(
-      'cascade',
-    ),
-    check(
-      'device_grants_platforms_shape',
-      sql`(${t.runtimeFamily} is null) <> (${t.platforms} is null)`,
-    ),
-  ],
-)
-
-// 登录失败计数，一个计数键一行（「用户名」或「用户名 + 客户端」，见 auth/rateLimit.ts）；放在数据库里而不是进程内存：
-// 并发请求用原子加一计数，不需要淘汰策略，也就不会被随机用户名挤掉或塞满
 export const loginAttempts = pgTable(
   'login_attempts',
   {
-    // 计数键：用户名，或用户名加客户端，编码见 auth/rateLimit.ts
     username: text().primaryKey(),
     count: integer().notNull(),
     resetAt: timestamp({ withTimezone: true }).notNull(),
   },
-  // 清理过期计数按 reset_at 删除
   (t) => [index().on(t.resetAt)],
 )
 
-// Key 明文只在创建时返回一次；库里存前缀（用于查找和显示）与整串的 SHA-256
-export const apiKeys = pgTable(
-  'api_keys',
-  {
-    id: uuid().primaryKey().defaultRandom(),
-    spaceId: uuid()
-      .notNull()
-      .references(() => spaces.id, { onDelete: 'cascade' }),
-    appId: uuid().notNull(),
-    name: text().notNull(),
-    prefix: text().notNull().unique(),
-    secretHash: text().notNull(),
-    scopes: jsonb().$type<KeyScopes>().notNull(),
-    createdAt: createdAt(),
-    lastUsedAt: timestamp({ withTimezone: true }),
-    revokedAt: timestamp({ withTimezone: true }),
-  },
-  (t) => [
-    index().on(t.spaceId),
-    foreignKey({ columns: [t.spaceId, t.appId], foreignColumns: [apps.spaceId, apps.id] }).onDelete(
-      'cascade',
-    ),
-  ],
-)
-
-// ---- 内容表（RLS）----
+// ---- 内容表（强制 RLS，共 31 张）----
 
 export const personas = pgTable(
   'personas',
   {
     id: uuid().primaryKey().defaultRandom(),
-    spaceId: uuid()
+    circleId: uuid()
       .notNull()
-      .references(() => spaces.id, { onDelete: 'cascade' }),
+      .references(() => circles.id, { onDelete: 'cascade' }),
     slug: text().notNull(),
     name: text().notNull(),
     extendsId: uuid().references((): AnyPgColumn => personas.id, { onDelete: 'set null' }),
@@ -298,205 +215,355 @@ export const personas = pgTable(
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
-  (t) => [uniqueIndex().on(t.spaceId, t.slug), unique().on(t.spaceId, t.id)],
+  (t) => [
+    uniqueIndex('personas_circle_slug_idx').on(t.circleId, t.slug),
+    unique('personas_circle_id_unique').on(t.circleId, t.id),
+  ],
 )
 
-// 一个接入方实例；ownerAccountId 是应用所有者，决定本人（user）读的是哪个成员的记忆
-export const apps = pgTable(
-  'apps',
+// 人格设定段：按 trait_key 在继承链上逐段覆盖
+export const personaTraits = pgTable(
+  'persona_traits',
+  {
+    circleId: uuid()
+      .notNull()
+      .references(() => circles.id, { onDelete: 'cascade' }),
+    personaId: uuid().notNull(),
+    traitKey: text().notNull(),
+    title: text().notNull(),
+    content: text().notNull(),
+    sortOrder: integer().notNull().default(0),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.personaId, t.traitKey] }),
+    index('persona_traits_circle_idx').on(t.circleId, t.personaId, t.sortOrder),
+    foreignKey({
+      name: 'persona_traits_persona_fk',
+      columns: [t.circleId, t.personaId],
+      foreignColumns: [personas.circleId, personas.id],
+    }).onDelete('cascade'),
+  ],
+)
+
+// 接入实例：作为访问密钥主场圈、所有者、默认人格及群规则的唯一真源
+export const clients = pgTable(
+  'clients',
   {
     id: uuid().primaryKey().defaultRandom(),
-    spaceId: uuid()
+    circleId: uuid()
       .notNull()
-      .references(() => spaces.id, { onDelete: 'cascade' }),
+      .references(() => circles.id, { onDelete: 'cascade' }),
     slug: text().notNull(),
     name: text().notNull(),
     runtimeFamily: text().notNull(),
     ownerAccountId: uuid()
       .notNull()
       .references(() => accounts.id),
-    defaultPersonaId: uuid().references(() => personas.id, { onDelete: 'set null' }),
-    config: jsonb().$type<Record<string, unknown>>().notNull().default({}),
+    defaultPersonaId: uuid(),
+    config: jsonb().$type<ClientConfig>().notNull().default({ personMemoryMode: 'strict' }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
-  (t) => [uniqueIndex().on(t.spaceId, t.slug), unique().on(t.spaceId, t.id)],
+  (t) => [
+    uniqueIndex('clients_circle_slug_idx').on(t.circleId, t.slug),
+    unique('clients_circle_id_unique').on(t.circleId, t.id),
+    // 迁移基线中手写 ON DELETE SET NULL ("default_persona_id")，避免把 circle_id 置空
+    foreignKey({
+      name: 'clients_default_persona_fk',
+      columns: [t.circleId, t.defaultPersonaId],
+      foreignColumns: [personas.circleId, personas.id],
+    }).onDelete('set null'),
+  ],
+)
+
+// 访问密钥（身份表）：归属某接入实例，主场圈与所有者统一从 clients 读取
+export const apiKeys = pgTable(
+  'api_keys',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    clientId: uuid()
+      .notNull()
+      .references(() => clients.id, { onDelete: 'cascade' }),
+    name: text().notNull(),
+    prefix: text().notNull().unique(),
+    secretHash: text().notNull(),
+    linkedCircles: jsonb().$type<LinkedCircleGrant[]>().notNull().default([]),
+    contextFacets: jsonb().$type<WhenCondition>().notNull().default({}),
+    personaOverrideId: uuid().references(() => personas.id, { onDelete: 'set null' }),
+    scopes: jsonb().$type<LensKeyScopes>().notNull(),
+    createdAt: createdAt(),
+    lastUsedAt: timestamp({ withTimezone: true }),
+    revokedAt: timestamp({ withTimezone: true }),
+  },
+  (t) => [index().on(t.clientId)],
+)
+
+export interface DeviceGrantPlatform {
+  runtimeFamily: string
+  clientName: string | null
+}
+export type DeviceGrantSelection =
+  | { runtimeFamily: string; skip: true }
+  | {
+      runtimeFamily: string
+      clientId: string
+      keyName: string
+      scopes: LensKeyScopes
+      contextFacets?: WhenCondition
+    }
+
+// 浏览器授权申请（身份表）
+export const deviceGrants = pgTable(
+  'device_grants',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    deviceHash: text().notNull().unique(),
+    userHash: text().notNull().unique(),
+    runtimeFamily: text(),
+    platforms: jsonb().$type<DeviceGrantPlatform[]>(),
+    clientName: text(),
+    clientAddress: text(),
+    clientKey: text().notNull(),
+    status: text({ enum: ['pending', 'approved', 'denied'] })
+      .notNull()
+      .default('pending'),
+    approvedBy: uuid().references(() => accounts.id, { onDelete: 'cascade' }),
+    selections: jsonb().$type<DeviceGrantSelection[]>(),
+    approvedAt: timestamp({ withTimezone: true }),
+    circleId: uuid().references(() => circles.id, { onDelete: 'cascade' }),
+    clientId: uuid(),
+    linkedCircles: jsonb().$type<LinkedCircleGrant[]>(),
+    contextFacets: jsonb().$type<WhenCondition>(),
+    keyName: text(),
+    scopes: jsonb().$type<LensKeyScopes>(),
+    createdAt: createdAt(),
+    expiresAt: timestamp({ withTimezone: true }).notNull(),
+    lastPolledAt: timestamp({ withTimezone: true }),
+  },
+  (t) => [
+    index().on(t.expiresAt),
+    index().on(t.clientKey),
+    index().on(t.circleId),
+    foreignKey({
+      name: 'device_grants_circle_client_fk',
+      columns: [t.circleId, t.clientId],
+      foreignColumns: [clients.circleId, clients.id],
+    }).onDelete('cascade'),
+    check(
+      'device_grants_platforms_shape',
+      sql`(${t.runtimeFamily} is null) <> (${t.platforms} is null)`,
+    ),
+  ],
 )
 
 export const subjects = pgTable(
   'subjects',
   {
     id: uuid().primaryKey().defaultRandom(),
-    spaceId: uuid()
+    circleId: uuid()
       .notNull()
-      .references(() => spaces.id, { onDelete: 'cascade' }),
+      .references(() => circles.id, { onDelete: 'cascade' }),
     kind: subjectKind().notNull(),
     displayName: text().notNull(),
-    // 成员在管理界面改过名字：之后平台上的显示名再变也不跟着改
     nameLocked: boolean().notNull().default(false),
-    // 对象就是空间成员本人时填；用来认出「主人」
     accountId: uuid().references(() => accounts.id, { onDelete: 'set null' }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
   (t) => [
-    // 对象页按第一次遇到的时间从新到旧翻页；只按空间查的也用它
-    index().on(t.spaceId, t.createdAt, t.id),
-    unique().on(t.spaceId, t.id),
-    // 平台账号按种类挂到对象上（见 subject_identities 的外键）
-    unique().on(t.spaceId, t.id, t.kind),
+    index('subjects_circle_created_idx').on(t.circleId, t.createdAt, t.id),
+    unique('subjects_circle_id_unique').on(t.circleId, t.id),
+    unique('subjects_circle_id_kind_unique').on(t.circleId, t.id, t.kind),
   ],
 )
 
-// 平台账号到对象的映射；合并对象就是把多条 identity 指向同一个 subject。
-// 账号按种类区分：QQ 的群号与 QQ 号是两套编号，同一个数字可能既是群又是人。
-// 外键带上种类，平台账号只能挂到同种类的对象上，人和群合并不到一起
 export const subjectIdentities = pgTable(
   'subject_identities',
   {
     id: uuid().primaryKey().defaultRandom(),
-    spaceId: uuid()
+    circleId: uuid()
       .notNull()
-      .references(() => spaces.id, { onDelete: 'cascade' }),
+      .references(() => circles.id, { onDelete: 'cascade' }),
     subjectId: uuid().notNull(),
     kind: subjectKind().notNull(),
     platform: text().notNull(),
     externalId: text().notNull(),
-    // 平台上的显示名，随上报更新
     displayName: text(),
     createdAt: createdAt(),
   },
   (t) => [
-    uniqueIndex().on(t.spaceId, t.platform, t.kind, t.externalId),
-    index().on(t.subjectId),
+    uniqueIndex('subject_identities_platform_idx').on(t.circleId, t.platform, t.kind, t.externalId),
+    index('subject_identities_subject_idx').on(t.subjectId),
     foreignKey({
       name: 'subject_identities_subject_fk',
-      columns: [t.spaceId, t.subjectId, t.kind],
-      foreignColumns: [subjects.spaceId, subjects.id, subjects.kind],
+      columns: [t.circleId, t.subjectId, t.kind],
+      foreignColumns: [subjects.circleId, subjects.id, subjects.kind],
     }).onDelete('cascade'),
   ],
 )
 
-// 按群换人格：应用在某个群（或频道）里用的人格。没有规则的群与私聊用应用的默认人格。
-// 人格被规则用着时不能删（删除人格的接口先检查，外键兜底）；群对象或应用删掉时规则跟着删
-export const appGroupPersonas = pgTable(
-  'app_group_personas',
+// 按群规则：按群覆盖人格及单群强隔离锁（isolate_group_memory）
+export const clientGroupRules = pgTable(
+  'client_group_rules',
   {
-    spaceId: uuid()
+    circleId: uuid()
       .notNull()
-      .references(() => spaces.id, { onDelete: 'cascade' }),
-    appId: uuid().notNull(),
-    subjectId: uuid().notNull(),
-    personaId: uuid().notNull(),
+      .references(() => circles.id, { onDelete: 'cascade' }),
+    clientId: uuid().notNull(),
+    groupSubjectId: uuid().notNull(),
+    personaId: uuid(),
+    isolateGroupMemory: boolean().notNull().default(false),
     createdAt: createdAt(),
+    updatedAt: updatedAt(),
   },
   (t) => [
-    primaryKey({ columns: [t.appId, t.subjectId] }),
-    index().on(t.personaId),
-    index().on(t.subjectId),
-    foreignKey({ columns: [t.spaceId, t.appId], foreignColumns: [apps.spaceId, apps.id] }).onDelete(
-      'cascade',
-    ),
+    primaryKey({ columns: [t.clientId, t.groupSubjectId] }),
+    index('client_group_rules_persona_idx').on(t.personaId),
+    index('client_group_rules_group_idx').on(t.groupSubjectId),
     foreignKey({
-      columns: [t.spaceId, t.subjectId],
-      foreignColumns: [subjects.spaceId, subjects.id],
+      name: 'client_group_rules_client_fk',
+      columns: [t.circleId, t.clientId],
+      foreignColumns: [clients.circleId, clients.id],
     }).onDelete('cascade'),
     foreignKey({
-      columns: [t.spaceId, t.personaId],
-      foreignColumns: [personas.spaceId, personas.id],
-    }),
+      name: 'client_group_rules_subject_fk',
+      columns: [t.circleId, t.groupSubjectId],
+      foreignColumns: [subjects.circleId, subjects.id],
+    }).onDelete('cascade'),
+    // 迁移基线中手写 ON DELETE SET NULL ("persona_id")
+    foreignKey({
+      name: 'client_group_rules_persona_fk',
+      columns: [t.circleId, t.personaId],
+      foreignColumns: [personas.circleId, personas.id],
+    }).onDelete('set null'),
   ],
 )
 
-// 会话：某个应用在一个群里（group，频道也算）、和一个人私聊（direct），或不带会话上下文时（none，例如本机的 Claude Code）
-// 的那一串对话，挂着会话摘要。按（应用、群）、（应用、私聊的人）、（应用、所属成员）认一个会话，生命周期事件来时
-// 建立或更新最近活动。删掉会话时它的会话摘要跟着删，在这里听到的联系人事实只断开关联（迁移里的触发器与外键动作）。
-// 应用、联系人或成员删掉时会话跟着删；合并联系人时改指向保留的联系人
+// 会话：群聊/频道、私聊，以及按 (client_id, owner_account_id, device_key, project_slug) 细分的本机无上下文会话
 export const conversations = pgTable(
   'conversations',
   {
     id: uuid().primaryKey().defaultRandom(),
-    spaceId: uuid()
+    circleId: uuid()
       .notNull()
-      .references(() => spaces.id, { onDelete: 'cascade' }),
-    appId: uuid().notNull(),
+      .references(() => circles.id, { onDelete: 'cascade' }),
+    clientId: uuid().notNull(),
     kind: conversationKind().notNull(),
-    // 群聊是那个群，私聊是那个人；不带会话上下文的为空
+    deviceKey: text().notNull().default(''),
+    projectSlug: text().notNull().default(''),
     subjectId: uuid(),
-    // 不带会话上下文的会话归哪个成员；群聊、私聊为空
     ownerAccountId: uuid().references(() => accounts.id, { onDelete: 'cascade' }),
     createdAt: createdAt(),
     lastActiveAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    unique().on(t.spaceId, t.id),
-    // 同一个应用里，一个群或一个人只有一个会话，一个成员只有一个不带会话上下文的会话（空值不算重复）
-    uniqueIndex('conversations_subject_idx').on(t.appId, t.subjectId),
-    uniqueIndex('conversations_owner_idx').on(t.appId, t.ownerAccountId),
-    // 对话页按最近活动从新到旧列出
-    index().on(t.spaceId, t.lastActiveAt),
-    // 合并联系人时按联系人找会话
-    index().on(t.subjectId),
-    foreignKey({ columns: [t.spaceId, t.appId], foreignColumns: [apps.spaceId, apps.id] }).onDelete(
-      'cascade',
-    ),
+    unique('conversations_circle_id_unique').on(t.circleId, t.id),
+    uniqueIndex('conversations_subject_idx')
+      .on(t.clientId, t.subjectId)
+      .where(sql`${t.kind} <> 'none'`),
+    uniqueIndex('conversations_none_idx')
+      .on(t.clientId, t.ownerAccountId, t.deviceKey, t.projectSlug)
+      .where(sql`${t.kind} = 'none'`),
+    index('conversations_circle_active_idx').on(t.circleId, t.lastActiveAt),
+    index('conversations_subject_lookup_idx').on(t.subjectId),
     foreignKey({
-      columns: [t.spaceId, t.subjectId],
-      foreignColumns: [subjects.spaceId, subjects.id],
+      name: 'conversations_client_fk',
+      columns: [t.circleId, t.clientId],
+      foreignColumns: [clients.circleId, clients.id],
+    }).onDelete('cascade'),
+    foreignKey({
+      name: 'conversations_subject_fk',
+      columns: [t.circleId, t.subjectId],
+      foreignColumns: [subjects.circleId, subjects.id],
     }).onDelete('cascade'),
     check(
       'conversations_kind_shape',
       sql`case when ${t.kind} = 'none'
         then ${t.subjectId} is null and ${t.ownerAccountId} is not null
-        else ${t.subjectId} is not null and ${t.ownerAccountId} is null end`,
+        else ${t.subjectId} is not null and ${t.ownerAccountId} is null and ${t.deviceKey} = '' and ${t.projectSlug} = '' end`,
     ),
   ],
 )
 
-// 记下的四类（通用、人格、应用、本人）在检查约束里的写法
-const curatedLayers = sql.raw(CURATED_LAYERS.map((l) => `'${l}'`).join(', '))
-
-export const memories = pgTable(
-  'memories',
+// 自定义切面维度：均按 circle_id 严格隔离；四大内置维度常量固化于 @kioku/contracts
+export const facetDimensions = pgTable(
+  'facet_dimensions',
   {
     id: uuid().primaryKey().defaultRandom(),
-    spaceId: uuid()
+    circleId: uuid()
       .notNull()
-      .references(() => spaces.id, { onDelete: 'cascade' }),
-    form: memoryForm().notNull(),
-    layer: memoryLayer().notNull(),
+      .references(() => circles.id, { onDelete: 'cascade' }),
+    key: text().notNull(),
+    name: text().notNull(),
+    matchMode: facetMatchMode().notNull().default('exclusive'),
+    description: text(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex('facet_dimensions_circle_key_idx').on(t.circleId, t.key),
+    check(
+      'facet_dimensions_not_builtin',
+      sql`${t.key} not in ('realm', 'env', 'runtime', 'project')`,
+    ),
+  ],
+)
+
+// 切面词表项：全量按 circle_id 隔离，含 implies 蕴含展开与 aliases 口语触发词
+export const facetTerms = pgTable(
+  'facet_terms',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    circleId: uuid()
+      .notNull()
+      .references(() => circles.id, { onDelete: 'cascade' }),
+    dimensionKey: text().notNull(),
+    slug: text().notNull(),
+    label: text().notNull(),
+    implies: jsonb().$type<FacetImplies>().notNull().default({}),
+    aliases: text()
+      .array()
+      .notNull()
+      .default(sql`'{}'`),
+    autoRegistered: boolean().notNull().default(false),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex('facet_terms_circle_dim_slug_idx').on(t.circleId, t.dimensionKey, t.slug),
+    index('facet_terms_aliases_gin_idx').using('gin', t.aliases),
+  ],
+)
+
+// 词条头表：统一正式词条（entry）、联系人/群事实（fact）与会话摘要（episode）
+export const entries = pgTable(
+  'entries',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    circleId: uuid()
+      .notNull()
+      .references(() => circles.id, { onDelete: 'cascade' }),
+    circleKind: circleKind().notNull(),
+    shortId: text().notNull(),
+    kind: entryKind().notNull(),
+    title: text().notNull(),
     sensitivity: sensitivity().notNull(),
     provenance: provenance().notNull(),
-    // global | app:<id> | group:<subject id> | direct:<subject id>
     originScope: text().notNull().default('global'),
-    // 归属到谁：按归属只填其中一个，约束见下方 check。本人（user）填所属成员；
-    // 不带会话上下文的会话摘要（episode）也填所属成员，群聊、私聊的会话摘要不填
+    clientId: uuid(),
     ownerAccountId: uuid().references(() => accounts.id, { onDelete: 'cascade' }),
-    personaId: uuid(),
-    appId: uuid(),
     subjectId: uuid(),
-    // 会话摘要挂在哪个会话上，联系人的事实是在哪个会话里听到的；记下的四类为空
+    subjectKind: subjectKind(),
     conversationId: uuid(),
-    // 记下的四类的坐标 = domain://path，domain 就是归属（core、user、persona、app）；来自对话的没有坐标
-    domain: text(),
-    path: text(),
-    // 记下的四类给人看的名字，必填；来自对话的为空。secret 的标题和坐标一样是明文
-    title: text(),
-    // secret 级只存密文：content 为空，ciphertext 与被主密钥包装过的数据密钥成对出现
-    content: text(),
-    ciphertext: bytea(),
-    wrappedKey: bytea(),
-    // 包装数据密钥用的主密钥的标识（crypto/keyring.ts）：轮换时按它找出还是旧密钥包装的记录
-    keyId: text(),
-    // 忽略明文提示时正文的 SHA-256（十六进制）：和现在的正文对得上才算忽略，正文一改提示自动回来。
-    // 不进事件快照，也不随空间导出（历史不跟着走，到了那边查不到是谁忽略的）；
-    // 正文变化、改成 secret 时清掉：它是含旧值的正文的哈希，能离线猜解，密文的哈希也不能留在明文列里
-    plaintextIgnoredHash: text(),
-    // 写入或回扫时由服务端完整引擎计算的敏感命中结果（只存类别与行号摘要，绝不存明文值）
-    sensitiveRevision: integer().notNull().default(0),
-    sensitiveCredential: boolean().notNull().default(false),
-    sensitivePii: boolean().notNull().default(false),
-    sensitiveFindings: jsonb().$type<StoredSensitiveFinding[]>().notNull().default([]),
+    realms: text()
+      .array()
+      .notNull()
+      .default(sql`'{}'`),
+    topics: text()
+      .array()
+      .notNull()
+      .default(sql`'{}'`),
     priority: integer().notNull().default(2),
     disclosure: text(),
     validFrom: timestamp({ withTimezone: true }).notNull().defaultNow(),
@@ -506,153 +573,225 @@ export const memories = pgTable(
     createdAt: createdAt(),
     updatedAt: updatedAt(),
     deletedAt: timestamp({ withTimezone: true }),
-    // 中文全文检索：标题、坐标、触发场景与正文；secret 的 content 为空，不会被索引
-    fts: tsvector().generatedAlwaysAs(
-      sql`to_tsvector('kioku_zh'::regconfig, coalesce(title, '') || ' ' || coalesce(domain, '') || ' ' || coalesce(path, '') || ' ' || coalesce(disclosure, '') || ' ' || coalesce(content, ''))`,
-    ),
   },
   (t) => [
-    index('memories_fts_idx').using('gin', t.fts),
-    // 坐标在同一归属里唯一：本人按成员各存一份，唯一键带上所属成员，共享的归属（成员为空）合并成同一个键。
-    // 两个成员可以各有一条 user://preferences/user；共享与本人的开头不同，坐标不会互相撞
-    uniqueIndex('memories_uri_live_idx')
-      .on(
-        t.spaceId,
-        t.domain,
-        t.path,
-        sql`coalesce(${t.ownerAccountId}, '00000000-0000-0000-0000-000000000000'::uuid)`,
-      )
-      .where(sql`${t.deletedAt} is null`),
-    index().on(t.spaceId, t.layer),
-    index().on(t.subjectId),
-    // 会话详情列出它的摘要与在这里听到的事实；删掉会话时外键动作与触发器也按它找
-    index('memories_conversation_idx')
+    // 全实例全局唯一短 ID（含已软删除行），绝不复用碰撞
+    unique('entries_short_id_unique').on(t.shortId),
+    unique('entries_circle_id_unique').on(t.circleId, t.id),
+    unique('entries_circle_id_sens_kind_unique').on(t.circleId, t.id, t.sensitivity, t.kind),
+    index('entries_circle_kind_idx').on(t.circleId, t.kind),
+    index('entries_subject_idx')
+      .on(t.subjectId)
+      .where(sql`${t.subjectId} is not null`),
+    index('entries_conversation_idx')
       .on(t.conversationId)
       .where(sql`${t.conversationId} is not null`),
-    // 轮换主密钥时按主密钥的标识找加密的行；只建在加密的行上（secret 不多）
-    index('memories_key_id_idx')
-      .on(t.spaceId, t.keyId)
-      .where(sql`${t.wrappedKey} is not null`),
-    index('memories_sensitive_idx')
-      .on(t.spaceId, t.sensitiveCredential, t.sensitivePii)
-      .where(sql`${t.deletedAt} is null`),
-    unique().on(t.spaceId, t.id),
+    index('entries_topics_gin_idx').using('gin', t.topics),
+    index('entries_realms_gin_idx').using('gin', t.realms),
     foreignKey({
-      columns: [t.spaceId, t.personaId],
-      foreignColumns: [personas.spaceId, personas.id],
+      name: 'entries_circle_kind_fk',
+      columns: [t.circleId, t.circleKind],
+      foreignColumns: [circles.id, circles.kind],
     }).onDelete('cascade'),
-    foreignKey({ columns: [t.spaceId, t.appId], foreignColumns: [apps.spaceId, apps.id] }).onDelete(
-      'cascade',
-    ),
+    // 迁移基线中手写 ON DELETE SET NULL ("client_id")
     foreignKey({
-      columns: [t.spaceId, t.subjectId],
-      foreignColumns: [subjects.spaceId, subjects.id],
-    }).onDelete('cascade'),
-    // 删掉会话时只把 conversation_id 置空（space_id 不动）：drizzle 写不出带列名的 SET NULL，
-    // 迁移里这条外键的动作是手写的 ON DELETE SET NULL ("conversation_id")。会话摘要由迁移里的触发器先删掉
-    foreignKey({
-      name: 'memories_conversation_fk',
-      columns: [t.spaceId, t.conversationId],
-      foreignColumns: [conversations.spaceId, conversations.id],
+      name: 'entries_client_fk',
+      columns: [t.circleId, t.clientId],
+      foreignColumns: [clients.circleId, clients.id],
     }).onDelete('set null'),
-    // 记下的四类有坐标与标题，来自对话的两类都没有；坐标的开头就是归属
+    foreignKey({
+      name: 'entries_subject_fk',
+      columns: [t.circleId, t.subjectId, t.subjectKind],
+      foreignColumns: [subjects.circleId, subjects.id, subjects.kind],
+    }).onDelete('cascade'),
+    // 迁移基线中手写 ON DELETE SET NULL ("conversation_id")；摘要由删除前触发器清理
+    foreignKey({
+      name: 'entries_conversation_fk',
+      columns: [t.circleId, t.conversationId],
+      foreignColumns: [conversations.circleId, conversations.id],
+    }).onDelete('set null'),
+    check('entries_short_id_format', sql`${t.shortId} ~ '^m-[2-9a-hjkmnp-tv-z]{6,8}$'`),
+    check('entries_subject_kind_pair', sql`(${t.subjectId} is null) = (${t.subjectKind} is null)`),
     check(
-      'memories_form_by_layer',
-      sql`(${t.form} = 'curated') = (${t.layer} in (${curatedLayers}))`,
+      'entries_shape_by_kind',
+      sql`case ${t.kind}
+        when 'entry' then ((${t.circleKind} = 'personal' and ${t.ownerAccountId} is not null)
+          or (${t.circleKind} = 'shared' and ${t.ownerAccountId} is null))
+          and ${t.subjectId} is null and ${t.subjectKind} is null and ${t.conversationId} is null
+        when 'fact' then ${t.subjectId} is not null and ${t.subjectKind} is not null
+          and ${t.ownerAccountId} is null
+        when 'episode' then ${t.conversationId} is not null
+          and ${t.subjectId} is null and ${t.subjectKind} is null
+        else false end`,
     ),
     check(
-      'memories_uri_by_form',
-      sql`(${t.form} = 'curated') = (${t.domain} is not null and ${t.path} is not null)`,
-    ),
-    check('memories_domain_by_layer', sql`${t.domain} is null or ${t.domain} = ${t.layer}::text`),
-    check('memories_title_by_form', sql`(${t.form} = 'curated') = (${t.title} is not null)`),
-    check(
-      'memories_secret_encrypted',
-      sql`case when ${t.sensitivity} = 'secret'
-        then ${t.content} is null and ${t.ciphertext} is not null and ${t.wrappedKey} is not null
-        else ${t.content} is not null and ${t.ciphertext} is null and ${t.wrappedKey} is null end`,
-    ),
-    // 本人必须有所属成员；会话摘要可以有（不带会话上下文的会话）；别的归属没有
-    check(
-      'memories_owner_by_layer',
-      sql`case ${t.layer} when 'user' then ${t.ownerAccountId} is not null
-          when 'episode' then true
-          else ${t.ownerAccountId} is null end
-        and (${t.layer} = 'persona') = (${t.personaId} is not null)
-        and (${t.layer} = 'app') = (${t.appId} is not null)
-        and (${t.layer} = 'subject') = (${t.subjectId} is not null)`,
+      'entries_untrusted_kinds',
+      sql`${t.provenance} <> 'untrusted' or ${t.kind} in ('fact', 'episode')`,
     ),
     check(
-      'memories_conversation_by_layer',
-      sql`${t.conversationId} is null or ${t.layer} in ('subject', 'episode')`,
+      'entries_episode_not_secret',
+      sql`${t.kind} <> 'episode' or ${t.sensitivity} <> 'secret'`,
     ),
-    // 会话摘要都挂在会话上（会话删掉时摘要由触发器先删，见基线末尾）；联系人的事实可以没有，会话删掉时只断开关联
-    check(
-      'memories_episode_conversation',
-      sql`${t.layer} <> 'episode' or ${t.conversationId} is not null`,
-    ),
-    // 本人不设公开：本人的记忆到不了群聊与陌生人私聊
-    check('memories_user_not_public', sql`${t.layer} <> 'user' or ${t.sensitivity} <> 'public'`),
-    // 未确认来源只能写联系人的事实与会话摘要
-    check(
-      'memories_untrusted_layers',
-      sql`${t.provenance} <> 'untrusted' or ${t.layer} in ('subject', 'episode')`,
-    ),
-    check('memories_priority_nonneg', sql`${t.priority} >= 0`),
+    check('entries_episode_priority', sql`${t.kind} <> 'episode' or ${t.priority} >= 1`),
+    check('entries_priority_nonneg', sql`${t.priority} >= 0`),
   ],
 )
 
-// 每条记忆在当前模型下一条向量；contentHash 是嵌入文本的哈希，没变就不重新请求
-export const memoryEmbeddings = pgTable(
-  'memory_embeddings',
+// 词条多变体切片表：承载切面条件、正文、信封密文、脱敏标记与单表级全文检索向量
+export const entryVariants = pgTable(
+  'entry_variants',
   {
-    spaceId: uuid()
+    id: uuid().primaryKey().defaultRandom(),
+    circleId: uuid()
       .notNull()
-      .references(() => spaces.id, { onDelete: 'cascade' }),
-    memoryId: uuid().notNull(),
+      .references(() => circles.id, { onDelete: 'cascade' }),
+    entryId: uuid().notNull(),
+    sensitivity: sensitivity().notNull(),
+    kind: entryKind().notNull(),
+    when: jsonb().$type<WhenCondition>().notNull().default({}),
+    whenSignature: text().notNull().default('{}'),
+    sortOrder: integer().notNull().default(0),
+    // 同事务同步拼接头表检索关键词；secret 词条必须为空串
+    searchHeader: text().notNull().default(''),
+    content: text(),
+    ciphertext: bytea(),
+    wrappedKey: bytea(),
+    keyId: text(),
+    plaintextIgnoredHash: text(),
+    sensitiveRevision: integer().notNull().default(0),
+    sensitiveCredential: boolean().notNull().default(false),
+    sensitivePii: boolean().notNull().default(false),
+    sensitiveFindings: jsonb().$type<StoredSensitiveFinding[]>().notNull().default([]),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+    fts: tsvector().generatedAlwaysAs(
+      sql`to_tsvector('kioku_zh'::regconfig, coalesce(search_header, '') || ' ' || coalesce(content, ''))`,
+    ),
+  },
+  (t) => [
+    unique('entry_variants_circle_id_unique').on(t.circleId, t.id),
+    uniqueIndex('entry_variants_entry_when_idx').on(t.entryId, t.whenSignature),
+    uniqueIndex('entry_variants_episode_single_idx')
+      .on(t.entryId)
+      .where(sql`${t.kind} = 'episode'`),
+    index('entry_variants_fts_idx').using('gin', t.fts),
+    index('entry_variants_key_id_idx')
+      .on(t.circleId, t.keyId)
+      .where(sql`${t.wrappedKey} is not null`),
+    index('entry_variants_sensitive_idx').on(t.circleId, t.sensitiveCredential, t.sensitivePii),
+    foreignKey({
+      name: 'entry_variants_entry_fk',
+      columns: [t.circleId, t.entryId],
+      foreignColumns: [entries.circleId, entries.id],
+    }).onDelete('cascade'),
+    // 迁移基线中声明为 DEFERRABLE INITIALLY DEFERRED，保障敏感级变更与正文加解密同事务同步提交
+    foreignKey({
+      name: 'entry_variants_state_fk',
+      columns: [t.circleId, t.entryId, t.sensitivity, t.kind],
+      foreignColumns: [entries.circleId, entries.id, entries.sensitivity, entries.kind],
+    }),
+    check(
+      'entry_variants_secret_encrypted',
+      sql`case when ${t.sensitivity} = 'secret'
+        then ${t.content} is null and ${t.searchHeader} = '' and ${t.ciphertext} is not null and ${t.wrappedKey} is not null
+        else ${t.content} is not null and ${t.ciphertext} is null and ${t.wrappedKey} is null end`,
+    ),
+    check(
+      'entry_variants_episode_unconditional',
+      sql`${t.kind} <> 'episode' or (${t.when} = '{}'::jsonb and ${t.whenSignature} = '{}')`,
+    ),
+  ],
+)
+
+export const entryEmbeddings = pgTable(
+  'entry_embeddings',
+  {
+    circleId: uuid()
+      .notNull()
+      .references(() => circles.id, { onDelete: 'cascade' }),
+    variantId: uuid().notNull(),
+    entryId: uuid().notNull(),
     model: text().notNull(),
     contentHash: text().notNull(),
     embedding: vector({ dimensions: EMBEDDING_DIMENSIONS }).notNull(),
     updatedAt: updatedAt(),
   },
   (t) => [
-    primaryKey({ columns: [t.memoryId, t.model] }),
-    index('memory_embeddings_hnsw_idx').using('hnsw', t.embedding.op('vector_cosine_ops')),
+    primaryKey({ columns: [t.variantId, t.model] }),
+    index('entry_embeddings_hnsw_idx').using('hnsw', t.embedding.op('vector_cosine_ops')),
+    index('entry_embeddings_entry_idx').on(t.circleId, t.entryId),
     foreignKey({
-      columns: [t.spaceId, t.memoryId],
-      foreignColumns: [memories.spaceId, memories.id],
+      name: 'entry_embeddings_variant_fk',
+      columns: [t.circleId, t.variantId],
+      foreignColumns: [entryVariants.circleId, entryVariants.id],
+    }).onDelete('cascade'),
+    foreignKey({
+      name: 'entry_embeddings_entry_fk',
+      columns: [t.circleId, t.entryId],
+      foreignColumns: [entries.circleId, entries.id],
     }).onDelete('cascade'),
   ],
 )
 
-export const memoryGlossary = pgTable(
-  'memory_glossary',
+// 双链边索引：细化至源变体切片粒度，目标按短 ID 保留悬空引用支持跨圈联想与软删除恢复
+export const entryLinks = pgTable(
+  'entry_links',
   {
-    spaceId: uuid()
+    circleId: uuid()
       .notNull()
-      .references(() => spaces.id, { onDelete: 'cascade' }),
-    memoryId: uuid().notNull(),
+      .references(() => circles.id, { onDelete: 'cascade' }),
+    sourceVariantId: uuid().notNull(),
+    sourceEntryId: uuid().notNull(),
+    targetShortId: text().notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.sourceVariantId, t.targetShortId] }),
+    index('entry_links_target_idx').on(t.targetShortId),
+    index('entry_links_source_entry_idx').on(t.circleId, t.sourceEntryId),
+    foreignKey({
+      name: 'entry_links_variant_fk',
+      columns: [t.circleId, t.sourceVariantId],
+      foreignColumns: [entryVariants.circleId, entryVariants.id],
+    }).onDelete('cascade'),
+    foreignKey({
+      name: 'entry_links_entry_fk',
+      columns: [t.circleId, t.sourceEntryId],
+      foreignColumns: [entries.circleId, entries.id],
+    }).onDelete('cascade'),
+    check('entry_links_target_format', sql`${t.targetShortId} ~ '^m-[2-9a-hjkmnp-tv-z]{6,8}$'`),
+  ],
+)
+
+export const entryGlossary = pgTable(
+  'entry_glossary',
+  {
+    circleId: uuid()
+      .notNull()
+      .references(() => circles.id, { onDelete: 'cascade' }),
+    entryId: uuid().notNull(),
     keyword: text().notNull(),
   },
   (t) => [
-    primaryKey({ columns: [t.memoryId, t.keyword] }),
-    index().on(t.spaceId, t.keyword),
+    primaryKey({ columns: [t.entryId, t.keyword] }),
+    index().on(t.circleId, t.keyword),
     foreignKey({
-      columns: [t.spaceId, t.memoryId],
-      foreignColumns: [memories.spaceId, memories.id],
+      name: 'entry_glossary_entry_fk',
+      columns: [t.circleId, t.entryId],
+      foreignColumns: [entries.circleId, entries.id],
     }).onDelete('cascade'),
   ],
 )
 
-// 每次写入一条事件，带前后快照，用于历史、回滚与审计
-export const memoryEvents = pgTable(
-  'memory_events',
+export const entryEvents = pgTable(
+  'entry_events',
   {
     id: bigserial({ mode: 'number' }).primaryKey(),
-    spaceId: uuid()
+    circleId: uuid()
       .notNull()
-      .references(() => spaces.id, { onDelete: 'cascade' }),
-    memoryId: uuid().references(() => memories.id, { onDelete: 'set null' }),
+      .references(() => circles.id, { onDelete: 'cascade' }),
+    entryId: uuid().references(() => entries.id, { onDelete: 'set null' }),
+    shortId: text().notNull(),
     eventType: text().notNull(),
     actorKeyId: uuid(),
     actorAccountId: uuid(),
@@ -662,43 +801,99 @@ export const memoryEvents = pgTable(
     context: jsonb().notNull().default({}),
     createdAt: createdAt(),
   },
-  (t) => [index().on(t.spaceId, t.createdAt), index().on(t.memoryId, t.createdAt)],
+  (t) => [
+    index().on(t.circleId, t.createdAt),
+    index().on(t.entryId, t.createdAt),
+    index().on(t.circleId, t.shortId, t.createdAt),
+  ],
 )
 
-// 密码库连接：成员连接的 Bitwarden 兼容账号。和凭据一样归某个成员，只有他本人看得到、用得上。
-// 刷新令牌与账户密钥整体加密保存，aad 绑定连接 id，主密码不保存；断开时清掉密文，这一行留着，
-// 凭据（含已删除的）照样指着它，重新登录同一个账号就恢复
+export const entryCredentialRefs = pgTable(
+  'entry_credential_refs',
+  {
+    circleId: uuid()
+      .notNull()
+      .references(() => circles.id, { onDelete: 'cascade' }),
+    entryId: uuid().notNull(),
+    identifier: text().notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.entryId, t.identifier] }),
+    index().on(t.circleId, t.identifier),
+    foreignKey({
+      name: 'entry_credential_refs_entry_fk',
+      columns: [t.circleId, t.entryId],
+      foreignColumns: [entries.circleId, entries.id],
+    }).onDelete('cascade'),
+  ],
+)
+
+export const entryRecallStats = pgTable(
+  'entry_recall_stats',
+  {
+    entryId: uuid().primaryKey(),
+    circleId: uuid()
+      .notNull()
+      .references(() => circles.id, { onDelete: 'cascade' }),
+    count: integer().notNull(),
+    lastRecalledAt: timestamp({ withTimezone: true }).notNull(),
+  },
+  (t) => [
+    foreignKey({
+      name: 'entry_recall_stats_entry_fk',
+      columns: [t.circleId, t.entryId],
+      foreignColumns: [entries.circleId, entries.id],
+    }).onDelete('cascade'),
+  ],
+)
+
+// 迁移旧坐标兜底映射表
+export const legacyUris = pgTable(
+  'legacy_uris',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    circleId: uuid()
+      .notNull()
+      .references(() => circles.id, { onDelete: 'cascade' }),
+    entryId: uuid().notNull(),
+    legacyUri: text().notNull(),
+    source: text().notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    uniqueIndex('legacy_uris_circle_uri_idx').on(t.circleId, t.legacyUri),
+    index('legacy_uris_entry_idx').on(t.circleId, t.entryId),
+    foreignKey({
+      name: 'legacy_uris_entry_fk',
+      columns: [t.circleId, t.entryId],
+      foreignColumns: [entries.circleId, entries.id],
+    }).onDelete('cascade'),
+    check('legacy_uris_source_check', sql`${t.source} in ('lore', 'kioku-legacy')`),
+  ],
+)
+
 export const vaultConnections = pgTable(
   'vault_connections',
   {
     id: uuid().primaryKey().defaultRandom(),
-    spaceId: uuid()
+    circleId: uuid()
       .notNull()
-      .references(() => spaces.id, { onDelete: 'cascade' }),
+      .references(() => circles.id, { onDelete: 'cascade' }),
     ownerAccountId: uuid()
       .notNull()
       .references(() => accounts.id, { onDelete: 'cascade' }),
-    // 末尾不带 /
     serverUrl: text().notNull(),
     email: text().notNull(),
-    // 密码库里的账号 id：重新登录时据此认出是不是同一个账号
     vaultUserId: text().notNull(),
-    // Kioku 为这个连接生成的设备 id，重新登录沿用，密码库的设备列表里按它认出 Kioku
     deviceId: uuid().notNull(),
-    // 刷新令牌与账户密钥（见 credential/bitwarden/types.ts 的 VaultSecrets）；断开时置空
     ciphertext: bytea(),
     wrappedKey: bytea(),
-    // 包装数据密钥用的主密钥的标识，同记忆的 keyId
     keyId: text(),
     status: vaultConnectionStatus().notNull().default('ok'),
     disabledReason: vaultDisabledReason(),
-    // 最近一次和服务器通信失败的原因与时间，之后成功一次就清掉
     lastErrorKind: vaultErrorKind(),
     lastErrorAt: timestamp({ withTimezone: true }),
-    // 最近一次成功同步的时间
     lastCheckedAt: timestamp({ withTimezone: true }),
-    // 新凭据的去处：组织里的一个集合，连同它所在的组织与名称（设定或最近一次同步时的）。
-    // 每个成员最多一个（vault_connections_destination_idx）；断开、停用时留着
     defaultCollectionId: text(),
     defaultOrganizationId: text(),
     defaultCollectionName: text(),
@@ -707,18 +902,16 @@ export const vaultConnections = pgTable(
     updatedAt: updatedAt(),
   },
   (t) => [
-    index().on(t.spaceId, t.ownerAccountId),
-    unique().on(t.spaceId, t.ownerAccountId, t.id),
-    // 同一个成员连同一个账号只有一个连接：再连一次就是重新登录
+    index('vault_connections_circle_owner_idx').on(t.circleId, t.ownerAccountId),
+    unique('vault_connections_circle_owner_id_unique').on(t.circleId, t.ownerAccountId, t.id),
     uniqueIndex('vault_connections_account_idx').on(
-      t.spaceId,
+      t.circleId,
       t.ownerAccountId,
       t.serverUrl,
       t.vaultUserId,
     ),
-    // 轮换主密钥时按主密钥的标识找连接
     index('vault_connections_key_id_idx')
-      .on(t.spaceId, t.keyId)
+      .on(t.circleId, t.keyId)
       .where(sql`${t.wrappedKey} is not null`),
     check(
       'vault_connections_secrets_shape',
@@ -734,85 +927,66 @@ export const vaultConnections = pgTable(
       'vault_connections_last_error',
       sql`(${t.lastErrorKind} is null) = (${t.lastErrorAt} is null)`,
     ),
-    // 去处的三列一起有或一起没有
     check(
       'vault_connections_destination_shape',
       sql`(${t.defaultCollectionId} is null) = (${t.defaultOrganizationId} is null)
         and (${t.defaultCollectionId} is null) = (${t.defaultCollectionName} is null)`,
     ),
-    // 每个成员最多一个去处：设去处时先清掉别的连接上的，并发时由它挡下
     uniqueIndex('vault_connections_destination_idx')
-      .on(t.spaceId, t.ownerAccountId)
+      .on(t.circleId, t.ownerAccountId)
       .where(sql`${t.defaultCollectionId} is not null`),
   ],
 )
 
-// 凭据：归某个成员，记忆正文用 {{cred:<标识>}} 引用。值要么由 Kioku 加密保存（hosted），
-// 要么在成员连接的密码库里、这里只记连接与条目的 id（vault）。软删除，可以恢复
 export const credentials = pgTable(
   'credentials',
   {
     id: uuid().primaryKey().defaultRandom(),
-    spaceId: uuid()
+    circleId: uuid()
       .notNull()
-      .references(() => spaces.id, { onDelete: 'cascade' }),
+      .references(() => circles.id, { onDelete: 'cascade' }),
     ownerAccountId: uuid()
       .notNull()
       .references(() => accounts.id, { onDelete: 'cascade' }),
-    // 创建后不能改：记忆按它引用
     identifier: text().notNull(),
     name: text().notNull(),
     description: text(),
     source: credentialSource().notNull(),
-    // 密码库来源指向的连接与条目
     vaultConnectionId: uuid(),
     vaultItemId: text(),
-    // 字段名，密码库来源再加上条目里对应的字段；托管的值不在这里
     fields: jsonb().$type<CredentialField[]>().notNull().default([]),
-    // 托管的值：各字段的值整体加密，aad 绑定凭据 id（见 credential/service.ts）
     ciphertext: bytea(),
     wrappedKey: bytea(),
-    // 包装数据密钥用的主密钥的标识，同记忆的 keyId
     keyId: text(),
-    // 只给这些应用用；null 表示不限定
-    appIds: uuid().array(),
+    clientIds: uuid().array(),
+    allowedRealms: text().array(),
     version: integer().notNull().default(1),
-    // 到期时间；null 表示不到期
     expiresAt: timestamp({ withTimezone: true }),
-    // 标了「需要轮换」的时间；值改过就清掉（托管的改了值时，密码库的看到条目的修改时间变了时）
     rotationRequestedAt: timestamp({ withTimezone: true }),
-    // 托管的值版本：最近一次改了值的那次修改之后的版本号。访问事件记下它，据此判断交出的是不是现在的值
     valueVersion: integer().notNull().default(1),
-    // 上次改值的时间：托管的是新建或改了值的时间，密码库的是最近看到的条目修改时间
     valueChangedAt: timestamp({ withTimezone: true }),
-    // 密码库的凭据：Kioku 最近看到的条目修改时间，原样记下（写回时用它判断条目在别处改过没有）
     vaultRevision: text(),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
     deletedAt: timestamp({ withTimezone: true }),
   },
   (t) => [
-    // 标识在同一个成员的有效凭据里唯一：建凭据时不会因为别人用过同一个标识而冲突
     uniqueIndex('credentials_identifier_live_idx')
-      .on(t.spaceId, t.ownerAccountId, t.identifier)
+      .on(t.circleId, t.ownerAccountId, t.identifier)
       .where(sql`${t.deletedAt} is null`),
-    // 一个条目只起一个标识
     uniqueIndex('credentials_vault_item_live_idx')
       .on(t.vaultConnectionId, t.vaultItemId)
       .where(sql`${t.deletedAt} is null`),
-    // 数连接上指着几条凭据、清理时找没有凭据（含已删除的）指着的连接
     index('credentials_vault_connection_idx').on(t.vaultConnectionId),
-    unique().on(t.spaceId, t.id),
-    // 轮换主密钥时按主密钥的标识找托管的凭据
+    unique('credentials_circle_id_unique').on(t.circleId, t.id),
     index('credentials_key_id_idx')
-      .on(t.spaceId, t.keyId)
+      .on(t.circleId, t.keyId)
       .where(sql`${t.wrappedKey} is not null`),
-    // 连接必须是同一个成员的：外键带上所有者。自动生成的约束名超过 PostgreSQL 的 63 字符上限，这里起短名
     foreignKey({
       name: 'credentials_vault_connection_fk',
-      columns: [t.spaceId, t.ownerAccountId, t.vaultConnectionId],
+      columns: [t.circleId, t.ownerAccountId, t.vaultConnectionId],
       foreignColumns: [
-        vaultConnections.spaceId,
+        vaultConnections.circleId,
         vaultConnections.ownerAccountId,
         vaultConnections.id,
       ],
@@ -826,179 +1000,116 @@ export const credentials = pgTable(
   ],
 )
 
-// 凭据的事件：新建、修改、删除、撤销删除与取用（交出值、被拒或失败）。只有凭据的所有者看得到，不进空间的变更记录；不含任何值
 export const credentialEvents = pgTable(
   'credential_events',
   {
     id: bigserial({ mode: 'number' }).primaryKey(),
-    spaceId: uuid()
+    circleId: uuid()
       .notNull()
-      .references(() => spaces.id, { onDelete: 'cascade' }),
+      .references(() => circles.id, { onDelete: 'cascade' }),
     credentialId: uuid().notNull(),
     eventType: text().notNull(),
     actorKeyId: uuid(),
     actorAccountId: uuid(),
-    // 取用经由哪里、取了哪些字段、用途、结果与原因、会话上下文，修改了哪些部分
     context: jsonb().$type<Record<string, unknown>>().notNull().default({}),
     createdAt: createdAt(),
   },
   (t) => [
-    // 一条凭据的事件按 id 倒序翻页
     index().on(t.credentialId, t.id),
     foreignKey({
       name: 'credential_events_credential_fk',
-      columns: [t.spaceId, t.credentialId],
-      foreignColumns: [credentials.spaceId, credentials.id],
+      columns: [t.circleId, t.credentialId],
+      foreignColumns: [credentials.circleId, credentials.id],
     }).onDelete('cascade'),
   ],
 )
 
-// 记忆正文里引用了哪些凭据标识：列出一条凭据被哪些记忆用着、挡住删除。每次写入按正文重写这条记忆的引用，
-// secret 的不进来（明文标识会透露加密正文写的是什么）。算不算数在查询时与记忆表关联判断
-// （没删除、不是 secret、仍有效、在凭据主人的本人记忆里），所以删除、撤销删除、让出 URI 都不用另外维护
-export const memoryCredentialRefs = pgTable(
-  'memory_credential_refs',
-  {
-    spaceId: uuid()
-      .notNull()
-      .references(() => spaces.id, { onDelete: 'cascade' }),
-    memoryId: uuid().notNull(),
-    identifier: text().notNull(),
-  },
-  (t) => [
-    primaryKey({ columns: [t.memoryId, t.identifier] }),
-    index().on(t.spaceId, t.identifier),
-    foreignKey({
-      name: 'memory_credential_refs_memory_fk',
-      columns: [t.spaceId, t.memoryId],
-      foreignColumns: [memories.spaceId, memories.id],
-    }).onDelete('cascade'),
-  ],
-)
-
-// 召回事件：会话开始的项目召回、每轮输入的召回、MCP 搜索与 REST 召回各记一条，管理界面里的搜索与调试不记。
-// 明细保留一段时间（实例设置），清理前把次数并入 memory_recall_stats。明细只给事件发生时的应用主人看：
-// 里面有那位主人的提示语和本人记忆的命中，应用转给别人之后不跟着转。不挂应用的外键：删掉应用之后，
-// 它召回过的次数仍算在记忆上，明细到期照常清理
 export const recallEvents = pgTable(
   'recall_events',
   {
     id: bigserial({ mode: 'number' }).primaryKey(),
-    spaceId: uuid()
+    circleId: uuid()
       .notNull()
-      .references(() => spaces.id, { onDelete: 'cascade' }),
-    appId: uuid().notNull(),
+      .references(() => circles.id, { onDelete: 'cascade' }),
+    clientId: uuid().notNull(),
     keyId: uuid(),
-    // 事件发生时的应用主人
     ownerAccountId: uuid()
       .notNull()
       .references(() => accounts.id, { onDelete: 'cascade' }),
     source: text().notNull(),
-    // 提示语的前 200 字，像凭据的片段已打码；应用关掉了记录提示语时为空
     query: text(),
     createdAt: createdAt(),
   },
   (t) => [
-    index().on(t.spaceId, t.createdAt),
-    index().on(t.appId, t.createdAt),
-    // 明细只给事件里记下的主人，按主人与应用翻页（应用详情里看的就是这样）
-    index().on(t.spaceId, t.ownerAccountId, t.appId, t.id),
+    index().on(t.circleId, t.createdAt),
+    index().on(t.clientId, t.createdAt),
+    index().on(t.circleId, t.ownerAccountId, t.clientId, t.id),
   ],
 )
 
-// 一次召回命中了哪些记忆：名次（从 1 开始）、分数与来路
+// 跨圈命中明细落在主场圈；不建指向客场 entries 的外键，累计统计由异步写入同步更新目标圈 entry_recall_stats
 export const recallEventHits = pgTable(
   'recall_event_hits',
   {
     eventId: bigint({ mode: 'number' })
       .notNull()
       .references(() => recallEvents.id, { onDelete: 'cascade' }),
-    spaceId: uuid()
+    circleId: uuid()
       .notNull()
-      .references(() => spaces.id, { onDelete: 'cascade' }),
-    memoryId: uuid().notNull(),
+      .references(() => circles.id, { onDelete: 'cascade' }),
+    targetCircleId: uuid()
+      .notNull()
+      .references(() => circles.id, { onDelete: 'cascade' }),
+    entryId: uuid().notNull(),
+    shortId: text().notNull(),
     rank: smallint().notNull(),
     score: real().notNull(),
     via: text().array().notNull(),
   },
   (t) => [
-    primaryKey({ columns: [t.eventId, t.memoryId] }),
-    index().on(t.spaceId, t.memoryId),
-    foreignKey({
-      name: 'recall_event_hits_memory_fk',
-      columns: [t.spaceId, t.memoryId],
-      foreignColumns: [memories.spaceId, memories.id],
-    }).onDelete('cascade'),
+    primaryKey({ columns: [t.eventId, t.entryId] }),
+    index('recall_event_hits_target_idx').on(t.targetCircleId, t.entryId),
   ],
 )
 
-// 每条记忆的累计召回次数：清理明细前并入，之后只剩次数与最后一次召回的时间
-export const memoryRecallStats = pgTable(
-  'memory_recall_stats',
-  {
-    memoryId: uuid().primaryKey(),
-    spaceId: uuid()
-      .notNull()
-      .references(() => spaces.id, { onDelete: 'cascade' }),
-    count: integer().notNull(),
-    lastRecalledAt: timestamp({ withTimezone: true }).notNull(),
-  },
-  (t) => [
-    foreignKey({
-      name: 'memory_recall_stats_memory_fk',
-      columns: [t.spaceId, t.memoryId],
-      foreignColumns: [memories.spaceId, memories.id],
-    }).onDelete('cascade'),
-  ],
-)
-
-// 会话缓冲：私聊、群聊与不带会话上下文的会话里一轮轮的对话，只是抽取的输入。攒批抽取完就删，空闲超过一天的也删，
-// 不进召回、不进活动，也没有读取的接口（群聊原文里有别人的话，不该长期留）。
-// 按应用与来源作用域（本群，或与此人的私聊）分批，不带会话上下文的按应用与所属成员分批，不按插件给的会话标识：
-// 标识重了也不会把私聊混进群里的那一批。会话上下文按这一轮解析出的对象记下；
-// 抽取时按写入这一轮的 Key 重新算权限，Key 吊销或作废就不抽取
 export const conversationTurns = pgTable(
   'conversation_turns',
   {
     id: bigserial({ mode: 'number' }).primaryKey(),
-    spaceId: uuid()
+    circleId: uuid()
       .notNull()
-      .references(() => spaces.id, { onDelete: 'cascade' }),
-    appId: uuid().notNull(),
+      .references(() => circles.id, { onDelete: 'cascade' }),
+    clientId: uuid().notNull(),
     keyId: uuid()
       .notNull()
       .references(() => apiKeys.id, { onDelete: 'cascade' }),
-    // group:<群对象> 或 direct:<发言人对象>，和这一批抽取写下的记忆的来源作用域相同
     scope: text().notNull(),
-    // 插件给的会话标识，只做记录
     sessionId: text().notNull(),
-    // direct | group | channel | none（不带会话上下文，例如本机的 Claude Code）
     chatType: text().notNull(),
     groupSubjectId: uuid(),
-    // 私聊、群聊与频道里这一轮的发言人；不带会话上下文的没有
     senderSubjectId: uuid(),
-    // 不带会话上下文的这一轮归哪个成员（应用所有者）；私聊、群聊与频道为空
     ownerAccountId: uuid().references(() => accounts.id, { onDelete: 'cascade' }),
-    // 这一轮上报的发言人名字（群里可能是群名片），抽取时给模型分清谁说的
     senderName: text(),
     userText: text().notNull(),
     replyText: text().notNull(),
     createdAt: createdAt(),
   },
   (t) => [
-    index().on(t.appId, t.scope, t.id),
-    foreignKey({ columns: [t.spaceId, t.appId], foreignColumns: [apps.spaceId, apps.id] }).onDelete(
-      'cascade',
-    ),
+    index('conversation_turns_client_scope_idx').on(t.clientId, t.scope, t.id),
+    foreignKey({
+      name: 'conversation_turns_client_fk',
+      columns: [t.circleId, t.clientId],
+      foreignColumns: [clients.circleId, clients.id],
+    }).onDelete('cascade'),
     foreignKey({
       name: 'conversation_turns_group_fk',
-      columns: [t.spaceId, t.groupSubjectId],
-      foreignColumns: [subjects.spaceId, subjects.id],
+      columns: [t.circleId, t.groupSubjectId],
+      foreignColumns: [subjects.circleId, subjects.id],
     }).onDelete('cascade'),
     foreignKey({
       name: 'conversation_turns_sender_fk',
-      columns: [t.spaceId, t.senderSubjectId],
-      foreignColumns: [subjects.spaceId, subjects.id],
+      columns: [t.circleId, t.senderSubjectId],
+      foreignColumns: [subjects.circleId, subjects.id],
     }).onDelete('cascade'),
     check(
       'conversation_turns_chat_type',
@@ -1016,22 +1127,17 @@ export const conversationTurns = pgTable(
   ],
 )
 
-// 抽取记录：每抽取一批缓冲记一条，给对象页看抽取了什么、用了多少 token；失败的也记，带上原因
 export const extractionRuns = pgTable(
   'extraction_runs',
   {
     id: bigserial({ mode: 'number' }).primaryKey(),
-    spaceId: uuid()
+    circleId: uuid()
       .notNull()
-      .references(() => spaces.id, { onDelete: 'cascade' }),
-    appId: uuid().notNull(),
-    // 这一批的来源作用域，见 conversation_turns.scope
+      .references(() => circles.id, { onDelete: 'cascade' }),
+    clientId: uuid().notNull(),
     scope: text().notNull(),
-    // 这一批是哪个会话的：会话详情按它找抽取记录。会话删掉时置空，记录留到保留期
     conversationId: uuid(),
-    // 这一批涉及的联系人（发言人与群），联系人详情按它找抽取记录
     subjectIds: uuid().array().notNull(),
-    // 给模型看了几轮；写入它们的 Key 吊销、作废或写不了的那几轮没给模型看，单独计数，随这一批删掉
     turns: integer().notNull(),
     skippedTurns: integer().notNull().default(0),
     model: text(),
@@ -1039,57 +1145,47 @@ export const extractionRuns = pgTable(
     completionTokens: integer().notNull().default(0),
     added: integer().notNull().default(0),
     updated: integer().notNull().default(0),
-    // 模型认为已经记过的（NONE），以及和已有事实一字不差的
     unchanged: integer().notNull().default(0),
-    // 丢掉的候选：对象不对、太长、像明文凭据、写不进去
     dropped: integer().notNull().default(0),
     summarized: boolean().notNull().default(false),
-    // 本月的 token 预算用完了，这一批只写了会话摘要
     summaryOnly: boolean().notNull().default(false),
-    // 对象当天写满了条数、没写的事实
     limited: integer().notNull().default(0),
     error: text(),
     createdAt: createdAt(),
   },
   (t) => [
-    index().on(t.spaceId, t.createdAt),
+    index().on(t.circleId, t.createdAt),
     index().using('gin', t.subjectIds),
     index('extraction_runs_conversation_idx')
       .on(t.conversationId, t.createdAt)
       .where(sql`${t.conversationId} is not null`),
-    foreignKey({ columns: [t.spaceId, t.appId], foreignColumns: [apps.spaceId, apps.id] }).onDelete(
-      'cascade',
-    ),
-    // 和记忆指向会话的外键一样，迁移里手写成 ON DELETE SET NULL ("conversation_id")，只置空这一列
+    foreignKey({
+      name: 'extraction_runs_client_fk',
+      columns: [t.circleId, t.clientId],
+      foreignColumns: [clients.circleId, clients.id],
+    }).onDelete('cascade'),
+    // 迁移基线中手写 ON DELETE SET NULL ("conversation_id")
     foreignKey({
       name: 'extraction_runs_conversation_fk',
-      columns: [t.spaceId, t.conversationId],
-      foreignColumns: [conversations.spaceId, conversations.id],
+      columns: [t.circleId, t.conversationId],
+      foreignColumns: [conversations.circleId, conversations.id],
     }).onDelete('set null'),
   ],
 )
 
-// 绑定码：在私聊里用 Key 申请，到另一个平台的私聊里带上它，把那边的对象并进申请的对象（见 access/binding.ts）。
-// 库里只存哈希。同一个对象再申请时旧的删掉，在群里发出来的也删掉；过期的（用过的也是 10 分钟就过期）由每小时的清理删掉。
-// 发码的对象被合并掉时跟着删。只活几分钟，不进备份
 export const subjectBindCodes = pgTable(
   'subject_bind_codes',
   {
     id: uuid().primaryKey().defaultRandom(),
-    spaceId: uuid()
+    circleId: uuid()
       .notNull()
-      .references(() => spaces.id, { onDelete: 'cascade' }),
-    // 只能在同一个应用里使用
-    appId: uuid().notNull(),
-    // 申请时用的 Key，只做记录
+      .references(() => circles.id, { onDelete: 'cascade' }),
+    clientId: uuid().notNull(),
     keyId: uuid().notNull(),
-    // 发码的对象，以及申请时用的平台账号
     subjectId: uuid().notNull(),
     platform: text().notNull(),
     externalId: text().notNull(),
     codeHash: text().notNull(),
-    // 预览过这个码的收码对象（只留最近几个）：预览过的才能接着确认合并，没预览过就确认的先给预览，
-    // 收码的人总会先看到要并到谁那里
     previewedBy: uuid()
       .array()
       .notNull()
@@ -1099,53 +1195,42 @@ export const subjectBindCodes = pgTable(
     usedAt: timestamp({ withTimezone: true }),
   },
   (t) => [
-    // 同一个应用里的码不重复，用码时按应用找
-    uniqueIndex().on(t.appId, t.codeHash),
+    uniqueIndex('subject_bind_codes_client_hash_idx').on(t.clientId, t.codeHash),
     index().on(t.subjectId),
     index().on(t.expiresAt),
-    foreignKey({ columns: [t.spaceId, t.appId], foreignColumns: [apps.spaceId, apps.id] }).onDelete(
-      'cascade',
-    ),
+    foreignKey({
+      name: 'subject_bind_codes_client_fk',
+      columns: [t.circleId, t.clientId],
+      foreignColumns: [clients.circleId, clients.id],
+    }).onDelete('cascade'),
     foreignKey({
       name: 'subject_bind_codes_subject_fk',
-      columns: [t.spaceId, t.subjectId],
-      foreignColumns: [subjects.spaceId, subjects.id],
+      columns: [t.circleId, t.subjectId],
+      foreignColumns: [subjects.circleId, subjects.id],
     }).onDelete('cascade'),
   ],
 )
 
-// 绑定记录：每用成一次绑定码记一条。发码的对象没有标记成员时马上把收码的对象并进来（merged）；
-// 标记了成员时等那个成员本人在管理界面确认（pending，有期限），确认后合并，也可能被拒绝、过期，
-// 或者等确认期间两边的对象被合并而作废（cancelled）。合并对象时指向被合并掉的对象的记录改指向保留的，
-// 对象页按对象找得到。处理完的过了保留期由清理删掉
 export const subjectBindings = pgTable(
   'subject_bindings',
   {
     id: uuid().primaryKey().defaultRandom(),
-    spaceId: uuid()
+    circleId: uuid()
       .notNull()
-      .references(() => spaces.id, { onDelete: 'cascade' }),
-    appId: uuid().notNull(),
-    // 收码时用的 Key，只做记录
+      .references(() => circles.id, { onDelete: 'cascade' }),
+    clientId: uuid().notNull(),
     keyId: uuid().notNull(),
-    // 发码的对象：并到这里
     subjectId: uuid().notNull(),
-    // 收码的对象：并进 subjectId
     fromSubjectId: uuid().notNull(),
-    // 收码时用的平台账号与平台上的名字
     platform: text().notNull(),
     externalId: text().notNull(),
     displayName: text(),
-    // 申请绑定码的平台账号与时间
     issuedPlatform: text().notNull(),
     issuedExternalId: text().notNull(),
     issuedAt: timestamp({ withTimezone: true }).notNull(),
-    // pending | merged | confirmed | rejected | cancelled；过了期限还没处理的是 pending，按 expires_at 判断过期
     status: text().$type<'pending' | 'merged' | 'confirmed' | 'rejected' | 'cancelled'>().notNull(),
-    // 要谁确认：收码时发码的对象标记成的成员
     accountId: uuid().references(() => accounts.id, { onDelete: 'set null' }),
     decidedBy: uuid().references(() => accounts.id, { onDelete: 'set null' }),
-    // 作废的原因
     note: text(),
     createdAt: createdAt(),
     expiresAt: timestamp({ withTimezone: true }),
@@ -1154,22 +1239,23 @@ export const subjectBindings = pgTable(
   (t) => [
     index().on(t.subjectId),
     index().on(t.fromSubjectId),
-    // 概览里列出等某个成员确认的
     index()
       .on(t.accountId)
       .where(sql`${t.status} = 'pending'`),
-    foreignKey({ columns: [t.spaceId, t.appId], foreignColumns: [apps.spaceId, apps.id] }).onDelete(
-      'cascade',
-    ),
+    foreignKey({
+      name: 'subject_bindings_client_fk',
+      columns: [t.circleId, t.clientId],
+      foreignColumns: [clients.circleId, clients.id],
+    }).onDelete('cascade'),
     foreignKey({
       name: 'subject_bindings_subject_fk',
-      columns: [t.spaceId, t.subjectId],
-      foreignColumns: [subjects.spaceId, subjects.id],
+      columns: [t.circleId, t.subjectId],
+      foreignColumns: [subjects.circleId, subjects.id],
     }).onDelete('cascade'),
     foreignKey({
       name: 'subject_bindings_from_subject_fk',
-      columns: [t.spaceId, t.fromSubjectId],
-      foreignColumns: [subjects.spaceId, subjects.id],
+      columns: [t.circleId, t.fromSubjectId],
+      foreignColumns: [subjects.circleId, subjects.id],
     }).onDelete('cascade'),
     check(
       'subject_bindings_status',
@@ -1180,156 +1266,144 @@ export const subjectBindings = pgTable(
   ],
 )
 
-// 输错绑定码的计数：一个计数键一行（收码的平台账号，或整个应用，见 access/binding.ts），一小时一个窗口。
-// 和登录失败计数一样放在数据库里原子递增；每小时的清理删掉过了窗口的。不进备份
 export const subjectBindAttempts = pgTable(
   'subject_bind_attempts',
   {
-    spaceId: uuid()
+    circleId: uuid()
       .notNull()
-      .references(() => spaces.id, { onDelete: 'cascade' }),
-    appId: uuid().notNull(),
+      .references(() => circles.id, { onDelete: 'cascade' }),
+    clientId: uuid().notNull(),
     key: text().notNull(),
     count: integer().notNull(),
     resetAt: timestamp({ withTimezone: true }).notNull(),
   },
   (t) => [
-    primaryKey({ columns: [t.appId, t.key] }),
+    primaryKey({ columns: [t.clientId, t.key] }),
     index().on(t.resetAt),
-    foreignKey({ columns: [t.spaceId, t.appId], foreignColumns: [apps.spaceId, apps.id] }).onDelete(
-      'cascade',
-    ),
+    foreignKey({
+      name: 'subject_bind_attempts_client_fk',
+      columns: [t.circleId, t.clientId],
+      foreignColumns: [clients.circleId, clients.id],
+    }).onDelete('cascade'),
   ],
 )
 
-// Dream 的运行记录：一次整理（每天一次或手动）逐个范围记一条，整次没走到范围时（没配模型、预算用完、没有新内容）
-// 记一条范围为空的；同一次整理的几条 run_id 相同。用量计入抽取的同一份月度预算（见 extraction/budget.ts），
-// 保留期的清理和抽取记录一样留着本月的。范围是某个成员的本人记忆时记下这个成员，只给他看
 export const dreamRuns = pgTable(
   'dream_runs',
   {
     id: bigserial({ mode: 'number' }).primaryKey(),
-    spaceId: uuid()
+    circleId: uuid()
       .notNull()
-      .references(() => spaces.id, { onDelete: 'cascade' }),
+      .references(() => circles.id, { onDelete: 'cascade' }),
     runId: uuid().notNull(),
-    // scheduled | manual
     trigger: text().notNull(),
-    // 范围，见 memory/scopes.ts 的 DREAM_SCOPE_KEY
     scope: text(),
     ownerAccountId: uuid().references(() => accounts.id, { onDelete: 'set null' }),
     model: text(),
     promptTokens: integer().notNull().default(0),
     completionTokens: integer().notNull().default(0),
-    // 给模型看了几条：上次以来新增或改动的，以及连同近邻一共几条
     changed: integer().notNull().default(0),
     considered: integer().notNull().default(0),
-    // 新提的建议、和已有的建议一样的（包括拒绝过的）、不合规则丢掉的
     suggested: integer().notNull().default(0),
     known: integer().notNull().default(0),
     dropped: integer().notNull().default(0),
-    // 这个范围还有没看完的，下次接着整理
     more: boolean().notNull().default(false),
-    // 没整理的原因：no-model | budget | idle
     skipped: text(),
     error: text(),
     createdAt: createdAt(),
   },
   (t) => [
-    index().on(t.spaceId, t.createdAt),
+    index().on(t.circleId, t.createdAt),
     check('dream_runs_trigger', sql`${t.trigger} in ('scheduled', 'manual')`),
   ],
 )
 
-// Dream 的建议：进待审，成员确认后才按建议执行，Dream 自己不写记忆。涉及的记忆与生成时各自的版本按下标对应，
-// 执行时版本对不上就不执行。指纹是「种类 + 涉及的记忆 id 与版本」，在空间里唯一：还在待审的、执行过的、拒绝过的
-// 都不再提；涉及的记忆改过之后版本变了，指纹也跟着变，可以再提。范围是某个成员的本人记忆时记下这个成员
 export const dreamSuggestions = pgTable(
   'dream_suggestions',
   {
     id: uuid().primaryKey().defaultRandom(),
-    spaceId: uuid()
+    circleId: uuid()
       .notNull()
-      .references(() => spaces.id, { onDelete: 'cascade' }),
+      .references(() => circles.id, { onDelete: 'cascade' }),
     scope: text().notNull(),
     ownerAccountId: uuid().references(() => accounts.id, { onDelete: 'cascade' }),
-    // merge | distill | stale | review
     kind: text().notNull(),
-    memoryIds: uuid().array().notNull(),
+    entryIds: uuid().array().notNull(),
     versions: integer().array().notNull(),
-    // 合并：保留的那一条
     keepId: uuid(),
-    // 合并后的正文；提炼的草稿正文、URI 与 disclosure
+    title: text(),
     content: text(),
-    uri: text(),
+    variants: jsonb().$type<VariantInput[] | null>(),
+    when: jsonb().$type<WhenCondition | null>(),
+    topics: text().array(),
     disclosure: text(),
-    // 审核：confirm | delete
     verdict: text(),
-    // 晋升：目标优先级（0 为加入启动加载，1 为高优先级）
     targetPriority: integer(),
     reason: text().notNull(),
     fingerprint: text().notNull(),
-    // pending | applied | rejected
     status: text().notNull().default('pending'),
     decidedBy: uuid().references(() => accounts.id, { onDelete: 'set null' }),
     decidedAt: timestamp({ withTimezone: true }),
     createdAt: createdAt(),
   },
   (t) => [
-    uniqueIndex('dream_suggestions_fingerprint_idx').on(t.spaceId, t.fingerprint),
-    // 待审里按状态与时间翻页
-    index().on(t.spaceId, t.status, t.createdAt),
+    uniqueIndex('dream_suggestions_fingerprint_idx').on(t.circleId, t.fingerprint),
+    index().on(t.circleId, t.status, t.createdAt),
     check(
       'dream_suggestions_kind',
-      sql`${t.kind} in ('merge', 'distill', 'stale', 'review', 'promote')`,
+      sql`${t.kind} in ('merge', 'merge_variants', 'facet_tag', 'generalize', 'distill', 'distill_episode', 'stale', 'review', 'promote')`,
     ),
     check('dream_suggestions_status', sql`${t.status} in ('pending', 'applied', 'rejected')`),
     check(
-      'dream_suggestions_memories',
-      sql`cardinality(${t.memoryIds}) >= 1 and cardinality(${t.memoryIds}) = cardinality(${t.versions})`,
+      'dream_suggestions_entries',
+      sql`cardinality(${t.entryIds}) >= 1 and cardinality(${t.entryIds}) = cardinality(${t.versions})`,
     ),
   ],
 )
 
-// Dream 整理过的记忆与当时的版本：下次只看没有标记、或者标记之后改过（版本变了）的记忆。不按时间判断，
-// 导入的（带着原来的更新时间）、写了很久才提交的都看得到；整理过、没改过的不会再给模型看。随记忆一起删掉
 export const dreamMarks = pgTable(
   'dream_marks',
   {
-    memoryId: uuid().primaryKey(),
-    spaceId: uuid()
+    entryId: uuid().primaryKey(),
+    circleId: uuid()
       .notNull()
-      .references(() => spaces.id, { onDelete: 'cascade' }),
+      .references(() => circles.id, { onDelete: 'cascade' }),
     version: integer().notNull(),
   },
   (t) => [
     foreignKey({
-      name: 'dream_marks_memory_fk',
-      columns: [t.spaceId, t.memoryId],
-      foreignColumns: [memories.spaceId, memories.id],
+      name: 'dream_marks_entry_fk',
+      columns: [t.circleId, t.entryId],
+      foreignColumns: [entries.circleId, entries.id],
     }).onDelete('cascade'),
   ],
 )
 
-// 迁移里据此给这些表开启并强制 RLS；新增内容表时同步加进来
+// 迁移里据此为以下 31 张内容表开启并强制 RLS（新增带 circle_id 的内容表时同步补充）
 export const RLS_TABLES = [
   'personas',
-  'apps',
+  'persona_traits',
+  'clients',
   'subjects',
   'subject_identities',
-  'app_group_personas',
+  'client_group_rules',
   'conversations',
-  'memories',
-  'memory_embeddings',
-  'memory_glossary',
-  'memory_events',
+  'facet_dimensions',
+  'facet_terms',
+  'entries',
+  'entry_variants',
+  'entry_embeddings',
+  'entry_links',
+  'entry_glossary',
+  'entry_events',
+  'entry_credential_refs',
+  'entry_recall_stats',
+  'legacy_uris',
   'vault_connections',
   'credentials',
   'credential_events',
-  'memory_credential_refs',
   'recall_events',
   'recall_event_hits',
-  'memory_recall_stats',
   'conversation_turns',
   'extraction_runs',
   'subject_bind_codes',

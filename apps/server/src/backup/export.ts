@@ -15,7 +15,7 @@ import { BACKUP_TABLES, type BackupTable } from './tables'
 // 读的时候看第一个字符就分得开。表按外键排好了顺序，恢复时照文件里的顺序写回。实例级的表没有记录也写段头：
 // 恢复时以备份为准清掉新库里迁移写下的默认值；按空间的表没有记录的不占一段
 export const BACKUP_FORMAT = 'kioku-backup'
-export const BACKUP_VERSION = 1
+export const BACKUP_VERSION = 2
 
 export interface BackupHeader {
   format: typeof BACKUP_FORMAT
@@ -27,7 +27,7 @@ export interface BackupHeader {
   migrations: { hash: string; at: number }
 }
 
-export type BackupSectionHead = [table: string, space: string | null]
+export type BackupSectionHead = [table: string, circle: string | null]
 
 export interface BackupSummary {
   createdAt: string
@@ -41,7 +41,7 @@ export interface BackupSummary {
 const FETCH = 500
 
 // 整份备份在一个可重复读的只读事务里读出：各表是同一时刻的快照，服务照常读写也不会读到写了一半的数据。
-// 按空间的表在事务里逐个切换 app.space_id 读。边读边压缩、加密，直接写进 out
+// 按记忆圈的表在事务里逐个切换 app.read_circles 读。边读边压缩、加密，直接写进 out
 export async function createBackup(
   db: Db,
   masterKey: MasterKey,
@@ -93,21 +93,21 @@ async function* lines(
   }
   yield `${JSON.stringify(header)}\n`
 
-  const spaceIds = (await tx.execute<{ id: string }>(sql`select id from spaces order by id`)).map(
+  const circleIds = (await tx.execute<{ id: string }>(sql`select id from circles order by id`)).map(
     (r) => r.id,
   )
   for (const table of BACKUP_TABLES) {
     let total = 0
-    for (const space of table.perSpace ? spaceIds : [null]) {
-      if (space) await tx.execute(sql`select set_config('app.space_id', ${space}, true)`)
+    for (const circle of table.perCircle ? circleIds : [null]) {
+      if (circle) await tx.execute(sql`select set_config('app.read_circles', ${circle}, true)`)
       await tx.execute(sql`declare backup_rows no scroll cursor for ${rowsQuery(table)}`)
       // 段头跟着第一批记录写出；实例级的表没有记录也写
-      let head = `${JSON.stringify([table.name, space] satisfies BackupSectionHead)}\n`
+      let head = `${JSON.stringify([table.name, circle] satisfies BackupSectionHead)}\n`
       for (;;) {
         const batch = await tx.execute<{ row: string }>(
           sql.raw(`fetch forward ${FETCH} from backup_rows`),
         )
-        if (batch.length || (head && !space)) {
+        if (batch.length || (head && !circle)) {
           yield head + batch.map((r) => `${r.row}\n`).join('')
           head = ''
           total += batch.length
