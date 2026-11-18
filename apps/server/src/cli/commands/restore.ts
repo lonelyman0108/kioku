@@ -177,13 +177,13 @@ async function restoreMain(argv: string[]): Promise<number> {
       const msg =
         '恢复时清掉了备份存储的设置，免得和原来的实例往同一个目录写、互相删掉对方的备份。' +
         '确认这个实例要接着用之后，在「设置 › 实例 › 数据与保留」里重新配备份。'
-      console.warn(`\n${process.stderr.isTTY ? yellow(`! ${msg}`) : msg}`)
+      console.warn(`\n${process.stderr.isTTY ? yellow(`! ${msg}`, process.stderr) : msg}`)
     }
     const pauseMsg =
       `保留期的清理暂停到 ${retentionPausedUntil.toISOString()}（恢复的时间加上保留天数）：` +
       '恢复出的已删除记录不会马上被永久删掉，要从这份备份里找回的在这之前撤销删除；之后自动照常清理，' +
       '也可以在「设置 › 实例 › 数据与保留」里提前开始。'
-    console.warn(`\n${process.stderr.isTTY ? yellow(`! ${pauseMsg}`) : pauseMsg}`)
+    console.warn(`\n${process.stderr.isTTY ? yellow(`! ${pauseMsg}`, process.stderr) : pauseMsg}`)
     console.log('\n现在可以启动服务：向量会在后台重新生成，所有人需要重新登录。')
     return 0
   } finally {
