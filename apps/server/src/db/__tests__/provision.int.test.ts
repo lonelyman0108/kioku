@@ -197,7 +197,7 @@ describe.skipIf(!superuserUrl)('数据库检查与超级用户代建', { timeout
         username: 'alice',
         displayName: 'Alice',
         password: 'correct horse battery',
-        spaceName: '家',
+        circleName: '家',
       })
       expect(setup.status).toBe(201)
     })

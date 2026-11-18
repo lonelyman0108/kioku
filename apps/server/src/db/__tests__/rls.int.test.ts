@@ -27,7 +27,7 @@ import {
   subjects,
 } from '../schema'
 
-const NON_RLS_CIRCLE_TABLES = ['circle_members', 'circle_departures', 'device_grants']
+const NON_RLS_CIRCLE_TABLES = ['api_keys', 'circle_members', 'circle_departures', 'device_grants']
 
 async function expectSavepointError(fn: () => Promise<unknown>): Promise<unknown> {
   try {

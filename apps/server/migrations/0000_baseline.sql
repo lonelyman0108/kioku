@@ -42,6 +42,7 @@ CREATE TABLE "accounts" (
 --> statement-breakpoint
 CREATE TABLE "api_keys" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"circle_id" uuid NOT NULL,
 	"client_id" uuid NOT NULL,
 	"name" text NOT NULL,
 	"prefix" text NOT NULL,
@@ -653,8 +654,9 @@ CREATE TABLE "vault_connections" (
 --> statement-breakpoint
 ALTER TABLE "account_links" ADD CONSTRAINT "account_links_account_id_accounts_id_fk" FOREIGN KEY ("account_id") REFERENCES "public"."accounts"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "account_links" ADD CONSTRAINT "account_links_created_by_accounts_id_fk" FOREIGN KEY ("created_by") REFERENCES "public"."accounts"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "api_keys" ADD CONSTRAINT "api_keys_client_id_clients_id_fk" FOREIGN KEY ("client_id") REFERENCES "public"."clients"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "api_keys" ADD CONSTRAINT "api_keys_persona_override_id_personas_id_fk" FOREIGN KEY ("persona_override_id") REFERENCES "public"."personas"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "api_keys" ADD CONSTRAINT "api_keys_circle_id_circles_id_fk" FOREIGN KEY ("circle_id") REFERENCES "public"."circles"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "api_keys" ADD CONSTRAINT "api_keys_circle_client_fk" FOREIGN KEY ("circle_id","client_id") REFERENCES "public"."clients"("circle_id","id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "api_keys" ADD CONSTRAINT "api_keys_persona_override_fk" FOREIGN KEY ("circle_id","persona_override_id") REFERENCES "public"."personas"("circle_id","id") ON DELETE SET NULL ("persona_override_id") ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "circle_departures" ADD CONSTRAINT "circle_departures_circle_id_circles_id_fk" FOREIGN KEY ("circle_id") REFERENCES "public"."circles"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "circle_departures" ADD CONSTRAINT "circle_departures_account_id_accounts_id_fk" FOREIGN KEY ("account_id") REFERENCES "public"."accounts"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "circle_members" ADD CONSTRAINT "circle_members_circle_id_circles_id_fk" FOREIGN KEY ("circle_id") REFERENCES "public"."circles"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
@@ -751,7 +753,8 @@ ALTER TABLE "vault_connections" ADD CONSTRAINT "vault_connections_circle_id_circ
 ALTER TABLE "vault_connections" ADD CONSTRAINT "vault_connections_owner_account_id_accounts_id_fk" FOREIGN KEY ("owner_account_id") REFERENCES "public"."accounts"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "account_links_account_id_index" ON "account_links" USING btree ("account_id");--> statement-breakpoint
 CREATE INDEX "account_links_expires_at_index" ON "account_links" USING btree ("expires_at");--> statement-breakpoint
-CREATE INDEX "api_keys_client_id_index" ON "api_keys" USING btree ("client_id");--> statement-breakpoint
+CREATE INDEX "api_keys_circle_client_idx" ON "api_keys" USING btree ("circle_id","client_id");--> statement-breakpoint
+CREATE INDEX "api_keys_client_idx" ON "api_keys" USING btree ("client_id");--> statement-breakpoint
 CREATE INDEX "circle_departures_left_at_index" ON "circle_departures" USING btree ("left_at");--> statement-breakpoint
 CREATE UNIQUE INDEX "circles_personal_owner_idx" ON "circles" USING btree ("owner_account_id") WHERE "circles"."kind" = 'personal';--> statement-breakpoint
 CREATE INDEX "client_group_rules_persona_idx" ON "client_group_rules" USING btree ("persona_id");--> statement-breakpoint

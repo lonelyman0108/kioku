@@ -1,10 +1,8 @@
-import { and, eq, inArray, ne, or, sql, type SQL, type SQLWrapper } from 'drizzle-orm'
-import { alias } from 'drizzle-orm/pg-core'
+import type { ResolvedPersonaTrait } from '@kioku/contracts'
+import { asc, eq, inArray } from 'drizzle-orm'
 
-import type { Access } from '../access/access'
-import { withSpace, type Db, type Tx } from '../db/client'
-import { memories, personas } from '../db/schema'
-import { readableConditions } from './filter'
+import { withCircle, type Db, type Tx } from '../db/client'
+import { personaTraits, personas } from '../db/schema'
 
 // 继承链（含自己）最多这么多层：新建与修改继承时检查，读的时候超出的部分不再往上找
 export const MAX_PERSONA_DEPTH = 8
@@ -34,79 +32,44 @@ export async function personaIdsBySlug(tx: Tx, slugs: string[]): Promise<Map<str
   return new Map(rows.map((r) => [r.slug, r.id]))
 }
 
-// 在空间事务里执行，并带上当前人格链；记忆服务与召回都经由这里访问内容表
-// persona 为 'all' 时（管理界面）人格链是空间里的全部人格
-export function runInSpace<T>(
+// 沿继承链（自身优先于祖先）按 traitKey 覆盖合并 persona_traits
+export async function resolvePersonaTraits(
+  tx: Tx,
+  personaId: string | null,
+): Promise<ResolvedPersonaTrait[]> {
+  const chain = await personaChain(tx, personaId)
+  if (!chain.length) return []
+  const rows = await tx
+    .select()
+    .from(personaTraits)
+    .where(inArray(personaTraits.personaId, chain))
+    .orderBy(asc(personaTraits.sortOrder), asc(personaTraits.traitKey))
+
+  const rank = new Map(chain.map((id, i) => [id, i]))
+  const byKey = new Map<string, (typeof rows)[number]>()
+  for (const row of rows) {
+    const existing = byKey.get(row.traitKey)
+    if (!existing || (rank.get(row.personaId) ?? 999) < (rank.get(existing.personaId) ?? 999)) {
+      byKey.set(row.traitKey, row)
+    }
+  }
+  return [...byKey.values()]
+    .sort((a, b) => a.sortOrder - b.sortOrder || a.traitKey.localeCompare(b.traitKey))
+    .map((r) => ({
+      traitKey: r.traitKey,
+      title: r.title,
+      content: r.content,
+      sortOrder: r.sortOrder,
+      updatedAt: r.updatedAt.toISOString(),
+      personaId: r.personaId,
+      overriddenBy: null,
+    }))
+}
+
+export function runInCircle<T>(
   db: Db,
-  spaceId: string,
-  persona: string | null | 'all',
-  fn: (tx: Tx, personaIds: string[]) => Promise<T>,
+  circleId: string,
+  fn: (tx: Tx, now: Date) => Promise<T>,
 ): Promise<T> {
-  return withSpace(db, spaceId, async (tx) => {
-    const personaIds =
-      persona === 'all'
-        ? (await tx.select({ id: personas.id }).from(personas)).map((r) => r.id)
-        : await personaChain(tx, persona)
-    return fn(tx, personaIds)
-  })
-}
-
-// 人格继承的覆盖：子人格有同一相对路径（persona://<人格>/ 之后的部分）的节点时，boot、召回与近期列表里
-// 不再放祖先的那条。只在这次请求读得到的节点之间比较，子人格的那条读不到时照常用祖先的。
-// 覆盖之后这个路径就是子人格的那条，priority 也按它的：它进不了 boot 时，boot 里就没有这个路径。
-// 人格的记忆都来自受信来源（数据库约束 memories_untrusted_layers），覆盖不用再看来源。
-// 这是挑选规则，不是权限：按 URI 读取和树浏览照样看得到祖先的节点
-const NEARER = 'nearer'
-const nearer = alias(memories, NEARER)
-
-// boot、召回与近期列表按哪些人格挑选：personaIds 决定读得到哪些人格的节点；inheritance 为 true 时
-// personaIds 是当前人格到最远祖先的继承链，按它覆盖。管理界面传的是空间里的全部人格，没有先后，不能覆盖
-export interface PersonaSelection {
-  personaIds: string[]
-  inheritance?: boolean
-}
-
-// now 是判断「读得到」时有效期用的时刻，和外层查询传同一个（见 momentSql）
-export function personaOverride(
-  access: Access,
-  selection: PersonaSelection,
-  now?: Date,
-): SQL | undefined {
-  const chain = selection.personaIds
-  if (!selection.inheritance || chain.length < 2) return undefined
-  return or(
-    ne(memories.layer, 'persona'),
-    // 别名表在 sql 模板里只渲染出别名本身，FROM 要自己写全
-    sql`not exists (select 1 from ${memories} as ${sql.identifier(NEARER)} where ${overrides(access, chain, now)})`,
-  )
-}
-
-// 覆盖这一行的节点的 URI（继承链上最近的人格的那条），没被覆盖时为 null。人格详情用，规则与 personaOverride 相同
-export function overriddenBy(
-  access: Access,
-  chain: readonly string[],
-  now?: Date,
-): SQL<string | null> {
-  return sql<string | null>`(select ${nearer.domain} || '://' || ${nearer.path}
-    from ${memories} as ${sql.identifier(NEARER)} where ${overrides(access, chain, now)}
-    order by array_position(${chainArray(chain)}, ${nearer.personaId}) limit 1)`
-}
-
-// nearer 覆盖 memories 的这一行：同一相对路径、继承链上更近的人格、这次请求读得到
-function overrides(access: Access, chain: readonly string[], now?: Date): SQL {
-  const ids = chainArray(chain)
-  const relative = (path: SQLWrapper) => sql`regexp_replace(${path}, '^[^/]+', '')`
-  return and(
-    eq(nearer.layer, 'persona'),
-    readableConditions(access, { personaIds: chain, ...(now ? { now } : {}) }, nearer),
-    sql`array_position(${ids}, ${nearer.personaId}) < array_position(${ids}, ${memories.personaId})`,
-    sql`${relative(nearer.path)} = ${relative(memories.path)}`,
-  )!
-}
-
-function chainArray(chain: readonly string[]): SQL {
-  return sql`array[${sql.join(
-    chain.map((id) => sql`${id}::uuid`),
-    sql`, `,
-  )}]`
+  return withCircle(db, circleId, fn)
 }

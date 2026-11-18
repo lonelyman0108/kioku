@@ -7,71 +7,67 @@ import {
   CreateAccountRequest,
   CreatedAccount,
   ErrorResponse,
-  SPACE_NAME_MAX,
   UpdateAccountRequest,
   type AccountLinkPurpose,
 } from '@kioku/contracts'
 import { and, asc, count, eq, gt, inArray, isNull, max, ne, sql } from 'drizzle-orm'
 
+import { createPersonalCircle, personalCircleName } from '../access/circles'
 import { lockAsAdmin, requireConsole, requireInstanceAdmin } from '../auth/middleware'
 import { hashToken, newToken } from '../auth/session'
 import type { Db, Tx } from '../db/client'
-import { accountLinks, accounts, sessions, spaceMembers, spaces } from '../db/schema'
+import { accountLinks, accounts, circleMembers, circles, sessions } from '../db/schema'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
+
+export { personalCircleName }
 
 const AccountParams = z.object({ accountId: z.uuid() })
 const forbidden = jsonResponse('需要实例管理员', ErrorResponse)
 const notFound = jsonResponse('账号不存在', ErrorResponse)
 
-// 新账号的个人空间叫「<显示名>的空间」，显示名截到放得下后缀。按码点截：zod 的长度上限按码点算
-// （SpaceName 的 max），也不会切开代理对
-const PERSONAL_SPACE_SUFFIX = '的空间'
-export function personalSpaceName(displayName: string): string {
-  const head = Array.from(displayName).slice(0, SPACE_NAME_MAX - PERSONAL_SPACE_SUFFIX.length)
-  return `${head.join('')}${PERSONAL_SPACE_SUFFIX}`
-}
-
 type AccountRow = typeof accounts.$inferSelect
 
-// 账号列表与单个账号共用：所在空间、最近活动与待用的链接一起查出来
 async function describeAccounts(db: Db | Tx, rows: AccountRow[]): Promise<AdminAccount[]> {
   if (!rows.length) return []
   const ids = rows.map((r) => r.id)
   const memberships = await db
     .select({
-      accountId: spaceMembers.accountId,
-      id: spaces.id,
-      name: spaces.name,
-      role: spaceMembers.role,
+      accountId: circleMembers.accountId,
+      id: circles.id,
+      slug: circles.slug,
+      name: circles.name,
+      kind: circles.kind,
+      role: circleMembers.role,
     })
-    .from(spaceMembers)
-    .innerJoin(spaces, eq(spaces.id, spaceMembers.spaceId))
-    .where(inArray(spaceMembers.accountId, ids))
-    .orderBy(asc(spaces.createdAt))
-  // 这些空间里各有几个没停用的所有者
-  const spaceIds = [...new Set(memberships.map((m) => m.id))]
-  const owners = spaceIds.length
+    .from(circleMembers)
+    .innerJoin(circles, eq(circles.id, circleMembers.circleId))
+    .where(inArray(circleMembers.accountId, ids))
+    .orderBy(asc(circles.kind), asc(circles.createdAt))
+
+  const circleIds = [...new Set(memberships.map((m) => m.id))]
+  const owners = circleIds.length
     ? await db
-        .select({ spaceId: spaceMembers.spaceId, n: count() })
-        .from(spaceMembers)
-        .innerJoin(accounts, eq(accounts.id, spaceMembers.accountId))
+        .select({ circleId: circleMembers.circleId, n: count() })
+        .from(circleMembers)
+        .innerJoin(accounts, eq(accounts.id, circleMembers.accountId))
         .where(
           and(
-            inArray(spaceMembers.spaceId, spaceIds),
-            eq(spaceMembers.role, 'owner'),
+            inArray(circleMembers.circleId, circleIds),
+            eq(circleMembers.role, 'owner'),
             isNull(accounts.disabledAt),
           ),
         )
-        .groupBy(spaceMembers.spaceId)
+        .groupBy(circleMembers.circleId)
     : []
-  const activeOwners = new Map(owners.map((o) => [o.spaceId, o.n]))
+  const activeOwners = new Map(owners.map((o) => [o.circleId, o.n]))
+
   const activity = await db
     .select({ accountId: sessions.accountId, last: max(sessions.lastActiveAt) })
     .from(sessions)
     .where(and(inArray(sessions.accountId, ids), gt(sessions.expiresAt, sql`now()`)))
     .groupBy(sessions.accountId)
-  // 同一账号最多一个待用的链接（生成新的时作废旧的），这里仍按最新的取
+
   const links = await db
     .select({
       accountId: accountLinks.accountId,
@@ -89,6 +85,7 @@ async function describeAccounts(db: Db | Tx, rows: AccountRow[]): Promise<AdminA
     .orderBy(asc(accountLinks.createdAt))
   const lastActive = new Map(activity.map((a) => [a.accountId, a.last]))
   const pending = new Map(links.map((l) => [l.accountId, l]))
+
   return rows.map((row) => {
     const link = pending.get(row.id)
     const last = lastActive.get(row.id)
@@ -101,11 +98,13 @@ async function describeAccounts(db: Db | Tx, rows: AccountRow[]): Promise<AdminA
       disabledAt: row.disabledAt?.toISOString() ?? null,
       createdAt: row.createdAt.toISOString(),
       lastActiveAt: last ? new Date(last).toISOString() : null,
-      spaces: memberships
+      circles: memberships
         .filter((m) => m.accountId === row.id)
-        .map(({ id, name, role }) => ({
+        .map(({ id, slug, name, kind, role }) => ({
           id,
+          slug,
           name,
+          kind,
           role,
           soleActiveOwner: role === 'owner' && !row.disabledAt && activeOwners.get(id) === 1,
         })),
@@ -119,8 +118,6 @@ async function describeAccount(db: Db | Tx, accountId: string): Promise<AdminAcc
   return row ? (await describeAccounts(db, [row]))[0]! : null
 }
 
-// 生成一次性链接：先作废这个账号没用过的链接，再写新的。还没设过密码的是「设置密码」，否则是「重置密码」。
-// 不改现在的密码，链接用掉时才改
 async function issueLink(
   tx: Tx,
   account: { id: string; passwordHash: string | null },
@@ -148,7 +145,7 @@ const listAccounts = createRoute({
   method: 'get',
   path: '/instance/accounts',
   tags: ['accounts'],
-  summary: '实例里的全部账号：所在空间与角色、最近活动、停用状态与待用的链接',
+  summary: '实例里的全部账号：所属记忆圈与角色、最近活动、停用状态与待用的链接',
   responses: { 200: jsonResponse('账号列表', AdminAccountList), 403: forbidden },
 })
 
@@ -157,7 +154,7 @@ const createAccount = createRoute({
   path: '/instance/accounts',
   tags: ['accounts'],
   summary:
-    '新建账号：同时建一个个人空间、本人是所有者；返回设置密码的一次性链接令牌（只返回这一次）',
+    '新建账号：同时建一个不可删除的个人圈、本人是所有者；返回设置密码的一次性链接令牌（只返回这一次）',
   request: { body: jsonBody(CreateAccountRequest) },
   responses: {
     201: jsonResponse('已创建', CreatedAccount),
@@ -223,13 +220,7 @@ export function accountRoutes(deps: Deps) {
           .onConflictDoNothing({ target: accounts.username })
           .returning()
         if (!account) return null
-        const [space] = await tx
-          .insert(spaces)
-          .values({ name: personalSpaceName(body.displayName) })
-          .returning()
-        await tx
-          .insert(spaceMembers)
-          .values({ spaceId: space!.id, accountId: account.id, role: 'owner' })
+        await createPersonalCircle(tx, account)
         const link = await issueLink(tx, account, actor)
         return { account: (await describeAccount(tx, account.id))!, link }
       })
@@ -242,8 +233,6 @@ export function accountRoutes(deps: Deps) {
       const actor = c.get('console').accountId
       const result = await deps.db.transaction(async (tx) => {
         if (!(await lockAsAdmin(tx, actor))) return 'forbidden' as const
-        // 锁住账号再判断停用：否则和停用并发时，停用删完链接之后这里又写进一个，启用之后它就能用了。
-        // 加锁顺序和别处一致：先链接、再账号
         await tx
           .select({ id: accountLinks.id })
           .from(accountLinks)
@@ -273,7 +262,6 @@ export function accountRoutes(deps: Deps) {
       const actor = c.get('console').accountId
       const result = await deps.db.transaction(async (tx) => {
         if (!(await lockAsAdmin(tx, actor))) return 'forbidden' as const
-        // 加锁顺序和用链接设置密码、改密码一致：先链接、再账号
         await tx
           .select({ id: accountLinks.id })
           .from(accountLinks)

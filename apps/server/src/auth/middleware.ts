@@ -1,18 +1,27 @@
-import { AppConfig, KeyScopes } from '@kioku/contracts'
-import { and, eq, isNull, sql } from 'drizzle-orm'
+import {
+  ClientConfig,
+  LensKeyScopes,
+  type CircleEffectiveGrant,
+  type MemberRole,
+} from '@kioku/contracts'
+import { and, eq, inArray, isNull, sql } from 'drizzle-orm'
 import { getCookie } from 'hono/cookie'
 import { createMiddleware } from 'hono/factory'
 
-import { keyEffectiveScopes } from '../access/access'
-import { withSpace, type Db, type Tx } from '../db/client'
-import { accounts, apiKeys, apps, spaceMembers, spaces } from '../db/schema'
+import {
+  computeKeyGrants,
+  type CircleGrantMembership,
+  type LinkedCircleInput,
+} from '../access/access'
+import { resolveStaticContextRealms } from '../access/realms'
+import { withCircle, type Db, type Tx } from '../db/client'
+import { accounts, apiKeys, circleMembers, circles, clients, facetTerms } from '../db/schema'
 import type { AppEnv, Deps, KeyPrincipal } from '../http/env'
 import { parseApiKey, verifyApiKey } from './keys'
 import { resolveSession, SESSION_COOKIE } from './session'
 
 const unauthorized = { error: '未登录或凭据无效' }
 
-// 管理界面：Cookie 会话
 export function requireConsole(deps: Deps) {
   return createMiddleware<AppEnv>(async (c, next) => {
     const token = getCookie(c, SESSION_COOKIE)
@@ -23,7 +32,6 @@ export function requireConsole(deps: Deps) {
   })
 }
 
-// 接入方：Authorization: Bearer <API Key>
 export function requireKey(deps: Deps) {
   return createMiddleware<AppEnv>(async (c, next) => {
     const header = c.req.header('authorization') ?? ''
@@ -40,7 +48,6 @@ export function requireKey(deps: Deps) {
     const principal = await principalOf(deps.db, key)
     if (!principal) return c.json(unauthorized, 401)
 
-    // 最后使用时间只用于界面展示，失败不影响本次请求
     deps.db
       .update(apiKeys)
       .set({ lastUsedAt: new Date() })
@@ -52,48 +59,137 @@ export function requireKey(deps: Deps) {
   })
 }
 
-// 一把 Key 现在的身份：所属应用与有效上限。Key 的权限按应用主人计算：主人已经不在空间里
-// （或离开后又被重新加入、Key 签发在那之前）、主人的账号被停用，Key 作废，返回 null；主人被降级，Key 的上限随之收紧
-async function principalOf(db: Db, key: typeof apiKeys.$inferSelect): Promise<KeyPrincipal | null> {
-  // 应用、主人当前的角色与 whoami 显示的名字一次查出来
-  const [found] = await withSpace(db, key.spaceId, (tx) =>
-    tx
+// 解析一把访问密钥在多记忆圈中的有效权限矩阵与静态在场场域；主场失效整体作废返回 null
+export async function principalOf(
+  db: Db,
+  key: typeof apiKeys.$inferSelect,
+): Promise<KeyPrincipal | null> {
+  const result = await withCircle(db, key.circleId, async (tx) => {
+    const [found] = await tx
       .select({
-        app: apps,
-        ownerRole: spaceMembers.role,
-        memberSince: spaceMembers.createdAt,
+        client: clients,
+        primaryCircle: circles,
+        ownerRole: circleMembers.role,
+        memberSince: circleMembers.createdAt,
         disabledAt: accounts.disabledAt,
         accountName: accounts.displayName,
-        spaceName: spaces.name,
       })
-      .from(apps)
+      .from(clients)
+      .innerJoin(circles, eq(circles.id, clients.circleId))
       .leftJoin(
-        spaceMembers,
+        circleMembers,
         and(
-          eq(spaceMembers.spaceId, apps.spaceId),
-          eq(spaceMembers.accountId, apps.ownerAccountId),
+          eq(circleMembers.circleId, clients.circleId),
+          eq(circleMembers.accountId, clients.ownerAccountId),
         ),
       )
-      .leftJoin(accounts, eq(accounts.id, apps.ownerAccountId))
-      .leftJoin(spaces, eq(spaces.id, apps.spaceId))
-      .where(eq(apps.id, key.appId))
-      .limit(1),
-  )
-  const scopes = found
-    ? keyEffectiveScopes(
-        { ...key, scopes: KeyScopes.parse(key.scopes) },
-        { role: found.ownerRole, memberSince: found.memberSince, disabledAt: found.disabledAt },
-      )
-    : null
-  return found && scopes
-    ? keyPrincipal(key, found.app, scopes, {
-        spaceName: found.spaceName,
-        accountName: found.accountName,
-      })
-    : null
+      .leftJoin(accounts, eq(accounts.id, clients.ownerAccountId))
+      .where(eq(clients.id, key.clientId))
+      .limit(1)
+    if (!found) return null
+
+    const contextFacets = key.contextFacets ?? {}
+    const terms = Object.keys(contextFacets).length
+      ? await tx
+          .select({
+            dimensionKey: facetTerms.dimensionKey,
+            slug: facetTerms.slug,
+            implies: facetTerms.implies,
+          })
+          .from(facetTerms)
+      : []
+
+    return {
+      ...found,
+      staticContextRealms: resolveStaticContextRealms(contextFacets, terms),
+    }
+  })
+
+  if (!result) return null
+
+  const {
+    client,
+    primaryCircle,
+    ownerRole,
+    memberSince,
+    disabledAt,
+    accountName,
+    staticContextRealms,
+  } = result
+  const scopes = LensKeyScopes.parse(key.scopes)
+  const linked = key.linkedCircles ?? []
+  const linkedIds = [...new Set(linked.map((l) => l.circleId))]
+
+  const [linkedCircles, linkedMembers] = linkedIds.length
+    ? await Promise.all([
+        db
+          .select({ id: circles.id, slug: circles.slug, name: circles.name, kind: circles.kind })
+          .from(circles)
+          .where(inArray(circles.id, linkedIds)),
+        db
+          .select({
+            circleId: circleMembers.circleId,
+            role: circleMembers.role,
+            createdAt: circleMembers.createdAt,
+          })
+          .from(circleMembers)
+          .where(
+            and(
+              inArray(circleMembers.circleId, linkedIds),
+              eq(circleMembers.accountId, client.ownerAccountId),
+            ),
+          ),
+      ])
+    : [[], []]
+
+  const linkedCircleById = new Map(linkedCircles.map((c) => [c.id, c]))
+  const linkedMemberByCircle = new Map(linkedMembers.map((m) => [m.circleId, m]))
+
+  const primaryMembership: CircleGrantMembership = {
+    circleId: primaryCircle.id,
+    circleSlug: primaryCircle.slug,
+    circleName: primaryCircle.name,
+    circleKind: primaryCircle.kind,
+    role: ownerRole,
+    memberSince,
+  }
+  const linkedInputs: LinkedCircleInput[] = linked.map((grant) => {
+    const c = linkedCircleById.get(grant.circleId)
+    const m = linkedMemberByCircle.get(grant.circleId)
+    return {
+      grant,
+      membership: c
+        ? {
+            circleId: c.id,
+            circleSlug: c.slug,
+            circleName: c.name,
+            circleKind: c.kind,
+            role: m?.role ?? null,
+            memberSince: m?.createdAt ?? null,
+          }
+        : null,
+    }
+  })
+
+  const { effectiveScopes, circleGrants } = computeKeyGrants({
+    key: { scopes, createdAt: key.createdAt, revokedAt: key.revokedAt },
+    ownerDisabledAt: disabledAt,
+    primary: primaryMembership,
+    linked: linkedInputs,
+  })
+  if (!effectiveScopes) return null
+
+  return keyPrincipal({
+    key,
+    client,
+    primaryCircle,
+    scopes: effectiveScopes,
+    circleGrants,
+    staticContextRealms,
+    labels: { circleName: primaryCircle.name, accountName },
+  })
 }
 
-// 后台任务按记下的 Key 重新确认身份（例如抽取缓冲里的对话）：吊销了、作废了都返回 null
 export async function principalForKeyId(db: Db, keyId: string): Promise<KeyPrincipal | null> {
   const [key] = await db
     .select()
@@ -103,32 +199,63 @@ export async function principalForKeyId(db: Db, keyId: string): Promise<KeyPrinc
   return key ? principalOf(db, key) : null
 }
 
-// 接入方的身份：Key、它所属的应用与有效上限。鉴权与管理界面的模拟（启动预览、召回调试）共用
-export function keyPrincipal(
-  key: { id: string; spaceId: string },
-  app: typeof apps.$inferSelect,
-  scopes: KeyScopes,
-  labels?: KeyPrincipal['labels'],
-): KeyPrincipal {
+export interface KeyPrincipalInput {
+  key: {
+    id: string
+    circleId: string
+    contextFacets?: Record<string, string[]>
+    personaOverrideId: string | null
+  }
+  client: typeof clients.$inferSelect
+  primaryCircle: Pick<
+    typeof circles.$inferSelect,
+    'id' | 'slug' | 'name' | 'kind' | 'defaultFacets'
+  >
+  scopes: LensKeyScopes
+  circleGrants: readonly CircleEffectiveGrant[]
+  staticContextRealms?: ReadonlySet<string>
+  labels?: KeyPrincipal['labels']
+}
+
+export function keyPrincipal(input: KeyPrincipalInput): KeyPrincipal {
+  const {
+    key,
+    client,
+    primaryCircle,
+    scopes,
+    circleGrants,
+    staticContextRealms = new Set<string>(),
+    labels,
+  } = input
   return {
     kind: 'key',
     keyId: key.id,
-    spaceId: key.spaceId,
+    circleId: key.circleId,
     scopes,
+    contextFacets: key.contextFacets ?? {},
+    staticContextRealms,
+    personaOverrideId: key.personaOverrideId,
+    primaryCircle: {
+      id: primaryCircle.id,
+      slug: primaryCircle.slug,
+      name: primaryCircle.name,
+      kind: primaryCircle.kind,
+      defaultRealms: primaryCircle.defaultFacets?.realm ?? [],
+    },
+    circleGrants,
     ...(labels ? { labels } : {}),
-    app: {
-      id: app.id,
-      slug: app.slug,
-      name: app.name,
-      runtimeFamily: app.runtimeFamily,
-      ownerAccountId: app.ownerAccountId,
-      defaultPersonaId: app.defaultPersonaId,
-      config: AppConfig.parse(app.config),
+    client: {
+      id: client.id,
+      slug: client.slug,
+      name: client.name,
+      runtimeFamily: client.runtimeFamily,
+      ownerAccountId: client.ownerAccountId,
+      defaultPersonaId: client.defaultPersonaId,
+      config: ClientConfig.parse(client.config),
     },
   }
 }
 
-// 是不是实例管理员：实例设置、备份与模型接口的原始报错只给他们
 export async function isInstanceAdmin(db: Db, accountId: string): Promise<boolean> {
   const [account] = await db
     .select({ isAdmin: accounts.isAdmin, disabledAt: accounts.disabledAt })
@@ -137,7 +264,6 @@ export async function isInstanceAdmin(db: Db, accountId: string): Promise<boolea
   return Boolean(account?.isAdmin && !account.disabledAt)
 }
 
-// 只给实例管理员的接口，放在 requireConsole 之后
 export function requireInstanceAdmin(deps: Deps) {
   return createMiddleware<AppEnv>(async (c, next) => {
     if (!(await isInstanceAdmin(deps.db, c.get('console').accountId))) {
@@ -147,13 +273,8 @@ export function requireInstanceAdmin(deps: Deps) {
   })
 }
 
-// 改管理员身份与停用状态的事务都先拿这把锁，再数还剩几个可用的管理员：
-// 两个请求同时降掉最后两个管理员时，后一个看得到前一个的结果。新建账号与发链接也拿它，
-// 和停用、降级操作者的事务排成先后
 const ADMIN_LOCK = 'kioku.instance-admins'
 
-// 取 ADMIN_LOCK，拿到锁之后确认操作者仍是没停用的管理员。中间件在事务之前查过一次，
-// 但等锁期间他可能被别的管理员停用或降级了：管理员的写操作（新建账号、发链接、改账号、改实例的空间数量上限）都要先过这一步
 export async function lockAsAdmin(tx: Tx, actor: string): Promise<boolean> {
   await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${ADMIN_LOCK}))`)
   const [self] = await tx
@@ -163,11 +284,15 @@ export async function lockAsAdmin(tx: Tx, actor: string): Promise<boolean> {
   return Boolean(self?.isAdmin && !self.disabledAt)
 }
 
-export async function memberRole(deps: Deps, spaceId: string, accountId: string) {
+export async function memberRole(
+  deps: Deps,
+  circleId: string,
+  accountId: string,
+): Promise<MemberRole | null> {
   const [row] = await deps.db
-    .select({ role: spaceMembers.role })
-    .from(spaceMembers)
-    .where(and(eq(spaceMembers.spaceId, spaceId), eq(spaceMembers.accountId, accountId)))
+    .select({ role: circleMembers.role })
+    .from(circleMembers)
+    .where(and(eq(circleMembers.circleId, circleId), eq(circleMembers.accountId, accountId)))
     .limit(1)
   return row?.role ?? null
 }

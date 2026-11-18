@@ -38,8 +38,9 @@ import {
   truncateUserAgent,
   type SessionClient,
 } from '../auth/session'
+import { loadSessionUser } from '../access/circles'
 import type { Db, Tx } from '../db/client'
-import { accountLinks, accounts, sessions, spaceMembers, spaces } from '../db/schema'
+import { accountLinks, accounts, sessions } from '../db/schema'
 import { clientAddress, clientIdentity } from '../http/clientIp'
 import type { AppEnv, Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
@@ -56,22 +57,8 @@ const UNUSABLE_HASH = (async () => {
 
 type Account = typeof accounts.$inferSelect
 
-export async function loadMe(db: Db | Tx, accountId: string) {
-  const [account] = await db.select().from(accounts).where(eq(accounts.id, accountId)).limit(1)
-  if (!account) return null
-  const memberships = await db
-    .select({ id: spaces.id, name: spaces.name, role: spaceMembers.role })
-    .from(spaceMembers)
-    .innerJoin(spaces, eq(spaces.id, spaceMembers.spaceId))
-    .where(eq(spaceMembers.accountId, accountId))
-    .orderBy(spaces.createdAt)
-  return {
-    id: account.id,
-    username: account.username,
-    displayName: account.displayName,
-    isAdmin: account.isAdmin,
-    spaces: memberships,
-  }
+export function loadMe(db: Db | Tx, accountId: string) {
+  return loadSessionUser(db, accountId)
 }
 
 export function sessionClient(c: Context, deps: Deps): SessionClient {
@@ -184,7 +171,7 @@ const me = createRoute({
   method: 'get',
   path: '/auth/me',
   tags: ['auth'],
-  summary: '当前登录账号与所属空间',
+  summary: '当前登录账号与所属记忆圈',
   responses: {
     200: jsonResponse('当前账号', Me),
     401: jsonResponse('未登录', ErrorResponse),

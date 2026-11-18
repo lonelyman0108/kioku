@@ -9,26 +9,26 @@ import { and, desc, eq, exists, inArray, isNull, ne, or, sql, type SQL } from 'd
 
 import { nowOf, type Tx } from '../db/client'
 import { microsOf } from '../db/paging'
-import { accounts, apps, conversations, extractionRuns, memories, subjects } from '../db/schema'
+import {
+  accounts,
+  clients,
+  conversations,
+  entries,
+  entryVariants,
+  extractionRuns,
+  subjects,
+} from '../db/schema'
 import { readableConditions } from '../memory/filter'
 import { scopeNames } from '../memory/scopes'
 import { clipChars, oneLine } from '../recall/text'
 import type { Access, SessionContext } from './access'
 
-// 会话的读取：对话页的会话列表与详情、联系人详情里参与的会话；文件末尾是会话的建立。
-// 看得到哪些：群聊、私聊的会话空间成员都看得到（和联系人一样）；不带会话上下文的会话只有所属成员本人看得到。
-// 摘要与事实照记忆的读权限（readableConditions）另外过滤
-
-// 列表里最新一段摘要的开头最多这么多字
 const EXCERPT_CHARS = 120
-// 详情里各部分最多列这么多条
 const DETAIL_SUMMARIES = 100
 const DETAIL_FACTS = 200
 const DETAIL_RUNS = 20
-// 联系人详情里最多列这么多个参与的会话
 const PARTICIPATED_LIMIT = 50
 
-// 当前账号看得到的会话
 export function visibleConversations(access: Access): SQL {
   return or(
     isNull(conversations.ownerAccountId),
@@ -36,26 +36,19 @@ export function visibleConversations(access: Access): SQL {
   )!
 }
 
-// 来自对话的记忆不分人格，读权限里的人格限制用不上。now 是判断有效期的时刻（事务开头取的数据库时间，
-// 不给时同样默认用它，见 momentSql）：一个片段在几条语句里用时，几条拿同一个时刻比
 const readable = (access: Access, now?: Date) =>
-  readableConditions(access, { personaIds: [], ...(now ? { now } : {}) })
+  readableConditions(access, { ...(now ? { now } : {}) })
 
-// 挂在会话上的、当前账号读得到的会话摘要
 const summariesOf = (access: Access, now?: Date) =>
-  and(eq(memories.form, 'extracted'), eq(memories.layer, 'episode'), readable(access, now))!
+  and(eq(entries.kind, 'episode'), readable(access, now))!
 
-// 在会话里听到、记在联系人身上的、现在有效的事实
-const factsOf = (access: Access) =>
-  and(eq(memories.form, 'extracted'), eq(memories.layer, 'subject'), readable(access))!
+const factsOf = (access: Access) => and(eq(entries.kind, 'fact'), readable(access))!
 
 export interface ConversationRow {
   info: ConversationInfo
-  // 翻页用：最近活动时间的微秒数
   activeMicros: string
 }
 
-// 按条件取会话，带上应用、联系人或所属成员的名字、最新一段摘要与摘要条数。按最近活动从新到旧
 export async function conversationInfos(
   tx: Tx,
   access: Access,
@@ -66,40 +59,45 @@ export async function conversationInfos(
     .select({
       conversation: conversations,
       activeMicros: sql<string>`${microsOf(conversations.lastActiveAt)}::text`,
-      appName: apps.name,
+      clientName: clients.name,
       subjectKind: subjects.kind,
       subjectName: subjects.displayName,
       ownerName: accounts.displayName,
     })
     .from(conversations)
-    .innerJoin(apps, eq(apps.id, conversations.appId))
+    .innerJoin(clients, eq(clients.id, conversations.clientId))
     .leftJoin(subjects, eq(subjects.id, conversations.subjectId))
     .leftJoin(accounts, eq(accounts.id, conversations.ownerAccountId))
     .where(and(visibleConversations(access), where))
     .orderBy(desc(conversations.lastActiveAt), desc(conversations.id))
     .limit(limit)
   if (!rows.length) return []
+
   const ids = rows.map((r) => r.conversation.id)
-  // 条数与最新一段在两条语句里算，拿同一个时刻比
-  const inPage = and(inArray(memories.conversationId, ids), summariesOf(access, nowOf(tx)))
+  const inPage = and(inArray(entries.conversationId, ids), summariesOf(access, nowOf(tx)))
   const [counts, latest] = await Promise.all([
     tx
-      .select({ id: memories.conversationId, n: sql<number>`count(*)::int` })
-      .from(memories)
+      .select({ id: entries.conversationId, n: sql<number>`count(*)::int` })
+      .from(entries)
       .where(inPage)
-      .groupBy(memories.conversationId),
+      .groupBy(entries.conversationId),
     tx
-      .selectDistinctOn([memories.conversationId], {
-        id: memories.conversationId,
-        content: memories.content,
-        createdAt: memories.createdAt,
+      .selectDistinctOn([entries.conversationId], {
+        id: entries.conversationId,
+        content: entryVariants.content,
+        createdAt: entries.createdAt,
       })
-      .from(memories)
+      .from(entries)
+      .innerJoin(
+        entryVariants,
+        and(eq(entryVariants.entryId, entries.id), eq(entryVariants.whenSignature, '{}')),
+      )
       .where(inPage)
-      .orderBy(memories.conversationId, desc(memories.createdAt), desc(memories.id)),
+      .orderBy(entries.conversationId, desc(entries.createdAt), desc(entries.id)),
   ])
   const countOf = new Map(counts.map((c) => [c.id, Number(c.n)]))
   const latestOf = new Map(latest.map((l) => [l.id, l]))
+
   return rows.map((r) => {
     const c = r.conversation
     const newest = latestOf.get(c.id)
@@ -115,8 +113,11 @@ export async function conversationInfos(
       activeMicros: r.activeMicros,
       info: {
         id: c.id,
+        circleId: c.circleId,
         kind: c.kind as ConversationKind,
-        app: { id: c.appId, name: r.appName },
+        client: { id: c.clientId, name: r.clientName },
+        deviceKey: c.deviceKey,
+        projectSlug: c.projectSlug,
         subject,
         owner,
         displayName: subject?.displayName ?? owner?.displayName ?? '',
@@ -134,8 +135,6 @@ export async function conversationInfos(
   })
 }
 
-// 联系人参与的会话：群聊时这个群的、私聊时和这个人的会话，以及这个人说过话的群（在那里记下了关于他的事实，
-// 或抽取记录涉及他）
 export async function participatedConversations(
   tx: Tx,
   access: Access,
@@ -143,11 +142,11 @@ export async function participatedConversations(
 ): Promise<ConversationInfo[]> {
   const heard = tx
     .select({ one: sql`1` })
-    .from(memories)
+    .from(entries)
     .where(
       and(
-        eq(memories.conversationId, conversations.id),
-        eq(memories.subjectId, subjectId),
+        eq(entries.conversationId, conversations.id),
+        eq(entries.subjectId, subjectId),
         factsOf(access),
       ),
     )
@@ -169,10 +168,8 @@ export async function participatedConversations(
   return rows.map((r) => r.info)
 }
 
-type RunRow = { run: typeof extractionRuns.$inferSelect; appName: string | null }
+type RunRow = { run: typeof extractionRuns.$inferSelect; clientName: string | null }
 
-// 抽取记录换成界面上的样子。conversationIds 是当前账号看得到的会话，别的会话的 id 不给；
-// errorOf 决定失败原因给谁看原文（见 routes/subjects.ts）
 export async function runInfos(
   tx: Tx,
   rows: RunRow[],
@@ -183,10 +180,10 @@ export async function runInfos(
     tx,
     rows.map((r) => r.run.scope),
   )
-  return rows.map(({ run, appName }) => ({
+  return rows.map(({ run, clientName }) => ({
     id: run.id,
     createdAt: run.createdAt.toISOString(),
-    app: appName ? { id: run.appId, name: appName } : null,
+    client: clientName ? { id: run.clientId, name: clientName } : null,
     scope: named(run.scope),
     conversationId:
       run.conversationId && visibleIds.has(run.conversationId) ? run.conversationId : null,
@@ -203,7 +200,6 @@ export async function runInfos(
   }))
 }
 
-// 这些会话里当前账号看得到的那些
 export async function visibleConversationIds(
   tx: Tx,
   access: Access,
@@ -218,7 +214,6 @@ export async function visibleConversationIds(
   return new Set(rows.map((r) => r.id))
 }
 
-// 会话详情；看不到与不存在都返回 null
 export async function conversationDetail(
   tx: Tx,
   access: Access,
@@ -229,22 +224,42 @@ export async function conversationDetail(
   if (!found) return null
   const [summaries, facts, runs] = await Promise.all([
     tx
-      .select()
-      .from(memories)
-      .where(and(eq(memories.conversationId, id), summariesOf(access)))
-      .orderBy(desc(memories.createdAt), desc(memories.id))
+      .select({
+        id: entries.id,
+        shortId: entries.shortId,
+        content: entryVariants.content,
+        provenance: entries.provenance,
+        createdAt: entries.createdAt,
+        expiresAt: entries.expiresAt,
+      })
+      .from(entries)
+      .innerJoin(
+        entryVariants,
+        and(eq(entryVariants.entryId, entries.id), eq(entryVariants.whenSignature, '{}')),
+      )
+      .where(and(eq(entries.conversationId, id), summariesOf(access)))
+      .orderBy(desc(entries.createdAt), desc(entries.id))
       .limit(DETAIL_SUMMARIES),
     tx
-      .select({ fact: memories, subjectKind: subjects.kind, subjectName: subjects.displayName })
-      .from(memories)
-      .innerJoin(subjects, eq(subjects.id, memories.subjectId))
-      .where(and(eq(memories.conversationId, id), factsOf(access)))
-      .orderBy(desc(memories.updatedAt), desc(memories.id))
+      .select({
+        fact: entries,
+        content: entryVariants.content,
+        subjectKind: subjects.kind,
+        subjectName: subjects.displayName,
+      })
+      .from(entries)
+      .innerJoin(subjects, eq(subjects.id, entries.subjectId))
+      .innerJoin(
+        entryVariants,
+        and(eq(entryVariants.entryId, entries.id), eq(entryVariants.whenSignature, '{}')),
+      )
+      .where(and(eq(entries.conversationId, id), factsOf(access)))
+      .orderBy(desc(entries.updatedAt), desc(entries.id))
       .limit(DETAIL_FACTS),
     tx
-      .select({ run: extractionRuns, appName: apps.name })
+      .select({ run: extractionRuns, clientName: clients.name })
       .from(extractionRuns)
-      .leftJoin(apps, eq(apps.id, extractionRuns.appId))
+      .leftJoin(clients, eq(clients.id, extractionRuns.clientId))
       .where(eq(extractionRuns.conversationId, id))
       .orderBy(desc(extractionRuns.createdAt), desc(extractionRuns.id))
       .limit(DETAIL_RUNS),
@@ -253,14 +268,16 @@ export async function conversationDetail(
     ...found.info,
     summaries: summaries.map((s) => ({
       id: s.id,
+      shortId: s.shortId,
       content: s.content ?? '',
       provenance: s.provenance,
       createdAt: s.createdAt.toISOString(),
       expiresAt: s.expiresAt?.toISOString() ?? null,
     })),
-    facts: facts.map(({ fact, subjectKind, subjectName }) => ({
+    facts: facts.map(({ fact, content, subjectKind, subjectName }) => ({
       id: fact.id,
-      content: fact.content ?? '',
+      shortId: fact.shortId,
+      content: content ?? '',
       provenance: fact.provenance,
       subject: { id: fact.subjectId!, kind: subjectKind, displayName: subjectName },
       version: fact.version,
@@ -273,18 +290,27 @@ export async function conversationDetail(
 
 // ---- 会话的建立 ----
 
-// 一个会话按（应用、群）、（应用、私聊的人）、（应用、所属成员）认；频道和群一样按群认
 export type ConversationRef =
-  { kind: 'group' | 'direct'; subjectId: string } | { kind: 'none'; ownerAccountId: string }
+  | { kind: 'group' | 'direct' | 'channel'; subjectId: string }
+  | { kind: 'none'; ownerAccountId: string; deviceKey: string; projectSlug: string }
 
-// 一次请求的会话上下文落在哪个会话上。不带会话上下文的归应用所有者；定时任务与子 Agent 不算会话
 export function conversationRefOf(
   context: SessionContext,
-  appOwnerAccountId: string,
+  clientOwnerAccountId: string,
+  options: { deviceKey?: string | null; projectSlug?: string | null } = {},
 ): ConversationRef | null {
-  if (!context.chatType) return { kind: 'none', ownerAccountId: appOwnerAccountId }
+  if (!context.chatType) {
+    return {
+      kind: 'none',
+      ownerAccountId: clientOwnerAccountId,
+      deviceKey: (options.deviceKey ?? '').trim(),
+      projectSlug: (options.projectSlug ?? '').trim(),
+    }
+  }
   if (context.chatType === 'group' || context.chatType === 'channel') {
-    return context.groupSubjectId ? { kind: 'group', subjectId: context.groupSubjectId } : null
+    return context.groupSubjectId
+      ? { kind: context.chatType, subjectId: context.groupSubjectId }
+      : null
   }
   if (context.chatType === 'direct') {
     return context.senderSubjectId ? { kind: 'direct', subjectId: context.senderSubjectId } : null
@@ -292,90 +318,115 @@ export function conversationRefOf(
   return null
 }
 
-const refValues = (spaceId: string, appId: string, ref: ConversationRef) => ({
-  spaceId,
-  appId,
+const refValues = (circleId: string, clientId: string, ref: ConversationRef) => ({
+  circleId,
+  clientId,
   kind: ref.kind,
+  deviceKey: ref.kind === 'none' ? ref.deviceKey : '',
+  projectSlug: ref.kind === 'none' ? ref.projectSlug : '',
   subjectId: ref.kind === 'none' ? null : ref.subjectId,
   ownerAccountId: ref.kind === 'none' ? ref.ownerAccountId : null,
 })
-// 两个唯一索引各管一种：群聊、私聊按联系人，不带会话上下文的按所属成员（空值不算重复）
-const refTarget = (ref: ConversationRef) =>
+
+const refConflict = (ref: ConversationRef) =>
   ref.kind === 'none'
-    ? [conversations.appId, conversations.ownerAccountId]
-    : [conversations.appId, conversations.subjectId]
-const refMatch = (appId: string, ref: ConversationRef) =>
+    ? {
+        target: [
+          conversations.clientId,
+          conversations.ownerAccountId,
+          conversations.deviceKey,
+          conversations.projectSlug,
+        ],
+        targetWhere: sql`${conversations.kind} = 'none'`,
+      }
+    : {
+        target: [conversations.clientId, conversations.subjectId],
+        targetWhere: sql`${conversations.kind} <> 'none'`,
+      }
+
+const refMatch = (clientId: string, ref: ConversationRef) =>
   and(
-    eq(conversations.appId, appId),
+    eq(conversations.clientId, clientId),
     ref.kind === 'none'
-      ? eq(conversations.ownerAccountId, ref.ownerAccountId)
-      : eq(conversations.subjectId, ref.subjectId),
+      ? and(
+          eq(conversations.kind, 'none'),
+          eq(conversations.ownerAccountId, ref.ownerAccountId),
+          eq(conversations.deviceKey, ref.deviceKey),
+          eq(conversations.projectSlug, ref.projectSlug),
+        )
+      : and(ne(conversations.kind, 'none'), eq(conversations.subjectId, ref.subjectId)),
   )!
 
-// 生命周期事件来时建立会话，已有的更新最近活动。时间都用数据库的 now()：测试台按 created_at = now()
-// 认这个事务写下的行，并发的两次请求也只建出一个（唯一索引上的 on conflict）。
-// 每轮都有好几个生命周期事件：最近活动早于一分钟以前才更新，否则不写这一行（列表的先后最多差一分钟）。
-// 最近活动在将来（时钟偏差、合并联系人时带过来的时间）也更新，否则它一直停在那里
 export async function touchConversation(
   tx: Tx,
-  spaceId: string,
-  appId: string,
+  circleId: string,
+  clientId: string,
   ref: ConversationRef,
 ): Promise<void> {
+  const conflict = refConflict(ref)
   await tx
     .insert(conversations)
-    .values(refValues(spaceId, appId, ref))
+    .values(refValues(circleId, clientId, ref))
     .onConflictDoUpdate({
-      target: refTarget(ref),
+      ...conflict,
       set: { lastActiveAt: sql`now()` },
       setWhere: sql`${conversations.lastActiveAt} < now() - interval '1 minute' or ${conversations.lastActiveAt} > now()`,
     })
 }
 
-// 抽取写入时这一批的会话：没有就建（例如会话被删掉之后这一批才抽取），不推进最近活动
 export async function ensureConversation(
   tx: Tx,
-  spaceId: string,
-  appId: string,
+  circleId: string,
+  clientId: string,
   ref: ConversationRef,
 ): Promise<string> {
+  const conflict = refConflict(ref)
   const [created] = await tx
     .insert(conversations)
-    .values(refValues(spaceId, appId, ref))
-    .onConflictDoNothing({ target: refTarget(ref) })
+    .values(refValues(circleId, clientId, ref))
+    .onConflictDoNothing({ target: conflict.target, where: conflict.targetWhere })
     .returning({ id: conversations.id })
   if (created) return created.id
-  return (await findConversation(tx, appId, ref))!
+  return (await findConversation(tx, clientId, ref))!
 }
 
-// 已有的会话，不建
 export async function findConversation(
   tx: Tx,
-  appId: string,
+  clientId: string,
   ref: ConversationRef,
 ): Promise<string | null> {
   const [row] = await tx
     .select({ id: conversations.id })
     .from(conversations)
-    .where(refMatch(appId, ref))
+    .where(refMatch(clientId, ref))
   return row?.id ?? null
 }
 
-// 一个会话最近的几段会话摘要，新的在前：不带会话上下文的会话开始时附上，接着上次的话题。
-// 会被当作指令级上下文，只收受信来源写下的（不带会话上下文的摘要都是）；读权限照这次的 Key
 export async function latestSummaries(
   tx: Tx,
   access: Access,
-  appId: string,
+  clientId: string,
   ref: ConversationRef,
   limit: number,
 ): Promise<SessionSummary[]> {
   const rows = await tx
-    .select({ content: memories.content, createdAt: memories.createdAt })
-    .from(memories)
-    .innerJoin(conversations, eq(conversations.id, memories.conversationId))
-    .where(and(refMatch(appId, ref), summariesOf(access), ne(memories.provenance, 'untrusted')))
-    .orderBy(desc(memories.createdAt), desc(memories.id))
+    .select({
+      shortId: entries.shortId,
+      content: entryVariants.content,
+      createdAt: entries.createdAt,
+    })
+    .from(entries)
+    .innerJoin(conversations, eq(conversations.id, entries.conversationId))
+    .innerJoin(
+      entryVariants,
+      and(eq(entryVariants.entryId, entries.id), eq(entryVariants.whenSignature, '{}')),
+    )
+    .where(and(refMatch(clientId, ref), summariesOf(access), ne(entries.provenance, 'untrusted')))
+    .orderBy(desc(entries.createdAt), desc(entries.id))
     .limit(limit)
-  return rows.map((r) => ({ content: r.content ?? '', createdAt: r.createdAt.toISOString() }))
+  return rows.map((r) => ({
+    shortId: r.shortId,
+    content: r.content ?? '',
+    createdAt: r.createdAt.toISOString(),
+  }))
 }

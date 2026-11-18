@@ -277,26 +277,41 @@ export const clients = pgTable(
   ],
 )
 
-// 访问密钥（身份表）：归属某接入实例，主场圈与所有者统一从 clients 读取
+// 访问密钥（身份表）：归属某接入实例，主场圈与所有者统一从 clients 关联约束
 export const apiKeys = pgTable(
   'api_keys',
   {
     id: uuid().primaryKey().defaultRandom(),
-    clientId: uuid()
+    circleId: uuid()
       .notNull()
-      .references(() => clients.id, { onDelete: 'cascade' }),
+      .references(() => circles.id, { onDelete: 'cascade' }),
+    clientId: uuid().notNull(),
     name: text().notNull(),
     prefix: text().notNull().unique(),
     secretHash: text().notNull(),
     linkedCircles: jsonb().$type<LinkedCircleGrant[]>().notNull().default([]),
     contextFacets: jsonb().$type<WhenCondition>().notNull().default({}),
-    personaOverrideId: uuid().references(() => personas.id, { onDelete: 'set null' }),
+    personaOverrideId: uuid(),
     scopes: jsonb().$type<LensKeyScopes>().notNull(),
     createdAt: createdAt(),
     lastUsedAt: timestamp({ withTimezone: true }),
     revokedAt: timestamp({ withTimezone: true }),
   },
-  (t) => [index().on(t.clientId)],
+  (t) => [
+    index('api_keys_circle_client_idx').on(t.circleId, t.clientId),
+    index('api_keys_client_idx').on(t.clientId),
+    foreignKey({
+      name: 'api_keys_circle_client_fk',
+      columns: [t.circleId, t.clientId],
+      foreignColumns: [clients.circleId, clients.id],
+    }).onDelete('cascade'),
+    // 迁移基线中手写 ON DELETE SET NULL ("persona_override_id")，避免把 circle_id 置空
+    foreignKey({
+      name: 'api_keys_persona_override_fk',
+      columns: [t.circleId, t.personaOverrideId],
+      foreignColumns: [personas.circleId, personas.id],
+    }).onDelete('set null'),
+  ],
 )
 
 export interface DeviceGrantPlatform {

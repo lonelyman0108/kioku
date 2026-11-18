@@ -1,187 +1,246 @@
 import {
-  BOOT_LAYERS,
-  LAYERS,
-  REVIEW_LAYERS,
+  BOOT_ENTRY_KINDS,
+  ENTRY_KINDS,
+  REVIEW_ENTRY_KINDS,
   SENSITIVITIES,
   bootEligible,
-  type Layer,
+  type EntryKind,
   type Sensitivity,
+  type SubjectKind,
 } from '@kioku/contracts'
-import {
-  and,
-  eq,
-  gt,
-  inArray,
-  isNull,
-  lte,
-  ne,
-  or,
-  sql,
-  type SQL,
-  type SQLWrapper,
-} from 'drizzle-orm'
+import { and, eq, gt, inArray, isNull, ne, or, sql, type SQL, type SQLWrapper } from 'drizzle-orm'
 
-import type { Access, MemoryFacts, ReadOptions } from '../access/access'
+import type { Access, EntryFacts, ReadOptions } from '../access/access'
 import { sensitivityRank } from '../access/access'
+import { checkStaticRealmLock } from '../access/realms'
 import { currentMoment } from '../db/moment'
-import { memories } from '../db/schema'
+import { entries } from '../db/schema'
 
-// 判断有效期用的「现在」，只用数据库的钟：给了 at 就是它；不给时是所在的 withSpace 事务开头取的数据库时间
-// （见 db/moment.ts），同一个事务里几条语句、SQL 条件与 JS 判断（canRead 等）都拿它比；不在事务里构造的
-// （模块级的常量）才是这条语句开始的时刻（statement_timestamp()）。写成显式转换的参数：快照里的时间是表达式，
-// 不像列那样能替 Date 选好参数类型
+// 判断有效期用的「现在」，只用数据库的钟：给了 at 就是它；不给时是所在的 withCircles 事务开头取的数据库时间
 export function momentSql(at?: Date): SQL {
   const now = at ?? currentMoment()
   return now ? sql`${now.toISOString()}::timestamptz` : sql`statement_timestamp()`
 }
 
-// 在 at 这一刻还没有失效或过期（不给 at 时见 momentSql）
 export function stillValid(at?: Date): SQL {
   const now = momentSql(at)
-  return sql`((${memories.validTo} is null or ${memories.validTo} > ${now}) and (${memories.expiresAt} is null or ${memories.expiresAt} > ${now}))`
+  return sql`((${entries.validTo} is null or ${entries.validTo} > ${now}) and (${entries.expiresAt} is null or ${entries.expiresAt} > ${now}))`
 }
 
-// 现在还没有失效或过期，按这条语句开始时数据库的时间。模块级的常量，构造时不在事务里，
-// 只给单独一条、不和 JS 一起判断的条件用（向量、整理的候选、凭据的引用）
 export const STILL_VALID = stillValid()
 
-// 启动加载只收受信来源写下的、记下的四类（理由见 recall/boot.ts）。JS 版的判断在 contracts，管理界面也要用
-export { BOOT_LAYERS, bootEligible }
+export { BOOT_ENTRY_KINDS, bootEligible }
 
-// 会进启动加载的节点：受信来源写下的、记下的四类里 priority 0 的，加上人格与应用 priority ≤ 1 的。
-// boot 按它挑选（再套读权限、继承覆盖与字数预算）；召回分析的「从没被召回」不算它们：
-// 每次会话开始都注入，只是不记成召回
+// 会进启动加载的词条：受信来源的正式词条，且 priority = 0
 export const BOOT_ELIGIBLE = and(
-  eq(memories.form, 'curated'),
-  inArray(memories.layer, BOOT_LAYERS),
-  ne(memories.provenance, 'untrusted'),
-  or(
-    eq(memories.priority, 0),
-    and(inArray(memories.layer, ['persona', 'app']), lte(memories.priority, 1)),
-  ),
+  eq(entries.kind, 'entry'),
+  ne(entries.provenance, 'untrusted'),
+  eq(entries.priority, 0),
 )!
 
-// 够格进启动加载的记忆：BOOT_ELIGIBLE，再加上不是机密（boot 照读权限不收机密）。管理界面标成启动加载的、
-// 概览「未设触发场景」不算的就是这些。JS 版是 contracts 的 isBootCandidate，browse.int.test.ts 逐行比对
-export const BOOT_CANDIDATE = and(BOOT_ELIGIBLE, ne(memories.sensitivity, 'secret'))!
+// 非机密的启动加载候选
+export const BOOT_CANDIDATE = and(BOOT_ELIGIBLE, ne(entries.sensitivity, 'secret'))!
 
-// 读权限要看的那几个字段从哪里取。记忆表上就是这些列；事件的前后快照（jsonb）里有同名字段，
-// 用 snapshotColumns 取出来，这样历史也用同一套条件判断，不另写一份规则
-export interface MemoryColumns {
-  layer: SQLWrapper
+// 读权限要看的列：头表上就是这些列；事件快照（jsonb）经 snapshotColumns 取出同一套字段
+export interface EntryColumns {
+  circleId: SQLWrapper
+  kind: SQLWrapper
   sensitivity: SQLWrapper
   originScope: SQLWrapper
+  clientId: SQLWrapper
   ownerAccountId: SQLWrapper
-  personaId: SQLWrapper
-  appId: SQLWrapper
+  subjectKind: SQLWrapper
+  realms: SQLWrapper
   deletedAt: SQLWrapper
   validTo: SQLWrapper
   expiresAt: SQLWrapper
 }
 
-export const MEMORY_COLUMNS: MemoryColumns = {
-  layer: memories.layer,
-  sensitivity: memories.sensitivity,
-  originScope: memories.originScope,
-  ownerAccountId: memories.ownerAccountId,
-  personaId: memories.personaId,
-  appId: memories.appId,
-  deletedAt: memories.deletedAt,
-  validTo: memories.validTo,
-  expiresAt: memories.expiresAt,
+export const ENTRY_COLUMNS: EntryColumns = {
+  circleId: entries.circleId,
+  kind: entries.kind,
+  sensitivity: entries.sensitivity,
+  originScope: entries.originScope,
+  clientId: entries.clientId,
+  ownerAccountId: entries.ownerAccountId,
+  subjectKind: entries.subjectKind,
+  realms: entries.realms,
+  deletedAt: entries.deletedAt,
+  validTo: entries.validTo,
+  expiresAt: entries.expiresAt,
 }
 
-// 快照是写入事件时记下的整行（键名与 drizzle 的字段名相同），时间存成 ISO 字符串
-export function snapshotColumns(snapshot: SQLWrapper): MemoryColumns {
-  const text = (key: string) => sql`(${snapshot} ->> ${key})`
-  const time = (key: string) => sql`(${snapshot} ->> ${key})::timestamptz`
+// 快照中的圈级与字段均由 jsonb 抽取，与 snapshotFacts 保持一致
+export function snapshotColumns(snapshot: SQLWrapper): EntryColumns {
+  const textCol = (key: string) =>
+    sql`case when jsonb_typeof(${snapshot} -> ${key}) = 'string' then ${snapshot} ->> ${key} else null end`
+  const timeCol = (key: string) =>
+    sql`case when jsonb_typeof(${snapshot} -> ${key}) = 'string' and (${snapshot} ->> ${key}) <> '' then (${snapshot} ->> ${key})::timestamptz else null end`
+  const arrayCol = (key: string) =>
+    sql`case when jsonb_typeof(${snapshot} -> ${key}) = 'array' then array(select e #>> '{}' from jsonb_array_elements(${snapshot} -> ${key}) e where jsonb_typeof(e) = 'string') else '{}'::text[] end`
   return {
-    layer: text('layer'),
-    sensitivity: text('sensitivity'),
-    originScope: text('originScope'),
-    ownerAccountId: text('ownerAccountId'),
-    personaId: text('personaId'),
-    appId: text('appId'),
-    deletedAt: time('deletedAt'),
-    validTo: time('validTo'),
-    expiresAt: time('expiresAt'),
+    circleId: textCol('circleId'),
+    kind: textCol('kind'),
+    sensitivity: textCol('sensitivity'),
+    originScope: textCol('originScope'),
+    clientId: textCol('clientId'),
+    ownerAccountId: textCol('ownerAccountId'),
+    subjectKind: textCol('subjectKind'),
+    realms: arrayCol('realms'),
+    deletedAt: timeCol('deletedAt'),
+    validTo: timeCol('validTo'),
+    expiresAt: timeCol('expiresAt'),
   }
 }
 
-// 快照转成 canRead 要的字段，给一致性测试比对 snapshotColumns 用，两者放在一起改。与 SQL 一侧的取值方式一致：
-// 层或敏感级缺失、不认识的快照返回 null，当作看不到（SQL 里这些字段为 NULL 时条件不成立）；
-// 缺来源作用域时记为空串，有作用域限制的访问照样读不到
-export function snapshotFacts(snapshot: Record<string, unknown>): MemoryFacts | null {
-  const text = (key: string) => (typeof snapshot[key] === 'string' ? snapshot[key] : null)
-  const time = (key: string) => {
-    const value = text(key)
+export function snapshotFacts(snapshot: Record<string, unknown> | null): EntryFacts | null {
+  if (!snapshot || typeof snapshot !== 'object') return null
+  const textVal = (key: string) => (typeof snapshot[key] === 'string' ? snapshot[key] : null)
+  const timeVal = (key: string) => {
+    const value = textVal(key)
     return value ? new Date(value) : null
   }
-  const layer = text('layer') as Layer | null
-  const sensitivity = text('sensitivity') as Sensitivity | null
-  if (!layer || !LAYERS.includes(layer) || !sensitivity || !SENSITIVITIES.includes(sensitivity)) {
+  const circleId = textVal('circleId')
+  const kind = textVal('kind') as EntryKind | null
+  const sensitivity = textVal('sensitivity') as Sensitivity | null
+  if (
+    !circleId ||
+    !kind ||
+    !ENTRY_KINDS.includes(kind) ||
+    !sensitivity ||
+    !SENSITIVITIES.includes(sensitivity)
+  ) {
     return null
   }
+  const rawRealms = snapshot.realms
+  const realms = Array.isArray(rawRealms)
+    ? rawRealms.filter((r): r is string => typeof r === 'string')
+    : []
   return {
-    layer,
+    circleId,
+    kind,
     sensitivity,
-    originScope: text('originScope') ?? '',
-    ownerAccountId: text('ownerAccountId'),
-    personaId: text('personaId'),
-    appId: text('appId'),
-    deletedAt: time('deletedAt'),
-    validTo: time('validTo'),
-    expiresAt: time('expiresAt'),
+    originScope: textVal('originScope') ?? '',
+    clientId: textVal('clientId'),
+    ownerAccountId: textVal('ownerAccountId'),
+    subjectKind: textVal('subjectKind') as SubjectKind | null,
+    realms,
+    deletedAt: timeVal('deletedAt'),
+    validTo: timeVal('validTo'),
+    expiresAt: timeVal('expiresAt'),
   }
 }
 
-// canRead 的 SQL 版本，用在召回、搜索、列表与历史查询里。两边规则必须一致，
-// filter.int.test.ts 用同一批数据逐条比对二者的结果（记忆表与事件快照都比）。
+function textArraySql(values: readonly string[]): SQL {
+  if (!values.length) return sql`'{}'::text[]`
+  return sql`array[${sql.join(
+    values.map((v) => sql`${v}`),
+    sql`, `,
+  )}]::text[]`
+}
+
+// 静态双向安全场域锁的 SQL 版本：仅认密钥 allowedRealms 与静态 context_facets 展开场域，与 checkStaticRealmLock 逐分支等价
+function staticRealmLockSql(realmsCol: SQLWrapper, access: Access): SQL {
+  const hasAllowedLock = access.allowedRealms !== null
+  const hasContextLock = access.staticContextRealms.size > 0
+  if (!hasAllowedLock && !hasContextLock) return sql`true`
+
+  const cleaned = sql`array(select lower(trim(r)) from unnest(coalesce(${realmsCol}, '{}'::text[])) r where trim(r) <> '')`
+  const checks: SQL[] = []
+  if (hasAllowedLock) {
+    if (access.allowedRealms!.size === 0) {
+      checks.push(sql`false`)
+    } else {
+      checks.push(sql`${cleaned} && ${textArraySql([...access.allowedRealms!])}`)
+    }
+  }
+  if (hasContextLock) {
+    checks.push(sql`${cleaned} && ${textArraySql([...access.staticContextRealms])}`)
+  }
+  const nonEmptyMatch = and(...checks)!
+  const emptyFallbackPasses = checkStaticRealmLock(
+    [],
+    access.primaryCircleRealms,
+    access.allowedRealms,
+    access.staticContextRealms,
+  )
+  return sql`case when coalesce(cardinality(${cleaned}), 0) > 0 then (${nonEmptyMatch}) else ${emptyFallbackPasses ? sql`true` : sql`false`} end`
+}
+
+// canRead / readDenial 的 SQL 版本，filter.int.test.ts 逐条比对二者一致性
 export function readableConditions(
   access: Access,
-  options: ReadOptions,
-  cols: MemoryColumns = MEMORY_COLUMNS,
+  options: ReadOptions = {},
+  cols: EntryColumns = ENTRY_COLUMNS,
 ): SQL {
-  // 有效期按数据库的时间：和 canRead 一起判断时两边传同一个 options.now（见 momentSql）
   const now = momentSql(options.now)
-  const conditions: (SQL | undefined)[] = options.management
+  const conditions: SQL[] = options.management
     ? []
     : [
         isNull(cols.deletedAt),
-        or(isNull(cols.validTo), gt(cols.validTo, now)),
-        or(isNull(cols.expiresAt), gt(cols.expiresAt, now)),
+        or(isNull(cols.validTo), gt(cols.validTo, now))!,
+        or(isNull(cols.expiresAt), gt(cols.expiresAt, now))!,
       ]
 
-  const layers = [...access.readLayers]
-  conditions.push(layers.length ? inArray(cols.layer, layers) : sql`false`)
+  const circleClauses: SQL[] = []
+  for (const circle of access.circles.values()) {
+    const readKinds = [...circle.readKinds]
+    if (!readKinds.length) continue
 
-  const allowed: Sensitivity[] = SENSITIVITIES.filter(
-    (s) => s !== 'secret' && sensitivityRank(s) <= sensitivityRank(access.maxSensitivity),
-  )
-  if ((options.explicit || options.management) && access.canReadSecret) allowed.push('secret')
-  conditions.push(allowed.length ? inArray(cols.sensitivity, allowed) : sql`false`)
+    const nonSecret = SENSITIVITIES.filter(
+      (s) => s !== 'secret' && sensitivityRank(s) <= sensitivityRank(circle.maxSensitivity),
+    )
+    const sensClauses: SQL[] = []
+    if (nonSecret.length) sensClauses.push(inArray(cols.sensitivity, nonSecret))
+    if (circle.isPrimary && (options.explicit || options.management) && circle.canReadSecret) {
+      sensClauses.push(
+        and(eq(cols.sensitivity, 'secret'), staticRealmLockSql(cols.realms, access))!,
+      )
+    }
+    if (!sensClauses.length) continue
 
-  if (access.originScopes) conditions.push(inArray(cols.originScope, [...access.originScopes]))
+    circleClauses.push(
+      and(
+        eq(cols.circleId, circle.circleId),
+        inArray(cols.kind, readKinds),
+        sensClauses.length === 1 ? sensClauses[0]! : or(...sensClauses)!,
+      )!,
+    )
+  }
+  conditions.push(circleClauses.length ? or(...circleClauses)! : sql`false`)
 
-  conditions.push(
-    // 归某个成员的（本人，以及不带会话上下文的会话摘要）只有这个成员读得到
-    or(isNull(cols.ownerAccountId), eq(cols.ownerAccountId, access.ownerAccountId)),
-    options.management
-      ? undefined
-      : options.personaIds.length
-        ? or(ne(cols.layer, 'persona'), inArray(cols.personaId, [...options.personaIds]))
-        : ne(cols.layer, 'persona'),
-    access.appId === null ? undefined : or(ne(cols.layer, 'app'), eq(cols.appId, access.appId)),
-  )
+  conditions.push(or(isNull(cols.ownerAccountId), eq(cols.ownerAccountId, access.ownerAccountId))!)
+
+  if (access.forbidOwnerBoundEpisodes) {
+    conditions.push(or(ne(cols.kind, 'episode'), isNull(cols.ownerAccountId))!)
+  }
+
+  if (access.baseOriginScopes !== null) {
+    const baseOrigins = [...access.baseOriginScopes]
+    const originOptions: SQL[] = []
+    if (baseOrigins.length) originOptions.push(inArray(cols.originScope, baseOrigins))
+    if (access.clientId !== null && access.crossGroupPersonScopes.size > 0) {
+      originOptions.push(
+        and(
+          eq(cols.circleId, access.primaryCircleId),
+          eq(cols.kind, 'fact'),
+          eq(cols.subjectKind, 'person'),
+          inArray(cols.originScope, [...access.crossGroupPersonScopes]),
+          or(isNull(cols.clientId), eq(cols.clientId, access.clientId)),
+        )!,
+      )
+    }
+    conditions.push(originOptions.length ? or(...originOptions)! : sql`false`)
+  }
+
   return and(...conditions)!
 }
 
-// 待审队列里的：不可信来源写下的联系人事实与会话摘要中，现在有效、读得到的。列表与处理都按它。
-// 处理时传事务开头的时刻，和之后写下删除时间的那一刻相同
-export function pendingReview(access: Access, personaIds: readonly string[], now?: Date): SQL {
+// 待确认内容队列：不可信来源写下的事实与会话摘要中当前有效、读得到的记录
+export function pendingReview(access: Access, now?: Date): SQL {
   return and(
-    eq(memories.provenance, 'untrusted'),
-    inArray(memories.layer, REVIEW_LAYERS),
-    readableConditions(access, { personaIds, ...(now ? { now } : {}) }),
+    eq(entries.provenance, 'untrusted'),
+    inArray(entries.kind, [...REVIEW_ENTRY_KINDS]),
+    readableConditions(access, { ...(now ? { now } : {}) }),
   )!
 }
