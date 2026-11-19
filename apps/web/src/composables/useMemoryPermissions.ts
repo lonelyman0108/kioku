@@ -37,6 +37,14 @@ export function useMemoryPermissions(circleId: Ref<string>) {
     return me.data.value?.circles.find((c) => c.id === targetCircleId)?.role ?? 'viewer'
   }
 
+  function kindForCircle(targetCircleId?: string, fallbackSlug?: string | null): CircleKind {
+    if (!targetCircleId || targetCircleId === circleId.value) return circleKind.value
+    return (
+      me.data.value?.circles.find((c) => c.id === targetCircleId)?.kind ??
+      (fallbackSlug === 'personal' ? 'personal' : 'shared')
+    )
+  }
+
   function canWriteEntry(entry: Pick<ConsoleEntryView, 'sensitivity' | 'circleId'>): boolean {
     const r = roleForCircle(entry.circleId)
     if (r === 'viewer') return false
@@ -65,6 +73,7 @@ export function useMemoryPermissions(circleId: Ref<string>) {
     canEditPersonas,
     canEditVocabulary,
     sensitivities,
+    kindForCircle,
     canWriteEntry,
     readOnlyReason,
   }

@@ -6,6 +6,7 @@ import { computed, reactive, ref, watch } from 'vue'
 import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { bootUsage, simulatorState } from '../apps'
+import { useSession } from '../composables/useSession'
 import { entryKindLabels, sessionExtraLabels } from '../labels'
 import { whenLabel } from '../memoryDetail'
 import { formatShort, formatTime } from '../time'
@@ -13,6 +14,7 @@ import Hint from './Hint.vue'
 import NoteLine from './strata/NoteLine.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
+import { entryBand } from './strata/strata'
 
 // 启动加载预览：按接入实例的一个访问密钥模拟会话开始，只给接入实例所有者
 const props = withDefaults(
@@ -94,10 +96,24 @@ const resolvedFacetsText = computed(() => {
   const f = preview.value?.resolvedFacets
   return f && Object.keys(f).length ? whenLabel(f, props.vocabulary ?? undefined) : null
 })
-const entryBandOf = (targetCircleId: string, kind: EntryKind = 'entry') => {
-  if (kind === 'episode') return 'episode' as const
-  if (kind === 'fact') return 'fact' as const
-  return targetCircleId === props.circleId ? ('primary' as const) : ('shared-away' as const)
+const { me } = useSession()
+const circlesById = computed(() => new Map((me.data.value?.circles ?? []).map((c) => [c.id, c])))
+const entryBandOf = (
+  item: { circleId: string; circleSlug?: string | null },
+  kind: EntryKind = 'entry',
+) => {
+  const currentKind = circlesById.value.get(props.circleId)?.kind ?? 'shared'
+  const targetKind =
+    circlesById.value.get(item.circleId)?.kind ??
+    (item.circleId === props.circleId
+      ? currentKind
+      : item.circleSlug === 'personal'
+        ? 'personal'
+        : 'shared')
+  return entryBand(
+    { kind, circleId: item.circleId, circleKind: targetKind },
+    { id: props.circleId, kind: currentKind },
+  )
 }
 const entryLink = (targetCircleId: string, shortId: string) => ({
   name: 'memories',
@@ -150,7 +166,7 @@ const entryLink = (targetCircleId: string, shortId: string) => ({
             :key="segment.shortId"
             :style="{
               width: `${segment.width}%`,
-              background: `var(--layer-${entryBandOf(segment.circleId)})`,
+              background: `var(--layer-${entryBandOf(segment)})`,
             }"
             :title="`${segment.title}（${segment.shortId}）：${segment.chars} 字`"
           />
@@ -182,7 +198,7 @@ const entryLink = (targetCircleId: string, shortId: string) => ({
 
         <ul v-if="preview.entries.length" class="boot-list">
           <li v-for="entry in preview.entries" :key="`${entry.circleId}:${entry.shortId}`">
-            <StrataSwatch :band="entryBandOf(entry.circleId)" plain />
+            <StrataSwatch :band="entryBandOf(entry)" plain />
             <RouterLink
               :to="entryLink(entry.circleId, entry.shortId)"
               class="boot-uri"
@@ -263,7 +279,7 @@ const entryLink = (targetCircleId: string, shortId: string) => ({
           </form>
           <ul v-if="preview?.related.length" class="boot-list">
             <li v-for="candidate in preview.related" :key="candidate.entryId">
-              <StrataSwatch :band="entryBandOf(candidate.circleId, candidate.kind)" plain />
+              <StrataSwatch :band="entryBandOf(candidate, candidate.kind)" plain />
               <RouterLink
                 :to="entryLink(candidate.circleId, candidate.shortId)"
                 class="boot-uri"

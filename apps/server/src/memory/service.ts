@@ -334,7 +334,12 @@ export type SuggestionAction =
 export interface LockedSuggestion {
   entries: { id: string; version: number }[]
   pending: boolean
-  action: (sources: readonly (EntryRow & { primaryContent: string | null })[]) => SuggestionAction
+  action: (
+    sources: readonly (EntryRow & {
+      primaryContent: string | null
+      allContents?: readonly (string | null)[]
+    })[],
+  ) => SuggestionAction
 }
 
 function contentDigest(content: string): string {
@@ -5350,12 +5355,25 @@ export class EntryService {
         glossaryByEntry.set(g.entryId, list)
       }
       const glossaryOf = (entryId: string): string[] => glossaryByEntry.get(entryId) ?? []
-      const enriched = sources.map((r) => ({
-        ...r,
-        primaryContent: vByEntry.get(r.id)?.[0]?.content ?? null,
-      }))
+      const enriched = sources.map((r) => {
+        const list = vByEntry.get(r.id) ?? []
+        return {
+          ...r,
+          primaryContent: list[0]?.content ?? null,
+          allContents: list.map((v) => v.content),
+        }
+      })
 
       const action = suggestion.action(enriched)
+      const hasDuplicateWhen = (variants: readonly VariantInput[]) => {
+        const seen = new Set<string>()
+        for (const v of variants) {
+          const sig = whenSignature(normalizeWhen(v.when))
+          if (seen.has(sig)) return true
+          seen.add(sig)
+        }
+        return false
+      }
       const [circleRow] = await tx.select().from(circles).where(eq(circles.id, circleId)).limit(1)
       const { settings: privacy } = await loadCirclePrivacy(tx, circleId)
       const previousSourceText = vRows.map((v) => v.content ?? '').join('\n')
@@ -5508,6 +5526,9 @@ export class EntryService {
         if (!action.variants.length || action.variants.length > VARIANTS_MAX) {
           throw new MemoryError(409, '建议生成的切片数量无效')
         }
+        if (hasDuplicateWhen(action.variants)) {
+          throw new MemoryError(400, '同一词条下不能存在相同的切面条件切片')
+        }
         const keepGlossary = glossaryOf(keep.id)
         const validated = await checkWrittenContents(
           action.variants.map((v) => v.content),
@@ -5634,6 +5655,9 @@ export class EntryService {
         const draftVariants: VariantInput[] = draft.variants ?? [
           { when: normalizeWhen(draft.when ?? {}), content: draft.content ?? '', sortOrder: 0 },
         ]
+        if (hasDuplicateWhen(draftVariants)) {
+          throw new MemoryError(400, '同一词条下不能存在相同的切面条件切片')
+        }
         const circleKind: CircleKind = circleRow?.kind ?? 'shared'
         const sensitivity = DEFAULT_SENSITIVITY[circleKind]
         const validated = await checkWrittenContents(

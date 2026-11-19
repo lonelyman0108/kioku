@@ -583,7 +583,8 @@ const createInitialTopic = computed(() =>
               <span class="tree-label">{{ item.label }}</span>
               <span v-if="item.circleId && item.circleId !== circleId" class="tree-meta">
                 {{
-                  circleKindsMap.get(item.circleId) === 'personal' || item.circleSlug === 'personal'
+                  (circleKindsMap.get(item.circleId) ??
+                    (item.circleSlug === 'personal' ? 'personal' : 'shared')) === 'personal'
                     ? '个人圈'
                     : item.circleSlug
                 }}

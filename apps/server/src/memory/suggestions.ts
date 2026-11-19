@@ -10,7 +10,7 @@ import type {
   VariantInput,
   WhenCondition,
 } from '@kioku/contracts'
-import { normalizeWhen } from '@kioku/contracts'
+import { normalizeWhen, whenSignature } from '@kioku/contracts'
 import { and, count, desc, eq, inArray, sql } from 'drizzle-orm'
 
 import { canModify, type Access } from '../access/access'
@@ -325,10 +325,23 @@ function lockSuggestion(id: string, edits: ApplyDreamSuggestion = {}) {
   }
 }
 
+function hasDuplicateWhen(variants: readonly VariantInput[]): boolean {
+  const seen = new Set<string>()
+  for (const v of variants) {
+    const sig = whenSignature(v.when)
+    if (seen.has(sig)) return true
+    seen.add(sig)
+  }
+  return false
+}
+
 function actionOf(
   row: SuggestionRow,
   edits: ApplyDreamSuggestion,
-  sources: readonly (EntryRow & { primaryContent: string | null })[],
+  sources: readonly (EntryRow & {
+    primaryContent: string | null
+    allContents?: readonly (string | null)[]
+  })[],
 ): SuggestionAction {
   const extra = (allowed: (keyof ApplyDreamSuggestion)[]) =>
     (Object.keys(edits) as (keyof ApplyDreamSuggestion)[]).some(
@@ -337,7 +350,7 @@ function actionOf(
   const check = (problem: string | null) => {
     if (problem) throw new MemoryError(400, problem)
   }
-  const sourceContents = sources.map((s) => s.primaryContent)
+  const sourceContents = sources.flatMap((s) => s.allContents ?? [s.primaryContent])
 
   switch (row.kind as DreamSuggestionKind) {
     case 'merge': {
@@ -356,6 +369,9 @@ function actionOf(
       if (extra(['variants'])) throw new MemoryError(400, '合并多变体建议只能修改切片列表')
       const variants = edits.variants ?? (row.variants as VariantInput[] | null) ?? []
       if (!variants.length) throw new MemoryError(400, '多变体建议至少包含一个切片')
+      if (hasDuplicateWhen(variants)) {
+        throw new MemoryError(400, '同一词条下不能存在相同的切面条件切片')
+      }
       for (const v of variants) check(mergedNodeProblem(v.content, sourceContents))
       return { kind: 'merge_variants', keepId: row.keepId!, variants }
     }
@@ -363,6 +379,9 @@ function actionOf(
       if (extra(['variants'])) throw new MemoryError(400, '泛化上浮建议只能修改切片列表')
       const variants = edits.variants ?? (row.variants as VariantInput[] | null) ?? []
       if (!variants.length) throw new MemoryError(400, '泛化上浮建议至少包含一个切片')
+      if (hasDuplicateWhen(variants)) {
+        throw new MemoryError(400, '同一词条下不能存在相同的切面条件切片')
+      }
       for (const v of variants) check(mergedNodeProblem(v.content, sourceContents))
       return { kind: 'generalize', targetId: row.keepId ?? row.entryIds[0]!, variants }
     }
@@ -376,6 +395,9 @@ function actionOf(
       const variants = edits.variants ?? (row.variants as VariantInput[] | null) ?? undefined
       const content = edits.content ?? row.content ?? undefined
       if (variants?.length) {
+        if (hasDuplicateWhen(variants)) {
+          throw new MemoryError(400, '同一词条下不能存在相同的切面条件切片')
+        }
         for (const v of variants) check(draftProblem(v.content))
       } else {
         check(draftProblem((content ?? '').trim()))

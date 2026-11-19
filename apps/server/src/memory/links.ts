@@ -252,7 +252,11 @@ export async function expandOneHopNeighbors(
   options: {
     decay?: number
     now?: Date
-    variantAllowed?: (when: WhenCondition, circleDefaults: DefaultFacets) => boolean
+    variantAllowed?: (
+      when: WhenCondition,
+      circleDefaults: DefaultFacets,
+      circleId: string,
+    ) => boolean
   } = {},
 ): Promise<OneHopNeighborHit[]> {
   if (!seeds.length) return []
@@ -382,7 +386,12 @@ export async function expandOneHopNeighbors(
       )
 
     for (const row of inLinks) {
-      if (options.variantAllowed && !options.variantAllowed(row.when, row.defaultFacets)) continue
+      if (
+        options.variantAllowed &&
+        !options.variantAllowed(row.when, row.defaultFacets, row.circleId)
+      ) {
+        continue
+      }
       const seed = seedByShort.get(row.targetShortId)
       if (!seed) continue
       consider(

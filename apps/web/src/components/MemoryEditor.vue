@@ -285,9 +285,7 @@ const activeEditVariant = computed(
 const entryCircleKind = computed<CircleKind>(() => {
   const m = base.value
   if (!m) return permissions.circleKind.value
-  const known = permissions.circle.value
-  if (known && known.id === m.circleId) return known.kind
-  return m.circleSlug === 'personal' ? 'personal' : 'shared'
+  return permissions.kindForCircle(m.circleId, m.circleSlug)
 })
 
 const entryStrataBand = computed<StrataBand | null>(() => {

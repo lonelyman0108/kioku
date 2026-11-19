@@ -919,11 +919,19 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
       title: '切面目标',
       content: '初始单一正文',
     })
+    const genDual = await createEntry({
+      title: '双切片泛化',
+      variants: [
+        { when: { env: ['mac'] }, content: 'Mac 上使用同一脚本' },
+        { when: { env: ['win'] }, content: 'Win 上同样使用脚本（支持 [REDACTED:PHONE] 标记）' },
+      ],
+    })
 
     const { model } = fakeChatModel((messages) => {
       const hKeep = handleByContent(messages, '前端构建统一使用 vite')!
       const hDrop = handleByContent(messages, '不要混用 webpack')!
       const hMulti = handleByContent(messages, '初始单一正文')!
+      const hGen = handleByContent(messages, 'Mac 上使用同一脚本')!
       return reply([
         {
           kind: 'merge',
@@ -937,6 +945,12 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
           entries: [hMulti],
           when: { env: ['mac'] },
           reason: '仅适用 Mac',
+        },
+        {
+          kind: 'generalize',
+          entries: [hGen],
+          variants: [{ when: {}, content: '全平台使用统一脚本（支持 [REDACTED:PHONE] 标记）' }],
+          reason: '次切片已带脱敏标记且跨端一致',
         },
       ])
     })
@@ -952,6 +966,28 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     const listed = await listSuggestions(database.db, sharedId, service, role, {})
     const mergeSug = listed.items.find((i) => i.kind === 'merge')!
     const tagSug = listed.items.find((i) => i.kind === 'facet_tag')!
+    const genSug = listed.items.find((i) => i.kind === 'generalize')!
+
+    // 提交规范化后重复的 whenSignature 切片列表应明确返回 400 而非数据库 23505 (500)
+    await expect(
+      applySuggestion(
+        service,
+        genSug.id,
+        {
+          variants: [
+            { when: {}, sortOrder: 0, content: '全平台统一脚本一' },
+            { when: { env: [] }, sortOrder: 1, content: '全平台统一脚本二' },
+          ],
+        },
+        aliceId,
+      ),
+    ).rejects.toMatchObject({ status: 400 })
+
+    // 次要切片（variants[1]）含 [REDACTED:PHONE] 时，allContents 应放行泛化应用
+    await applySuggestion(service, genSug.id, {}, aliceId)
+    expect((await service.get({ id: genDual.shortId })).variants[0]!.content).toContain(
+      '[REDACTED:PHONE]',
+    )
 
     // merge 应保留 eKeep 的 glossary 于事件快照 before/after 中，并软删除 eDrop
     await applySuggestion(service, mergeSug.id, {}, aliceId)

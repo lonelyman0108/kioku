@@ -516,11 +516,6 @@ export async function scoreRecallWithMeta(
       activeByEntry.set(v.entryId, list)
     }
 
-    const combinedCustomDims = new Map<string, FacetMatchMode>()
-    for (const vocab of vocabularies.values()) {
-      for (const [k, mode] of vocab.dimensions) combinedCustomDims.set(k, mode)
-    }
-
     const oneHopSeeds: OneHopSeed[] = seedsSorted.map((s) => ({
       entryId: s.entryId,
       shortId: s.shortId,
@@ -534,12 +529,12 @@ export async function scoreRecallWithMeta(
       now,
       ...(options.focus !== undefined
         ? {
-            variantAllowed: (when, defaults) =>
+            variantAllowed: (when, defaults, circleId) =>
               !evaluateVariantFocus({
                 when: normalizeWhen(when),
                 circleDefaults: normalizeWhen(defaults),
                 focus: flip.queryFocus,
-                customDimensions: combinedCustomDims,
+                customDimensions: vocabularies.get(circleId)?.dimensions ?? emptyDims,
                 awayCircle: false,
                 flippedCircle: false,
                 flippedRealms: new Set(),
