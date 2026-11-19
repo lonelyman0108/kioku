@@ -7,7 +7,7 @@ import {
 
 import { mentionsPlaceholder } from '../credential/placeholders'
 
-// 兼容第 8 期迁入器尚未重构前的旧坐标类型定义；新版服务改以短 ID 替代路径坐标
+// 兼容旧版迁入器的旧坐标解析；新版服务改以短 ID 替代路径坐标
 export type LegacyCuratedLayer = 'user' | 'core' | 'app' | 'persona'
 
 const LEGACY_URI_PATTERN =

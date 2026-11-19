@@ -89,6 +89,10 @@ describe.skipIf(!testDatabaseUrl)('服务端统一运维命令行 kioku-ctl', ()
       expect(subHelp.code).toBe(0)
       expect(subHelp.stdout).toContain('--out <文件>')
 
+      const legacyHelp = await runCtlProcess(['help', 'migrate-legacy'])
+      expect(legacyHelp.code).toBe(0)
+      expect(legacyHelp.stdout).toContain('--space-export')
+
       const unknown = await runCtlProcess(['nope'])
       expect(unknown.code).toBe(2)
       expect(unknown.stderr).toContain('不认识的子命令 nope')

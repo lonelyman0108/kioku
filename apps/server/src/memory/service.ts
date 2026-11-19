@@ -341,7 +341,7 @@ function contentDigest(content: string): string {
   return createHash('sha256').update(content, 'utf8').digest('hex')
 }
 
-function buildSearchHeader(input: {
+export function buildSearchHeader(input: {
   sensitivity: Sensitivity
   title: string
   topics: readonly string[]
@@ -443,7 +443,7 @@ export interface StoredEntrySnapshot extends EntrySnapshot {
   expiresAt: string | null
 }
 
-function toStoredSnapshot(
+export function toStoredSnapshot(
   entry: EntryRow,
   variants: readonly { when: WhenCondition; content: string | null }[],
   glossary: readonly string[],
@@ -679,7 +679,7 @@ function validateCredentialPlaceholders(
   return { identifiers: allIdentifiers, refs: allRefs }
 }
 
-async function syncCredentialRefs(
+export async function syncCredentialRefs(
   tx: Tx,
   circleId: string,
   entryId: string,
