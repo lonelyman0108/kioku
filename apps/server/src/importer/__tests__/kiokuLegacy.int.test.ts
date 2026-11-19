@@ -502,15 +502,21 @@ describe.skipIf(!testDatabaseUrl)('旧版 Kioku 双形态迁移集成测试', ()
     const space2Id = randomUUID()
     const app1Id = randomUUID()
     const conv1Id = randomUUID()
+    const convDupId = randomUUID()
     const vault1Id = randomUUID()
     const vault2Id = randomUUID()
     const cred1Id = randomUUID()
     const cred2Id = randomUUID()
     const secretMemId = randomUUID()
     const episodeId = randomUUID()
+    const episodeDupId = randomUUID()
     const userMem2Id = randomUUID()
 
-    const sealedSecretMem = encryptSecret(oldKey, 'super-secret-alice-note', secretMemId)
+    const sealedSecretMem = encryptSecret(
+      oldKey,
+      '# 机密标题同正文\nsuper-secret-alice-note',
+      secretMemId,
+    )
     const sealedCred1 = encryptSecret(
       oldKey,
       JSON.stringify({ token: 'tok-from-space1' }),
@@ -634,6 +640,16 @@ describe.skipIf(!testDatabaseUrl)('旧版 Kioku 双形态迁移集成测试', ()
         created_at: '2026-10-01T00:00:00.000Z',
         last_active_at: '2026-10-02T00:00:00.000Z',
       }),
+      JSON.stringify({
+        id: convDupId,
+        space_id: space1Id,
+        app_id: app1Id,
+        kind: 'none',
+        subject_id: null,
+        owner_account_id: aliceId,
+        created_at: '2026-10-01T00:00:00.000Z',
+        last_active_at: '2026-10-03T00:00:00.000Z',
+      }),
       JSON.stringify(['vault_connections', space1Id]),
       JSON.stringify({
         id: vault1Id,
@@ -750,7 +766,7 @@ describe.skipIf(!testDatabaseUrl)('旧版 Kioku 双形态迁移集成测试', ()
         conversation_id: null,
         domain: 'user',
         path: 'secrets/bank',
-        title: '银行卡',
+        title: '机密标题同正文',
         content: null,
         ciphertext: `\\x${sealedSecretMem.ciphertext.toString('hex')}`,
         wrapped_key: `\\x${sealedSecretMem.wrappedKey.toString('hex')}`,
@@ -796,6 +812,41 @@ describe.skipIf(!testDatabaseUrl)('旧版 Kioku 双形态迁移集成测试', ()
         sensitive_pii: false,
         sensitive_findings: [],
         priority: 0,
+        disclosure: null,
+        valid_from: '2026-10-01T00:00:00.000Z',
+        valid_to: null,
+        expires_at: null,
+        version: 1,
+        created_at: '2026-10-01T00:00:00.000Z',
+        updated_at: '2026-10-01T00:00:00.000Z',
+        deleted_at: null,
+      }),
+      JSON.stringify({
+        id: episodeDupId,
+        space_id: space1Id,
+        form: 'extracted',
+        layer: 'episode',
+        sensitivity: 'internal',
+        provenance: 'agent',
+        origin_scope: `app:${app1Id}`,
+        owner_account_id: aliceId,
+        persona_id: null,
+        app_id: null,
+        subject_id: null,
+        conversation_id: convDupId,
+        domain: null,
+        path: null,
+        title: null,
+        content: '重复会话里的摘要不应丢弃',
+        ciphertext: null,
+        wrapped_key: null,
+        key_id: null,
+        plaintext_ignored_hash: null,
+        sensitive_revision: 0,
+        sensitive_credential: false,
+        sensitive_pii: false,
+        sensitive_findings: [],
+        priority: 1,
         disclosure: null,
         valid_from: '2026-10-01T00:00:00.000Z',
         valid_to: null,
@@ -881,21 +932,28 @@ describe.skipIf(!testDatabaseUrl)('旧版 Kioku 双形态迁移集成测试', ()
       async (tx) => {
         const variants = await tx.select().from(entryVariants)
         const secretVar = variants.find((v) => v.sensitivity === 'secret')!
+        const secretEntry = await tx.query.entries.findFirst({
+          where: (e, { eq: eqCol }) => eqCol(e.id, secretVar.entryId),
+        })
+        expect(secretEntry?.title).toBe(secretEntry?.shortId)
         const opened = decryptSecret(
           decryptionKey(targetMasterKey, secretVar.keyId),
           { ciphertext: secretVar.ciphertext!, wrappedKey: secretVar.wrappedKey! },
           `variant:${secretVar.id}`,
         )
-        expect(opened).toBe('super-secret-alice-note')
+        expect(opened).toBe('# 机密标题同正文\nsuper-secret-alice-note')
 
         const user2 = variants.find((v) => v.content?.includes('api_tok-2'))
         expect(user2).toBeDefined()
 
-        const epEntry = await tx.query.entries.findFirst({
+        const epEntries = await tx.query.entries.findMany({
           where: (e, { eq: eqCol }) => eqCol(e.kind, 'episode'),
         })
-        expect(epEntry?.priority).toBe(1)
-        expect(epEntry?.originScope.startsWith('client:')).toBe(true)
+        expect(epEntries).toHaveLength(2)
+        expect(epEntries.every((e) => e.conversationId === epEntries[0]!.conversationId)).toBe(true)
+        const epEntry = epEntries.find(
+          (e) => e.priority === 1 && e.originScope.startsWith('client:'),
+        )
         expect(epEntry?.ownerAccountId).toBe(aliceId)
       },
       { accessMode: 'read only' },

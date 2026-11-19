@@ -2289,7 +2289,7 @@ export class EntryService {
           provenance: sourceEntry.provenance,
         })
       ) {
-        throw new MemoryError(403, '当前账号在目标记忆圈无权写入该敏感到或物种的词条')
+        throw new MemoryError(403, '当前账号在目标记忆圈无权写入该敏感级或物种的词条')
       }
       return (await this.performTransfer(
         tx,
@@ -3308,7 +3308,13 @@ export class EntryService {
         throw new MemoryError(404, '未找到词条')
       }
       checkExpected(before, request.expectedVersion)
+      if (!canModify(this.ctx.access, before)) {
+        throw new MemoryError(403, '无权修改该词条')
+      }
       const targetSensitivity: Sensitivity = request.target === 'secret' ? 'secret' : 'private'
+      if (before.sensitivity === 'secret' && targetSensitivity !== 'secret') {
+        throw new MemoryError(400, '机密词条不支持通过该操作降级，请编辑词条并确认敏感级')
+      }
       if (
         !sensitivityAllowed(before.circleKind, before.kind, targetSensitivity, before.provenance)
       ) {
@@ -3421,6 +3427,12 @@ export class EntryService {
       if (targetSensitivity === 'secret') {
         await tx.delete(entryEmbeddings).where(eq(entryEmbeddings.entryId, before.id))
         await tx.delete(entryLinks).where(eq(entryLinks.sourceEntryId, before.id))
+        await syncCredentialRefs(tx, circleId, before.id, new Set())
+      } else if (placeholderAllowed(meta.kind, before.kind, targetSensitivity)) {
+        const nextCreds = new Set(decoded.flatMap((d) => [...placeholderIdentifiers(d.content)]))
+        await syncCredentialRefs(tx, circleId, before.id, nextCreds)
+      } else {
+        await syncCredentialRefs(tx, circleId, before.id, new Set())
       }
 
       if (becameSecret && secretHeadings) {
@@ -5308,19 +5320,36 @@ export class EntryService {
           throw new MemoryError(403, '无权修改该词条')
         }
       }
-      const vRows = ids.length
-        ? await tx
-            .select()
-            .from(entryVariants)
-            .where(inArray(entryVariants.entryId, ids))
-            .orderBy(asc(entryVariants.sortOrder))
-        : []
+      if (sources.some((s) => s.sensitivity === 'secret')) {
+        throw new MemoryError(409, '整理建议不适用于机密词条')
+      }
+      const [vRows, gRows] = uniqueIds.length
+        ? await Promise.all([
+            tx
+              .select()
+              .from(entryVariants)
+              .where(inArray(entryVariants.entryId, uniqueIds))
+              .orderBy(asc(entryVariants.sortOrder)),
+            tx
+              .select({ entryId: entryGlossary.entryId, keyword: entryGlossary.keyword })
+              .from(entryGlossary)
+              .where(inArray(entryGlossary.entryId, uniqueIds))
+              .orderBy(asc(entryGlossary.keyword)),
+          ])
+        : [[], []]
       const vByEntry = new Map<string, VariantRow[]>()
       for (const v of vRows) {
         const list = vByEntry.get(v.entryId) ?? []
         list.push(v)
         vByEntry.set(v.entryId, list)
       }
+      const glossaryByEntry = new Map<string, string[]>()
+      for (const g of gRows) {
+        const list = glossaryByEntry.get(g.entryId) ?? []
+        list.push(g.keyword)
+        glossaryByEntry.set(g.entryId, list)
+      }
+      const glossaryOf = (entryId: string): string[] => glossaryByEntry.get(entryId) ?? []
       const enriched = sources.map((r) => ({
         ...r,
         primaryContent: vByEntry.get(r.id)?.[0]?.content ?? null,
@@ -5329,6 +5358,53 @@ export class EntryService {
       const action = suggestion.action(enriched)
       const [circleRow] = await tx.select().from(circles).where(eq(circles.id, circleId)).limit(1)
       const { settings: privacy } = await loadCirclePrivacy(tx, circleId)
+      const previousSourceText = vRows.map((v) => v.content ?? '').join('\n')
+      const baselineIdentifiers = new Set(
+        vRows.flatMap((v) => [...placeholderIdentifiers(v.content ?? '')]),
+      )
+      const checkWrittenContents = async (
+        contents: readonly string[],
+        targetCircleKind: CircleKind,
+        targetKind: EntryKind,
+        targetSensitivity: Sensitivity,
+      ) => {
+        if (privacy.credentials && targetSensitivity !== 'secret') {
+          const credOpts = {
+            credentials: true,
+            pii: false,
+            customRules: privacy.customRules,
+            allowlist: privacy.allowlist,
+          }
+          const addedFindings: PlaintextFinding[] = []
+          for (const content of contents) {
+            for (const m of addedSensitiveContent(previousSourceText, content, credOpts)) {
+              addedFindings.push({ line: m.line, kind: m.kind as PlaintextKind })
+            }
+          }
+          if (addedFindings.length) {
+            throw new MemoryError(
+              400,
+              plaintextRejection(addedFindings, !this.isConsole),
+              addedFindings,
+            )
+          }
+        }
+        const validated = validateCredentialPlaceholders(
+          contents,
+          targetCircleKind,
+          targetKind,
+          targetSensitivity,
+          false,
+        )
+        await this.verifyAddedCredentialRefs(tx, {
+          circleId,
+          ownerAccountId: targetCircleKind === 'personal' ? this.ctx.access.ownerAccountId : null,
+          refs: validated.refs,
+          baselineIdentifiers,
+          isNonTrusted: false,
+        })
+        return validated
+      }
       let primaryResult: { id: string; shortId: string; title: string } | null = null
 
       const snapVariants = (list: readonly { when: unknown; content: string | null }[]) =>
@@ -5341,6 +5417,7 @@ export class EntryService {
         for (const src of sources) {
           if (src.id === keepId) continue
           const srcV = snapVariants(vByEntry.get(src.id) ?? [])
+          const srcGlossary = glossaryOf(src.id)
           const [del] = await tx
             .update(entries)
             .set({ deletedAt: now, version: src.version + 1, updatedAt: updatedAtFor(now) })
@@ -5353,8 +5430,8 @@ export class EntryService {
             entryId: src.id,
             type: 'delete',
             provenance: this.ctx.access.writeProvenance,
-            before: toStoredSnapshot(src, srcV, []),
-            after: toStoredSnapshot(del!, srcV, []),
+            before: toStoredSnapshot(src, srcV, srcGlossary),
+            after: toStoredSnapshot(del!, srcV, srcGlossary),
             context: mergedInto ? { ...eventMeta, mergedInto } : eventMeta,
           })
           affected.push(src.id)
@@ -5365,50 +5442,59 @@ export class EntryService {
         const keep = byId.get(action.keepId)
         if (!keep) throw new MemoryError(409, '保留目标不存在')
         const keepVariants = vByEntry.get(keep.id) ?? []
-        const beforeSnap = toStoredSnapshot(keep, snapVariants(keepVariants), [])
         const firstV = keepVariants[0]
-        if (firstV) {
-          const outcome = evaluateSensitiveContent(action.content, privacy)
-          await tx
-            .update(entryVariants)
-            .set({
-              content: action.content,
-              sensitiveCredential: outcome.hasCredential,
-              sensitivePii: outcome.hasPii,
-              sensitiveFindings: outcome.findings,
-              plaintextIgnoredHash:
-                firstV.content === action.content ? firstV.plaintextIgnoredHash : null,
-              updatedAt: now,
-            })
-            .where(eq(entryVariants.id, firstV.id))
-        }
+        if (!firstV) throw new MemoryError(409, '保留目标缺少变体切片')
+        const keepGlossary = glossaryOf(keep.id)
+        const allContents = [action.content, ...keepVariants.slice(1).map((v) => v.content ?? '')]
+        const validated = await checkWrittenContents(
+          allContents,
+          keep.circleKind,
+          keep.kind,
+          keep.sensitivity,
+        )
+        const beforeSnap = toStoredSnapshot(keep, snapVariants(keepVariants), keepGlossary)
+        const outcome = evaluateSensitiveContent(action.content, privacy)
+        await tx
+          .update(entryVariants)
+          .set({
+            content: action.content,
+            sensitiveCredential: outcome.hasCredential,
+            sensitivePii: outcome.hasPii,
+            sensitiveFindings: outcome.findings,
+            plaintextIgnoredHash:
+              firstV.content === action.content ? firstV.plaintextIgnoredHash : null,
+            updatedAt: now,
+          })
+          .where(eq(entryVariants.id, firstV.id))
         const [uKeep] = await tx
           .update(entries)
           .set({ provenance: 'owner', version: keep.version + 1, updatedAt: updatedAtFor(now) })
           .where(eq(entries.id, keep.id))
           .returning()
+        await syncCredentialRefs(tx, circleId, keep.id, validated.identifiers)
         await syncEntryLinks(tx, {
           circleId,
           entryId: keep.id,
           shortId: keep.shortId,
           sensitivity: keep.sensitivity,
           provenance: 'owner',
-          variants: [{ id: firstV?.id ?? keep.id, content: action.content }],
+          variants: [
+            { id: firstV.id, content: action.content },
+            ...keepVariants.slice(1).map((v) => ({ id: v.id, content: v.content })),
+          ],
         })
         await softDeleteOthers(keep.id, keep.id)
-        const afterV = firstV
-          ? [
-              { when: normalizeWhen(firstV.when), content: action.content },
-              ...snapVariants(keepVariants.slice(1)),
-            ]
-          : [{ when: {}, content: action.content }]
+        const afterV = [
+          { when: normalizeWhen(firstV.when), content: action.content },
+          ...snapVariants(keepVariants.slice(1)),
+        ]
         await this.writeEvent(tx, {
           circleId,
           entryId: keep.id,
           type: 'update',
           provenance: this.ctx.access.writeProvenance,
           before: beforeSnap,
-          after: toStoredSnapshot(uKeep!, afterV, []),
+          after: toStoredSnapshot(uKeep!, afterV, keepGlossary),
           context: {
             ...eventMeta,
             mergedFrom: sources.filter((s) => s.id !== keep.id).map((s) => s.id),
@@ -5419,7 +5505,21 @@ export class EntryService {
         const targetId = action.kind === 'merge_variants' ? action.keepId : action.targetId
         const keep = byId.get(targetId)
         if (!keep) throw new MemoryError(409, '目标词条不存在')
-        const beforeSnap = toStoredSnapshot(keep, snapVariants(vByEntry.get(keep.id) ?? []), [])
+        if (!action.variants.length || action.variants.length > VARIANTS_MAX) {
+          throw new MemoryError(409, '建议生成的切片数量无效')
+        }
+        const keepGlossary = glossaryOf(keep.id)
+        const validated = await checkWrittenContents(
+          action.variants.map((v) => v.content),
+          keep.circleKind,
+          keep.kind,
+          keep.sensitivity,
+        )
+        const beforeSnap = toStoredSnapshot(
+          keep,
+          snapVariants(vByEntry.get(keep.id) ?? []),
+          keepGlossary,
+        )
         await tx.delete(entryVariants).where(eq(entryVariants.entryId, keep.id))
         const realms = normalizeRealms(
           action.variants.flatMap((v) => normalizeWhen(v.when).realm ?? []),
@@ -5429,7 +5529,7 @@ export class EntryService {
           title: keep.title,
           topics: keep.topics,
           disclosure: keep.disclosure,
-          glossary: [],
+          glossary: keepGlossary,
         })
         const createdV: VariantRow[] = []
         for (let i = 0; i < action.variants.length; i++) {
@@ -5465,6 +5565,7 @@ export class EntryService {
           })
           .where(eq(entries.id, keep.id))
           .returning()
+        await syncCredentialRefs(tx, circleId, keep.id, validated.identifiers)
         await syncEntryLinks(tx, {
           circleId,
           entryId: keep.id,
@@ -5480,7 +5581,7 @@ export class EntryService {
           type: 'update',
           provenance: this.ctx.access.writeProvenance,
           before: beforeSnap,
-          after: toStoredSnapshot(uKeep!, snapVariants(createdV), []),
+          after: toStoredSnapshot(uKeep!, snapVariants(createdV), keepGlossary),
           context:
             action.kind === 'merge_variants'
               ? {
@@ -5496,32 +5597,38 @@ export class EntryService {
         const norm = normalizeWhen(action.when)
         const sig = whenSignature(norm)
         const vRowsOf = vByEntry.get(target.id) ?? []
-        if (vRowsOf.length === 1) {
-          const beforeSnap = toStoredSnapshot(target, snapVariants(vRowsOf), [])
-          await tx
-            .update(entryVariants)
-            .set({ when: norm, whenSignature: sig, updatedAt: now })
-            .where(eq(entryVariants.id, vRowsOf[0]!.id))
-          const [uTarget] = await tx
-            .update(entries)
-            .set({
-              realms: normalizeRealms(norm.realm ?? []),
-              version: target.version + 1,
-              updatedAt: updatedAtFor(now),
-            })
-            .where(eq(entries.id, target.id))
-            .returning()
-          await this.writeEvent(tx, {
-            circleId,
-            entryId: target.id,
-            type: 'update',
-            provenance: this.ctx.access.writeProvenance,
-            before: beforeSnap,
-            after: toStoredSnapshot(uTarget!, [{ when: norm, content: vRowsOf[0]!.content }], []),
-            context: eventMeta,
-          })
-          affected.push(target.id)
+        if (vRowsOf.length !== 1) {
+          throw new MemoryError(409, '词条已包含多个切片，这条建议已作废')
         }
+        const targetGlossary = glossaryOf(target.id)
+        const beforeSnap = toStoredSnapshot(target, snapVariants(vRowsOf), targetGlossary)
+        await tx
+          .update(entryVariants)
+          .set({ when: norm, whenSignature: sig, updatedAt: now })
+          .where(eq(entryVariants.id, vRowsOf[0]!.id))
+        const [uTarget] = await tx
+          .update(entries)
+          .set({
+            realms: normalizeRealms(norm.realm ?? []),
+            version: target.version + 1,
+            updatedAt: updatedAtFor(now),
+          })
+          .where(eq(entries.id, target.id))
+          .returning()
+        await this.writeEvent(tx, {
+          circleId,
+          entryId: target.id,
+          type: 'update',
+          provenance: this.ctx.access.writeProvenance,
+          before: beforeSnap,
+          after: toStoredSnapshot(
+            uTarget!,
+            [{ when: norm, content: vRowsOf[0]!.content }],
+            targetGlossary,
+          ),
+          context: eventMeta,
+        })
+        affected.push(target.id)
       } else if (action.kind === 'distill' || action.kind === 'distill_episode') {
         const draft = action.draft
         const draftVariants: VariantInput[] = draft.variants ?? [
@@ -5529,6 +5636,12 @@ export class EntryService {
         ]
         const circleKind: CircleKind = circleRow?.kind ?? 'shared'
         const sensitivity = DEFAULT_SENSITIVITY[circleKind]
+        const validated = await checkWrittenContents(
+          draftVariants.map((v) => v.content),
+          circleKind,
+          'entry',
+          sensitivity,
+        )
         const topics = cleanTopics(draft.topics)
         const realms = normalizeRealms(
           draftVariants.flatMap((v) => normalizeWhen(v.when).realm ?? []),
@@ -5588,6 +5701,7 @@ export class EntryService {
           }
           return { row: nRow!, variants: vCreated }
         })
+        await syncCredentialRefs(tx, circleId, inserted.row.id, validated.identifiers)
         await syncEntryLinks(tx, {
           circleId,
           entryId: inserted.row.id,
@@ -5618,6 +5732,7 @@ export class EntryService {
       } else if (action.kind === 'stale') {
         for (const src of sources) {
           const srcV = snapVariants(vByEntry.get(src.id) ?? [])
+          const srcGlossary = glossaryOf(src.id)
           const [uRow] = await tx
             .update(entries)
             .set({ validTo: now, version: src.version + 1, updatedAt: updatedAtFor(now) })
@@ -5629,8 +5744,8 @@ export class EntryService {
             entryId: src.id,
             type: 'update',
             provenance: this.ctx.access.writeProvenance,
-            before: toStoredSnapshot(src, srcV, []),
-            after: toStoredSnapshot(uRow!, srcV, []),
+            before: toStoredSnapshot(src, srcV, srcGlossary),
+            after: toStoredSnapshot(uRow!, srcV, srcGlossary),
             context: eventMeta,
           })
           affected.push(src.id)
@@ -5643,8 +5758,9 @@ export class EntryService {
           await softDeleteOthers('__none__')
         } else {
           for (const src of sources) {
-            const vRows = vByEntry.get(src.id) ?? []
-            const srcV = snapVariants(vRows)
+            const vRowsOfSrc = vByEntry.get(src.id) ?? []
+            const srcV = snapVariants(vRowsOfSrc)
+            const srcGlossary = glossaryOf(src.id)
             const [uRow] = await tx
               .update(entries)
               .set({ provenance: 'owner', version: src.version + 1, updatedAt: updatedAtFor(now) })
@@ -5656,15 +5772,15 @@ export class EntryService {
               shortId: src.shortId,
               sensitivity: src.sensitivity,
               provenance: 'owner',
-              variants: vRows.map((v) => ({ id: v.id, content: v.content })),
+              variants: vRowsOfSrc.map((v) => ({ id: v.id, content: v.content })),
             })
             await this.writeEvent(tx, {
               circleId,
               entryId: src.id,
               type: 'confirm',
               provenance: 'owner',
-              before: toStoredSnapshot(src, srcV, []),
-              after: toStoredSnapshot(uRow!, srcV, []),
+              before: toStoredSnapshot(src, srcV, srcGlossary),
+              after: toStoredSnapshot(uRow!, srcV, srcGlossary),
               context: eventMeta,
             })
             affected.push(src.id)
@@ -5673,6 +5789,7 @@ export class EntryService {
       } else if (action.kind === 'promote') {
         for (const src of sources) {
           const srcV = snapVariants(vByEntry.get(src.id) ?? [])
+          const srcGlossary = glossaryOf(src.id)
           const [uRow] = await tx
             .update(entries)
             .set({
@@ -5687,8 +5804,8 @@ export class EntryService {
             entryId: src.id,
             type: 'update',
             provenance: this.ctx.access.writeProvenance,
-            before: toStoredSnapshot(src, srcV, []),
-            after: toStoredSnapshot(uRow!, srcV, []),
+            before: toStoredSnapshot(src, srcV, srcGlossary),
+            after: toStoredSnapshot(uRow!, srcV, srcGlossary),
             context: eventMeta,
           })
           affected.push(src.id)

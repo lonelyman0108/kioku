@@ -386,6 +386,21 @@ describe.skipIf(!testDatabaseUrl)(
       expect(teamBoot.entries.map((e) => e.shortId)).not.toContain(homeRoutine.shortId)
       expect(teamBoot.entries.map((e) => e.shortId)).not.toContain(gitGuide.shortId)
 
+      const conflictSeedTarget = await personalSvc.create({
+        title: '冲突种子独有邻居',
+        variants: [{ when: {}, content: '绝不应经冲突种子扩散出来的普通词条。', sortOrder: 0 }],
+      })
+      const conflictingSeed = await personalSvc.create({
+        title: '仅 Win 有效的家里网络拓扑种子',
+        variants: [
+          {
+            when: { env: ['win'] },
+            content: `仅 win 环境下提及 家里网络拓扑 与 [[${conflictSeedTarget.shortId}]]。`,
+            sortOrder: 0,
+          },
+        ],
+      })
+
       // 2 + 4) 嵌入后执行提问破壁召回 + 1 跳安全双链扩散
       await embedEntries(database.db, embedder, personal.id, [
         homeNetEntry.id,
@@ -393,11 +408,13 @@ describe.skipIf(!testDatabaseUrl)(
         leakedNeighbor.id,
         noiseEntry.id,
         gitGuide.id,
+        conflictSeedTarget.id,
+        conflictingSeed.id,
       ])
       void teamSvc
 
       // 无「家里」触发词时，不发生破壁；含「家里」触发词时，破壁并入 home 场域，命中 homeNetEntry 并从无冲突切片扩散到 safeNeighbor，
-      // 绝不从已被剥离的 win 切片扩散到 leakedNeighbor，也绝不泄露 secretNeighbor；relevanceFloor 挡掉无关 noiseEntry
+      // 绝不从已被剥离的 win 切片扩散到 leakedNeighbor，全部切片均冲突的种子亦不回退扩散到 conflictSeedTarget，也绝不泄露 secretNeighbor；relevanceFloor 挡掉无关 noiseEntry
       const flippedHits = await scope.recall('家里网络拓扑', {
         limit: 10,
         minScore: 0.1,
@@ -412,6 +429,7 @@ describe.skipIf(!testDatabaseUrl)(
       expect(neighborHit!.cues.some((c) => c.includes(homeNetEntry.shortId))).toBe(true)
 
       expect(flippedHits.some((h) => h.shortId === leakedNeighbor.shortId)).toBe(false)
+      expect(flippedHits.some((h) => h.shortId === conflictSeedTarget.shortId)).toBe(false)
       expect(flippedHits.some((h) => h.shortId === secretNeighbor.shortId)).toBe(false)
       expect(flippedHits.some((h) => h.shortId === noiseEntry.shortId)).toBe(false)
 

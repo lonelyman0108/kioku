@@ -141,6 +141,9 @@ export function useConvertCredential(
   }
 
   // 占位符放不进这条记忆：服务端一定拒绝，值不显示，也不让提交
+  const entryCircleKind = computed<CircleKind>(() =>
+    entry.value ? resolveCircleKind(entry.value) : 'shared',
+  )
   const scopeBlocked = (
     view: Pick<ConsoleEntryView, 'circleId' | 'circleSlug' | 'kind' | 'sensitivity'>,
   ) => !placeholderAllowed(resolveCircleKind(view), view.kind, view.sensitivity)
@@ -404,6 +407,7 @@ export function useConvertCredential(
 
   return {
     entry,
+    entryCircleKind,
     loading,
     loadFailure,
     form,

@@ -2,6 +2,7 @@
 import type { CircleKind, EntryLinkNeighbor } from '@kioku/contracts'
 import { computed } from 'vue'
 
+import { useSession } from '../composables/useSession'
 import MemoryRow from './strata/MemoryRow.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 import { entryBand } from './strata/strata'
@@ -13,6 +14,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{ open: [shortId: string, targetCircleId: string] }>()
+const { me } = useSession()
 
 function uniqueByShortId(items: readonly EntryLinkNeighbor[]): EntryLinkNeighbor[] {
   const seen = new Set<string>()
@@ -32,19 +34,27 @@ const incoming = computed(() =>
   uniqueByShortId(props.links.filter((l) => l.direction === 'incoming')),
 )
 
+function kindOf(item: Pick<EntryLinkNeighbor, 'circleId' | 'circleSlug'>): CircleKind {
+  if (item.circleId === props.circleId) return props.circleKind
+  return (
+    me.data.value?.circles.find((c) => c.id === item.circleId)?.kind ??
+    (item.circleSlug === 'personal' ? 'personal' : 'shared')
+  )
+}
+
 function bandOf(item: EntryLinkNeighbor) {
   return entryBand(
     {
       kind: item.kind,
       circleId: item.circleId,
-      circleKind: item.circleSlug === 'personal' ? 'personal' : 'shared',
+      circleKind: kindOf(item),
     },
     { id: props.circleId, kind: props.circleKind },
   )
 }
 
 function circleLabel(item: EntryLinkNeighbor): string {
-  return item.circleSlug === 'personal' ? '个人圈' : item.circleSlug
+  return kindOf(item) === 'personal' ? '个人圈' : item.circleSlug
 }
 </script>
 

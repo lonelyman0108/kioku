@@ -19,7 +19,13 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { createApp } from '../../app'
 import { rotateMasterKey } from '../../crypto/rotation'
 import { withCircle, type Database } from '../../db/client'
-import { dreamSuggestions, entryEvents, entryRecallStats, settings } from '../../db/schema'
+import {
+  dreamSuggestions,
+  entryCredentialRefs,
+  entryEvents,
+  entryRecallStats,
+  settings,
+} from '../../db/schema'
 import type { Embedder } from '../../embedding/provider'
 import { staticEmbedderSource } from '../../embedding/source'
 import { embedEntries } from '../../embedding/worker'
@@ -201,6 +207,52 @@ describe.skipIf(!testDatabaseUrl)('敏感内容与隐私设置', () => {
     const sealed = (await protectSecretRes.json()) as ConsoleEntryView
     expect(sealed.sensitivity).toBe('secret')
     expect(sealed.contentHidden).toBe(true)
+
+    // 4c. 机密词条禁止经 protect 降级为 personal_private，且 private -> secret 会清理 entry_credential_refs
+    const downgradeViaProtect = await send(
+      'POST',
+      `/circles/${ws.personalCircleId}/entries/protect`,
+      {
+        entryId: sealed.id,
+        expectedVersion: sealed.version,
+        target: 'personal_private',
+      },
+    )
+    expect(downgradeViaProtect.status).toBe(400)
+    expect((await getEntry(sealed.id, ws.personalCircleId)).sensitivity).toBe('secret')
+
+    const credCreateRes = await send('POST', `/circles/${ws.personalCircleId}/credentials`, {
+      identifier: 'protect_test_key',
+      name: '保护回归凭据',
+      source: { kind: 'new', values: { password: 'secret-value-123' } },
+    })
+    expect(credCreateRes.status, await credCreateRes.clone().text()).toBe(201)
+    const entryWithCred = await createEntry(
+      '登录密码见 {{cred:protect_test_key#password}}',
+      '凭据引用词条',
+      'private',
+      ws.personalCircleId,
+    )
+    const refsBefore = await withCircle(database.db, ws.personalCircleId, (tx) =>
+      tx
+        .select()
+        .from(entryCredentialRefs)
+        .where(eq(entryCredentialRefs.entryId, entryWithCred.id)),
+    )
+    expect(refsBefore).toHaveLength(1)
+    const sealCredEntryRes = await send('POST', `/circles/${ws.personalCircleId}/entries/protect`, {
+      entryId: entryWithCred.id,
+      expectedVersion: entryWithCred.version,
+      target: 'secret',
+    })
+    expect(sealCredEntryRes.status, await sealCredEntryRes.clone().text()).toBe(200)
+    const refsAfter = await withCircle(database.db, ws.personalCircleId, (tx) =>
+      tx
+        .select()
+        .from(entryCredentialRefs)
+        .where(eq(entryCredentialRefs.entryId, entryWithCred.id)),
+    )
+    expect(refsAfter).toHaveLength(0)
 
     // 5. 误粘贴的冗余敏感文本支持 stars 与 tag 两种模式抹除敏感段
     const noiseA = await createEntry('误粘贴手机 13812345678', '噪音A')

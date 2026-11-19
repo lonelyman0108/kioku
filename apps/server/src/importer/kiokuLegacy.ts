@@ -1849,7 +1849,8 @@ interface PlannedEntry {
   circleKind: CircleKind
   circleName: string
   kind: EntryKind
-  title: string
+  explicitTitle: string | null
+  titleFallback: string | null
   sensitivity: Sensitivity
   provenance: Provenance
   originScope: string
@@ -2293,8 +2294,8 @@ export async function planLegacyMigration(
   const conversationById = new Map<string, PlannedConversation>()
   const conversationClientMap = new Map<string, string>()
   const plannedConversations: PlannedConversation[] = []
-  const seenSubjectConv = new Set<string>()
-  const seenNoneConv = new Set<string>()
+  const seenSubjectConv = new Map<string, string>()
+  const seenNoneConv = new Map<string, string>()
 
   for (const conv of snapshot.conversations) {
     const circle = sharedBySpaceId.get(conv.spaceId)
@@ -2307,9 +2308,13 @@ export async function planLegacyMigration(
           ? conv.ownerAccountId
           : null) ?? clientById.get(clientId)!.ownerAccountId
       const key = `${clientId}\0${ownerId}\0\0`
-      if (seenNoneConv.has(key)) continue
-      seenNoneConv.add(key)
+      const existingId = seenNoneConv.get(key)
+      if (existingId) {
+        conversationIdMap.set(conv.id, existingId)
+        continue
+      }
       const nextId = randomUUID()
+      seenNoneConv.set(key, nextId)
       conversationIdMap.set(conv.id, nextId)
       conversationClientMap.set(nextId, clientId)
       const planned: PlannedConversation = {
@@ -2330,9 +2335,13 @@ export async function planLegacyMigration(
       const subjectId = conv.subjectId ? (subjectIdMap.get(conv.subjectId) ?? null) : null
       if (!subjectId) continue
       const key = `${clientId}\0${subjectId}`
-      if (seenSubjectConv.has(key)) continue
-      seenSubjectConv.add(key)
+      const existingId = seenSubjectConv.get(key)
+      if (existingId) {
+        conversationIdMap.set(conv.id, existingId)
+        continue
+      }
       const nextId = randomUUID()
+      seenSubjectConv.set(key, nextId)
       conversationIdMap.set(conv.id, nextId)
       conversationClientMap.set(nextId, clientId)
       const planned: PlannedConversation = {
@@ -2638,12 +2647,8 @@ export async function planLegacyMigration(
 
       // 机密人格片段或孤立人格记忆降落为安全 entry
       const ownerAccount = accountById.get(primaryOwnerBySpaceId.get(mem.spaceId)!)!
-      const fallbackName = mem.uri?.split('/').pop() || '未命名人格机密'
-      const title =
-        mem.title?.trim().slice(0, ENTRY_TITLE_MAX) ||
-        (mem.sensitivity === 'secret'
-          ? fallbackName.slice(0, ENTRY_TITLE_MAX)
-          : deriveEntryTitle(undefined, [{ content: plaintext }], fallbackName, mem.sensitivity))
+      const fallbackName = mem.uri?.split('/').pop()?.slice(0, ENTRY_TITLE_MAX) || '未命名人格'
+      const explicitTitle = mem.title?.trim() ? mem.title.trim().slice(0, ENTRY_TITLE_MAX) : null
       const provenance: Provenance = mem.provenance === 'untrusted' ? 'agent' : mem.provenance
       const sens: Sensitivity =
         mem.sensitivity === 'secret'
@@ -2665,7 +2670,8 @@ export async function planLegacyMigration(
         circleKind: 'personal',
         circleName: ownerAccount.personalCircleName,
         kind: 'entry',
-        title,
+        explicitTitle,
+        titleFallback: sens === 'secret' ? null : fallbackName,
         sensitivity: sens,
         provenance,
         originScope: 'global',
@@ -2709,17 +2715,8 @@ export async function planLegacyMigration(
       const rewrittenText = renameMap ? rewritePlaceholders(plaintext, renameMap) : plaintext
       const placeholderChanged = rewrittenText !== plaintext
       const provenance: Provenance = mem.provenance === 'untrusted' ? 'owner' : mem.provenance
-      const fallbackName = mem.uri?.split('/').pop() || '未命名记忆'
-      const title =
-        mem.title?.trim().slice(0, ENTRY_TITLE_MAX) ||
-        (mem.sensitivity === 'secret'
-          ? fallbackName.slice(0, ENTRY_TITLE_MAX)
-          : deriveEntryTitle(
-              undefined,
-              [{ content: rewrittenText }],
-              fallbackName,
-              mem.sensitivity,
-            ))
+      const fallbackName = mem.uri?.split('/').pop()?.slice(0, ENTRY_TITLE_MAX) || '未命名记忆'
+      const explicitTitle = mem.title?.trim() ? mem.title.trim().slice(0, ENTRY_TITLE_MAX) : null
       const when: WhenCondition = {}
       const sig = whenSignature(when)
       counts.entry++
@@ -2731,7 +2728,8 @@ export async function planLegacyMigration(
         circleKind: 'personal',
         circleName: ownerAccount.personalCircleName,
         kind: 'entry',
-        title,
+        explicitTitle,
+        titleFallback: mem.sensitivity === 'secret' ? null : fallbackName,
         sensitivity: mem.sensitivity,
         provenance,
         originScope: 'global',
@@ -2786,12 +2784,8 @@ export async function planLegacyMigration(
           : null
       const when: WhenCondition = runtimeSlug ? { runtime: [runtimeSlug] } : {}
       const sig = whenSignature(when)
-      const fallbackName = mem.uri?.split('/').pop() || '未命名记忆'
-      const title =
-        mem.title?.trim().slice(0, ENTRY_TITLE_MAX) ||
-        (mem.sensitivity === 'secret'
-          ? fallbackName.slice(0, ENTRY_TITLE_MAX)
-          : deriveEntryTitle(undefined, [{ content: plaintext }], fallbackName, mem.sensitivity))
+      const fallbackName = mem.uri?.split('/').pop()?.slice(0, ENTRY_TITLE_MAX) || '未命名记忆'
+      const explicitTitle = mem.title?.trim() ? mem.title.trim().slice(0, ENTRY_TITLE_MAX) : null
 
       counts.entry++
       if (mem.sensitivity === 'secret') counts.secret++
@@ -2802,7 +2796,8 @@ export async function planLegacyMigration(
         circleKind: 'shared',
         circleName: sharedCircle.name,
         kind: 'entry',
-        title,
+        explicitTitle,
+        titleFallback: mem.sensitivity === 'secret' ? null : fallbackName,
         sensitivity: mem.sensitivity,
         provenance,
         originScope: remapOriginScope(mem.originScope, appIdToClientId, subjectIdMap),
@@ -2860,12 +2855,7 @@ export async function planLegacyMigration(
       if (sens !== mem.sensitivity) {
         warnings.push(`未确认来源联系人事实 ${mem.id} 不能标为 secret，已降级为 private`)
       }
-      const title = deriveEntryTitle(
-        mem.title ?? undefined,
-        [{ content: plaintext }],
-        '联系人事实',
-        sens,
-      )
+      const explicitTitle = mem.title?.trim() ? mem.title.trim().slice(0, ENTRY_TITLE_MAX) : null
       counts.fact++
       if (sens === 'secret') counts.secret++
       plannedEntries.push({
@@ -2874,7 +2864,8 @@ export async function planLegacyMigration(
         circleKind: 'shared',
         circleName: sharedCircle.name,
         kind: 'fact',
-        title,
+        explicitTitle,
+        titleFallback: sens === 'secret' ? null : '联系人事实',
         sensitivity: sens,
         provenance: mem.provenance,
         originScope: remapOriginScope(mem.originScope, appIdToClientId, subjectIdMap),
@@ -2928,12 +2919,7 @@ export async function planLegacyMigration(
           ? mem.ownerAccountId
           : convObj.ownerAccountId
         : null
-    const title = deriveEntryTitle(
-      mem.title ?? undefined,
-      [{ content: plaintext }],
-      '会话摘要',
-      sens,
-    )
+    const explicitTitle = mem.title?.trim() ? mem.title.trim().slice(0, ENTRY_TITLE_MAX) : null
     counts.episode++
     plannedEntries.push({
       id: randomUUID(),
@@ -2941,7 +2927,8 @@ export async function planLegacyMigration(
       circleKind: 'shared',
       circleName: sharedCircle.name,
       kind: 'episode',
-      title,
+      explicitTitle,
+      titleFallback: '会话摘要',
       sensitivity: sens,
       provenance: mem.provenance,
       originScope: remapOriginScope(mem.originScope, appIdToClientId, subjectIdMap),
@@ -3382,6 +3369,12 @@ export async function applyLegacyMigration(
             }
           }
 
+          const title = deriveEntryTitle(
+            item.explicitTitle,
+            [{ content: item.plaintext }],
+            item.sensitivity === 'secret' ? shortId : item.titleFallback || shortId,
+            item.sensitivity,
+          )
           const [insertedEntry] = await cTx
             .insert(entries)
             .values({
@@ -3390,7 +3383,7 @@ export async function applyLegacyMigration(
               circleKind: item.circleKind,
               shortId,
               kind: item.kind,
-              title: item.title,
+              title,
               sensitivity: item.sensitivity,
               provenance: item.provenance,
               originScope: item.originScope,
@@ -3450,7 +3443,7 @@ export async function applyLegacyMigration(
               sortOrder: 0,
               searchHeader: buildSearchHeader({
                 sensitivity: item.sensitivity,
-                title: item.title,
+                title,
                 topics: item.topics,
                 disclosure: item.disclosure,
                 glossary: item.glossary,

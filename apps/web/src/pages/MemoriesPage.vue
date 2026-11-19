@@ -582,7 +582,11 @@ const createInitialTopic = computed(() =>
               />
               <span class="tree-label">{{ item.label }}</span>
               <span v-if="item.circleId && item.circleId !== circleId" class="tree-meta">
-                {{ item.circleSlug === 'personal' ? '个人圈' : item.circleSlug }}
+                {{
+                  circleKindsMap.get(item.circleId) === 'personal' || item.circleSlug === 'personal'
+                    ? '个人圈'
+                    : item.circleSlug
+                }}
               </span>
               <span class="tree-trail">
                 <MemoryFlags

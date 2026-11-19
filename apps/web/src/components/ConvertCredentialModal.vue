@@ -8,6 +8,7 @@ import {
 import { computed, toRef, useId, watch } from 'vue'
 
 import { useConvertCredential } from '../composables/useConvertCredential'
+import { useSession } from '../composables/useSession'
 import { convertSummary, UNMATCHED_HINT, unmatchedNote } from '../plaintext'
 import { entryRoute } from '../routes'
 import { orphanNotice } from '../vault'
@@ -27,6 +28,7 @@ const emit = defineEmits<{
 
 const {
   entry,
+  entryCircleKind,
   loading,
   loadFailure,
   form,
@@ -81,6 +83,14 @@ function close() {
   if (!submitting.value) open.value = false
 }
 
+const { me } = useSession()
+const targetCircleKind = computed(() =>
+  entry.value
+    ? (me.data.value?.circles.find((c) => c.id === entry.value!.circleId)?.kind ??
+      entryCircleKind.value)
+    : 'shared',
+)
+
 const unmatched = computed(() =>
   unmatchedNote({
     unavailableConnections: unavailableConnections.value,
@@ -130,7 +140,7 @@ const candidateGroup = useId()
               entryBand({
                 kind: entry.kind,
                 circleId: entry.circleId,
-                circleKind: entry.circleSlug === 'personal' ? 'personal' : 'shared',
+                circleKind: targetCircleKind,
               })
             "
             :sensitivity="entry.sensitivity"
@@ -160,7 +170,7 @@ const candidateGroup = useId()
               entryBand({
                 kind: entry.kind,
                 circleId: entry.circleId,
-                circleKind: entry.circleSlug === 'personal' ? 'personal' : 'shared',
+                circleKind: targetCircleKind,
               })
             "
             :sensitivity="entry.sensitivity"

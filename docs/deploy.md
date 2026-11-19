@@ -71,7 +71,7 @@ docker compose -f docker-compose.build.yml up -d --build
 ```bash
 curl -fsS -X POST http://127.0.0.1:18920/v1/setup \
   -H 'content-type: application/json' \
-  -d "{\"setupCode\":\"$KIOKU_SETUP_CODE\",\"username\":\"admin\",\"displayName\":\"管理员\",\"password\":\"<至少 10 位>\",\"spaceName\":\"我的空间\"}"
+  -d "{\"setupCode\":\"$KIOKU_SETUP_CODE\",\"username\":\"admin\",\"displayName\":\"管理员\",\"password\":\"<至少 10 位>\",\"circleName\":\"我的记忆圈\"}"
 ```
 
 ## HTTPS 与反向代理

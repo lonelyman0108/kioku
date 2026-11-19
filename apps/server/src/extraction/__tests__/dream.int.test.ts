@@ -17,6 +17,7 @@ import {
   dreamRuns,
   dreamSuggestions,
   entries,
+  entryEvents,
   entryRecallStats,
   entryVariants,
   extractionRuns,
@@ -193,6 +194,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
       when?: WhenCondition
       variants?: { when?: WhenCondition; content: string }[]
       topics?: string[]
+      glossary?: string[]
       sensitivity?: 'public' | 'internal' | 'private' | 'secret'
       priority?: number
       validTo?: string
@@ -891,5 +893,96 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     // 确认 dreamRuns 行已正常写入
     const totalRuns = await withCircle(database.db, sharedId, (tx) => tx.select().from(dreamRuns))
     expect(totalRuns.length).toBeGreaterThanOrEqual(4)
+  })
+
+  it('应用建议在事件快照中保留关键词，并在 facet_tag 目标变为多切片时返回 409 不误标已应用', async () => {
+    await withCircle(database.db, sharedId, (tx) =>
+      createTerm(tx, sharedId, {
+        dimensionKey: 'env',
+        slug: 'mac',
+        label: 'Mac',
+        implies: {},
+        aliases: [],
+      }),
+    )
+
+    const eKeep = await createEntry({
+      title: '构建工具',
+      content: '前端构建统一使用 vite',
+      glossary: ['vite', 'frontend'],
+    })
+    const eDrop = await createEntry({
+      title: '构建工具补充',
+      content: '不要混用 webpack',
+    })
+    const multiTarget = await createEntry({
+      title: '切面目标',
+      content: '初始单一正文',
+    })
+
+    const { model } = fakeChatModel((messages) => {
+      const hKeep = handleByContent(messages, '前端构建统一使用 vite')!
+      const hDrop = handleByContent(messages, '不要混用 webpack')!
+      const hMulti = handleByContent(messages, '初始单一正文')!
+      return reply([
+        {
+          kind: 'merge',
+          entries: [hKeep, hDrop],
+          keep: hKeep,
+          content: '前端构建统一使用 vite（禁用 webpack）',
+          reason: '合并重复 构建说明',
+        },
+        {
+          kind: 'facet_tag',
+          entries: [hMulti],
+          when: { env: ['mac'] },
+          reason: '仅适用 Mac',
+        },
+      ])
+    })
+
+    await dreamCircle(database.db, masterKey, {
+      circleId: sharedId,
+      runId: randomUUID(),
+      trigger: 'manual',
+      modelFor: () => model,
+    })
+
+    const { service, role } = await member()
+    const listed = await listSuggestions(database.db, sharedId, service, role, {})
+    const mergeSug = listed.items.find((i) => i.kind === 'merge')!
+    const tagSug = listed.items.find((i) => i.kind === 'facet_tag')!
+
+    // merge 应保留 eKeep 的 glossary 于事件快照 before/after 中，并软删除 eDrop
+    await applySuggestion(service, mergeSug.id, {}, aliceId)
+    await expect(service.get({ id: eDrop.shortId })).rejects.toThrow()
+    const evs = await withCircle(database.db, sharedId, (tx) =>
+      tx.select().from(entryEvents).where(eq(entryEvents.entryId, eKeep.id)),
+    )
+    const updateEv = evs.find((e) => e.eventType === 'update')!
+    expect((updateEv.before as { glossary?: string[] }).glossary).toEqual(['frontend', 'vite'])
+    expect((updateEv.after as { glossary?: string[] }).glossary).toEqual(['frontend', 'vite'])
+
+    // 把 multiTarget 改成多变体但不改 version（不可能同版本，先按新版本更新后再把 suggestion 条目设为双切片再匹配）—
+    // 直接更新并重新生成带版本匹配的 multiTarget？不用，applySuggestion 检查 req.version；
+    // 实际上 multiTarget 最初就只有 1 个切片才会被建议，这里验证若版本一致但存在 2 个切片时的防线：
+    await withCircle(database.db, sharedId, (tx) =>
+      tx.insert(entryVariants).values({
+        circleId: sharedId,
+        entryId: multiTarget.id,
+        kind: multiTarget.kind,
+        sensitivity: multiTarget.sensitivity,
+        when: { env: ['mac'] },
+        whenSignature: 'env=mac',
+        sortOrder: 1,
+        content: '额外切片',
+        searchHeader: '',
+      }),
+    )
+    await expect(applySuggestion(service, tagSug.id, {}, aliceId)).rejects.toMatchObject({
+      status: 409,
+    })
+    const stillPending = await listSuggestions(database.db, sharedId, service, role, {})
+    expect(stillPending.items.some((i) => i.id === tagSug.id)).toBe(true)
   })
 })

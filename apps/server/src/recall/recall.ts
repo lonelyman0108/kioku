@@ -524,7 +524,8 @@ export async function scoreRecallWithMeta(
     const oneHopSeeds: OneHopSeed[] = seedsSorted.map((s) => ({
       entryId: s.entryId,
       shortId: s.shortId,
-      activeVariantIds: activeByEntry.get(s.entryId) ?? [s.variantId],
+      activeVariantIds:
+        activeByEntry.get(s.entryId) ?? (options.focus !== undefined ? [] : [s.variantId]),
       score: s.rawScore,
     }))
 

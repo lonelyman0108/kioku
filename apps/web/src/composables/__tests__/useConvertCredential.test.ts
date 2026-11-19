@@ -755,4 +755,28 @@ describe('转存的去处', () => {
     await settle()
     expect(convert.selected.value.kind).toBe('credential')
   })
+
+  it('从 ME_KEY 缓存识别 me-<username> 个人圈归属，不误判为共享圈', async () => {
+    client.setQueryData(['me'], {
+      account: {
+        id: '00000000-0000-4000-8000-0000000000a1',
+        username: 'alice',
+        displayName: 'Alice',
+        isAdmin: true,
+        passwordSet: true,
+      },
+      circles: [
+        {
+          id: '00000000-0000-4000-8000-0000000000c1',
+          slug: 'me-alice',
+          name: '个人圈',
+          kind: 'personal',
+          role: 'owner',
+          joinedAt: '2026-10-31T00:00:00Z',
+        },
+      ],
+    })
+    const convert = await shown({ circleSlug: 'me-alice' })
+    expect(convert.entryCircleKind.value).toBe('personal')
+  })
 })
