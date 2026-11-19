@@ -8,17 +8,17 @@ import Hint from './Hint.vue'
 import NoteLine from './strata/NoteLine.vue'
 
 // 连接密码库与重新登录共用。状态和规则在 useVaultLogin，这里只管长相
-const props = defineProps<{ spaceId: string; connection: VaultConnection | null }>()
+const props = defineProps<{ circleId: string; connection: VaultConnection | null }>()
 const open = defineModel<boolean>('open', { required: true })
-// 事件带上提交时的空间：提交期间切换了空间，页面刷新的是连上的那个空间
-const emit = defineEmits<{ connected: [connection: VaultConnection, spaceId: string] }>()
+// 事件带上提交时的记忆圈：提交期间切换了记忆圈，页面刷新的是连上的那个记忆圈
+const emit = defineEmits<{ connected: [connection: VaultConnection, circleId: string] }>()
 const toast = useToast()
 
 const { form, step, provider, submitting, failure, problem, hint, reset, back, submit } =
-  useVaultLogin(toRef(props, 'spaceId'), toRef(props, 'connection'), (connection, sid) => {
+  useVaultLogin(toRef(props, 'circleId'), toRef(props, 'connection'), (connection, cid) => {
     open.value = false
     toast.add({ title: props.connection ? '已重新登录' : '已连接密码库', color: 'success' })
-    emit('connected', connection, sid)
+    emit('connected', connection, cid)
   })
 
 // 打开时按要连的那一个重新填；关掉时清掉主密码与验证码

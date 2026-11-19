@@ -7,25 +7,26 @@ import {
   type DeviceGrantInfo,
   type DeviceGrantProblem,
   type DeviceTokenResponse,
-  type KeyScopes,
+  type LensKeyScopes,
   type WhoAmI,
 } from '@kioku/contracts'
-import { eq, sql } from 'drizzle-orm'
+import { and, eq, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
-import { withSpace, type Database } from '../../db/client'
-import { accounts, apiKeys, apps, deviceGrants, spaceMembers } from '../../db/schema'
+import { withCircle, type Database } from '../../db/client'
+import { accounts, apiKeys, circleMembers, circles, clients, deviceGrants } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import type { Deps } from '../../http/env'
 import { cleanupExpired } from '../../jobs/cleanup'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 
-const SCOPES: KeyScopes = {
-  readLayers: ['core', 'persona', 'app', 'user'],
-  writeLayers: ['app', 'user'],
+const SCOPES: LensKeyScopes = {
+  readKinds: ['entry', 'episode', 'fact'],
+  writeKinds: ['entry', 'episode', 'fact'],
   maxSensitivity: 'private',
+  allowedRealms: null,
   admin: false,
   credentials: 'none',
 }
@@ -84,21 +85,23 @@ describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
     userCode: string,
     extra: Record<string, unknown> = {},
     cookie: string = ws.cookie,
+    topExtra: Record<string, unknown> = {},
   ) =>
     web('/v1/device/grants/approve', cookie, {
       userCode,
-      spaceId: ws.spaceId,
+      circleId: ws.circleId,
+      ...topExtra,
       items: [
         {
           runtimeFamily: 'codex',
-          app: { slug: 'codex', name: 'Codex' },
+          client: { slug: 'codex', name: 'Codex' },
           keyName: 'laptop',
           scopes: SCOPES,
           ...extra,
         },
       ],
     })
-  // 单个平台的申请取到的结果：照早期的形状，只有 key 与 app
+  // 单个平台的申请取到的结果：只有 key 与 client
   const single = (result: DeviceTokenResponse) => {
     if (result.status !== 'approved' || !('key' in result)) {
       throw new Error(`没有取到：${JSON.stringify(result)}`)
@@ -108,11 +111,10 @@ describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
   // 轮询之间至少隔一秒，测试里把上次轮询的时间往回拨
   const rewind = () => database.db.update(deviceGrants).set({ lastPolledAt: null })
   const grants = () => database.db.select().from(deviceGrants)
-  // 应用与 Key 是内容表，要在空间里读
-  const inSpace = <T>(fn: Parameters<typeof withSpace<T>>[2]) =>
-    withSpace(database.db, ws.spaceId, fn)
-  const keys = () => inSpace((tx) => tx.select().from(apiKeys))
-  const spaceApps = () => inSpace((tx) => tx.select().from(apps))
+  const inCircle = <T>(fn: Parameters<typeof withCircle<T>>[2]) =>
+    withCircle(database.db, ws.circleId, fn)
+  const keys = () => inCircle((tx) => tx.select().from(apiKeys))
+  const circleClients = () => inCircle((tx) => tx.select().from(clients))
 
   it('申请、确认、取走：访问密钥只给一次，能用，库里没有明文', async () => {
     const grant = await request()
@@ -137,22 +139,29 @@ describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
       clientName: 'laptop',
     })
 
-    const approved = await approve(grant.userCode)
+    const approved = await approve(grant.userCode, {}, ws.cookie, {
+      linkedCircles: [{ circleId: ws.personalCircleId, mode: 'read_write' }],
+      contextFacets: { env: ['prod'] },
+    })
     expect(approved.status).toBe(200)
     // 确认时还没有 Key
     expect(await keys()).toHaveLength(0)
 
     await rewind()
     const result = single(await poll(grant.deviceCode))
-    // 早期的命令行只认这两个字段，不多给
-    expect(Object.keys(result).sort()).toEqual(['app', 'key', 'status'])
-    expect(result.app).toEqual({ slug: 'codex', name: 'Codex', runtimeFamily: 'codex' })
+    expect(Object.keys(result).sort()).toEqual(['client', 'key', 'status'])
+    expect(result.client).toEqual({ slug: 'codex', name: 'Codex', runtimeFamily: 'codex' })
     const who = await app.request('/v1/whoami', { headers: bearer(result.key) })
     expect(who.status).toBe(200)
-    expect(((await who.json()) as WhoAmI).scopes).toMatchObject({
+    const whoBody = (await who.json()) as WhoAmI
+    expect(whoBody.scopes).toMatchObject({
       maxSensitivity: 'private',
       credentials: 'none',
     })
+    expect(whoBody.linkedCircles).toEqual([
+      expect.objectContaining({ id: ws.personalCircleId, mode: 'read_write', kind: 'personal' }),
+    ])
+    expect(whoBody.contextFacets).toEqual({ env: ['prod'] })
 
     // 这条申请没有了，再取是过期；库里只有 Key 的哈希
     expect(await grants()).toHaveLength(0)
@@ -160,7 +169,7 @@ describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
     const [key] = await keys()
     expect(key).toMatchObject({ name: 'laptop', scopes: SCOPES })
     expect(JSON.stringify(key)).not.toContain(result.key)
-    const [created] = await spaceApps()
+    const [created] = await circleClients()
     expect(created).toMatchObject({
       slug: 'codex',
       runtimeFamily: 'codex',
@@ -176,38 +185,38 @@ describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
     expect(await keys()).toHaveLength(1)
   })
 
-  it('用确认人自己已有的应用；别人的应用不行', async () => {
-    const mine = await ws.createApp('mine', { runtimeFamily: 'codex' })
+  it('用确认人自己已有的接入实例；别人的接入实例不行', async () => {
+    const mine = await ws.createClient('mine', { runtimeFamily: 'codex' })
     const grant = await request()
-    expect((await approve(grant.userCode, { app: { id: mine.id } })).status).toBe(200)
+    expect((await approve(grant.userCode, { client: { id: mine.id } })).status).toBe(200)
     const result = await poll(grant.deviceCode)
-    expect(result).toMatchObject({ status: 'approved', app: { slug: 'mine' } })
+    expect(result).toMatchObject({ status: 'approved', client: { slug: 'mine' } })
 
-    const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    const bob = await addMember(database.db, ws.circleId, 'bob', 'editor')
     const second = await request()
-    const refused = await approve(second.userCode, { app: { id: mine.id } }, bob.cookie)
+    const refused = await approve(second.userCode, { client: { id: mine.id } }, bob.cookie)
     expect(refused.status).toBe(403)
-    // 申请还在，换个应用可以接着确认
+    // 申请还在，换个接入实例可以接着确认
     expect((await approve(second.userCode, {}, bob.cookie)).status).toBe(200)
     expect(
       (
         await approve((await request()).userCode, {
-          app: { id: '00000000-0000-4000-8000-000000000000' },
+          client: { id: '00000000-0000-4000-8000-000000000000' },
         })
       ).status,
     ).toBe(404)
   })
 
-  it('应用的标识被占用时回 409，申请还在', async () => {
-    await ws.createApp('codex')
+  it('接入实例的标识被占用时回 409，申请还在', async () => {
+    await ws.createClient('codex')
     const grant = await request()
     expect((await approve(grant.userCode)).status).toBe(409)
     expect(
-      (await approve(grant.userCode, { app: { slug: 'codex-2', name: 'Codex' } })).status,
+      (await approve(grant.userCode, { client: { slug: 'codex-2', name: 'Codex' } })).status,
     ).toBe(200)
     // 确认过的不能再确认、再拒绝一次
     expect(
-      (await approve(grant.userCode, { app: { slug: 'codex-3', name: 'Codex' } })).status,
+      (await approve(grant.userCode, { client: { slug: 'codex-3', name: 'Codex' } })).status,
     ).toBe(404)
     expect(
       (await web('/v1/device/grants/deny', ws.cookie, { userCode: grant.userCode })).status,
@@ -231,7 +240,7 @@ describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
     expect(
       (await web('/v1/device/grants/lookup', ws.cookie, { userCode: pending.userCode })).status,
     ).toBe(404)
-    expect((await approve(pending.userCode, { app: { slug: 'x', name: 'x' } })).status).toBe(404)
+    expect((await approve(pending.userCode, { client: { slug: 'x', name: 'x' } })).status).toBe(404)
     expect(await poll(approved.deviceCode)).toEqual({ status: 'expired' })
     expect(await keys()).toHaveLength(0)
     // 轮询到过期的顺手删了，剩下的一条归定时清理
@@ -240,12 +249,19 @@ describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
     expect(await grants()).toHaveLength(0)
   })
 
-  it('签发的规则照旧：查看者不能确认，编辑者给不了机密级与凭据能力，不是成员的进不了这个空间', async () => {
-    const editor = await addMember(database.db, ws.spaceId, 'bob', 'editor')
-    const viewer = await addMember(database.db, ws.spaceId, 'carol', 'viewer')
-    // 登录着、但不是这个空间的成员
-    const outsider = await addMember(database.db, ws.spaceId, 'dave', 'owner')
-    await database.db.delete(spaceMembers).where(eq(spaceMembers.accountId, outsider.accountId))
+  it('签发的规则照旧：查看者不能确认，编辑者给不了机密级与凭据能力，不是成员的进不了这个记忆圈', async () => {
+    const editor = await addMember(database.db, ws.circleId, 'bob', 'editor')
+    const viewer = await addMember(database.db, ws.circleId, 'carol', 'viewer')
+    // 登录着、但不是这个记忆圈的成员
+    const outsider = await addMember(database.db, ws.circleId, 'dave', 'owner')
+    await database.db
+      .delete(circleMembers)
+      .where(
+        and(
+          eq(circleMembers.circleId, ws.circleId),
+          eq(circleMembers.accountId, outsider.accountId),
+        ),
+      )
     const grant = await request()
     expect((await approve(grant.userCode, {}, viewer.cookie)).status).toBe(403)
     expect((await approve(grant.userCode, {}, outsider.cookie)).status).toBe(403)
@@ -258,67 +274,112 @@ describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
       expect(
         (
           await approve((await request()).userCode, {
-            app: { slug: `s${Math.random().toString(36).slice(2, 8)}`, name: 'x' },
+            client: { slug: `s${Math.random().toString(36).slice(2, 8)}`, name: 'x' },
             scopes,
           })
         ).status,
       ).toBe(200)
     }
-    // 被拒的那几次没有动这条申请，也没有留下应用
+    // 被拒的那几次没有动这条申请，也没有留下接入实例
     expect((await approve(grant.userCode, {}, editor.cookie)).status).toBe(200)
   })
 
-  it('确认之后、取走之前确认人被降级、停用、移出空间，或者应用转给了别人：取不到，不签发', async () => {
-    const bob = await addMember(database.db, ws.spaceId, 'bob', 'owner')
-    const changes = [
-      () =>
-        database.db
-          .update(spaceMembers)
-          .set({ role: 'viewer' })
-          .where(eq(spaceMembers.accountId, bob.accountId)),
-      () =>
-        database.db
-          .update(accounts)
-          .set({ disabledAt: new Date() })
-          .where(eq(accounts.id, bob.accountId)),
-      () => database.db.delete(spaceMembers).where(eq(spaceMembers.accountId, bob.accountId)),
-      () =>
-        inSpace((tx) =>
-          tx
-            .update(apps)
-            .set({ ownerAccountId: ws.accountId })
-            .where(eq(apps.ownerAccountId, bob.accountId)),
-        ),
+  it('确认之后、取走之前确认人被降级、停用、移出记忆圈，或关联客场圈失效，或接入实例转给了别人：取不到，不签发', async () => {
+    const bob = await addMember(database.db, ws.circleId, 'bob', 'owner')
+    const [extraShared] = await database.db
+      .insert(circles)
+      .values({ slug: 'extra-shared', name: '协作圈', kind: 'shared' })
+      .returning({ id: circles.id })
+    const changes: Array<{ fn: () => Promise<unknown>; extra?: Record<string, unknown> }> = [
+      {
+        fn: () =>
+          database.db
+            .update(circleMembers)
+            .set({ role: 'viewer' })
+            .where(
+              and(
+                eq(circleMembers.circleId, ws.circleId),
+                eq(circleMembers.accountId, bob.accountId),
+              ),
+            ),
+      },
+      {
+        fn: () =>
+          database.db
+            .update(accounts)
+            .set({ disabledAt: new Date() })
+            .where(eq(accounts.id, bob.accountId)),
+      },
+      {
+        fn: () =>
+          database.db
+            .delete(circleMembers)
+            .where(
+              and(
+                eq(circleMembers.circleId, ws.circleId),
+                eq(circleMembers.accountId, bob.accountId),
+              ),
+            ),
+      },
+      {
+        fn: () =>
+          inCircle((tx) =>
+            tx
+              .update(clients)
+              .set({ ownerAccountId: ws.accountId })
+              .where(eq(clients.ownerAccountId, bob.accountId)),
+          ),
+      },
+      {
+        extra: { linkedCircles: [{ circleId: extraShared!.id, mode: 'read' }] },
+        fn: () =>
+          database.db
+            .delete(circleMembers)
+            .where(
+              and(
+                eq(circleMembers.circleId, extraShared!.id),
+                eq(circleMembers.accountId, bob.accountId),
+              ),
+            ),
+      },
     ]
-    for (const [index, change] of changes.entries()) {
+    for (const [index, { fn, extra }] of changes.entries()) {
       // 每轮从头来：恢复成所有者、没停用
       await database.db
-        .insert(spaceMembers)
-        .values({ spaceId: ws.spaceId, accountId: bob.accountId, role: 'owner' })
+        .insert(circleMembers)
+        .values({ circleId: ws.circleId, accountId: bob.accountId, role: 'owner' })
         .onConflictDoUpdate({
-          target: [spaceMembers.spaceId, spaceMembers.accountId],
+          target: [circleMembers.circleId, circleMembers.accountId],
           set: { role: 'owner' },
+        })
+      await database.db
+        .insert(circleMembers)
+        .values({ circleId: extraShared!.id, accountId: bob.accountId, role: 'editor' })
+        .onConflictDoUpdate({
+          target: [circleMembers.circleId, circleMembers.accountId],
+          set: { role: 'editor' },
         })
       await database.db.update(accounts).set({ disabledAt: null })
       const grant = await request()
       const res = await approve(
         grant.userCode,
-        { app: { slug: `bob-${index}`, name: 'x' }, scopes: { ...SCOPES, credentials: 'use' } },
+        { client: { slug: `bob-${index}`, name: 'x' }, scopes: { ...SCOPES, credentials: 'use' } },
         bob.cookie,
+        extra ?? {},
       )
       expect(res.status, `第 ${index} 种`).toBe(200)
-      await change()
+      await fn()
       expect(await poll(grant.deviceCode), `第 ${index} 种`).toEqual({ status: 'denied' })
       expect(await poll(grant.deviceCode)).toEqual({ status: 'expired' })
     }
     expect(await keys()).toHaveLength(0)
   })
 
-  it('应用被删掉时，确认过还没取走的申请一起没了', async () => {
+  it('接入实例被删掉时，确认过还没取走的申请一起没了', async () => {
     const grant = await request()
     await approve(grant.userCode)
-    const [target] = await spaceApps()
-    const res = await app.request(`/v1/spaces/${ws.spaceId}/apps/${target!.id}`, {
+    const [target] = await circleClients()
+    const res = await app.request(`/v1/circles/${ws.circleId}/clients/${target!.id}`, {
       method: 'DELETE',
       headers: { cookie: ws.cookie, 'sec-fetch-site': 'same-origin' },
     })
@@ -359,7 +420,7 @@ describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
     for (const body of [
       { runtimeFamily: 'nope' },
       { runtimeFamily: 'codex', clientName: 'a\nb' },
-      { runtimeFamily: 'codex', clientName: 'a‮b' },
+      { runtimeFamily: 'codex', clientName: 'a\u202eb' },
       { runtimeFamily: 'codex', clientName: 'x'.repeat(65) },
       {},
     ]) {
@@ -405,22 +466,26 @@ describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
     for (let i = 0; i < 12; i++) await request()
   })
 
-  it('确认之后离开过空间的确认人，重新加入也取不到：离开前确认的申请不能留下一个访问密钥', async () => {
-    const bob = await addMember(database.db, ws.spaceId, 'bob', 'owner')
+  it('确认之后离开过记忆圈的确认人，重新加入也取不到：离开前确认的申请不能留下一个访问密钥', async () => {
+    const bob = await addMember(database.db, ws.circleId, 'bob', 'owner')
     const grant = await request()
     expect((await approve(grant.userCode, {}, bob.cookie)).status).toBe(200)
-    await database.db.delete(spaceMembers).where(eq(spaceMembers.accountId, bob.accountId))
     await database.db
-      .insert(spaceMembers)
-      .values({ spaceId: ws.spaceId, accountId: bob.accountId, role: 'owner' })
+      .delete(circleMembers)
+      .where(
+        and(eq(circleMembers.circleId, ws.circleId), eq(circleMembers.accountId, bob.accountId)),
+      )
+    await database.db
+      .insert(circleMembers)
+      .values({ circleId: ws.circleId, accountId: bob.accountId, role: 'owner' })
     expect(await poll(grant.deviceCode)).toEqual({ status: 'denied' })
     expect(await keys()).toHaveLength(0)
   })
 
-  it('已有的应用要和申请的运行时一致', async () => {
-    const bot = await ws.createApp('bot', { runtimeFamily: 'astrbot' })
+  it('已有的接入实例要和申请的运行时一致', async () => {
+    const bot = await ws.createClient('bot', { runtimeFamily: 'astrbot' })
     const grant = await request('codex')
-    const res = await approve(grant.userCode, { app: { id: bot.id } })
+    const res = await approve(grant.userCode, { client: { id: bot.id } })
     expect(res.status).toBe(409)
     expect(((await res.json()) as { error: string }).error).toContain('运行时')
     // 申请还在
@@ -438,14 +503,14 @@ describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
     expect((await poll(grant.deviceCode)).status).toBe('approved')
   })
 
-  it('取走与删除应用同时进行不会互相卡死', async () => {
+  it('取走与删除接入实例同时进行不会互相卡死', async () => {
     for (let round = 0; round < 5; round++) {
       const grant = await request()
-      await approve(grant.userCode, { app: { slug: `race-${round}`, name: 'x' } })
-      const [target] = (await spaceApps()).filter((a) => a.slug === `race-${round}`)
+      await approve(grant.userCode, { client: { slug: `race-${round}`, name: 'x' } })
+      const [target] = (await circleClients()).filter((a) => a.slug === `race-${round}`)
       const [taken, removed] = await Promise.all([
         cli('/v1/device/token', { deviceCode: grant.deviceCode }),
-        app.request(`/v1/spaces/${ws.spaceId}/apps/${target!.id}`, {
+        app.request(`/v1/circles/${ws.circleId}/clients/${target!.id}`, {
           method: 'DELETE',
           headers: { cookie: ws.cookie, 'sec-fetch-site': 'same-origin' },
         }),
@@ -478,13 +543,13 @@ describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
     }
     const item = (runtimeFamily: string, extra: Record<string, unknown> = {}) => ({
       runtimeFamily,
-      app: { slug: `${runtimeFamily}-mac`, name: `${runtimeFamily} · mac` },
+      client: { slug: `${runtimeFamily}-mac`, name: `${runtimeFamily} · mac` },
       keyName: 'mac',
       scopes: SCOPES,
       ...extra,
     })
     const approveMany = (userCode: string, items: unknown[], cookie: string = ws.cookie) =>
-      web('/v1/device/grants/approve', cookie, { userCode, spaceId: ws.spaceId, items })
+      web('/v1/device/grants/approve', cookie, { userCode, circleId: ws.circleId, items })
     const many = (result: DeviceTokenResponse) => {
       if (result.status !== 'approved' || !('keys' in result)) {
         throw new Error(`没有取到：${JSON.stringify(result)}`)
@@ -493,7 +558,7 @@ describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
     }
 
     it('查看、确认一次、取走：每个平台一项，顺序和申请的一样，取消勾选的是 skipped', async () => {
-      const hermes = await ws.createApp('hermes-old', { runtimeFamily: 'hermes' })
+      const hermes = await ws.createClient('hermes-old', { runtimeFamily: 'hermes' })
       const grant = await requestMany()
       expect(await poll(grant.deviceCode)).toEqual({ status: 'pending' })
       const seen = await web('/v1/device/grants/lookup', ws.cookie, { userCode: grant.userCode })
@@ -508,13 +573,16 @@ describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
 
       // 顺序不必和申请一致：按运行时对上
       const res = await approveMany(grant.userCode, [
-        item('hermes', { app: { id: hermes.id }, keyName: 'mac hermes' }),
+        item('hermes', { client: { id: hermes.id }, keyName: 'mac hermes' }),
         { runtimeFamily: 'pi', skip: true },
         item('codex'),
       ])
       expect(res.status).toBe(200)
       expect(
-        ((await res.json()) as DeviceGrantApproved).items.map((i) => [i.runtimeFamily, i.app.slug]),
+        ((await res.json()) as DeviceGrantApproved).items.map((i) => [
+          i.runtimeFamily,
+          i.client.slug,
+        ]),
       ).toEqual([
         ['codex', 'codex-mac'],
         ['hermes', 'hermes-old'],
@@ -534,8 +602,8 @@ describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
         const who = await app.request('/v1/whoami', { headers: bearer(k.key) })
         expect(who.status).toBe(200)
       }
-      expect(issued[0]).toMatchObject({ app: { slug: 'codex-mac', runtimeFamily: 'codex' } })
-      expect(issued[2]).toMatchObject({ app: { slug: 'hermes-old', runtimeFamily: 'hermes' } })
+      expect(issued[0]).toMatchObject({ client: { slug: 'codex-mac', runtimeFamily: 'codex' } })
+      expect(issued[2]).toMatchObject({ client: { slug: 'hermes-old', runtimeFamily: 'hermes' } })
       expect((await keys()).map((k) => k.name).sort()).toEqual(['mac', 'mac hermes'])
       expect(JSON.stringify(await keys())).not.toContain((issued[0] as { key: string }).key)
       expect(await grants()).toHaveLength(0)
@@ -578,14 +646,14 @@ describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
         // 多一项
         [item('codex'), item('pi'), item('hermes'), item('mcp')],
         // 同一个平台两项
-        [item('codex'), item('pi'), item('pi', { app: { slug: 'pi-2', name: 'x' } })],
+        [item('codex'), item('pi'), item('pi', { client: { slug: 'pi-2', name: 'x' } })],
         // 全部跳过
         [skip('codex'), skip('pi'), skip('hermes')],
       ]) {
         expect((await approveMany(grant.userCode, items)).status).toBe(400)
       }
-      // 编辑者给不了机密级：指出是哪个平台，一个应用都不建
-      const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+      // 编辑者给不了机密级：指出是哪个平台，一个接入实例都不建
+      const bob = await addMember(database.db, ws.circleId, 'bob', 'editor')
       const refused = await approveMany(
         grant.userCode,
         [
@@ -599,34 +667,34 @@ describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
       const problem = (await refused.json()) as DeviceGrantProblem
       expect(problem.runtimeFamily).toBe('pi')
       expect(problem.error).toMatch(/^Pi：/)
-      expect(await spaceApps()).toHaveLength(0)
+      expect(await circleClients()).toHaveLength(0)
       expect(
         (await approveMany(grant.userCode, [item('codex'), skip('pi'), skip('hermes')])).status,
       ).toBe(200)
     })
 
-    it('新建应用的标识被占用时回 409 并指出是哪一项，前面新建的应用不留下', async () => {
-      await ws.createApp('pi-mac', { runtimeFamily: 'pi' })
+    it('新建接入实例的标识被占用时回 409 并指出是哪一项，前面新建的接入实例不留下', async () => {
+      await ws.createClient('pi-mac', { runtimeFamily: 'pi' })
       const grant = await requestMany()
       const res = await approveMany(grant.userCode, [item('codex'), item('pi'), item('hermes')])
       expect(res.status).toBe(409)
       const problem = (await res.json()) as DeviceGrantProblem
       expect(problem).toMatchObject({ runtimeFamily: 'pi' })
       expect(problem.error).toContain('pi-mac')
-      // codex 那一项先建了应用，跟着回滚
-      expect((await spaceApps()).map((a) => a.slug)).toEqual(['pi-mac'])
+      // codex 那一项先建了接入实例，跟着回滚
+      expect((await circleClients()).map((a) => a.slug)).toEqual(['pi-mac'])
       // 同一个请求里两项用同一个标识也是 409
       const twice = await approveMany(grant.userCode, [
-        item('codex', { app: { slug: 'same', name: 'x' } }),
-        item('pi', { app: { slug: 'same', name: 'x' } }),
+        item('codex', { client: { slug: 'same', name: 'x' } }),
+        item('pi', { client: { slug: 'same', name: 'x' } }),
         item('hermes'),
       ])
       expect(twice.status).toBe(409)
       expect(((await twice.json()) as DeviceGrantProblem).runtimeFamily).toBe('pi')
-      // 已有的应用运行时对不上也指出是哪一项
-      const [pi] = await spaceApps()
+      // 已有的接入实例运行时对不上也指出是哪一项
+      const [pi] = await circleClients()
       const mismatch = await approveMany(grant.userCode, [
-        item('codex', { app: { id: pi!.id } }),
+        item('codex', { client: { id: pi!.id } }),
         { runtimeFamily: 'pi', skip: true },
         { runtimeFamily: 'hermes', skip: true },
       ])
@@ -636,7 +704,7 @@ describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
         (
           await approveMany(grant.userCode, [
             item('codex'),
-            item('pi', { app: { slug: 'pi-mac-2', name: 'x' } }),
+            item('pi', { client: { slug: 'pi-mac-2', name: 'x' } }),
             item('hermes'),
           ])
         ).status,
@@ -644,7 +712,7 @@ describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
     })
 
     it('取走时逐项再核对：降级后超出范围的那一项 denied，别的照常签发', async () => {
-      const bob = await addMember(database.db, ws.spaceId, 'bob', 'owner')
+      const bob = await addMember(database.db, ws.circleId, 'bob', 'owner')
       const grant = await requestMany()
       const res = await approveMany(
         grant.userCode,
@@ -657,9 +725,11 @@ describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
       )
       expect(res.status).toBe(200)
       await database.db
-        .update(spaceMembers)
+        .update(circleMembers)
         .set({ role: 'editor' })
-        .where(eq(spaceMembers.accountId, bob.accountId))
+        .where(
+          and(eq(circleMembers.circleId, ws.circleId), eq(circleMembers.accountId, bob.accountId)),
+        )
       const result = many(await poll(grant.deviceCode))
       expect(result).toEqual([
         { runtimeFamily: 'codex', status: 'denied', reason: DEVICE_KEY_DENIALS.role },
@@ -669,8 +739,8 @@ describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
       expect(await keys()).toHaveLength(1)
     })
 
-    it('确认之后应用所有者被停用：每一项都是 denied，不签发', async () => {
-      const bob = await addMember(database.db, ws.spaceId, 'bob', 'owner')
+    it('确认之后接入实例所有者被停用：每一项都是 denied，不签发', async () => {
+      const bob = await addMember(database.db, ws.circleId, 'bob', 'owner')
       const grant = await requestMany()
       await approveMany(grant.userCode, [item('codex'), item('pi'), item('hermes')], bob.cookie)
       await database.db
@@ -686,24 +756,25 @@ describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
       expect(await grants()).toHaveLength(0)
     })
 
-    it('确认之后删掉其中一个应用：那一项 denied，别的平台不受连累', async () => {
+    it('确认之后删掉其中一个接入实例：那一项 denied，别的平台不受连累', async () => {
       const grant = await requestMany()
       await approveMany(grant.userCode, [item('codex'), item('pi'), item('hermes')])
-      const [pi] = (await spaceApps()).filter((a) => a.slug === 'pi-mac')
-      const removed = await app.request(`/v1/spaces/${ws.spaceId}/apps/${pi!.id}`, {
+      const [pi] = (await circleClients()).filter((a) => a.slug === 'pi-mac')
+      const removed = await app.request(`/v1/circles/${ws.circleId}/clients/${pi!.id}`, {
         method: 'DELETE',
         headers: { cookie: ws.cookie, 'sec-fetch-site': 'same-origin' },
       })
       expect(removed.status).toBeLessThan(300)
       const result = many(await poll(grant.deviceCode))
       expect(result.map((k) => k.status)).toEqual(['issued', 'denied', 'issued'])
-      expect(result[1]).toMatchObject({ reason: DEVICE_KEY_DENIALS.app })
+      expect(result[1]).toMatchObject({ reason: DEVICE_KEY_DENIALS.client })
     })
 
-    it('两个平台顺序相反的申请同时确认、用同样的已有应用：不会互相卡死', async () => {
-      const codex = await ws.createApp('codex-old', { runtimeFamily: 'codex' })
-      const hermes = await ws.createApp('hermes-old', { runtimeFamily: 'hermes' })
-      const existing = (runtimeFamily: string, id: string) => item(runtimeFamily, { app: { id } })
+    it('两个平台顺序相反的申请同时确认、用同样的已有接入实例：不会互相卡死', async () => {
+      const codex = await ws.createClient('codex-old', { runtimeFamily: 'codex' })
+      const hermes = await ws.createClient('hermes-old', { runtimeFamily: 'hermes' })
+      const existing = (runtimeFamily: string, id: string) =>
+        item(runtimeFamily, { client: { id } })
       for (let round = 0; round < 5; round++) {
         const forward = await requestMany([{ runtimeFamily: 'codex' }, { runtimeFamily: 'hermes' }])
         const backward = await requestMany([
@@ -736,7 +807,7 @@ describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
       expect(await keys()).toHaveLength(0)
     })
 
-    it('同时来的两次轮询只有一次取得到；取走与删除应用同时进行不会互相卡死', async () => {
+    it('同时来的两次轮询只有一次取得到；取走与删除接入实例同时进行不会互相卡死', async () => {
       const grant = await requestMany()
       await approveMany(grant.userCode, [item('codex'), item('pi'), item('hermes')])
       const results = await Promise.all([poll(grant.deviceCode), poll(grant.deviceCode)])
@@ -746,14 +817,14 @@ describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
       for (let round = 0; round < 5; round++) {
         const next = await requestMany()
         const items = ['codex', 'pi', 'hermes'].map((rf) =>
-          item(rf, { app: { slug: `${rf}-race-${round}`, name: 'x' } }),
+          item(rf, { client: { slug: `${rf}-race-${round}`, name: 'x' } }),
         )
         expect((await approveMany(next.userCode, items)).status).toBe(200)
-        const targets = (await spaceApps()).filter((a) => a.slug.endsWith(`-race-${round}`))
+        const targets = (await circleClients()).filter((a) => a.slug.endsWith(`-race-${round}`))
         const [taken, ...removed] = await Promise.all([
           cli('/v1/device/token', { deviceCode: next.deviceCode }),
           ...targets.map((target) =>
-            app.request(`/v1/spaces/${ws.spaceId}/apps/${target.id}`, {
+            app.request(`/v1/circles/${ws.circleId}/clients/${target.id}`, {
               method: 'DELETE',
               headers: { cookie: ws.cookie, 'sec-fetch-site': 'same-origin' },
             }),

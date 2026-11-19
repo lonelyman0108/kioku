@@ -5,16 +5,16 @@ import {
   EXTRACTION_KEYS,
   PromptSupplement,
   type TuningKey,
-  type UpdateSpaceAdvanced,
+  type UpdateCircleAdvanced,
 } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 
 import {
+  circleAdvancedKey,
   formatTuning,
   overriddenAt,
   refreshAdvanced,
-  spaceAdvancedKey,
   SUPPLEMENT_MAX,
   TUNING_META,
 } from '../advancedSettings'
@@ -30,16 +30,16 @@ import SettingsBlock from './strata/SettingsBlock.vue'
 import SettingsStageBar from './strata/SettingsStageBar.vue'
 
 // 抽取与整理的高级项：每批轮数、空闲时长、会话摘要有效期、整理的请求次数与建议条数，以及两段规则的补充。
-// 没覆盖的沿用实例默认；只有空间所有者能改
-const props = defineProps<{ spaceId: string }>()
+// 没覆盖的沿用实例默认；只有记忆圈所有者能改
+const props = defineProps<{ circleId: string }>()
 const dirtyModel = defineModel<boolean>('dirty', { default: false })
 const toast = useToast()
 const queryClient = useQueryClient()
 
 const view = useQuery({
-  queryKey: computed(() => spaceAdvancedKey(props.spaceId)),
-  enabled: computed(() => Boolean(props.spaceId)),
-  queryFn: ({ queryKey: [, , sid] }) => api.spaceAdvanced(sid),
+  queryKey: computed(() => circleAdvancedKey(props.circleId)),
+  enabled: computed(() => Boolean(props.circleId)),
+  queryFn: ({ queryKey: [, , cid] }) => api.circleAdvanced(cid),
 })
 const editable = computed(() => view.data.value?.canEdit ?? false)
 
@@ -50,7 +50,7 @@ const tuning = useTuningFields(
   KEYS,
   () => view.data.value?.effective,
   () => view.data.value?.instance,
-  () => overriddenAt(view.data.value?.sources, 'space'),
+  () => overriddenAt(view.data.value?.sources, 'circle'),
 )
 const { fields } = tuning
 const rules = {
@@ -187,7 +187,7 @@ function discard() {
 const saving = ref(false)
 async function save() {
   if (saving.value || !changedCount.value || problem.value) return
-  const sid = props.spaceId
+  const cid = props.circleId
   const submitted = tuning.snapshot()
   const extraction = rules.extraction.value.value
   const dream = rules.dream.value.value
@@ -198,13 +198,13 @@ async function save() {
   if (rules.dream.changed.value) body['prompts.dreamRules'] = dream.trim() ? dream : null
   saving.value = true
   try {
-    const saved = await api.saveSpaceAdvanced(sid, body as UpdateSpaceAdvanced)
-    if (sid === props.spaceId) {
+    const saved = await api.saveCircleAdvanced(cid, body as UpdateCircleAdvanced)
+    if (cid === props.circleId) {
       tuning.commit(submitted, saved.effective)
       rules.extraction.commit(extraction, saved.overrides['prompts.extractionRules'] ?? '')
       rules.dream.commit(dream, saved.overrides['prompts.dreamRules'] ?? '')
     }
-    queryClient.setQueryData(spaceAdvancedKey(sid), saved)
+    queryClient.setQueryData(circleAdvancedKey(cid), saved)
     await refreshAdvanced(queryClient)
     toast.add({ title: '已保存', color: 'success' })
   } catch (err) {
@@ -234,7 +234,7 @@ const fixedOf = (key: 'prompts.extractionRules' | 'prompts.dreamRules', titles: 
       <SettingsBlock
         v-show="stage === 'all' || stage === 'extraction'"
         title="抽取的高级项"
-        :badge="editable ? '空间所有者 · 表单保存' : '仅空间所有者可修改'"
+        :badge="editable ? '记忆圈所有者 · 表单保存' : '仅记忆圈所有者可修改'"
         :tone="editable ? 'form' : 'readonly'"
         wide
       >
@@ -265,7 +265,7 @@ const fixedOf = (key: 'prompts.extractionRules' | 'prompts.dreamRules', titles: 
               level: '实例',
               text: view.data.value.instancePrompts['prompts.extractionRules'],
             }"
-            level="空间"
+            level="记忆圈"
             :editable="editable"
             :invalid="rules.extraction.invalid.value"
           />
@@ -274,7 +274,7 @@ const fixedOf = (key: 'prompts.extractionRules' | 'prompts.dreamRules', titles: 
       <SettingsBlock
         v-show="stage === 'all' || stage === 'dream'"
         title="整理的高级项"
-        :badge="editable ? '空间所有者 · 表单保存' : '仅空间所有者可修改'"
+        :badge="editable ? '记忆圈所有者 · 表单保存' : '仅记忆圈所有者可修改'"
         :tone="editable ? 'form' : 'readonly'"
         wide
       >
@@ -302,13 +302,13 @@ const fixedOf = (key: 'prompts.extractionRules' | 'prompts.dreamRules', titles: 
               level: '实例',
               text: view.data.value.instancePrompts['prompts.dreamRules'],
             }"
-            level="空间"
+            level="记忆圈"
             :editable="editable"
             :invalid="rules.dream.invalid.value"
           />
         </div>
       </SettingsBlock>
-      <p v-if="!editable" class="pt-6 text-muted">仅空间所有者可修改。</p>
+      <p v-if="!editable" class="pt-6 text-muted">仅记忆圈所有者可修改。</p>
       <SaveBar
         v-if="editable"
         :count="changedCount"

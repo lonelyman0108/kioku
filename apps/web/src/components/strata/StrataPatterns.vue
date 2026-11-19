@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { LAYERS } from '@kioku/contracts'
+import { STRATA_BANDS } from '@kioku/contracts'
 
 import { DASHES, TEXTURES, accessFill, dashId, type TextureScale } from './strata'
 
@@ -8,7 +8,7 @@ const SCALES: TextureScale[] = ['lg', 'sm']
 
 <template>
   <!--
-    全站唯一一套纹理：内部圆点、私密斜线，再加权限格子下沿的虚线条（每层一种颜色，缺口是透明的）。
+    全站唯一一套纹理：内部圆点、私密斜线，再加权限格子下沿的虚线条（每个色带一种颜色，缺口是透明的）。
     lg 用在大图形，sm 用在小色块。
     颜色走 CSS 变量，主题切换时跟着变。外壳里挂一次；不能 display: none，否则有的浏览器引用不到
   -->
@@ -40,16 +40,16 @@ const SCALES: TextureScale[] = ['lg', 'sm']
       >
         <rect class="strata-texture" width="1.05" height="3.4" />
       </pattern>
-      <template v-for="layer in LAYERS" :key="layer">
+      <template v-for="band in STRATA_BANDS" :key="band">
         <pattern
           v-for="scale in SCALES"
-          :id="dashId(layer, scale)"
+          :id="dashId(band, scale)"
           :key="scale"
           :width="DASHES[scale].on + DASHES[scale].off"
           height="10"
           patternUnits="userSpaceOnUse"
         >
-          <rect :width="DASHES[scale].on" height="10" :style="{ fill: accessFill(layer) }" />
+          <rect :width="DASHES[scale].on" height="10" :style="{ fill: accessFill(band) }" />
         </pattern>
       </template>
     </defs>

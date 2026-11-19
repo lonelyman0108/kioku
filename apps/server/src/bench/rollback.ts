@@ -14,8 +14,8 @@ import { normalizeQuery } from '../recall/recall'
 // 回滚模式：一次运行的全部步骤放进一个事务，结束时回滚。约束、触发器与 RLS 都真实生效，后面的步骤读得到前面的写入。
 // 做法是把 Deps.db 换成这个事务的代理、jobs 置空，接入方的路径不用改：
 // - 同一条连接上不能并行开 savepoint，所以顶层的嵌套事务互相排队，已经在事务回调里的直接嵌套；
-// - 每个 withSpace 是一层 savepoint，和真实的事务边界一一对应：出错只回滚出错的那个事务，同一步里已经结束的保留；
-// - app.space_id 留在根事务里（savepoint 结束时不复原），每个顶层事务结束后清掉，和真实一样随事务失效；
+// - 每个 withCircles 是一层 savepoint，和真实的事务边界一一对应：出错只回滚出错的那个事务，同一步里已经结束的保留；
+// - app.read_circles 与 app.write_circles 留在根事务里（savepoint 结束时不复原），每个顶层事务结束后清掉，和真实一样随事务失效；
 // - 直接写在 deps.db 上的语句落在根事务上，出错会中止整个运行，后面的步骤记为没有执行；
 // - 事务开着时不发外部请求（前面步骤的行锁和 URI 咨询锁都没放）：查询向量事先算好，事务里只查这张表；
 // - postgres.js 的 savepoint 成功时不 release，一次运行的 savepoint 累积到回滚为止，靠步骤数与总时长的上限兜着。
@@ -96,7 +96,7 @@ export class RollbackRun {
           try {
             return await holding.run(true, () => root.transaction(fn))
           } finally {
-            await this.clearSpace()
+            await this.clearCircles()
           }
         })
         .catch((err: unknown) => {
@@ -129,12 +129,14 @@ export class RollbackRun {
     })
   }
 
-  // 根事务上不经 withSpace 的语句和真实一样读不到内容表：RLS 策略用 nullif，空串等于没设置。
+  // 根事务上不经 withCircles 的语句和真实一样读不到内容表：RLS 策略用 nullif，空串等于没设置。
   // 只在事务还活着时发，失败不影响这个事务的结果：根事务上的语句出错就是根事务中止了，后面的步骤由 stopReason 停下
-  private async clearSpace(): Promise<void> {
+  private async clearCircles(): Promise<void> {
     if (this.aborted) return
     try {
-      await this.root?.execute(sql`select set_config('app.space_id', '', true)`)
+      await this.root?.execute(
+        sql`select set_config('app.read_circles', '', true), set_config('app.write_circles', '', true)`,
+      )
     } catch {
       this.aborted = true
     }
@@ -244,7 +246,7 @@ export async function prepareQueryVectors(
   deps: Deps,
   queries: readonly BenchQuery[],
   budgetMs: number,
-  spaceId?: string,
+  circleId?: string,
 ): Promise<QueryVectors> {
   // 顺带预热：嵌入设置的缓存为空时要读库，事务开着时这要第二条连接
   const embedder = await deps.embedder.get().catch((err: unknown) => {
@@ -282,7 +284,7 @@ export async function prepareQueryVectors(
       capturingDeps,
       query,
       Math.min(timeoutMs ?? left, left),
-      spaceId,
+      circleId,
     )
     if (found) {
       vectors.set(query, found.vector)

@@ -30,9 +30,21 @@ export const icons = {
   cancel: 'i-lucide-x',
   file: 'i-lucide-file-text',
   secret: 'i-lucide-lock',
-  // 按空间导出与导入
+  // 按记忆圈导出与导入
   exportSpace: 'i-lucide-file-down',
   importSpace: 'i-lucide-file-up',
+  exportCircle: 'i-lucide-file-down',
+  importCircle: 'i-lucide-file-up',
+  // 切面词表、多变体切片、双链与跨群锁定
+  vocabulary: 'i-lucide-tags',
+  facets: 'i-lucide-sliders-horizontal',
+  variants: 'i-lucide-layers',
+  splitView: 'i-lucide-columns-2',
+  links: 'i-lucide-network',
+  lock: 'i-lucide-lock',
+  rotate: 'i-lucide-refresh-cw',
+  promote: 'i-lucide-arrow-up-right',
+  clients: 'i-lucide-key-round',
   lore: 'i-lucide-book-open',
   vector: 'i-lucide-sparkles',
   user: 'i-lucide-user',
@@ -72,9 +84,10 @@ export const icons = {
   calendar: 'i-lucide-calendar',
   filter: 'i-lucide-list-filter',
   unknownActor: 'i-lucide-circle-help',
-  // 设置：三组与各小节、空间切换器、保存条
+  // 设置：三组与各小节、记忆圈切换器、保存条
   account: 'i-lucide-user',
   space: 'i-lucide-layers',
+  circle: 'i-lucide-layers',
   instance: 'i-lucide-server',
   appearance: 'i-lucide-sun-moon',
   extraction: 'i-lucide-sparkles',
@@ -84,6 +97,7 @@ export const icons = {
   privacy: 'i-lucide-shield-alert',
   data: 'i-lucide-database',
   spaces: 'i-lucide-boxes',
+  circles: 'i-lucide-boxes',
   members: 'i-lucide-users',
   general: 'i-lucide-info',
   system: 'i-lucide-activity',

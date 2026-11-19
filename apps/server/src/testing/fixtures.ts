@@ -1,19 +1,21 @@
-import { KeyScopes, LAYERS, type CreatedKey, type Me } from '@kioku/contracts'
+import { ENTRY_KINDS, LensKeyScopes, type IssuedKey, type Me } from '@kioku/contracts'
 import type { z } from 'zod'
 
+import { createPersonalCircle } from '../access/circles'
 import { createSession } from '../auth/session'
 import type { createApp } from '../app'
 import type { Db } from '../db/client'
-import { accounts, spaceMembers } from '../db/schema'
+import { accounts, circleMembers } from '../db/schema'
 
 type App = ReturnType<typeof createApp>
 // 签发时的上限：凭据能力不给就是不可用
-type KeyScopesInput = z.input<typeof KeyScopes>
+type KeyScopesInput = z.input<typeof LensKeyScopes>
 
-export const FULL_SCOPES: KeyScopes = {
-  readLayers: [...LAYERS],
-  writeLayers: [...LAYERS],
+export const FULL_SCOPES: LensKeyScopes = {
+  readKinds: [...ENTRY_KINDS],
+  writeKinds: [...ENTRY_KINDS],
   maxSensitivity: 'secret',
+  allowedRealms: null,
   admin: false,
   credentials: 'manage',
 }
@@ -36,16 +38,17 @@ async function expectOk<T>(res: Response): Promise<T> {
 
 export interface Workspace {
   cookie: string
-  spaceId: string
+  circleId: string
+  personalCircleId: string
   accountId: string
-  createApp: (slug: string, extra?: Record<string, unknown>) => Promise<{ id: string }>
+  createClient: (slug: string, extra?: Record<string, unknown>) => Promise<{ id: string }>
   createPersona: (slug: string, extendsId?: string) => Promise<{ id: string }>
-  issueKey: (appId: string, scopes?: KeyScopesInput) => Promise<string>
+  issueKey: (clientId: string, scopes?: KeyScopesInput) => Promise<string>
   // 要 Key 的 id 时用它（测试台按 id 模拟）；key 是明文
-  createKey: (appId: string, scopes?: KeyScopesInput) => Promise<CreatedKey>
+  createKey: (clientId: string, scopes?: KeyScopesInput) => Promise<IssuedKey>
 }
 
-// 初始化一个账号和空间，返回在其中建应用、人格、签发 Key 的快捷方法
+// 初始化一个账号和记忆圈，返回在其中建客户端、人格、签发 Key 的快捷方法
 export async function bootstrap(app: App, username = 'alice'): Promise<Workspace> {
   const res = await app.request(
     '/v1/setup',
@@ -55,56 +58,66 @@ export async function bootstrap(app: App, username = 'alice'): Promise<Workspace
       username,
       displayName: username,
       password: 'correct horse battery',
-      spaceName: '家',
+      circleName: '家',
     }),
   )
   const cookie = res.headers.get('set-cookie')!.split(';')[0]!
   const me = await expectOk<Me>(res)
-  const spaceId = me.spaces[0]!.id
+  const circleId = me.circles.find((c) => c.kind === 'shared')!.id
+  const personalCircleId = me.personalCircleId
   const withCookie = { cookie }
-  const createKey = async (appId: string, scopes: KeyScopesInput = FULL_SCOPES) =>
-    expectOk<CreatedKey>(
+  const createKey = async (clientId: string, scopes: KeyScopesInput = FULL_SCOPES) =>
+    expectOk<IssuedKey>(
       await app.request(
-        `/v1/spaces/${spaceId}/apps/${appId}/keys`,
+        `/v1/circles/${circleId}/clients/${clientId}/keys`,
         jsonRequest('POST', { name: 'test', scopes }, withCookie),
       ),
     )
   return {
     cookie,
-    spaceId,
+    circleId,
+    personalCircleId,
     accountId: me.id,
-    createApp: async (slug, extra = {}) =>
+    createClient: async (slug, extra = {}) =>
       expectOk(
         await app.request(
-          `/v1/spaces/${spaceId}/apps`,
+          `/v1/circles/${circleId}/clients`,
           jsonRequest('POST', { slug, name: slug, runtimeFamily: 'mcp', ...extra }, withCookie),
         ),
       ),
     createPersona: async (slug, extendsId) =>
       expectOk(
         await app.request(
-          `/v1/spaces/${spaceId}/personas`,
+          `/v1/circles/${circleId}/personas`,
           jsonRequest('POST', { slug, name: slug, extendsId: extendsId ?? null }, withCookie),
         ),
       ),
-    issueKey: async (appId, scopes = FULL_SCOPES) => (await createKey(appId, scopes)).key,
+    issueKey: async (clientId, scopes = FULL_SCOPES) => (await createKey(clientId, scopes)).key,
     createKey,
   }
 }
 
 export const bearer = (key: string) => ({ authorization: `Bearer ${key}` })
 
-// 往空间里直接加一个成员（还没有邀请接口），返回它的会话 Cookie
+// 往记忆圈里直接加一个成员（同时补齐其唯一个人圈），返回它的会话 Cookie
 export async function addMember(
   db: Db,
-  spaceId: string,
+  circleId: string,
   username: string,
   role: 'owner' | 'editor' | 'viewer',
-): Promise<{ accountId: string; cookie: string }> {
-  const [account] = await db
-    .insert(accounts)
-    .values({ username, displayName: username, passwordHash: 'x' })
-    .returning()
-  await db.insert(spaceMembers).values({ spaceId, accountId: account!.id, role })
-  return { accountId: account!.id, cookie: `kioku_session=${await createSession(db, account!.id)}` }
+): Promise<{ accountId: string; personalCircleId: string; cookie: string }> {
+  const created = await db.transaction(async (tx) => {
+    const [account] = await tx
+      .insert(accounts)
+      .values({ username, displayName: username, passwordHash: 'x' })
+      .returning()
+    const personal = await createPersonalCircle(tx, account!)
+    await tx.insert(circleMembers).values({ circleId, accountId: account!.id, role })
+    return { accountId: account!.id, personalCircleId: personal.id }
+  })
+  return {
+    accountId: created.accountId,
+    personalCircleId: created.personalCircleId,
+    cookie: `kioku_session=${await createSession(db, created.accountId)}`,
+  }
 }

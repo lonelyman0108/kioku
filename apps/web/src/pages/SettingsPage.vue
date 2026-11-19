@@ -22,49 +22,56 @@ import {
 const props = defineProps<{ group: SettingsGroupKey }>()
 const group = computed(() => props.group)
 const route = useRoute()
-const { me, space } = useSession()
+const { me, circle } = useSession()
 
-// 空间组用地址里的空间；个人与实例页面上用会话里当前的空间
+// 记忆圈组用地址里的记忆圈；个人与实例页面上用会话里当前的记忆圈
 const viewer = computed(() => ({
   isAdmin: me.data.value?.isAdmin ?? false,
-  role: space.value?.role ?? null,
+  role: circle.value?.role ?? null,
+  circleKind: circle.value?.kind ?? null,
 }))
 const sections = computed(() => visibleSections(group.value, viewer.value))
 const current = computed(() => currentSection(sections.value, route.params.section))
 
 // 哪些小节有未保存的改动：切走之后表单看不见了，左栏上标出来。
-// 组内切小节只改地址里的 :section，各小节都还挂着，不算离开；换组、换空间时先确认
+// 组内切小节只改地址里的 :section，各小节都还挂着，不算离开；换组、换记忆圈时先确认
 const dirty = reactive<Record<string, boolean>>({})
 const anyDirty = computed(() => Object.values(dirty).some(Boolean))
 useUnsavedChangesGuard(anyDirty, { leavesOn: leavesSettingsPage })
 
-// 空间组里换空间：确认过之后小节按新空间重新挂上（下面的 key），旧空间的改动标记一起清掉
-const spaceKey = computed(() => String(route.params.spaceId ?? ''))
-watch(spaceKey, () => {
+// 记忆圈组里换记忆圈：确认过之后小节按新记忆圈重新挂上（下面的 key），旧记忆圈的改动标记一起清掉
+const circleKey = computed(() => String(route.params.circleId ?? ''))
+watch(circleKey, () => {
   for (const key of Object.keys(dirty)) delete dirty[key]
 })
 
 function asideOf(key: SettingsGroupKey): string | undefined {
   if (key === 'account') return me.data.value?.displayName
-  if (key === 'space')
-    return space.value ? `${space.value.name} · ${roleName(space.value.role)}` : undefined
+  if (key === 'circle') {
+    if (!circle.value) return undefined
+    return circle.value.kind === 'personal'
+      ? `${circle.value.name} · 个人`
+      : `${circle.value.name} · ${roleName(circle.value.role)}`
+  }
   return '仅管理员'
 }
 
 function linkTo(key: SettingsGroupKey, section: string) {
   const name = SETTINGS_GROUPS.find((g) => g.key === key)!.route
-  return key === 'space'
-    ? { name, params: { spaceId: space.value?.id, section } }
+  return key === 'circle'
+    ? { name, params: { circleId: circle.value?.id, section } }
     : { name, params: { section } }
 }
 
-// 小节后面的条数（成员数）：只有空间组的左栏用得上，别的组不读
+// 小节后面的条数（成员数）：只有共享记忆圈组的左栏用得上，别的组不读
 const counts = useSectionCounts(
-  computed(() => (group.value === 'space' ? (space.value?.id ?? null) : null)),
+  computed(() =>
+    group.value === 'circle' && circle.value?.kind === 'shared' ? circle.value.id : null,
+  ),
 )
 
 const groups = computed<SettingsFrameGroup[]>(() =>
-  visibleGroups({ ...viewer.value, hasSpace: Boolean(space.value) }).flatMap((key) => {
+  visibleGroups({ ...viewer.value, hasCircle: Boolean(circle.value) }).flatMap((key) => {
     const meta = SETTINGS_GROUPS.find((g) => g.key === key)!
     const list = visibleSections(key, viewer.value)
     if (!list.length) return []
@@ -75,7 +82,8 @@ const groups = computed<SettingsFrameGroup[]>(() =>
         icon: meta.icon,
         to: linkTo(key, list[0]!.key),
         aside: asideOf(key),
-        crumb: key === 'space' && space.value ? `${meta.label} · ${space.value.name}` : meta.label,
+        crumb:
+          key === 'circle' && circle.value ? `${meta.label} · ${circle.value.name}` : meta.label,
         // 左栏树列出所有可见分组的小节，组内点击原地切换，跨组由路由守卫检查未保存改动
         sections: list.map((section) => ({
           key: section.key,
@@ -83,7 +91,7 @@ const groups = computed<SettingsFrameGroup[]>(() =>
           icon: section.icon,
           to: linkTo(key, section.key),
           unsaved: key === group.value && Boolean(dirty[section.key]),
-          count: key === 'space' ? counts.value[`${key}:${section.key}`] : undefined,
+          count: key === 'circle' ? counts.value[`${key}:${section.key}`] : undefined,
         })),
       },
     ]
@@ -98,12 +106,12 @@ const componentOf = (key: string) => sections.value.find((s) => s.key === key)?.
     :groups="groups"
     :group="group"
     :current="current?.key ?? ''"
-    :space-id="space?.id"
+    :circle-id="circle?.id"
   >
     <template #default="{ section }">
       <component
         :is="componentOf(section)"
-        :key="`${section}:${spaceKey}`"
+        :key="`${section}:${circleKey}`"
         v-model:dirty="dirty[section]"
       />
     </template>

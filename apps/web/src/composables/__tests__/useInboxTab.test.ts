@@ -42,7 +42,7 @@ let client: QueryClient
 let scope: EffectScope
 let route: { name: string; query: Record<string, string> }
 let replace: ReturnType<typeof vi.fn>
-const spaceId = ref('s1')
+const circleId = ref('c1')
 
 function start(query: Record<string, string> = {}) {
   route = reactive({ name: 'inbox', query })
@@ -55,7 +55,7 @@ function start(query: Record<string, string> = {}) {
   const vueApp = createApp({})
   vueApp.use(VueQueryPlugin, { queryClient: client })
   scope = effectScope()
-  return vueApp.runWithContext(() => scope.run(() => useInboxTab(useInboxCounts(spaceId)))!)
+  return vueApp.runWithContext(() => scope.run(() => useInboxTab(useInboxCounts(circleId)))!)
 }
 
 async function settle() {
@@ -73,7 +73,7 @@ const setCounts = async (value: InboxCounts) => {
 
 beforeEach(() => {
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  spaceId.value = 's1'
+  circleId.value = 'c1'
   fakes.api.inboxCounts.mockReset()
 })
 afterEach(() => {
@@ -141,22 +141,22 @@ describe('地址没带分类', () => {
 
   it('读到过又刷新失败：手里的条数是真的，照样定下来', async () => {
     fakes.api.inboxCounts.mockRejectedValue(new Error('读不到'))
-    client.setQueryData(['inbox-counts', 's1'], counts({ plaintext: 1 }))
+    client.setQueryData(['inbox-counts', 'c1'], counts({ plaintext: 1 }))
     const tab = start()
     await settle()
     expect(tab.value).toBe('plaintext')
     expect(route.query.tab).toBe('plaintext')
   })
 
-  it('换空间时不把上一个空间的分类写进地址', async () => {
+  it('换记忆圈时不把上一个记忆圈的分类写进地址', async () => {
     fakes.api.inboxCounts.mockImplementation(async (id: string) =>
-      id === 's1' ? counts({ bindings: 1 }) : counts({ plaintext: 1 }),
+      id === 'c1' ? counts({ bindings: 1 }) : counts({ plaintext: 1 }),
     )
     const tab = start()
     await settle()
     expect(route.query.tab).toBe('binding')
-    // 换空间的导航不带分类
-    spaceId.value = 's2'
+    // 换记忆圈的导航不带分类
+    circleId.value = 'c2'
     route.query = {}
     await settle()
     expect(tab.value).toBe('plaintext')
@@ -197,7 +197,7 @@ describe('地址带了分类', () => {
     start()
     await settle()
     route.name = 'memories'
-    client.setQueryData(['inbox-counts', 's1'], counts({ review: 1 }))
+    client.setQueryData(['inbox-counts', 'c1'], counts({ review: 1 }))
     await settle()
     expect(replace).not.toHaveBeenCalled()
   })

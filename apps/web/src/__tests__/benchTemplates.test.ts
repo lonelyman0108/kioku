@@ -264,7 +264,7 @@ describe('真实模式要确认', () => {
     expect(shownIn(line)).toEqual(['line'])
   })
 
-  it('应用与 Key 的下拉框接到选择上', () => {
+  it('接入实例与 Key 的下拉框接到选择上', () => {
     const select = (label: string) =>
       must(
         toolbar.elements.find(
@@ -274,9 +274,9 @@ describe('真实模式要确认', () => {
         ),
         `下拉框「${label}」`,
       )
-    expect(bound(select('应用'), 'model-value')).toBe('appId')
-    expect(bound(select('应用'), 'items')).toBe('appItems')
-    expect(handler(select('应用'), 'update:model-value')).toBe('(v) => selectApp(String(v))')
+    expect(bound(select('接入实例'), 'model-value')).toBe('clientId')
+    expect(bound(select('接入实例'), 'items')).toBe('clientItems')
+    expect(handler(select('接入实例'), 'update:model-value')).toBe('(v) => selectClient(String(v))')
     expect(bound(select('访问密钥'), 'model-value')).toBe('keyId')
     expect(bound(select('访问密钥'), 'items')).toBe('keyItems')
     expect(handler(select('访问密钥'), 'update:model-value')).toBe('(v) => selectKey(String(v))')
@@ -290,12 +290,12 @@ describe('真实模式要确认', () => {
     expect(handler(alert, 'update:open')).toBe('(v) => !v && (selectionNotice = null)')
   })
 
-  it('换了应用或 Key 回到回滚，会话换一份新的', () => {
+  it('换了接入实例或 Key 回到回滚，会话换一份新的', () => {
     expect(useBench).toMatch(
-      /watch\(\[spaceId, appId, keyId\], \(\) => \{\s+mode\.value = 'rollback'/,
+      /watch\(\[circleId, clientId, keyId\], \(\) => \{\s+mode\.value = 'rollback'/,
     )
     expect(useBench).toMatch(
-      /watch\(\[spaceId, appId, keyId, mode\], \(\) => \{\s+current\.value = null\s+session\.value = emptySession\(\)/,
+      /watch\(\[circleId, clientId, keyId, mode\], \(\) => \{\s+current\.value = null\s+session\.value = emptySession\(\)/,
     )
   })
 
@@ -420,7 +420,7 @@ describe('调用台的目录与表单', () => {
   })
 
   it('目录来自真实的 tools/list，点一项换成它', () => {
-    expect(calls.script).toContain('api.benchTools(spaceId.value, appId.value!, keyId.value!)')
+    expect(calls.script).toContain('api.benchTools(circleId.value, clientId.value!, keyId.value!)')
     expect(calls.script).toContain('callTargets(tools.data.value?.tools ?? [])')
     const item = withFor(calls.elements, 't in group.targets')
     const button = withTag(walk(item), 'button')
@@ -887,9 +887,9 @@ describe('一步的结果', () => {
     expect(shownIn(withTag(walk(fold), 'summary'))).toEqual(['title'])
   })
 
-  it('uris 为 null 时不显示列表', () => {
+  it('shortIds 为 null 时不显示列表', () => {
     const list = view.elements.find((el) =>
-      el.props?.some((p) => p.name === 'if' && p.exp?.content === 'step.uris?.length'),
+      el.props?.some((p) => p.name === 'if' && p.exp?.content === 'step.shortIds?.length'),
     )
     expect(list).toBeDefined()
   })
@@ -962,12 +962,11 @@ describe('一步的结果', () => {
     expect(view.script).toContain('props.step.raw !== null')
   })
 
-  it('结果里的 URI', () => {
-    const list = withIf(view.elements, 'step.uris?.length')
-    const uri = withTag(walk(withFor(walk(list), 'uri in step.uris')), 'UriPath')
-    expect(bound(uri, 'uri')).toBe('uri')
-    // 要看全：不能缩成省略号
-    expect(uri.props?.some((p) => p.name === 'wrap')).toBe(true)
+  it('结果里的短 ID', () => {
+    const list = withIf(view.elements, 'step.shortIds?.length')
+    const item = withFor(walk(list), 'shortId in step.shortIds')
+    const code = withTag(walk(item), 'code')
+    expect(shownIn(code)).toEqual(['shortId'])
   })
 
   it('session.start 的字数上限、没展开的节点、放不下的附加块', () => {
@@ -1140,7 +1139,7 @@ describe('模型对话的页面', () => {
   }
 
   it('用不用得了由 GET bench/agent 决定：用不了时显示原因，不显示输入区', () => {
-    expect(view.script).toContain('api.benchAgent(spaceId.value, appId.value!, keyId.value!)')
+    expect(view.script).toContain('api.benchAgent(circleId.value, clientId.value!, keyId.value!)')
     expect(view.script).toContain('AGENT_UNAVAILABLE_NOTES[reason]')
     const alert = withDirective(view.elements, 'else-if', 'unavailable')
     expect(alert.tag).toBe('BenchNotice')
@@ -1268,15 +1267,15 @@ describe('模型对话的页面', () => {
 
   it('取消传给模型请求：api 把 signal 带给 fetch', () => {
     expect(bodyOf(useBench, 'agentTurn')).toContain(
-      'api.benchAgentTurn(target.space, target.app.id, target.key.id, body, signal)',
+      'api.benchAgentTurn(target.circle, target.client.id, target.key.id, body, signal)',
     )
     expect(bodyOf(useBench, 'sendToAgent')).toContain('signal: controller.signal')
   })
 
-  it('换了应用、Key 或模式：对话清掉，进行中的取消', () => {
+  it('换了接入实例、Key 或模式：对话清掉，进行中的取消', () => {
     const watcher = blockOf(
       useBench.replaceAll('\n  ', '\n'),
-      'watch([spaceId, appId, keyId, mode]',
+      'watch([circleId, clientId, keyId, mode]',
     )
     expect(watcher).toContain('agentController.value?.abort()')
     expect(watcher).toContain('agent.value = emptyConversation()')
@@ -1517,14 +1516,14 @@ describe('读取失败', () => {
   const toolbar = sfc(benchToolbar)
 
   it('错误放在上面，读到过的内容照常显示', () => {
-    const appsError = withIf(toolbar.elements, 'apps.isError.value')
-    expect(appsError.tag).toBe('BenchNotice')
+    const clientsError = withIf(toolbar.elements, 'clients.isError.value')
+    expect(clientsError.tag).toBe('BenchNotice')
     const keysError = withIf(toolbar.elements, 'keys.isError.value')
     expect(keysError.tag).toBe('BenchNotice')
     // 缓存是空的又刷新失败时只剩这一句：要能重新读
-    expect(bound(appsError, 'actions')).toBe('retryApps')
+    expect(bound(clientsError, 'actions')).toBe('retryClients')
     expect(bound(keysError, 'actions')).toBe('retryKeys')
-    expect(toolbar.script).toContain('const retryApps = computed(() => retryOf(apps))')
+    expect(toolbar.script).toContain('const retryClients = computed(() => retryOf(clients))')
     expect(toolbar.script).toContain('const retryKeys = computed(() => retryOf(keys))')
     const retry = blockOf(toolbar.script, 'const retryOf = ')
     expect(retry).toContain('query.refetch()')
@@ -1539,12 +1538,12 @@ describe('读取失败', () => {
 
   it('「暂无」只在真的读到空时说：读取中、读取失败时不说', () => {
     // 缓存是空的又刷新失败时也不说：不知道到底有没有，不能把人引去再建一个
-    const noApps = withDirective(
+    const noClients = withDirective(
       toolbar.elements,
       'else-if',
-      'apps.data.value && !owned.length && !apps.isError.value',
+      'clients.data.value && !owned.length && !clients.isError.value',
     )
-    expect(textOf(noApps)).toContain('暂无应用')
+    expect(textOf(noClients)).toContain('暂无接入实例')
     const noKeys = withIf(
       toolbar.elements,
       'keys.data.value && !usable.length && !keys.isError.value',
@@ -1825,24 +1824,26 @@ describe('运行标记那一行', () => {
     }
   })
 
-  it('运行标记、应用与权限范围都显示', async () => {
-    const app = createSSRApp(BenchRunLine, {
+  it('运行标记、接入实例与权限范围都显示', async () => {
+    const view = createSSRApp(BenchRunLine, {
       result: {
         run: 'abc12345',
         whoami: {
-          app: { name: '测试应用' },
+          client: { name: '测试接入实例' },
           scopes: {
-            readLayers: ['base'],
-            writeLayers: [],
+            readKinds: ['entry'],
+            writeKinds: [],
             maxSensitivity: 'internal',
+            allowedRealms: null,
             admin: false,
+            credentials: 'none',
           },
         },
       },
     })
-    const html = await renderToString(app)
+    const html = await renderToString(view)
     expect(html).toContain('abc12345')
-    expect(html).toContain('测试应用')
+    expect(html).toContain('测试接入实例')
     expect(html).toContain('读 1 类，写 0 类，至内部')
   })
 })
@@ -1957,27 +1958,29 @@ describe('改版之后的约束', () => {
 })
 
 describe('入口', () => {
-  it('只有应用主人看得到导航入口', () => {
-    expect(consoleLayout).toContain('ownedApps(apps.data.value ?? [], me.data.value?.id)')
-    expect(consoleLayout).toMatch(/ownsApp\.value\s*\? \[\{ label: '测试台'/)
+  it('只有接入实例所有者看得到导航入口', () => {
+    expect(consoleLayout).toContain(
+      '(clients.data.value ?? []).some((client) => client.ownerAccountId === me.data.value?.id)',
+    )
+    expect(consoleLayout).toMatch(/ownsClient\.value\s*\? \[\{ label: '测试台'/)
   })
 
-  it('选应用只列自己是主人的', () => {
-    expect(useBench).toContain('ownedApps(apps.data.value ?? [], me.data.value?.id)')
+  it('选接入实例只列自己是所有者的', () => {
+    expect(useBench).toContain('ownedClients(clients.data.value ?? [], me.data.value?.id)')
     expect(useBench).toContain('usableKeys(keys.data.value ?? [])')
-    expect(useBench).toContain('list.find((a) => a.id === selection.app)?.id ?? list[0]?.id')
+    expect(useBench).toContain('list.find((c) => c.id === selection.client)?.id ?? list[0]?.id')
   })
 
   it('路由', () => {
-    expect(routes).toContain("path: 'spaces/:spaceId/bench'")
+    expect(routes).toContain("path: 'circles/:circleId/bench'")
     expect(routes).toContain("name: 'bench'")
   })
 
-  it('模拟器链接到测试台，带上应用与 Key', () => {
+  it('模拟器链接到测试台，带上接入实例与 Key', () => {
     const { elements } = sfc(appSimulator)
     const link = buttonOf(elements, '在测试台打开')
     expect(bound(link, 'to')).toBe(
-      "{ name: 'bench', params: { spaceId }, query: { app: appId, key: keyId } }",
+      "{ name: 'bench', params: { circleId }, query: { client: clientId, key: keyId } }",
     )
   })
 })

@@ -4,6 +4,7 @@ import {
   type BenchRunResult,
   type BenchScenario,
   type BenchStepResult,
+  type LensKeyScopes,
   type WhoAmI,
 } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
@@ -44,7 +45,7 @@ const step = (over: Partial<BenchStepResult> = {}): BenchStepResult => ({
   text: '',
   raw: {},
   ms: 1,
-  uris: [],
+  shortIds: [],
   session: null,
   vectorSkipped: false,
   assertions: [],
@@ -64,6 +65,7 @@ const result = (
     mode: 'rollback',
     ok: !all.failed && !all.notRun,
     whoami: {} as WhoAmI,
+    scopes: {} as LensKeyScopes,
     counts: all,
     steps: [],
     replayDiverged: null,
@@ -155,7 +157,9 @@ describe('按运行时筛', () => {
   it('不适用的说明原因', () => {
     const only = scenario([{ kind: 'boot' }], { runtimes: ['claudecode', 'codex'] })
     expect(runtimeMismatch(only, 'codex')).toBeNull()
-    expect(runtimeMismatch(only, 'astrbot')).toBe('仅适用于 claudecode、codex，当前应用是 astrbot')
+    expect(runtimeMismatch(only, 'astrbot')).toBe(
+      '仅适用于 claudecode、codex，当前接入实例是 astrbot',
+    )
   })
 })
 
@@ -191,11 +195,17 @@ describe('导出前检测明文', () => {
       scenario([
         tool('kioku_create', { uri: 'a://b', content: '机密', sensitivity: 'secret' }),
         tool('kioku_update', { uri: 'a://b', content: '机密', sensitivity: 'secret' }),
+        tool('kioku_create', {
+          title: '变体机密',
+          variants: [{ when: {}, content: '切片机密' }],
+          sensitivity: 'secret',
+        }),
       ]),
     )
     expect(findings).toEqual([
       { step: 1, label: 'kioku_create', what: '机密级正文' },
       { step: 2, label: 'kioku_update', what: '机密级正文' },
+      { step: 3, label: 'kioku_create', what: '机密级正文' },
     ])
   })
 

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import type { DeletedMemory } from '@kioku/contracts'
+import type { DeletedEntry } from '@kioku/contracts'
 import { useInfiniteQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref } from 'vue'
 
@@ -16,20 +16,23 @@ import FlagTag from './strata/FlagTag.vue'
 import MemoryRow from './strata/MemoryRow.vue'
 import NoteLine from './strata/NoteLine.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
+import { entryBand } from './strata/strata'
 
-const props = defineProps<{ spaceId: string }>()
-// restored：撤销删除之后回到了树上；showExpired：撤销之后它是过期的，要去「已过期」里看
-const emit = defineEmits<{ restored: [uri: string]; showExpired: [] }>()
+const props = defineProps<{ circleId: string }>()
+// restored：撤销删除之后回到了目录上；showExpired：撤销之后它是过期的，要去「已过期」里看
+const emit = defineEmits<{ restored: [shortId: string]; showExpired: [] }>()
 const toast = useToast()
 const queryClient = useQueryClient()
-// 和别处一样按条判断：editor 撤销不了别人的应用的记忆
-const { canWriteUri } = useMemoryPermissions(computed(() => props.spaceId))
+// 和别处一样按条判断：editor 改不了机密记忆
+const { circleKind, canWriteEntry } = useMemoryPermissions(computed(() => props.circleId))
+const canWriteItem = (item: DeletedEntry) =>
+  canWriteEntry({ sensitivity: item.sensitivity, circleId: props.circleId })
 
-const queryKey = computed(() => ['memory-deleted', props.spaceId] as const)
+const queryKey = computed(() => ['entry-deleted', props.circleId] as const)
 const deleted = useInfiniteQuery({
   queryKey,
-  // 参数从键里取：换了空间之后，旧键剩下的页还在重新拉取时，不会去请求新的空间
-  queryFn: ({ pageParam, queryKey: [, spaceId] }) => api.deletedMemories(spaceId, pageParam),
+  // 参数从键里取：换了记忆圈之后，旧键剩下的页还在重新拉取时，不会去请求新的记忆圈
+  queryFn: ({ pageParam, queryKey: [, cid] }) => api.deletedEntries(cid, pageParam),
   initialPageParam: undefined as string | undefined,
   getNextPageParam: (last) => last.nextCursor ?? undefined,
   enabled: useActivated(),
@@ -37,9 +40,8 @@ const deleted = useInfiniteQuery({
 const items = computed(() => deleted.data.value?.pages.flatMap((page) => page.items) ?? [])
 // 保留期是整个实例的设置，每一页都带着，用第一页的
 const retention = computed(() => deleted.data.value?.pages[0]?.retention ?? null)
-// 还剩几天、警示色与「已过期」都按它算：页面一直开着也每分钟跟着变，切到别的视图时停下
+// 还剩几天与「已过期」都按它算：页面一直开着也每分钟跟着变，切到别的视图时停下
 const now = useNow()
-// 每一条后面的说法与要不要标警示色
 const notes = computed(() => {
   const r = retention.value
   return new Map(
@@ -48,15 +50,13 @@ const notes = computed(() => {
 })
 
 const restoring = ref<string | null>(null)
-async function undelete(item: DeletedMemory) {
-  // 请求期间可能换了空间（页面会被复用）：缓存按发出请求时的空间写，换了空间就不通知页面
-  const spaceId = props.spaceId
+async function undelete(item: DeletedEntry) {
+  const cid = props.circleId
   const key = queryKey.value
   restoring.value = item.id
   try {
-    const memory = await api.undeleteMemory(spaceId, item.id)
-    if (isExpired(memory.validTo)) {
-      // 撤销删除不动有效期：删掉之后才到期的，撤销之后还是过期的，按 URI 读不到，不写那个 URI 的缓存，也不跳过去
+    const entry = await api.undeleteEntry(cid, item.id)
+    if (isExpired(entry.validTo)) {
       toast.add({
         title: '已恢复；这条记忆已过期，可在「已过期」中恢复生效',
         color: 'success',
@@ -66,35 +66,28 @@ async function undelete(item: DeletedMemory) {
             color: 'neutral',
             variant: 'subtle',
             onClick: () => {
-              if (props.spaceId === spaceId) emit('showExpired')
+              if (props.circleId === cid) emit('showExpired')
             },
           },
         ],
       })
-      void queryClient.invalidateQueries({ queryKey: ['memory-expired', spaceId] })
+      void queryClient.invalidateQueries({ queryKey: ['entry-expired', cid] })
     } else {
       // 写进这条记忆的缓存：删除前留下的缓存版本号对不上，打开后第一次保存会冲突
-      queryClient.setQueryData(['memory', spaceId, memory.uri], memory)
-      toast.add({ title: `已恢复 ${memory.uri}`, color: 'success' })
-      if (props.spaceId === spaceId) emit('restored', memory.uri)
+      queryClient.setQueryData(['entry', cid, entry.shortId], entry)
+      toast.add({ title: `已恢复「${entry.title || entry.shortId}」`, color: 'success' })
+      if (props.circleId === cid) emit('restored', entry.shortId)
     }
-    // 等列表重新拉取完、这一行消失之后按钮才恢复，免得再点一次。页面收到通知时已经发出了重新拉取，接着等它
     await queryClient.invalidateQueries({ queryKey: key }, { cancelRefetch: false })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '恢复失败', color: 'error' })
-    // URI 刚被别的记忆占上、这条已经被别人撤销或永久清除、权限变了：列表已经过时，重新读，标记跟着变
-    if (err instanceof ApiError && props.spaceId === spaceId) {
+    if (err instanceof ApiError && props.circleId === cid) {
       void deleted.refetch()
     }
   } finally {
     restoring.value = null
   }
 }
-
-// 坐标被别的记忆占用时撤销删除会冲突：说清楚为什么、该怎么办。按钮照样能点：标记是列表读出时的，
-// 占用的那条可能已经过期、被移走或删掉，点了还冲突时会重新读列表
-const TAKEN_HINT =
-  '坐标已被占用。移走或删除占用它的记忆后可恢复。标记按列表读取时计算，可直接重试。'
 </script>
 
 <template>
@@ -102,7 +95,8 @@ const TAKEN_HINT =
     <div class="list-head">
       <p>
         已删除的记忆在保留期内可以恢复。<Hint>
-          恢复后内容不变。同一坐标已有其他记忆时会冲突（标记为「坐标已被占用」），需先移走或删除那条记忆。恢复不改变有效期：标记为「已过期」的记忆恢复后回到「已过期」，可在其中恢复生效。
+          恢复后内容与短 ID
+          不变。恢复不改变有效期：标记为「已过期」的记忆恢复后回到「已过期」，可在其中恢复生效。
         </Hint>
       </p>
       <p v-if="retention" class="text-warning">{{ deletionNotice(retention) }}</p>
@@ -118,9 +112,10 @@ const TAKEN_HINT =
       <ul>
         <li v-for="item in items" :key="item.id">
           <MemoryRow
-            :uri="item.uri"
+            :short-id="item.shortId"
             :title="item.title"
-            :layer="item.layer"
+            :band="entryBand({ kind: item.kind }, { id: circleId, kind: circleKind })"
+            :kind="item.kind"
             :sensitivity="item.sensitivity"
             :priority="item.priority"
           >
@@ -139,26 +134,22 @@ const TAKEN_HINT =
                 </span>
               </template>
             </span>
-            <span v-if="isExpired(item.validTo, now) || item.uriTaken" class="row-marks">
+            <span v-if="isExpired(item.validTo, now)" class="row-marks">
               <FlagTag
-                v-if="isExpired(item.validTo, now)"
                 status="expired"
                 :title="`删除后已于 ${formatTime(item.validTo!)} 过期，恢复后回到「已过期」`"
               />
-              <span v-if="item.uriTaken" class="text-error" :title="TAKEN_HINT">坐标已被占用</span>
             </span>
-            <template v-if="canWriteUri(item.uri)" #actions>
-              <UTooltip :text="TAKEN_HINT" :disabled="!item.uriTaken">
-                <UButton
-                  size="xs"
-                  color="neutral"
-                  variant="outline"
-                  :loading="restoring === item.id"
-                  @click="undelete(item)"
-                >
-                  恢复
-                </UButton>
-              </UTooltip>
+            <template v-if="canWriteItem(item)" #actions>
+              <UButton
+                size="xs"
+                color="neutral"
+                variant="outline"
+                :loading="restoring === item.id"
+                @click="undelete(item)"
+              >
+                恢复
+              </UButton>
             </template>
           </MemoryRow>
         </li>

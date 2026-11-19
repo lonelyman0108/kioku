@@ -94,7 +94,7 @@ describe.skipIf(!testDatabaseUrl)('模型服务商与用途绑定设置', () => 
   }
 
   it('只有实例管理员能看、能改', async () => {
-    const bob = await addMember(database.db, ws.spaceId, 'bob', 'owner')
+    const bob = await addMember(database.db, ws.circleId, 'bob', 'owner')
     expect((await call('GET', '', undefined, bob.cookie)).status).toBe(403)
     expect(
       (

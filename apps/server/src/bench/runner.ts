@@ -4,6 +4,7 @@ import {
   CREDENTIAL_CAPABILITY_NAMES,
   isReplayStep,
   SENSITIVITIES,
+  ShortId,
   type BenchAssertion,
   type BenchCapture,
   type BenchExpect,
@@ -13,17 +14,18 @@ import {
   type BenchRunResult,
   type BenchStep,
   type BenchStepResult,
-  type KeyScopes,
+  type CircleKind,
+  type LensKeyScopes,
 } from '@kioku/contracts'
 
-import { layerWithValue, sensitivityWithValue } from '../memory/names'
+import { circleKindWithValue, kindWithValue, sensitivityWithValue } from '../memory/names'
 import type { BenchExecutor, ResolvedStep, StepOutcome } from './executor'
 
 // 跑一串步骤：requires、展开变量、执行、断言、capture、重放日志。执行方式由 executor 决定，这里不碰数据库。
 // 断言与 capture 都是字符串的线性操作，不执行场景给的模式（场景可以从别处导入，见 BenchExpect）
 
-// ${expires} 比这次运行开始时晚这么久：写记忆的步骤拿它当 valid_to，真实模式或命令行中途断开时，
-// 残留的记忆到时候自己过期，不会一直被真实会话召回。重放存的是展开之后的时间，这么久之内都能接着重放
+// ${expires} 比这次运行开始时晚这么久：写词条的步骤拿它当 valid_to，真实模式或命令行中途断开时，
+// 残留的词条到时候自己过期，不会一直被本人的真实会话召回。重放存的是展开之后的时间，这么久之内都能接着重放
 export const BENCH_EXPIRES_AFTER_MS = 6 * 60 * 60_000
 
 const VARIABLE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g
@@ -32,7 +34,7 @@ const INTEGER = /^-?\d{1,15}$/
 
 // 字符串里的 ${名字} 换成变量的值，没有这个变量的原样留着（正文里可能真的写着这种文字）。
 // 整个字符串就是一个 capture 变量、取到的又是整数时按数字代入：expected_version 这类参数要数字。
-// ${run} 总是字符串：它可能刚好全是数字，又常拼在 URI 与标识里
+// ${run} 总是字符串：它可能刚好全是数字，又常拼在标题与标识里
 export function expand(value: unknown, vars: ReadonlyMap<string, string>): unknown {
   if (typeof value === 'string') {
     const name = WHOLE_VARIABLE.exec(value)?.[1]
@@ -101,11 +103,18 @@ function defaultLabel(step: BenchStep): string {
 }
 
 // 不满足 requires 的原因；满足时为 null
-export function unmetRequirement(requires: BenchRequires, scopes: KeyScopes): string | null {
-  const unreadable = requires.readLayers?.filter((l) => !scopes.readLayers.includes(l)) ?? []
-  if (unreadable.length) return `当前访问密钥无权读取${unreadable.map(layerWithValue).join('、')}`
-  const unwritable = requires.writeLayers?.filter((l) => !scopes.writeLayers.includes(l)) ?? []
-  if (unwritable.length) return `当前访问密钥无权写入${unwritable.map(layerWithValue).join('、')}`
+export function unmetRequirement(
+  requires: BenchRequires,
+  scopes: LensKeyScopes,
+  primaryCircleKind?: CircleKind,
+): string | null {
+  if (requires.circleKind && primaryCircleKind && primaryCircleKind !== requires.circleKind) {
+    return `当前访问密钥的主场记忆圈不是${circleKindWithValue(requires.circleKind)}`
+  }
+  const unreadable = requires.readKinds?.filter((k) => !scopes.readKinds.includes(k)) ?? []
+  if (unreadable.length) return `当前访问密钥无权读取${unreadable.map(kindWithValue).join('、')}`
+  const unwritable = requires.writeKinds?.filter((k) => !scopes.writeKinds.includes(k)) ?? []
+  if (unwritable.length) return `当前访问密钥无权写入${unwritable.map(kindWithValue).join('、')}`
   const needed = requires.maxSensitivity
   if (needed && SENSITIVITIES.indexOf(scopes.maxSensitivity) < SENSITIVITIES.indexOf(needed)) {
     return `当前访问密钥的敏感级上限低于${sensitivityWithValue(needed)}`
@@ -149,10 +158,10 @@ function check(
       value: expandText(template, vars),
       text: shown(template),
     }))
-  const onUris = (message: string, ok: (uris: string[]) => boolean): BenchAssertion =>
-    outcome.uris
-      ? { message, ok: ok(outcome.uris) }
-      : { message: `${message}：此类结果无法区分 URI 列表，查看启动加载请用 boot 步骤`, ok: false }
+  const onShortIds = (message: string, ok: (ids: string[]) => boolean): BenchAssertion =>
+    outcome.shortIds
+      ? { message, ok: ok(outcome.shortIds) }
+      : { message: `${message}：此类结果无法区分短 ID 列表，查看启动加载请用 boot 步骤`, ok: false }
   const assertions: BenchAssertion[] = []
   if (expected.error !== undefined) {
     assertions.push({
@@ -166,11 +175,20 @@ function check(
   for (const { value, text } of list(expected.notContains)) {
     assertions.push({ message: `不应包含「${text}」`, ok: !outcome.text.includes(value) })
   }
-  for (const { value, text } of list(expected.uris)) {
-    assertions.push(onUris(`URI 列表应有 ${text}`, (uris) => uris.includes(value)))
+  for (const { value, text } of list(expected.shortIds)) {
+    const needle = value.toLowerCase()
+    assertions.push(
+      onShortIds(`短 ID 列表应有 ${text}`, (ids) => ids.some((id) => id.toLowerCase() === needle)),
+    )
   }
-  for (const { value, text } of list(expected.notUris)) {
-    assertions.push(onUris(`URI 列表不应有 ${text}`, (uris) => !uris.includes(value)))
+  for (const { value, text } of list(expected.notShortIds)) {
+    const needle = value.toLowerCase()
+    assertions.push(
+      onShortIds(
+        `短 ID 列表不应有 ${text}`,
+        (ids) => !ids.some((id) => id.toLowerCase() === needle),
+      ),
+    )
   }
   return assertions
 }
@@ -203,7 +221,7 @@ const NOT_RUN = {
   text: '',
   raw: null,
   ms: 0,
-  uris: [],
+  shortIds: [],
   session: null,
   vectorSkipped: false,
   assertions: [],
@@ -300,7 +318,9 @@ export async function runSteps(
       results.push({ ...NOT_RUN, ...head, status: 'notRun', reason: STOP_REASONS[stop] })
       continue
     }
-    const unmet = step.requires ? unmetRequirement(step.requires, whoami.scopes) : null
+    const unmet = step.requires
+      ? unmetRequirement(step.requires, whoami.scopes, whoami.primaryCircle.kind)
+      : null
     if (unmet) {
       markCaptures(step, 'skipped')
       results.push({ ...NOT_RUN, ...head, status: 'skipped', reason: unmet })
@@ -361,7 +381,7 @@ export async function runSteps(
       text: outcome.text,
       raw: outcome.raw,
       ms,
-      uris: outcome.uris,
+      shortIds: outcome.shortIds,
       session: outcome.session,
       vectorSkipped: outcome.vectorSkipped,
       assertions,
@@ -369,7 +389,7 @@ export async function runSteps(
       changes: outcome.changes,
       replay:
         mode === 'rollback' && !outcome.isError && !outcome.internalError
-          ? replayEntry(resolved)
+          ? replayEntry(resolved, outcome)
           : null,
     })
   }
@@ -387,6 +407,7 @@ export async function runSteps(
     mode,
     ok: !counts.failed && !counts.notRun && !replayDiverged,
     whoami,
+    scopes: whoami.scopes,
     counts,
     steps: results,
     replayDiverged,
@@ -396,12 +417,22 @@ export async function runSteps(
 // 依赖没取到的（失败）优先于依赖被跳过的
 const stateRank = (state: 'skipped' | 'failed') => (state === 'failed' ? 0 : 1)
 
-// 这一步要记进重放日志的样子：只记成功的写步骤（报错的与标成内部错误的不算），参数已经展开
-function replayEntry(step: ResolvedStep): BenchReplayStep | null {
+// 这一步要记进重放日志的样子：只记成功的写步骤（报错的与标成内部错误的不算），参数已经展开；
+// 新建词条时记住分配到的短 ID，下次重放沿用同一个短 ID
+function replayEntry(step: ResolvedStep, outcome: StepOutcome): BenchReplayStep | null {
   if (!isReplayStep(step)) return null
+  const createdId =
+    step.kind === 'tool' && step.tool === 'kioku_create'
+      ? ShortId.safeParse(outcome.shortIds?.[0])
+      : null
   const entry =
     step.kind === 'tool'
-      ? { kind: step.kind, tool: step.tool, arguments: step.arguments }
+      ? {
+          kind: step.kind,
+          tool: step.tool,
+          arguments: step.arguments,
+          ...(createdId?.success ? { shortId: createdId.data } : {}),
+        }
       : { kind: step.kind, body: 'body' in step ? step.body : undefined }
   const parsed = BenchReplayStep.safeParse(entry)
   return parsed.success ? parsed.data : null

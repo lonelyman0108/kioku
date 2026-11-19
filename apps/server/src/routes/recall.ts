@@ -25,7 +25,7 @@ const recallRoute = createRoute({
   path: '/recall',
   tags: ['recall'],
   summary:
-    '按一段文本召回候选记忆（只返回 URI 与线索，正文用 GET /memories 读）；带了会话上下文时按它收紧权限，并附上当前发言人与本群的事实',
+    '按一段文本召回候选词条（只返回短 ID 与线索，正文用 GET /entries 读）；带了会话上下文或切面时按它收紧权限并调制排序，并附上当前发言人与本群的事实',
   security,
   request: { body: jsonBody(RecallRequest) },
   responses: { 200: jsonResponse('候选', RecallResponse), ...errors },
@@ -35,9 +35,9 @@ const bootRoute = createRoute({
   method: 'get',
   path: '/boot',
   tags: ['recall'],
-  summary: '会话开始时应注入的启动节点',
+  summary: '会话开始时应注入的人格特质与启动词条',
   security,
-  responses: { 200: jsonResponse('启动节点', BootResponse), ...errors },
+  responses: { 200: jsonResponse('启动词条', BootResponse), ...errors },
 })
 
 const lifecycleRoute = createRoute({
@@ -45,7 +45,7 @@ const lifecycleRoute = createRoute({
   path: '/lifecycle/event',
   tags: ['lifecycle'],
   summary:
-    '插件转发宿主的生命周期事件，返回宿主可直接使用的输出；turn.end 把这一轮对话放进会话缓冲，攒批后抽取',
+    '插件转发宿主的生命周期事件，返回宿主可直接使用的输出与短 ID 列表；turn.end 把这一轮对话放进会话缓冲，攒批后抽取',
   security,
   request: { body: jsonBody(LifecycleEvent) },
   responses: { 200: jsonResponse('宿主输出', LifecycleResponse), ...errors },
@@ -57,8 +57,8 @@ export function recallRoutes(deps: Deps) {
   return app
     .openapi(recallRoute, async (c) => {
       const key = c.get('key')
-      const result = await recallRequest(deps, key, c.req.valid('json'), (session) =>
-        recallScopeForKey(deps, key, session),
+      const result = await recallRequest(deps, key, c.req.valid('json'), (session, options) =>
+        recallScopeForKey(deps, key, session, options),
       )
       return c.json(result, 200)
     })
@@ -67,13 +67,13 @@ export function recallRoutes(deps: Deps) {
     )
     .openapi(lifecycleRoute, async (c) => {
       const key = c.get('key')
-      // 响应只有 LifecycleResponse 的字段，多带的那几项不发给接入方
-      const { hostOutput, nodeUris } = await lifecycleEvent(
+      // 响应只有 LifecycleResponse 的字段，内部辅助字段不发给接入方
+      const { hostOutput, shortIds } = await lifecycleEvent(
         deps,
         key,
         c.req.valid('json'),
-        (session) => recallScopeForKey(deps, key, session),
+        (session, options) => recallScopeForKey(deps, key, session, options),
       )
-      return c.json({ hostOutput, nodeUris }, 200)
+      return c.json({ hostOutput, shortIds }, 200)
     })
 }

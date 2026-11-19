@@ -8,18 +8,18 @@ import type {
   CredentialSummary,
   CredentialValues,
   KeyCredentialList,
-  KeyScopes,
+  LensKeyScopes,
   VaultConnection,
 } from '@kioku/contracts'
-import { LAYERS } from '@kioku/contracts'
+import { ENTRY_KINDS } from '@kioku/contracts'
 import { eq } from 'drizzle-orm'
 import postgres from 'postgres'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
-import { withSpace, type Database } from '../../db/client'
+import { withCircle, type Database } from '../../db/client'
 import { createSession } from '../../auth/session'
-import { accounts, credentialEvents, credentials, spaceMembers } from '../../db/schema'
+import { accounts, circleMembers, credentialEvents, credentials } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { fakeVault } from '../../testing/fakeVault'
@@ -33,9 +33,9 @@ import {
 } from '../../testing/fixtures'
 
 const PASSWORD = 'pw-correct-horse-staple'
-const withoutPrivate = LAYERS.filter((l) => l !== 'user')
-const PRIVATE_LEVEL: KeyScopes = { ...FULL_SCOPES, maxSensitivity: 'private' }
-const USE_ONLY: KeyScopes = { ...PRIVATE_LEVEL, credentials: 'use' }
+const withoutEntry = ENTRY_KINDS.filter((k) => k !== 'entry')
+const PRIVATE_LEVEL: LensKeyScopes = { ...FULL_SCOPES, maxSensitivity: 'private' }
+const USE_ONLY: LensKeyScopes = { ...PRIVATE_LEVEL, credentials: 'use' }
 
 describe.skipIf(!testDatabaseUrl)('凭据', () => {
   let database: Database
@@ -67,7 +67,7 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
     ws = await bootstrap(app)
   })
 
-  const space = () => `/v1/spaces/${ws.spaceId}`
+  const circle = () => `/v1/circles/${ws.circleId}`
   const send = (method: string, path: string, body?: unknown, headers?: Record<string, string>) =>
     app.request(
       path,
@@ -75,9 +75,9 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
         ? { method, headers: { 'sec-fetch-site': 'same-origin', ...(headers ?? {}) } }
         : jsonRequest(method, body, headers ?? {}),
     )
-  // 管理界面的请求，默认是空间 owner（alice）
+  // 管理界面的请求，默认是记忆圈所有者（alice）
   const asMember = (method: string, path: string, body?: unknown, cookie: string = ws.cookie) =>
-    send(method, `${space()}${path}`, body, { cookie })
+    send(method, `${circle()}${path}`, body, { cookie })
   const asKey = (method: string, path: string, key: string, body?: unknown) =>
     send(method, `/v1${path}`, body, bearer(key))
   const ok = async <T>(res: Response, status = 200): Promise<T> => {
@@ -121,8 +121,8 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
     name: '文件服务器',
     values: { username: 'alice', password: PASSWORD },
   })
-  const keyFor = async (scopes: KeyScopes = FULL_SCOPES, slug = 'agent') =>
-    ws.issueKey((await ws.createApp(slug)).id, scopes)
+  const keyFor = async (scopes: LensKeyScopes = FULL_SCOPES, slug = 'agent') =>
+    ws.issueKey((await ws.createClient(slug)).id, scopes)
 
   it('管理界面新建托管的凭据：列表与详情不含值，查看要单独请求并记一条访问事件', async () => {
     const created = await createCredential(hosted())
@@ -130,7 +130,7 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
       { name: 'password', itemField: null },
       { name: 'username', itemField: null },
     ])
-    expect(created.appIds).toBeNull()
+    expect(created.clientIds).toBeNull()
     expect(created.vault).toBeNull()
     expect(JSON.stringify(created)).not.toContain(PASSWORD)
     const list = await ok<ConsoleCredentialList>(await asMember('GET', '/credentials'))
@@ -154,11 +154,11 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
     expect(events.items[0]!.actor.accountName).toBe('alice')
 
     // 库里只有密文，事件里也没有值
-    const [row] = await withSpace(database.db, ws.spaceId, (tx) =>
+    const [row] = await withCircle(database.db, ws.circleId, (tx) =>
       tx.select().from(credentials).where(eq(credentials.id, created.id)),
     )
     expect(row!.ciphertext!.includes(Buffer.from(PASSWORD))).toBe(false)
-    const stored = await withSpace(database.db, ws.spaceId, (tx) =>
+    const stored = await withCircle(database.db, ws.circleId, (tx) =>
       tx.select().from(credentialEvents),
     )
     expect(JSON.stringify(stored)).not.toContain(PASSWORD)
@@ -216,8 +216,8 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
     ).toContain('字段对应只用于密码库的凭据')
   })
 
-  it('每个成员只看得到自己的凭据与密码库连接，空间 owner 也看不到别人的', async () => {
-    const bob = await addMember(database.db, ws.spaceId, 'bob', 'owner')
+  it('每个成员只看得到自己的凭据与密码库连接，记忆圈 owner 也看不到别人的', async () => {
+    const bob = await addMember(database.db, ws.circleId, 'bob', 'owner')
     const mine = await createCredential(hosted())
     // 标识按成员各占一份
     const his = await createCredential(hosted(), bob.cookie)
@@ -262,12 +262,12 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
   })
 
   it('editor 与 viewer 不能管理凭据，也看不到托管的值，只看得到自己凭据的说明', async () => {
-    const bob = await addMember(database.db, ws.spaceId, 'bob', 'owner')
+    const bob = await addMember(database.db, ws.circleId, 'bob', 'owner')
     const his = await createCredential(hosted(), bob.cookie)
     await database.db
-      .update(spaceMembers)
+      .update(circleMembers)
       .set({ role: 'editor' })
-      .where(eq(spaceMembers.accountId, bob.accountId))
+      .where(eq(circleMembers.accountId, bob.accountId))
     expect(
       (
         await ok<ConsoleCredentialList>(
@@ -280,7 +280,7 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
         await asMember('POST', `/credentials/${his.id}/reveal`, undefined, bob.cookie),
         403,
       ),
-    ).toContain('空间所有者')
+    ).toContain('记忆圈所有者')
     expect(
       (
         await asMember(
@@ -294,7 +294,7 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
     expect((await asMember('DELETE', `/credentials/${his.id}`, undefined, bob.cookie)).status).toBe(
       403,
     )
-    const viewer = await addMember(database.db, ws.spaceId, 'carol', 'viewer')
+    const viewer = await addMember(database.db, ws.circleId, 'carol', 'viewer')
     expect((await asMember('POST', '/credentials', hosted(), viewer.cookie)).status).toBe(403)
     expect(
       (
@@ -371,12 +371,12 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
     )
     expect((await asKey('GET', '/credentials/list', none)).status).toBe(403)
 
-    const blind = await keyFor({ ...FULL_SCOPES, readLayers: withoutPrivate }, 'blind')
+    const blind = await keyFor({ ...FULL_SCOPES, readKinds: withoutEntry }, 'blind')
     expect((await asKey('GET', '/credentials?identifier=file-server', blind)).status).toBe(403)
     expect((await asKey('GET', '/credentials/list', blind)).status).toBe(403)
 
     // 只读不写本人的管理 Key 能取值，不能管理凭据
-    const readOnly = await keyFor({ ...FULL_SCOPES, writeLayers: withoutPrivate }, 'read-only')
+    const readOnly = await keyFor({ ...FULL_SCOPES, writeKinds: withoutEntry }, 'read-only')
     expect(
       (await asKey('POST', '/credentials', readOnly, { ...hosted('new-one'), values: { a: 'b' } }))
         .status,
@@ -388,7 +388,7 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
     expect(
       events.items
         .filter((e) => e.type === 'access')
-        .map((e) => [e.via, e.actor.appName, e.result, e.reason]),
+        .map((e) => [e.via, e.actor.clientName, e.result, e.reason]),
     ).toEqual([
       ['rest', 'blind', 'denied', 'scope'],
       ['rest', 'none', 'denied', 'capability'],
@@ -400,9 +400,9 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
     expect(first).toMatchObject({ purpose: '备份', chatType: 'none' })
   })
 
-  it('Key 新建的凭据只给这个应用用；限定给别的应用的，读、改、删一律 404，撞名返回同一个错误', async () => {
-    const appA = await ws.createApp('app-a')
-    const appB = await ws.createApp('app-b')
+  it('Key 新建的凭据只给这个接入实例用；限定给别的接入实例的，读、改、删一律 404，撞名返回同一个错误', async () => {
+    const appA = await ws.createClient('app-a')
+    const appB = await ws.createClient('app-b')
     const keyA = await ws.issueKey(appA.id, FULL_SCOPES)
     const keyB = await ws.issueKey(appB.id, { ...FULL_SCOPES, admin: true })
 
@@ -413,14 +413,18 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
     expect(created.fields).toEqual(['password', 'username'])
     const [inConsole] = (await ok<ConsoleCredentialList>(await asMember('GET', '/credentials')))
       .items
-    expect(inConsole!.appIds).toEqual([appA.id])
+    expect(inConsole!.clientIds).toEqual([appA.id])
 
-    // 跨人格 / 应用写入的 Key 也不放宽；限定给别的应用的取用记一条被拒
+    // 跨切面写入的 Key 也不放宽；限定给别的接入实例的取用记一条被拒
     expect((await asKey('GET', '/credentials?identifier=api-token', keyB)).status).toBe(404)
     const restricted = await ok<CredentialEventList>(
       await asMember('GET', `/credentials/${created.id}/events`),
     )
-    expect(restricted.items[0]).toMatchObject({ type: 'access', result: 'denied', reason: 'app' })
+    expect(restricted.items[0]).toMatchObject({
+      type: 'access',
+      result: 'denied',
+      reason: 'client',
+    })
     expect(
       (await asKey('PATCH', '/credentials', keyB, { identifier: 'api-token', expectedVersion: 1 }))
         .status,
@@ -441,21 +445,21 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
     expect(hidden).toBe('标识已被占用或不可用：api-token')
     expect(visible).toBe(hidden)
 
-    // Key 改不了限定的应用：请求里带上也不生效
+    // Key 改不了限定的接入实例：请求里带上也不生效
     await ok(
       await asKey('PATCH', '/credentials', keyA, {
         identifier: 'api-token',
         expectedVersion: created.version,
-        appIds: null,
+        clientIds: null,
       }),
     )
     const after = await ok<ConsoleCredential>(await asMember('GET', `/credentials/${created.id}`))
-    expect(after.appIds).toEqual([appA.id])
-    // 在管理界面放宽之后，别的应用就能用了
+    expect(after.clientIds).toEqual([appA.id])
+    // 在管理界面放宽之后，别的接入实例就能用了
     await ok(
       await asMember('PATCH', `/credentials/${created.id}`, {
         expectedVersion: after.version,
-        appIds: [appA.id, appB.id],
+        clientIds: [appA.id, appB.id],
       }),
     )
     expect((await asKey('GET', '/credentials?identifier=api-token', keyB)).status).toBe(200)
@@ -495,13 +499,13 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
       jobs: null,
     })
     const res = await plain.request(
-      `${space()}/credentials`,
+      `${circle()}/credentials`,
       jsonRequest('POST', hosted(), { cookie: ws.cookie }),
     )
     expect(res.status).toBe(400)
     expect(((await res.json()) as { error: string }).error).toContain('KIOKU_MASTER_KEY')
     const connected = await plain.request(
-      `${space()}/vault-connections`,
+      `${circle()}/vault-connections`,
       jsonRequest(
         'POST',
         { serverUrl: 'https://vault.example.com', email: 'agent@example.com', masterPassword: 'x' },
@@ -612,7 +616,8 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
     try {
       let pending!: Promise<Response>
       await side.begin(async (tx) => {
-        await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
+        await tx`select set_config('app.read_circles', ${ws.circleId}, true)`
+        await tx`select set_config('app.write_circles', ${ws.circleId}, true)`
         await tx`select id from credentials where id = ${created.id} for update`
         const [{ pid }] = (await tx`select pg_backend_pid() as pid`) as unknown as [{ pid: number }]
         pending = Promise.resolve(
@@ -644,7 +649,8 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
     try {
       let pending!: Promise<Response>
       await side.begin(async (tx) => {
-        await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
+        await tx`select set_config('app.read_circles', ${ws.circleId}, true)`
+        await tx`select set_config('app.write_circles', ${ws.circleId}, true)`
         await tx`select id from credentials where id = ${created.id} for update`
         const [{ pid }] = (await tx`select pg_backend_pid() as pid`) as unknown as [{ pid: number }]
         pending = Promise.resolve(asMember('POST', `/credentials/${created.id}/undelete`))

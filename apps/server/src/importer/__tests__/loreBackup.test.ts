@@ -2,7 +2,6 @@ import { LORE_BACKUP_FORMAT } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
 import { MemoryError } from '../../memory/service'
-import { planImport } from '../lore'
 import { parseLoreBackup } from '../loreBackup'
 
 const at = '2026-01-01T00:00:00.000Z'
@@ -134,19 +133,6 @@ describe('解析 Lore 的导出', () => {
     expect(nodes([...paths].reverse())).toEqual(nodes(paths))
   })
 
-  it('业务范围留给计划：priority 超范围只跳过这一个节点，不拒绝整个文件', () => {
-    const { snapshot } = parseLoreBackup(
-      backup({ edges: [{ id: '7', child_uuid: 'n1', priority: 500, disclosure: null }] }),
-    )
-    const plan = planImport(snapshot, [], {
-      accountId: 'me',
-      persona: { slug: 'default', name: '默认人格' },
-      secretUris: new Set(),
-    })
-    expect(plan.memories).toEqual([])
-    expect(plan.skipped.map((s) => s.source)).toEqual(['infra://nas'])
-  })
-
   it('不是 Lore 的导出直接拒绝', () => {
     for (const input of [null, 'x', [], {}, backup({}, { format: 'other' })]) {
       expect(rejected(input)).toBe('不是 Lore 的导出文件')
@@ -155,8 +141,8 @@ describe('解析 Lore 的导出', () => {
 
   it('五张表都必填：少了关键词的表不能当成没有关键词，同步会把关键词都删掉', () => {
     for (const table of ['nodes', 'memories', 'edges', 'paths', 'glossary_keywords']) {
-      expect(rejected(backup({ [table]: undefined }))).toContain(`tables.${table}：缺少这张表`)
-      expect(rejected(backup({ [table]: {} }))).toContain(`tables.${table}：缺少这张表`)
+      expect(rejected(backup({ [table]: undefined }))).toContain(`tables.${table} 缺少这张表`)
+      expect(rejected(backup({ [table]: {} }))).toContain(`tables.${table} 缺少这张表`)
     }
     expect(rejected({ format: LORE_BACKUP_FORMAT, created_at: at })).toContain('缺少 tables')
   })
@@ -195,16 +181,16 @@ describe('解析 Lore 的导出', () => {
     ]
     for (const input of [...bad('机密a\u0000b'), ...bad('机密a\ud800b')]) {
       const message = rejected(input)
-      expect(message).toContain('无法存入数据库')
+      expect(message).toContain('包含数据库无法存放的字符')
       expect(message).not.toContain('机密')
     }
   })
 
   it('时间要合法、不能在未来；差一点的时钟不算', () => {
     const future = '9999-01-01T00:00:00.000Z'
-    expect(rejected(backup({}, { created_at: future }))).toContain('created_at：时间在未来')
+    expect(rejected(backup({}, { created_at: future }))).toContain('created_at 时间在未来')
     expect(rejected(backup({ nodes: [{ uuid: 'n1', created_at: future }] }))).toContain(
-      'nodes 第 1 行 created_at：时间在未来',
+      'nodes 第 1 行 created_at 时间在未来',
     )
     expect(
       rejected(

@@ -4,13 +4,9 @@ import { embeddingCoverage } from './coverage'
 import { clearEmbeddingError, recordEmbeddingError } from './errors'
 import { loadEmbeddingModels, switchEmbedding } from './settings'
 import type { EmbedderSource } from './source'
-import { backfillEmbeddings, embedMemories, EmbedUnavailable, pruneEmbeddings } from './worker'
+import { backfillEmbeddings, embedEntries, EmbedUnavailable, pruneEmbeddings } from './worker'
 
-// 向量相关的后台任务本身，由任务队列调用。出错时记下来给实例设置页看（记下与清掉本身出错只记日志，见 errors.ts），
-// 再交给队列处理：写入之后的向量任务逐项返回失败的，别的直接抛出
-
-// 写回时正被别的事务锁着、这次没处理的记忆另排一个新任务，稍后逐条再来。返回没排进去（入队失败）的那几条
-export type Retry = (spaceId: string, ids: string[]) => Promise<string[]>
+export type Retry = (circleId: string, entryIds: string[]) => Promise<string[]>
 
 async function recording<T>(db: Db, model: string, run: () => Promise<T>): Promise<T> {
   try {
@@ -21,7 +17,6 @@ async function recording<T>(db: Db, model: string, run: () => Promise<T>): Promi
   }
 }
 
-// 接口只拒绝了个别记忆时，跳过它们、补完别的，最后把原因记下来
 function failureLog() {
   let count = 0
   let last = ''
@@ -33,24 +28,20 @@ function failureLog() {
     get count() {
       return count
     },
-    message: () => `${count} 条记忆无法生成向量，最近一条的原因：${last}`,
+    message: () => `${count} 条词条无法生成向量，最近一条的原因：${last}`,
   }
 }
 
-// 一条写入之后要生成向量的记忆
 export interface EmbedTarget {
-  spaceId: string
-  memoryId: string
+  circleId: string
+  entryId: string
 }
 
 export interface EmbedJobsSignals {
-  // 这一批的处理时间
   budget?: AbortSignal | undefined
-  // pg-boss 给这一批每个任务的中止信号（服务要停、任务过期时断开）。全都断开才停下：只有一个任务的断开不该让整批停下
   jobs?: AbortSignal[] | undefined
 }
 
-// 这些信号全都断开时才断开。用完调用 release，拿掉加在各个信号上的监听
 function allAborted(signals: AbortSignal[]): { signal: AbortSignal; release: () => void } {
   const controller = new AbortController()
   let left = signals.length
@@ -69,14 +60,6 @@ function allAborted(signals: AbortSignal[]): { signal: AbortSignal; release: () 
   }
 }
 
-// 记忆写入之后生成向量，一次处理一批：同一个空间的一起读、合起来请求嵌入接口（每次最多 EMBED_BATCH 条）、一起写回。
-// 换模型期间两个模型都生成，不然新模型永远补不齐；一个模型出错不挡另一个。
-// 返回生成失败的是第几项（targets 的下标）与原因，调用方逐项交给队列按任务的重试次数（有退避）再试：
-// 逐条再试时失败的只算那几条，别的照常写；一个空间接口不可用时（最短的几条都失败）算这个空间里还没写好的，
-// 写库出错算这个空间的全部。处理时间用完了，还没生成的不再请求、算失败，已经拿到的照常写回，并记下这一批没做完。
-// 服务要停时（pg-boss 在中止信号之前已经把这些任务记成失败、会重试）同样停下，但不记也不清错误、不另排新任务。
-// 写回时正被别的事务锁着的，按记忆去重后交给 retry 另排一个新任务、原任务算完成（这一批里别的模型记下的失败也去掉）；
-// 没排进去的算失败
 export async function embedJobs(
   db: Db,
   source: EmbedderSource,
@@ -88,7 +71,6 @@ export async function embedJobs(
   try {
     return await embedTargets(db, source, targets, retry, budget, stopping?.signal)
   } finally {
-    // 这一批做完就拿掉加在各个任务信号上的监听，不留下闭包
     stopping?.release()
   }
 }
@@ -101,29 +83,26 @@ async function embedTargets(
   budget: AbortSignal | undefined,
   stopping: AbortSignal | undefined,
 ): Promise<Map<number, Error>> {
-  // 空间 → 记忆 → 要它的是哪几项（同一条记忆连着改了几次，会有几项）
   const groups = new Map<string, Map<string, number[]>>()
   targets.forEach((target, index) => {
-    const items = groups.get(target.spaceId) ?? new Map<string, number[]>()
-    items.set(target.memoryId, [...(items.get(target.memoryId) ?? []), index])
-    groups.set(target.spaceId, items)
+    const items = groups.get(target.circleId) ?? new Map<string, number[]>()
+    items.set(target.entryId, [...(items.get(target.entryId) ?? []), index])
+    groups.set(target.circleId, items)
   })
   const failed = new Map<number, Error>()
-  const indexes = (spaceId: string, memoryIds: Iterable<string>) =>
-    [...memoryIds].flatMap((memoryId) => groups.get(spaceId)?.get(memoryId) ?? [])
-  const fail = (spaceId: string, memoryIds: Iterable<string>, error: Error) => {
-    for (const index of indexes(spaceId, memoryIds)) failed.set(index, error)
+  const indexes = (circleId: string, entryIds: Iterable<string>) =>
+    [...entryIds].flatMap((entryId) => groups.get(circleId)?.get(entryId) ?? [])
+  const fail = (circleId: string, entryIds: Iterable<string>, error: Error) => {
+    for (const index of indexes(circleId, entryIds)) failed.set(index, error)
   }
-  // 写回时被锁着、要另排一个新任务的记忆，按空间
   const later = new Map<string, Set<string>>()
-  const postpone = (spaceId: string, memoryIds: Iterable<string>) => {
-    const set = later.get(spaceId) ?? new Set<string>()
-    for (const id of memoryIds) set.add(id)
-    later.set(spaceId, set)
+  const postpone = (circleId: string, entryIds: Iterable<string>) => {
+    const set = later.get(circleId) ?? new Set<string>()
+    for (const id of entryIds) set.add(id)
+    later.set(circleId, set)
   }
   const signals = [budget, stopping].filter((s): s is AbortSignal => s !== undefined)
   const signal = signals.length ? AbortSignal.any(signals) : undefined
-  // 没做完的记成哪种失败
   const unfinished = () =>
     new Error(stopping?.aborted ? '服务正在停止，这一批未完成' : '这一批未在时限内完成，将重试')
 
@@ -134,34 +113,31 @@ async function embedTargets(
     let broken: Error | null = null
     let deferred = 0
     let written = 0
-    for (const [spaceId, items] of groups) {
+    for (const [circleId, items] of groups) {
       if (signal?.aborted) {
         deferred += items.size
-        fail(spaceId, items.keys(), unfinished())
+        fail(circleId, items.keys(), unfinished())
         continue
       }
       try {
-        written += await embedMemories(db, embedder, spaceId, [...items.keys()], {
+        written += await embedEntries(db, embedder, circleId, [...items.keys()], {
           signal,
-          onSkipped: (ids) => postpone(spaceId, ids),
-          onFailed: (memoryId, message) => {
-            failures.onFailed(memoryId, message)
-            fail(spaceId, [memoryId], new Error(message))
+          onSkipped: (ids) => postpone(circleId, ids),
+          onFailed: (entryId, message) => {
+            failures.onFailed(entryId, message)
+            fail(circleId, [entryId], new Error(message))
           },
           onDeferred: (ids) => {
             deferred += ids.length
-            fail(spaceId, ids, unfinished())
+            fail(circleId, ids, unfinished())
           },
         })
       } catch (err) {
         broken = err as Error
-        // 接口不可用：已经写好的那几条算完成，只有还没生成的算失败
-        fail(spaceId, err instanceof EmbedUnavailable ? err.unfinished : items.keys(), broken)
+        fail(circleId, err instanceof EmbedUnavailable ? err.unfinished : items.keys(), broken)
       }
     }
-    // 服务要停时一律不记也不清：没做完的任务 pg-boss 已经记成失败、会重试，到时再记
     if (stopping?.aborted) continue
-    // 记下这个模型这一批出的错给管理员看；都成功、写下了向量时清掉之前记下的
     if (broken) {
       await recordEmbeddingError(db, embedder.model, errorText(broken))
     } else if (failures.count) {
@@ -173,23 +149,20 @@ async function embedTargets(
       await clearEmbeddingError(db, embedder.model)
     }
   }
-  // 被锁着的另排新任务，等它排进去。排上了的原任务算完成：新任务两个模型都会再做一遍，这一批里别的模型记下的失败
-  // （接口拒绝、时间用完）也去掉，不然既另排又重试；没排上的算失败。
-  // 服务要停时不另排：这些任务 pg-boss 已经记成失败、会重试
-  for (const [spaceId, ids] of later) {
+
+  for (const [circleId, ids] of later) {
     if (stopping?.aborted) {
-      fail(spaceId, ids, unfinished())
+      fail(circleId, ids, unfinished())
       continue
     }
-    const lost = new Set(await retry(spaceId, [...ids]))
+    const lost = new Set(await retry(circleId, [...ids]))
     const queued = [...ids].filter((id) => !lost.has(id))
-    for (const index of indexes(spaceId, queued)) failed.delete(index)
-    fail(spaceId, lost, new Error('写回时遇到锁，新任务未能入队，将重试'))
+    for (const index of indexes(circleId, queued)) failed.delete(index)
+    fail(circleId, lost, new Error('写回时遇到锁，新任务未能入队，将重试'))
   }
   return failed
 }
 
-// 补齐正在用的模型的向量；没配置时返回 null
 export async function backfillJob(
   db: Db,
   source: EmbedderSource,
@@ -201,29 +174,22 @@ export async function backfillJob(
   let lost = 0
   const total = await recording(db, active.model, () =>
     backfillEmbeddings(db, active, {
-      // 被锁着的另排新任务，等它排进去；没排上的记下来，等下一次补齐
-      onSkipped: async (spaceId, ids) => {
-        lost += (await retry(spaceId, ids)).length
+      onSkipped: async (circleId, ids) => {
+        lost += (await retry(circleId, ids)).length
       },
       onFailed: failures.onFailed,
     }),
   )
   const problems: string[] = []
   if (failures.count) problems.push(failures.message())
-  if (lost) problems.push(`${lost} 条记忆写回时遇到锁，新任务未能入队，将在下次补齐`)
+  if (lost) problems.push(`${lost} 条词条写回时遇到锁，新任务未能入队，将在下次补齐`)
   if (problems.length) await recordEmbeddingError(db, active.model, problems.join('；'))
   else await clearEmbeddingError(db, active.model)
   return total
 }
 
-// idle：没在换模型；switched：补齐了、已经切过去（旧模型的向量该清了）；
-// cancelled：补的时候被放弃或换成了别的模型，停下了（这期间写下的向量该清了）；
-// changed：还是这个模型，但渠道改了，停下来让新排的任务用新的渠道接着补；
-// again：还有缺的，但这一遍有进展（补上了一些，或者有被锁着跳过、另排的新任务已经排上的），过一会儿再补；
-// stuck：补了一遍一条都没补上，也没有在等的，隔久一点再试
 export type SwitchOutcome = 'idle' | 'switched' | 'cancelled' | 'changed' | 'again' | 'stuck'
 
-// 补齐新模型的向量，召回在这期间一直用旧模型；补齐了就切过去。整个过程出的错都记下来给管理员看
 export async function switchJob(
   db: Db,
   source: EmbedderSource,
@@ -236,14 +202,12 @@ export async function switchJob(
   try {
     const next = await source.next()
     if (next?.model !== target.model) return 'changed'
-    // 每补一页之前看一眼设置与底层服务商/模型是否变化：被放弃、换成了别的模型或者渠道改了，就停下
     const unchanged = async () => (await embeddingNextSnapshot(db)) === snapshot
     let requeued = 0
     const failures = failureLog()
     const written = await backfillEmbeddings(db, next, {
-      // 被锁着的另排新任务，等它排进去；排上了才算有进展，没排上的等下一遍补
-      onSkipped: async (spaceId, ids) => {
-        requeued += ids.length - (await retry(spaceId, ids)).length
+      onSkipped: async (circleId, ids) => {
+        requeued += ids.length - (await retry(circleId, ids)).length
       },
       onFailed: failures.onFailed,
       shouldContinue: unchanged,
@@ -256,7 +220,6 @@ export async function switchJob(
     const done = embedded.get(target.model) ?? 0
     if (done >= eligible) {
       const previous = await switchEmbedding(db, target.model)
-      // 刚好在这时被放弃或换成了别的模型：这次不切
       if (previous === null) return 'cancelled'
       source.invalidate()
       await clearEmbeddingError(db, target.model)
@@ -273,7 +236,7 @@ export async function switchJob(
       await recordEmbeddingError(
         db,
         target.model,
-        `仍有 ${eligible - done} 条记忆缺少新模型的向量，补齐未成功；稍后将重试，也可以立即切换`,
+        `仍有 ${eligible - done} 个切片缺少新模型的向量，补齐未成功；稍后将重试，也可以立即切换`,
       )
     }
     return 'stuck'
@@ -283,7 +246,6 @@ export async function switchJob(
   }
 }
 
-// 删掉既不是正在用、也不是正在换过去的模型的向量。按库里的设置算，不用缓存：刚切换或放弃之后缓存可能还是旧的
 export async function pruneJob(db: Db): Promise<number> {
   const stored = await loadEmbeddingModels(db)
   return pruneEmbeddings(

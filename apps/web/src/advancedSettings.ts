@@ -3,7 +3,7 @@ import {
   TUNING_KEYS,
   TuningValues,
   WEIGHT_KEYS,
-  type AppAdvancedSummary,
+  type ClientAdvancedSummary,
   type DebugCandidate,
   type SettingSource,
   type TuningKey,
@@ -14,7 +14,7 @@ import type { QueryClient } from '@tanstack/vue-query'
 export { runtimeName } from './runtimes'
 
 // 高级设置的界面：各项的名称与单位、取值范围、来源的说法、试算的本地重算与补充的拼接。
-// 取值顺序是「实例默认 → 空间 → 应用」，每一级只存覆盖了的项；补充只叠加，固定部分在前
+// 取值顺序是「实例默认 → 记忆圈 → 接入实例」，每一级只存覆盖了的项；补充只叠加，固定部分在前
 
 export const SUPPLEMENT_MAX = PROMPT_SUPPLEMENT_MAX_CHARS
 
@@ -30,6 +30,10 @@ export const TUNING_META: Record<TuningKey, TuningMeta> = {
     label: '最低分',
     description: '向量、全文、关键词加权后的分数，低于它的不注入',
   },
+  'recall.relevanceFloor': {
+    label: '切面相关性门槛',
+    description: '达到此原始相关性后才叠加切面亲和调制',
+  },
   'recall.subjectFacts': {
     label: '联系人事实条数',
     description: '群聊与私聊时附上发言人、本群的事实',
@@ -37,7 +41,7 @@ export const TUNING_META: Record<TuningKey, TuningMeta> = {
   },
   'recall.chatInlineChars': {
     label: '群聊召回附带正文',
-    description: '群聊机器人无法读取坐标，召回时直接附正文开头',
+    description: '群聊机器人无法按短 ID 读取时，召回直接附正文开头',
     unit: '字',
   },
   'recallWeights.semantic': { label: '向量相似度', description: '未配置嵌入模型时这一路不参与' },
@@ -47,12 +51,12 @@ export const TUNING_META: Record<TuningKey, TuningMeta> = {
   'recallWeights.priority': { label: '优先级', description: '优先级数字越小加分越多' },
   'boot.charBudget': {
     label: '字数预算',
-    description: '超出的记忆只列标题，模型需要时再读',
+    description: '超出的词条只列标题，模型需要时再按短 ID 读取',
     unit: '字',
   },
   'boot.summaries.enabled': { label: '同一会话的会话摘要' },
   'boot.summaries.count': { label: '会话摘要条数', unit: '条' },
-  'boot.recent.enabled': { label: '近期更新的记忆' },
+  'boot.recent.enabled': { label: '近期更新的词条' },
   'boot.recent.count': { label: '近期更新条数', unit: '条' },
   'boot.related.enabled': { label: '与当前项目相关' },
   'boot.related.count': { label: '项目相关条数', unit: '条' },
@@ -73,7 +77,7 @@ export const TUNING_META: Record<TuningKey, TuningMeta> = {
   },
   'dream.maxCalls': {
     label: '每次最多请求模型',
-    description: '其中 2 次固定留给本人的记忆',
+    description: '按记忆圈配额发起整理调用',
     unit: '次',
   },
   'dream.maxSuggestions': { label: '每次最多建议', description: '每次请求最多收几条', unit: '条' },
@@ -87,9 +91,11 @@ export const BOOT_EXTRAS = [
 ] as const
 export type BootExtra = (typeof BOOT_EXTRAS)[number]['key']
 
-// 两位小数的项：最低分与权重
+// 两位小数的项：最低分、相关性门槛与权重
 export const isDecimal = (key: TuningKey) =>
-  key === 'recall.minScore' || (WEIGHT_KEYS as readonly TuningKey[]).includes(key)
+  key === 'recall.minScore' ||
+  key === 'recall.relevanceFloor' ||
+  (WEIGHT_KEYS as readonly TuningKey[]).includes(key)
 export const isFlag = (key: TuningKey) => key.endsWith('.enabled')
 
 // 取值范围与校验取自契约（TuningValues 里这一项的定义），和服务端是同一份；开关按 0、1 记
@@ -125,15 +131,13 @@ export function formatTuning(key: TuningKey, value: number | boolean | null | un
   return value.toLocaleString('en-US')
 }
 
-// 「沿用实例 · 8」里的那一级
 export const LEVEL_NAMES: Record<SettingSource, string> = {
   builtin: '内置',
   instance: '实例',
-  space: '空间',
-  app: '应用',
+  circle: '记忆圈',
+  client: '接入实例',
 }
 
-// 这一级覆盖了哪几项，以服务端为准：空间、应用看生效值的来源，实例看存下的覆盖
 export const overriddenAt = (sources: TuningSources | undefined, level: SettingSource) =>
   sources
     ? new Set((Object.keys(sources) as TuningKey[]).filter((k) => sources[k] === level))
@@ -143,8 +147,6 @@ export const overriddenIn = (overrides: Partial<Record<string, unknown>> | undef
     ? new Set((TUNING_KEYS as readonly TuningKey[]).filter((k) => overrides[k] !== undefined))
     : undefined
 
-// 试算：拿召回调试的候选，按表单里的最低分与条数在本地重算。和服务端一样：按未取整的分数排序、和最低分比，
-// 过了最低分的取前 limit 条注入，过了但排在后面的是超出条数，其余不注入
 export type TrialState = 'injected' | 'overLimit' | 'excluded'
 export interface TrialRow {
   candidate: DebugCandidate
@@ -170,14 +172,12 @@ export function trialRows(
   })
 }
 
-// 试算用的最低分与条数：默认是空间表单里的值；所选访问密钥的应用自己覆盖了哪一项，那一项按应用的值，
-// 并给一句说明（空间的设置对它不起作用）
 export function trialSettings(
   form: { minScore: number; limit: number },
-  app: { id: string; name: string } | null,
-  appOverrides: readonly AppAdvancedSummary[] | undefined,
+  client: { id: string; name: string } | null,
+  clientOverrides: readonly ClientAdvancedSummary[] | undefined,
 ): { minScore: number; limit: number; note: string | null } {
-  const overrides = app ? appOverrides?.find((a) => a.id === app.id)?.overrides : undefined
+  const overrides = client ? clientOverrides?.find((a) => a.id === client.id)?.overrides : undefined
   const minScore = overrides?.['recall.minScore']
   const limit = overrides?.['recall.limit']
   const parts = [
@@ -188,8 +188,8 @@ export function trialSettings(
     minScore: minScore ?? form.minScore,
     limit: limit ?? form.limit,
     note:
-      app && parts.length
-        ? `应用「${app.name}」另有覆盖（${parts.join('、')}），按它的值试算，空间的设置对它不起作用。`
+      client && parts.length
+        ? `接入实例「${client.name}」另有覆盖（${parts.join('、')}），按它的值试算，记忆圈的设置对它不起作用。`
         : null,
   }
 }
@@ -204,11 +204,12 @@ export function promptText(fixed: string, supplements: readonly (string | null |
   return [fixed, ...supplements.filter((s): s is string => !!s && s.trim() !== '')].join('\n')
 }
 
-// 查询键：三级的视图互相依赖（实例改了，空间与应用的沿用值跟着变），保存后整组失效
+// 查询键：三级的视图互相依赖（实例改了，记忆圈与接入实例的沿用值跟着变），保存后整组失效
 export const ADVANCED_KEY = ['advanced-settings'] as const
 export const instanceAdvancedKey = () => [...ADVANCED_KEY, 'instance'] as const
-export const spaceAdvancedKey = (spaceId: string) => [...ADVANCED_KEY, 'space', spaceId] as const
-export const appAdvancedKey = (spaceId: string, appId: string) =>
-  [...ADVANCED_KEY, 'app', spaceId, appId] as const
+export const circleAdvancedKey = (circleId: string) =>
+  [...ADVANCED_KEY, 'circle', circleId] as const
+export const clientAdvancedKey = (circleId: string, clientId: string) =>
+  [...ADVANCED_KEY, 'client', circleId, clientId] as const
 export const refreshAdvanced = (client: QueryClient) =>
   client.invalidateQueries({ queryKey: ADVANCED_KEY })

@@ -4,6 +4,7 @@ import { BUILD } from '../version'
 import { runBackup } from './commands/backup'
 import { runBench } from './commands/bench'
 import { runImportLore } from './commands/importLore'
+import { runMigrateLegacy } from './commands/migrateLegacy'
 import { runRestore } from './commands/restore'
 import { runStatus } from './commands/status'
 import { isMainModule } from './common'
@@ -31,6 +32,10 @@ const COMMANDS: Record<string, Subcommand> = {
     description: '从 Lore 数据库导入或同步记忆',
     run: runImportLore,
   },
+  'migrate-legacy': {
+    description: '从旧版 Kioku 迁移数据到新版记忆圈架构',
+    run: runMigrateLegacy,
+  },
   bench: {
     description: '用真实 HTTP 与访问密钥运行测试台场景',
     run: runBench,
@@ -48,11 +53,12 @@ export const CTL_HELP = `Kioku 服务端运维工具。
 
 用法：kioku-ctl <子命令> [参数…]
 
-  status       检查数据库、权限、扩展、迁移与主密钥状态
-  backup       把整个实例备份成加密文件
-  restore      从备份文件或兼容S3的对象存储恢复到空实例
-  import-lore  从 Lore 数据库导入或同步记忆
-  bench        用真实 HTTP 与访问密钥运行测试台场景
+  status          检查数据库、权限、扩展、迁移与主密钥状态
+  backup          把整个实例备份成加密文件
+  restore         从备份文件或兼容S3的对象存储恢复到空实例
+  import-lore     从 Lore 数据库导入或同步记忆
+  migrate-legacy  从旧版 Kioku 迁移数据到新版记忆圈架构
+  bench           用真实 HTTP 与访问密钥运行测试台场景
 
   -h, --help     显示本说明
   -v, --version  显示版本号

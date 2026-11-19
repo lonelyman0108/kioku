@@ -1,7 +1,7 @@
+import { readFile } from 'node:fs/promises'
 import { parseArgs } from 'node:util'
 
 import {
-  LAYER_NAMES,
   LORE_DEFAULT_PERSONA,
   SENSITIVITY_NAMES,
   Slug,
@@ -9,39 +9,42 @@ import {
   type LoreTargetState,
   type LoreWarningKind,
 } from '@kioku/contracts'
-import { and, eq } from 'drizzle-orm'
+import { eq } from 'drizzle-orm'
 import postgres from 'postgres'
 
 import { loadConfig } from '../../config'
 import { assertRuntimeRole, connect, type Db } from '../../db/client'
 import { pendingMigrations } from '../../db/migrate'
-import { accounts, spaceMembers } from '../../db/schema'
+import { accounts, circleMembers, circles } from '../../db/schema'
 import {
   applyImport,
   applySync,
   assertExecutable,
-  existingImportApps,
+  existingImportClientsIn,
   inPlanSnapshot,
+  loreDataTimeIn,
   loreTitle,
   MAX_DISCLOSURE,
-  plainSensitivity,
   planImportFor,
   planSync,
   previewImport,
   readLore,
-  requestLayer,
+  resolveCirclesForImport,
+  staleAgainst,
   verifyMasterKey,
   type ImportPlan,
   type ImportPreview,
   type ImportResult,
+  type LoreSnapshot,
   type SyncItem,
   type SyncPlan,
   type SyncResult,
   type SyncState,
   type TargetPreview,
 } from '../../importer/lore'
+import { parseLoreBackup } from '../../importer/loreBackup'
 import { requestBackfill } from '../../jobs/queue'
-import { MemoryError } from '../../memory/service'
+import { MemoryError } from '../../memory/errors'
 import { DATABASE_ENV_HELP, databaseUrlOf, runCli, UsageError } from '../common'
 import { bold, dim, green, red, yellow } from '../format'
 
@@ -51,24 +54,27 @@ export const IMPORT_LORE_HELP = `从 Lore 导入记忆。
       node dist/import-lore.mjs --account <用户名> [选项]
 
 默认只打印导入计划，确认无误后加 --apply 执行。可以重复执行：按 Lore 节点去重，导入过的节点不再写入
-（导入后在 Kioku 里删除或移动了的也不会写回）；目标坐标（URI）已被其他记忆占用的，计划里列为不导入。
+（导入后在 Kioku 里删除或移动了的也不会写回）；每次新建由服务端生成唯一短 ID，不再因目标路径撞车丢弃条目。
 加 --sync 时，导入过的节点也按 Lore 现在的内容更新，但只更新导入（或上次同步）之后
 在 Kioku 里没人改过的；改过、移动过、删除了的，以及 Lore 里换了路径的，都只列出来。
 
-Lore 的 URI 映射到这些坐标（括号里是归属，下级路径照搬）。标题取正文第一个 # 标题，没有就用标识
-（坐标的最后一段），机密的只用标识：
-  core://soul            → persona://<人格>/soul（人格）
-  core://agent/<运行时>  → app://<应用>/agent（导入者自己的对应应用）
-  core:// 下别的         → 坐标不变（通用）
-  preferences://<路径>   → user://preferences/<路径>（导入者本人 · 内部）
-  别的，如 infra://nas   → user://infra/nas（导入者本人 · 私密）
+Lore 的 URI 映射到记忆圈、切面与独立人格（下级中间段转为主题标签），标题取正文第一个 # 标题，没有就用来源最后一段（机密的只用最后一段）：
+  core://soul            → 目标记忆圈下指定人格（persona_traits）
+  core://agent/<运行时>  → 目标记忆圈 · 带 runtime 切面的正式词条（并关联或新建接入实例）
+  core:// 下别的         → 目标记忆圈 · 通用正式词条（内部）
+  preferences://<路径>   → 导入者个人圈 · 正式词条（内部）
+  别的，如 infra://nas   → 导入者个人圈 · 正式词条（私密）
 
-  --account <用户名>      导入到这个账号名下，需要是空间所有者
-  --space <空间 id>       账号属于多个空间时指定
+  --account <用户名>      导入到这个账号名下，需要是目标记忆圈所有者
+  --circle <标识或 id>    目标记忆圈（拥有多个共享圈时必传；不传时默认取唯一共享圈，否则个人圈）
+  --file <JSON 文件>      从 Lore 导出的 JSON 文件读取（与直连数据库二选一）
+  --from <数据库连接>     Lore 的 PostgreSQL 连接串（默认读 LORE_DATABASE_URL）
   --persona <标识>        core://soul 导入为这个人格的设定，默认 default；要写入新的 core://soul 时不存在就新建
   --persona-name <名称>   新建人格时用的名称，默认「默认人格」
   --secret <Lore 的 URI>  把这个节点导入为机密（正文加密存储），可以重复；对已导入的节点不生效
+  --exclude <Lore URI>    本次不导入或不同步的节点，可以重复
   --sync                  同步导入过的节点：正文、标题、优先级、触发场景与关键词改成 Lore 里现在的
+  --confirm-stale         使用导出文件且早于已导入数据时确认继续写入
   -v, --verbose           已导入的、同步时已是最新的也逐条列出（默认只给条数）
   --apply                 执行导入（与同步）；不加时只打印计划
 
@@ -83,11 +89,16 @@ function parseImportLoreOptions(argv: string[]) {
       args: argv,
       options: {
         account: { type: 'string' },
+        circle: { type: 'string' },
         space: { type: 'string' },
+        file: { type: 'string' },
+        from: { type: 'string' },
         persona: { type: 'string', default: LORE_DEFAULT_PERSONA.slug },
         'persona-name': { type: 'string', default: LORE_DEFAULT_PERSONA.name },
         secret: { type: 'string', multiple: true, default: [] },
+        exclude: { type: 'string', multiple: true, default: [] },
         sync: { type: 'boolean', default: false },
+        'confirm-stale': { type: 'boolean', default: false },
         verbose: { type: 'boolean', short: 'v', default: false },
         apply: { type: 'boolean', default: false },
         help: { type: 'boolean', short: 'h', default: false },
@@ -95,6 +106,33 @@ function parseImportLoreOptions(argv: string[]) {
     }).values
   } catch (err) {
     throw new UsageError((err as Error).message)
+  }
+}
+
+async function loadLoreSnapshot(options: {
+  file?: string | undefined
+  from?: string | undefined
+}): Promise<{ snapshot: LoreSnapshot; exportedAt?: string | undefined }> {
+  if (options.file && options.from) {
+    throw new UsageError('--file 与 --from 不能同时使用')
+  }
+  if (options.file) {
+    let raw: unknown
+    try {
+      raw = JSON.parse(await readFile(options.file, 'utf8'))
+    } catch {
+      throw new UsageError(`无法读取或解析 Lore 导出文件：${options.file}`)
+    }
+    const parsed = parseLoreBackup(raw)
+    return { snapshot: parsed.snapshot, exportedAt: parsed.exportedAt }
+  }
+  const loreUrl = options.from ?? process.env.LORE_DATABASE_URL
+  if (!loreUrl) throw new UsageError('缺少 --file 或环境变量 LORE_DATABASE_URL（或 --from）')
+  const lore = postgres(loreUrl, { max: 1, onnotice: () => {} })
+  try {
+    return { snapshot: await readLore(lore) }
+  } finally {
+    await lore.end()
   }
 }
 
@@ -108,8 +146,9 @@ async function importLoreMain(argv: string[]): Promise<number> {
   if (!Slug.safeParse(values.persona).success) {
     throw new UsageError('--persona 只用小写字母、数字和连字符')
   }
-  const loreUrl = process.env.LORE_DATABASE_URL
-  if (!loreUrl) throw new UsageError('缺少环境变量 LORE_DATABASE_URL')
+
+  const circleArg = values.circle ?? values.space ?? null
+  const loaded = await loadLoreSnapshot({ file: values.file, from: values.from })
 
   const config = loadConfig()
   const database = connect(databaseUrlOf(config), { max: 2 })
@@ -118,46 +157,71 @@ async function importLoreMain(argv: string[]): Promise<number> {
     if ((await pendingMigrations(database.db, config.migrationsFolder)) !== 0) {
       throw new Error('Kioku 数据库的迁移与这个版本不一致：先用同一版本启动一次服务完成迁移')
     }
-    const { spaceId, accountId } = await resolveTarget(
-      database.db,
-      values.account,
-      values.space ?? null,
-    )
 
-    const target = { db: database.db, spaceId, accountId, masterKey: config.masterKey }
-    const lore = postgres(loreUrl, { max: 1, onnotice: () => {} })
-    const snapshot = await readLore(lore).finally(() => lore.end())
-    // 和管理界面同一份计划：坐标已被别的记忆占用的目标在计划里就列为不导入；计划、预览与同步在同一个快照里读。
-    // 先打印计划，再核对主密钥：主密钥不对时不加 --apply 的预演也看得到计划和 --secret 的错误
-    const { plan, preview, sync } = await inPlanSnapshot(target, async (snap) => {
-      const base = await planImportFor(snap, snapshot, await existingImportApps(snap.db, spaceId), {
+    const { circleId, accountId } = await resolveTarget(database.db, values.account, circleArg)
+    const targetCircles = await resolveCirclesForImport(database.db, accountId, circleId)
+    const target = {
+      db: database.db,
+      circleId: targetCircles.target.id,
+      personalCircleId: targetCircles.personal.id,
+      accountId,
+      masterKey: config.masterKey,
+    }
+
+    const { plan, preview, sync, staleTime } = await inPlanSnapshot(target, async (snap) => {
+      const existing = await existingImportClientsIn(snap.tx, targetCircles.target.id)
+      const base = await planImportFor(snap, loaded.snapshot, targetCircles, existing, {
         accountId,
         persona: { slug: values.persona, name: values['persona-name'] },
         secretUris: new Set(values.secret),
+        excludeUris: new Set(values.exclude),
+        ...(loaded.exportedAt ? { exportedAt: loaded.exportedAt } : {}),
         quoteMalformed: true,
       })
-      const versions = snapshot.nodes.reduce((n, node) => n + node.previousVersions, 0)
+      const versions = loaded.snapshot.nodes.reduce((n, node) => n + node.previousVersions, 0)
       console.log(
-        `Lore：${snapshot.nodes.length} 个节点；${versions} 个旧版本不迁移` +
-          (snapshot.recallEvents === null ? '' : `；${snapshot.recallEvents} 条召回事件不迁移`),
+        `Lore：${loaded.snapshot.nodes.length} 个节点；${versions} 个旧版本不迁移` +
+          (loaded.snapshot.recallEvents === null
+            ? ''
+            : `；${loaded.snapshot.recallEvents} 条召回事件不迁移`),
       )
       const preview = await previewImport(snap, base.plan, base.imports)
       printPlan(base.plan, preview, values.verbose)
-      // 计划有错误时下面直接退出，不用同步
-      if (!values.sync || base.plan.errors.length) return { plan: base.plan, preview, sync: null }
-      // 同步要读出机密记忆来比对：先确认主密钥和服务用的是同一把，免得解密失败时才发现。
-      // 用连接池另开连接核对：它并行读几项设置，快照里只能一步一步地读
-      if (config.masterKey) await verifyMasterKey(database.db, spaceId, config.masterKey)
-      const sync = await planSync(snap, base.plan, snapshot, base.imports)
-      return { plan: base.plan, preview, sync }
+      if (!values.sync || base.plan.errors.length) {
+        const staleTime =
+          loaded.exportedAt && !base.plan.errors.length
+            ? staleAgainst(loaded.exportedAt, await loreDataTimeIn(snap.tx), preview, {
+                items: [],
+                goneFromLore: [],
+              })
+            : null
+        return { plan: base.plan, preview, sync: null, staleTime }
+      }
+      if (config.masterKey) await verifyMasterKey(database.db, target, config.masterKey)
+      const sync = await planSync(snap, base.plan, loaded.snapshot, base.imports)
+      const staleTime = loaded.exportedAt
+        ? staleAgainst(loaded.exportedAt, await loreDataTimeIn(snap.tx), preview, sync)
+        : null
+      return { plan: base.plan, preview, sync, staleTime }
     })
+
     if (plan.errors.length) {
-      // 命令行只有 --secret 会对不上
-      const lines = plan.errors.map((e) => `  --secret 指定的 ${e.uri} 在 Lore 里不存在`)
+      const lines = plan.errors.map((e) =>
+        e.kind === 'secretNotFound'
+          ? `  --secret 指定的 ${e.uri} 在 Lore 里不存在`
+          : `  --exclude 指定的 ${e.uri} 在 Lore 里不存在`,
+      )
       console.error(`\n计划有错误，不能执行：\n${lines.join('\n')}`)
       return 2
     }
     if (sync) printSync(sync, values.verbose)
+    if (staleTime) {
+      console.log(
+        yellow(
+          `\n注意：导出文件早于已写入数据（${staleTime.toISOString()}），写入可能覆盖同步内容。`,
+        ),
+      )
+    }
     if (!values.apply) {
       const created = preview.targets.filter((t) => t.state === 'new').length
       const updated = sync ? `、按 Lore 更新 ${syncOf(sync, 'update').length} 条` : ''
@@ -166,16 +230,18 @@ async function importLoreMain(argv: string[]): Promise<number> {
       )
       return 0
     }
-    // 有机密节点时，写入任何东西之前先确认主密钥可用、且和服务用的是同一把。
-    // 计划的错误上面已经报过，这里只会是缺主密钥
+    if (staleTime && !values['confirm-stale']) {
+      throw new UsageError('导出文件早于已写入数据；若仍要写入请加上 --confirm-stale')
+    }
+
     try {
       assertExecutable(plan, config.masterKey)
     } catch (err) {
       if (!(err instanceof MemoryError)) throw err
       throw new UsageError('要导入机密节点，需要设置与服务相同的 KIOKU_MASTER_KEY')
     }
-    if (config.masterKey && plan.memories.some((m) => m.request.sensitivity === 'secret')) {
-      if (!(await verifyMasterKey(database.db, spaceId, config.masterKey))) {
+    if (config.masterKey && plan.targets.some((t) => !t.isSoul && t.sensitivity === 'secret')) {
+      if (!(await verifyMasterKey(database.db, target, config.masterKey))) {
         console.warn(
           yellow(
             '库里还没有加密过的数据，无法确认 KIOKU_MASTER_KEY 与服务一致，请自行核对',
@@ -190,7 +256,6 @@ async function importLoreMain(argv: string[]): Promise<number> {
     const synced = sync ? await applySync(target, sync) : null
     if (synced) printSyncResult(synced)
     if (result.created.length || synced?.updated.length) {
-      // 向量由服务的后台任务生成；服务没在运行时，下次启动也会补齐
       await requestBackfill(databaseUrlOf(config)).catch((err: unknown) =>
         console.warn('没能安排向量补齐，服务下次启动时会补上', err),
       )
@@ -211,28 +276,42 @@ export function runImportLore(argv: string[]): Promise<number> {
 async function resolveTarget(
   db: Db,
   username: string,
-  space: string | null,
-): Promise<{ spaceId: string; accountId: string }> {
+  circleArg: string | null,
+): Promise<{ circleId: string; accountId: string }> {
   const [account] = await db
     .select({ id: accounts.id })
     .from(accounts)
     .where(eq(accounts.username, username))
   if (!account) throw new UsageError(`账号不存在：${username}`)
+
   const memberships = await db
-    .select({ spaceId: spaceMembers.spaceId, role: spaceMembers.role })
-    .from(spaceMembers)
-    .where(
-      space
-        ? and(eq(spaceMembers.accountId, account.id), eq(spaceMembers.spaceId, space))
-        : eq(spaceMembers.accountId, account.id),
-    )
-  if (!memberships.length)
-    throw new UsageError(`${username} 不是${space ? '该' : '任何'}空间的成员`)
-  if (memberships.length > 1) throw new UsageError(`${username} 属于多个空间，用 --space 指定`)
-  const membership = memberships[0]!
-  // 导入要写机密记忆、新建人格和应用，需要空间所有者的权限
-  if (membership.role !== 'owner') throw new UsageError(`${username} 不是空间所有者`)
-  return { spaceId: membership.spaceId, accountId: account.id }
+    .select({
+      circleId: circleMembers.circleId,
+      role: circleMembers.role,
+      kind: circles.kind,
+      slug: circles.slug,
+    })
+    .from(circleMembers)
+    .innerJoin(circles, eq(circles.id, circleMembers.circleId))
+    .where(eq(circleMembers.accountId, account.id))
+
+  if (circleArg) {
+    const matched = memberships.find((m) => m.circleId === circleArg || m.slug === circleArg)
+    if (!matched) throw new UsageError(`${username} 不是记忆圈 ${circleArg} 的成员`)
+    if (matched.role !== 'owner') throw new UsageError(`${username} 不是该记忆圈的所有者`)
+    return { circleId: matched.circleId, accountId: account.id }
+  }
+
+  const ownedShared = memberships.filter((m) => m.kind === 'shared' && m.role === 'owner')
+  if (ownedShared.length === 1) {
+    return { circleId: ownedShared[0]!.circleId, accountId: account.id }
+  }
+  if (ownedShared.length > 1) {
+    throw new UsageError(`${username} 拥有多个共享记忆圈，用 --circle 指定`)
+  }
+  const ownedPersonal = memberships.find((m) => m.kind === 'personal' && m.role === 'owner')
+  if (!ownedPersonal) throw new UsageError(`${username} 没有可导入的记忆圈`)
+  return { circleId: ownedPersonal.circleId, accountId: account.id }
 }
 
 const WARNINGS: Record<LoreWarningKind, (uri: string) => string> = {
@@ -243,7 +322,6 @@ const WARNINGS: Record<LoreWarningKind, (uri: string) => string> = {
   disclosureTruncated: (uri) => `${uri} 的触发场景超过 ${MAX_DISCLOSURE} 字，已截断`,
 }
 
-// 几种状态的条数写成一句：always 的是 0 也写，别的是 0 就不写；note 接在条数后面
 function counts(parts: [label: string, count: number, always?: boolean, note?: string][]): string {
   return parts
     .filter(([, count, always]) => always || count > 0)
@@ -251,10 +329,8 @@ function counts(parts: [label: string, count: number, always?: boolean, note?: s
     .join('，')
 }
 
-// 只给条数、不逐条列出的那一组，提示怎么列出来
 const VERBOSE_NOTE = '（--verbose 逐条列出）'
 
-// 一组逐条列出的：标题里带条数，没有的整组不出现
 function list(heading: string, lines: string[], styleHeading?: (text: string) => string): void {
   if (!lines.length) return
   console.log(`\n${styleHeading ? styleHeading(`${heading}：`) : `${heading}：`}`)
@@ -264,50 +340,43 @@ function list(heading: string, lines: string[], styleHeading?: (text: string) =>
 function personaLine(plan: ImportPlan, preview: ImportPreview): string {
   const { slug, name } = plan.persona
   if (!preview.personaExists && !preview.createsPersona) {
-    return `这次没有要写入的 core://soul，人格 ${slug} 也不存在：不新建，新建的应用默认人格为空`
+    return `这次没有要写入的 core://soul，人格 ${slug} 也不存在：不新建，新建接入实例的默认人格为空`
   }
-  return plan.memories.some((m) => requestLayer(m.request) === 'persona')
+  return plan.targets.some((t) => t.isSoul)
     ? `core://soul 导入为 ${slug}（不存在时新建为「${name}」）`
-    : `这次没有要导入的 core://soul，不新建人格；已有的人格 ${slug} 照常用，新建的应用和还没有默认人格的应用设成它`
+    : `这次没有要导入的 core://soul，不新建人格；已有的人格 ${slug} 照常用，新建的接入实例和还没有默认人格的接入实例设成它`
 }
 
-// 一个写入目标：标题、坐标（和 Lore 的 URI 不同时带上来源）、归属 · 敏感级 · 优先级。
-// 新建的按这次的计划，--secret 标的写机密；已导入的按记忆现在的样子：之前导入的那条已经是机密的写机密，
-// 还是明文的 --secret 也改不了（见提醒）。标题和写入时同一个取法，机密的只用标识
 function targetLine({ item, state, current }: TargetPreview): string {
-  const uri = item.request.uri
-  const layer = requestLayer(item.request)
-  const secret =
-    state === 'new' ? item.request.sensitivity === 'secret' : current.some((c) => c.secret)
-  const sensitivity = secret ? 'secret' : plainSensitivity(item.source, layer)
-  const from = item.source === uri ? '' : ` ← ${item.source}`
-  return (
-    `${loreTitle(item.request.content, uri, secret)}  ${uri}${from}  ` +
-    `${LAYER_NAMES[layer]} · ${SENSITIVITY_NAMES[sensitivity]} · P${item.request.priority}`
-  )
+  const secret = state === 'new' ? item.sensitivity === 'secret' : current.some((c) => c.secret)
+  const sensitivity = secret ? 'secret' : item.sensitivity
+  const dest = item.isSoul
+    ? `人格 ${item.personaSlug}:${item.traitKey}`
+    : `${item.targetCircleKind === 'personal' ? '个人圈' : '共享圈'}${item.topics.length ? ` [${item.topics.join(',')}]` : ''}`
+  const prio = `P${item.priority}`
+  const title = loreTitle(item.content, item.legacyUri, secret)
+  return `${title}  ${item.legacyUri} → ${dest}  ${SENSITIVITY_NAMES[sensitivity]} · ${prio}`
 }
 
-// 之前导入的那些记忆现在在哪：移动过、删除了的说一声，还在原处的不说
-function currentNote({ item, current }: TargetPreview): string {
+function currentNote({ current }: TargetPreview): string {
   const notes = current.flatMap((c) =>
-    c.uri === null ? ['已在 Kioku 里删除'] : c.uri === item.request.uri ? [] : [`现在在 ${c.uri}`],
+    c.shortId === null ? ['已在 Kioku 中删除'] : [`当前词条 ${c.shortId}`],
   )
-  return notes.length ? `（之前导入的${notes.join('；')}）` : ''
+  return notes.length ? `（${notes.join('；')}）` : ''
 }
 
 function printPlan(plan: ImportPlan, preview: ImportPreview, verbose: boolean): void {
   console.log(`\n${bold('人格')}：${personaLine(plan, preview)}`)
-  if (plan.apps.length) {
-    console.log(`\n${bold('应用')}：`)
-    for (const mapping of plan.apps) {
-      const targets = mapping.apps.map((a) =>
-        a.create ? `${a.slug}（新建，类型 ${a.runtimeFamily}）` : `${a.slug}（已有）`,
+  if (plan.clients.length) {
+    console.log(`\n${bold('接入实例')}：`)
+    for (const mapping of plan.clients) {
+      const targets = mapping.clients.map((c) =>
+        c.create ? `${c.slug}（新建，类型 ${c.runtimeFamily}）` : `${c.slug}（已有）`,
       )
       console.log(`  ${mapping.runtime} → ${targets.join('、')}`)
     }
   }
 
-  // 先给各状态的条数，再按状态分组列出。已导入的不再写入，默认只给条数
   const of = (state: LoreTargetState) => preview.targets.filter((t) => t.state === state)
   const created = of('new')
   const imported = of('imported')
@@ -329,7 +398,7 @@ function printPlan(plan: ImportPlan, preview: ImportPreview, verbose: boolean): 
     )
   }
   list(
-    `Lore 里换了路径（${moved.length} 条），不在新位置新建；之前导入的留在原处，要跟着移动就在管理界面移`,
+    `Lore 里换了路径（${moved.length} 条），不在新位置新建；之前导入的留在原处`,
     moved.map((t) => `${targetLine(t)}${currentNote(t)}`),
     yellow,
   )
@@ -343,18 +412,17 @@ function printPlan(plan: ImportPlan, preview: ImportPreview, verbose: boolean): 
     plan.droppedKeywords.map((k) => `${k.source}「${k.keyword}」：${k.reason}`),
     dim,
   )
-  // --secret 只对要新建的目标起作用：导入过、现在还是明文的写入时照样跳过，在这里先说
   const secretIgnored = preview.targets.flatMap(({ item, state, current }) =>
-    state !== 'new' && item.request.sensitivity === 'secret'
+    state !== 'new' && item.sensitivity === 'secret'
       ? current
-          .filter((c) => c.uri !== null && !c.secret)
+          .filter((c) => c.shortId !== null && !c.secret)
           .map(
             (c) =>
-              `${item.source} 之前导入过，现在是明文，--secret 对它不生效：请在管理界面把 ${c.uri} 改为机密`,
+              `${item.source} 之前导入过，现在是明文，--secret 对它不生效：请在管理界面把 ${c.shortId} 改为机密`,
           )
       : [],
   )
-  const warnings = [...plan.warnings.map((w) => WARNINGS[w.kind](w.uri)), ...secretIgnored]
+  const warnings = [...plan.warnings.map((w) => WARNINGS[w.kind](w.legacyUri)), ...secretIgnored]
   list(`提醒（${warnings.length} 条）`, warnings, yellow)
 }
 
@@ -363,40 +431,39 @@ function printResult(plan: ImportPlan, result: ImportResult): void {
   console.log(
     result.personaUsed
       ? `  人格 ${plan.persona.slug}：${result.personaCreated ? '新建' : '已有'}`
-      : `  人格 ${plan.persona.slug} 不存在，这次也没有要写入的 core://soul：没有新建，新建的应用默认人格为空`,
+      : `  人格 ${plan.persona.slug} 不存在，这次也没有要写入的 core://soul：没有新建，新建接入实例的默认人格为空`,
   )
-  if (result.appsCreated.length) console.log(`  新建应用：${result.appsCreated.join('、')}`)
-  if (result.appsGivenPersona.length) {
-    console.log(`  设为默认人格 ${plan.persona.slug}：${result.appsGivenPersona.join('、')}`)
+  if (result.clientsCreated.length)
+    console.log(`  新建接入实例：${result.clientsCreated.join('、')}`)
+  if (result.clientsGivenPersona.length) {
+    console.log(`  设为默认人格 ${plan.persona.slug}：${result.clientsGivenPersona.join('、')}`)
   }
-  if (result.appsOtherPersona.length) {
+  if (result.clientsOtherPersona.length) {
     console.log(
-      `  这些应用在用别的人格，core://soul 不会进入它们的启动加载：${result.appsOtherPersona.join('、')}`,
+      `  这些接入实例在用别的人格，core://soul 不会进入它们的启动加载：${result.clientsOtherPersona.join('、')}`,
     )
   }
   console.log(
     `  新建 ${result.created.length} 条；已导入、跳过 ${result.previouslyImported.length} 条` +
       `（包括导入后在 Kioku 里删除或移动了的）`,
   )
-  for (const uri of result.occupied) console.log(`  跳过 ${uri}：坐标已被其他记忆占用`)
-  for (const { uri, current } of result.movedInLore) {
+  for (const { legacyUri, shortId } of result.movedInLore) {
     console.log(
-      current
-        ? `  跳过 ${uri}：Lore 里换了路径，之前导入的那条还在 ${current}，没有在新位置再建一条（要跟着移动就在管理界面移）`
-        : `  跳过 ${uri}：Lore 里换了路径，之前导入的那条在 Kioku 里删除了，没有在新位置再建一条`,
+      shortId
+        ? `  跳过 ${legacyUri}：Lore 里换了路径，之前导入的那条还在 ${shortId}，没有在新位置再建一条`
+        : `  跳过 ${legacyUri}：Lore 里换了路径，之前导入的那条在 Kioku 里删除了，没有在新位置再建一条`,
     )
   }
-  for (const { uri, current } of result.secretAlreadyImported) {
-    const moved = current === uri ? '' : `（导入后移到了 ${current}）`
+  for (const { legacyUri, shortId } of result.secretAlreadyImported) {
     console.log(
       yellow(
-        `  注意 ${uri}${moved}：之前导入过，现在还是明文，这次的 --secret 没有生效。请在管理界面把 ${current} 改为机密（会同时清除历史里的明文）`,
+        `  注意 ${legacyUri}：之前导入过，现在还是明文，这次的 --secret 没有生效。请在管理界面把 ${shortId} 改为机密（会同时清除历史里的明文）`,
       ),
     )
   }
-  for (const f of result.failed) console.log(red(`  失败 ${f.uri}：${f.reason}`))
-  if (result.appsCreated.length) {
-    console.log('  新建的应用暂无访问密钥：在管理界面的「应用」页为要接入的应用签发')
+  for (const f of result.failed) console.log(red(`  失败 ${f.source}：${f.reason}`))
+  if (result.clientsCreated.length) {
+    console.log('  新建的接入实例暂无访问密钥：在管理界面的「接入」页为要接入的实例签发')
   }
 }
 
@@ -410,9 +477,8 @@ const CHANGE_LABELS: Record<LoreSyncChange, string> = {
 
 const syncOf = (sync: SyncPlan, state: SyncState) => sync.items.filter((i) => i.state === state)
 
-// 同步项：标题、记忆现在的坐标，再加上各状态要说的（要更新的几项、换了路径之后应在的坐标、原因）
 function syncLine(item: SyncItem): string {
-  const head = `${item.title}  ${item.uri}`
+  const head = `${item.title}  ${item.shortId} (${item.legacyUri})`
   switch (item.state) {
     case 'update':
       return `${head}：${item.changes.map((c) => CHANGE_LABELS[c]).join('、')}`
@@ -426,18 +492,16 @@ function syncLine(item: SyncItem): string {
   }
 }
 
-// 不同步的几种：条数里的叫法，与逐条列出时的标题
 const NOT_SYNCED: [SyncState, string, (n: number) => string][] = [
   [
     'edited',
     '在 Kioku 里改过',
-    (n) => `导入后在 Kioku 里改过或移动过（${n} 条），不同步；要跟上 Lore 就在管理界面手动改`,
+    (n) => `导入后在 Kioku 里改过或迁移过（${n} 条），不同步；要跟上 Lore 就在管理界面手动改`,
   ],
   [
     'moved',
     'Lore 里换了路径',
-    (n) =>
-      `Lore 里换了路径（${n} 条），不同步；移动可能改变归属与可见范围，要在管理界面手动移动，移动之后只能手动更新`,
+    (n) => `Lore 里换了路径（${n} 条），不同步；移动可能改变记忆圈与可见范围，需要手动处理`,
   ],
   ['deleted', '在 Kioku 里删除了', (n) => `在 Kioku 里删除了（${n} 条），不同步`],
   [
@@ -445,15 +509,10 @@ const NOT_SYNCED: [SyncState, string, (n: number) => string][] = [
     '这次不导入',
     (n) => `这次的导入计划不导入（${n} 条），没有同步；原因见上面的「不导入」`,
   ],
-  [
-    'unmapped',
-    '没有映射到',
-    (n) => `这次的计划没有映射到（${n} 条），没有同步；例如换了 --persona，或者对应的应用不在了`,
-  ],
+  ['unmapped', '没有映射到', (n) => `这次的计划没有映射到（${n} 条），没有同步`],
   ['unreadable', '读不出来', (n) => `读不出来（${n} 条），没有同步`],
 ]
 
-// 同步也是先给条数再分组列出：已是最新的默认只给条数
 function printSync(sync: SyncPlan, verbose: boolean): void {
   const current = syncOf(sync, 'current')
   const update = syncOf(sync, 'update')
@@ -477,5 +536,5 @@ function printSync(sync: SyncPlan, verbose: boolean): void {
 
 function printSyncResult(result: SyncResult): void {
   console.log(`\n${green('同步完成')}：更新 ${result.updated.length} 条`)
-  for (const f of result.failed) console.log(red(`  失败 ${f.uri}：${f.reason}`))
+  for (const f of result.failed) console.log(red(`  失败 ${f.source}：${f.reason}`))
 }

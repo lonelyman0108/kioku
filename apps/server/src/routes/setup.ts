@@ -22,6 +22,7 @@ import { count, sql } from 'drizzle-orm'
 import type { Context } from 'hono'
 import { setCookie } from 'hono/cookie'
 
+import { createPersonalCircle, insertSharedCircle, loadSessionUser } from '../access/circles'
 import { hashPassword } from '../auth/password'
 import { createSession, SESSION_COOKIE, SESSION_TTL_MS } from '../auth/session'
 import type { Db } from '../db/client'
@@ -32,7 +33,7 @@ import {
   ProvisionError,
   summarize,
 } from '../db/probe'
-import { accounts, spaceMembers, spaces } from '../db/schema'
+import { accounts } from '../db/schema'
 import { clientIdentity } from '../http/clientIp'
 import type { Deps, SetupHost } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
@@ -51,7 +52,7 @@ const setup = createRoute({
   method: 'post',
   path: '/setup',
   tags: ['setup'],
-  summary: '首次初始化：创建第一个账号和它的空间',
+  summary: '首次初始化：创建第一个管理员账号、其个人圈以及可选的首个共享记忆圈',
   request: { body: jsonBody(SetupRequest) },
   responses: {
     201: jsonResponse('已创建并登录', Me),
@@ -330,14 +331,16 @@ export function setupRoutes(deps: Deps) {
           isAdmin: true,
         })
         .returning()
-      const [space] = await tx.insert(spaces).values({ name: body.spaceName }).returning()
-      await tx
-        .insert(spaceMembers)
-        .values({ spaceId: space!.id, accountId: account!.id, role: 'owner' })
-      return { account: account!, space: space! }
+      await createPersonalCircle(tx, account!)
+      if (body.circleName) {
+        await insertSharedCircle(tx, { name: body.circleName, ownerAccountId: account!.id })
+      }
+      return {
+        account: account!,
+        me: (await loadSessionUser(tx, account!.id))!,
+      }
     })
     if (!result) return c.json({ error: DONE }, 409)
-    // 有了账号：初始化码作废
     host?.gate.close()
 
     const token = await createSession(deps.db, result.account.id, sessionClient(c, deps))
@@ -348,15 +351,6 @@ export function setupRoutes(deps: Deps) {
       path: '/',
       maxAge: SESSION_TTL_MS / 1000,
     })
-    return c.json(
-      {
-        id: result.account.id,
-        username: result.account.username,
-        displayName: result.account.displayName,
-        isAdmin: result.account.isAdmin,
-        spaces: [{ id: result.space.id, name: result.space.name, role: 'owner' as const }],
-      },
-      201,
-    )
+    return c.json(result.me, 201)
   })
 }

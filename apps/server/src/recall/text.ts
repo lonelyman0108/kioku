@@ -1,7 +1,6 @@
-// 交给模型的文字怎么压：召回块、启动加载与 MCP 工具结果共用。不依赖别的模块：
-// mcp/format.ts 引用它，又打进不带数据库的 dist/bench.mjs
+// 交给模型的文字压缩与安全处理：召回块、启动加载与对象直连共用
 
-// 压成单行：去掉控制字符（数据库的文本里存不了 \u0000），连续的空白换成一个空格
+// 压成单行：去掉控制字符，连续空白折叠为单个空格
 export function oneLine(text: string): string {
   const printable = [...text].filter((ch) => {
     const code = ch.codePointAt(0)!
@@ -10,20 +9,18 @@ export function oneLine(text: string): string {
   return printable.join('').replace(/\s+/g, ' ').trim()
 }
 
-// 召回块会原样进入宿主的上下文。disclosure 与关键词可能来自不可信的写入者，
-// 压成单行并去掉尖括号，避免伪造 </recall> 闭合标签后注入任意文本
+// 召回与启动块进入宿主上下文，必须剔除尖括号防止伪造闭合标签注入
 export function inlineText(text: string): string {
   return oneLine(text.replace(/[<>]/g, ''))
 }
 
-// 给模型看的坐标后面带上标题（「」里），标题就是标识（没写标题、正文里也没有 # 标题）时省掉。
-// 标题里的「」去掉，免得和外面的括号混在一起（bench/executor.ts 按它认出坐标）
-export function titleSuffix(uri: string, title: string): string {
+// 短 ID 后的可读标题附注（「标题」），标题与短 ID 相同时省去
+export function titleSuffix(shortId: string, title: string): string {
   const label = inlineText(title).replace(/[「」]/g, '')
-  return label && label !== uri.slice(uri.lastIndexOf('/') + 1) ? `「${label}」` : ''
+  return label && label !== shortId ? `「${label}」` : ''
 }
 
-// 按字符（不是 UTF-16 码元）截断，免得切开表情符号；截掉了才接上 suffix
+// 按 Unicode 码点截断，避免拆开代理对，发生截断时拼上 suffix
 export function clipChars(text: string, max: number, suffix = ''): string {
   const chars = [...text]
   return chars.length > max ? `${chars.slice(0, max).join('')}${suffix}` : text

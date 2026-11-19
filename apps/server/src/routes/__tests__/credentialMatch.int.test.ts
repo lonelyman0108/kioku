@@ -4,19 +4,20 @@ import {
   ConvertedToCredential,
   CredentialValueMatches,
   type ConsoleCredential,
-  type MemoryView,
+  type ConsoleEntryView,
   type VaultConnection,
 } from '@kioku/contracts'
 import { and, eq } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
-import { withSpace, type Database, type Tx } from '../../db/client'
+import { withCircle, type Database, type Tx } from '../../db/client'
 import {
   credentialEvents,
   credentials,
-  memories,
-  memoryEvents,
+  entries,
+  entryEvents,
+  entryVariants,
   vaultConnections,
 } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
@@ -77,10 +78,10 @@ describe.skipIf(!testDatabaseUrl)('按值查找与转存的去处', () => {
     })
   })
 
-  const inSpace = <T>(fn: (tx: Tx) => Promise<T>) => withSpace(database.db, ws.spaceId, fn)
+  const inCircle = <T>(fn: (tx: Tx) => Promise<T>) => withCircle(database.db, ws.circleId, fn)
   const send = (method: string, path: string, body?: unknown, cookie = ws.cookie) =>
     app.request(
-      `/v1/spaces/${ws.spaceId}${path}`,
+      `/v1/circles/${ws.circleId}${path}`,
       body === undefined
         ? { method, headers: { cookie, 'sec-fetch-site': 'same-origin' } }
         : jsonRequest(method, body, { cookie }),
@@ -137,7 +138,7 @@ describe.skipIf(!testDatabaseUrl)('按值查找与转存的去处', () => {
     CredentialValueMatches.parse(await ok(await match(values)))
   const accessEvents = async () =>
     (
-      await inSpace((tx) =>
+      await inCircle((tx) =>
         tx.select().from(credentialEvents).where(eq(credentialEvents.eventType, 'access')),
       )
     ).length
@@ -218,7 +219,7 @@ describe.skipIf(!testDatabaseUrl)('按值查找与转存的去处', () => {
     it('不可用的连接计进 unavailableConnections，不向它请求；指着它的凭据不比', async () => {
       const connection = await connect()
       await bindRouter(connection.id)
-      await inSpace((tx) =>
+      await inCircle((tx) =>
         tx
           .update(vaultConnections)
           .set({ status: 'reauth_required' })
@@ -238,7 +239,7 @@ describe.skipIf(!testDatabaseUrl)('按值查找与转存的去处', () => {
       const res = await matched([NAS_PW])
       expect(res.items[0]).toEqual({ credentials: [], vaultItems: [] })
       expect(res.unavailableConnections).toBe(1)
-      const [row] = await inSpace((tx) =>
+      const [row] = await inCircle((tx) =>
         tx.select().from(vaultConnections).where(eq(vaultConnections.id, connection.id)),
       )
       expect(row!.lastErrorKind).toBe('unreachable')
@@ -264,7 +265,7 @@ describe.skipIf(!testDatabaseUrl)('按值查找与转存的去处', () => {
         vault: vault.client,
       })
       const res = await otherKey.request(
-        `/v1/spaces/${ws.spaceId}/credentials/match`,
+        `/v1/circles/${ws.circleId}/credentials/match`,
         jsonRequest('POST', { values: [HOSTED_PW] }, { cookie: ws.cookie }),
       )
       const locked = CredentialValueMatches.parse(await ok(res))
@@ -289,7 +290,7 @@ describe.skipIf(!testDatabaseUrl)('按值查找与转存的去处', () => {
       expect(res.unavailableConnections).toBe(1)
       // 另一个照常比到了 NAS（两个连接看到的是同一份假条目）
       expect(res.items[0]!.vaultItems).toHaveLength(1)
-      const rows = await inSpace((tx) => tx.select().from(vaultConnections))
+      const rows = await inCircle((tx) => tx.select().from(vaultConnections))
       const errors = rows
         .filter((r) => [first.id, second.id].includes(r.id))
         .map((r) => r.lastErrorKind)
@@ -320,9 +321,9 @@ describe.skipIf(!testDatabaseUrl)('按值查找与转存的去处', () => {
       expect(res.unavailableConnections).toBe(0)
     })
 
-    it('只给空间所有者，别的成员 403', async () => {
-      const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
-      expect(await errorOf(await match([HOSTED_PW], editor.cookie), 403)).toContain('空间所有者')
+    it('只给记忆圈所有者，别的成员 403', async () => {
+      const editor = await addMember(database.db, ws.circleId, 'eve', 'editor')
+      expect(await errorOf(await match([HOSTED_PW], editor.cookie), 403)).toContain('记忆圈所有者')
     })
 
     it('值的校验：太短、带空白、含占位符的 400', async () => {
@@ -335,33 +336,95 @@ describe.skipIf(!testDatabaseUrl)('按值查找与转存的去处', () => {
 
   describe('转存的去处', () => {
     const NOTE = (value: string) => `路由器的管理密码：${value}，备用写法 ${value}`
-    // 正文带着要转存的明文：照样保存（写入前拦截放行，进待处理）
-    const remember = async (content: string, uri = 'user://notes/router') =>
-      ok<MemoryView>(await send('POST', '/memories', { uri, content, allowPlaintext: true }), 201)
-    const convert = (m: MemoryView, value: string, target: Record<string, unknown>) =>
-      send('POST', '/memories/convert-to-credential', {
-        memoryId: m.id,
+    const sendP = (method: string, path: string, body?: unknown, cookie = ws.cookie) =>
+      app.request(
+        `/v1/circles/${ws.personalCircleId}${path}`,
+        body === undefined
+          ? { method, headers: { cookie, 'sec-fetch-site': 'same-origin' } }
+          : jsonRequest(method, body, { cookie }),
+      )
+    const inPersonal = <T>(fn: (tx: Tx) => Promise<T>) =>
+      withCircle(database.db, ws.personalCircleId, fn)
+    const connectP = async () =>
+      (
+        await ok<{ connection: VaultConnection }>(
+          await sendP('POST', '/vault-connections', {
+            serverUrl: 'https://vault.example.com',
+            email: 'agent@example.com',
+            masterPassword: 'master-pw',
+          }),
+        )
+      ).connection
+    const hostedP = async (identifier: string, values: Record<string, string>) =>
+      ok<ConsoleCredential>(
+        await sendP('POST', '/credentials', {
+          identifier,
+          name: `托管 ${identifier}`,
+          source: { kind: 'new', values },
+        }),
+        201,
+      )
+    const bindRouterP = async (connectionId: string) =>
+      ok<ConsoleCredential>(
+        await sendP('POST', '/credentials', {
+          identifier: 'router',
+          name: '路由器',
+          source: {
+            kind: 'vault',
+            connectionId,
+            itemId: routerItem,
+            fields: [
+              { name: 'username', itemField: 'login.username' },
+              { name: 'password', itemField: 'login.password' },
+              { name: 'totp', itemField: 'login.totp' },
+            ],
+          },
+        }),
+        201,
+      )
+    // 正文带着要转存的明文：照样保存（写入前拦截放行，进待处理），需在个人圈且不低于 private
+    const remember = async (content: string, title = 'notes/router') =>
+      ok<ConsoleEntryView>(
+        await sendP('POST', '/entries', {
+          title,
+          content,
+          sensitivity: 'private',
+          allowPlaintext: true,
+        }),
+        201,
+      )
+    const convert = (m: ConsoleEntryView, value: string, target: Record<string, unknown>) =>
+      sendP('POST', '/entries/convert-to-credential', {
+        entryId: m.id,
         expectedVersion: m.version,
         value,
         target,
       })
-    const rowOf = async (id: string) =>
-      (await inSpace((tx) => tx.select().from(memories).where(eq(memories.id, id))))[0]!
-    const eventCount = async (id: string) =>
-      (await inSpace((tx) => tx.select().from(memoryEvents).where(eq(memoryEvents.memoryId, id))))
-        .length
-    const credentialRows = () => inSpace((tx) => tx.select().from(credentials))
+    const variantOf = async (entryId: string) =>
+      (
+        await inPersonal((tx) =>
+          tx.select().from(entryVariants).where(eq(entryVariants.entryId, entryId)),
+        )
+      )[0]!
+    const entryOf = async (entryId: string) =>
+      (await inPersonal((tx) => tx.select().from(entries).where(eq(entries.id, entryId))))[0]!
+    const eventCount = async (entryId: string) =>
+      (
+        await inPersonal((tx) =>
+          tx.select().from(entryEvents).where(eq(entryEvents.entryId, entryId)),
+        )
+      ).length
+    const credentialRows = () => inPersonal((tx) => tx.select().from(credentials))
     // 失败时什么都没改：正文、版本、事件与凭据都和之前一样
-    const untouched = async (m: MemoryView, content: string, credentialCount: number) => {
-      const row = await rowOf(m.id)
-      expect(row.content).toBe(content)
-      expect(row.version).toBe(m.version)
+    const untouched = async (m: ConsoleEntryView, content: string, credentialCount: number) => {
+      expect((await variantOf(m.id)).content).toBe(content)
+      expect((await entryOf(m.id)).version).toBe(m.version)
       expect(await eventCount(m.id)).toBe(1)
       expect(await credentialRows()).toHaveLength(credentialCount)
     }
 
     it('credential：换成已有托管凭据的字段，不新建', async () => {
-      const cred = await hosted('router-admin', { password: ROUTER_PW })
+      const cred = await hostedP('router-admin', { password: ROUTER_PW })
       const m = await remember(NOTE(ROUTER_PW))
       const res = ConvertedToCredential.parse(
         await ok(
@@ -377,13 +440,13 @@ describe.skipIf(!testDatabaseUrl)('按值查找与转存的去处', () => {
       expect(res.credential.id).toBe(cred.id)
       expect(res.credential.referenceCount).toBe(1)
       expect(res.replaced).toBe(2)
-      expect((await rowOf(m.id)).content).toBe(NOTE('{{cred:router-admin#password}}'))
+      expect((await variantOf(m.id)).content).toBe(NOTE('{{cred:router-admin#password}}'))
       expect(await credentialRows()).toHaveLength(1)
     })
 
     it('credential：密码库来源的，向条目核对值', async () => {
-      const connection = await connect()
-      const router = await bindRouter(connection.id)
+      const connection = await connectP()
+      const router = await bindRouterP(connection.id)
       const m = await remember(NOTE(ROUTER_PW))
       const before = vault.calls.item
       const res = ConvertedToCredential.parse(
@@ -397,11 +460,11 @@ describe.skipIf(!testDatabaseUrl)('按值查找与转存的去处', () => {
       )
       expect(vault.calls.item).toBe(before + 1)
       expect(res.created).toBe(false)
-      expect((await rowOf(m.id)).content).toBe(NOTE('{{cred:router#password}}'))
+      expect((await variantOf(m.id)).content).toBe(NOTE('{{cred:router#password}}'))
     })
 
     it('credential：字段现在的值不同时 400，文字不带值，什么都不改', async () => {
-      const cred = await hosted('router-admin', { password: 'another-value-1' })
+      const cred = await hostedP('router-admin', { password: 'another-value-1' })
       const m = await remember(NOTE(ROUTER_PW))
       const res = await convert(m, ROUTER_PW, {
         kind: 'credential',
@@ -415,8 +478,8 @@ describe.skipIf(!testDatabaseUrl)('按值查找与转存的去处', () => {
       await untouched(m, NOTE(ROUTER_PW), 1)
 
       // 密码库来源的，条目里的值改过了
-      const connection = await connect()
-      const router = await bindRouter(connection.id)
+      const connection = await connectP()
+      const router = await bindRouterP(connection.id)
       vault.setItemValues(routerItem, { 'login.password': 'rotated-pw-000' })
       const vaultRes = await convert(m, ROUTER_PW, {
         kind: 'credential',
@@ -428,8 +491,8 @@ describe.skipIf(!testDatabaseUrl)('按值查找与转存的去处', () => {
     })
 
     it('credential：验证码字段不能用，不存在的字段与已删除的凭据也不行', async () => {
-      const connection = await connect()
-      const router = await bindRouter(connection.id)
+      const connection = await connectP()
+      const router = await bindRouterP(connection.id)
       const m = await remember(NOTE(TOTP_SECRET))
       expect(
         (
@@ -449,8 +512,8 @@ describe.skipIf(!testDatabaseUrl)('按值查找与转存的去处', () => {
           })
         ).status,
       ).toBe(400)
-      const other = await hosted('gone', { password: TOTP_SECRET })
-      expect((await send('DELETE', `/credentials/${other.id}`)).status).toBe(204)
+      const other = await hostedP('gone', { password: TOTP_SECRET })
+      expect((await sendP('DELETE', `/credentials/${other.id}`)).status).toBe(204)
       expect(
         (
           await convert(m, TOTP_SECRET, {
@@ -464,7 +527,7 @@ describe.skipIf(!testDatabaseUrl)('按值查找与转存的去处', () => {
     })
 
     it('vault：给还没起标识的条目起标识、建凭据，再换；名称默认用条目的', async () => {
-      const connection = await connect()
+      const connection = await connectP()
       const m = await remember(NOTE(NAS_PW))
       const res = ConvertedToCredential.parse(
         await ok(
@@ -491,12 +554,12 @@ describe.skipIf(!testDatabaseUrl)('按值查找与转存的去处', () => {
         { name: 'password', itemField: 'login.password' },
         { name: 'totp', itemField: 'login.totp' },
       ])
-      expect((await rowOf(m.id)).content).toBe(NOTE('{{cred:nas#password}}'))
+      expect((await variantOf(m.id)).content).toBe(NOTE('{{cred:nas#password}}'))
       expect(JSON.stringify(res)).not.toContain(NAS_PW)
     })
 
     it('vault：值不同时 400，不建凭据、不改记忆', async () => {
-      const connection = await connect()
+      const connection = await connectP()
       const m = await remember(NOTE('nas-secret-WRONG'))
       const res = await convert(m, 'nas-secret-WRONG', {
         kind: 'vault',
@@ -512,8 +575,8 @@ describe.skipIf(!testDatabaseUrl)('按值查找与转存的去处', () => {
     })
 
     it('vault：条目已经有凭据时 409，提示改用已有的凭据', async () => {
-      const connection = await connect()
-      await bindRouter(connection.id)
+      const connection = await connectP()
+      await bindRouterP(connection.id)
       const m = await remember(NOTE(ROUTER_PW))
       const before = vault.calls.item
       const res = await convert(m, ROUTER_PW, {
@@ -530,8 +593,8 @@ describe.skipIf(!testDatabaseUrl)('按值查找与转存的去处', () => {
     })
 
     it('vault：标识冲突 409，凭据与记忆都不留下', async () => {
-      const connection = await connect()
-      await hosted('nas', { password: 'whatever-1' })
+      const connection = await connectP()
+      await hostedP('nas', { password: 'whatever-1' })
       const m = await remember(NOTE(NAS_PW))
       const res = await convert(m, NAS_PW, {
         kind: 'vault',
@@ -542,7 +605,7 @@ describe.skipIf(!testDatabaseUrl)('按值查找与转存的去处', () => {
       })
       expect(await errorOf(res, 409)).toContain('nas')
       await untouched(m, NOTE(NAS_PW), 1)
-      const live = await inSpace((tx) =>
+      const live = await inPersonal((tx) =>
         tx
           .select()
           .from(credentials)
@@ -552,7 +615,7 @@ describe.skipIf(!testDatabaseUrl)('按值查找与转存的去处', () => {
     })
 
     it('vault：验证码字段不能用；连接不可用时 409', async () => {
-      const connection = await connect()
+      const connection = await connectP()
       const m = await remember(NOTE(TOTP_SECRET))
       const base = {
         kind: 'vault',
@@ -561,27 +624,27 @@ describe.skipIf(!testDatabaseUrl)('按值查找与转存的去处', () => {
         identifier: 'router',
       }
       expect((await convert(m, TOTP_SECRET, { ...base, itemField: 'login.totp' })).status).toBe(400)
-      await inSpace((tx) =>
+      await inPersonal((tx) =>
         tx
           .update(vaultConnections)
           .set({ status: 'reauth_required' })
           .where(eq(vaultConnections.id, connection.id)),
       )
-      const n = await remember(NOTE(ROUTER_PW), 'user://notes/router-2')
+      const n = await remember(NOTE(ROUTER_PW), 'notes/router-2')
       expect((await convert(n, ROUTER_PW, { ...base, itemField: 'login.password' })).status).toBe(
         409,
       )
     })
 
-    it('不是空间所有者 403', async () => {
-      const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
+    it('不是记忆圈所有者 403', async () => {
+      const editor = await addMember(database.db, ws.circleId, 'eve', 'editor')
       const cred = await hosted('router-admin', { password: ROUTER_PW })
       const res = await app.request(
-        `/v1/spaces/${ws.spaceId}/memories/convert-to-credential`,
+        `/v1/circles/${ws.circleId}/entries/convert-to-credential`,
         jsonRequest(
           'POST',
           {
-            memoryId: '00000000-0000-4000-8000-000000000000',
+            entryId: '00000000-0000-4000-8000-000000000000',
             expectedVersion: 1,
             value: ROUTER_PW,
             target: { kind: 'credential', credentialId: cred.id, field: 'password' },

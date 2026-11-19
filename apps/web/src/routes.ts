@@ -1,10 +1,10 @@
 import type { RouteRecordRaw, Router } from 'vue-router'
 
 import { api } from './api/endpoints'
-import { loadMe, rememberSpace } from './composables/useSession'
+import { loadMe, rememberCircle } from './composables/useSession'
 import { legacyReviewTab } from './inbox'
 import UnavailablePage from './pages/UnavailablePage.vue'
-import { legacySettingsRedirect, legacySpaceSettingsRedirect } from './settingsSections'
+import { legacyCircleSettingsRedirect, legacySettingsRedirect } from './settingsSections'
 
 export const routes: RouteRecordRaw[] = [
   { path: '/setup', name: 'setup', component: () => import('./pages/SetupPage.vue') },
@@ -21,7 +21,7 @@ export const routes: RouteRecordRaw[] = [
     name: 'password',
     component: () => import('./pages/PasswordPage.vue'),
   },
-  // 浏览器授权的确认页：要登录，不在外壳里（不带空间）。确认码在页面里输入，地址里不带
+  // 浏览器授权的确认页：要登录，不在外壳里（不带记忆圈）。确认码在页面里输入，地址里不带
   {
     path: '/authorize',
     name: 'authorize',
@@ -35,47 +35,53 @@ export const routes: RouteRecordRaw[] = [
     children: [
       { path: '', name: 'home', component: () => import('./pages/HomePage.vue') },
       {
-        path: 'spaces/:spaceId',
+        path: 'circles/:circleId',
         name: 'overview',
         component: () => import('./pages/OverviewPage.vue'),
       },
       {
-        path: 'spaces/:spaceId/memories',
+        path: 'circles/:circleId/memories',
         name: 'memories',
         component: () => import('./pages/MemoriesPage.vue'),
       },
       {
-        path: 'spaces/:spaceId/activity',
+        path: 'circles/:circleId/vocabulary',
+        name: 'vocabulary',
+        component: () => import('./pages/VocabularyPage.vue'),
+      },
+      {
+        path: 'circles/:circleId/activity',
         name: 'activity',
         component: () => import('./pages/ActivityPage.vue'),
       },
       {
-        path: 'spaces/:spaceId/credentials',
+        path: 'circles/:circleId/credentials',
         name: 'credentials',
         component: () => import('./pages/CredentialsPage.vue'),
       },
-      // 旧地址：人格并进了记忆页的目录，选中人格时右边是它的设置
+      // 旧地址重定向：人格管理并入词表页的独立人格分页
       {
-        path: 'spaces/:spaceId/personas',
+        path: 'circles/:circleId/personas',
+        name: 'personas',
         redirect: (to) => ({
-          name: 'memories',
+          name: 'vocabulary',
           params: to.params,
-          query: { node: typeof to.query.id === 'string' ? `persona:${to.query.id}` : 'persona' },
+          query: { tab: 'personas' },
         }),
       },
       {
-        path: 'spaces/:spaceId/conversations',
+        path: 'circles/:circleId/conversations',
         name: 'conversations',
         component: () => import('./pages/ConversationsPage.vue'),
       },
       {
-        path: 'spaces/:spaceId/conversations/contacts/:subjectId',
+        path: 'circles/:circleId/conversations/contacts/:subjectId',
         name: 'contact',
         component: () => import('./pages/ContactDetailPage.vue'),
       },
       // 旧地址：联系人并进了对话页的联系人分页
       {
-        path: 'spaces/:spaceId/subjects',
+        path: 'circles/:circleId/subjects',
         redirect: (to) => ({
           name: 'conversations',
           params: to.params,
@@ -83,17 +89,17 @@ export const routes: RouteRecordRaw[] = [
         }),
       },
       {
-        path: 'spaces/:spaceId/subjects/:subjectId',
+        path: 'circles/:circleId/subjects/:subjectId',
         redirect: (to) => ({ name: 'contact', params: to.params }),
       },
       {
-        path: 'spaces/:spaceId/inbox',
+        path: 'circles/:circleId/inbox',
         name: 'inbox',
         component: () => import('./pages/InboxPage.vue'),
       },
       // 旧地址：书签和别处的链接还能到对应的分类
       {
-        path: 'spaces/:spaceId/review',
+        path: 'circles/:circleId/review',
         name: 'review',
         redirect: (to) => ({
           name: 'inbox',
@@ -102,35 +108,64 @@ export const routes: RouteRecordRaw[] = [
         }),
       },
       {
-        path: 'spaces/:spaceId/apps',
-        name: 'apps',
+        path: 'circles/:circleId/clients',
+        name: 'clients',
         component: () => import('./pages/AppsPage.vue'),
       },
       {
-        path: 'spaces/:spaceId/apps/:appId',
-        name: 'app',
+        path: 'circles/:circleId/clients/:clientId',
+        name: 'client',
         component: () => import('./pages/AppDetailPage.vue'),
       },
+      // 旧地址 /apps 重定向到 /clients
       {
-        path: 'spaces/:spaceId/recall',
+        path: 'circles/:circleId/apps',
+        redirect: (to) => ({ name: 'clients', params: to.params, query: to.query }),
+      },
+      {
+        path: 'circles/:circleId/apps/:appId',
+        redirect: (to) => ({
+          name: 'client',
+          params: { circleId: to.params.circleId, clientId: to.params.appId },
+          query: to.query,
+        }),
+      },
+      {
+        path: 'circles/:circleId/recall',
         name: 'recall',
         component: () => import('./pages/RecallPage.vue'),
       },
       {
-        path: 'spaces/:spaceId/bench',
+        path: 'circles/:circleId/bench',
         name: 'bench',
         component: () => import('./pages/BenchPage.vue'),
       },
       // 设置的三组：每组一个路由组件，都包着 SettingsPage。换组时换掉整页，离开前由页面确认未保存的改动
       {
-        path: 'spaces/:spaceId/settings/:section?',
-        name: 'space-settings',
+        path: 'circles/:circleId/settings/:section?',
+        name: 'circle-settings',
         component: () => import('./pages/SpaceSettingsPage.vue'),
         // 旧地址 ?section=：换成合并后的小节
         beforeEnter: (to) =>
           to.params.section
             ? true
-            : (legacySpaceSettingsRedirect(String(to.params.spaceId), to.query) ?? true),
+            : (legacyCircleSettingsRedirect(String(to.params.circleId), to.query) ?? true),
+      },
+      // 旧 /spaces/:spaceId/... 书签重定向到 /circles/:spaceId/...
+      {
+        path: 'spaces/:spaceId/:rest(.*)*',
+        redirect: (to) => {
+          const rest = Array.isArray(to.params.rest)
+            ? to.params.rest.join('/')
+            : typeof to.params.rest === 'string'
+              ? to.params.rest
+              : ''
+          return {
+            path: `/circles/${to.params.spaceId}${rest ? `/${rest}` : ''}`,
+            query: to.query,
+            hash: to.hash,
+          }
+        },
       },
       {
         path: 'settings/account/:section?',
@@ -153,17 +188,17 @@ export const routes: RouteRecordRaw[] = [
   },
 ]
 
-// 记忆页打开某条记忆的地址；各处链到记忆都用它
-export const memoryRoute = (spaceId: string, uri: string) => ({
+// 记忆页打开某条词条的地址；各处链到词条都用它
+export const entryRoute = (circleId: string, id: string) => ({
   name: 'memories',
-  params: { spaceId },
-  query: { uri },
+  params: { circleId },
+  query: { id },
 })
 
-// 记忆页打开目录里的一个根（user、app、persona、core）、人格或应用（persona:<id>、app:<id>）
-export const memoryNodeRoute = (spaceId: string, node: string) => ({
+// 记忆页按分组打开，或跳转到指定条目
+export const memoryNodeRoute = (circleId: string, node: string) => ({
   name: 'memories',
-  params: { spaceId },
+  params: { circleId },
   query: { node },
 })
 
@@ -176,9 +211,9 @@ export function setupLost(): void {
 }
 
 export function installGuards(router: Router): void {
-  // 记下最近访问的空间：个人与实例设置这些不带空间的页面沿用它
+  // 记下最近访问的记忆圈：个人与实例设置这些不带记忆圈的页面沿用它
   router.afterEach((to, _from, failure) => {
-    if (!failure && typeof to.params.spaceId === 'string') rememberSpace(to.params.spaceId)
+    if (!failure && typeof to.params.circleId === 'string') rememberCircle(to.params.circleId)
   })
   router.beforeEach(async (to) => {
     if (to.name === 'unavailable') return true

@@ -5,15 +5,15 @@ import { computed } from 'vue'
 import { icons } from '../../icons'
 import { actorLabel } from '../../labels'
 
-// 事件的操作方。经 Key 操作的带应用标记，不靠名字区分：应用可以和成员同名
+// 事件的操作方。经 Key 操作的带接入实例标记，不靠名字区分：接入实例可以和成员同名
 const props = defineProps<{ actor: EventActor }>()
 const label = computed(() => actorLabel(props.actor))
 </script>
 
 <template>
   <span :title="label.name">
-    <template v-if="label.viaApp">
-      <UIcon :name="icons.bot" class="actor-app" /><span class="sr-only">应用：</span>
+    <template v-if="label.viaClient">
+      <UIcon :name="icons.bot" class="actor-app" /><span class="sr-only">接入实例：</span>
     </template>
     {{ label.name }}
   </span>

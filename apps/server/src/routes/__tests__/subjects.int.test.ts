@@ -1,45 +1,55 @@
 import { randomBytes } from 'node:crypto'
 
 import type {
-  GroupPersonaRuleList,
+  ClientGroupRuleList,
+  ConsoleEntryView,
   RecallResponse,
   SessionContextInput,
   SubjectDetail,
   SubjectInfo,
   SubjectList,
 } from '@kioku/contracts'
-import { asc, eq, sql } from 'drizzle-orm'
+import { asc, eq, inArray, sql } from 'drizzle-orm'
 import postgres from 'postgres'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
-import { withSpace, type Database } from '../../db/client'
+import { withCircle, type Database } from '../../db/client'
 import {
+  circles,
   conversationTurns,
+  entries,
+  entryVariants,
   extractionRuns,
-  memories,
   settings,
-  spaces,
   subjects,
 } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
-import type { ChatModel } from '../../extraction/provider'
 import {
   BATCH_MOVED,
   BUDGET_NO_SUMMARY,
   NO_USABLE_KEY,
   RUN_ERROR_WORDINGS,
 } from '../../extraction/extract'
+import type { ChatModel } from '../../extraction/provider'
 import { saveExtractionConfig } from '../../extraction/settings'
 import { processSession } from '../../extraction/worker'
 import type { Jobs } from '../../jobs/queue'
+import { generateShortId } from '../../memory/shortId'
 import {
   conversationOfScope,
   openTestDatabase,
   resetDatabase,
   testDatabaseUrl,
 } from '../../testing/db'
-import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
+import {
+  addMember,
+  bearer,
+  bootstrap,
+  FULL_SCOPES,
+  jsonRequest,
+  type Workspace,
+} from '../../testing/fixtures'
 
 const fakeModel = (reply: unknown): ChatModel => ({
   model: 'fake-model',
@@ -52,7 +62,7 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
   let database: Database
   let app: ReturnType<typeof createApp>
   let ws: Workspace
-  let appId: string
+  let clientId: string
   let key: string
   const masterKey = randomBytes(32)
   // 排进抽取队列的批次与延迟，合并之后看有没有按合并后的批次排
@@ -89,17 +99,23 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
   beforeEach(async () => {
     await resetDatabase(database)
     ws = await bootstrap(app)
-    appId = (await ws.createApp('qq-bot', { name: '群聊 bot', runtimeFamily: 'astrbot' })).id
-    key = await ws.issueKey(appId)
+    clientId = (await ws.createClient('qq-bot', { name: '群聊 bot', runtimeFamily: 'astrbot' })).id
+    key = await ws.issueKey(clientId)
     await saveExtractionConfig(database.db, masterKey, {
       baseUrl: 'https://llm.example.com/v1',
       model: 'm',
     })
   })
 
-  const api = (method: string, path: string, body?: unknown, cookie = ws.cookie) =>
+  const api = (
+    method: string,
+    path: string,
+    body?: unknown,
+    cookie = ws.cookie,
+    circleId = ws.circleId,
+  ) =>
     app.request(
-      `/v1/spaces/${ws.spaceId}${path}`,
+      `/v1/circles/${circleId}${path}`,
       method === 'GET' ? { headers: { cookie } } : jsonRequest(method, body, { cookie }),
     )
   const listOf = async (query = '', cookie = ws.cookie) => {
@@ -113,11 +129,12 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     return (await res.json()) as SubjectDetail
   }
   const summaryScope = async (content: string) => {
-    const [row] = await withSpace(database.db, ws.spaceId, (tx) =>
+    const [row] = await withCircle(database.db, ws.circleId, (tx) =>
       tx
-        .select({ originScope: memories.originScope })
-        .from(memories)
-        .where(eq(memories.content, content)),
+        .select({ originScope: entries.originScope })
+        .from(entries)
+        .innerJoin(entryVariants, eq(entryVariants.entryId, entries.id))
+        .where(eq(entryVariants.content, content)),
     )
     return row?.originScope
   }
@@ -132,32 +149,48 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     platform,
     sender: { id: sender, ...(name ? { name } : {}) },
   })
-  // 直接写一条抽取出的记忆（对象层的事实或情节层的摘要）
+  // 直接写一条抽取出的词条（事实或会话摘要）
   const extracted = (values: {
-    layer: 'subject' | 'episode'
+    kind: 'fact' | 'episode'
     content: string
     originScope: string
     subjectId?: string
+    subjectKind?: 'person' | 'group'
   }) =>
-    withSpace(database.db, ws.spaceId, async (tx) =>
-      tx
-        .insert(memories)
+    withCircle(database.db, ws.circleId, async (tx) => {
+      const [inserted] = await tx
+        .insert(entries)
         .values({
-          spaceId: ws.spaceId,
-          form: 'extracted',
+          circleId: ws.circleId,
+          shortId: generateShortId(),
+          circleKind: 'shared',
+          kind: values.kind,
+          title: values.content.slice(0, 40),
           sensitivity: 'public',
           provenance: 'untrusted',
-          subjectId: values.subjectId ?? null,
-          // 会话摘要挂在这个作用域的会话上（群里的或和这个人的私聊）
+          originScope: values.originScope,
+          subjectId: values.kind === 'fact' ? (values.subjectId ?? null) : null,
+          subjectKind: values.kind === 'fact' ? (values.subjectKind ?? 'person') : null,
           conversationId:
-            values.layer === 'episode'
-              ? await conversationOfScope(tx, ws.spaceId, appId, values.originScope)
+            values.kind === 'episode'
+              ? await conversationOfScope(tx, ws.circleId, clientId, values.originScope)
               : null,
-          expiresAt: values.layer === 'episode' ? new Date(Date.now() + 86_400_000) : null,
-          ...values,
+          priority: 2,
+          expiresAt: values.kind === 'episode' ? new Date(Date.now() + 86_400_000) : null,
         })
-        .returning(),
-    )
+        .returning()
+      await tx.insert(entryVariants).values({
+        circleId: ws.circleId,
+        entryId: inserted!.id,
+        kind: values.kind,
+        sensitivity: 'public',
+        when: {},
+        whenSignature: '{}',
+        sortOrder: 0,
+        content: values.content,
+      })
+      return inserted!
+    })
   const recallSubjects = async (context: SessionContextInput) => {
     const res = await app.request(
       '/v1/recall',
@@ -177,13 +210,13 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
   const chatInGroup = async () => {
     await say('我在学日语', group('1001', '小明'))
     await say('我喜欢猫', group('1002', '小红'))
-    const [turn] = await withSpace(database.db, ws.spaceId, (tx) =>
+    const [turn] = await withCircle(database.db, ws.circleId, (tx) =>
       tx.select().from(conversationTurns).orderBy(asc(conversationTurns.id)).limit(1),
     )
     await processSession(
       database.db,
       masterKey,
-      { spaceId: ws.spaceId, appId, scope: turn!.scope },
+      { circleId: ws.circleId, clientId, scope: turn!.scope },
       () =>
         fakeModel({
           facts: [
@@ -218,10 +251,10 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
   })
 
   it('翻页：每页 50 个，新遇到的在前；改名、标记不会让对象挪位置；游标无效时返回 400', async () => {
-    await withSpace(database.db, ws.spaceId, (tx) =>
+    await withCircle(database.db, ws.circleId, (tx) =>
       tx.insert(subjects).values(
         Array.from({ length: 55 }, (_, i) => ({
-          spaceId: ws.spaceId,
+          circleId: ws.circleId,
           kind: 'person' as const,
           displayName: `人${i}`,
           createdAt: new Date(Date.UTC(2026, 9, 1, 0, 0, i)),
@@ -243,10 +276,10 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
   it('详情：事实带来源（哪个群）、参与的会话、涉及它的抽取记录', async () => {
     await chatInGroup()
     // 别的群的一批，不涉及这里的人
-    await withSpace(database.db, ws.spaceId, (tx) =>
+    await withCircle(database.db, ws.circleId, (tx) =>
       tx.insert(extractionRuns).values({
-        spaceId: ws.spaceId,
-        appId,
+        circleId: ws.circleId,
+        clientId,
         scope: `group:${crypto.randomUUID()}`,
         subjectIds: [crypto.randomUUID()],
         turns: 1,
@@ -263,7 +296,7 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     ])
     expect(person.runs).toMatchObject([
       {
-        app: { id: appId, name: '群聊 bot' },
+        client: { id: clientId, name: '群聊 bot' },
         scope: { kind: 'group', name: '读书会' },
         turns: 2,
         added: 3,
@@ -287,12 +320,20 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     expect(person.runs[0]!.conversationId).toBe(room.conversations[0]!.id)
 
     // 被推翻（失效）的事实不列、不计数
-    await withSpace(database.db, ws.spaceId, (tx) =>
+    await withCircle(database.db, ws.circleId, (tx) =>
       tx
-        .update(memories)
+        .update(entries)
         // 读取按服务的时间判断，数据库容器的时钟可能快几毫秒：设成一秒前才算已失效
         .set({ validTo: sql`now() - interval '1 second'` })
-        .where(eq(memories.content, '在学日语')),
+        .where(
+          inArray(
+            entries.id,
+            tx
+              .select({ id: entryVariants.entryId })
+              .from(entryVariants)
+              .where(eq(entryVariants.content, '在学日语')),
+          ),
+        ),
     )
     expect((await detailOf(person.id)).facts).toEqual([])
     expect(find(await listOf(), '小明').factCount).toBe(0)
@@ -325,7 +366,8 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     let pending: Promise<void> | undefined
     try {
       await side.begin(async (tx) => {
-        await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
+        await tx`select set_config('app.read_circles', ${ws.circleId}, true)`
+        await tx`select set_config('app.write_circles', ${ws.circleId}, true)`
         await tx`select id from subjects where id = ${id} for update`
         const [{ pid }] = (await tx`select pg_backend_pid() as pid`) as unknown as [{ pid: number }]
         pending = say('我改名了', direct('1001', '小明二'))
@@ -365,32 +407,46 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
       displayName: 'alice',
     })
 
-    // 应用开了主人私聊的提升：标记为自己的人私聊时读得到画像层，别人读不到
-    await api('POST', '/memories', {
-      uri: 'user://preferences/user',
-      content: '主人喜欢简洁',
-      sensitivity: 'internal',
-      glossary: ['简洁'],
+    // 接入实例开了主人私聊的提升：标记为自己的人私聊时读得到关联个人圈的内部词条，别人读不到
+    await api(
+      'POST',
+      '/entries',
+      {
+        title: '偏好',
+        content: '主人喜欢简洁',
+        sensitivity: 'internal',
+        glossary: ['简洁'],
+      },
+      ws.cookie,
+      ws.personalCircleId,
+    )
+    const linkedKeyRes = await api('POST', `/clients/${clientId}/keys`, {
+      name: 'elevated',
+      linkedCircles: [{ circleId: ws.personalCircleId, mode: 'read' }],
+      scopes: FULL_SCOPES,
     })
+    expect(linkedKeyRes.status).toBe(201)
+    const linkedKey = ((await linkedKeyRes.json()) as { key: string }).key
     expect(
-      (await api('PATCH', `/apps/${appId}`, { config: { elevateOwnerDirect: 'internal' } })).status,
+      (await api('PATCH', `/clients/${clientId}`, { config: { elevateOwnerDirect: 'internal' } }))
+        .status,
     ).toBe(200)
     const recallAs = async (sender: string) => {
-      const res = await app.request(
+      const r = await app.request(
         '/v1/recall',
-        jsonRequest('POST', { query: '简洁', context: direct(sender) }, bearer(key)),
+        jsonRequest('POST', { query: '简洁', context: direct(sender) }, bearer(linkedKey)),
       )
-      return ((await res.json()) as RecallResponse).candidates.map((c) => c.uri)
+      return ((await r.json()) as RecallResponse).candidates.map((c) => c.title)
     }
-    expect(await recallAs('1001')).toEqual(['user://preferences/user'])
+    expect(await recallAs('1001')).toEqual(['偏好'])
     expect(await recallAs('1002')).toEqual([])
   })
 
-  it('标记的冲突与权限：已是别人的返回 409；只能取消自己的，空间 owner 能取消任何人的；viewer 只能看', async () => {
+  it('标记的冲突与权限：已是别人的返回 409；只能取消自己的，记忆圈 owner 能取消任何人的；viewer 只能看', async () => {
     await say('你好', direct('1001', '小明'))
     const id = (await listOf()).items[0]!.id
-    const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
-    const carol = await addMember(database.db, ws.spaceId, 'carol', 'viewer')
+    const bob = await addMember(database.db, ws.circleId, 'bob', 'editor')
+    const carol = await addMember(database.db, ws.circleId, 'carol', 'viewer')
 
     expect((await api('PATCH', `/subjects/${id}`, { linkedToMe: true })).status).toBe(200)
     expect((await api('PATCH', `/subjects/${id}`, { linkedToMe: true }, bob.cookie)).status).toBe(
@@ -404,7 +460,7 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
       403,
     )
 
-    // bob 标记为自己之后，空间 owner 能取消
+    // bob 标记为自己之后，记忆圈 owner 能取消
     expect((await api('PATCH', `/subjects/${id}`, { linkedToMe: false })).status).toBe(200)
     expect((await api('PATCH', `/subjects/${id}`, { linkedToMe: true }, bob.cookie)).status).toBe(
       200,
@@ -413,7 +469,7 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     expect(((await cleared.json()) as SubjectInfo).account).toBeNull()
 
     // 被降为 viewer 的成员撤得掉自己当初的标记，但不能标记、不能改名
-    await withSpace(database.db, ws.spaceId, (tx) =>
+    await withCircle(database.db, ws.circleId, (tx) =>
       tx.update(subjects).set({ accountId: carol.accountId }).where(eq(subjects.id, id)),
     )
     expect(
@@ -428,10 +484,10 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     ).toBe(403)
 
     // 抽取的失败原因可能带着模型接口的原文，viewer 只看到失败
-    await withSpace(database.db, ws.spaceId, (tx) =>
+    await withCircle(database.db, ws.circleId, (tx) =>
       tx.insert(extractionRuns).values({
-        spaceId: ws.spaceId,
-        appId,
+        circleId: ws.circleId,
+        clientId,
         scope: `direct:${id}`,
         subjectIds: [id],
         turns: 1,
@@ -442,11 +498,11 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
       const res = await api('GET', `/subjects/${id}`, undefined, cookie)
       return ((await res.json()) as SubjectDetail).runs[0]!.error
     }
-    // 模型接口的原文只给实例管理员（alice 是初始化时建的管理员），空间里的 editor、viewer 都看不到
+    // 模型接口的原文只给实例管理员（alice 是初始化时建的管理员），记忆圈里的 editor、viewer 都看不到
     expect(await runError(ws.cookie)).toBe('抽取模型返回 HTTP 401：令牌无效')
     expect(await runError(bob.cookie)).toBe('抽取失败（原因仅实例管理员可见）')
     expect(await runError(carol.cookie)).toBe('抽取失败（原因仅实例管理员可见）')
-    // 服务端自己判断出的原因不带外部原文，谁都看得到。旧版本写下的记录里是当时的写法，每一代都按现在的显示
+    // 服务端自己判断出的原因不带外部原文，谁都看得到
     const generations: [stored: string, shown: string][] = [
       [NO_USABLE_KEY, NO_USABLE_KEY],
       ['写入这一批的访问密钥均已吊销、作废或无权写入联系人层与情节层', NO_USABLE_KEY],
@@ -458,12 +514,11 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
       [BATCH_MOVED, BATCH_MOVED],
       ['抽取期间对象被合并，这一批交给合并后的批次重新抽取', BATCH_MOVED],
     ]
-    // 和 RUN_ERROR_WORDINGS 一一对应：那边加了旧句子，这里也要加一行核对
     expect(new Set(generations.map(([stored]) => stored))).toEqual(
       new Set(RUN_ERROR_WORDINGS.flat()),
     )
     for (const [stored, shown] of generations) {
-      await withSpace(database.db, ws.spaceId, (tx) =>
+      await withCircle(database.db, ws.circleId, (tx) =>
         tx.update(extractionRuns).set({ error: stored }),
       )
       expect(await runError(carol.cookie), stored).toBe(shown)
@@ -478,20 +533,21 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     const keep = find(all, '小明')
     const gone = find(all, '明')
     await extracted({
-      layer: 'subject',
+      kind: 'fact',
       content: '住在上海',
       originScope: `direct:${gone.id}`,
       subjectId: gone.id,
+      subjectKind: 'person',
     })
     await extracted({
-      layer: 'episode',
+      kind: 'episode',
       content: '私聊里聊了上海',
       originScope: `direct:${gone.id}`,
     })
-    await withSpace(database.db, ws.spaceId, (tx) =>
+    await withCircle(database.db, ws.circleId, (tx) =>
       tx.insert(extractionRuns).values({
-        spaceId: ws.spaceId,
-        appId,
+        circleId: ws.circleId,
+        clientId,
         scope: `direct:${gone.id}`,
         subjectIds: [gone.id, keep.id],
         turns: 1,
@@ -515,14 +571,14 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     expect(await summaryScope('私聊里聊了上海')).toBe(`direct:${keep.id}`)
     expect(merged.runs.map((r) => r.scope.kind).sort()).toEqual(['direct', 'group'])
     // 两个都在同一批里时，换完不留两个一样的 id
-    const runIds = await withSpace(database.db, ws.spaceId, (tx) =>
+    const runIds = await withCircle(database.db, ws.circleId, (tx) =>
       tx.select({ ids: extractionRuns.subjectIds }).from(extractionRuns),
     )
     expect(runIds.some((r) => r.ids.length !== new Set(r.ids).size)).toBe(false)
     // 移过来的缓冲按合并后的批次排抽取：只有一轮，等空闲
     expect(queued).toEqual([{ scope: `direct:${keep.id}`, delay: 600 }])
     // 缓冲里还没抽取的那一轮也跟过来
-    const turns = await withSpace(database.db, ws.spaceId, (tx) =>
+    const turns = await withCircle(database.db, ws.circleId, (tx) =>
       tx.select().from(conversationTurns),
     )
     expect(turns.map((t) => [t.senderSubjectId, t.scope])).toContainEqual([
@@ -543,7 +599,7 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     await processSession(
       database.db,
       masterKey,
-      { spaceId: ws.spaceId, appId, scope: `direct:${gone.id}` },
+      { circleId: ws.circleId, clientId, scope: `direct:${gone.id}` },
       () => ({
         model: 'fake-model',
         async complete() {
@@ -561,8 +617,11 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
         },
       }),
     )
-    const written = await withSpace(database.db, ws.spaceId, (tx) =>
-      tx.select().from(memories).where(eq(memories.form, 'extracted')),
+    const written = await withCircle(database.db, ws.circleId, (tx) =>
+      tx
+        .select()
+        .from(entries)
+        .where(inArray(entries.kind, ['fact', 'episode'])),
     )
     expect(written).toEqual([])
     // 记录跟着对话换到合并后的对象上，对象页看得到
@@ -570,7 +629,7 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
       { error: BATCH_MOVED, scope: { kind: 'direct' } },
     ])
     // 那一轮对话还在，在合并后的批次里
-    const turns = await withSpace(database.db, ws.spaceId, (tx) =>
+    const turns = await withCircle(database.db, ws.circleId, (tx) =>
       tx.select().from(conversationTurns),
     )
     expect(turns.map((t) => t.scope).sort()).toEqual([`direct:${keep.id}`, `direct:${keep.id}`])
@@ -580,13 +639,13 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     await say('我在学日语', group('1001', '小明'))
     await say('我喜欢猫', group('1002', '小红'))
     const all = await listOf()
-    const [turn] = await withSpace(database.db, ws.spaceId, (tx) =>
+    const [turn] = await withCircle(database.db, ws.circleId, (tx) =>
       tx.select().from(conversationTurns).limit(1),
     )
     await processSession(
       database.db,
       masterKey,
-      { spaceId: ws.spaceId, appId, scope: turn!.scope },
+      { circleId: ws.circleId, clientId, scope: turn!.scope },
       () => ({
         model: 'fake-model',
         async complete() {
@@ -604,16 +663,21 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
         },
       }),
     )
-    const written = await withSpace(database.db, ws.spaceId, (tx) =>
-      tx.select().from(memories).where(eq(memories.form, 'extracted')),
+    const written = await withCircle(database.db, ws.circleId, (tx) =>
+      tx
+        .select()
+        .from(entries)
+        .where(inArray(entries.kind, ['fact', 'episode'])),
     )
     expect(written).toEqual([])
-    const runs = await withSpace(database.db, ws.spaceId, (tx) => tx.select().from(extractionRuns))
+    const runs = await withCircle(database.db, ws.circleId, (tx) =>
+      tx.select().from(extractionRuns),
+    )
     expect(runs.map((r) => [r.error, r.scope])).toEqual([[BATCH_MOVED, turn!.scope]])
     expect(runs[0]!.subjectIds).toContain(find(all, '小明').id)
     expect(runs[0]!.subjectIds).not.toContain(find(all, '小红').id)
     // 两轮都还在，留给合并后的批次
-    const left = await withSpace(database.db, ws.spaceId, (tx) =>
+    const left = await withCircle(database.db, ws.circleId, (tx) =>
       tx.select().from(conversationTurns),
     )
     expect(left).toHaveLength(2)
@@ -628,7 +692,7 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     await processSession(
       database.db,
       masterKey,
-      { spaceId: ws.spaceId, appId, scope: `direct:${keep.id}` },
+      { circleId: ws.circleId, clientId, scope: `direct:${keep.id}` },
       () => ({
         model: 'fake-model',
         async complete() {
@@ -642,7 +706,7 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
         },
       }),
     )
-    const left = await withSpace(database.db, ws.spaceId, (tx) =>
+    const left = await withCircle(database.db, ws.circleId, (tx) =>
       tx.select().from(conversationTurns),
     )
     expect(left.map((t) => [t.userText, t.scope])).toEqual([['我住在上海', `direct:${keep.id}`]])
@@ -660,19 +724,18 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     expect(
       (await api('POST', `/subjects/${ming.id}/merge`, { from: crypto.randomUUID() })).status,
     ).toBe(404)
-    const carol = await addMember(database.db, ws.spaceId, 'carol', 'viewer')
+    const carol = await addMember(database.db, ws.circleId, 'carol', 'viewer')
     expect(
       (await api('POST', `/subjects/${ming.id}/merge`, { from: hong.id }, carol.cookie)).status,
     ).toBe(403)
-    // alice 把小明标记成自己。bob 不能把别的账号并进小明，也不能把小明并进别人：
-    // 那等于把平台账号挂到 alice 的标记下，那个账号的私聊就成了 alice 的主人私聊
-    const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    // alice 把小明标记成自己。bob 不能把别的账号并进小明，也不能把小明并进别人
+    const bob = await addMember(database.db, ws.circleId, 'bob', 'editor')
     await api('PATCH', `/subjects/${ming.id}`, { linkedToMe: true })
     const merge = (into: string, from: string, cookie?: string) =>
       api('POST', `/subjects/${into}/merge`, { from }, cookie)
     expect((await merge(ming.id, hong.id, bob.cookie)).status).toBe(403)
     expect((await merge(hong.id, ming.id, bob.cookie)).status).toBe(403)
-    // 空间 owner 也不能并别人标记的
+    // 记忆圈 owner 也不能并别人标记的
     await api('PATCH', `/subjects/${ming.id}`, { linkedToMe: false })
     await api('PATCH', `/subjects/${hong.id}`, { linkedToMe: true }, bob.cookie)
     expect((await merge(ming.id, hong.id)).status).toBe(403)
@@ -682,7 +745,7 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     expect(((await res.json()) as SubjectInfo).account?.id).toBe(bob.accountId)
   })
 
-  it('合并两个群：按群换人格的规则跟过来，两边在同一个应用都有规则时留保留的那个', async () => {
+  it('合并两个群：按群规则跟过来，两边在同一接入实例都有规则时留保留的人格且隔离锁取逻辑或', async () => {
     await say('你好', group('1001', '小明'))
     await say('hi', {
       chatType: 'group',
@@ -695,41 +758,84 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     const gone = find(all, '读书会 TG')
     const serious = (await ws.createPersona('serious')).id
     const cute = (await ws.createPersona('cute')).id
-    const other = (await ws.createApp('tg-bot', { runtimeFamily: 'astrbot' })).id
+    const other = (await ws.createClient('tg-bot', { runtimeFamily: 'astrbot' })).id
     const rules = (id: string, list: unknown) =>
-      api('PUT', `/apps/${id}/group-personas`, { rules: list })
-    expect((await rules(appId, [{ subjectId: gone.id, personaId: serious }])).status).toBe(200)
+      api('PUT', `/clients/${id}/group-rules`, { rules: list })
+    expect(
+      (
+        await rules(clientId, [
+          { groupSubjectId: gone.id, personaId: serious, isolateGroupMemory: true },
+        ])
+      ).status,
+    ).toBe(200)
     await rules(other, [
-      { subjectId: keep.id, personaId: cute },
-      { subjectId: gone.id, personaId: serious },
+      { groupSubjectId: keep.id, personaId: cute, isolateGroupMemory: false },
+      { groupSubjectId: gone.id, personaId: serious, isolateGroupMemory: true },
     ])
 
     expect((await api('POST', `/subjects/${keep.id}/merge`, { from: gone.id })).status).toBe(200)
     const listed = async (id: string) =>
       (
-        (await (await api('GET', `/apps/${id}/group-personas`)).json()) as GroupPersonaRuleList
-      ).rules.map((r) => [r.subjectId, r.personaId])
-    expect(await listed(appId)).toEqual([[keep.id, serious]])
-    expect(await listed(other)).toEqual([[keep.id, cute]])
+        (await (await api('GET', `/clients/${id}/group-rules`)).json()) as ClientGroupRuleList
+      ).rules.map((r) => [r.groupSubjectId, r.personaId, r.isolateGroupMemory])
+    expect(await listed(clientId)).toEqual([[keep.id, serious, true]])
+    expect(await listed(other)).toEqual([[keep.id, cute, true]])
   })
 
-  it('对象页能删事实：确认过的也能删；版本对不上返回 409；viewer 不能删；别的对象下的找不到', async () => {
+  it('对象页能删事实与提炼升级事实：版本与权限核对准确', async () => {
     await chatInGroup()
     const all = await listOf()
     const ming = find(all, '小明')
     const [fact] = (await detailOf(ming.id)).facts
-    await withSpace(database.db, ws.spaceId, (tx) =>
-      tx.update(memories).set({ provenance: 'owner', version: 2 }).where(eq(memories.id, fact!.id)),
+    const carol = await addMember(database.db, ws.circleId, 'carol', 'viewer')
+
+    // 提炼升级成正式词条：viewer 拒绝，目标记忆圈需可写，editor 可写入有权限的记忆圈
+    expect(
+      (
+        await api(
+          'POST',
+          `/subjects/${ming.id}/facts/${fact!.id}/promote`,
+          { targetCircleId: ws.circleId, title: '语言学习', sensitivity: 'internal' },
+          carol.cookie,
+        )
+      ).status,
+    ).toBe(403)
+    const promotedRes = await api(
+      'POST',
+      `/subjects/${ming.id}/facts/${fact!.id}/promote`,
+      {
+        targetCircleId: ws.personalCircleId,
+        title: '语言学习',
+        content: '小明在学日语',
+        sensitivity: 'internal',
+        topics: ['study'],
+        priority: 1,
+      },
+      ws.cookie,
+    )
+    expect(promotedRes.status).toBe(201)
+    const promoted = (await promotedRes.json()) as ConsoleEntryView
+    expect(promoted).toMatchObject({
+      circleId: ws.personalCircleId,
+      kind: 'entry',
+      title: '语言学习',
+      sensitivity: 'internal',
+      topics: ['study'],
+      priority: 1,
+    })
+
+    // 删除事实（确认过的也能删）
+    await withCircle(database.db, ws.circleId, (tx) =>
+      tx.update(entries).set({ provenance: 'owner', version: 2 }).where(eq(entries.id, fact!.id)),
     )
     const del = (subject: string, version: number, cookie = ws.cookie) =>
       app.request(
-        `/v1/spaces/${ws.spaceId}/subjects/${subject}/facts/${fact!.id}?version=${version}`,
+        `/v1/circles/${ws.circleId}/subjects/${subject}/facts/${fact!.id}?version=${version}`,
         {
           method: 'DELETE',
           headers: { cookie, 'sec-fetch-site': 'same-origin' },
         },
       )
-    const carol = await addMember(database.db, ws.spaceId, 'carol', 'viewer')
     expect((await del(ming.id, 2, carol.cookie)).status).toBe(403)
     expect((await del(find(all, '小红').id, 2)).status).toBe(404)
     expect((await del(ming.id, 1)).status).toBe(409)
@@ -738,20 +844,23 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     expect(find(await listOf(), '小明').factCount).toBe(0)
   })
 
-  it('别的空间的对象看不到也改不了', async () => {
-    const [other] = await database.db.insert(spaces).values({ name: '别人家' }).returning()
-    const [stranger] = await withSpace(database.db, other!.id, (tx) =>
+  it('别的记忆圈的对象看不到也改不了', async () => {
+    const [other] = await database.db
+      .insert(circles)
+      .values({ slug: 'other-home', name: '别人家', kind: 'shared' })
+      .returning()
+    const [stranger] = await withCircle(database.db, other!.id, (tx) =>
       tx
         .insert(subjects)
-        .values({ spaceId: other!.id, kind: 'person', displayName: '外人' })
+        .values({ circleId: other!.id, kind: 'person', displayName: '外人' })
         .returning(),
     )
     expect((await listOf()).items).toEqual([])
     expect((await api('GET', `/subjects/${stranger!.id}`)).status).toBe(404)
     expect((await api('PATCH', `/subjects/${stranger!.id}`, { displayName: 'x' })).status).toBe(404)
-    // 不是这个空间的成员
+    // 不是这个记忆圈的成员
     expect(
-      (await app.request(`/v1/spaces/${other!.id}/subjects`, { headers: { cookie: ws.cookie } }))
+      (await app.request(`/v1/circles/${other!.id}/subjects`, { headers: { cookie: ws.cookie } }))
         .status,
     ).toBe(403)
   })

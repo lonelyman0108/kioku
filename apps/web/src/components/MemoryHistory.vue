@@ -1,19 +1,14 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import { SENSITIVITIES, type HistoryEvent, type MemorySnapshot } from '@kioku/contracts'
+import { SENSITIVITIES, type EntrySnapshot, type HistoryEvent } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref } from 'vue'
 
 import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
-import { collapseUnchanged, diffLines, type DiffRow } from '../diff'
-import {
-  eventLabel,
-  layerLabels,
-  memoryViaLabels,
-  provenanceLabels,
-  sensitivityLabels,
-} from '../labels'
+import { diffVariantSnapshots, type VariantDiffItem } from '../diff'
+import { eventLabel, memoryViaLabels, provenanceLabels, sensitivityLabels } from '../labels'
+import { whenLabel } from '../memoryDetail'
 import { formatRelative, formatTime, isExpired } from '../time'
 import Hint from './Hint.vue'
 import ActorName from './strata/ActorName.vue'
@@ -21,8 +16,8 @@ import NoteLine from './strata/NoteLine.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 
 const props = defineProps<{
-  spaceId: string
-  memoryId: string
+  circleId: string
+  entryId: string
   canRestore: boolean
   // 过期了时能不能让它重新生效；重新生效由打开历史的地方去做（已过期列表）
   canReactivate?: boolean
@@ -34,40 +29,46 @@ const toast = useToast()
 const queryClient = useQueryClient()
 
 const history = useQuery({
-  queryKey: computed(() => ['memory-history', props.spaceId, props.memoryId]),
-  queryFn: () => api.memoryHistory(props.spaceId, props.memoryId),
+  queryKey: computed(() => ['entry-history', props.circleId, props.entryId] as const),
+  queryFn: ({ queryKey: [, cid, id] }) => api.entryHistory(cid, id),
 })
+const facets = useQuery({
+  queryKey: computed(() => ['facets', props.circleId] as const),
+  queryFn: ({ queryKey: [, cid] }) => api.facets(cid),
+})
+
 // 最近的在上面
 const events = computed(() => [...(history.data.value?.events ?? [])].reverse())
-const current = computed(() => history.data.value?.memory)
-// 这条记忆现在过期了：已经让出 URI 的也算；删掉之后才到期的不算（它走撤销删除，见已删除）
+const current = computed(() => history.data.value?.entry)
+// 这条记忆现在过期了：删掉之后才到期的不算（它走撤销删除，见已删除）
 const expiredNow = computed(() => {
-  const m = current.value
-  return !!m && isExpired(m.validTo) && (!m.deletedAt || m.released)
+  const e = current.value
+  return !!e && isExpired(e.validTo) && !e.deletedAt
 })
 const validToText = (validTo: string | null) => (validTo ? formatTime(validTo) : '长期有效')
 
-// 一次改动里变了的属性；正文另外按行对比
-function changes(before: MemorySnapshot | null, after: MemorySnapshot | null): string[] {
+// 一次改动里变了的属性；变体切片正文另外按行对比
+function changes(before: EntrySnapshot | null, after: EntrySnapshot | null): string[] {
   if (!before || !after) return []
   const list: string[] = []
   if (before.title !== after.title && before.title && after.title) {
     list.push(`标题：${before.title} → ${after.title}`)
-  }
-  if (before.uri !== after.uri) list.push(`坐标：${before.uri} → ${after.uri}`)
-  if (before.layer !== after.layer) {
-    list.push(`归属：${layerLabels[before.layer]} → ${layerLabels[after.layer]}`)
   }
   if (before.sensitivity !== after.sensitivity) {
     list.push(
       `敏感级：${sensitivityLabels[before.sensitivity]} → ${sensitivityLabels[after.sensitivity]}`,
     )
   }
-  if (before.priority !== after.priority)
+  if (before.priority !== after.priority) {
     list.push(`优先级：P${before.priority} → P${after.priority}`)
+  }
   if (before.disclosure !== after.disclosure) {
     list.push(`触发场景：${before.disclosure ?? '（无）'} → ${after.disclosure ?? '（无）'}`)
   }
+  const topicsAdded = after.topics.filter((t) => !before.topics.includes(t))
+  const topicsRemoved = before.topics.filter((t) => !after.topics.includes(t))
+  if (topicsAdded.length) list.push(`添加主题：${topicsAdded.join('、')}`)
+  if (topicsRemoved.length) list.push(`移除主题：${topicsRemoved.join('、')}`)
   const added = after.glossary.filter((k) => !before.glossary.includes(k))
   const removed = before.glossary.filter((k) => !after.glossary.includes(k))
   if (added.length) list.push(`添加关键词：${added.join('、')}`)
@@ -78,46 +79,62 @@ function changes(before: MemorySnapshot | null, after: MemorySnapshot | null): s
   return list
 }
 
-// 这次改动里正文的情况。有一边是 secret 时那一边没有正文，对比不出改了什么：
-// 改成 secret 或从 secret 改回来时，整段都会算成改动
-function contentChange(event: HistoryEvent): 'none' | 'secret' | 'changed' {
-  const { before, after } = event
-  if (!after) return 'none'
-  if (after.content === null || (before && before.content === null)) return 'secret'
-  return before && before.content === after.content ? 'none' : 'changed'
+const variantDiffStatusLabels: Record<VariantDiffItem['status'], string> = {
+  added: '新增切片',
+  removed: '移除切片',
+  modified: '修改',
+  unchanged: '未变',
+  secret: '机密',
 }
 
-// 只对展开的那一条做对比：每次渲染都对所有事件按行对比，事件多、正文长时很慢
+function variantDiffs(event: HistoryEvent): VariantDiffItem[] {
+  if (event.left || !event.after) return []
+  return diffVariantSnapshots(event.before?.variants ?? null, event.after.variants)
+}
+
+function contentChange(event: HistoryEvent): 'none' | 'secret' | 'changed' {
+  const { before, after } = event
+  if (!after || event.left) return 'none'
+  const diffs = variantDiffs(event)
+  if (
+    diffs.some((d) => d.status === 'added' || d.status === 'removed' || d.status === 'modified')
+  ) {
+    return 'changed'
+  }
+  if (
+    diffs.some((d) => d.status === 'secret') &&
+    (after.variants.some((v) => v.content === null) ||
+      before?.variants.some((v) => v.content === null))
+  ) {
+    return 'secret'
+  }
+  return 'none'
+}
+
 const open = ref<number | null>(null)
-const openRows = computed<DiffRow[]>(() => {
+const openDiffs = computed<VariantDiffItem[]>(() => {
   const event = events.value.find((e) => e.id === open.value)
-  if (!event || contentChange(event) !== 'changed') return []
-  const after = event.after?.content ?? ''
-  // 新建时整段算加上
-  if (!event.before) return after.split('\n').map((text) => ({ kind: 'add' as const, text }))
-  return collapseUnchanged(diffLines(event.before.content ?? '', after))
+  if (!event) return []
+  return variantDiffs(event).filter((d) => d.status !== 'unchanged')
 })
 
-// 改动之后的那一版就是现在的样子。删除、过期后让出 URI 不改版本号，同一个版本号可能有好几个事件，只标最近的那个
+// 改动之后的那一版就是现在的样子
 const currentEventId = computed(
   () =>
     events.value.find((e) => !!e.after && !e.left && e.after.version === current.value?.version)
       ?.id ?? null,
 )
 const isCurrent = (event: HistoryEvent) => event.id === currentEventId.value
-// 服务端只恢复和现在同一归属、敏感级不高于现在的版本：改过层、移到别的人格或应用、
-// 或者调低过敏感级之后，之前的版本不能直接恢复
-const namespaceOf = (uri: string) => /^(?:persona|app):\/\/[^/]+/.exec(uri)?.[0] ?? null
-function sameScope(snapshot: MemorySnapshot): boolean {
+
+// 服务端只恢复同物种、敏感级不高于现在的版本
+function sameScope(snapshot: EntrySnapshot): boolean {
   const now = current.value
   return (
     !!now &&
-    snapshot.layer === now.layer &&
-    namespaceOf(snapshot.uri) === namespaceOf(now.uri) &&
+    snapshot.kind === now.kind &&
     SENSITIVITIES.indexOf(snapshot.sensitivity) <= SENSITIVITIES.indexOf(now.sensitivity)
   )
 }
-// 能拿来恢复的：看得到改后的那一版，不是删除之后的状态，不是现在这一版，归属与敏感级也允许
 const restorable = (event: HistoryEvent) =>
   props.canRestore &&
   !current.value?.deletedAt &&
@@ -127,12 +144,10 @@ const restorable = (event: HistoryEvent) =>
   !isCurrent(event) &&
   sameScope(event.after)
 
-// 点「恢复此版本」时记下这条记忆与它现在的版本：确认期间历史重新拉取到了更新的版本，
-// 或编辑器换成了重建的另一条，恢复返回冲突，不会盖掉没看过的改动
-const confirming = ref<{ event: HistoryEvent; memoryId: string; version: number } | null>(null)
+const confirming = ref<{ event: HistoryEvent; entryId: string; version: number } | null>(null)
 function askRestore(event: HistoryEvent) {
   const version = current.value?.version
-  if (version !== undefined) confirming.value = { event, memoryId: props.memoryId, version }
+  if (version !== undefined) confirming.value = { event, entryId: props.entryId, version }
 }
 const restoring = ref(false)
 async function restore() {
@@ -140,26 +155,22 @@ async function restore() {
   if (!target) return
   restoring.value = true
   try {
-    const restored = await api.restoreMemory(props.spaceId, {
-      memoryId: target.memoryId,
+    const restored = await api.restoreEntry(props.circleId, {
+      entryId: target.entryId,
       eventId: target.event.id,
       expectedVersion: target.version,
     })
     confirming.value = null
     toast.add({ title: '已恢复此版本', color: 'success' })
-    // 直接写进这条记忆的缓存，编辑器会跟上（并通知页面）。不靠事件：侧栏在请求期间被关掉时，
-    // 这个组件已经卸载，发出的事件没人收到。过期的记忆按 URI 读不到，不写进那个 URI 的缓存
     if (!isExpired(restored.validTo)) {
-      const key = ['memory', props.spaceId, restored.uri]
+      const key = ['entry', props.circleId, restored.shortId]
       await queryClient.cancelQueries({ queryKey: key, exact: true })
       queryClient.setQueryData(key, restored)
     }
-    // 版本变了，已过期列表里记着的版本也要跟上
-    void queryClient.invalidateQueries({ queryKey: ['memory-expired', props.spaceId] })
+    void queryClient.invalidateQueries({ queryKey: ['entry-expired', props.circleId] })
     await history.refetch()
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '恢复失败', color: 'error' })
-    // 版本冲突等情况下历史可能已经变了；冲突时关掉确认框，看过新的历史再选
     if (err instanceof ApiError && err.status === 409) confirming.value = null
     void history.refetch()
   } finally {
@@ -167,7 +178,6 @@ async function restore() {
   }
 }
 
-// 版本号写在最左边：改动之后的那一版；离开可见范围的只有改前的那一版
 const versionOf = (event: HistoryEvent) => event.after?.version ?? event.before?.version ?? null
 </script>
 
@@ -185,9 +195,6 @@ const versionOf = (event: HistoryEvent) => event.after?.version ?? event.before?
     <template v-else>
       <NoteLine v-if="expiredNow && current?.validTo" tone="warning">
         这条记忆已于 {{ formatTime(current.validTo) }} 过期，不再召回，也不进启动加载
-        <template v-if="current.released" #detail>
-          过期后同一坐标上已写入新记忆，坐标已释放。那条记忆仍在时，需先移走或删除才能恢复生效。
-        </template>
         <template v-if="canReactivate" #actions>
           <UButton
             size="sm"
@@ -203,7 +210,7 @@ const versionOf = (event: HistoryEvent) => event.after?.version ?? event.before?
       <SectionHeading title="历史">
         <template #hint>
           <Hint>
-            恢复此版本只改正文、标题、触发场景、优先级与关键词。坐标、归属、敏感级与有效期不变（过期的记忆在「已过期」中恢复生效）。归属与当前不同、敏感级高于当前的版本无法恢复。
+            恢复此版本只改正文切片、标题、主题、触发场景、优先级与关键词。所在记忆圈、敏感级与有效期不变（过期的记忆在「已过期」中恢复生效）。敏感级高于当前版本的记录无法恢复。
           </Hint>
         </template>
         <template v-if="history.data.value?.truncated" #actions>
@@ -213,7 +220,7 @@ const versionOf = (event: HistoryEvent) => event.after?.version ?? event.before?
       <ol>
         <li v-for="event in events" :key="event.id" class="history-row">
           <span class="history-version" :class="{ current: isCurrent(event) }">
-            <template v-if="versionOf(event) !== null">v{{ versionOf(event) }}</template>
+            <template v-if="versionOf(event) !== null">#{{ versionOf(event) }}</template>
           </span>
           <div class="min-w-0">
             <p class="history-title">
@@ -239,17 +246,23 @@ const versionOf = (event: HistoryEvent) => event.after?.version ?? event.before?
             <p v-if="!event.left && contentChange(event) === 'secret'" class="history-meta">
               机密内容的历史不含正文
             </p>
-            <pre
-              v-if="open === event.id && contentChange(event) === 'changed'"
-              class="history-diff"
-            ><template v-for="(row, index) in openRows" :key="index"><span
-              v-if="row.kind === 'skip'"
-              class="diff-skip"
-            >… 省略未改动的 {{ row.count }} 行</span><span
-              v-else
-              class="diff-line"
-              :class="row.kind"
-            >{{ row.text }}</span></template></pre>
+            <div v-if="open === event.id && openDiffs.length" class="variant-diffs">
+              <div v-for="item in openDiffs" :key="item.sig" class="variant-diff-item">
+                <p class="variant-diff-head">
+                  <span>{{ whenLabel(item.when, facets.data.value) }}</span>
+                  <span class="variant-diff-status">{{
+                    variantDiffStatusLabels[item.status]
+                  }}</span>
+                </p>
+                <p v-if="item.status === 'secret'" class="history-meta">机密切片历史不含正文</p>
+                <pre v-else-if="item.rows.length" class="history-diff"><template
+                  v-for="(row, index) in item.rows"
+                  :key="index"
+                ><span v-if="row.kind === 'skip'" class="diff-skip"
+                  >… 省略未改动的 {{ row.count }} 行</span
+                ><span v-else class="diff-line" :class="row.kind">{{ row.text }}</span></template></pre>
+              </div>
+            </div>
           </div>
           <div class="history-side">
             <time :datetime="event.createdAt" :title="formatTime(event.createdAt)">
@@ -289,7 +302,7 @@ const versionOf = (event: HistoryEvent) => event.after?.version ?? event.before?
     >
       <template #body>
         <p class="text-sm">
-          正文、标题、触发场景、优先级与关键词恢复为此次改动后的内容，并记录一次新改动；坐标、归属与敏感级不变。
+          正文切片、标题、主题、触发场景、优先级与关键词恢复为此次改动后的内容，并记录一次新改动；所在记忆圈与敏感级不变。
         </p>
       </template>
       <template #footer>
@@ -358,9 +371,30 @@ const versionOf = (event: HistoryEvent) => event.after?.version ?? event.before?
   display: flex;
   gap: 5px;
 }
+.variant-diffs {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+.variant-diff-item {
+  border-left: 2px solid var(--ui-border-accented);
+  padding-left: 10px;
+}
+.variant-diff-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.variant-diff-status {
+  padding: 0 5px;
+  border: 1px solid var(--ui-border);
+}
 .history-diff {
   max-height: 24rem;
-  margin-top: 7px;
+  margin-top: 5px;
   overflow: auto;
   font-family: var(--font-sans);
   font-size: 14px;

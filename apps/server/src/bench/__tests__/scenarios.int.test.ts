@@ -5,66 +5,70 @@ import type { AddressInfo } from 'node:net'
 
 import { serve } from '@hono/node-server'
 import {
-  LAYERS,
+  ENTRY_KINDS,
   mayWrite,
   type BenchRunResult,
   type BenchScenario,
   type BenchStep,
-  type KeyScopes,
+  type LensKeyScopes,
 } from '@kioku/contracts'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
 import { keyToSimulate } from '../../access/simulate'
-import { withSpace, type Database } from '../../db/client'
-import { memories, settings } from '../../db/schema'
+import { withCircle, type Database } from '../../db/client'
+import { entries, settings } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import { saveExtractionConfig } from '../../extraction/settings'
 import type { Deps, KeyPrincipal } from '../../http/env'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
-import { bootstrap, type Workspace } from '../../testing/fixtures'
+import { bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 import { httpExecutor } from '../httpExecutor'
 import { runBench } from '../inProcess'
 import { BENCH_EXPIRES_AFTER_MS, runSteps } from '../runner'
 import { BENCH_SCENARIOS, scenariosForRuntime } from '../scenarios'
 
-const SHARED: KeyScopes['readLayers'] = ['core', 'persona', 'app', 'subject', 'episode']
-// 四种 Key：secret 级，以及管理界面签发 Key 的三种预设（apps/web/src/components/keyPresets.ts）
-const KEYS: Record<string, KeyScopes> = {
+const BOT_READ: LensKeyScopes['readKinds'] = ['entry', 'fact', 'episode']
+// 四种 Key：secret 级，以及管理界面常见透镜预设
+const KEYS: Record<string, LensKeyScopes> = {
   secret: {
-    readLayers: [...LAYERS],
-    writeLayers: [...LAYERS],
+    readKinds: [...ENTRY_KINDS],
+    writeKinds: [...ENTRY_KINDS],
     maxSensitivity: 'secret',
+    allowedRealms: null,
     admin: false,
     credentials: 'manage',
   },
   agent: {
-    readLayers: [...LAYERS],
-    writeLayers: [...LAYERS],
+    readKinds: [...ENTRY_KINDS],
+    writeKinds: [...ENTRY_KINDS],
     maxSensitivity: 'private',
+    allowedRealms: null,
     admin: false,
     credentials: 'none',
   },
   bot: {
-    readLayers: SHARED,
-    writeLayers: ['subject', 'episode'],
+    readKinds: BOT_READ,
+    writeKinds: ['fact', 'episode'],
     maxSensitivity: 'public',
+    allowedRealms: null,
     admin: false,
     credentials: 'none',
   },
   readonly: {
-    readLayers: [...LAYERS],
-    writeLayers: [],
+    readKinds: [...ENTRY_KINDS],
+    writeKinds: [],
     maxSensitivity: 'private',
+    allowedRealms: null,
     admin: false,
     credentials: 'none',
   },
 }
 
-// 每个预设配上适用的运行时类型的应用，运行时不限的用 mcp
+// 每个预设配上适用的运行时类型的接入实例，运行时不限的用 mcp
 const runtimeOf = (scenario: BenchScenario) => scenario.runtimes?.[0] ?? 'mcp'
 
-// 每种 Key 上有哪些步骤真的跑了（不是跳过），防止矩阵因为全跳过而失去意义
+// 找出未通过也没跳过的步骤，防止矩阵只因报错或跳过掩盖问题
 const failures = (result: BenchRunResult) =>
   result.steps
     .filter((s) => s.status !== 'passed' && s.status !== 'skipped')
@@ -75,13 +79,16 @@ const failures = (result: BenchRunResult) =>
     }))
 
 describe('内置场景的约定', () => {
-  it('有五个预设，id 不重复，按运行时筛得对', () => {
+  it('有八个预设，id 不重复，按运行时筛得对', () => {
     expect(BENCH_SCENARIOS.map((s) => s.id).sort()).toEqual([
       'astrbot-group-round',
       'claude-code-session',
+      'context-cap-and-isolation',
       'credential-flow',
+      'links-and-recall',
       'memory-crud',
       'permission-probe',
+      'variants-and-facets',
     ])
     expect(scenariosForRuntime('claudecode').map((s) => s.id)).toContain('claude-code-session')
     expect(scenariosForRuntime('claudecode').map((s) => s.id)).not.toContain('astrbot-group-round')
@@ -90,7 +97,14 @@ describe('内置场景的约定', () => {
       scenariosForRuntime('mcp')
         .map((s) => s.id)
         .sort(),
-    ).toEqual(['credential-flow', 'memory-crud', 'permission-probe'])
+    ).toEqual([
+      'context-cap-and-isolation',
+      'credential-flow',
+      'links-and-recall',
+      'memory-crud',
+      'permission-probe',
+      'variants-and-facets',
+    ])
   })
 
   const writes = BENCH_SCENARIOS.flatMap((s) =>
@@ -99,22 +113,23 @@ describe('内置场景的约定', () => {
     ),
   )
 
-  it('只写本人（user://）、不用 priority 0，URI 带 ${run}，都带有效期', () => {
+  it('不用 priority 0，标题带 ${run}，都带有效期', () => {
     expect(writes.length).toBeGreaterThan(0)
     for (const [id, step] of writes) {
-      expect(step.arguments.uri, id).toMatch(/^user:\/\//)
       expect(step.arguments.priority ?? 2, id).toBeGreaterThan(0)
-      expect(step.arguments.uri, id).toContain('${run}')
+      expect(String(step.arguments.title ?? ''), id).toContain('${run}')
       expect(step.arguments.valid_to, id).toBe('${expires}')
     }
   })
 
-  it('平台账号用固定值：对象没有删除接口，带 ${run} 的话每跑一次多两个永久的假对象', () => {
+  it('平台账号与项目/设备上下文用固定值：避免每次运行新增永久记录', () => {
     for (const scenario of BENCH_SCENARIOS) {
       for (const step of scenario.steps) {
         if (step.kind !== 'lifecycle' && step.kind !== 'recall') continue
-        const context = (step.body as { context?: unknown }).context
-        expect(JSON.stringify(context ?? null), scenario.id).not.toContain('${')
+        const body = step.body as { context?: unknown; project?: unknown; deviceKey?: unknown }
+        expect(JSON.stringify(body.context ?? null), scenario.id).not.toContain('${')
+        expect(JSON.stringify(body.project ?? null), scenario.id).not.toContain('${')
+        expect(JSON.stringify(body.deviceKey ?? null), scenario.id).not.toContain('${')
       }
     }
   })
@@ -154,12 +169,13 @@ describe('内置场景的约定', () => {
 describe.skipIf(!testDatabaseUrl)('内置场景：三种执行方式、四种 Key', () => {
   let database: Database
   let deps: Deps
+  let app: ReturnType<typeof createApp>
   let ws: Workspace
   let url: string
   let server: Server
   const masterKey = randomBytes(32)
-  // 各运行时的应用
-  let apps: Record<string, string>
+  // 各运行时的接入实例
+  let clients: Record<string, string>
 
   beforeAll(async () => {
     database = await openTestDatabase()
@@ -170,8 +186,9 @@ describe.skipIf(!testDatabaseUrl)('内置场景：三种执行方式、四种 Ke
       embedder: staticEmbedderSource(null),
       jobs: null,
     }
+    app = createApp(deps)
     server = serve({
-      fetch: createApp(deps).fetch,
+      fetch: app.fetch,
       port: 0,
       hostname: '127.0.0.1',
     }) as Server
@@ -193,19 +210,21 @@ describe.skipIf(!testDatabaseUrl)('内置场景：三种执行方式、四种 Ke
       model: 'fake',
       apiKey: 'x',
     })
-    ws = await bootstrap(createApp(deps))
-    apps = {}
+    ws = await bootstrap(app)
+    clients = {}
     for (const runtimeFamily of new Set(BENCH_SCENARIOS.map(runtimeOf))) {
-      apps[runtimeFamily] = (await ws.createApp(`app-${runtimeFamily}`, { runtimeFamily })).id
+      clients[runtimeFamily] = (
+        await ws.createClient(`client-${runtimeFamily}`, { runtimeFamily })
+      ).id
     }
   })
 
-  const keyFor = async (scopes: KeyScopes, scenario: BenchScenario) => {
-    const appId = apps[runtimeOf(scenario)]!
-    const created = await ws.createKey(appId, scopes)
+  const keyFor = async (scopes: LensKeyScopes, scenario: BenchScenario) => {
+    const clientId = clients[runtimeOf(scenario)]!
+    const created = await ws.createKey(clientId, scopes)
     const found = await keyToSimulate(
       deps,
-      { spaceId: ws.spaceId, appId, keyId: created.id },
+      { circleId: ws.circleId, clientId, keyId: created.id },
       ws.accountId,
     )
     if ('error' in found) throw new Error(found.error)
@@ -225,8 +244,28 @@ describe.skipIf(!testDatabaseUrl)('内置场景：三种执行方式、四种 Ke
       }
       if (name === 'bot' || name === 'readonly') expect(ran).toEqual(['读启动基线'])
     }
+    if (scenario.id === 'variants-and-facets') {
+      if (name === 'secret' || name === 'agent') expect(ran).toContain('增量增删切片')
+      else expect(ran).toEqual([])
+    }
+    if (scenario.id === 'links-and-recall') {
+      if (name === 'secret' || name === 'agent') expect(ran).toContain('召回 1 跳扩散出目标词条')
+      else expect(ran).toEqual([])
+    }
+    if (scenario.id === 'context-cap-and-isolation') {
+      if (name === 'secret') {
+        expect(ran).toContain('新建机密词条')
+        expect(ran).toContain('群聊上下文封顶到公开')
+      } else if (name === 'agent') {
+        expect(ran).toContain('群聊上下文封顶到公开')
+        expect(ran).not.toContain('新建机密词条')
+      } else {
+        expect(ran).toEqual([])
+      }
+    }
     if (scenario.id === 'credential-flow') {
       expect(ran.length > 0).toBe(name === 'secret')
+      if (name === 'secret') expect(ran).not.toContain('在词条里引用')
     }
     if (scenario.id === 'astrbot-group-round') expect(ran).toHaveLength(scenario.steps.length)
     if (scenario.id === 'permission-probe') expect(ran).toHaveLength(scenario.steps.length)
@@ -284,7 +323,47 @@ describe.skipIf(!testDatabaseUrl)('内置场景：三种执行方式、四种 Ke
     }, 20_000)
   })
 
-  it('真实模式中途断开：残留的记忆带着几小时后的有效期，到时候自己过期', async () => {
+  it('个人圈凭据管理 Key 跑 credential-flow：包含占位符引用的全流程 10 步全部通过', async () => {
+    const scenario = BENCH_SCENARIOS.find((s) => s.id === 'credential-flow')!
+    const createdClient = await app.request(
+      `/v1/circles/${ws.personalCircleId}/clients`,
+      jsonRequest(
+        'POST',
+        { slug: 'personal-mcp', name: 'Personal MCP', runtimeFamily: 'mcp' },
+        { cookie: ws.cookie },
+      ),
+    )
+    expect(createdClient.status).toBe(201)
+    const { id: clientId } = (await createdClient.json()) as { id: string }
+    const createdKey = await app.request(
+      `/v1/circles/${ws.personalCircleId}/clients/${clientId}/keys`,
+      jsonRequest('POST', { name: 'personal-secret', scopes: KEYS.secret }, { cookie: ws.cookie }),
+    )
+    expect(createdKey.status).toBe(201)
+    const { id: keyId } = (await createdKey.json()) as { id: string }
+    const found = await keyToSimulate(
+      deps,
+      { circleId: ws.personalCircleId, clientId, keyId },
+      ws.accountId,
+    )
+    if ('error' in found) throw new Error(found.error)
+
+    const result = await runBench(deps, found.key, ws.accountId, {
+      mode: 'rollback',
+      steps: scenario.steps,
+      replay: [],
+    })
+    expect(failures(result)).toEqual([])
+    expect(result.ok).toBe(true)
+    expect(result.counts).toEqual({
+      passed: scenario.steps.length,
+      failed: 0,
+      skipped: 0,
+      notRun: 0,
+    })
+  })
+
+  it('真实模式中途断开：残留的词条带着几小时后的有效期，到时候自己过期', async () => {
     const scenario = BENCH_SCENARIOS.find((s) => s.id === 'memory-crud')!
     const { principal } = await keyFor(KEYS.agent!, scenario)
     const before = Date.now()
@@ -296,14 +375,14 @@ describe.skipIf(!testDatabaseUrl)('内置场景：三种执行方式、四种 Ke
     })
     expect(failures(result)).toEqual([])
     expect(result.steps[1]!.text).toContain('有效到: ')
-    const rows = await withSpace(database.db, ws.spaceId, (tx) => tx.select().from(memories))
+    const rows = await withCircle(database.db, ws.circleId, (tx) => tx.select().from(entries))
     expect(rows).toHaveLength(1)
     expect(rows[0]!.deletedAt).toBeNull()
     expect(rows[0]!.validTo!.getTime()).toBeGreaterThanOrEqual(before + BENCH_EXPIRES_AFTER_MS)
     expect(rows[0]!.validTo!.getTime()).toBeLessThanOrEqual(Date.now() + BENCH_EXPIRES_AFTER_MS)
   })
 
-  it('重放能接上内置场景：第一次的写步骤放进下一次，结果和一次跑完相同', async () => {
+  it('重放能接上内置场景：第一次写下保留 shortId，第二次按原短 ID 读改照常走通', async () => {
     const scenario = BENCH_SCENARIOS.find((s) => s.id === 'memory-crud')!
     const { principal } = await keyFor(KEYS.agent!, scenario)
     const first = await runBench(deps, principal, ws.accountId, {
@@ -317,16 +396,16 @@ describe.skipIf(!testDatabaseUrl)('内置场景：三种执行方式、四种 Ke
       'kioku_create',
       'kioku_update',
     ])
-    // 重放不再求值：第二次运行的 ${run} 不同，读的是第一次写下的 URI
     const created = replay[0]!
-    const uri = created.kind === 'tool' ? created.arguments.uri : null
+    const shortId = created.kind === 'tool' ? created.shortId : undefined
+    expect(shortId).toMatch(/^m-/)
     const second = await runBench(deps, principal, ws.accountId, {
       mode: 'rollback',
       steps: [
         {
           kind: 'tool',
           tool: 'kioku_get',
-          arguments: { uri },
+          arguments: { id: shortId },
           expect: { contains: ['改过的记忆', '版本: 2'] },
         },
       ],

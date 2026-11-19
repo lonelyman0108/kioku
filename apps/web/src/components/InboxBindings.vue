@@ -11,11 +11,11 @@ import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 
 // 账号绑定：等当前账号确认的绑定只有概览接口给，和概览共用一份缓存
-const props = defineProps<{ spaceId: string }>()
+const props = defineProps<{ circleId: string }>()
 const active = useActivated()
 const overview = useQuery({
-  queryKey: computed(() => ['overview', props.spaceId] as const),
-  queryFn: ({ queryKey: [, spaceId] }) => api.overview(spaceId),
+  queryKey: computed(() => ['overview', props.circleId] as const),
+  queryFn: ({ queryKey: [, circleId] }) => api.overview(circleId),
   enabled: active,
   staleTime: 60_000,
 })
@@ -40,7 +40,7 @@ const total = computed(() => overview.data.value?.inbox.bindings ?? 0)
       <p v-if="total > items.length" class="panel-more">
         仅列出前 {{ items.length }} 个，处理后显示其余的。
       </p>
-      <SubjectBindings :space-id="spaceId" :items="items" />
+      <SubjectBindings :circle-id="circleId" :items="items" />
     </template>
   </div>
 </template>

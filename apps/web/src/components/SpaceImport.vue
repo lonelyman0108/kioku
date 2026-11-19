@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
 import {
-  SPACE_EXPORT_MAX_BYTES,
-  type SpaceImportPreview,
-  type SpaceImportResult,
+  CIRCLE_EXPORT_MAX_BYTES,
+  type CircleImportPreview,
+  type CircleImportResult,
 } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
@@ -12,17 +12,18 @@ import { useRouter } from 'vue-router'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { formatBytes } from '../backup'
-import { useSpaceLimit } from '../composables/useCreateSpace'
+import { useCircleLimit } from '../composables/useCreateSpace'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
-import { refreshSpaces } from '../spaces'
+import { circleKindLabels } from '../labels'
+import { refreshCircles } from '../spaces'
 import { formatTime } from '../time'
 import Hint from './Hint.vue'
 import ModalOrBare from './strata/ModalOrBare.vue'
 import NoteLine from './strata/NoteLine.vue'
 
-// 导入空间：空间 › 导入与导出里用弹窗入口，外壳的弹窗里（bare）直接放表单。
-// busy 报给弹窗：检查、导入期间不让关。导入成功后自己刷新、跳到新空间，再报 imported
+// 导入记忆圈：记忆圈 › 导入与导出里用弹窗入口，外壳的弹窗里（bare）直接放表单。
+// busy 报给弹窗：检查、导入期间不让关。导入成功后自己刷新、跳到目标记忆圈，再报 imported
 const props = withDefaults(defineProps<{ bare?: boolean }>(), { bare: false })
 const emit = defineEmits<{ imported: [] }>()
 const busy = defineModel<boolean>('busy', { default: false })
@@ -32,8 +33,8 @@ const toast = useToast()
 const router = useRouter()
 const queryClient = useQueryClient()
 const { me } = useSession()
-// 导入占一个名额：用完时写出原因，不让检查与导入
-const { blocked } = useSpaceLimit()
+// 导入共享圈才占名额；检查文件和个人圈合并导入不受共享圈上限限制
+const { blocked } = useCircleLimit()
 
 // 和实例设置的主密钥卡片同一份数据：没配主密钥时先提醒，含 secret 或托管凭据的文件导入不了。
 // 这个接口只给实例管理员，别的账号不问，导入时由服务端说明
@@ -48,8 +49,8 @@ const passphrase = ref('')
 const name = ref('')
 // 检查或导入失败的原因（口令不对、文件被改过、没配主密钥等）留在卡片上，改了再试
 const error = ref<string | null>(null)
-// 检查过的文件：是谁导出的、有多少。换了文件或口令就要重新检查，导入之前先让人看清哪些会归自己
-const preview = ref<SpaceImportPreview | null>(null)
+// 检查过的文件：是谁导出的、个人圈还是共享圈、有多少内容
+const preview = ref<CircleImportPreview | null>(null)
 watch([file, passphrase], () => {
   preview.value = null
   error.value = null
@@ -61,24 +62,23 @@ watch(modalOpen, (opened) => {
   }
 })
 
-const tooLarge = computed(() => (file.value ? file.value.size > SPACE_EXPORT_MAX_BYTES : false))
-const ready = computed(
-  () =>
-    Boolean(file.value) &&
-    !tooLarge.value &&
-    Boolean(passphrase.value) &&
-    !busy.value &&
-    !blocked.value,
+const tooLarge = computed(() => (file.value ? file.value.size > CIRCLE_EXPORT_MAX_BYTES : false))
+const canInspect = computed(
+  () => Boolean(file.value) && !tooLarge.value && Boolean(passphrase.value) && !busy.value,
 )
+const importBlocked = computed(
+  () => preview.value?.circleKind === 'shared' && Boolean(blocked.value),
+)
+const canImport = computed(() => canInspect.value && Boolean(preview.value) && !importBlocked.value)
 // 文件里写的导出人：是文件自带的，谁都能填，界面上不当成核实过的事实
 const exporter = computed(() => preview.value?.exporter.displayName || '（未填写）')
 
 async function inspect() {
-  if (!ready.value || !file.value) return
+  if (!canInspect.value || !file.value) return
   busy.value = true
   error.value = null
   try {
-    preview.value = await api.inspectSpaceImport(file.value, passphrase.value)
+    preview.value = await api.inspectCircleImport(file.value, passphrase.value)
   } catch (err) {
     error.value = err instanceof ApiError ? err.message : '检查失败'
   } finally {
@@ -86,13 +86,17 @@ async function inspect() {
   }
 }
 
-async function importSpace() {
-  if (!ready.value || !file.value || !preview.value) return
+async function importCircle() {
+  if (!canImport.value || !file.value || !preview.value) return
+  const currentPreview = preview.value
   busy.value = true
   error.value = null
-  let result: SpaceImportResult
+  let result: CircleImportResult
   try {
-    result = await api.importSpace(file.value, passphrase.value, name.value)
+    result = await api.importCircle(file.value, passphrase.value, {
+      name: currentPreview.circleKind === 'shared' ? name.value : undefined,
+      intoPersonalCircle: currentPreview.circleKind === 'personal',
+    })
   } catch (err) {
     error.value = err instanceof ApiError ? err.message : '导入失败'
     busy.value = false
@@ -104,16 +108,19 @@ async function importSpace() {
   name.value = ''
   const c = result.counts
   toast.add({
-    title: `已导入「${result.name}」`,
-    description: `共导入 ${c.memories} 条记忆。导出人的本人记忆 ${c.userMemories} 条与 ${c.credentials} 条凭据归当前账号所有。请为应用重新签发访问密钥；向量在后台重新生成。`,
+    title:
+      result.circleKind === 'personal'
+        ? `已合并导入个人圈「${result.name}」`
+        : `已导入共享圈「${result.name}」`,
+    description: `共导入 ${c.entries} 条词条（${c.variants} 个切片）、${c.credentials} 条凭据。请为接入实例重新签发访问密钥；向量在后台重新生成。`,
     color: 'success',
   })
-  // 新空间要先出现在自己的空间列表里，跳过去才不会被当成不是成员；名额与实例的列表一起刷新
-  await refreshSpaces(queryClient, undefined, { accounts: true }).catch(() => {})
+  // 新记忆圈要先出现在列表中，跳过去才不会被当成无权访问；名额与实例列表一起刷新
+  await refreshCircles(queryClient, undefined, { accounts: true }).catch(() => {})
   busy.value = false
   modalOpen.value = false
   emit('imported')
-  await router.push({ name: 'overview', params: { spaceId: result.spaceId } })
+  await router.push({ name: 'overview', params: { circleId: result.circleId } })
 }
 </script>
 
@@ -121,43 +128,40 @@ async function importSpace() {
   <ModalOrBare
     v-model:open="modalOpen"
     :bare="props.bare"
-    title="导入空间"
-    entry-title="还原为新空间（.kioku-space）"
-    entry-description="选择导出的空间文件并在弹窗中核对内容，当前账号将成为新空间的所有者。"
-    action-label="导入空间"
-    :icon="icons.importSpace"
+    title="导入记忆圈"
+    entry-title="导入记忆圈文件（.kioku-circle）"
+    entry-description="选择导出的记忆圈文件并在弹窗中核对内容；个人圈包合并入本人个人圈，共享圈包导入为新共享圈。"
+    action-label="导入记忆圈"
+    :icon="icons.importCircle"
     :busy="busy"
-    :disabled="Boolean(blocked)"
   >
     <template #note>
-      将空间导出文件导入为新空间。仅导入本人导出、或导出人同意移交的文件。
+      从导出文件恢复或迁移记忆圈。仅导入本人导出、或导出人同意移交的文件。
       <Hint>
         <p>
-          当前账号成为新空间的所有者。导出人的本人记忆与凭据导入后归当前账号所有，其中符合条件的本人记忆将进入当前账号
-          Agent 的启动加载，被客户端当作指令读取。
+          个人圈导出文件将合并进入当前账号的个人记忆圈；共享圈导出文件将新建为一个由当前账号所有的共享记忆圈。其中高优先级词条会按接入配置进入启动加载。
         </p>
         <p class="mt-1">
-          机密记忆与托管的凭据值使用当前实例的主密钥重新加密。访问密钥不在文件中，导入后需为应用重新签发。
+          机密词条与托管的凭据值使用当前实例的主密钥重新加密。访问密钥不在文件中，导入后需为接入实例重新签发。
         </p>
       </Hint>
     </template>
     <template #alerts>
       <NoteLine v-if="masterKey.data.value && !masterKey.data.value.configured" tone="warning">
-        当前实例未配置主密钥：文件包含机密记忆或托管的凭据时无法导入。请先配置 KIOKU_MASTER_KEY。
+        当前实例未配置主密钥：文件包含机密词条或托管的凭据时无法导入。请先配置 KIOKU_MASTER_KEY。
       </NoteLine>
-      <NoteLine v-if="blocked" tone="warning">{{ blocked }}，删除或转让一个空间后再导入。</NoteLine>
     </template>
-    <form class="space-y-4" @submit.prevent="preview ? importSpace() : inspect()">
+    <form class="space-y-4" @submit.prevent="preview ? importCircle() : inspect()">
       <UFormField
         label="导出文件"
-        :help="`不超过 ${formatBytes(SPACE_EXPORT_MAX_BYTES)}`"
-        :error="tooLarge ? `文件超出 ${formatBytes(SPACE_EXPORT_MAX_BYTES)} 上限` : undefined"
+        :help="`不超过 ${formatBytes(CIRCLE_EXPORT_MAX_BYTES)}`"
+        :error="tooLarge ? `文件超出 ${formatBytes(CIRCLE_EXPORT_MAX_BYTES)} 上限` : undefined"
       >
         <!-- 不预览文件内容：导出文件是加密的，预览要给它建 blob: 地址当图片加载，会被内容安全策略拦下 -->
         <UFileUpload
           v-model="file"
           label="选择或拖入导出文件"
-          description=".kioku-space"
+          description=".kioku-circle"
           layout="list"
           :file-image="false"
           class="w-full"
@@ -180,34 +184,47 @@ async function importSpace() {
           </NoteLine>
           <div class="space-y-1">
             <p>
-              文件记录的来源空间为「{{ preview.spaceName }}」，导出时间
-              {{ formatTime(preview.exportedAt) }}。共
-              {{ preview.counts.memories }} 条记忆（其中机密 {{ preview.counts.secrets }} 条）、{{
-                preview.counts.personas
+              文件记录来源：{{ circleKindLabels[preview.circleKind] }}「{{
+                preview.circleName
+              }}」，导出时间 {{ formatTime(preview.exportedAt) }}。共
+              {{ preview.counts.entries }} 条词条（{{ preview.counts.variants }} 个切片、其中机密
+              {{ preview.counts.secrets }} 条）、{{ preview.counts.personas }} 个人格、{{
+                preview.counts.clients
               }}
-              个人格、{{ preview.counts.apps }} 个应用、{{ preview.counts.subjects }} 个联系人。
+              个接入实例、{{ preview.counts.facetTerms }} 个切面词条、{{ preview.counts.subjects }}
+              个联系人。
             </p>
-            <p>
-              导入后，导出人的本人记忆 {{ preview.counts.userMemories }} 条，{{
-                preview.counts.credentials
+            <p v-if="preview.circleKind === 'personal'">
+              此包为个人圈导出文件，确认后将合并导入当前账号的个人记忆圈，包含
+              {{ preview.counts.credentials }} 条凭据与
+              {{ preview.counts.vaultConnections }} 个密码库连接；冲突的短 ID 将自动重映射。
+            </p>
+            <p v-else>
+              导入后，当前账号将成为新共享记忆圈的所有者，并接收文件中的
+              {{ preview.counts.credentials }} 条凭据与
+              {{ preview.counts.vaultConnections }} 个密码库连接及关联本人联系人（{{
+                preview.counts.linkedSubjects
               }}
-              条凭据与
-              {{ preview.counts.vaultConnections }} 个密码库连接，以及标记为导出人本人的
-              {{ preview.counts.linkedSubjects }}
-              个联系人均归当前账号所有；其中符合条件的本人记忆将进入当前账号 Agent
-              的启动加载。仅导入本人导出、或导出人同意移交的文件。
+              个）。仅导入本人导出、或导出人同意移交的文件。
             </p>
             <p v-if="!preview.exporter.dreamPrivate">
-              导出人已关闭「允许整理本人记忆」：新空间中同样保持关闭，本人记忆不发送给抽取模型。如需整理，请在新空间的空间设置中开启。
+              导出人已关闭「允许整理本人记忆」：导入后同样保持关闭，相关隐私内容不发送给抽取模型。如需整理，可在记忆圈设置中开启。
             </p>
           </div>
         </div>
-        <UFormField label="新空间名称" :help="`留空时使用导出时的空间名称「${preview.spaceName}」`">
+        <NoteLine v-if="importBlocked && blocked" tone="warning">
+          {{ blocked }}，删除或转让一个共享圈后再导入共享记忆圈。
+        </NoteLine>
+        <UFormField
+          v-if="preview.circleKind === 'shared'"
+          label="新共享圈名称"
+          :help="`留空时使用导出时的名称「${preview.circleName}」`"
+        >
           <UInput
             v-model="name"
             class="w-full"
             maxlength="64"
-            :placeholder="preview.spaceName"
+            :placeholder="preview.circleName"
             :disabled="busy"
           />
         </UFormField>
@@ -229,11 +246,11 @@ async function importSpace() {
           color="primary"
           variant="outline"
           :loading="busy"
-          :disabled="!ready"
+          :disabled="!canInspect"
         >
           检查文件
         </UButton>
-        <UButton v-else type="submit" :loading="busy" :disabled="!ready">确认导入</UButton>
+        <UButton v-else type="submit" :loading="busy" :disabled="!canImport">确认导入</UButton>
       </div>
     </form>
   </ModalOrBare>

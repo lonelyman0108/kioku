@@ -4,7 +4,7 @@ import {
   placeholderIdentifiers,
   scanPlaceholders,
 } from '../credential/placeholders'
-import { MAX_FACT_CHARS } from './extract'
+export const MAX_FACT_CHARS = 200
 
 // Dream 的建议里要写进记忆的文字：模型给的（生成建议时，不合规就丢掉这条建议）和执行时的（成员改过的或者原样的，
 // 不合规返回 400）过同一套检查。都不能像有明文凭据；合并后的策展记忆只能带合并的几条里本来就有的凭据占位符，

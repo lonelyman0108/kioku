@@ -2,9 +2,14 @@
 import { useToast } from '@nuxt/ui/composables'
 import {
   PLAINTEXT_CREDENTIAL,
-  URI_PATTERN,
+  VARIANTS_MAX,
+  normalizeWhen,
+  whenSignature,
   type ApplyDreamSuggestion,
+  type DreamEntryRef,
   type DreamSuggestion,
+  type VariantInput,
+  type WhenCondition,
 } from '@kioku/contracts'
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
@@ -12,7 +17,7 @@ import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
-import { layerOfUri } from '../coordinates'
+import { useSession } from '../composables/useSession'
 import {
   dreamScopeText,
   dreamSettingsKey,
@@ -24,10 +29,12 @@ import {
   triggerLabels,
 } from '../dream'
 import { invalidateInboxCounts } from '../inbox'
-import { layerLabels, URI_FORMAT_HINT } from '../labels'
-import { memoryRoute } from '../routes'
-import { spaceSettingsRoute } from '../settingsSections'
+import { entryKindLabels } from '../labels'
+import { whenLabel } from '../memoryDetail'
+import { entryRoute } from '../routes'
+import { circleSettingsRoute } from '../settingsSections'
 import { formatRelative, formatTime } from '../time'
+import FacetWhenPicker from './FacetWhenPicker.vue'
 import Hint from './Hint.vue'
 import EmptyState from './strata/EmptyState.vue'
 import MemoryFlags from './strata/MemoryFlags.vue'
@@ -36,119 +43,234 @@ import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
 import MemoryName from './strata/MemoryName.vue'
+import { entryBand } from './strata/strata'
 
-const props = defineProps<{ spaceId: string; canAct: boolean }>()
+const props = defineProps<{ circleId: string; canAct: boolean }>()
 const toast = useToast()
 const queryClient = useQueryClient()
+const { circle } = useSession()
 
 const active = useActivated()
-const listKey = computed(() => ['dream-suggestions', props.spaceId] as const)
+const listKey = computed(() => ['dream-suggestions', props.circleId] as const)
 const suggestions = useInfiniteQuery({
   queryKey: listKey,
-  // 参数从键里取：换了空间之后，旧键剩下的页还在重新拉取时，不会去请求新的空间
-  queryFn: ({ pageParam, queryKey: [, spaceId] }) => api.dreamSuggestions(spaceId, pageParam),
+  // 参数从键里取：换了记忆圈之后，旧键剩下的页还在重新拉取时，不会去请求新的记忆圈
+  queryFn: ({ pageParam, queryKey: [, cid] }) => api.dreamSuggestions(cid, pageParam),
   initialPageParam: undefined as string | undefined,
   getNextPageParam: (last) => last.nextCursor ?? undefined,
   enabled: active,
 })
 const items = computed(() => suggestions.data.value?.pages.flatMap((page) => page.items) ?? [])
 
-const runsKey = computed(() => ['dream-runs', props.spaceId] as const)
+const facets = useQuery({
+  queryKey: computed(() => ['facets', props.circleId] as const),
+  queryFn: ({ queryKey: [, cid] }) => api.facets(cid),
+  enabled: active,
+  staleTime: 60_000,
+})
+const vocab = computed(() => facets.data.value ?? undefined)
+
+const runsKey = computed(() => ['dream-runs', props.circleId] as const)
 const runs = useQuery({
   queryKey: runsKey,
-  queryFn: ({ queryKey: [, spaceId] }) => api.dreamRuns(spaceId),
+  queryFn: ({ queryKey: [, cid] }) => api.dreamRuns(cid),
   enabled: active,
 })
 const lastRun = computed(() => {
   const run = runs.data.value?.runs[0]
   return run ? lastRunSummary(run) : null
 })
-// 自己的本人记忆整理不整理：在空间设置里改，这里说一声
+// 自己的个人内容整理不整理：在记忆圈设置里改，这里说一声
 const mine = useQuery({
-  queryKey: computed(() => dreamSettingsKey(props.spaceId)),
-  queryFn: ({ queryKey: [, spaceId] }) => api.dreamSettings(spaceId),
+  queryKey: computed(() => dreamSettingsKey(props.circleId)),
+  queryFn: ({ queryKey: [, cid] }) => api.dreamSettings(cid),
   enabled: active,
 })
 
-// 正在改的合并正文与提炼草稿，按建议记下；没改的按建议原样执行。提炼的归属由坐标的开头决定
-interface Draft {
+const bandOf = (entry: DreamEntryRef) => entryBand({ kind: entry.kind }, circle.value)
+const hasWhen = (when: WhenCondition | null | undefined) =>
+  !!when && Object.keys(normalizeWhen(when)).length > 0
+
+interface DraftVariant {
+  key: number
+  when: Record<string, string[]>
   content: string
-  uri: string
+}
+interface Draft {
+  title: string
+  content: string
+  variants: DraftVariant[]
+  useVariants: boolean
+  when: Record<string, string[]>
+  topicsText: string
   disclosure: string
   priority: number
 }
+let nextVariantKey = 1
+const makeDraftVariant = (when: WhenCondition = {}, content = ''): DraftVariant => ({
+  key: nextVariantKey++,
+  when: normalizeWhen(when),
+  content,
+})
+
 const drafts = reactive(new Map<string, Draft>())
 watch(
-  () => props.spaceId,
+  () => props.circleId,
   () => drafts.clear(),
 )
 function startEdit(item: DreamSuggestion) {
+  const variants = (item.variants ?? []).map((v) => makeDraftVariant(v.when, v.content))
+  const useVariants =
+    item.kind === 'merge_variants' || item.kind === 'generalize' || variants.length > 0
   drafts.set(item.id, {
+    title: item.title ?? '',
     content: item.content ?? '',
-    uri: item.uri ?? '',
+    variants: variants.length ? variants : [makeDraftVariant(item.when ?? {}, item.content ?? '')],
+    useVariants,
+    when: normalizeWhen(item.when ?? {}),
+    topicsText: (item.topics ?? []).join(', '),
     disclosure: item.disclosure ?? '',
     priority: item.targetPriority ?? 1,
   })
 }
-// 草稿写到哪一类归属：坐标的开头说了算
-const draftLayer = (uri: string | null) => {
-  const layer = uri ? layerOfUri(uri.trim()) : null
-  return layer ? layerLabels[layer] : null
+function addDraftVariant(id: string) {
+  const draft = drafts.get(id)
+  if (!draft || draft.variants.length >= VARIANTS_MAX) return
+  draft.variants.push(makeDraftVariant())
 }
-const looksPlaintext = (text: string) => PLAINTEXT_CREDENTIAL.test(text)
+function removeDraftVariant(id: string, idx: number) {
+  const draft = drafts.get(id)
+  if (!draft || draft.variants.length <= 1) return
+  draft.variants.splice(idx, 1)
+}
+const looksDraftPlaintext = (item: DreamSuggestion): boolean => {
+  const draft = drafts.get(item.id)
+  if (!draft) return false
+  if (item.kind === 'merge') return PLAINTEXT_CREDENTIAL.test(draft.content)
+  if (item.kind === 'merge_variants' || item.kind === 'generalize' || draft.useVariants) {
+    return draft.variants.some((v) => PLAINTEXT_CREDENTIAL.test(v.content))
+  }
+  if (item.kind === 'distill' || item.kind === 'distill_episode') {
+    return PLAINTEXT_CREDENTIAL.test(draft.content)
+  }
+  return false
+}
 
-// 改过的草稿能不能提交：URI 格式对、正文不空
+// 改过的草稿能不能提交
 function draftProblem(item: DreamSuggestion): string | null {
   const draft = drafts.get(item.id)
   if (!draft) return null
-  if (item.kind === 'promote') return null
-  if (!draft.content.trim()) return '正文不能为空'
-  if (item.kind === 'distill' && !URI_PATTERN.test(draft.uri.trim())) {
-    return URI_FORMAT_HINT
+  if (item.kind === 'promote' || item.kind === 'facet_tag') return null
+  if (item.kind === 'merge') return !draft.content.trim() ? '正文不能为空' : null
+  if (item.kind === 'merge_variants' || item.kind === 'generalize' || draft.useVariants) {
+    if (!draft.variants.length) return '至少保留一个切片'
+    const seen = new Set<string>()
+    for (const v of draft.variants) {
+      if (!v.content.trim()) return '正文不能为空'
+      const sig = whenSignature(normalizeWhen(v.when))
+      if (seen.has(sig)) return '存在相同切面条件的重复切片'
+      seen.add(sig)
+    }
+    return null
   }
+  if (!draft.content.trim()) return '正文不能为空'
   return null
 }
 
 function bodyOf(item: DreamSuggestion): ApplyDreamSuggestion {
   const draft = drafts.get(item.id)
   if (!draft) return {}
-  if (item.kind === 'merge') return { content: draft.content }
-  if (item.kind === 'promote') return { priority: draft.priority }
-  const uri = draft.uri.trim()
-  return { uri, content: draft.content, disclosure: draft.disclosure.trim() || null }
+  switch (item.kind) {
+    case 'merge':
+      return { content: draft.content }
+    case 'merge_variants':
+    case 'generalize':
+      return {
+        variants: draft.variants.map((v, i) => ({
+          when: normalizeWhen(v.when),
+          content: v.content.trim(),
+          sortOrder: i,
+        })),
+      }
+    case 'facet_tag':
+      return { when: normalizeWhen(draft.when) }
+    case 'distill':
+    case 'distill_episode': {
+      const topics = draft.topicsText
+        .split(/[,，、\s]+/)
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean)
+      const variants: VariantInput[] = draft.variants.map((v, i) => ({
+        when: normalizeWhen(v.when),
+        content: v.content.trim(),
+        sortOrder: i,
+      }))
+      return {
+        ...(draft.title.trim() ? { title: draft.title.trim() } : {}),
+        ...(draft.useVariants
+          ? { variants }
+          : { content: draft.content, when: normalizeWhen(draft.when) }),
+        ...(topics.length ? { topics } : {}),
+        disclosure: draft.disclosure.trim() || null,
+      }
+    }
+    case 'promote':
+      return { priority: draft.priority }
+    default:
+      return {}
+  }
 }
+
+const editable = (kind: DreamSuggestion['kind']) => kind !== 'stale' && kind !== 'review'
 
 // 执行按钮上的说法
 function actionLabel(item: DreamSuggestion): string {
-  if (item.kind === 'merge') return '合并'
-  if (item.kind === 'distill') return '新建记忆'
-  if (item.kind === 'stale') return '设为过时'
-  if (item.kind === 'promote') return '提升优先级'
-  return item.verdict === 'delete' ? '删除' : '确认'
+  switch (item.kind) {
+    case 'merge':
+      return '合并'
+    case 'merge_variants':
+      return '合并为多变体'
+    case 'facet_tag':
+      return '应用切面标签'
+    case 'generalize':
+      return '应用泛化上浮'
+    case 'distill':
+      return '新建词条'
+    case 'distill_episode':
+      return '沉淀为词条'
+    case 'stale':
+      return '设为过时'
+    case 'promote':
+      return '提升优先级'
+    case 'review':
+      return item.verdict === 'delete' ? '删除' : '确认'
+  }
 }
 // 会删掉记忆的先确认：合并删掉其余几条，审核里的删除
 const destructive = (item: DreamSuggestion) =>
-  item.kind === 'merge' || (item.kind === 'review' && item.verdict === 'delete')
+  item.kind === 'merge' ||
+  item.kind === 'merge_variants' ||
+  (item.kind === 'review' && item.verdict === 'delete')
 
-// 处理之后要刷新的：建议与运行记录、待确认内容、记忆的各个列表、联系人页、变更记录、概览与待处理的条数
-function refresh(spaceId: string) {
+// 处理之后要刷新的：建议与运行记录、待确认内容、词条列表、联系人页、变更记录、概览与待处理的条数
+function refresh(circleId: string) {
   for (const key of [
     'dream-suggestions',
     'inbox-counts',
     'review',
-    'memory',
-    'memory-list',
-    'memory-children',
-    'memory-deleted',
-    'memory-expired',
-    'memory-history',
+    'entry',
+    'entry-list',
+    'entry-browse',
+    'entry-deleted',
+    'entry-expired',
+    'entry-history',
     'activity-event',
     'subjects',
     'subject',
     'activity',
     'overview',
   ]) {
-    void queryClient.invalidateQueries({ queryKey: [key, spaceId] })
+    void queryClient.invalidateQueries({ queryKey: [key, circleId] })
   }
 }
 
@@ -156,23 +278,23 @@ const busy = ref<string | null>(null)
 const confirming = ref<DreamSuggestion | null>(null)
 async function apply(item: DreamSuggestion) {
   if (busy.value) return
-  // 请求期间可能换了空间（页面会被复用）：按发出请求时的空间刷新
-  const spaceId = props.spaceId
+  // 请求期间可能换了记忆圈（页面会被复用）：按发出请求时的记忆圈刷新
+  const circleId = props.circleId
   busy.value = item.id
   try {
-    const result = await api.applyDreamSuggestion(spaceId, item.id, bodyOf(item))
+    const result = await api.applyDreamSuggestion(circleId, item.id, bodyOf(item))
     drafts.delete(item.id)
     toast.add({
-      title: result.memory ? `已新建「${result.memory.title}」` : `已${actionLabel(item)}`,
+      title: result.entry ? `已新建「${result.entry.title}」` : `已${actionLabel(item)}`,
       color: 'success',
     })
-    refresh(spaceId)
+    refresh(circleId)
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '执行失败', color: 'error' })
     // 建议作废了、已经被别人处理了：刷新列表
     if (err instanceof ApiError && (err.status === 404 || err.status === 409)) {
-      void queryClient.invalidateQueries({ queryKey: ['dream-suggestions', spaceId] })
-      void invalidateInboxCounts(queryClient, spaceId)
+      void queryClient.invalidateQueries({ queryKey: ['dream-suggestions', circleId] })
+      void invalidateInboxCounts(queryClient, circleId)
     }
   } finally {
     busy.value = null
@@ -181,18 +303,18 @@ async function apply(item: DreamSuggestion) {
 }
 async function reject(item: DreamSuggestion) {
   if (busy.value) return
-  const spaceId = props.spaceId
+  const circleId = props.circleId
   busy.value = item.id
   try {
-    await api.rejectDreamSuggestion(spaceId, item.id)
+    await api.rejectDreamSuggestion(circleId, item.id)
     drafts.delete(item.id)
     toast.add({ title: '已拒绝，不再提出相同建议', color: 'success' })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '拒绝失败', color: 'error' })
   } finally {
     busy.value = null
-    void queryClient.invalidateQueries({ queryKey: ['dream-suggestions', spaceId] })
-    void invalidateInboxCounts(queryClient, spaceId)
+    void queryClient.invalidateQueries({ queryKey: ['dream-suggestions', circleId] })
+    void invalidateInboxCounts(queryClient, circleId)
   }
 }
 
@@ -200,8 +322,8 @@ async function reject(item: DreamSuggestion) {
 const runId = ref<string | null>(null)
 const starting = ref(false)
 const run = useQuery({
-  queryKey: computed(() => ['dream-run', props.spaceId, runId.value]),
-  queryFn: () => api.dreamRun(props.spaceId, runId.value!),
+  queryKey: computed(() => ['dream-run', props.circleId, runId.value]),
+  queryFn: () => api.dreamRun(props.circleId, runId.value!),
   enabled: computed(() => Boolean(runId.value)),
   refetchInterval: 3_000,
   retry: false,
@@ -216,16 +338,16 @@ onBeforeUnmount(() => {
   alive = false
   stopWaiting()
 })
-// 换了空间：不再等上一个空间的那一次
-watch(() => props.spaceId, stopWaiting)
+// 换了记忆圈：不再等上一个记忆圈的那一次
+watch(() => props.circleId, stopWaiting)
 async function runNow() {
   if (starting.value || runId.value) return
-  const spaceId = props.spaceId
+  const circleId = props.circleId
   starting.value = true
   try {
-    const queued = await api.startDream(spaceId)
-    // 请求回来之前已经离开了这一页或者换了空间：不再等
-    if (!alive || spaceId !== props.spaceId) return
+    const queued = await api.startDream(circleId)
+    // 请求回来之前已经离开了这一页或者换了记忆圈：不再等
+    if (!alive || circleId !== props.circleId) return
     runId.value = queued.runId
     giveUp = setTimeout(stopWaiting, 15 * 60_000)
   } catch (err) {
@@ -241,7 +363,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
   toast.add(outcome ?? { title: '无法获取本次整理的状态，请稍后刷新查看', color: 'warning' })
   void queryClient.invalidateQueries({ queryKey: listKey.value })
   void queryClient.invalidateQueries({ queryKey: runsKey.value })
-  void invalidateInboxCounts(queryClient, props.spaceId)
+  void invalidateInboxCounts(queryClient, props.circleId)
 })
 </script>
 
@@ -250,7 +372,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
     <SectionHeading title="整理建议">
       <template #hint>
         <Hint>
-          每天自动整理一次，只提建议，执行后才会修改记忆。建议分四类：合并重复内容、将多条事实提炼为一个节点、标记可能过时的内容、对未确认来源的内容建议确认或删除。执行后写入的来源记为本人；已拒绝的相同建议不再提出。
+          每天自动整理一次，只提建议，执行后才会修改记忆。建议包含合并重复内容、合并多变体词条、补全切面标签、跨项目泛化上浮、提炼词条、沉淀会话摘要、标记过时、审核待确认内容与调整优先级。执行后写入的来源记为本人；已拒绝的相同建议不再提出。
         </Hint>
       </template>
       <template v-if="lastRun" #actions>
@@ -265,10 +387,10 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
       <p v-if="mine.data.value">
         {{
           mine.data.value.includePrivate
-            ? '当前账号的本人记忆（机密除外）也会发送给实例配置的抽取模型整理，'
-            : '当前账号已关闭本人记忆的整理，目前仅整理共享内容，'
-        }}<RouterLink :to="spaceSettingsRoute(spaceId, 'extraction')" class="text-primary"
-          >可在空间设置中{{ mine.data.value.includePrivate ? '关闭' : '开启' }}</RouterLink
+            ? '当前账号的个人内容（机密除外）也会发送给实例配置的抽取模型整理，'
+            : '当前账号已关闭个人内容的整理，目前仅整理共享内容，'
+        }}<RouterLink :to="circleSettingsRoute(circleId, 'extraction')" class="text-primary"
+          >可在记忆圈设置中{{ mine.data.value.includePrivate ? '关闭' : '开启' }}</RouterLink
         >。
       </p>
       <UButton
@@ -313,36 +435,38 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
           <p class="suggestion-reason">{{ item.reason }}</p>
 
           <ul class="suggestion-memories">
-            <li v-for="memory in item.memories" :key="memory.id">
+            <li v-for="entry in item.entries" :key="entry.id">
               <p class="memory-head">
-                <StrataSwatch :layer="memory.layer" :sensitivity="memory.sensitivity" />
+                <StrataSwatch :band="bandOf(entry)" :sensitivity="entry.sensitivity" />
                 <RouterLink
-                  v-if="memory.uri"
-                  :to="memoryRoute(spaceId, memory.uri)"
+                  v-if="entry.kind === 'entry'"
+                  :to="entryRoute(circleId, entry.shortId)"
                   class="memory-link"
                 >
-                  <MemoryName :uri="memory.uri" :title="memory.title" />
+                  <MemoryName :short-id="entry.shortId" :title="entry.title" />
                 </RouterLink>
                 <RouterLink
-                  v-else-if="memory.subject"
-                  :to="{ name: 'contact', params: { spaceId, subjectId: memory.subject.id } }"
+                  v-else-if="entry.subject"
+                  :to="{ name: 'contact', params: { circleId, subjectId: entry.subject.id } }"
                   class="memory-link"
                 >
-                  关于「{{ memory.subject.displayName }}」
+                  关于「{{ entry.subject.displayName }}」
                 </RouterLink>
-                <span v-else>{{ layerLabels[memory.layer] }}</span>
-                <!-- 色块旁边写归属，和记忆列表一样；没有坐标也不是联系人时上面已经写了归属的全名 -->
+                <span v-else>{{ entryKindLabels[entry.kind] }}</span>
                 <MemoryFlags
-                  v-if="memory.uri || memory.subject"
-                  :layer="memory.layer"
-                  :sensitivity="memory.sensitivity"
+                  v-if="entry.kind === 'entry' || entry.subject"
+                  :band="bandOf(entry)"
+                  :sensitivity="entry.sensitivity"
                 />
-                <span v-if="item.keepId === memory.id" class="memory-flag">保留</span>
-                <span v-if="memory.provenance === 'untrusted'" class="memory-flag warning">
+                <span v-if="hasWhen(entry.when)" class="memory-flag">
+                  {{ whenLabel(entry.when, vocab) }}
+                </span>
+                <span v-if="item.keepId === entry.id" class="memory-flag">保留</span>
+                <span v-if="entry.provenance === 'untrusted'" class="memory-flag warning">
                   未确认来源
                 </span>
               </p>
-              <p class="memory-body">{{ memory.content }}</p>
+              <p class="memory-body">{{ entry.content }}</p>
             </li>
           </ul>
 
@@ -360,32 +484,170 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
               <p>{{ item.content }}</p>
             </div>
           </template>
-          <template v-else-if="item.kind === 'distill'">
+          <template v-else-if="item.kind === 'merge_variants' || item.kind === 'generalize'">
+            <div v-if="drafts.has(item.id)" class="draft-form">
+              <div class="draft-variants-head">
+                <p class="draft-label">切片列表</p>
+                <UButton
+                  v-if="drafts.get(item.id)!.variants.length < VARIANTS_MAX"
+                  size="xs"
+                  color="neutral"
+                  variant="outline"
+                  @click="addDraftVariant(item.id)"
+                >
+                  新增切片
+                </UButton>
+              </div>
+              <div
+                v-for="(variant, idx) in drafts.get(item.id)!.variants"
+                :key="variant.key"
+                class="draft-variant"
+              >
+                <div class="draft-variant-head">
+                  <span class="draft-label">切片 {{ idx + 1 }}</span>
+                  <UButton
+                    v-if="drafts.get(item.id)!.variants.length > 1"
+                    size="xs"
+                    color="error"
+                    variant="ghost"
+                    @click="removeDraftVariant(item.id, idx)"
+                  >
+                    删除切片
+                  </UButton>
+                </div>
+                <FacetWhenPicker
+                  v-model="variant.when"
+                  :circle-id="circleId"
+                  :vocabulary="facets.data.value ?? null"
+                />
+                <UFormField label="正文">
+                  <UTextarea
+                    v-model="variant.content"
+                    :rows="3"
+                    autoresize
+                    class="w-full font-mono"
+                  />
+                </UFormField>
+              </div>
+            </div>
+            <div v-else class="draft">
+              <span class="draft-label">建议切片列表</span>
+              <div v-for="(variant, idx) in item.variants ?? []" :key="idx" class="draft-slice">
+                <p class="draft-meta">{{ whenLabel(variant.when, vocab) }}</p>
+                <p>{{ variant.content }}</p>
+              </div>
+            </div>
+          </template>
+          <template v-else-if="item.kind === 'facet_tag'">
+            <div v-if="drafts.has(item.id)" class="draft-form">
+              <p class="draft-label">适用切面</p>
+              <FacetWhenPicker
+                v-model="drafts.get(item.id)!.when"
+                :circle-id="circleId"
+                :vocabulary="facets.data.value ?? null"
+              />
+            </div>
+            <div v-else class="draft">
+              <span class="draft-label">建议适用切面</span>
+              <p>{{ whenLabel(item.when ?? {}, vocab) }}</p>
+            </div>
+          </template>
+          <template v-else-if="item.kind === 'distill' || item.kind === 'distill_episode'">
             <div v-if="drafts.has(item.id)" class="draft-form">
               <p class="draft-label">草稿</p>
-              <UFormField label="坐标" :help="draftLayer(drafts.get(item.id)!.uri) ?? undefined">
-                <UInput v-model="drafts.get(item.id)!.uri" class="w-full font-mono" />
+              <UFormField label="标题">
+                <UInput v-model="drafts.get(item.id)!.title" class="w-full" />
+              </UFormField>
+              <UFormField label="主题标签" help="多个标签用逗号分隔">
+                <UInput v-model="drafts.get(item.id)!.topicsText" class="w-full" />
               </UFormField>
               <UFormField label="触发场景" help="什么场景下应该想起这条记忆">
                 <UInput v-model="drafts.get(item.id)!.disclosure" class="w-full" />
               </UFormField>
-              <UFormField label="正文">
-                <UTextarea
-                  v-model="drafts.get(item.id)!.content"
-                  :rows="4"
-                  autoresize
-                  class="w-full font-mono"
-                />
-              </UFormField>
+              <template v-if="drafts.get(item.id)!.useVariants">
+                <div class="draft-variants-head">
+                  <span class="draft-label">切片列表</span>
+                  <UButton
+                    v-if="drafts.get(item.id)!.variants.length < VARIANTS_MAX"
+                    size="xs"
+                    color="neutral"
+                    variant="outline"
+                    @click="addDraftVariant(item.id)"
+                  >
+                    新增切片
+                  </UButton>
+                </div>
+                <div
+                  v-for="(variant, idx) in drafts.get(item.id)!.variants"
+                  :key="variant.key"
+                  class="draft-variant"
+                >
+                  <div class="draft-variant-head">
+                    <span class="draft-label">切片 {{ idx + 1 }}</span>
+                    <UButton
+                      v-if="drafts.get(item.id)!.variants.length > 1"
+                      size="xs"
+                      color="error"
+                      variant="ghost"
+                      @click="removeDraftVariant(item.id, idx)"
+                    >
+                      删除切片
+                    </UButton>
+                  </div>
+                  <FacetWhenPicker
+                    v-model="variant.when"
+                    :circle-id="circleId"
+                    :vocabulary="facets.data.value ?? null"
+                  />
+                  <UFormField label="正文">
+                    <UTextarea
+                      v-model="variant.content"
+                      :rows="3"
+                      autoresize
+                      class="w-full font-mono"
+                    />
+                  </UFormField>
+                </div>
+              </template>
+              <template v-else>
+                <UFormField label="适用切面">
+                  <FacetWhenPicker
+                    v-model="drafts.get(item.id)!.when"
+                    :circle-id="circleId"
+                    :vocabulary="facets.data.value ?? null"
+                  />
+                </UFormField>
+                <UFormField label="正文">
+                  <UTextarea
+                    v-model="drafts.get(item.id)!.content"
+                    :rows="4"
+                    autoresize
+                    class="w-full font-mono"
+                  />
+                </UFormField>
+              </template>
             </div>
             <div v-else class="draft">
               <span class="draft-label">草稿</span>
-              <p class="draft-uri">
-                <code>{{ item.uri }}</code>
-                <span v-if="draftLayer(item.uri)">{{ draftLayer(item.uri) }}</span>
+              <p v-if="item.title" class="draft-meta">
+                <b>{{ item.title }}</b>
               </p>
-              <p v-if="item.disclosure" class="draft-uri">触发场景：{{ item.disclosure }}</p>
-              <p>{{ item.content }}</p>
+              <p v-if="item.topics?.length" class="draft-meta">
+                主题标签：{{ item.topics.join('、') }}
+              </p>
+              <p v-if="item.disclosure" class="draft-meta">触发场景：{{ item.disclosure }}</p>
+              <template v-if="item.variants?.length">
+                <div v-for="(variant, idx) in item.variants" :key="idx" class="draft-slice">
+                  <p class="draft-meta">{{ whenLabel(variant.when, vocab) }}</p>
+                  <p>{{ variant.content }}</p>
+                </div>
+              </template>
+              <template v-else>
+                <p v-if="hasWhen(item.when)" class="draft-meta">
+                  适用切面：{{ whenLabel(item.when ?? {}, vocab) }}
+                </p>
+                <p>{{ item.content }}</p>
+              </template>
             </div>
           </template>
           <template v-else-if="item.kind === 'promote'">
@@ -412,7 +674,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
             </div>
           </template>
           <NoteLine
-            v-if="drafts.has(item.id) && looksPlaintext(drafts.get(item.id)!.content)"
+            v-if="drafts.has(item.id) && looksDraftPlaintext(item)"
             class="dream-note"
             tone="warning"
           >
@@ -421,7 +683,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
           </NoteLine>
           <p class="suggestion-effect">{{ suggestionKinds[item.kind].effect }}</p>
           <p v-if="canAct && !item.actionable" class="suggestion-effect">
-            包含当前账号无权写入的记忆（如其他成员的应用的记忆），需由有权限的成员处理。
+            包含当前账号无权写入的记忆（如其他成员的接入实例的记忆），需由有权限的成员处理。
           </p>
           <p v-if="draftProblem(item)" class="suggestion-problem">{{ draftProblem(item) }}</p>
         </div>
@@ -438,10 +700,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
             {{ actionLabel(item) }}
           </UButton>
           <UButton
-            v-if="
-              (item.kind === 'merge' || item.kind === 'distill' || item.kind === 'promote') &&
-              !drafts.has(item.id)
-            "
+            v-if="editable(item.kind) && !drafts.has(item.id)"
             color="primary"
             variant="outline"
             :disabled="Boolean(busy)"
@@ -486,7 +745,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
       <SectionHeading title="最近整理" :level="3">
         <template #hint>
           <Hint>
-            整理使用抽取模型，用量计入空间的抽取预算。只处理上次以来新增或修改的记忆，其他成员的本人记忆不在此列出。共享内容先整理并记录一条汇总，之后才整理各成员的本人记忆，因此当前账号的结果可能稍晚于整理状态出现。
+            整理使用抽取模型，用量计入记忆圈的抽取预算。只处理上次以来新增或修改的记忆，其他成员的个人内容不在此列出。共享内容先整理并记录一条汇总，之后才整理各成员的个人内容，因此当前账号的结果可能稍晚于整理状态出现。
           </Hint>
         </template>
       </SectionHeading>
@@ -516,7 +775,11 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
 
     <UModal
       :open="confirming !== null"
-      :title="confirming?.kind === 'merge' ? '合并这几条记忆？' : '删除这条内容？'"
+      :title="
+        confirming?.kind === 'merge' || confirming?.kind === 'merge_variants'
+          ? '合并这几条记忆？'
+          : '删除这条内容？'
+      "
       @update:open="(v) => !v && (confirming = null)"
     >
       <template #body>
@@ -526,7 +789,9 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
         <div class="flex w-full justify-end gap-2">
           <UButton color="neutral" variant="ghost" @click="confirming = null">取消</UButton>
           <UButton
-            :color="confirming?.kind === 'merge' ? 'primary' : 'error'"
+            :color="
+              confirming?.kind === 'review' && confirming.verdict === 'delete' ? 'error' : 'primary'
+            "
             :loading="busy !== null"
             @click="confirming && apply(confirming)"
           >
@@ -671,6 +936,29 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
 }
 .draft-uri code {
   color: var(--ui-text);
+}
+.draft-meta {
+  font-size: 13px;
+  color: var(--ui-text-muted);
+}
+.draft-slice + .draft-slice {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--ui-border);
+}
+.draft-variants-head,
+.draft-variant-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.draft-variant {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--ui-border);
 }
 .draft-field {
   margin-top: 12px;

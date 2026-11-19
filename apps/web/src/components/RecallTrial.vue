@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { AppAdvancedSummary, DebugCandidate } from '@kioku/contracts'
+import type { ClientAdvancedSummary, DebugCandidate, EntryKind } from '@kioku/contracts'
 import { useQueries, useQuery } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 
@@ -12,44 +12,45 @@ import {
 } from '../advancedSettings'
 import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
-import { ownedApps } from '../benchSession'
+import { ownedClients } from '../apps'
 import { useSession } from '../composables/useSession'
 import { debugKeyChoices } from '../recall'
 import StrataSwatch from './strata/StrataSwatch.vue'
+import { entryBand } from './strata/strata'
 
 // 试算：选一个访问密钥、填一句提示语，用召回调试取候选的分数，再按表单里的最低分与条数在本地重算，不保存。
-// 召回调试只给应用所有者（会读到所有者的本人记忆），所以只列当前账号是所有者的应用的有效访问密钥
-// minScore、limit 是空间表单里的值；appOverrides 是空间里覆盖了设置的应用：所选访问密钥的应用自己覆盖了
-// 最低分或条数时，按应用的值算（空间的滑块对它不起作用），并写明
+// 召回调试只给接入实例所有者（会读到所有者的个人内容），所以只列当前账号是所有者的接入实例的有效访问密钥
+// minScore、limit 是记忆圈表单里的值；clientOverrides 是记忆圈里覆盖了设置的接入实例：所选访问密钥的接入实例自己覆盖了
+// 最低分或条数时，按接入实例的值算（记忆圈的滑块对它不起作用），并写明
 const props = defineProps<{
-  spaceId: string
+  circleId: string
   minScore: number
   limit: number
-  appOverrides?: readonly AppAdvancedSummary[]
+  clientOverrides?: readonly ClientAdvancedSummary[]
 }>()
-const { me } = useSession()
+const { me, circle } = useSession()
 
-const apps = useQuery({
-  queryKey: computed(() => ['apps', props.spaceId]),
-  queryFn: () => api.apps(props.spaceId),
+const clients = useQuery({
+  queryKey: computed(() => ['clients', props.circleId]),
+  queryFn: () => api.clients(props.circleId),
 })
-const owned = computed(() => ownedApps(apps.data.value ?? [], me.data.value?.id))
-// 和应用详情的访问密钥列表同一份缓存
+const owned = computed(() => ownedClients(clients.data.value ?? [], me.data.value?.id))
+// 和接入实例详情的访问密钥列表同一份缓存
 const keyResults = useQueries({
   queries: computed(() =>
-    owned.value.map((app) => ({
-      queryKey: ['keys', props.spaceId, app.id] as const,
-      queryFn: ({ queryKey: [, sid, id] }: { queryKey: readonly string[] }) => api.keys(sid!, id!),
+    owned.value.map((client) => ({
+      queryKey: ['keys', props.circleId, client.id] as const,
+      queryFn: ({ queryKey: [, cid, id] }: { queryKey: readonly string[] }) => api.keys(cid!, id!),
     })),
   ),
 })
 const choices = computed(() => debugKeyChoices(owned.value, keyResults.value))
 const keysPending = computed(
-  () => apps.isPending.value || keyResults.value.some((result) => result.isPending),
+  () => clients.isPending.value || keyResults.value.some((result) => result.isPending),
 )
 const items = computed(() =>
-  choices.value.options.map(({ app, key }) => ({
-    label: `${app.name} · ${key.name}`,
+  choices.value.options.map(({ client, key }) => ({
+    label: `${client.name} · ${key.name}`,
     value: key.id,
   })),
 )
@@ -63,12 +64,12 @@ watch(
 )
 // 没有能选的访问密钥时为什么
 const unavailable = computed(() => {
-  if (apps.isError.value) return readFailure(apps.error.value)
-  if (!owned.value.length) return '当前账号在这个空间没有应用，无法试算。'
+  if (clients.isError.value) return readFailure(clients.error.value)
+  if (!owned.value.length) return '当前账号在这个记忆圈没有接入实例，无法试算。'
   if (!items.value.length) {
     return choices.value.failures.length
       ? `访问密钥读取失败：${choices.value.failures[0]!.text}`
-      : '当前账号的应用暂无有效访问密钥，无法试算。'
+      : '当前账号的接入实例暂无有效访问密钥，无法试算。'
   }
   return null
 })
@@ -78,8 +79,8 @@ const candidates = ref<DebugCandidate[] | null>(null)
 const failure = ref<string | null>(null)
 const running = ref(false)
 let counter = 0
-// 换了访问密钥或空间，之前的分数就不是这一个的了
-watch([() => props.spaceId, keyId], () => {
+// 换了访问密钥或记忆圈，之前的分数就不是这一个的了
+watch([() => props.circleId, keyId], () => {
   counter++
   candidates.value = null
   failure.value = null
@@ -94,7 +95,9 @@ async function run() {
   running.value = true
   failure.value = null
   try {
-    const debug = await api.recallDebug(props.spaceId, option.app.id, option.key.id, text)
+    const debug = await api.recallDebug(props.circleId, option.client.id, option.key.id, {
+      query: text,
+    })
     if (id !== counter) return
     candidates.value = [...debug.injected, ...debug.others]
   } catch (err) {
@@ -105,25 +108,31 @@ async function run() {
   }
 }
 
-// 所选访问密钥的应用自己覆盖了的最低分与条数
-const selectedApp = computed(
-  () => choices.value.options.find((o) => o.key.id === keyId.value)?.app ?? null,
+// 所选访问密钥的接入实例自己覆盖了的最低分与条数
+const selectedClient = computed(
+  () => choices.value.options.find((o) => o.key.id === keyId.value)?.client ?? null,
 )
 const used = computed(() =>
   trialSettings(
     { minScore: props.minScore, limit: props.limit },
-    selectedApp.value,
-    props.appOverrides,
+    selectedClient.value,
+    props.clientOverrides,
   ),
 )
 const minScoreUsed = computed(() => used.value.minScore)
 const limitUsed = computed(() => used.value.limit)
-const appNote = computed(() => used.value.note)
+const clientNote = computed(() => used.value.note)
 
 const rows = computed<TrialRow[]>(() =>
   candidates.value ? trialRows(candidates.value, minScoreUsed.value, limitUsed.value) : [],
 )
 const percent = (n: number) => `${Math.max(0, Math.min(1, n)) * 100}%`
+
+function bandOf(c: { kind: EntryKind; circleId: string; circleSlug: string | null }) {
+  const matched = me.data.value?.circles.find((ci) => ci.id === c.circleId)
+  const circleKind = matched?.kind ?? (c.circleSlug === 'personal' ? 'personal' : 'shared')
+  return entryBand({ kind: c.kind, circleId: c.circleId, circleKind }, circle.value)
+}
 </script>
 
 <template>
@@ -156,12 +165,12 @@ const percent = (n: number) => `${Math.max(0, Math.min(1, n)) * 100}%`
     <p v-if="keysPending" class="trial-note">正在读取访问密钥…</p>
     <p v-else-if="unavailable" class="trial-note">{{ unavailable }}</p>
     <p v-if="failure" class="trial-note text-error">{{ failure }}</p>
-    <p v-if="appNote" class="trial-note app-note">{{ appNote }}</p>
+    <p v-if="clientNote" class="trial-note app-note">{{ clientNote }}</p>
     <template v-if="candidates">
       <p v-if="!rows.length" class="trial-note">暂无候选</p>
-      <div v-for="row in rows" :key="row.candidate.uri" class="cand" :class="row.state">
-        <StrataSwatch :layer="row.candidate.layer" plain :width="12" :height="12" />
-        <span class="cand-title" :title="row.candidate.uri">{{ row.candidate.title }}</span>
+      <div v-for="row in rows" :key="row.candidate.entryId" class="cand" :class="row.state">
+        <StrataSwatch :band="bandOf(row.candidate)" plain :width="12" :height="12" />
+        <span class="cand-title" :title="row.candidate.shortId">{{ row.candidate.title }}</span>
         <span class="bar" aria-hidden="true">
           <i :style="{ width: percent(row.candidate.rawScore) }" />
           <b :style="{ left: percent(minScoreUsed) }" />

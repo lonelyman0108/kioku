@@ -13,17 +13,17 @@ import SaveBar, { type SaveBarChange } from './strata/SaveBar.vue'
 import SettingsBlock from './strata/SettingsBlock.vue'
 import SettingsRow from './strata/SettingsRow.vue'
 
-const props = defineProps<{ spaceId: string; editable: boolean }>()
+const props = defineProps<{ circleId: string; editable: boolean }>()
 // 有没有没保存的修改：交给页面统一做离开前的确认
 const dirtyModel = defineModel<boolean>('dirty', { default: false })
 
 const toast = useToast()
 const queryClient = useQueryClient()
-const queryKey = computed(() => ['extraction-budget', props.spaceId] as const)
+const queryKey = computed(() => ['extraction-budget', props.circleId] as const)
 const usage = useQuery({
   queryKey,
-  enabled: computed(() => Boolean(props.spaceId)),
-  queryFn: ({ queryKey: [, sid] }) => api.extractionBudget(sid),
+  enabled: computed(() => Boolean(props.circleId)),
+  queryFn: ({ queryKey: [, cid] }) => api.extractionBudget(cid),
 })
 
 // 两项各和服务端最新的预算比（useSavedField）：用量隔一会儿就刷新，预算本身变了时基准跟上，本地改过的输入留着
@@ -87,23 +87,23 @@ function discard() {
 const saving = ref(false)
 async function save() {
   if (saving.value || changedCount.value === 0 || problem.value) return
-  const sid = props.spaceId
+  const cid = props.circleId
   const monthlyTokens = monthly.value.value
   const dailyWritesPerSubject = daily.value.value
   if (typeof monthlyTokens !== 'number' || typeof dailyWritesPerSubject !== 'number') return
   saving.value = true
   try {
-    const saved = await api.saveExtractionBudget(sid, {
+    const saved = await api.saveExtractionBudget(cid, {
       monthlyTokens,
       dailyWritesPerSubject,
     })
-    if (sid === props.spaceId) {
+    if (cid === props.circleId) {
       monthly.commit(monthlyTokens, saved.monthlyTokens)
       daily.commit(dailyWritesPerSubject, saved.dailyWritesPerSubject)
     }
     await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ['extraction-budget', sid] }),
-      queryClient.invalidateQueries({ queryKey: ['overview', sid] }),
+      queryClient.invalidateQueries({ queryKey: ['extraction-budget', cid] }),
+      queryClient.invalidateQueries({ queryKey: ['overview', cid] }),
     ])
     toast.add({ title: '已保存', color: 'success' })
   } catch (err) {
@@ -117,7 +117,7 @@ async function save() {
 <template>
   <SettingsBlock
     title="抽取预算"
-    :badge="editable ? '空间所有者 · 表单保存' : '仅空间所有者可修改'"
+    :badge="editable ? '记忆圈所有者 · 表单保存' : '仅记忆圈所有者可修改'"
     :tone="editable ? 'form' : 'readonly'"
   >
     <template #note>
@@ -196,7 +196,7 @@ async function save() {
         <SettingsRow label="每个联系人每日写入上限">
           {{ usage.data.value.dailyWritesPerSubject }} 条
         </SettingsRow>
-        <p class="pt-3 text-muted">仅空间所有者可修改预算。</p>
+        <p class="pt-3 text-muted">仅记忆圈所有者可修改预算。</p>
       </template>
     </div>
   </SettingsBlock>

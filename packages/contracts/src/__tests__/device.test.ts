@@ -51,25 +51,38 @@ describe('浏览器授权的申请', () => {
 })
 
 describe('浏览器授权的确认', () => {
-  const base = { userCode: 'BCDF-GHJK', spaceId: '00000000-0000-4000-8000-000000000000' }
+  const base = {
+    userCode: 'BCDF-GHJK',
+    circleId: '00000000-0000-4000-8000-000000000000',
+    linkedCircles: [{ circleId: '00000000-0000-4000-8000-000000000001', mode: 'read' as const }],
+    contextFacets: { Env: ['Mac'] },
+  }
   const scopes = {
-    readLayers: ['core'],
-    writeLayers: [],
+    readKinds: ['entry'],
+    writeKinds: [],
     maxSensitivity: 'private',
+    allowedRealms: ['home'],
     admin: false,
     credentials: 'none',
   }
 
-  it('每项是跳过，或者应用、访问密钥名与签发范围', () => {
+  it('每项是跳过，或者接入实例、访问密钥名与透镜签发范围', () => {
     const parsed = DeviceGrantApprove.parse({
       ...base,
       items: [
         { runtimeFamily: 'pi', skip: true },
-        { runtimeFamily: 'codex', app: { slug: 'codex', name: 'Codex' }, keyName: 'mac', scopes },
+        {
+          runtimeFamily: 'codex',
+          client: { slug: 'codex', name: 'Codex' },
+          keyName: 'mac',
+          scopes,
+        },
       ],
     })
+    expect(parsed.contextFacets).toEqual({ env: ['mac'] })
+    expect(parsed.linkedCircles).toHaveLength(1)
     expect(parsed.items[0]).toEqual({ runtimeFamily: 'pi', skip: true })
-    expect(parsed.items[1]).toMatchObject({ app: { slug: 'codex' } })
+    expect(parsed.items[1]).toMatchObject({ client: { slug: 'codex' } })
     expect(
       DeviceGrantApprove.safeParse({ ...base, items: [{ runtimeFamily: 'codex', keyName: 'x' }] })
         .success,
@@ -79,24 +92,23 @@ describe('浏览器授权的确认', () => {
 })
 
 describe('取走的结果', () => {
-  it('单个平台是 key 与 app，几个平台是 keys', () => {
-    const app = { slug: 'codex', name: 'Codex', runtimeFamily: 'codex' }
-    expect(DeviceTokenResponse.parse({ status: 'approved', key: 'k', app })).toEqual({
+  it('单个平台是 key 与 client，几个平台是 keys', () => {
+    const client = { slug: 'codex', name: 'Codex', runtimeFamily: 'codex' }
+    expect(DeviceTokenResponse.parse({ status: 'approved', key: 'k', client })).toEqual({
       status: 'approved',
       key: 'k',
-      app,
+      client,
     })
     const keys = [
-      { runtimeFamily: 'codex', status: 'issued', key: 'k', app },
+      { runtimeFamily: 'codex', status: 'issued', key: 'k', client },
       { runtimeFamily: 'pi', status: 'skipped' },
-      { runtimeFamily: 'hermes', status: 'denied', reason: '确认人已不在空间或已停用' },
+      { runtimeFamily: 'hermes', status: 'denied', reason: '确认人已不在记忆圈或已停用' },
     ]
     expect(DeviceTokenResponse.parse({ status: 'approved', keys })).toEqual({
       status: 'approved',
       keys,
     })
     expect(DeviceTokenResponse.parse({ status: 'pending' })).toEqual({ status: 'pending' })
-    // denied 的原因只能是固定的几类
     expect(
       DeviceTokenResponse.safeParse({
         status: 'approved',

@@ -1,39 +1,48 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
 import {
+  BrowseEntriesQuery,
   CREDENTIAL_PURPOSE_MAX,
-  CreateMemoryRequest,
+  CreateEntryRequest,
   CredentialFieldName,
   CredentialIdentifier,
   CredentialIdentifierQuery,
+  DeleteEntryRequest,
+  DISCLOSURE_MAX,
+  ENTRY_CONTENT_MAX,
+  ENTRY_TITLE_MAX,
+  GLOSSARY_MAX,
   KeyCreateCredentialRequest,
   KeyUpdateCredentialRequest,
-  MemoryUri,
-  type MemoryView,
-  RecallRequest,
-  Sensitivity,
-  UpdateMemoryRequest,
-  URI_FORMAT_MESSAGE,
+  MAX_WHEN_TERMS_PER_DIMENSION,
+  SENSITIVITIES,
+  sensitivityRank,
+  TOPICS_MAX,
+  TransferEntryRequest,
+  UpdateEntryRequest,
+  VARIANTS_MAX,
+  WhenCondition,
+  type EntryView,
 } from '@kioku/contracts'
 import { z } from 'zod'
 
 import { looksLikePlaintextCredential, placeholderIdentifiers } from '../credential/placeholders'
 import type { CredentialService } from '../credential/service'
 import { loggableError, logInternalError } from '../db/client'
-import type { RecallScope } from '../lifecycle/scope'
 import { guidanceFor, GUIDANCE } from '../lifecycle/lifecycle'
-import { hasUntouchedPlaintext, MemoryError, type MemoryService } from '../memory/service'
+import type { RecallScope } from '../lifecycle/scope'
+import { hasUntouchedPlaintext, MemoryError, type EntryService } from '../memory/service'
 import { formatBootBlock } from '../recall/boot'
 import { formatRecallBlock } from '../recall/recall'
+import { formatSubjectBlock } from '../recall/subjects'
 import { VERSION } from '../version'
 import {
-  formatChildren,
+  formatBrowse,
   formatCredentialAccess,
   formatCredentialList,
   formatCredentialSummary,
   formatCredentialUnchanged,
-  formatDomains,
-  formatMemory,
+  formatEntry,
   formatPlaceholderCredentials,
   PLAINTEXT_REMINDER,
   TOOL_INTERNAL_ERROR,
@@ -54,7 +63,7 @@ async function tool(fn: () => Promise<string>): Promise<ToolResult> {
   }
 }
 
-// 工具参数按 contracts 里的请求定义再校验一遍（例如字段名不能重复），不通过时作为工具错误返回
+// 工具参数按 contracts 里的请求定义再校验一遍，不通过时作为工具错误返回
 function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   const result = schema.safeParse(value)
   if (result.success) return result.data
@@ -63,38 +72,57 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   throw new MemoryError(400, `${where}${issue?.message ?? '参数格式错误'}`)
 }
 
-// 标题参数的说明，新建与修改共用
-const TITLE_HELP =
-  '标题：给人看的名字，最多 80 个字符；不填时取正文第一个 # 标题，没有就用坐标的最后一段'
+// MCP SDK 会把 inputSchema 转成 JSON Schema 给外部调用方：
+// 不能直接放入带 .meta({ id }) 或 .transform() 的契约 schema，否则会产生 $ref / definitions 或转换失败
+const McpSensitivity = z.enum(SENSITIVITIES)
+const McpEntryKind = z.enum(['entry', 'fact', 'episode'])
+const McpBrowseGroupBy = z.enum(['circle', 'realm', 'env', 'runtime', 'project', 'topic', 'kind'])
+const McpWhen = z
+  .record(
+    z.string().min(1).max(32),
+    z.array(z.string().min(1).max(64)).max(MAX_WHEN_TERMS_PER_DIMENSION),
+  )
+  .describe('切面条件映射（维度键 -> 词条标识数组），例如 {"env":["mac"],"realm":["work"]}')
 
-// 有效到参数的说明，新建与修改共用
+const McpVariant = z.object({
+  when: McpWhen.optional().describe('适用切面条件；通用底座省略或传 {}'),
+  content: z.string().min(1).max(ENTRY_CONTENT_MAX).describe('切片正文'),
+  sort_order: z
+    .number()
+    .int()
+    .min(0)
+    .max(999)
+    .optional()
+    .describe('展示与拼接顺序，默认按数组顺序'),
+})
+
+const TITLE_HELP =
+  '标题：给人看的名字，最多 200 个字符；不填时取正文第一个 # 标题，没有就用短 ID 兜底'
 const VALID_TO_HELP =
   '有效到：ISO 8601，要带时区（例如 2026-12-31T23:59:00+08:00），要比现在晚至少一分钟。' +
   '只在一段时间内成立的事（临时安排、截止日期）才填，到期后不再召回、不进 boot，不填就一直有效'
+const PLAINTEXT_OK_HELP =
+  '正文里新增的疑似明文（密码、令牌这类）确实不是凭据时设为 true：照常写入，这条词条进待处理由人看过。' +
+  '是凭据时不要设，先用 kioku_credential_save 存值，正文写占位符'
+const PLAINTEXT_TOOL_HELP =
+  '正文里不要写明文的密码、令牌与密钥：先用 kioku_credential_save 存起来，正文里写 {{cred:<标识>#<字段>}} 占位符。' +
+  '正文里有新增的疑似明文时写入会被拒，错误里指出第几行、哪一类；确实不是凭据（例如示例、已作废的值）时带上 plaintext_ok 再写。'
 
-// 写入的正文像有明文密码或 Token 时，在结果后面提醒换成占位符（规则与导入工具的提醒相同）。
-// 新增的疑似明文在写入前就被拒了，能写进来的是原来就有的、结果是 secret 的，或者带了 plaintext_ok 的。
-// plaintext_ok 只确认了这次新增的几处：正文里原来就有、没处理过的照常提醒（见 hasUntouchedPlaintext）
-function withPlaintextReminder(view: MemoryView, plaintextOk: boolean | undefined): string {
-  const text = formatMemory(view)
+function withPlaintextReminder(
+  view: EntryView,
+  plaintextOk: boolean | undefined,
+  options?: { requestedId?: string },
+): string {
+  const text = formatEntry(view, options)
   const remind = plaintextOk
     ? hasUntouchedPlaintext(view)
-    : !!view.content && looksLikePlaintextCredential(view.content)
+    : view.sensitivity !== 'secret' &&
+      view.variants.some((v) => v.content !== null && looksLikePlaintextCredential(v.content))
   return remind ? `${text}\n\n${PLAINTEXT_REMINDER}` : text
 }
 
-// 新建与修改的 plaintext_ok 参数
-const PLAINTEXT_OK_HELP =
-  '正文里新增的疑似明文（密码、令牌这类）确实不是凭据时设为 true：照常写入，这条记忆进待处理由人看过。' +
-  '是凭据时不要设，先用 kioku_credential_save 存值，正文写占位符'
-
-// 新建与修改的工具说明里共用的一段
-const PLAINTEXT_TOOL_HELP =
-  '正文里不要写明文的密码、令牌与密钥：先用 kioku_credential_save 存起来，正文里写 {{cred:<标识>#<字段>}} 占位符。' +
-  '正文里有新增的疑似明文时写入会被拒，错误里指出第几行、哪一类；确实不是凭据（例如示例、已经作废的值）时带上 plaintext_ok 再写。'
-
 export function buildMcpServer(
-  memory: MemoryService,
+  entries: EntryService,
   scope: RecallScope,
   credentials: CredentialService,
   instructions?: string,
@@ -108,12 +136,11 @@ export function buildMcpServer(
     'kioku_boot',
     {
       description:
-        '读取启动基线：完整使用指引与 priority 0 的核心记忆。没有启动钩子的客户端在会话开始时应先调用一次；长对话或上下文压缩后也可用它重新校准。',
+        '读取启动基线：完整使用指引、独立人格设定以及按当前切面编译后的 priority 0 核心词条。没有启动钩子的客户端在会话开始时应先调用一次；长对话或上下文压缩后也可用它重新校准。',
       annotations: { readOnlyHint: true },
     },
     () =>
       tool(async () => {
-        // 调这个工具的是能调工具的客户端，用编码 Agent 的指引；设置在 boot 的事务里读，之后取的是同一份
         const result = await scope.boot()
         return formatBootBlock(result, guidanceFor(false, await scope.settings()))
       }),
@@ -123,18 +150,41 @@ export function buildMcpServer(
     'kioku_search',
     {
       description:
-        '按语义、全文和关键词搜索记忆，返回候选的坐标（URI）、标题与线索；需要正文时再用 kioku_get。回答涉及历史决定、环境约束或用户偏好的问题前，即使没有提示词触发也应主动搜索确认。',
+        '按语义、全文、关键词与切面亲和度搜索记忆，返回候选短 ID、标题、匹配切面与线索；需要正文时再用 kioku_get。回答涉及历史决定、环境约束或用户偏好的问题前，即使没有提示词触发也应主动搜索确认。',
       inputSchema: {
-        query: RecallRequest.shape.query.describe('要找的内容，用自然语言描述'),
+        query: z.string().trim().min(1).max(2000).describe('要找的内容，用自然语言描述'),
         limit: z.number().int().min(1).max(30).optional().describe('最多返回几条，默认 10'),
+        facets: McpWhen.optional().describe(
+          '显式临时聚焦的切面条件（仅影响存在感加权，不放宽安全边界）',
+        ),
+        cross_circle: z
+          .boolean()
+          .optional()
+          .describe('是否同时搜索有权限的关联客场记忆圈，默认 true'),
+        include_subjects: z.boolean().optional().describe('是否附带当前聊天对象事实，默认 true'),
       },
       annotations: { readOnlyHint: true },
     },
-    ({ query, limit }) =>
+    ({ query, limit, facets, cross_circle, include_subjects }) =>
       tool(async () => {
-        const candidates = await scope.recall(query, { limit: limit ?? 10, minScore: 0 })
+        const parsedFacets = facets !== undefined ? parse(WhenCondition, facets) : undefined
+        const candidates = await scope.recall(query, {
+          limit: limit ?? 10,
+          minScore: 0,
+          ...(parsedFacets !== undefined ? { facets: parsedFacets } : {}),
+          ...(cross_circle !== undefined ? { crossCircle: cross_circle } : {}),
+        })
         scope.record('mcp.search', query, candidates)
-        return formatRecallBlock(candidates) || '没有找到相关记忆'
+        const recallBlock = formatRecallBlock(
+          candidates,
+          undefined,
+          undefined,
+          undefined,
+          scope.primaryCircleId,
+        )
+        const subjectBlock =
+          include_subjects === false ? '' : formatSubjectBlock(await scope.subjects())
+        return [recallBlock, subjectBlock].filter(Boolean).join('\n\n') || '没有找到相关记忆'
       }),
   )
 
@@ -142,171 +192,372 @@ export function buildMcpServer(
     'kioku_get',
     {
       description:
-        '按坐标（URI）读取一条记忆的标题与完整正文。召回结果只是候选，引用之前先用它读正文。',
-      inputSchema: { uri: MemoryUri.describe('记忆的坐标（URI），例如 core://agent') },
+        '按短 ID（m-xxxxxx）、旧版坐标或精确标题读取词条的正文与关联双链。默认只返回与当前在场切面相容的变体切片并列出其余可用切面；传 all_variants: true 可看全量。召回结果只是线索，引用前先用它读正文。',
+      inputSchema: {
+        id: z
+          .string()
+          .trim()
+          .min(1)
+          .max(2048)
+          .describe('词条短 ID（例如 m-234567）、旧版坐标 URI 或精确标题'),
+        variant_filter: McpWhen.optional().describe('按指定切面过滤返回匹配的变体切片'),
+        all_variants: z
+          .boolean()
+          .optional()
+          .describe('为 true 时返回该词条下的全量变体切片，默认按当前在场切面过滤'),
+        circle: z
+          .string()
+          .trim()
+          .min(1)
+          .max(64)
+          .optional()
+          .describe('精确标题遇到重名时限定目标记忆圈标识（slug 或 UUID）'),
+      },
       annotations: { readOnlyHint: true },
     },
-    ({ uri }) =>
+    ({ id, variant_filter, all_variants, circle }) =>
       tool(async () => {
-        const view = await memory.get(uri, 'kioku_get')
-        // 占位符按记忆的所有者解析：只有本人的记忆能引用凭据，所有者就是读者自己
-        const identifiers = [...placeholderIdentifiers(view.content ?? '')]
-        if (!identifiers.length) return formatMemory(view)
-        const found =
-          view.layer === 'user'
-            ? await credentials.forPlaceholders(identifiers)
-            : identifiers.map((identifier) => ({
-                identifier,
-                state: 'unavailable' as const,
-                name: null,
-              }))
-        return `${formatMemory(view)}\n\n${formatPlaceholderCredentials(found)}`
+        const parsedFilter =
+          variant_filter !== undefined ? parse(WhenCondition, variant_filter) : undefined
+        const currentFocus = !all_variants && !parsedFilter ? await scope.focus() : undefined
+        const view = await entries.get(
+          {
+            id,
+            ...(circle !== undefined ? { circle } : {}),
+            ...(all_variants !== undefined ? { allVariants: all_variants } : {}),
+            ...(parsedFilter !== undefined ? { variantFilter: parsedFilter } : {}),
+            ...(currentFocus !== undefined ? { focus: currentFocus } : {}),
+          },
+          'kioku_get',
+        )
+        const identifiers = [
+          ...new Set(view.variants.flatMap((v) => [...placeholderIdentifiers(v.content ?? '')])),
+        ]
+        if (!identifiers.length) return formatEntry(view, { requestedId: id })
+        const circleKind = entries.access.circles.get(view.circleId)?.circleKind
+        const canResolve =
+          view.circleId === scope.primaryCircleId &&
+          circleKind === 'personal' &&
+          view.kind === 'entry' &&
+          sensitivityRank(view.sensitivity) >= sensitivityRank('private')
+        const found = canResolve
+          ? await credentials.forPlaceholders(identifiers)
+          : identifiers.map((identifier) => ({
+              identifier,
+              state: 'unavailable' as const,
+              name: null,
+            }))
+        return `${formatEntry(view, { requestedId: id })}\n\n${formatPlaceholderCredentials(found)}`
       }),
   )
 
   server.registerTool(
-    'kioku_list',
+    'kioku_browse',
     {
       description:
-        '浏览记忆的目录：不带参数列出有记忆的开头（core://、user://、persona://、app://）；' +
-        '给开头（如 core）或坐标（URI）时列出它下面的直接子节点，persona://<人格标识> 与 app://<应用标识> 列这个人格、应用下的第一级。',
+        '按指定维度或主题动态分组浏览可见记忆词条，返回短 ID、标题、敏感级、摘要与可用切面列表。',
       inputSchema: {
-        of: z
+        group_by: McpBrowseGroupBy.optional().describe(
+          '分组维度：circle / realm / env / runtime / project / topic / kind，默认 topic',
+        ),
+        circle: z
           .string()
+          .trim()
+          .min(1)
+          .max(64)
           .optional()
-          .describe('开头（core、user、persona、app）或坐标（URI），例如 user://projects'),
+          .describe('仅看指定记忆圈（slug 或 UUID）'),
+        kind: McpEntryKind.optional().describe('按物种过滤：entry / fact / episode'),
+        topic: z.string().trim().min(1).max(64).optional().describe('按主题标签过滤'),
+        facets: McpWhen.optional().describe('按切面条件交集过滤'),
+        query: z.string().trim().max(200).optional().describe('按标题、正文或关键词过滤'),
+        limit: z.number().int().min(1).max(500).optional().describe('最多返回词条数，默认 100'),
       },
       annotations: { readOnlyHint: true },
     },
-    ({ of }) =>
-      tool(async () =>
-        of
-          ? formatChildren(await memory.children(of, 'kioku_list'))
-          : formatDomains(await memory.domains()),
-      ),
+    (args) =>
+      tool(async () => {
+        const query = parse(BrowseEntriesQuery, {
+          ...(args.group_by !== undefined ? { groupBy: args.group_by } : {}),
+          ...(args.circle !== undefined ? { circle: args.circle } : {}),
+          ...(args.kind !== undefined ? { kind: args.kind } : {}),
+          ...(args.topic !== undefined ? { topic: args.topic } : {}),
+          ...(args.facets !== undefined ? { facets: args.facets } : {}),
+          ...(args.query !== undefined ? { query: args.query } : {}),
+          ...(args.limit !== undefined ? { limit: args.limit } : {}),
+        })
+        return formatBrowse(await entries.browse(query))
+      }),
   )
 
   server.registerTool(
     'kioku_create',
     {
       description:
-        '新建一条长期记忆。不等用户点名「记住」，遇到重要新信息、偏好、纠正、环境踩坑或长期结论时主动记下。正文要自带背景（为什么、在什么条件下），disclosure 写清楚什么场景下该想起它。' +
-        `${URI_FORMAT_MESSAGE}。坐标的开头决定这条记忆归谁、谁读得到：人格与应用的记忆只能写本应用当前的人格与本应用；` +
-        'user:// 下的只有本人的 agent 读得到，不能设为 public。' +
+        '新建一条长期记忆词条（服务端自动分配全局唯一短 ID m-xxxxxx，支持 [[m-xxxxxx]] 双链）。' +
+        '普通记忆直接传 content 与可选 when；同主题跨环境差异规范可用 variants 一次写入多个切面切片。' +
+        '不传 circle 时写入当前主场圈，传 circle 可写入有写权限的关联圈。个人圈默认 private；共享圈默认 internal。' +
         PLAINTEXT_TOOL_HELP,
       inputSchema: {
-        // 长度与数量限制和 REST 共用 contracts 里的定义
-        uri: MemoryUri.describe('新记忆的坐标（URI），开头决定归属'),
-        title: CreateMemoryRequest.shape.title.describe(TITLE_HELP),
-        content: CreateMemoryRequest.shape.content.describe('正文'),
-        disclosure: CreateMemoryRequest.shape.disclosure.describe('什么场景下需要想起这条记忆'),
-        priority: CreateMemoryRequest.shape.priority.describe('0 最重要，默认 2'),
-        glossary: CreateMemoryRequest.shape.glossary.describe('关键词，用于召回'),
-        sensitivity: Sensitivity.optional().describe(
-          '敏感级：public / internal / private / secret。不填时按归属取默认值，user:// 下默认 private、不能是 public',
+        title: z.string().trim().min(1).max(ENTRY_TITLE_MAX).optional().describe(TITLE_HELP),
+        content: z
+          .string()
+          .min(1)
+          .max(ENTRY_CONTENT_MAX)
+          .optional()
+          .describe('单切片正文；与 variants 二选一'),
+        when: McpWhen.optional().describe('单切片时的适用切面条件；通用词条可省略或传 {}'),
+        variants: z
+          .array(McpVariant)
+          .min(1)
+          .max(VARIANTS_MAX)
+          .optional()
+          .describe('多变体切片数组；与 content 二选一'),
+        circle: z
+          .string()
+          .trim()
+          .min(1)
+          .max(64)
+          .optional()
+          .describe('写入的目标记忆圈 slug 或 UUID；不填写入主场圈'),
+        topics: z
+          .array(z.string().trim().min(1).max(64))
+          .max(TOPICS_MAX)
+          .optional()
+          .describe('主题分类标签，用于动态分组浏览'),
+        disclosure: z
+          .string()
+          .trim()
+          .max(DISCLOSURE_MAX)
+          .optional()
+          .describe('什么场景下需要想起这条词条'),
+        priority: z
+          .number()
+          .int()
+          .min(0)
+          .max(99)
+          .optional()
+          .describe('0 最重要（进入 boot），默认 2'),
+        glossary: z
+          .array(z.string().trim().min(2).max(64))
+          .max(GLOSSARY_MAX)
+          .optional()
+          .describe('关键词，用于精确召回'),
+        sensitivity: McpSensitivity.optional().describe(
+          '敏感级：public / internal / private / secret；个人圈默认 private，共享圈默认 internal',
         ),
-        valid_to: CreateMemoryRequest.shape.validTo.describe(VALID_TO_HELP),
+        valid_to: z.string().optional().describe(VALID_TO_HELP),
         plaintext_ok: z.boolean().optional().describe(PLAINTEXT_OK_HELP),
       },
     },
     (args) =>
-      tool(async () =>
-        withPlaintextReminder(
-          await memory.create({
-            uri: args.uri,
-            ...(args.title ? { title: args.title } : {}),
-            content: args.content,
-            priority: args.priority,
-            glossary: args.glossary,
-            ...(args.disclosure ? { disclosure: args.disclosure } : {}),
-            ...(args.sensitivity ? { sensitivity: args.sensitivity } : {}),
-            ...(args.valid_to ? { validTo: args.valid_to } : {}),
-            ...(args.plaintext_ok ? { plaintextOk: true } : {}),
-          }),
-          args.plaintext_ok,
-        ),
-      ),
+      tool(async () => {
+        const input = parse(CreateEntryRequest, {
+          ...(args.circle !== undefined ? { circle: args.circle } : {}),
+          ...(args.title !== undefined ? { title: args.title } : {}),
+          ...(args.content !== undefined ? { content: args.content } : {}),
+          ...(args.when !== undefined ? { when: args.when } : {}),
+          ...(args.variants !== undefined
+            ? {
+                variants: args.variants.map((v) => ({
+                  ...(v.when !== undefined ? { when: v.when } : {}),
+                  content: v.content,
+                  ...(v.sort_order !== undefined ? { sortOrder: v.sort_order } : {}),
+                })),
+              }
+            : {}),
+          ...(args.topics !== undefined ? { topics: args.topics } : {}),
+          ...(args.disclosure !== undefined ? { disclosure: args.disclosure } : {}),
+          ...(args.priority !== undefined ? { priority: args.priority } : {}),
+          ...(args.glossary !== undefined ? { glossary: args.glossary } : {}),
+          ...(args.sensitivity !== undefined ? { sensitivity: args.sensitivity } : {}),
+          ...(args.valid_to !== undefined ? { validTo: args.valid_to } : {}),
+          ...(args.plaintext_ok ? { plaintextOk: true } : {}),
+        })
+        return withPlaintextReminder(await entries.create(input), args.plaintext_ok)
+      }),
   )
 
   server.registerTool(
     'kioku_update',
     {
       description:
-        '修改已有记忆。改之前先用 kioku_get 读正文；带上 expected_version 防止覆盖别人的修改。' +
-        '改标题不改坐标；要换位置、标识或归属（坐标的开头）用 kioku_move。' +
+        '修改已有词条（改主题或切面不改变短 ID）：修改前先用 kioku_get 读取正文与版本号，带上 expected_version 防并发覆盖。' +
+        '支持三种变体编辑方式（互斥）：① content + 可选 when 更新单个切片；② upsert_variants / remove_variant_whens 增量增删切片；③ variants 整组替换。整条词条至少保留 1 个切片。' +
         PLAINTEXT_TOOL_HELP +
         '原来就有的疑似明文不挡修改。',
       inputSchema: {
-        uri: MemoryUri.describe('要修改的记忆的坐标（URI）'),
-        title: UpdateMemoryRequest.shape.title.describe(TITLE_HELP),
-        content: UpdateMemoryRequest.shape.content.describe('新的完整正文'),
-        disclosure: UpdateMemoryRequest.shape.disclosure,
-        priority: UpdateMemoryRequest.shape.priority,
-        sensitivity: Sensitivity.optional().describe(
-          '敏感级：public / internal / private / secret；user:// 下的不能是 public',
-        ),
-        glossary_add: UpdateMemoryRequest.shape.glossaryAdd,
-        glossary_remove: UpdateMemoryRequest.shape.glossaryRemove,
-        valid_to: UpdateMemoryRequest.shape.validTo.describe(
-          `${VALID_TO_HELP}；填 null 清掉，一直有效`,
-        ),
+        id: z
+          .string()
+          .trim()
+          .min(1)
+          .max(2048)
+          .describe('要修改的词条短 ID（m-xxxxxx）、旧版坐标或精确标题'),
+        circle: z
+          .string()
+          .trim()
+          .min(1)
+          .max(64)
+          .optional()
+          .describe('精确标题遇到重名时限定目标记忆圈'),
         expected_version: z.number().int().optional().describe('读取时看到的版本号'),
+        title: z.string().trim().min(1).max(ENTRY_TITLE_MAX).optional().describe(TITLE_HELP),
+        content: z.string().min(1).max(ENTRY_CONTENT_MAX).optional().describe('单切片更新正文'),
+        when: McpWhen.optional().describe('配合 content 更新指定切面的单个切片，默认 {}'),
+        variants: z
+          .array(McpVariant)
+          .min(1)
+          .max(VARIANTS_MAX)
+          .optional()
+          .describe('整组替换该词条的全部变体切片'),
+        upsert_variants: z
+          .array(McpVariant)
+          .min(1)
+          .max(VARIANTS_MAX)
+          .optional()
+          .describe('增量新增或按切面条件覆盖多个切片'),
+        remove_variant_whens: z
+          .array(McpWhen)
+          .min(1)
+          .max(VARIANTS_MAX)
+          .optional()
+          .describe('按切面条件移除不再需要的切片'),
+        topics: z
+          .array(z.string().trim().min(1).max(64))
+          .max(TOPICS_MAX)
+          .optional()
+          .describe('整组替换主题标签'),
+        disclosure: z.string().trim().max(DISCLOSURE_MAX).nullable().optional(),
+        priority: z.number().int().min(0).max(99).optional(),
+        sensitivity: McpSensitivity.optional().describe(
+          '敏感级：public / internal / private / secret；个人圈默认 private，共享圈默认 internal',
+        ),
+        glossary_add: z.array(z.string().trim().min(2).max(64)).max(GLOSSARY_MAX).optional(),
+        glossary_remove: z.array(z.string().trim().min(1).max(64)).max(GLOSSARY_MAX).optional(),
+        valid_to: z
+          .string()
+          .nullable()
+          .optional()
+          .describe(`${VALID_TO_HELP}；填 null 清掉，一直有效`),
         plaintext_ok: z.boolean().optional().describe(PLAINTEXT_OK_HELP),
       },
     },
     (args) =>
-      tool(async () =>
-        withPlaintextReminder(
-          await memory.update(
-            {
-              uri: args.uri,
-              ...(args.title !== undefined ? { title: args.title } : {}),
-              ...(args.content !== undefined ? { content: args.content } : {}),
-              ...(args.disclosure !== undefined ? { disclosure: args.disclosure } : {}),
-              ...(args.priority !== undefined ? { priority: args.priority } : {}),
-              ...(args.sensitivity ? { sensitivity: args.sensitivity } : {}),
-              ...(args.glossary_add ? { glossaryAdd: args.glossary_add } : {}),
-              ...(args.glossary_remove ? { glossaryRemove: args.glossary_remove } : {}),
-              ...(args.valid_to !== undefined ? { validTo: args.valid_to } : {}),
-              ...(args.expected_version !== undefined
-                ? { expectedVersion: args.expected_version }
-                : {}),
-              ...(args.plaintext_ok ? { plaintextOk: true } : {}),
-            },
-            { via: 'kioku_update' },
-          ),
+      tool(async () => {
+        const input = parse(UpdateEntryRequest, {
+          id: args.id,
+          ...(args.circle !== undefined ? { circle: args.circle } : {}),
+          ...(args.expected_version !== undefined
+            ? { expectedVersion: args.expected_version }
+            : {}),
+          ...(args.title !== undefined ? { title: args.title } : {}),
+          ...(args.content !== undefined ? { content: args.content } : {}),
+          ...(args.when !== undefined ? { when: args.when } : {}),
+          ...(args.variants !== undefined
+            ? {
+                variants: args.variants.map((v) => ({
+                  ...(v.when !== undefined ? { when: v.when } : {}),
+                  content: v.content,
+                  ...(v.sort_order !== undefined ? { sortOrder: v.sort_order } : {}),
+                })),
+              }
+            : {}),
+          ...(args.upsert_variants !== undefined
+            ? {
+                upsertVariants: args.upsert_variants.map((v) => ({
+                  ...(v.when !== undefined ? { when: v.when } : {}),
+                  content: v.content,
+                  ...(v.sort_order !== undefined ? { sortOrder: v.sort_order } : {}),
+                })),
+              }
+            : {}),
+          ...(args.remove_variant_whens !== undefined
+            ? { removeVariantWhens: args.remove_variant_whens }
+            : {}),
+          ...(args.topics !== undefined ? { topics: args.topics } : {}),
+          ...(args.disclosure !== undefined ? { disclosure: args.disclosure } : {}),
+          ...(args.priority !== undefined ? { priority: args.priority } : {}),
+          ...(args.sensitivity !== undefined ? { sensitivity: args.sensitivity } : {}),
+          ...(args.glossary_add !== undefined ? { glossaryAdd: args.glossary_add } : {}),
+          ...(args.glossary_remove !== undefined ? { glossaryRemove: args.glossary_remove } : {}),
+          ...(args.valid_to !== undefined ? { validTo: args.valid_to } : {}),
+          ...(args.plaintext_ok ? { plaintextOk: true } : {}),
+        })
+        return withPlaintextReminder(
+          await entries.update(input, 'kioku_update'),
           args.plaintext_ok,
-        ),
-      ),
+          { requestedId: args.id },
+        )
+      }),
   )
 
   server.registerTool(
     'kioku_delete',
     {
-      description: '删除一条记忆。历史事件会保留，必要时可以恢复。',
-      inputSchema: { uri: MemoryUri.describe('要删除的记忆的坐标（URI）') },
+      description:
+        '软删除整条词条（含其下所有切片）。短 ID 与历史事件会保留，必要时可在管理界面恢复。',
+      inputSchema: {
+        id: z
+          .string()
+          .trim()
+          .min(1)
+          .max(2048)
+          .describe('要删除的词条短 ID（m-xxxxxx）、旧版坐标或精确标题'),
+        circle: z.string().trim().min(1).max(64).optional().describe('限定所在记忆圈'),
+        expected_version: z.number().int().optional().describe('读取时看到的版本号'),
+      },
       annotations: { destructiveHint: true },
     },
-    ({ uri }) =>
+    (args) =>
       tool(async () => {
-        await memory.delete(uri)
-        return `已删除 ${uri}`
+        const input = parse(DeleteEntryRequest, {
+          id: args.id,
+          ...(args.circle !== undefined ? { circle: args.circle } : {}),
+          ...(args.expected_version !== undefined
+            ? { expectedVersion: args.expected_version }
+            : {}),
+        })
+        const deleted = await entries.remove({
+          id: input.id,
+          ...(input.circle !== undefined ? { circle: input.circle } : {}),
+          ...(input.expectedVersion !== undefined
+            ? { expectedVersion: input.expectedVersion }
+            : {}),
+        })
+        return `已删除 ${deleted.shortId}`
       }),
   )
 
   server.registerTool(
-    'kioku_move',
+    'kioku_transfer',
     {
       description:
-        '修改记忆的坐标（URI）：换最后一段是改标识，换中间各级是挪位置，换开头就是改归属（例如从 core:// 移到 app://<应用>/）。' +
-        '共享的归属（core://、persona://、app://）与本人（user://）之间不能通过访问密钥移动：这会改变谁读得到它，要在管理界面里由人来移。' +
-        '标题不变；只有标识变了、标题又就是原来的标识时，按新坐标重新取：正文有 # 标题取它，没有就用新的标识。',
+        '把一条正式词条（entry）跨记忆圈迁移，迁移后保留原短 ID m-xxxxxx。' +
+        '访问密钥仅限在两个都有写权限的共享圈之间迁移；个人圈与共享圈之间的互转请在管理界面操作。',
       inputSchema: {
-        from: MemoryUri.describe('现在的坐标（URI）'),
-        to: MemoryUri.describe('新的坐标（URI）'),
+        id: z
+          .string()
+          .trim()
+          .min(1)
+          .max(2048)
+          .describe('要迁移的词条短 ID（m-xxxxxx）、旧版坐标或精确标题'),
+        from_circle: z.string().trim().min(1).max(64).optional().describe('源记忆圈标识'),
+        to_circle: z.string().trim().min(1).max(64).describe('目标共享记忆圈 slug 或 UUID'),
+        expected_version: z.number().int().optional().describe('读取时看到的版本号'),
       },
     },
-    ({ from, to }) => tool(async () => formatMemory(await memory.move({ from, to }, 'kioku_move'))),
+    (args) =>
+      tool(async () => {
+        const input = parse(TransferEntryRequest, {
+          id: args.id,
+          ...(args.from_circle !== undefined ? { fromCircle: args.from_circle } : {}),
+          toCircle: args.to_circle,
+          ...(args.expected_version !== undefined
+            ? { expectedVersion: args.expected_version }
+            : {}),
+        })
+        return formatEntry(await entries.transfer(input))
+      }),
   )
 
   server.registerTool(
@@ -343,7 +594,7 @@ export function buildMcpServer(
     'kioku_credential_save',
     {
       description:
-        '新建或修改凭据（要凭据能力为「管理」的访问密钥）。不给 expected_version 就是新建，新建的凭据只给这个应用用；' +
+        '新建或修改凭据（要凭据能力为「管理」的访问密钥）。不给 expected_version 就是新建；' +
         '所有者设了密码库的去处时写进密码库，没设时由 Kioku 托管，结果里写明存在哪里。' +
         '有 username 或 password 字段的是登录类，url 用于浏览器自动填充；别的字段存成隐藏字段。' +
         '修改时先用不带参数的 kioku_credential 列出凭据，看它的版本号（不用取值）；版本号不对时，错误里会给出现在的版本号。' +
@@ -463,14 +714,14 @@ async function mcpInstructions(
 
 // 无状态模式：每个请求一个服务器实例，不在进程里保存会话，方便多实例部署
 export async function handleMcpRequest(
-  memory: MemoryService,
+  entries: EntryService,
   scope: RecallScope,
   credentials: CredentialService,
   request: Request,
 ): Promise<Response> {
   const parsedBody = await parseMcpPostBody(request)
   const instructions = await mcpInstructions(scope, parsedBody)
-  const server = buildMcpServer(memory, scope, credentials, instructions)
+  const server = buildMcpServer(entries, scope, credentials, instructions)
   // 不传 sessionIdGenerator 即无状态模式
   const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true })
   await server.connect(transport)

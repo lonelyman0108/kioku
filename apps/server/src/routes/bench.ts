@@ -17,34 +17,32 @@ import { keyToSimulate } from '../access/simulate'
 import { isInstanceAdmin } from '../auth/middleware'
 import { agentGetsTools, agentLoopFor, agentSendsTurnEnd } from '../bench/agentLoop'
 import { AgentModelError, requestAgentTurn, toolDefinitions } from '../bench/agentModel'
-import { benchTools, runBench } from '../bench/inProcess'
-import { BENCH_SCENARIOS } from '../bench/scenarios'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { consoleRoleFor } from '../memory/context'
 import { loadBenchAgentModelState, resolveChatProfileById } from '../models/store'
 import { unlocked } from '../settings/endpoint'
 
-const KeyParams = z.object({ spaceId: z.uuid(), appId: z.uuid(), keyId: z.uuid() })
+const KeyParams = z.object({ circleId: z.uuid(), clientId: z.uuid(), keyId: z.uuid() })
 const errors = {
   403: jsonResponse('没有权限', ErrorResponse),
-  404: jsonResponse('应用或 Key 不存在，或 Key 已作废', ErrorResponse),
+  404: jsonResponse('接入实例或访问密钥不存在，或密钥已作废', ErrorResponse),
 }
 
 const toolsRoute = createRoute({
   method: 'get',
-  path: '/spaces/{spaceId}/apps/{appId}/keys/{keyId}/bench/tools',
+  path: '/circles/{circleId}/clients/{clientId}/keys/{keyId}/bench/tools',
   tags: ['bench'],
-  summary: '测试台：真实 MCP 服务端的工具列表（只给应用主人）',
+  summary: '测试台：真实 MCP 服务端的工具列表（只给接入实例所有者）',
   request: { params: KeyParams },
   responses: { 200: jsonResponse('工具列表', BenchToolList), ...errors },
 })
 
 const runRoute = createRoute({
   method: 'post',
-  path: '/spaces/{spaceId}/apps/{appId}/keys/{keyId}/bench/run',
+  path: '/circles/{circleId}/clients/{clientId}/keys/{keyId}/bench/run',
   tags: ['bench'],
-  summary: '测试台：按这把 Key 执行一串步骤，默认放进事务、结束时回滚（只给应用主人）',
+  summary: '测试台：按这把访问密钥执行一串步骤，默认放进事务、结束时回滚（只给接入实例所有者）',
   middleware: [
     bodyLimit({
       maxSize: BENCH_MAX_REQUEST_BYTES,
@@ -63,32 +61,32 @@ const runRoute = createRoute({
 
 const scenariosRoute = createRoute({
   method: 'get',
-  path: '/spaces/{spaceId}/bench/scenarios',
+  path: '/circles/{circleId}/bench/scenarios',
   tags: ['bench'],
   summary: '测试台：内置的场景预设',
-  request: { params: z.object({ spaceId: z.uuid() }) },
+  request: { params: z.object({ circleId: z.uuid() }) },
   responses: {
     200: jsonResponse('场景', BenchScenarioList),
-    403: jsonResponse('不是该空间成员', ErrorResponse),
+    403: jsonResponse('不是该记忆圈成员', ErrorResponse),
   },
 })
 
 const agentInfoRoute = createRoute({
   method: 'get',
-  path: '/spaces/{spaceId}/apps/{appId}/keys/{keyId}/bench/agent',
+  path: '/circles/{circleId}/clients/{clientId}/keys/{keyId}/bench/agent',
   tags: ['bench'],
   summary:
-    '测试台：模型代理可用状态（非实例管理员也返回原因）、可选对话模型列表、默认模型、接口地址、运行时循环与是否给工具（只给应用所有者）',
+    '测试台：模型代理可用状态（非实例管理员也返回原因）、可选对话模型列表、默认模型、接口地址、运行时循环与是否给工具（只给接入实例所有者）',
   request: { params: KeyParams },
   responses: { 200: jsonResponse('模型代理的情况', BenchAgentInfo), ...errors },
 })
 
 const agentTurnRoute = createRoute({
   method: 'post',
-  path: '/spaces/{spaceId}/apps/{appId}/keys/{keyId}/bench/agent/turn',
+  path: '/circles/{circleId}/clients/{clientId}/keys/{keyId}/bench/agent/turn',
   tags: ['bench'],
   summary:
-    '测试台：请求一次模型，使用所选对话模型或默认模型，工具来自真实 tools/list；不计入抽取预算、不写库（只给实例管理员且是应用所有者）',
+    '测试台：请求一次模型，使用所选对话模型或默认模型，工具来自真实 tools/list；不计入抽取预算、不写库（只给实例管理员且是接入实例所有者）',
   middleware: [
     bodyLimit({
       // 留出请求体里 messages 之外的部分，messages 本身的上限在契约里
@@ -112,27 +110,30 @@ export function benchRoutes(deps: Deps) {
     .openapi(toolsRoute, async (c) => {
       const found = await keyToSimulate(deps, c.req.valid('param'), c.get('console').accountId)
       if ('error' in found) return c.json({ error: found.error }, found.status)
+      const { benchTools } = await import('../bench/inProcess')
       return c.json({ tools: await benchTools(deps, found.key) }, 200)
     })
     .openapi(runRoute, async (c) => {
       const accountId = c.get('console').accountId
       const found = await keyToSimulate(deps, c.req.valid('param'), accountId)
       if ('error' in found) return c.json({ error: found.error }, found.status)
+      const { runBench } = await import('../bench/inProcess')
       return c.json(await runBench(deps, found.key, accountId, c.req.valid('json')), 200)
     })
     .openapi(scenariosRoute, async (c) => {
-      await consoleRoleFor(deps, c.req.valid('param').spaceId, c.get('console').accountId)
+      await consoleRoleFor(deps, c.get('console').accountId, c.req.valid('param').circleId)
+      const { BENCH_SCENARIOS } = await import('../bench/scenarios')
       return c.json({ scenarios: [...BENCH_SCENARIOS] }, 200)
     })
     .openapi(agentInfoRoute, async (c) => {
       const accountId = c.get('console').accountId
       const found = await keyToSimulate(deps, c.req.valid('param'), accountId)
       if ('error' in found) return c.json({ error: found.error }, found.status)
-      const loop = agentLoopFor(found.key.app.runtimeFamily)
+      const loop = agentLoopFor(found.key.client.runtimeFamily)
       const runtime = {
         loop,
         tools: agentGetsTools(loop),
-        turnEnd: agentSendsTurnEnd(found.key.app.runtimeFamily),
+        turnEnd: agentSendsTurnEnd(found.key.client.runtimeFamily),
       }
       // 先判身份、不查设置：模型配没配、配的什么都是实例设置，不给实例管理员之外的人看
       if (!(await isInstanceAdmin(deps.db, accountId))) {
@@ -203,8 +204,8 @@ export function benchRoutes(deps: Deps) {
       if (!config) {
         return c.json({ error: '所选模型条目不存在，请重新选择后再试。' }, 400)
       }
-      const tools = agentGetsTools(agentLoopFor(found.key.app.runtimeFamily))
-        ? toolDefinitions(await benchTools(deps, found.key))
+      const tools = agentGetsTools(agentLoopFor(found.key.client.runtimeFamily))
+        ? toolDefinitions(await (await import('../bench/inProcess')).benchTools(deps, found.key))
         : []
       // 这里没有事务：请求模型可能要一两分钟，不占连接、不持锁
       try {

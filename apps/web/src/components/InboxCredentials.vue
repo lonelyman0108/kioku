@@ -15,12 +15,12 @@ import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 
 // 待处理的凭据：快到期、已到期、标了需要轮换的，只有当前账号自己的。到凭据详情里改值、改到期时间或清除标记
-const props = defineProps<{ spaceId: string; canAct: boolean }>()
+const props = defineProps<{ circleId: string; canAct: boolean }>()
 
 const active = useActivated()
 const list = useQuery({
-  queryKey: computed(() => attentionCredentialsKey(props.spaceId)),
-  queryFn: ({ queryKey: [, sid] }) => api.credentials(sid, { attention: 'true' }),
+  queryKey: computed(() => attentionCredentialsKey(props.circleId)),
+  queryFn: ({ queryKey: [, cid] }) => api.credentials(cid, { attention: 'true' }),
   enabled: active,
 })
 const items = computed(() => list.data.value?.items ?? [])
@@ -45,7 +45,7 @@ const items = computed(() => list.data.value?.items ?? [])
       <ul v-else>
         <li v-for="c in items" :key="c.id" class="cred-row">
           <div class="cred-name">
-            <RouterLink :to="{ name: 'credentials', params: { spaceId }, query: { id: c.id } }">{{
+            <RouterLink :to="{ name: 'credentials', params: { circleId }, query: { id: c.id } }">{{
               c.name
             }}</RouterLink>
             <code class="cred-identifier">{{ c.identifier }}</code>
@@ -58,7 +58,7 @@ const items = computed(() => list.data.value?.items ?? [])
             <UButton
               color="neutral"
               variant="outline"
-              :to="{ name: 'credentials', params: { spaceId }, query: { id: c.id } }"
+              :to="{ name: 'credentials', params: { circleId }, query: { id: c.id } }"
             >
               {{ canAct ? '去处理' : '查看' }}
             </UButton>

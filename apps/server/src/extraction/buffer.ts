@@ -1,6 +1,6 @@
 import {
   TUNING_DEFAULTS,
-  type Layer,
+  type EntryKind,
   type Sensitivity,
   type TuningValues,
   type TurnEndEvent,
@@ -9,50 +9,64 @@ import { and, count, eq, sql } from 'drizzle-orm'
 
 import { sensitivityRank } from '../access/access'
 import type { KeySession } from '../access/session'
-import { withSpace, type Db, type Tx } from '../db/client'
-import { conversationTurns, spaces } from '../db/schema'
+import { withCircle, type Db, type Tx } from '../db/client'
+import { circles, conversationTurns } from '../db/schema'
 import type { Deps, KeyPrincipal } from '../http/env'
-import { loadSpaceSettings } from '../settings/advanced'
+import { normalizeProjectSlug } from '../memory/facets'
+import { loadCircleSettings } from '../settings/advanced'
 import { hasExtractionModel } from './settings'
 
-// 内置值：攒满这么多轮就马上排一次抽取；不满时等这一批空闲这么久再抽取。按空间的高级设置算（extractionDelay）
 export const BATCH_TURNS = TUNING_DEFAULTS['extraction.batchTurns']
 export const IDLE_SECONDS = TUNING_DEFAULTS['extraction.idleMinutes'] * 60
-// 每一批最多留这么多轮：抽取一直失败（例如模型出错）时丢掉最早的，缓冲不会无限长
 export const MAX_BUFFERED_TURNS = 100
-// 一批空闲这么久就整批删掉：正常情况下早就抽取完了，留下的是抽取不了的
 export const BUFFER_IDLE_HOURS = 24
 
-// 一批缓冲：按应用与来源作用域分（本群，或与此人的私聊），抽取写下的记忆都在这个作用域里。
-// 不带会话上下文的轮次按应用与所属成员分：作用域是 global（不带会话上下文的 Key 写下的记忆的来源作用域），
-// 一个应用只有一个所有者；应用转给别人时旧 Key 都吊销了，旧所有者剩下的几轮抽取时按「没有能用的 Key」丢掉
-export const NO_CONTEXT_SCOPE = 'global'
+// 无上下文缓冲作用域按 JSON 数组编码，避免用户名/设备/项目名内包含冒号导致冲突
+export function noContextScope(ownerAccountId: string, deviceKey = '', projectSlug = ''): string {
+  return JSON.stringify(['none', ownerAccountId, deviceKey, projectSlug])
+}
+
+export function parseNoContextScope(
+  scope: string,
+): { ownerAccountId: string; deviceKey: string; projectSlug: string } | null {
+  try {
+    const parsed: unknown = JSON.parse(scope)
+    if (
+      !Array.isArray(parsed) ||
+      parsed.length !== 4 ||
+      parsed[0] !== 'none' ||
+      typeof parsed[1] !== 'string' ||
+      typeof parsed[2] !== 'string' ||
+      typeof parsed[3] !== 'string'
+    ) {
+      return null
+    }
+    return { ownerAccountId: parsed[1], deviceKey: parsed[2], projectSlug: parsed[3] }
+  } catch {
+    return null
+  }
+}
 
 export interface BufferedSession {
-  spaceId: string
-  appId: string
+  circleId: string
+  clientId: string
   scope: string
 }
 
-// 这些写权限写不写得下几轮对话抽取出的东西：带会话上下文的写联系人的事实或会话摘要，两类都写不了时写不进去；
-// 不带会话上下文的只写会话摘要，摘要归所属成员、私密，要写得了会话摘要、敏感级到私密。
-// 规则只有这一份：turn.end 进不进缓冲按 Key 的上限判断（会话上下文只会把能写的归属收紧到这两类，不用先解析会话，
-// 解析会建联系人），抽取时每一轮再按写入它的 Key 现在的上限与这一批的会话上下文判断一次（extract.ts）
+// 这些写权限写不写得下几轮对话抽取出的东西：带会话上下文写事实或摘要；不带上下文仅写摘要且须支持 private
 export function canWriteTurns(
-  write: { writeLayers: Iterable<Layer>; maxSensitivity: Sensitivity },
+  write: { writeKinds: Iterable<EntryKind>; maxSensitivity: Sensitivity },
   withContext: boolean,
 ): boolean {
-  const layers = new Set(write.writeLayers)
+  const kinds = new Set(write.writeKinds)
   if (!withContext) {
     return (
-      layers.has('episode') && sensitivityRank(write.maxSensitivity) >= sensitivityRank('private')
+      kinds.has('episode') && sensitivityRank(write.maxSensitivity) >= sensitivityRank('private')
     )
   }
-  return layers.has('subject') || layers.has('episode')
+  return kinds.has('fact') || kinds.has('episode')
 }
 
-// 把一轮对话放进缓冲，按轮数或空闲时间排抽取任务（同一批只排一个，空闲计时从最后一轮算起）。
-// 没配抽取模型时不存：不抽取就没有理由留着别人的话
 export async function bufferTurn(
   deps: Deps,
   key: KeyPrincipal,
@@ -61,39 +75,37 @@ export async function bufferTurn(
 ): Promise<void> {
   if (!(await hasExtractionModel(deps.db))) return
   const { context } = session
-  // 契约保证带会话上下文的 turn.end 是私聊、群聊或频道，并且带着发言人；不带的按应用与所属成员分批
+  const deviceKey = (input.deviceKey ?? '').trim()
+  const projectSlug = normalizeProjectSlug(input.project) ?? ''
   const scope = !context.chatType
-    ? NO_CONTEXT_SCOPE
+    ? noContextScope(key.client.ownerAccountId, deviceKey, projectSlug)
     : context.groupSubjectId
       ? `group:${context.groupSubjectId}`
       : `direct:${context.senderSubjectId!}`
-  const target: BufferedSession = { spaceId: key.spaceId, appId: key.app.id, scope }
-  const { buffered, values } = await withSpace(deps.db, key.spaceId, async (tx) => {
+  const target: BufferedSession = { circleId: key.circleId, clientId: key.client.id, scope }
+  const { buffered, values } = await withCircle(deps.db, key.circleId, async (tx) => {
     await tx.insert(conversationTurns).values({
-      spaceId: key.spaceId,
-      appId: key.app.id,
+      circleId: key.circleId,
+      clientId: key.client.id,
       keyId: key.keyId,
       scope,
       sessionId: input.sessionId,
       chatType: context.chatType ?? 'none',
       groupSubjectId: context.groupSubjectId ?? null,
       senderSubjectId: context.senderSubjectId ?? null,
-      ownerAccountId: context.chatType ? null : key.app.ownerAccountId,
+      ownerAccountId: context.chatType ? null : key.client.ownerAccountId,
       senderName: session.subjects.find((s) => s.role === 'sender')?.name ?? null,
       userText: input.user,
       replyText: input.reply,
     })
-    const buffered = await trimBatch(tx, key.app.id, scope)
-    return { buffered, values: (await loadSpaceSettings(tx, key.spaceId)).values }
+    const buffered = await trimBatch(tx, key.client.id, scope)
+    return { buffered, values: (await loadCircleSettings(tx, key.circleId)).values }
   })
-  // 两轮同时进来时，后入队的可能把「马上」改回「等空闲」，这一批最多晚一个空闲时长：
-  // 下一轮进来或空闲到点时照样处理，不丢对话
-  void deps.jobs?.enqueueExtraction(target, extractionDelay(buffered, values))
+  void deps.jobs?.enqueueExtraction(target as never, extractionDelay(buffered, values))
 }
 
-// 一批最多留 MAX_BUFFERED_TURNS 轮，多出的删掉最早的；返回剩下几轮
-export async function trimBatch(tx: Tx, appId: string, scope: string): Promise<number> {
-  const inBatch = and(eq(conversationTurns.appId, appId), eq(conversationTurns.scope, scope))
+export async function trimBatch(tx: Tx, clientId: string, scope: string): Promise<number> {
+  const inBatch = and(eq(conversationTurns.clientId, clientId), eq(conversationTurns.scope, scope))
   await tx.execute(sql`
     delete from ${conversationTurns}
     where ${inBatch} and ${conversationTurns.id} <= (
@@ -104,7 +116,6 @@ export async function trimBatch(tx: Tx, appId: string, scope: string): Promise<n
   return row!.n
 }
 
-// 攒满一批马上抽取，不满时等空闲；返回等几秒。轮数与空闲时长按空间的高级设置
 export function extractionDelay(
   buffered: number,
   values: Pick<TuningValues, 'extraction.batchTurns' | 'extraction.idleMinutes'> = TUNING_DEFAULTS,
@@ -112,35 +123,36 @@ export function extractionDelay(
   return buffered >= values['extraction.batchTurns'] ? 0 : values['extraction.idleMinutes'] * 60
 }
 
-// 丢掉一批缓冲，返回删了几轮
 export async function dropBuffered(db: Db, target: BufferedSession): Promise<number> {
-  const gone = await withSpace(db, target.spaceId, (tx) =>
+  const gone = await withCircle(db, target.circleId, (tx) =>
     tx
       .delete(conversationTurns)
       .where(
-        and(eq(conversationTurns.appId, target.appId), eq(conversationTurns.scope, target.scope)),
+        and(
+          eq(conversationTurns.clientId, target.clientId),
+          eq(conversationTurns.scope, target.scope),
+        ),
       )
       .returning({ id: conversationTurns.id }),
   )
   return gone.length
 }
 
-// 整批删掉空闲超过 BUFFER_IDLE_HOURS 的缓冲（最后一轮在那之前），还在聊的不动。内容表开了 RLS，逐个空间处理
 export async function pruneConversationTurns(db: Db): Promise<number> {
-  const all = await db.select({ id: spaces.id }).from(spaces)
+  const all = await db.select({ id: circles.id }).from(circles)
   let removed = 0
-  for (const space of all) {
-    const [row] = await withSpace(db, space.id, (tx) =>
+  for (const circle of all) {
+    const [row] = await withCircle(db, circle.id, (tx) =>
       tx.execute<{ removed: number }>(sql`
         with idle as (
-          select ${conversationTurns.appId} as app_id, ${conversationTurns.scope} as scope
+          select ${conversationTurns.clientId} as client_id, ${conversationTurns.scope} as scope
           from ${conversationTurns}
-          group by ${conversationTurns.appId}, ${conversationTurns.scope}
+          group by ${conversationTurns.clientId}, ${conversationTurns.scope}
           having max(${conversationTurns.createdAt}) < now() - make_interval(hours => ${BUFFER_IDLE_HOURS}::int)
         ),
         gone as (
           delete from ${conversationTurns} t using idle
-          where t.app_id = idle.app_id and t.scope = idle.scope
+          where t.client_id = idle.client_id and t.scope = idle.scope
           returning 1
         )
         select count(*)::int as removed from gone`),

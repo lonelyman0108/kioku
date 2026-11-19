@@ -1,20 +1,19 @@
 import {
   BENCH_TOOLS,
   BenchStep,
-  LAYERS,
+  ENTRY_KINDS,
   ValidTo,
   type BenchReplayStep,
-  type DomainSummary,
-  type KeyScopes,
-  type MemoryChildren,
-  type MemoryView,
+  type EntryBrowseResponse,
+  type EntryView,
+  type LensKeyScopes,
   type RecallCandidate,
   type WhoAmI,
 } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 import type { z } from 'zod'
 
-import { formatChildren, formatDomains, formatMemory, TOOL_INTERNAL_ERROR } from '../../mcp/format'
+import { formatBrowse, formatEntry, TOOL_INTERNAL_ERROR } from '../../mcp/format'
 import { formatBootBlock } from '../../recall/boot'
 import { formatRecallBlock } from '../../recall/recall'
 import {
@@ -28,14 +27,15 @@ import {
 import { handshakeProblem } from '../httpExecutor'
 import { BENCH_EXPIRES_AFTER_MS, captureAfter, expand, runSteps, unmetRequirement } from '../runner'
 
-const FULL: KeyScopes = {
-  readLayers: [...LAYERS],
-  writeLayers: [...LAYERS],
+const FULL: LensKeyScopes = {
+  readKinds: [...ENTRY_KINDS],
+  writeKinds: [...ENTRY_KINDS],
   maxSensitivity: 'secret',
+  allowedRealms: null,
   admin: false,
   credentials: 'manage',
 }
-const READONLY: KeyScopes = { ...FULL, writeLayers: [], maxSensitivity: 'private' }
+const READONLY: LensKeyScopes = { ...FULL, writeKinds: [], maxSensitivity: 'private' }
 
 const textOutcome = (text: string): StepOutcome =>
   toolOutcome('kioku_get', { content: [{ type: 'text', text }] })
@@ -45,14 +45,28 @@ const errorOutcome = (text: string): StepOutcome =>
 // 假的执行方式：按调用顺序给结果，记下收到的步骤
 function fakeExecutor(
   answer: (step: ResolvedStep, index: number) => StepOutcome = () => textOutcome('好'),
-  options: { scopes?: KeyScopes; stops?: ('aborted' | 'timeout' | null)[] } = {},
+  options: {
+    scopes?: LensKeyScopes
+    circleKind?: 'personal' | 'shared'
+    stops?: ('aborted' | 'timeout' | null)[]
+  } = {},
 ) {
   const seen: ResolvedStep[] = []
   const calls: string[] = []
   let stopAt = 0
   const executor: BenchExecutor = {
     whoami: async () =>
-      ({ spaceId: 's', app: {}, scopes: options.scopes ?? FULL }) as unknown as WhoAmI,
+      ({
+        primaryCircle: {
+          id: 'c-1',
+          slug: 'home',
+          name: '家',
+          kind: options.circleKind ?? 'shared',
+        },
+        linkedCircles: [],
+        client: { runtimeFamily: 'claudecode' },
+        scopes: options.scopes ?? FULL,
+      }) as unknown as WhoAmI,
     execute: async (step, execution) => {
       seen.push(step)
       calls.push(execution?.replaying ? '重放' : '步骤')
@@ -83,11 +97,8 @@ describe('expand', () => {
 
   it('把字符串里的变量换掉，对象与数组里的也换，别的值不动', () => {
     expect(
-      expand(
-        { uri: 'a://${run}/b', list: ['${name}', 1, null], nested: { deep: '${name}!' } },
-        vars,
-      ),
-    ).toEqual({ uri: 'a://12345678/b', list: ['x', 1, null], nested: { deep: 'x!' } })
+      expand({ id: 'item-${run}', list: ['${name}', 1, null], nested: { deep: '${name}!' } }, vars),
+    ).toEqual({ id: 'item-12345678', list: ['x', 1, null], nested: { deep: 'x!' } })
   })
 
   it('没有这个变量的原样留着', () => {
@@ -105,8 +116,13 @@ describe('expand', () => {
 
 describe('capture', () => {
   it('按固定前缀取到行尾，去掉两头的空白；有好几处时取第一处', () => {
-    expect(captureAfter('层: private，版本: 3\n\n正文 版本: 9', '版本: ')).toBe('3')
-    expect(captureAfter('URI: a://b  \n', 'URI: ')).toBe('a://b')
+    expect(
+      captureAfter(
+        '记忆圈: home，物种: entry，敏感级: private，priority: 2，版本: 3\n\n正文 版本: 9',
+        '版本: ',
+      ),
+    ).toBe('3')
+    expect(captureAfter('ID: m-abc234  \n', 'ID: ')).toBe('m-abc234')
     expect(captureAfter('已新建凭据，版本 1', '版本 ')).toBe('1')
   })
 
@@ -123,12 +139,16 @@ describe('capture', () => {
 })
 
 describe('requires', () => {
-  it('归属与最高敏感级都满足才算满足', () => {
-    expect(unmetRequirement({ readLayers: ['user'] }, READONLY)).toBeNull()
-    expect(unmetRequirement({ writeLayers: ['user'] }, READONLY)).toContain('无权写入本人（user）')
+  it('记忆圈类型、物种与最高敏感级都满足才算满足', () => {
+    expect(unmetRequirement({ readKinds: ['entry'] }, READONLY, 'shared')).toBeNull()
+    expect(unmetRequirement({ circleKind: 'personal' }, READONLY, 'shared')).toContain(
+      '个人圈（personal）',
+    )
+    expect(unmetRequirement({ circleKind: 'personal' }, READONLY, 'personal')).toBeNull()
+    expect(unmetRequirement({ writeKinds: ['entry'] }, READONLY)).toContain('无权写入词条（entry）')
     expect(
-      unmetRequirement({ readLayers: ['user'] }, { ...READONLY, readLayers: ['core', 'persona'] }),
-    ).toContain('无权读取本人（user）')
+      unmetRequirement({ readKinds: ['fact'] }, { ...READONLY, readKinds: ['entry'] }),
+    ).toContain('无权读取事实（fact）')
     expect(unmetRequirement({ maxSensitivity: 'secret' }, READONLY)).toContain(
       '低于机密级（secret）',
     )
@@ -140,7 +160,7 @@ describe('requires', () => {
 
 describe('断言', () => {
   it('没带断言的步骤只要不是内部错误就算通过，业务错误也算', async () => {
-    const { executor } = fakeExecutor(() => errorOutcome('记忆不存在'))
+    const { executor } = fakeExecutor(() => errorOutcome('未找到词条：m-234567'))
     const result = await run(executor, steps({ kind: 'whoami' }))
     expect(result.steps[0]).toMatchObject({ status: 'passed', isError: true, assertions: [] })
     expect(result.ok).toBe(true)
@@ -166,85 +186,99 @@ describe('断言', () => {
     expect(restFailure(404, '不存在')).toMatchObject({ isError: true, httpStatus: 404 })
   })
 
-  it('报错与否、包含、不包含、URI 列表，都展开变量；失败的说明不带实际结果', async () => {
-    const { executor } = fakeExecutor(() => textOutcome('URI: a://abc123\n\n秘密的实际内容'))
+  it('报错与否、包含、不包含、短 ID 列表，都展开变量；失败的说明不带实际结果', async () => {
+    const { executor } = fakeExecutor((_, i) =>
+      textOutcome(i === 0 ? 'ID: m-234567' : 'ID: m-234567\n标题: abc123\n\n秘密的实际内容'),
+    )
     const result = await run(
       executor,
-      steps({
-        kind: 'tool',
-        tool: 'kioku_get',
-        expect: {
-          error: false,
-          contains: ['a://${run}', '没有这句'],
-          notContains: ['秘密的实际内容', '也没有这句'],
-          uris: ['a://${run}', 'x://y'],
-          notUris: ['a://${run}', 'z://z'],
+      steps(
+        { kind: 'tool', tool: 'kioku_create', capture: { hit: 'ID: ' } },
+        {
+          kind: 'tool',
+          tool: 'kioku_get',
+          expect: {
+            error: false,
+            contains: ['abc123', '没有这句'],
+            notContains: ['秘密的实际内容', '也没有这句'],
+            shortIds: ['${hit}', 'm-89abcd'],
+            notShortIds: ['${hit}', 'm-777777'],
+          },
         },
-      }),
+      ),
     )
-    const step = result.steps[0]!
+    const step = result.steps[1]!
     expect(step.status).toBe('failed')
-    expect(step.uris).toEqual(['a://abc123'])
+    expect(step.shortIds).toEqual(['m-234567'])
     expect(step.assertions.filter((a) => !a.ok).map((a) => a.message)).toEqual([
       '应包含「没有这句」',
       '不应包含「秘密的实际内容」',
-      'URI 列表应有 x://y',
-      'URI 列表不应有 a://abc123',
+      '短 ID 列表应有 m-89abcd',
+      '短 ID 列表不应有 ${hit}',
     ])
     expect(step.assertions.filter((a) => a.ok)).toHaveLength(5)
   })
 
   it('说明与 label 用展开之前的模板：capture 取到的值不进这两处，比较时照常展开', async () => {
     const VALUE = 'hunter2-value'
+    const CAPTURED_ID = 'm-234567'
     const { executor, seen } = fakeExecutor((_, i) =>
-      textOutcome(i === 0 ? `值：${VALUE}` : `URI: a://b\n\n回显 ${VALUE}`),
+      i === 0
+        ? textOutcome(`值：${VALUE}\nID: ${CAPTURED_ID}`)
+        : textOutcome(`ID: ${CAPTURED_ID}\n\n回显 ${VALUE}`),
     )
     const result = await run(
       executor,
       steps(
-        { kind: 'tool', tool: 'kioku_credential', capture: { pw: '值：' } },
+        { kind: 'tool', tool: 'kioku_credential', capture: { pw: '值：', cid: 'ID: ' } },
         {
           kind: 'tool',
           tool: 'kioku_get',
           label: '用 ${pw} 登录 ${run}',
-          arguments: { uri: 'a://${pw}' },
+          arguments: { id: '${pw}' },
           expect: {
             contains: ['没有 ${pw}', '回显 ${pw}'],
             notContains: ['${pw}', '${run}'],
-            uris: ['${pw}://x'],
-            notUris: ['${pw}://x'],
+            shortIds: ['${cid}', 'm-89abcd'],
+            notShortIds: ['${cid}', 'm-89abcd'],
           },
         },
       ),
     )
     const step = result.steps[1]!
-    expect(seen[1]).toMatchObject({ arguments: { uri: `a://${VALUE}` } })
+    expect(seen[1]).toMatchObject({ arguments: { id: VALUE } })
     expect(step.label).toBe('用 ${pw} 登录 abc123')
     expect(step.assertions).toEqual([
       { message: '应包含「没有 ${pw}」', ok: false },
       { message: '应包含「回显 ${pw}」', ok: true },
       { message: '不应包含「${pw}」', ok: false },
       { message: '不应包含「abc123」', ok: true },
-      { message: 'URI 列表应有 ${pw}://x', ok: false },
-      { message: 'URI 列表不应有 ${pw}://x', ok: true },
+      { message: '短 ID 列表应有 ${cid}', ok: true },
+      { message: '短 ID 列表应有 m-89abcd', ok: false },
+      { message: '短 ID 列表不应有 ${cid}', ok: false },
+      { message: '短 ID 列表不应有 m-89abcd', ok: true },
     ])
     expect(JSON.stringify([step.label, step.assertions, step.reason])).not.toContain(VALUE)
   })
 
-  it('kioku_boot 分不清 URI 列表：uris 与 notUris 断言都明确失败，不算没有', async () => {
+  it('kioku_boot 分不清短 ID 列表：shortIds 与 notShortIds 断言都明确失败，不算没有', async () => {
     const { executor } = fakeExecutor(() =>
-      toolOutcome('kioku_boot', { content: [{ type: 'text', text: '<kioku-boot>\n## a://b' }] }),
+      toolOutcome('kioku_boot', { content: [{ type: 'text', text: '<kioku-boot>\n## 规范' }] }),
     )
     const result = await run(
       executor,
-      steps({ kind: 'tool', tool: 'kioku_boot', expect: { uris: ['a://b'], notUris: ['c://d'] } }),
+      steps({
+        kind: 'tool',
+        tool: 'kioku_boot',
+        expect: { shortIds: ['m-234567'], notShortIds: ['m-345678'] },
+      }),
     )
     const step = result.steps[0]!
-    expect(step).toMatchObject({ status: 'failed', uris: null })
+    expect(step).toMatchObject({ status: 'failed', shortIds: null })
     expect(step.assertions.map((a) => a.ok)).toEqual([false, false])
-    expect(step.assertions[0]!.message).toContain('URI 列表应有 a://b')
+    expect(step.assertions[0]!.message).toContain('短 ID 列表应有 m-234567')
     expect(step.assertions[0]!.message).toContain('无法区分')
-    expect(step.assertions[1]!.message).toContain('URI 列表不应有 c://d')
+    expect(step.assertions[1]!.message).toContain('短 ID 列表不应有 m-345678')
   })
 
   it('报错与否对不上时失败', async () => {
@@ -260,7 +294,7 @@ describe('断言', () => {
 describe('变量与 capture', () => {
   it('${run} 与前面取到的变量展开之后才执行', async () => {
     const { executor, seen } = fakeExecutor((_, i) =>
-      i === 0 ? textOutcome('URI: a://b\n层: private，版本: 7\n\n正文') : textOutcome('好'),
+      i === 0 ? textOutcome('ID: m-234567\n敏感级: private，版本: 7\n\n正文') : textOutcome('好'),
     )
     const result = await run(
       executor,
@@ -268,20 +302,20 @@ describe('变量与 capture', () => {
         {
           kind: 'tool',
           tool: 'kioku_create',
-          arguments: { uri: 'a://${run}' },
-          capture: { version: '版本: ', uri: 'URI: ' },
+          arguments: { title: 'note-${run}' },
+          capture: { version: '版本: ', id: 'ID: ' },
         },
         {
           kind: 'tool',
           tool: 'kioku_update',
-          arguments: { uri: '${uri}', expected_version: '${version}' },
+          arguments: { id: '${id}', expected_version: '${version}' },
           expect: { contains: ['好'] },
         },
       ),
     )
-    expect(seen[0]).toMatchObject({ arguments: { uri: 'a://abc123' } })
-    expect(seen[1]).toMatchObject({ arguments: { uri: 'a://b', expected_version: 7 } })
-    expect(result.steps[0]!.captured).toEqual({ version: '7', uri: 'a://b' })
+    expect(seen[0]).toMatchObject({ arguments: { title: 'note-abc123' } })
+    expect(seen[1]).toMatchObject({ arguments: { id: 'm-234567', expected_version: 7 } })
+    expect(result.steps[0]!.captured).toEqual({ version: '7', id: 'm-234567' })
     expect(result.run).toBe('abc123')
   })
 
@@ -309,7 +343,7 @@ describe('变量与 capture', () => {
       executor,
       steps(
         { kind: 'whoami', capture: { version: '版本: ' } },
-        { kind: 'tool', tool: 'kioku_get', arguments: { uri: 'a://${version}' } },
+        { kind: 'tool', tool: 'kioku_get', arguments: { id: 'note-${version}' } },
         { kind: 'whoami' },
       ),
     )
@@ -328,14 +362,14 @@ describe('变量与 capture', () => {
         {
           kind: 'tool',
           tool: 'kioku_create',
-          requires: { writeLayers: ['user'] },
+          requires: { writeKinds: ['entry'] },
           capture: { version: '版本: ' },
         },
         { kind: 'tool', tool: 'kioku_update', arguments: { expected_version: '${version}' } },
       ),
     )
     expect(result.steps.map((s) => s.status)).toEqual(['skipped', 'skipped'])
-    expect(result.steps[0]!.reason).toContain('无权写入本人（user）')
+    expect(result.steps[0]!.reason).toContain('无权写入词条（entry）')
     expect(result.steps[1]!.reason).toContain('${version}')
     expect(seen).toHaveLength(0)
     expect(result.ok).toBe(true)
@@ -358,7 +392,7 @@ describe('变量与 capture', () => {
   })
 
   describe('之前取到过的变量', () => {
-    const uses = { kind: 'tool', tool: 'kioku_get', arguments: { uri: 'a://${version}' } } as const
+    const uses = { kind: 'tool', tool: 'kioku_get', arguments: { id: 'note-${version}' } } as const
 
     it('后一步没取到：旧值作废，依赖它的步骤不执行、算失败', async () => {
       const { executor, seen } = fakeExecutor((_, i) =>
@@ -388,7 +422,7 @@ describe('变量与 capture', () => {
           {
             kind: 'tool',
             tool: 'kioku_update',
-            requires: { writeLayers: ['user'] },
+            requires: { writeKinds: ['entry'] },
             capture: { version: '版本: ' },
           },
           uses,
@@ -411,7 +445,7 @@ describe('变量与 capture', () => {
           {
             kind: 'tool',
             tool: 'kioku_get',
-            arguments: { uri: 'a://${other}' },
+            arguments: { id: 'note-${other}' },
             capture: { version: '版本: ' },
           },
           uses,
@@ -435,7 +469,7 @@ describe('变量与 capture', () => {
         ),
       )
       expect(result.steps.map((s) => s.status)).toEqual(['passed', 'failed', 'passed', 'passed'])
-      expect(seen[3]).toMatchObject({ arguments: { uri: 'a://3' } })
+      expect(seen[3]).toMatchObject({ arguments: { id: 'note-3' } })
     })
   })
 
@@ -457,7 +491,7 @@ describe('变量与 capture', () => {
         steps: steps(
           { kind: 'whoami', capture: { query: '查询: ' } },
           { kind: 'recall', label: '发', body: { query: '${query}' }, capture: { x: '好' } },
-          { kind: 'tool', tool: 'kioku_get', arguments: { uri: 'a://${x}' } },
+          { kind: 'tool', tool: 'kioku_get', arguments: { id: 'note-${x}' } },
           { kind: 'whoami', label: '后面照常跑' },
         ),
       })
@@ -477,16 +511,20 @@ describe('变量与 capture', () => {
 
 describe('跳过与没有执行', () => {
   it('不满足 requires 的步骤记跳过，不执行，不算失败', async () => {
-    const { executor, seen } = fakeExecutor(() => textOutcome('好'), { scopes: READONLY })
+    const { executor, seen } = fakeExecutor(() => textOutcome('好'), {
+      scopes: READONLY,
+      circleKind: 'shared',
+    })
     const result = await run(
       executor,
       steps(
         { kind: 'whoami' },
-        { kind: 'tool', tool: 'kioku_create', requires: { writeLayers: ['user'] } },
+        { kind: 'tool', tool: 'kioku_create', requires: { writeKinds: ['entry'] } },
         { kind: 'boot', requires: { maxSensitivity: 'secret' } },
+        { kind: 'whoami', requires: { circleKind: 'personal' } },
       ),
     )
-    expect(result.steps.map((s) => s.status)).toEqual(['passed', 'skipped', 'skipped'])
+    expect(result.steps.map((s) => s.status)).toEqual(['passed', 'skipped', 'skipped', 'skipped'])
     expect(seen).toHaveLength(1)
     expect(result.ok).toBe(true)
   })
@@ -539,14 +577,15 @@ describe('重放', () => {
   const entry: BenchReplayStep = {
     kind: 'tool',
     tool: 'kioku_create',
-    arguments: { uri: 'a://${run}' },
+    arguments: { title: 'note-${run}', content: 'x' },
+    shortId: 'm-234567',
   }
 
   it('先执行，结果不返回；参数不再展开', async () => {
     const { executor, seen } = fakeExecutor()
     const result = await run(executor, steps({ kind: 'whoami' }), [entry, entry])
     expect(seen.map((s) => s.kind)).toEqual(['tool', 'tool', 'whoami'])
-    expect(seen[0]).toMatchObject({ arguments: { uri: 'a://${run}' } })
+    expect(seen[0]).toMatchObject({ arguments: { title: 'note-${run}' }, shortId: 'm-234567' })
     expect(result.steps).toHaveLength(1)
     expect(result.replayDiverged).toBeNull()
     expect(result.ok).toBe(true)
@@ -554,7 +593,7 @@ describe('重放', () => {
 
   it('有步骤报错就停下：后面的重放与当前步骤都不执行，返回第几步', async () => {
     const { executor, seen } = fakeExecutor((_, i) =>
-      i === 1 ? errorOutcome('URI 已被占用') : textOutcome('好'),
+      i === 1 ? errorOutcome('短 ID 已被占用') : textOutcome('好'),
     )
     const result = await run(executor, steps({ kind: 'whoami' }, { kind: 'boot' }), [
       entry,
@@ -562,7 +601,11 @@ describe('重放', () => {
       entry,
     ])
     expect(seen).toHaveLength(2)
-    expect(result.replayDiverged).toEqual({ index: 1, text: 'URI 已被占用', internalError: false })
+    expect(result.replayDiverged).toEqual({
+      index: 1,
+      text: '短 ID 已被占用',
+      internalError: false,
+    })
     expect(result.steps.map((s) => s.status)).toEqual(['notRun', 'notRun'])
     expect(result.steps[0]!.reason).toContain('第 2 步')
     expect(result.ok).toBe(false)
@@ -575,25 +618,32 @@ describe('重放', () => {
     expect(result.replayDiverged!.text).toContain('总时长')
   })
 
-  it('只记成功的写步骤，存展开之后的参数；读步骤、报错的步骤与真实模式都不记', async () => {
+  it('只记成功的写步骤并带上新建词条的 shortId；读步骤、报错的步骤与真实模式都不记', async () => {
     const answers: Record<string, StepOutcome> = {
-      kioku_create: textOutcome('好'),
-      kioku_update: errorOutcome('记忆不存在'),
+      kioku_create: toolOutcome('kioku_create', {
+        content: [{ type: 'text', text: 'ID: m-234567\n标题: t\n版本: 1' }],
+      }),
+      kioku_update: errorOutcome('未找到词条'),
       kioku_get: textOutcome('好'),
     }
     const { executor } = fakeExecutor((step) =>
       step.kind === 'tool' ? answers[step.tool]! : restSuccess('lifecycle', LIFECYCLE_OK),
     )
     const input = steps(
-      { kind: 'tool', tool: 'kioku_create', arguments: { uri: 'a://${run}' } },
-      { kind: 'tool', tool: 'kioku_update', arguments: { uri: 'a://${run}' } },
-      { kind: 'tool', tool: 'kioku_get', arguments: { uri: 'a://${run}' } },
+      { kind: 'tool', tool: 'kioku_create', arguments: { title: 't-${run}', content: 'x' } },
+      { kind: 'tool', tool: 'kioku_update', arguments: { id: 'm-234567' } },
+      { kind: 'tool', tool: 'kioku_get', arguments: { id: 'm-234567' } },
       { kind: 'lifecycle', body: TURN_END },
       { kind: 'lifecycle', body: { event: 'prompt.submit', prompt: '你好' } },
     )
     const result = await run(executor, input)
     expect(result.steps.map((s) => s.replay)).toEqual([
-      { kind: 'tool', tool: 'kioku_create', arguments: { uri: 'a://abc123' } },
+      {
+        kind: 'tool',
+        tool: 'kioku_create',
+        arguments: { title: 't-abc123', content: 'x' },
+        shortId: 'm-234567',
+      },
       null,
       null,
       { kind: 'lifecycle', body: TURN_END },
@@ -609,7 +659,7 @@ describe('重放', () => {
     })
     const result = await run(
       executor,
-      steps({ kind: 'tool', tool: 'kioku_create', arguments: { uri: 'a://b' } }),
+      steps({ kind: 'tool', tool: 'kioku_create', arguments: { content: 'a' } }),
     )
     expect(result.steps[0]).toMatchObject({
       status: 'failed',
@@ -620,13 +670,17 @@ describe('重放', () => {
   })
 
   it('断言不成立但确实写成了的步骤照样记：写入是真的，后面的步骤要读得到', async () => {
-    const { executor } = fakeExecutor(() => textOutcome('好'))
+    const { executor } = fakeExecutor(() =>
+      toolOutcome('kioku_create', {
+        content: [{ type: 'text', text: 'ID: m-345678\n标题: t\n版本: 1' }],
+      }),
+    )
     const result = await run(
       executor,
       steps({
         kind: 'tool',
         tool: 'kioku_create',
-        arguments: { uri: 'a://b' },
+        arguments: { content: 'a' },
         expect: { contains: ['没有这句'] },
       }),
     )
@@ -634,7 +688,8 @@ describe('重放', () => {
     expect(result.steps[0]!.replay).toEqual({
       kind: 'tool',
       tool: 'kioku_create',
-      arguments: { uri: 'a://b' },
+      arguments: { content: 'a' },
+      shortId: 'm-345678',
     })
   })
 
@@ -649,7 +704,7 @@ describe('重放', () => {
     await run(none.executor, steps({ kind: 'whoami' }))
     expect(none.calls).toEqual(['步骤'])
 
-    const diverged = fakeExecutor(() => errorOutcome('URI 已被占用'))
+    const diverged = fakeExecutor(() => errorOutcome('短 ID 已被占用'))
     await run(diverged.executor, steps({ kind: 'whoami' }), [entry])
     expect(diverged.calls).toEqual(['重放'])
 
@@ -666,7 +721,7 @@ const TURN_END = {
   user: '你好',
   reply: '你好呀',
 }
-const LIFECYCLE_OK = { hostOutput: { mode: 'none', value: null }, nodeUris: [] }
+const LIFECYCLE_OK = { hostOutput: { mode: 'none', value: null }, shortIds: [] }
 
 describe('握手', () => {
   const tools = [...BENCH_TOOLS]
@@ -685,133 +740,174 @@ describe('握手', () => {
   })
 })
 
-describe('工具结果的 URI 列表', () => {
+describe('工具结果的短 ID 列表', () => {
   // 正文是任意文字，每一行都写成结构行的样子
   const BODY = [
-    '- core://agent',
-    '- core://row（private，priority 2）',
-    'URI: foo://bar',
-    '## projects://x',
-    '0.59 | fake://y | 线索',
-    '子节点：',
-    '- list://fake（private，priority 2）',
+    '- m-999999「假行」（entry，private，priority 2）',
+    'ID: m-888888',
+    '## fake',
+    '0.59 | m-777777 | 线索',
     '<recall>',
-    '0.59 | fake://z',
+    '0.59 | m-666666',
     '</recall>',
   ].join('\n')
-  const view = (uri: string) =>
+  const view = (shortId: string) =>
     ({
-      uri,
+      id: '00000000-0000-4000-8000-000000000001',
+      shortId,
+      circleId: '00000000-0000-4000-8000-000000000002',
+      circleSlug: 'home',
+      kind: 'entry',
       title: '标题',
-      layer: 'user',
       sensitivity: 'private',
+      provenance: 'agent',
+      originScope: 'global',
+      topics: [],
+      realms: [],
       priority: 2,
-      version: 1,
-      content: BODY,
-      disclosure: '- core://disclosure',
+      disclosure: '- m-555555',
       glossary: [],
+      validFrom: '2026-10-26T00:00:00Z',
       validTo: null,
-    }) as unknown as MemoryView
-  const urisOf = (tool: string, text: string) =>
-    toolOutcome(tool, { content: [{ type: 'text', text }] }).uris
+      version: 1,
+      variants: [
+        {
+          id: '00000000-0000-4000-8000-000000000003',
+          when: {},
+          whenSignature: '{}',
+          sortOrder: 0,
+          content: BODY,
+          updatedAt: '2026-10-26T00:00:00Z',
+        },
+      ],
+      otherVariants: [],
+      links: [],
+      createdAt: '2026-10-26T00:00:00Z',
+      updatedAt: '2026-10-26T00:00:00Z',
+    }) as EntryView
+  const idsOf = (tool: string, text: string) =>
+    toolOutcome(tool, { content: [{ type: 'text', text }] }).shortIds
 
-  it.each(['kioku_get', 'kioku_create', 'kioku_update', 'kioku_move'])(
-    '%s 只看第一行的 URI，正文里的不算',
+  it.each(['kioku_get', 'kioku_create', 'kioku_update', 'kioku_transfer'])(
+    '%s 只看头两行的 ID，正文里的不算（包含重定向提示行）',
     (tool) => {
-      expect(urisOf(tool, formatMemory(view('notes://real')))).toEqual(['notes://real'])
-      expect(urisOf(tool, BODY)).toEqual([])
+      expect(idsOf(tool, formatEntry(view('m-234567')))).toEqual(['m-234567'])
+      expect(idsOf(tool, formatEntry(view('m-234567'), { requestedId: '旧标题' }))).toEqual([
+        'm-234567',
+      ])
+      expect(idsOf(tool, BODY)).toEqual([])
     },
   )
 
-  it('kioku_list 只看子节点列表：父节点的 URI 与正文都不算，路径本身没有记忆的算', () => {
-    const children = [
-      {
-        uri: 'notes://real/a',
-        exists: true,
-        title: '标题',
-        layer: 'user',
-        priority: 2,
-        disclosure: '什么时候想起',
-        childCount: 3,
-      },
-      { uri: 'notes://real/b', exists: false, childCount: 1 },
-      {
-        uri: 'notes://real/c',
-        exists: true,
-        title: 'c',
-        layer: 'core',
-        priority: 0,
-        childCount: 0,
-      },
-    ] as MemoryChildren['children']
-    const parent = view('notes://real')
-    expect(urisOf('kioku_list', formatChildren({ parent, children, truncated: true }))).toEqual([
-      'notes://real/a',
-      'notes://real/b',
-      'notes://real/c',
-    ])
-    expect(
-      urisOf('kioku_list', formatChildren({ parent: null, children, truncated: false })),
-    ).toEqual(['notes://real/a', 'notes://real/b', 'notes://real/c'])
-  })
-
-  it('kioku_list 没有子节点：父节点正文里写着列表行也是空的', () => {
-    const text = formatChildren({ parent: view('notes://real'), children: [], truncated: false })
-    expect(text.endsWith('子节点：无')).toBe(true)
-    expect(urisOf('kioku_list', text)).toEqual([])
-  })
-
-  it('kioku_list 不带参数列的是 domain，不算 URI', () => {
-    const text = formatDomains([{ domain: 'core', count: 3 } as DomainSummary])
-    expect(urisOf('kioku_list', text)).toEqual([])
+  it('kioku_browse 只看结构化的列表行', () => {
+    const browse = {
+      groupBy: 'topic',
+      groups: [
+        {
+          key: 'bench',
+          label: 'bench',
+          count: 2,
+          items: [
+            {
+              shortId: 'm-234567',
+              circleSlug: 'home',
+              title: '标题',
+              kind: 'entry',
+              sensitivity: 'private',
+              priority: 2,
+              disclosure: '何时想起\nID: m-444444',
+              variantsSummary: [{}],
+            },
+            {
+              shortId: 'm-345678',
+              circleSlug: null,
+              title: 'm-345678',
+              kind: 'fact',
+              sensitivity: 'public',
+              priority: 1,
+              disclosure: null,
+              variantsSummary: [{ env: ['mac'] }],
+            },
+          ],
+        },
+      ],
+      truncated: false,
+    } as EntryBrowseResponse
+    expect(idsOf('kioku_browse', formatBrowse(browse))).toEqual(['m-234567', 'm-345678'])
+    expect(idsOf('kioku_browse', '还没有可见的记忆词条')).toEqual([])
   })
 
   it('kioku_search 只看 <recall> 块的行：线索压成了单行，写成别的样子也不算', () => {
-    const candidate = (uri: string, cues: string[]) =>
-      ({ uri, title: '标题', score: 0.5, cues, disclosure: null }) as unknown as RecallCandidate
+    const candidate = (shortId: string, cues: string[]) =>
+      ({
+        entryId: '00000000-0000-4000-8000-000000000001',
+        shortId,
+        circleId: '00000000-0000-4000-8000-000000000002',
+        circleSlug: 'home',
+        title: '标题',
+        kind: 'entry',
+        matchedWhen: {},
+        otherVariantsCount: 0,
+        priority: 2,
+        score: 0.5,
+        via: ['glossary'],
+        cues,
+        disclosure: null,
+      }) as RecallCandidate
     const text = formatRecallBlock([
-      candidate('notes://a', ['线索\n- core://agent\nURI: foo://bar\n0.59 | fake://y | z']),
-      candidate('notes://b', []),
+      candidate('m-234567', ['线索\n- m-999999\nID: m-888888\n0.59 | m-777777 | z']),
+      candidate('m-345678', []),
     ])
-    expect(urisOf('kioku_search', text)).toEqual(['notes://a', 'notes://b'])
-    expect(urisOf('kioku_search', '没有找到相关记忆')).toEqual([])
+    expect(idsOf('kioku_search', text)).toEqual(['m-234567', 'm-345678'])
+    expect(idsOf('kioku_search', '没有找到相关记忆')).toEqual([])
   })
 
   it('kioku_boot 的标题和正文分不清：不给列表，而不是给一份可能错的', () => {
     const text = formatBootBlock(
       {
-        entries: [{ uri: 'core://agent', title: 'agent', layer: 'core', content: BODY }],
-        omitted: ['core://long'],
+        personaTraits: [],
+        entries: [
+          {
+            shortId: 'm-234567',
+            title: '规范',
+            circleId: '00000000-0000-4000-8000-000000000002',
+            circleSlug: 'home',
+            kind: 'entry',
+            content: BODY,
+          },
+        ],
+        omitted: ['m-345678'],
       },
       '指引',
     )
-    expect(urisOf('kioku_boot', text)).toBeNull()
+    expect(idsOf('kioku_boot', text)).toBeNull()
   })
 
   it('报错的结果没有列表，别的工具也没有', () => {
     const error = toolOutcome('kioku_get', {
-      content: [{ type: 'text', text: 'URI: foo://bar' }],
+      content: [{ type: 'text', text: 'ID: m-234567' }],
       isError: true,
     })
-    expect(error.uris).toEqual([])
+    expect(error.shortIds).toEqual([])
     const boot = toolOutcome('kioku_boot', {
       content: [{ type: 'text', text: TOOL_INTERNAL_ERROR }],
       isError: true,
     })
-    expect(boot.uris).toEqual([])
-    expect(urisOf('kioku_delete', '已删除 notes://real')).toEqual([])
-    expect(urisOf('kioku_credential', '- core://agent（private，priority 2）')).toEqual([])
-    expect(urisOf('constructor', 'URI: foo://bar')).toEqual([])
+    expect(boot.shortIds).toEqual([])
+    expect(idsOf('kioku_delete', '已删除 m-234567')).toEqual([])
+    expect(idsOf('kioku_credential', '- m-234567（private，priority 2）')).toEqual([])
+    expect(idsOf('constructor', 'ID: m-234567')).toEqual([])
   })
 
-  it('REST 不变：/boot 取 entries，生命周期取 nodeUris', () => {
+  it('REST 不变：/boot 取 entries，生命周期取 shortIds', () => {
     const boot = restSuccess('boot', {
-      entries: [{ uri: 'core://agent', title: 'agent', layer: 'core', content: BODY }],
-      omitted: ['core://long'],
+      personaTraits: [],
+      entries: [{ shortId: 'm-234567', title: '规范', content: BODY }],
+      omitted: ['m-345678'],
     })
-    expect(boot.uris).toEqual(['core://agent'])
-    const lifecycle = restSuccess('lifecycle', { ...LIFECYCLE_OK, nodeUris: ['core://agent'] })
-    expect(lifecycle.uris).toEqual(['core://agent'])
+    expect(boot.shortIds).toEqual(['m-234567'])
+    const lifecycle = restSuccess('lifecycle', { ...LIFECYCLE_OK, shortIds: ['m-234567'] })
+    expect(lifecycle.shortIds).toEqual(['m-234567'])
   })
 })
 
@@ -824,7 +920,7 @@ describe('结果的文字', () => {
 
   it('生命周期事件是交给宿主的文字，规则和插件一样', () => {
     const textOf = (hostOutput: unknown) =>
-      restSuccess('lifecycle', { hostOutput, nodeUris: ['a://b'] })
+      restSuccess('lifecycle', { hostOutput, shortIds: ['m-234567'] })
     expect(
       textOf({
         mode: 'stdout_json',
@@ -840,26 +936,34 @@ describe('结果的文字', () => {
     expect(textOf({ mode: 'stdout_text', value: '纯文本' }).text).toBe('纯文本')
     expect(textOf({ mode: 'return_value', value: { context: '给宿主' } }).text).toBe('给宿主')
     expect(textOf({ mode: 'none', value: null }).text).toBe('')
-    expect(textOf({ mode: 'none', value: null }).uris).toEqual(['a://b'])
+    expect(textOf({ mode: 'none', value: null }).shortIds).toEqual(['m-234567'])
   })
 
   it('session.start 多带的那几项单独放，原始响应和真实接口的相同', () => {
     const outcome = restSuccess('lifecycle', {
       ...LIFECYCLE_OK,
-      session: { limit: 100, omitted: ['a://b'], dropped: ['recent'] },
+      session: { limit: 100, omitted: ['m-234567'], dropped: ['recent'] },
     })
-    expect(outcome.session).toEqual({ limit: 100, omitted: ['a://b'], dropped: ['recent'] })
+    expect(outcome.session).toEqual({ limit: 100, omitted: ['m-234567'], dropped: ['recent'] })
     expect(outcome.raw).toEqual(LIFECYCLE_OK)
   })
 
-  it('REST 的 URI 列表：召回的候选、启动节点', () => {
+  it('REST 的短 ID 列表：召回的候选、启动词条', () => {
     expect(
-      restSuccess('recall', { candidates: [{ uri: 'a://b' }, { uri: 'c://d' }], subjects: [] })
-        .uris,
-    ).toEqual(['a://b', 'c://d'])
-    expect(restSuccess('boot', { entries: [{ uri: 'a://b' }], omitted: ['c://d'] }).uris).toEqual([
-      'a://b',
-    ])
-    expect(JSON.parse(restSuccess('whoami', { spaceId: 's' }).text)).toEqual({ spaceId: 's' })
+      restSuccess('recall', {
+        candidates: [{ shortId: 'm-234567' }, { shortId: 'm-345678' }],
+        subjects: [],
+      }).shortIds,
+    ).toEqual(['m-234567', 'm-345678'])
+    expect(
+      restSuccess('boot', {
+        personaTraits: [],
+        entries: [{ shortId: 'm-234567' }],
+        omitted: ['m-345678'],
+      }).shortIds,
+    ).toEqual(['m-234567'])
+    expect(JSON.parse(restSuccess('whoami', { primaryCircle: { id: 'c' } }).text)).toEqual({
+      primaryCircle: { id: 'c' },
+    })
   })
 })

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { versionLabel } from '@kioku/contracts'
+import { versionLabel, type CircleSummary } from '@kioku/contracts'
 import type { CommandPaletteItem, DropdownMenuItem } from '@nuxt/ui'
 import { useToast } from '@nuxt/ui/composables'
 import { useQuery } from '@tanstack/vue-query'
@@ -8,50 +8,55 @@ import { useRoute, useRouter, type RouteLocationRaw } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
-import { ownedApps } from '../benchSession'
 import CreateSpaceModal from '../components/CreateSpaceModal.vue'
 import ImportSpaceModal from '../components/ImportSpaceModal.vue'
 import KiokuMark from '../components/KiokuMark.vue'
-import StrataPatterns from '../components/strata/StrataPatterns.vue'
 import NoteLine from '../components/strata/NoteLine.vue'
+import StrataPatterns from '../components/strata/StrataPatterns.vue'
 import { COLOR_PREFERENCES, useColorPreference } from '../composables/useColorPreference'
 import { useConsoleSearch } from '../composables/useConsoleSearch'
-import { NEW_SPACE, useCreateSpace } from '../composables/useCreateSpace'
+import { NEW_CIRCLE, useCreateCircle } from '../composables/useCreateSpace'
 import { useInboxCounts } from '../composables/useInboxCounts'
 import { confirmDiscard, hasUnsavedChanges } from '../composables/unsavedChanges'
 import { LOGOUT } from '../composables/useLogout'
-import { forgetSpace, ME_KEY, useSession } from '../composables/useSession'
+import { forgetCircle, ME_KEY, useSession } from '../composables/useSession'
 import { icons } from '../icons'
 import { actionableInboxCount } from '../inbox'
+import { circleKindLabels } from '../labels'
 import { queryClient } from '../query'
 import {
   accountSettingsRoute,
+  circleSettingsRoute,
   instanceSettingsRoute,
   roleName,
-  spaceSettingsRoute,
 } from '../settingsSections'
 
 const router = useRouter()
 const route = useRoute()
 const toast = useToast()
-const { me, space } = useSession()
+const { me, circle } = useSession()
 
 // 会话过期或在别的标签页退出后，当前账号会变成 null：带人回登录页，登录后回到原来的页面
 let loggingOut = false
 watch(
   () => me.data.value,
   (m) => {
-    if (m === null) forgetSpace()
+    if (m === null) forgetCircle()
     if (m === null && !loggingOut) {
       void router.replace({ name: 'login', query: { next: route.fullPath } })
     }
   },
 )
 
-const spaces = computed(() => me.data.value?.spaces ?? [])
-// 新建与导入空间：登录的账号都有，名额用完时入口不可用、旁边写原因
-const newSpace = useCreateSpace(computed(() => Boolean(me.data.value)))
-provide(NEW_SPACE, newSpace)
+const circles = computed(() => {
+  const list = me.data.value?.circles ?? []
+  const personal = list.filter((c) => c.kind === 'personal')
+  const shared = list.filter((c) => c.kind !== 'personal')
+  return [...personal, ...shared]
+})
+// 新建共享圈与导入记忆圈：登录的账号都有，共享圈名额用完时「新建共享圈」不可用、旁边写原因
+const newCircle = useCreateCircle(computed(() => Boolean(me.data.value)))
+provide(NEW_CIRCLE, newCircle)
 
 // 窄屏的导航收进抽屉，换页就关上
 const navOpen = ref(false)
@@ -78,19 +83,21 @@ function focusAfterNavClosed(event: Event) {
   accountButton.value?.$el.focus()
 }
 
-function switchSpace(id: string) {
-  // 已经在这个空间的概览时地址不变，上面的 watch 不会触发，抽屉要在这里关
+function switchCircle(id: string) {
+  // 已经在这个记忆圈的概览时地址不变，上面的 watch 不会触发，抽屉要在这里关
   navOpen.value = false
-  void router.push({ name: 'overview', params: { spaceId: id } })
+  void router.push({ name: 'overview', params: { circleId: id } })
 }
 
-// 测试台只给应用所有者（会读到所有者的本人记忆）：这个空间里没有自己的应用时不显示入口，后端同样拒绝
-const apps = useQuery({
-  queryKey: computed(() => ['apps', space.value?.id] as const),
-  queryFn: ({ queryKey: [, id] }) => api.apps(id!),
-  enabled: computed(() => Boolean(space.value)),
+// 测试台只给接入实例所有者（会读取所有者的个人隐私上下文）：本圈没有自己的接入实例时不显示入口，后端同样拒绝
+const clients = useQuery({
+  queryKey: computed(() => ['clients', circle.value?.id] as const),
+  queryFn: ({ queryKey: [, id] }) => api.clients(id!),
+  enabled: computed(() => Boolean(circle.value)),
 })
-const ownsApp = computed(() => ownedApps(apps.data.value ?? [], me.data.value?.id).length > 0)
+const ownsClient = computed(() =>
+  (clients.data.value ?? []).some((client) => client.ownerAccountId === me.data.value?.id),
+)
 
 interface NavItem {
   label: string
@@ -103,23 +110,23 @@ interface NavItem {
 }
 
 // 待处理的条数：角标和待处理页共用缓存，处理完待办之后失效，不跟着每个页面重取
-const inboxCounts = useInboxCounts(computed(() => space.value?.id ?? null))
+const inboxCounts = useInboxCounts(computed(() => circle.value?.id ?? null))
 const inboxBadge = computed(() =>
-  inboxCounts.data.value && space.value
-    ? actionableInboxCount(inboxCounts.data.value, space.value.role)
+  inboxCounts.data.value && circle.value
+    ? actionableInboxCount(inboxCounts.data.value, circle.value.role)
     : undefined,
 )
 
 // 联系人详情也算在「对话」下面
 const CONVERSATION_ROUTES = ['conversations', 'contact']
 // 设置的三组是同一个页面，都点亮「设置」
-const SETTINGS_ROUTES = ['space-settings', 'account-settings', 'instance-settings']
+const SETTINGS_ROUTES = ['circle-settings', 'account-settings', 'instance-settings']
 
-// 顶部导航按用途分组：人格与应用的记忆在「记忆」的目录里，联系人在「对话」里，不再单独成组。入口的名字按术语表
+// 顶部导航按用途分组：入口名字严格按《术语表》
 const navGroups = computed<{ title?: string; items: NavItem[] }[]>(() => {
-  const id = space.value?.id
+  const id = circle.value?.id
   if (!id) return []
-  const params = { spaceId: id }
+  const params = { circleId: id }
   const link = (name: string, icon: string, routes = [name]) => ({
     icon,
     to: { name, params },
@@ -138,17 +145,18 @@ const navGroups = computed<{ title?: string; items: NavItem[] }[]>(() => {
     {
       title: '接入',
       items: [
-        { label: '应用', ...link('apps', icons.apps, ['apps', 'app']) },
+        { label: '接入实例', ...link('clients', icons.clients, ['clients', 'client']) },
         { label: '召回', ...link('recall', icons.recall) },
-        ...(ownsApp.value ? [{ label: '测试台', ...link('bench', icons.bench) }] : []),
+        ...(ownsClient.value ? [{ label: '测试台', ...link('bench', icons.bench) }] : []),
       ],
     },
     {
-      title: '空间',
+      title: '记忆圈',
       items: [
+        { label: '切面词表', ...link('vocabulary', icons.vocabulary) },
         { label: '变更记录', ...link('activity', icons.activity) },
-        // 「设置」进空间组，账号设置与实例设置放在账号菜单里
-        { label: '设置', ...link('space-settings', icons.settings, SETTINGS_ROUTES) },
+        // 「设置」进记忆圈组，账号设置与实例设置放在账号菜单里
+        { label: '设置', ...link('circle-settings', icons.settings, SETTINGS_ROUTES) },
       ],
     },
   ]
@@ -174,7 +182,7 @@ const accountNav = computed<NavItem[]>(() => [
 ])
 const isCurrent = (item: NavItem) => item.routes.includes(String(route.name))
 
-// ⌘K 里的页面与导航一致；记忆的搜索结果来自服务端
+// ⌘K 里的页面与导航一致；词条的搜索结果来自服务端
 const pages = computed<CommandPaletteItem[]>(() =>
   [...navGroups.value.flatMap((group) => group.items), ...accountNav.value].map((item) => ({
     label: item.label,
@@ -187,7 +195,7 @@ const {
   loading: searching,
   groups: searchGroups,
 } = useConsoleSearch(
-  computed(() => space.value?.id ?? null),
+  computed(() => circle.value?.id ?? null),
   pages,
 )
 
@@ -214,52 +222,66 @@ const userMenu = computed<DropdownMenuItem[][]>(() => [
   [{ label: '退出登录', icon: icons.logout, onSelect: () => void logout() }],
   ...(versionText.value ? [[{ type: 'label' as const, label: versionText.value }]] : []),
 ])
-// 菜单项上额外带的角色名：组件库的插槽不知道这个字段
-const roleOf = (item: unknown) => (item as { role?: string }).role
-// 空间切换器：各空间与当前账号在里面的角色（当前空间打勾），下面是当前空间的设置
-const spaceMenu = computed<DropdownMenuItem[][]>(() => [
-  [
-    { type: 'label', label: '空间' },
-    ...spaces.value.map((s): DropdownMenuItem => ({
-      type: 'checkbox',
-      slot: 'space',
-      label: s.name,
-      role: roleName(s.role),
-      checked: s.id === space.value?.id,
-      onSelect: () => switchSpace(s.id),
-    })),
-  ],
-  // 没有空间时没有这一组，不留一个空的
-  ...(space.value
-    ? [
-        [
-          {
-            label: '成员与设置',
-            icon: icons.settings,
-            to: spaceSettingsRoute(space.value.id),
-          },
-        ],
-      ]
-    : []),
-  [
-    {
-      label: '新建空间',
-      icon: icons.add,
-      disabled: Boolean(newSpace.blocked.value),
-      onSelect: () => (newSpace.open.value = true),
-    },
-    {
-      label: '导入空间',
-      icon: icons.importSpace,
-      disabled: Boolean(newSpace.blocked.value),
-      onSelect: () => (newSpace.importing.value = true),
-    },
-    // 不可用时原因写成文字，不只靠禁用的样子
-    ...(newSpace.blocked.value
-      ? [{ type: 'label' as const, label: newSpace.blocked.value, class: 'font-normal text-muted' }]
+// 菜单项上额外带的标注：个人圈标「本人」，共享圈标当前账号角色
+const badgeOf = (item: unknown) => (item as { badge?: string }).badge
+const circleBadge = (c: CircleSummary) => (c.kind === 'personal' ? '本人' : roleName(c.role))
+
+// 记忆圈切换器：个人圈置顶，其后列各共享圈及角色（当前记忆圈打勾），下面是设置、新建与导入
+const circleMenu = computed<DropdownMenuItem[][]>(() => {
+  const personal = circles.value.filter((c) => c.kind === 'personal')
+  const shared = circles.value.filter((c) => c.kind !== 'personal')
+  const toItem = (c: CircleSummary): DropdownMenuItem => ({
+    type: 'checkbox',
+    slot: 'circle',
+    label: c.name,
+    badge: circleBadge(c),
+    checked: c.id === circle.value?.id,
+    onSelect: () => switchCircle(c.id),
+  })
+  return [
+    ...(personal.length
+      ? [[{ type: 'label' as const, label: circleKindLabels.personal }, ...personal.map(toItem)]]
       : []),
-  ],
-])
+    ...(shared.length
+      ? [[{ type: 'label' as const, label: circleKindLabels.shared }, ...shared.map(toItem)]]
+      : []),
+    // 没有记忆圈时不留空的分隔组
+    ...(circle.value
+      ? [
+          [
+            {
+              label: '成员与设置',
+              icon: icons.settings,
+              to: circleSettingsRoute(circle.value.id),
+            },
+          ],
+        ]
+      : []),
+    [
+      {
+        label: '新建共享圈',
+        icon: icons.add,
+        disabled: Boolean(newCircle.blocked.value),
+        onSelect: () => (newCircle.open.value = true),
+      },
+      {
+        label: '导入记忆圈',
+        icon: icons.importCircle,
+        onSelect: () => (newCircle.importing.value = true),
+      },
+      // 不可用时原因写成文字，不只靠禁用的样子
+      ...(newCircle.blocked.value
+        ? [
+            {
+              type: 'label' as const,
+              label: newCircle.blocked.value,
+              class: 'font-normal text-muted',
+            },
+          ]
+        : []),
+    ],
+  ]
+})
 
 async function logout() {
   // 先确认未保存的修改，取消就什么都不做；确认之后再去服务端退出
@@ -280,7 +302,7 @@ async function logout() {
     }
   }
   loggingOut = true
-  forgetSpace()
+  forgetCircle()
   // 清掉全部缓存：下一个在这个标签页登录的人不能看到上一个人的记忆
   queryClient.clear()
   queryClient.setQueryData(ME_KEY, null)
@@ -347,23 +369,23 @@ provide(LOGOUT, logout)
         />
         <div class="flex min-w-0 items-center gap-1.5 max-[1024px]:hidden">
           <UDropdownMenu
-            :items="spaceMenu"
+            :items="circleMenu"
             :content="{ align: 'end' }"
             :ui="{ content: 'min-w-60 max-w-80' }"
             size="sm"
           >
             <UButton
-              :label="space?.name ?? '选择空间'"
-              :title="space?.name"
-              :icon="icons.space"
+              :label="circle?.name ?? '选择记忆圈'"
+              :title="circle?.name"
+              :icon="icons.circle"
               :trailing-icon="icons.chevronDown"
               color="neutral"
               variant="ghost"
               class="max-w-48 min-w-0"
-              aria-label="切换空间"
+              aria-label="切换记忆圈"
             />
-            <template #space-trailing="{ item }">
-              <span class="text-xs text-muted">{{ roleOf(item) }}</span>
+            <template #circle-trailing="{ item }">
+              <span class="text-xs text-muted">{{ badgeOf(item) }}</span>
             </template>
           </UDropdownMenu>
           <UDropdownMenu
@@ -422,25 +444,25 @@ provide(LOGOUT, logout)
               </div>
             </nav>
             <div class="space-y-3 px-5 py-4">
-              <div v-if="spaces.length">
-                <p class="pb-1 text-xs text-muted">空间</p>
+              <div v-if="circles.length">
+                <p class="pb-1 text-xs text-muted">记忆圈</p>
                 <button
-                  v-for="s in spaces"
-                  :key="s.id"
+                  v-for="c in circles"
+                  :key="c.id"
                   type="button"
                   class="flex w-full items-baseline gap-2 py-1.5 text-left text-sm/6"
-                  :class="s.id === space?.id ? 'font-semibold' : ''"
-                  :aria-current="s.id === space?.id ? 'true' : undefined"
-                  @click="switchSpace(s.id)"
+                  :class="c.id === circle?.id ? 'font-semibold' : ''"
+                  :aria-current="c.id === circle?.id ? 'true' : undefined"
+                  @click="switchCircle(c.id)"
                 >
-                  <span class="min-w-0 truncate" :title="s.name">{{ s.name }}</span>
+                  <span class="min-w-0 truncate" :title="c.name">{{ c.name }}</span>
                   <span class="ml-auto shrink-0 text-xs font-normal text-muted">{{
-                    roleName(s.role)
+                    circleBadge(c)
                   }}</span>
                 </button>
                 <RouterLink
-                  v-if="space"
-                  :to="spaceSettingsRoute(space.id)"
+                  v-if="circle"
+                  :to="circleSettingsRoute(circle.id)"
                   class="block py-1.5 text-sm/6"
                   @click="navOpen = false"
                 >
@@ -451,23 +473,21 @@ provide(LOGOUT, logout)
                 <button
                   type="button"
                   class="block py-1.5 text-left text-sm/6 disabled:cursor-not-allowed disabled:text-muted"
-                  :disabled="Boolean(newSpace.blocked.value)"
-                  :aria-describedby="newSpace.blocked.value ? 'space-limit-note' : undefined"
-                  @click="((navOpen = false), (newSpace.open.value = true))"
+                  :disabled="Boolean(newCircle.blocked.value)"
+                  :aria-describedby="newCircle.blocked.value ? 'circle-limit-note' : undefined"
+                  @click="((navOpen = false), (newCircle.open.value = true))"
                 >
-                  新建空间
+                  新建共享圈
                 </button>
                 <button
                   type="button"
-                  class="block py-1.5 text-left text-sm/6 disabled:cursor-not-allowed disabled:text-muted"
-                  :disabled="Boolean(newSpace.blocked.value)"
-                  :aria-describedby="newSpace.blocked.value ? 'space-limit-note' : undefined"
-                  @click="((navOpen = false), (newSpace.importing.value = true))"
+                  class="block py-1.5 text-left text-sm/6"
+                  @click="((navOpen = false), (newCircle.importing.value = true))"
                 >
-                  导入空间
+                  导入记忆圈
                 </button>
-                <p v-if="newSpace.blocked.value" id="space-limit-note" class="text-xs text-muted">
-                  {{ newSpace.blocked.value }}
+                <p v-if="newCircle.blocked.value" id="circle-limit-note" class="text-xs text-muted">
+                  {{ newCircle.blocked.value }}
                 </p>
               </div>
               <div>
@@ -511,24 +531,24 @@ provide(LOGOUT, logout)
       </div>
     </header>
 
-    <!-- 组件库默认的空状态是「没有匹配的数据」，记忆还在搜的时候也这么说：搜索中另说，搜完再说暂无匹配 -->
+    <!-- 组件库默认的空状态是「没有匹配的数据」，还在搜的时候也这么说：搜索中另说，搜完再说暂无匹配 -->
     <UDashboardSearch
       v-model:search-term="searchTerm"
       :groups="searchGroups"
       :loading="searching"
-      placeholder="搜索记忆或跳转页面"
+      placeholder="搜索词条或跳转页面"
     >
       <template #empty>{{ searching ? '搜索中' : '暂无匹配' }}</template>
     </UDashboardSearch>
 
     <main class="flex min-h-0 flex-1">
-      <!-- 地址里的空间不是自己的（被移出了、或打开了旧链接）：说明情况，不展示别的空间的内容和操作 -->
-      <div v-if="me.data.value && route.params.spaceId && !space" class="not-member">
+      <!-- 地址里的记忆圈无权访问（被移出了、或打开了旧链接）：说明情况，不展示别的记忆圈的内容和操作 -->
+      <div v-if="me.data.value && route.params.circleId && !circle" class="not-member">
         <NoteLine>
-          无权访问此空间
+          无权访问此记忆圈
           <template #actions>
             <UButton :to="{ name: 'home' }" color="neutral" variant="outline" size="sm">
-              返回我的空间
+              返回我的记忆圈
             </UButton>
           </template>
         </NoteLine>
@@ -536,11 +556,14 @@ provide(LOGOUT, logout)
       <RouterView v-else />
     </main>
     <CreateSpaceModal
-      :open="newSpace.open.value"
-      @close="newSpace.open.value = false"
-      @created="newSpace.created"
+      :open="newCircle.open.value"
+      @close="newCircle.open.value = false"
+      @created="newCircle.created"
     />
-    <ImportSpaceModal :open="newSpace.importing.value" @close="newSpace.importing.value = false" />
+    <ImportSpaceModal
+      :open="newCircle.importing.value"
+      @close="newCircle.importing.value = false"
+    />
   </UDashboardGroup>
 </template>
 

@@ -1,7 +1,13 @@
-import type { DreamRunEntry } from '@kioku/contracts'
+import { DREAM_SUGGESTION_KINDS, type DreamRunEntry } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
-import { dreamScopeText, runEntrySummary, runOutcome, sharedSummaryText } from '../dream'
+import {
+  dreamScopeText,
+  runEntrySummary,
+  runOutcome,
+  sharedSummaryText,
+  suggestionKinds,
+} from '../dream'
 
 const entry: DreamRunEntry = {
   scope: null,
@@ -18,12 +24,16 @@ const entry: DreamRunEntry = {
 }
 
 describe('Dream 的范围', () => {
-  it('共享的归属带名字，本人只说归属名，联系人的事实与会话摘要说是在哪里的对话里记下的', () => {
+  it('覆盖全部建议种类与作用域文案', () => {
+    for (const kind of DREAM_SUGGESTION_KINDS) {
+      expect(suggestionKinds[kind].label).toBeTruthy()
+      expect(suggestionKinds[kind].effect).toBeTruthy()
+    }
     const base = { id: null, name: null, origin: null }
-    expect(dreamScopeText({ ...base, kind: 'core' })).toBe('通用')
-    expect(dreamScopeText({ ...base, kind: 'persona', name: '豆包' })).toBe('人格「豆包」')
-    expect(dreamScopeText({ ...base, kind: 'app' })).toBe('已删除的应用')
-    expect(dreamScopeText({ ...base, kind: 'user' })).toBe('本人')
+    expect(dreamScopeText({ ...base, kind: 'circle', name: '前端工程' })).toBe('记忆圈「前端工程」')
+    expect(dreamScopeText({ ...base, kind: 'circle' })).toBe('当前记忆圈')
+    expect(dreamScopeText({ ...base, kind: 'personal', name: '小明' })).toBe('小明 的私密内容')
+    expect(dreamScopeText({ ...base, kind: 'personal' })).toBe('个人范围')
     expect(
       dreamScopeText({
         ...base,
@@ -31,6 +41,10 @@ describe('Dream 的范围', () => {
         origin: { kind: 'group', id: null, name: '读书会' },
       }),
     ).toBe('群「读书会」中记下的')
+    expect(dreamScopeText({ ...base, kind: 'local_session', name: 'kioku / repo' })).toBe(
+      '本地会话「kioku / repo」',
+    )
+    expect(dreamScopeText({ ...base, kind: 'local_session' })).toBe('本地会话')
   })
 })
 

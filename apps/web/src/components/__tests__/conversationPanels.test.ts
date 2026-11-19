@@ -1,15 +1,13 @@
-import type { ConversationDetail as Detail, PersonaInfo } from '@kioku/contracts'
+import type { ConversationDetail as Detail } from '@kioku/contracts'
 import { QueryClient, VueQueryPlugin } from '@tanstack/vue-query'
 import { describe, expect, it, vi } from 'vitest'
 import { createSSRApp, defineComponent, h, type Component } from 'vue'
 import { renderToString } from 'vue/server-renderer'
 import { createMemoryHistory, createRouter } from 'vue-router'
 
-import AppPanel from '../AppPanel.vue'
 import ConversationDetail from '../ConversationDetail.vue'
-import CoordinateFields from '../CoordinateFields.vue'
-import MemoryRootPanel from '../MemoryRootPanel.vue'
-import { tallyCounts } from '../strata/strata'
+import personaDetailSource from '../PersonaDetail.vue?raw'
+import promoteFactModalSource from '../PromoteFactModal.vue?raw'
 
 // 提示层依赖组件库的 provider，这里只看内容本身
 vi.mock('../Hint.vue', () => ({
@@ -21,11 +19,10 @@ vi.mock('../Hint.vue', () => ({
   }),
 }))
 
-const SPACE = 's1'
+const CIRCLE = '00000000-0000-4000-8000-0000000000s1'
 const at = '2026-11-06T08:00:00.000Z'
 
-// 链接要解析路由名（组件库的按钮带 to 时也是），挂一个只有这几个名字的路由；查询的结果先放进缓存，渲染时直接用
-const NAMES = ['home', 'memories', 'conversations', 'contact', 'app', 'apps', 'credentials']
+const NAMES = ['home', 'memories', 'conversations', 'contact', 'client', 'clients', 'vocabulary']
 async function render(
   component: Component,
   props: Record<string, unknown>,
@@ -37,7 +34,7 @@ async function render(
   const router = createRouter({
     history: createMemoryHistory(),
     routes: NAMES.map((name, i) => ({
-      path: i === 0 ? '/' : `/${name}/:spaceId?/:appId?/:subjectId?`,
+      path: i === 0 ? '/' : `/${name}/:circleId?/:clientId?/:subjectId?`,
       name,
       component: empty,
     })),
@@ -51,8 +48,11 @@ async function render(
 
 const detail = (over: Partial<Detail> = {}): Detail => ({
   id: '00000000-0000-4000-8000-000000000001',
+  circleId: CIRCLE,
   kind: 'group',
-  app: { id: '00000000-0000-4000-8000-0000000000a1', name: 'QQ 机器人' },
+  client: { id: '00000000-0000-4000-8000-0000000000a1', name: 'QQ 机器人' },
+  deviceKey: '',
+  projectSlug: '',
   subject: { id: '00000000-0000-4000-8000-0000000000b1', kind: 'group', displayName: '读书会' },
   owner: null,
   displayName: '读书会',
@@ -63,6 +63,7 @@ const detail = (over: Partial<Detail> = {}): Detail => ({
   summaries: [
     {
       id: '00000000-0000-4000-8000-0000000000c1',
+      shortId: 'ep-0001',
       content: '讨论了第三章',
       provenance: 'untrusted',
       createdAt: at,
@@ -72,6 +73,7 @@ const detail = (over: Partial<Detail> = {}): Detail => ({
   facts: [
     {
       id: '00000000-0000-4000-8000-0000000000d1',
+      shortId: 'fa-0001',
       content: '在学日语',
       provenance: 'untrusted',
       subject: { id: '00000000-0000-4000-8000-0000000000b2', kind: 'person', displayName: '张三' },
@@ -85,158 +87,60 @@ const detail = (over: Partial<Detail> = {}): Detail => ({
 })
 
 describe('会话详情', () => {
-  it('群聊：摘要的时间线、在这里记下的事实连着各自的联系人', async () => {
+  it('群聊：摘要的时间线与短 ID、在这里记下的事实连着各自的联系人', async () => {
     const data = detail()
-    const html = await render(ConversationDetail, { spaceId: SPACE, id: data.id }, [
-      [['conversation', SPACE, data.id], data],
+    const html = await render(ConversationDetail, { circleId: CIRCLE, id: data.id }, [
+      [['conversation', CIRCLE, data.id], data],
     ])
     expect(html).toContain('读书会')
     expect(html).toContain('QQ 机器人')
     expect(html).toContain('群聊')
     expect(html).toContain('讨论了第三章')
+    expect(html).toContain('ep-0001')
     expect(html).toContain('在学日语')
+    expect(html).toContain('fa-0001')
     expect(html).toContain('张三')
     expect(html).toContain('未确认来源')
   })
 
-  it('不带会话上下文：名字写应用，写「本人」，不列事实', async () => {
+  it('不带会话上下文：按接入实例、项目与设备区分，写「本人」，不列事实', async () => {
     const data = detail({
       kind: 'none',
       subject: null,
       owner: { id: '00000000-0000-4000-8000-0000000000e1', displayName: 'LM' },
       displayName: 'LM',
-      app: { id: '00000000-0000-4000-8000-0000000000a2', name: 'Claude Code' },
+      client: { id: '00000000-0000-4000-8000-0000000000a2', name: 'Claude Code' },
+      deviceKey: 'macbook',
+      projectSlug: 'kioku',
       facts: [],
     })
-    const html = await render(ConversationDetail, { spaceId: SPACE, id: data.id }, [
-      [['conversation', SPACE, data.id], data],
+    const html = await render(ConversationDetail, { circleId: CIRCLE, id: data.id }, [
+      [['conversation', CIRCLE, data.id], data],
     ])
-    expect(html).toMatch(/<h2 tabindex="-1"[^>]*>Claude Code<\/h2>/)
-    // 名字已经是应用了，下面一行不再重复
-    expect(html.match(/Claude Code/g)).toHaveLength(1)
+    expect(html).toContain('Claude Code · kioku · macbook')
+    expect(html).toContain('项目 kioku')
+    expect(html).toContain('设备 macbook')
     expect(html).toContain('本人')
     expect(html).not.toContain('在这里记下的事实')
     expect(html).toContain('不带会话上下文的会话只写摘要')
   })
 })
 
-describe('记忆目录的根', () => {
-  const personas: PersonaInfo[] = [
-    { id: 'p1', slug: 'default', name: '默认', extendsId: null, description: null },
-    { id: 'p2', slug: 'doubao', name: '豆包', extendsId: 'p1', description: null },
-  ]
-  const counts = tallyCounts([
-    { layer: 'persona', sensitivity: 'public', count: 3 },
-    { layer: 'user', sensitivity: 'private', count: 5 },
-  ])
-
-  it('人格的根列出各个人格与继承，坐标开头写在底部，适用范围在提示层', async () => {
-    const html = await render(
-      MemoryRootPanel,
-      { spaceId: SPACE, layer: 'persona', counts, canWrite: true, canEditPersonas: true },
-      [
-        [['personas', SPACE], personas],
-        [['apps', SPACE], []],
-      ],
-    )
-    expect(html).toContain('默认')
-    expect(html).toContain('继承默认')
-    expect(html).toContain('persona://')
-    expect(html).toContain('使用该人格的应用，含子人格')
-    expect(html).toContain('新建人格')
-  })
-
-  it('本人的根不列公开那一档', async () => {
-    const html = await render(
-      MemoryRootPanel,
-      { spaceId: SPACE, layer: 'user', counts, canWrite: false, canEditPersonas: false },
-      [],
-    )
-    expect(html).toContain('私密')
-    expect(html).not.toContain('公开')
-    expect(html).toContain('user://')
-    expect(html).not.toContain('新建记忆')
+describe('提炼事实弹窗', () => {
+  it('不使用 form 防止隐式提交，调用 promoteFact 与切面选择器', () => {
+    expect(promoteFactModalSource).not.toContain('<form')
+    expect(promoteFactModalSource).toContain('api.promoteFact')
+    expect(promoteFactModalSource).toContain('<FacetWhenPicker')
+    expect(promoteFactModalSource).toContain('sensitivityAllowed')
   })
 })
 
-describe('新建与移动的坐标', () => {
-  it('人格要选是哪个，坐标随归属、位置与标识拼出来', async () => {
-    const html = await render(
-      CoordinateFields,
-      {
-        modelValue: { layer: 'persona', entity: 'doubao', position: 'style', identifier: 'tone' },
-        personas: [{ id: 'p2', slug: 'doubao', name: '豆包', extendsId: null, description: null }],
-        apps: [],
-      },
-      [],
-    )
-    expect(html).toContain('persona://doubao/style/tone')
-    expect(html).toContain('aria-label="人格"')
-  })
-})
-
-describe('目录里选中一个应用', () => {
-  const app = {
-    id: '00000000-0000-4000-8000-0000000000a1',
-    slug: 'claudecode',
-    name: 'Claude Code',
-    runtimeFamily: 'claudecode',
-    ownerAccountId: '00000000-0000-4000-8000-0000000000f1',
-    defaultPersonaId: 'p1',
-    config: {},
-  }
-  const memory = {
-    id: '00000000-0000-4000-8000-0000000000c9',
-    uri: 'app://claudecode/commit_style',
-    title: '提交规范',
-    layer: 'app' as const,
-    sensitivity: 'internal' as const,
-    provenance: 'owner' as const,
-    priority: 1,
-    disclosure: '要写提交信息时',
-    personaId: null,
-    appId: app.id,
-    version: 1,
-    updatedAt: at,
-    validTo: null,
-  }
-  const persona = { id: 'p1', slug: 'default', name: '默认', extendsId: null, description: null }
-
-  it('它的记忆写标题，会话与访问密钥的入口都在，底部是坐标开头', async () => {
-    const html = await render(AppPanel, { spaceId: SPACE, appId: app.id, canWrite: true }, [
-      [['apps', SPACE], [app]],
-      [['personas', SPACE], [persona]],
-      [
-        ['memory-list', SPACE, { under: 'claudecode', panel: true }],
-        { items: [memory], nextCursor: null },
-      ],
-      [['conversations', SPACE, app.id, 'recent'], { items: [], nextCursor: null }],
-      [['overview', SPACE], { apps: [{ id: app.id, keys: { active: 2, lastUsedAt: null } }] }],
-    ])
-    expect(html).toContain('提交规范')
-    expect(html).toContain('默认')
-    expect(html).toContain('暂无会话')
-    expect(html).toContain('有效访问密钥')
-    expect(html).toContain('app://claudecode/')
-  })
-
-  it('会话只写群聊、私聊或本人：面板就是这个应用的，应用名不再写一遍', async () => {
-    const qq = {
-      ...app,
-      id: '00000000-0000-4000-8000-0000000000a3',
-      slug: 'qqbot',
-      name: 'QQ 机器人',
-    }
-    const group = detail({ app: { id: qq.id, name: qq.name } })
-    const html = await render(AppPanel, { spaceId: SPACE, appId: qq.id, canWrite: true }, [
-      [['apps', SPACE], [qq]],
-      [['personas', SPACE], [persona]],
-      [['memory-list', SPACE, { under: 'qqbot', panel: true }], { items: [], nextCursor: null }],
-      [['conversations', SPACE, qq.id, 'recent'], { items: [group], nextCursor: null }],
-      [['overview', SPACE], { apps: [{ id: qq.id, keys: { active: 1, lastUsedAt: null } }] }],
-    ])
-    expect(html).toContain('读书会')
-    expect(html).toContain('群聊')
-    expect(html).not.toContain('QQ 机器人 · 群聊')
+describe('独立人格详情', () => {
+  it('管理设定段而不使用 persona://，展示客户端引用并保留通知插槽', () => {
+    expect(personaDetailSource).not.toContain('persona://')
+    expect(personaDetailSource).toContain('api.upsertPersonaTrait')
+    expect(personaDetailSource).toContain('api.deletePersonaTrait')
+    expect(personaDetailSource).toContain('persona.clients')
+    expect(personaDetailSource).toContain('<slot name="notice"')
   })
 })

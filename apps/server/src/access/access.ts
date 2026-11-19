@@ -1,72 +1,89 @@
 import {
   ACCESS_CONTEXTS,
-  LAYERS,
+  CIRCLE_KINDS,
+  ENTRY_KINDS,
   SENSITIVITIES,
   sensitivityAllowed,
   type AccessContext,
+  type CircleEffectiveGrant,
+  type CircleKind,
   type CredentialAccessReason,
   type CredentialCapability,
+  type EntryKind,
   type KeyAccessMatrix,
-  type KeyScopes,
-  type Layer,
+  type LensKeyScopes,
   type MemberRole,
+  type PersonMemoryMode,
   type Provenance,
   type ReadDenial,
   type Sensitivity,
+  type SubjectKind,
 } from '@kioku/contracts'
 
 import { currentMoment } from '../db/moment'
+import { checkStaticRealmLock, normalizeRealms } from './realms'
 
-// 有效权限 = API Key 的上限 ∩ 会话上下文规则 ∩ 应用配置。
-// 会话上下文由插件上报，不可信，所以每条规则都只能在 Key 上限之内收紧，不能放宽。
+// 有效权限 = 透镜访问密钥上限（主场圈 / 关联客场圈）∩ 会话上下文规则 ∩ 接入实例配置。
+// 会话上下文由插件上报，不可信，每条规则只能在密钥上限之内收紧，绝不能放宽。
 
 export type ChatType = 'direct' | 'group' | 'channel' | 'cron' | 'subagent'
 
 export interface SessionContext {
   chatType?: ChatType
-  // 以下由服务端根据插件上报的平台 ID 解析成对象后填入
   groupSubjectId?: string
   senderSubjectId?: string
   senderIsOwner?: boolean
+  // 当前群是否开启单群强隔离锁（client_group_rules.isolate_group_memory）
+  currentGroupIsolated?: boolean
+  // 拟人跨群模式下，当前 client 未加锁且实际存在会话的群作用域（形如 group:<id>）
+  sharedGroupScopes?: readonly string[]
+  // 已开启单群强隔离锁的群作用域集合（用于 readDenial 准确区分 group_lock 与 origin）
+  lockedGroupScopes?: readonly string[]
 }
 
-export interface AppAccessConfig {
-  appId: string
+export interface ClientAccessConfig {
+  clientId: string
   ownerAccountId: string
-  // 应用当前的人格。Key 写人格的记忆只能写它，不能改继承链上的祖先；没有人格时人格的记忆一条也写不了
-  personaId?: string | null
-  // 本人私聊时读取本人记忆（界面上的开关）：开启后本人私聊读本人的内部及以下，不开就和陌生人私聊一样
   elevateOwnerDirect?: 'internal'
+  personMemoryMode?: PersonMemoryMode
+}
+
+export interface CircleAccess {
+  circleId: string
+  circleKind: CircleKind
+  isPrimary: boolean
+  readKinds: ReadonlySet<EntryKind>
+  writeKinds: ReadonlySet<EntryKind>
+  maxSensitivity: Sensitivity
+  canReadSecret: boolean
 }
 
 export interface Access {
-  readLayers: ReadonlySet<Layer>
-  writeLayers: ReadonlySet<Layer>
-  maxSensitivity: Sensitivity
-  // null 表示不限来源作用域（没有会话上下文的受信 agent）
-  originScopes: ReadonlySet<string> | null
-  // 新写入记忆的来源作用域与来源
+  primaryCircleId: string
+  primaryCircleRealms: readonly string[]
+  circles: ReadonlyMap<string, CircleAccess>
+  // null 表示不按白名单限制场域；非 null 时仅放行与之交集非空的目标
+  allowedRealms: ReadonlySet<string> | null
+  // 访问密钥静态 context_facets 经 implies 展开后的场域集合
+  staticContextRealms: ReadonlySet<string>
+  // null 表示无会话上下文上限（本机受信 Agent 或管理界面）；否则仅允许基础作用域 + 合法跨群人物印象
+  baseOriginScopes: ReadonlySet<string> | null
+  crossGroupPersonScopes: ReadonlySet<string>
+  lockedGroupScopes: ReadonlySet<string>
+  currentGroupIsolated: boolean
+  // 带会话上下文（cron/subagent/group/channel/direct）时，一律禁止读取归属于成员个人的本地会话摘要
+  forbidOwnerBoundEpisodes: boolean
   writeOriginScope: string
   writeProvenance: Provenance
   ownerAccountId: string
-  // null 表示管理界面：不代表某个应用，能看到空间里所有应用的记忆
-  appId: string | null
-  // 能写哪些应用的记忆。'all'：admin Key 与管理界面里的空间 owner；Key 只能写自己的应用；
-  // 管理界面里的 editor 只能写自己是所有者的应用，与签发 Key 的规则一致（Key 只能由应用所有者签发）
-  writableAppIds: ReadonlySet<string> | 'all'
-  // 能写哪些人格的记忆。'all'：admin Key 与管理界面；Key 只能写应用当前的人格，
-  // 否则群聊版的应用能改掉它继承的主人格的设定
-  writablePersonaIds: ReadonlySet<string> | 'all'
-  // 允许按坐标显式读取 secret；召回和搜索永远不返回 secret
-  canReadSecret: boolean
+  // null 表示管理界面（不代表某个接入实例）
+  clientId: string | null
   admin: boolean
-  // 凭据能力：Key 的签发上限，带会话上下文时一律是 none；管理界面里空间 owner 是 manage，别人是 use
+  // 主场圈的凭据能力；带会话上下文或客场圈一律为 none
   credentials: CredentialCapability
 }
 
-// 带会话上下文时读得到的归属：本人之外的五类。本人只给不带会话上下文的访问密钥，开启之后再给本人私聊
-const SHARED_CONTEXT_LAYERS: readonly Layer[] = ['core', 'persona', 'app', 'subject', 'episode']
-const UNTRUSTED_WRITE_LAYERS: readonly Layer[] = ['subject', 'episode']
+const UNTRUSTED_WRITE_KINDS: readonly EntryKind[] = ['fact', 'episode']
 
 export function sensitivityRank(s: Sensitivity): number {
   return SENSITIVITIES.indexOf(s)
@@ -76,326 +93,537 @@ function minSensitivity(a: Sensitivity, b: Sensitivity): Sensitivity {
   return sensitivityRank(a) <= sensitivityRank(b) ? a : b
 }
 
-function intersect(base: readonly Layer[], allowed: readonly Layer[]): Set<Layer> {
-  return new Set(base.filter((l) => allowed.includes(l)))
+function intersectKinds(base: readonly EntryKind[], allowed: readonly EntryKind[]): Set<EntryKind> {
+  return new Set(base.filter((k) => allowed.includes(k)))
 }
 
-export function resolveAccess(
-  scopes: KeyScopes,
-  app: AppAccessConfig,
-  context: SessionContext = {},
-): Access {
-  const common = {
-    ownerAccountId: app.ownerAccountId,
-    appId: app.appId,
-    writableAppIds: scopes.admin ? ('all' as const) : new Set([app.appId]),
-    writablePersonaIds: scopes.admin
-      ? ('all' as const)
-      : new Set(app.personaId ? [app.personaId] : []),
-    admin: scopes.admin,
-    // 凭据只给不带会话上下文的访问：群聊、私聊、定时任务与子 agent 都没有
-    credentials: 'none' as CredentialCapability,
-  }
-  const appScope = `app:${app.appId}`
+export interface CircleGrantMembership {
+  circleId: string
+  circleSlug: string
+  circleName: string
+  circleKind: CircleKind
+  role: MemberRole | null
+  memberSince: Date | null
+}
 
-  // 没有会话上下文：Key 自己就是全部授权，例如本机的编码 agent
-  if (!context.chatType) {
+export interface LinkedCircleInput {
+  grant: { circleId: string; mode: 'read' | 'read_write' }
+  membership: CircleGrantMembership | null
+}
+
+export interface ComputeKeyGrantsInput {
+  key: { scopes: LensKeyScopes; createdAt: Date; revokedAt: Date | null }
+  ownerDisabledAt: Date | null
+  primary: CircleGrantMembership
+  linked: readonly LinkedCircleInput[]
+}
+
+export interface ComputedKeyGrants {
+  effectiveScopes: LensKeyScopes | null
+  circleGrants: CircleEffectiveGrant[]
+}
+
+// 密钥上限受成员「当前」在该记忆圈的角色约束：owner 保留上限；editor 失去 admin、secret 与凭据能力；
+// viewer 在此基础上转为只读
+export function clampScopesToRole(scopes: LensKeyScopes, role: MemberRole): LensKeyScopes {
+  if (role === 'owner') return scopes
+  return {
+    readKinds: scopes.readKinds,
+    writeKinds: role === 'viewer' ? [] : scopes.writeKinds,
+    maxSensitivity: minSensitivity(scopes.maxSensitivity, 'private'),
+    allowedRealms: scopes.allowedRealms,
+    admin: false,
+    credentials: 'none',
+  }
+}
+
+// 密钥在主场圈现在的有效上限：吊销、不在圈里、账号停用、或在重新加入前签发的密钥一律作废返回 null
+export function keyEffectiveScopes(
+  key: { scopes: LensKeyScopes; createdAt: Date; revokedAt: Date | null },
+  owner: { role: MemberRole | null; memberSince: Date | null; disabledAt: Date | null } | undefined,
+): LensKeyScopes | null {
+  if (key.revokedAt || !owner?.role || owner.disabledAt) return null
+  if (owner.memberSince && key.createdAt < owner.memberSince) return null
+  return clampScopesToRole(key.scopes, owner.role)
+}
+
+// 计算主场圈 + 各关联客场圈的独立权限状态：
+// 主场圈失效则整把密钥作废，客场圈离开或重进后失效时静默剥离该圈，客场圈上限封顶在 private 且禁用凭据、禁用跨圈写入非 entry
+export function computeKeyGrants(input: ComputeKeyGrantsInput): ComputedKeyGrants {
+  const { key, ownerDisabledAt, primary, linked } = input
+  const effectiveScopes = keyEffectiveScopes(key, {
+    role: primary.role,
+    memberSince: primary.memberSince,
+    disabledAt: ownerDisabledAt,
+  })
+
+  if (!effectiveScopes) {
     return {
-      ...common,
-      readLayers: new Set(scopes.readLayers),
-      writeLayers: new Set(scopes.writeLayers),
-      maxSensitivity: scopes.maxSensitivity,
-      originScopes: null,
+      effectiveScopes: null,
+      circleGrants: [
+        {
+          circleId: primary.circleId,
+          circleSlug: primary.circleSlug,
+          circleName: primary.circleName,
+          circleKind: primary.circleKind,
+          isPrimary: true,
+          mode: 'read',
+          readKinds: [],
+          writeKinds: [],
+          maxSensitivity: 'public',
+          credentials: 'none',
+          active: false,
+        },
+        ...linked.map((l) => ({
+          circleId: l.grant.circleId,
+          circleSlug: l.membership?.circleSlug ?? '',
+          circleName: l.membership?.circleName ?? '',
+          circleKind: l.membership?.circleKind ?? ('shared' as CircleKind),
+          isPrimary: false,
+          mode: 'read' as const,
+          readKinds: [] as EntryKind[],
+          writeKinds: [] as EntryKind[],
+          maxSensitivity: 'public' as Sensitivity,
+          credentials: 'none' as CredentialCapability,
+          active: false,
+        })),
+      ],
+    }
+  }
+
+  const primaryGrant: CircleEffectiveGrant = {
+    circleId: primary.circleId,
+    circleSlug: primary.circleSlug,
+    circleName: primary.circleName,
+    circleKind: primary.circleKind,
+    isPrimary: true,
+    mode: effectiveScopes.writeKinds.length > 0 ? 'read_write' : 'read',
+    readKinds: [...effectiveScopes.readKinds],
+    writeKinds: [...effectiveScopes.writeKinds],
+    maxSensitivity: effectiveScopes.maxSensitivity,
+    credentials: effectiveScopes.credentials,
+    active: true,
+  }
+
+  const linkedGrants: CircleEffectiveGrant[] = linked.map((item) => {
+    const m = item.membership
+    const isActive = Boolean(
+      m &&
+      m.role &&
+      m.circleId !== primary.circleId &&
+      (!m.memberSince || key.createdAt >= m.memberSince),
+    )
+    if (!isActive || !m?.role) {
+      return {
+        circleId: item.grant.circleId,
+        circleSlug: m?.circleSlug ?? '',
+        circleName: m?.circleName ?? '',
+        circleKind: m?.circleKind ?? 'shared',
+        isPrimary: false,
+        mode: 'read',
+        readKinds: [],
+        writeKinds: [],
+        maxSensitivity: 'public',
+        credentials: 'none',
+        active: false,
+      }
+    }
+    const clamped = clampScopesToRole(key.scopes, m.role)
+    const canWriteAway = item.grant.mode === 'read_write' && m.role !== 'viewer'
+    const writeKinds = canWriteAway ? clamped.writeKinds.filter((k) => k === 'entry') : []
+    return {
+      circleId: m.circleId,
+      circleSlug: m.circleSlug,
+      circleName: m.circleName,
+      circleKind: m.circleKind,
+      isPrimary: false,
+      mode: canWriteAway && writeKinds.length > 0 ? 'read_write' : 'read',
+      readKinds: [...clamped.readKinds],
+      writeKinds,
+      maxSensitivity: minSensitivity(clamped.maxSensitivity, 'private'),
+      credentials: 'none',
+      active: true,
+    }
+  })
+
+  return {
+    effectiveScopes,
+    circleGrants: [primaryGrant, ...linkedGrants],
+  }
+}
+
+export interface ResolveAccessInput {
+  primaryCircleId: string
+  primaryCircleRealms?: readonly string[]
+  scopes: LensKeyScopes
+  grants: readonly CircleEffectiveGrant[]
+  staticContextRealms?: ReadonlySet<string>
+  client: ClientAccessConfig
+  context?: SessionContext
+}
+
+export function resolveAccess(input: ResolveAccessInput): Access {
+  const {
+    primaryCircleId,
+    primaryCircleRealms = [],
+    scopes,
+    grants,
+    staticContextRealms = new Set<string>(),
+    client,
+    context = {},
+  } = input
+  const allowedRealms =
+    scopes.allowedRealms !== null ? new Set(normalizeRealms(scopes.allowedRealms)) : null
+  const normalizedPrimaryRealms = normalizeRealms(primaryCircleRealms)
+  const lockedGroupScopes = new Set(context.lockedGroupScopes ?? [])
+  const currentGroupIsolated = context.currentGroupIsolated === true
+  const clientScope = `client:${client.clientId}`
+  const chatType = context.chatType
+
+  const circleMap = new Map<string, CircleAccess>()
+  const activeGrants = grants.filter((g) => g.active)
+
+  if (!chatType) {
+    for (const g of activeGrants) {
+      circleMap.set(g.circleId, {
+        circleId: g.circleId,
+        circleKind: g.circleKind,
+        isPrimary: g.isPrimary,
+        readKinds: new Set(g.readKinds),
+        writeKinds: new Set(g.writeKinds),
+        maxSensitivity: g.isPrimary
+          ? g.maxSensitivity
+          : minSensitivity(g.maxSensitivity, 'private'),
+        canReadSecret: g.isPrimary && g.maxSensitivity === 'secret',
+      })
+    }
+    return {
+      primaryCircleId,
+      primaryCircleRealms: normalizedPrimaryRealms,
+      circles: circleMap,
+      allowedRealms,
+      staticContextRealms,
+      baseOriginScopes: null,
+      crossGroupPersonScopes: new Set(),
+      lockedGroupScopes,
+      currentGroupIsolated: false,
+      forbidOwnerBoundEpisodes: false,
       writeOriginScope: 'global',
       writeProvenance: 'agent',
-      canReadSecret: scopes.maxSensitivity === 'secret',
+      ownerAccountId: client.ownerAccountId,
+      clientId: client.clientId,
+      admin: scopes.admin,
       credentials: scopes.credentials ?? 'none',
     }
   }
 
-  // 定时任务与子 agent：不是和本人对话，读不到本人的记忆
-  if (context.chatType === 'cron' || context.chatType === 'subagent') {
+  if (chatType === 'cron' || chatType === 'subagent') {
+    for (const g of activeGrants) {
+      circleMap.set(g.circleId, {
+        circleId: g.circleId,
+        circleKind: g.circleKind,
+        isPrimary: g.isPrimary,
+        readKinds: new Set(g.readKinds),
+        writeKinds: g.isPrimary ? new Set(g.writeKinds) : new Set(),
+        maxSensitivity:
+          g.circleKind === 'personal'
+            ? minSensitivity(g.maxSensitivity, 'public')
+            : minSensitivity(g.maxSensitivity, 'internal'),
+        canReadSecret: false,
+      })
+    }
     return {
-      ...common,
-      readLayers: intersect(scopes.readLayers, SHARED_CONTEXT_LAYERS),
-      writeLayers: intersect(scopes.writeLayers, SHARED_CONTEXT_LAYERS),
-      maxSensitivity: minSensitivity(scopes.maxSensitivity, 'internal'),
-      originScopes: new Set(['global', appScope]),
-      writeOriginScope: appScope,
+      primaryCircleId,
+      primaryCircleRealms: normalizedPrimaryRealms,
+      circles: circleMap,
+      allowedRealms,
+      staticContextRealms,
+      baseOriginScopes: new Set(['global', clientScope]),
+      crossGroupPersonScopes: new Set(),
+      lockedGroupScopes,
+      currentGroupIsolated: false,
+      forbidOwnerBoundEpisodes: true,
+      writeOriginScope: clientScope,
       writeProvenance: 'agent',
-      canReadSecret: false,
+      ownerAccountId: client.ownerAccountId,
+      clientId: client.clientId,
+      admin: scopes.admin,
+      credentials: 'none',
     }
   }
 
-  if (context.chatType === 'group' || context.chatType === 'channel') {
+  if (chatType === 'group' || chatType === 'channel') {
     if (!context.groupSubjectId) throw new Error('群聊上下文缺少群对象')
     const groupScope = `group:${context.groupSubjectId}`
+    const crossGroupPersonScopes = new Set<string>()
+    if (client.personMemoryMode === 'persona_shared' && !currentGroupIsolated) {
+      for (const s of context.sharedGroupScopes ?? []) {
+        if (s.startsWith('group:') && s !== groupScope && !lockedGroupScopes.has(s)) {
+          crossGroupPersonScopes.add(s)
+        }
+      }
+    }
+    for (const g of activeGrants) {
+      circleMap.set(g.circleId, {
+        circleId: g.circleId,
+        circleKind: g.circleKind,
+        isPrimary: g.isPrimary,
+        readKinds: new Set(g.readKinds),
+        writeKinds: g.isPrimary ? intersectKinds(g.writeKinds, UNTRUSTED_WRITE_KINDS) : new Set(),
+        maxSensitivity: minSensitivity(g.maxSensitivity, 'public'),
+        canReadSecret: false,
+      })
+    }
     return {
-      ...common,
-      readLayers: intersect(scopes.readLayers, SHARED_CONTEXT_LAYERS),
-      writeLayers: intersect(scopes.writeLayers, UNTRUSTED_WRITE_LAYERS),
-      maxSensitivity: minSensitivity(scopes.maxSensitivity, 'public'),
-      originScopes: new Set(['global', appScope, groupScope]),
+      primaryCircleId,
+      primaryCircleRealms: normalizedPrimaryRealms,
+      circles: circleMap,
+      allowedRealms,
+      staticContextRealms,
+      baseOriginScopes: new Set(['global', clientScope, groupScope]),
+      crossGroupPersonScopes,
+      lockedGroupScopes,
+      currentGroupIsolated,
+      forbidOwnerBoundEpisodes: true,
       writeOriginScope: groupScope,
       writeProvenance: 'untrusted',
-      canReadSecret: false,
+      ownerAccountId: client.ownerAccountId,
+      clientId: client.clientId,
+      admin: scopes.admin,
+      credentials: 'none',
     }
   }
 
   // 私聊
   if (!context.senderSubjectId) throw new Error('私聊上下文缺少发言人对象')
   const directScope = `direct:${context.senderSubjectId}`
-  const elevated = context.senderIsOwner === true && app.elevateOwnerDirect === 'internal'
-  return {
-    ...common,
-    // 开启「本人私聊时读取本人记忆」后加上本人，敏感级到内部为止：本人的私密只给不带会话上下文的访问密钥
-    readLayers: elevated
-      ? intersect(scopes.readLayers, [...SHARED_CONTEXT_LAYERS, 'user'])
-      : intersect(scopes.readLayers, SHARED_CONTEXT_LAYERS),
-    writeLayers: intersect(scopes.writeLayers, UNTRUSTED_WRITE_LAYERS),
-    maxSensitivity: minSensitivity(scopes.maxSensitivity, elevated ? 'internal' : 'public'),
-    originScopes: new Set(['global', appScope, directScope]),
-    writeOriginScope: directScope,
-    // 平台账号能证明的身份有限，本人私聊写入也按 untrusted 处理
-    writeProvenance: 'untrusted',
-    canReadSecret: false,
+  const elevated = context.senderIsOwner === true && client.elevateOwnerDirect === 'internal'
+  const directCap: Sensitivity = elevated ? 'internal' : 'public'
+  const crossGroupPersonScopes = new Set<string>()
+  if (client.personMemoryMode === 'persona_shared') {
+    for (const s of context.sharedGroupScopes ?? []) {
+      if (s.startsWith('group:') && !lockedGroupScopes.has(s)) {
+        crossGroupPersonScopes.add(s)
+      }
+    }
   }
-}
-
-// Key 的有效上限还要受应用主人「当前」角色约束：签发之后主人被降级，Key 也随之降级，
-// 与签发规则一致：admin、secret 与凭据能力（取用、管理）只属于空间 owner，viewer 只读
-export function clampScopesToRole(scopes: KeyScopes, role: MemberRole): KeyScopes {
-  if (role === 'owner') return scopes
+  for (const g of activeGrants) {
+    circleMap.set(g.circleId, {
+      circleId: g.circleId,
+      circleKind: g.circleKind,
+      isPrimary: g.isPrimary,
+      readKinds: new Set(g.readKinds),
+      writeKinds: g.isPrimary ? intersectKinds(g.writeKinds, UNTRUSTED_WRITE_KINDS) : new Set(),
+      maxSensitivity: minSensitivity(g.maxSensitivity, directCap),
+      canReadSecret: false,
+    })
+  }
   return {
-    readLayers: scopes.readLayers,
-    writeLayers: role === 'viewer' ? [] : scopes.writeLayers,
-    maxSensitivity: minSensitivity(scopes.maxSensitivity, 'private'),
-    admin: false,
+    primaryCircleId,
+    primaryCircleRealms: normalizedPrimaryRealms,
+    circles: circleMap,
+    allowedRealms,
+    staticContextRealms,
+    baseOriginScopes: new Set(['global', clientScope, directScope]),
+    crossGroupPersonScopes,
+    lockedGroupScopes,
+    currentGroupIsolated: false,
+    forbidOwnerBoundEpisodes: true,
+    writeOriginScope: directScope,
+    writeProvenance: 'untrusted',
+    ownerAccountId: client.ownerAccountId,
+    clientId: client.clientId,
+    admin: scopes.admin,
     credentials: 'none',
   }
 }
 
-// Key 现在的有效上限：签发上限按应用主人当前的角色收紧。Key 已吊销、主人已经不在空间里、主人的账号被停用，
-// 或主人离开后又被重新加入、而 Key 签发在重新加入之前，Key 都作废，返回 null。鉴权与 Key 列表都按这里算。
-// 停用之后再启用，Key 恢复：停用不吊销，只是期间用不了
-export function keyEffectiveScopes(
-  key: { scopes: KeyScopes; createdAt: Date; revokedAt: Date | null },
-  owner: { role: MemberRole | null; memberSince: Date | null; disabledAt: Date | null } | undefined,
-): KeyScopes | null {
-  if (key.revokedAt || !owner?.role || owner.disabledAt) return null
-  if (owner.memberSince && key.createdAt < owner.memberSince) return null
-  return clampScopesToRole(key.scopes, owner.role)
-}
-
-// 权限范围用的会话上下文：联系人只是占位，只看归属与敏感级，来源作用域另外说明
-const MATRIX_CONTEXTS: Record<AccessContext, SessionContext> = {
-  none: {},
-  direct: { chatType: 'direct', senderSubjectId: 'sender' },
-  owner_direct: { chatType: 'direct', senderSubjectId: 'owner', senderIsOwner: true },
-  group: { chatType: 'group', groupSubjectId: 'group' },
-  cron: { chatType: 'cron' },
-}
-
-// 一把 Key 在各种会话上下文下实际能读写哪些归属、哪些敏感级：每一格按 canRead 与 canWrite 判断一条
-// 属于这个应用、应用所有者与当前人格的记忆，不另写一份规则。本人不设公开，那一格读写都没有
-export function accessMatrix(scopes: KeyScopes, app: AppAccessConfig): KeyAccessMatrix {
-  const personaId = app.personaId ?? null
-  const personaIds = personaId ? [personaId] : []
-  return {
-    contexts: ACCESS_CONTEXTS.map((context) => {
-      const access = resolveAccess(scopes, app, MATRIX_CONTEXTS[context])
-      const origins = access.originScopes ? [...access.originScopes] : null
-      return {
-        context,
-        credentials:
-          CREDENTIAL_CAPABILITIES_DESC.find(
-            (need) => credentialDenial(access, { appIds: null }, need) === null,
-          ) ?? 'none',
-        originScope: !origins
-          ? 'any'
-          : origins.some((o) => o.startsWith('group:'))
-            ? 'group'
-            : origins.some((o) => o.startsWith('direct:'))
-              ? 'direct'
-              : 'app',
-        rows: LAYERS.map((layer) => ({
-          layer,
-          cells: SENSITIVITIES.map((sensitivity) => {
-            const facts: MemoryFacts = {
-              layer,
-              sensitivity,
-              originScope: 'global',
-              ownerAccountId: app.ownerAccountId,
-              personaId,
-              appId: app.appId,
-              validTo: null,
-              expiresAt: null,
-              deletedAt: null,
-            }
-            const read = !sensitivityAllowed(layer, sensitivity)
-              ? 'none'
-              : !canRead(access, facts, { personaIds, explicit: true })
-                ? 'none'
-                : canRead(access, facts, { personaIds })
-                  ? 'recall'
-                  : 'explicit'
-            return {
-              sensitivity,
-              read,
-              write: canWrite(access, { layer, sensitivity, appId: app.appId, personaId }),
-            } as const
-          }),
-        })),
-      }
-    }),
-  }
-}
-
-// 判断时用到的记忆字段；查询里的 SQL 过滤条件必须与 canRead 保持一致
-export interface MemoryFacts {
-  layer: Layer
+export interface EntryFacts {
+  circleId: string
+  kind: EntryKind
   sensitivity: Sensitivity
   originScope: string
+  clientId: string | null
   ownerAccountId: string | null
-  personaId: string | null
-  appId: string | null
+  subjectKind: SubjectKind | null
+  realms: readonly string[]
   validTo: Date | null
   expiresAt: Date | null
   deletedAt: Date | null
 }
 
 export interface ReadOptions {
-  // 当前人格及其继承链；人格的记忆只能读到这些人格的
-  personaIds: readonly string[]
-  // 按坐标显式读取时才可能读到 secret
   explicit?: boolean
-  // 管理读取：管理界面看历史、恢复时用。不看有效期与删除状态（历史就是给过期、被推翻和删掉的版本看的），
-  // 按显式读取算，人格也不限（管理界面本来看得到全部人格，删掉的人格的旧快照照样看得到）
   management?: boolean
-  // 判断有效期的「现在」，只用数据库的钟：事务开头取的时刻（nowOf）。不给时用所在的 withSpace 事务开头的时刻
-  // （见 db/moment.ts），和同一个事务里的 SQL（readableConditions）一样；不在事务里又遇到有有效期的记忆时抛错
   now?: Date
 }
 
-export function canRead(access: Access, memory: MemoryFacts, options: ReadOptions): boolean {
-  return readDenial(access, memory, options) === null
+export function canRead(access: Access, entry: EntryFacts, options: ReadOptions = {}): boolean {
+  return readDenial(access, entry, options) === null
 }
 
-// 有效期过了没有：失效（valid_to：被推翻、到了有效到）或到期（expires_at：会话摘要）的时刻不晚于 now 就算过了
-export function lapsed(memory: Pick<MemoryFacts, 'validTo' | 'expiresAt'>, now: Date): boolean {
+// 有效期过了没有：validTo 或 expiresAt 不晚于 now 就算过期
+export function lapsed(entry: Pick<EntryFacts, 'validTo' | 'expiresAt'>, now: Date): boolean {
   return (
-    (memory.validTo !== null && memory.validTo <= now) ||
-    (memory.expiresAt !== null && memory.expiresAt <= now)
+    (entry.validTo !== null && entry.validTo <= now) ||
+    (entry.expiresAt !== null && entry.expiresAt <= now)
   )
 }
 
-// 读不到的第一个原因，读得到时为 null。canRead 就是它，召回调试台用它说明一条记忆为什么被过滤掉
+// 读不到的原因，读得到时为 null；SQL 过滤条件 readableConditions 必须与之逐条对齐
 export function readDenial(
   access: Access,
-  memory: MemoryFacts,
-  options: ReadOptions,
-): Exclude<ReadDenial, 'override'> | null {
+  entry: EntryFacts,
+  options: ReadOptions = {},
+): ReadDenial | null {
   if (!options.management) {
-    if (memory.deletedAt) return 'deleted'
-    if (memory.validTo !== null || memory.expiresAt !== null) {
-      // 不用应用的钟顶替：两个钟会差几十毫秒，和 SQL 一侧的判断就对不上了
+    if (entry.deletedAt) return 'deleted'
+    if (entry.validTo !== null || entry.expiresAt !== null) {
       const now = options.now ?? currentMoment()
       if (!now) throw new Error('判断有效期要传入数据库的时刻（ReadOptions.now）')
-      if (lapsed(memory, now)) return 'expired'
+      if (lapsed(entry, now)) return 'expired'
     }
   }
-  if (!access.readLayers.has(memory.layer)) return 'layer'
 
-  if (memory.sensitivity === 'secret') {
-    if (!(options.explicit || options.management) || !access.canReadSecret) return 'secret'
-  } else if (sensitivityRank(memory.sensitivity) > sensitivityRank(access.maxSensitivity)) {
+  const circle = access.circles.get(entry.circleId)
+  if (!circle) return 'circle'
+  if (!circle.readKinds.has(entry.kind)) return 'kind'
+
+  if (entry.sensitivity === 'secret') {
+    if (!circle.isPrimary) return 'circle'
+    if (!(options.explicit || options.management) || !circle.canReadSecret) return 'secret'
+    if (
+      !checkStaticRealmLock(
+        entry.realms,
+        access.primaryCircleRealms,
+        access.allowedRealms,
+        access.staticContextRealms,
+      )
+    ) {
+      return 'realm'
+    }
+  } else if (sensitivityRank(entry.sensitivity) > sensitivityRank(circle.maxSensitivity)) {
     return 'sensitivity'
   }
 
-  if (access.originScopes && !access.originScopes.has(memory.originScope)) return 'origin'
-  // 归某个成员的（本人，以及不带会话上下文的会话摘要）只有这个成员读得到
-  if (memory.ownerAccountId !== null && memory.ownerAccountId !== access.ownerAccountId) {
+  if (entry.ownerAccountId !== null && entry.ownerAccountId !== access.ownerAccountId) {
     return 'owner'
   }
   if (
-    memory.layer === 'persona' &&
-    !options.management &&
-    !options.personaIds.includes(memory.personaId ?? '')
+    access.forbidOwnerBoundEpisodes &&
+    entry.kind === 'episode' &&
+    entry.ownerAccountId !== null
   ) {
-    return 'persona'
+    return 'owner'
   }
-  if (memory.layer === 'app' && access.appId !== null && memory.appId !== access.appId) {
-    return 'app'
+
+  if (access.baseOriginScopes !== null && !access.baseOriginScopes.has(entry.originScope)) {
+    const canCrossGroup =
+      access.clientId !== null &&
+      access.crossGroupPersonScopes.has(entry.originScope) &&
+      entry.circleId === access.primaryCircleId &&
+      entry.kind === 'fact' &&
+      entry.subjectKind === 'person' &&
+      (entry.clientId === null || entry.clientId === access.clientId)
+
+    if (!canCrossGroup) {
+      if (
+        entry.kind === 'fact' &&
+        entry.subjectKind === 'person' &&
+        entry.originScope.startsWith('group:')
+      ) {
+        if (
+          entry.clientId !== null &&
+          access.clientId !== null &&
+          entry.clientId !== access.clientId
+        ) {
+          return 'client'
+        }
+        if (access.currentGroupIsolated || access.lockedGroupScopes.has(entry.originScope)) {
+          return 'group_lock'
+        }
+      }
+      return 'origin'
+    }
   }
+
   return null
 }
 
 export interface WriteIntent {
-  layer: Layer
+  circleId: string
+  kind: EntryKind
   sensitivity: Sensitivity
-  // 应用的记忆所属的应用、人格的记忆所属的人格；其他归属为 null
-  appId: string | null
-  personaId: string | null
+  provenance?: Provenance
 }
 
 export function canWrite(access: Access, intent: WriteIntent): boolean {
-  if (!access.writeLayers.has(intent.layer)) return false
-  if (!sensitivityAllowed(intent.layer, intent.sensitivity)) return false
-  if (intent.layer === 'app' && !canWriteApp(access, intent.appId)) return false
-  if (intent.layer === 'persona' && !canWritePersona(access, intent.personaId)) return false
-  if (intent.sensitivity === 'secret') return access.canReadSecret
-  return sensitivityRank(intent.sensitivity) <= sensitivityRank(access.maxSensitivity)
+  const circle = access.circles.get(intent.circleId)
+  if (!circle) return false
+  if (!circle.writeKinds.has(intent.kind)) return false
+  if (
+    !sensitivityAllowed(
+      circle.circleKind,
+      intent.kind,
+      intent.sensitivity,
+      intent.provenance ?? access.writeProvenance,
+    )
+  ) {
+    return false
+  }
+  if (intent.sensitivity === 'secret') return circle.canReadSecret
+  return sensitivityRank(intent.sensitivity) <= sensitivityRank(circle.maxSensitivity)
 }
 
-// 改动已有的记录（修改、移动、删除、推翻、恢复）：在能写这一类之上，不可信来源（群聊、陌生人私聊）
-// 只能动不可信来源写下的记录。否则群里的人能改掉受信的记忆（例如本人确认过的事实），来源却仍显示受信
-export function canModify(access: Access, row: WriteIntent & { provenance: Provenance }): boolean {
+// 改动已有的记录（修改、删除、取代、恢复）：在能写的基础上，不可信来源（群聊、陌生人私聊）
+// 只能改动同 originScope 内由不可信来源写下的记录
+export function canModify(
+  access: Access,
+  row: WriteIntent & { provenance: Provenance; originScope: string },
+): boolean {
   return (
     canWrite(access, row) &&
-    (access.writeProvenance !== 'untrusted' || row.provenance === 'untrusted')
+    (access.writeProvenance !== 'untrusted' ||
+      (row.provenance === 'untrusted' && row.originScope === access.writeOriginScope))
   )
 }
 
-export function canWriteApp(access: Access, appId: string | null): boolean {
-  return access.writableAppIds === 'all' || (appId !== null && access.writableAppIds.has(appId))
-}
-
-export function canWritePersona(access: Access, personaId: string | null): boolean {
-  return (
-    access.writablePersonaIds === 'all' ||
-    (personaId !== null && access.writablePersonaIds.has(personaId))
-  )
-}
-
-// 凭据归某个成员，和本人的记忆一样：取用（列出、取值）要凭据能力至少是 use，能读本人、最高敏感级至少 private，
-// 并且不带会话上下文；管理（新建、修改、删除）要能力是 manage，并且还能写本人。凭据属于这次访问代表的成员
-// （Key 是应用所有者），只查这个成员的凭据，所以这里不比所有者。限定了应用的，只有那些应用的 Key 能用；
-// 跨人格 / 应用写入（admin）也不放宽。管理界面不代表某个应用，不受这个限制。不再借用 secret 级
 export interface CredentialFacts {
-  appIds: readonly string[] | null
+  circleId: string
+  clientIds: readonly string[] | null
+  allowedRealms: readonly string[] | null
 }
 
 const CAPABILITY_RANK: Record<CredentialCapability, number> = { none: 0, use: 1, manage: 2 }
-// 从高到低，权限范围按它找出某个会话上下文下实际的能力
 const CREDENTIAL_CAPABILITIES_DESC = ['manage', 'use'] as const
 
-// 不能取用或管理的第一个原因，能时为 null。原因记进访问事件，见 contracts 的 CREDENTIAL_ACCESS_REASONS
+// 凭据取用或管理拒绝原因：客场圈与静态场域锁定冲突均拒绝（接口对外统一返回 404）
 export function credentialDenial(
   access: Access,
   credential: CredentialFacts,
   need: 'use' | 'manage',
 ): CredentialAccessReason | null {
-  if (access.appId !== null && access.originScopes !== null) return 'context'
+  if (access.clientId !== null && access.baseOriginScopes !== null) return 'context'
+  const primary = access.circles.get(access.primaryCircleId)
+  if (!primary || credential.circleId !== access.primaryCircleId) return 'circle'
   if (CAPABILITY_RANK[access.credentials] < CAPABILITY_RANK[need]) return 'capability'
-  if (!access.readLayers.has('user')) return 'scope'
-  if (sensitivityRank(access.maxSensitivity) < sensitivityRank('private')) return 'scope'
-  if (need === 'manage' && !access.writeLayers.has('user')) return 'scope'
-  if (
-    access.appId !== null &&
-    credential.appIds !== null &&
-    !credential.appIds.includes(access.appId)
-  ) {
-    return 'app'
+  if (!primary.readKinds.has('entry')) return 'scope'
+  if (sensitivityRank(primary.maxSensitivity) < sensitivityRank('private')) return 'scope'
+  if (need === 'manage' && !primary.writeKinds.has('entry')) return 'scope'
+  if (access.clientId !== null) {
+    if (
+      !checkStaticRealmLock(
+        credential.allowedRealms ?? [],
+        access.primaryCircleRealms,
+        access.allowedRealms,
+        access.staticContextRealms,
+      )
+    ) {
+      return 'realm'
+    }
+    if (credential.clientIds !== null && !credential.clientIds.includes(access.clientId)) {
+      return 'client'
+    }
   }
   return null
 }
@@ -406,30 +634,142 @@ export function canUseCredential(access: Access, credential: CredentialFacts): b
 
 export type ConsoleRole = 'owner' | 'editor' | 'viewer'
 
-// 管理界面里成员本人的权限，与签发 Key 的规则一致：secret 只有空间 owner 能读写，viewer 只读，
-// 应用的记忆 editor 只能写自己是所有者的应用（ownedAppIds）。本人的记忆与不带会话上下文的会话摘要只看得到自己的；
-// 所有人格、所有应用的记忆都能看到（personaIds 由调用方传入全部人格）
+// 管理界面单圈权限：owner 可读写 secret 与管理凭据；editor 最高 private 且不可管理凭据；viewer 只读
 export function consoleAccess(
+  circleId: string,
+  circleKind: CircleKind,
   role: ConsoleRole,
   accountId: string,
-  ownedAppIds: Iterable<string> = [],
+  circleDefaultRealms: readonly string[] = [],
 ): Access {
-  const all = new Set<Layer>(LAYERS)
+  const allKinds = new Set<EntryKind>(ENTRY_KINDS)
+  const circles = new Map<string, CircleAccess>([
+    [
+      circleId,
+      {
+        circleId,
+        circleKind,
+        isPrimary: true,
+        readKinds: allKinds,
+        writeKinds: role === 'viewer' ? new Set() : allKinds,
+        maxSensitivity: role === 'owner' ? 'secret' : 'private',
+        canReadSecret: role === 'owner',
+      },
+    ],
+  ])
   return {
-    readLayers: all,
-    writeLayers: role === 'viewer' ? new Set() : all,
-    maxSensitivity: role === 'owner' ? 'secret' : 'private',
-    originScopes: null,
+    primaryCircleId: circleId,
+    primaryCircleRealms: normalizeRealms(circleDefaultRealms),
+    circles,
+    allowedRealms: null,
+    staticContextRealms: new Set(),
+    baseOriginScopes: null,
+    crossGroupPersonScopes: new Set(),
+    lockedGroupScopes: new Set(),
+    currentGroupIsolated: false,
+    forbidOwnerBoundEpisodes: false,
     writeOriginScope: 'global',
     writeProvenance: 'owner',
     ownerAccountId: accountId,
-    appId: null,
-    writableAppIds: role === 'owner' ? 'all' : new Set(role === 'editor' ? ownedAppIds : []),
-    // 人格不设限：editor 本来就能建一个用任意人格的应用、再用它的 Key 写那个人格
-    writablePersonaIds: 'all',
-    canReadSecret: role === 'owner',
+    clientId: null,
     admin: role === 'owner',
-    // 凭据和机密记忆一样，目前只有空间 owner 能管理（含连接密码库与查看值）
     credentials: role === 'owner' ? 'manage' : 'use',
   }
 }
+
+const MATRIX_CONTEXTS: Record<AccessContext, SessionContext> = {
+  none: {},
+  direct: { chatType: 'direct', senderSubjectId: 'sender' },
+  owner_direct: { chatType: 'direct', senderSubjectId: 'owner', senderIsOwner: true },
+  group: { chatType: 'group', groupSubjectId: 'group' },
+  cron: { chatType: 'cron' },
+}
+
+export function accessMatrix(input: Omit<ResolveAccessInput, 'context'>): KeyAccessMatrix {
+  const activeGrants = input.grants.filter((g) => g.active)
+  return {
+    contexts: ACCESS_CONTEXTS.map((context) => {
+      const access = resolveAccess({ ...input, context: MATRIX_CONTEXTS[context] })
+      const origins = access.baseOriginScopes ? [...access.baseOriginScopes] : null
+      const testRealms =
+        access.allowedRealms !== null ? [...access.allowedRealms] : [...access.staticContextRealms]
+      return {
+        context,
+        credentials:
+          CREDENTIAL_CAPABILITIES_DESC.find(
+            (need) =>
+              credentialDenial(
+                access,
+                {
+                  circleId: input.primaryCircleId,
+                  clientIds: null,
+                  allowedRealms: testRealms.length ? testRealms : null,
+                },
+                need,
+              ) === null,
+          ) ?? 'none',
+        originScope: !origins
+          ? 'any'
+          : origins.some((o) => o.startsWith('group:'))
+            ? 'group'
+            : origins.some((o) => o.startsWith('direct:'))
+              ? 'direct'
+              : 'client',
+        circles: activeGrants.map((grant) => ({
+          circleId: grant.circleId,
+          circleName: grant.circleName,
+          circleKind: grant.circleKind,
+          isPrimary: grant.isPrimary,
+          credentials: grant.isPrimary
+            ? (CREDENTIAL_CAPABILITIES_DESC.find(
+                (need) =>
+                  credentialDenial(
+                    access,
+                    {
+                      circleId: grant.circleId,
+                      clientIds: null,
+                      allowedRealms: testRealms.length ? testRealms : null,
+                    },
+                    need,
+                  ) === null,
+              ) ?? 'none')
+            : 'none',
+          rows: ENTRY_KINDS.map((kind) => ({
+            kind,
+            cells: SENSITIVITIES.map((sensitivity) => {
+              const allowed = sensitivityAllowed(grant.circleKind, kind, sensitivity)
+              const facts: EntryFacts = {
+                circleId: grant.circleId,
+                kind,
+                sensitivity,
+                originScope: 'global',
+                clientId: null,
+                ownerAccountId: null,
+                subjectKind: kind === 'fact' ? 'person' : null,
+                realms:
+                  sensitivity === 'secret' && access.allowedRealms?.size !== 0 ? testRealms : [],
+                validTo: null,
+                expiresAt: null,
+                deletedAt: null,
+              }
+              const read = !allowed
+                ? 'none'
+                : !canRead(access, facts, { explicit: true })
+                  ? 'none'
+                  : canRead(access, facts, { explicit: false })
+                    ? 'recall'
+                    : 'explicit'
+              return {
+                sensitivity,
+                read,
+                write: canWrite(access, { circleId: grant.circleId, kind, sensitivity }),
+              } as const
+            }),
+          })),
+        })),
+      }
+    }),
+  }
+}
+
+export { CIRCLE_KINDS }

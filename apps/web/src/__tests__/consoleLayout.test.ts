@@ -42,19 +42,20 @@ describe('顶部导航', () => {
       '对话',
       '凭据',
       '待处理',
-      '应用',
+      '接入实例',
       '召回',
       '测试台',
+      '切面词表',
       '变更记录',
       '设置',
     ])
-    expect([...script.matchAll(/title: '([^']+)'/g)].map((m) => m[1])).toEqual(['接入', '空间'])
+    expect([...script.matchAll(/title: '([^']+)'/g)].map((m) => m[1])).toEqual(['接入', '记忆圈'])
   })
 
   it('详情页点亮列表的入口', () => {
     expect(script).toContain("link('conversations', icons.conversations, CONVERSATION_ROUTES)")
     expect(script).toContain("const CONVERSATION_ROUTES = ['conversations', 'contact']")
-    expect(script).toContain("link('apps', icons.apps, ['apps', 'app'])")
+    expect(script).toContain("link('clients', icons.clients, ['clients', 'client'])")
   })
 
   it('每个入口都有图标，图标旁一定有文字；放不下时先收组标题、再收图标', () => {
@@ -67,10 +68,10 @@ describe('顶部导航', () => {
     expect(template).toContain('{{ item.label }}')
   })
 
-  it('「设置」进空间组，三组设置页都点亮它', () => {
-    expect(script).toContain("link('space-settings', icons.settings, SETTINGS_ROUTES)")
+  it('「设置」进记忆圈组，三组设置页都点亮它', () => {
+    expect(script).toContain("link('circle-settings', icons.settings, SETTINGS_ROUTES)")
     expect(script).toContain(
-      "const SETTINGS_ROUTES = ['space-settings', 'account-settings', 'instance-settings']",
+      "const SETTINGS_ROUTES = ['circle-settings', 'account-settings', 'instance-settings']",
     )
   })
 
@@ -83,36 +84,35 @@ describe('顶部导航', () => {
     expect(script).not.toMatch(/\{ label: '实例设置', \.\.\.link\(/)
   })
 
-  it('空间切换器一直显示：各空间与角色，当前空间打勾，下面是成员与设置，再下面是新建与导入空间', () => {
+  it('记忆圈切换器一直显示：个人圈置顶与共享圈角色，当前圈打勾，下面是成员与设置、新建共享圈与导入记忆圈', () => {
     const switcher = elements.find(
-      (el) => el.tag === 'UDropdownMenu' && bound(el, 'items') === 'spaceMenu',
+      (el) => el.tag === 'UDropdownMenu' && bound(el, 'items') === 'circleMenu',
     )!
     expect(condition(switcher)).toBeUndefined()
-    expect(script).toContain('role: roleName(s.role)')
-    expect(script).toContain('checked: s.id === space.value?.id')
+    expect(script).toContain("c.kind === 'personal' ? '本人' : roleName(c.role)")
+    expect(script).toContain('checked: c.id === circle.value?.id')
     expect(script).toContain("label: '成员与设置'")
-    expect(script).not.toContain("label: '空间设置'")
-    expect(script).toContain("label: '新建空间'")
-    expect(script).toContain("label: '导入空间'")
-    expect(script).toContain('icon: icons.importSpace')
+    expect(script).not.toContain("label: '记忆圈设置'")
+    expect(script).toContain("label: '新建共享圈'")
+    expect(script).toContain("label: '导入记忆圈'")
+    expect(script).toContain('icon: icons.importCircle')
     expect(template).toContain('<CreateSpaceModal')
     expect(template).toContain('<ImportSpaceModal')
   })
 
-  it('名额用完时新建与导入的入口还在、不可用，原因写成文字', () => {
-    // 两个菜单项与窄屏抽屉里的两个按钮
-    expect(script.match(/disabled: Boolean\(newSpace\.blocked\.value\)/g)).toHaveLength(2)
-    expect(script).toContain("type: 'label' as const, label: newSpace.blocked.value")
-    expect(template.match(/:disabled="Boolean\(newSpace\.blocked\.value\)"/g)).toHaveLength(2)
-    expect(template).toContain('id="space-limit-note"')
+  it('共享圈名额用完时仅新建共享圈不可用并写出原因，导入记忆圈保持可用', () => {
+    expect(script.match(/disabled: Boolean\(newCircle\.blocked\.value\)/g)).toHaveLength(1)
+    expect(script).toMatch(/type:\s*'label'\s*as\s*const,\s*label:\s*newCircle\.blocked\.value/)
+    expect(template.match(/:disabled="Boolean\(newCircle\.blocked\.value\)"/g)).toHaveLength(1)
+    expect(template).toContain('id="circle-limit-note"')
     expect(
       template.match(
-        /:aria-describedby="newSpace\.blocked\.value \? 'space-limit-note' : undefined"/g,
+        /:aria-describedby="newCircle\.blocked\.value \? 'circle-limit-note' : undefined"/g,
       ),
-    ).toHaveLength(2)
+    ).toHaveLength(1)
     expect(script).not.toContain('canCreate')
-    expect(script).toContain('to: spaceSettingsRoute(space.value.id)')
-    expect(template).toContain('#space-trailing="{ item }"')
+    expect(script).toContain('to: circleSettingsRoute(circle.value.id)')
+    expect(template).toContain('#circle-trailing="{ item }"')
   })
 
   it('窄屏把导航收进抽屉，宽屏和窄屏的分界一致', () => {
@@ -136,9 +136,9 @@ describe('顶栏放不下时', () => {
     expect(classes(right)).toEqual(expect.arrayContaining(['min-w-0', 'flex-1', 'justify-end']))
   })
 
-  it('空间名、显示名能截断，悬停看全名', () => {
+  it('记忆圈名、显示名能截断，悬停看全名', () => {
     for (const [label, name] of [
-      ['切换空间', 'space?.name'],
+      ['切换记忆圈', 'circle?.name'],
       ['账号菜单', 'displayName'],
     ] as const) {
       const button = labelled(label)
@@ -152,7 +152,7 @@ describe('顶栏放不下时', () => {
     expect(menus).toHaveLength(2)
     for (const menu of menus) expect(bound(menu, 'ui')).toContain('max-w-80')
     const inDrawer = walk(elements.find((el) => el.tag === 'USlideover')!)
-    for (const name of ['s.name', 'displayName']) {
+    for (const name of ['c.name', 'displayName']) {
       const el = inDrawer.find((n) => bound(n, 'title') === name)!
       expect(classes(el), name).toContain('truncate')
     }
@@ -183,13 +183,15 @@ describe('抽屉', () => {
     expect(focus).toContain('accountButton.value?.$el.focus()')
   })
 
-  it('切换空间时关上抽屉，点当前空间地址不变也要关', () => {
-    const body = /function switchSpace\(id: string\) \{[^}]*\}/.exec(script)![0]
+  it('切换记忆圈时关上抽屉，点当前记忆圈地址不变也要关', () => {
+    const body = /function switchCircle\(id: string\) \{[^}]*\}/.exec(script)![0]
     expect(body).toContain('navOpen.value = false')
-    const spaceButton = walk(slideover).find(
-      (n) => n.tag === 'button' && n.children?.some((c) => bound(c, 'title') === 's.name'),
+    const circleButton = walk(slideover).find(
+      (n) => n.tag === 'button' && n.children?.some((c) => bound(c, 'title') === 'c.name'),
     )!
-    expect(spaceButton.props?.find((p) => p.name === 'on')?.exp?.content).toBe('switchSpace(s.id)')
+    expect(circleButton.props?.find((p) => p.name === 'on')?.exp?.content).toBe(
+      'switchCircle(c.id)',
+    )
   })
 })
 
@@ -205,17 +207,17 @@ describe('保留的逻辑', () => {
     expect(logout).toContain('hasUnsavedChanges.value = hadUnsaved')
   })
 
-  it('地址里的空间不是自己的时只给说明，不渲染页面', () => {
-    expect(template).toContain('v-if="me.data.value && route.params.spaceId && !space"')
+  it('地址里的记忆圈无权访问时只给说明，不渲染页面', () => {
+    expect(template).toContain('v-if="me.data.value && route.params.circleId && !circle"')
     expect(template).toMatch(/<RouterView v-else \/>/)
   })
 
-  it('窄屏抽屉里的入口同步：图标、各空间与角色、空间设置、账号设置与实例设置', () => {
+  it('窄屏抽屉里的入口同步：图标、记忆圈与角色、成员与设置、账号设置与实例设置', () => {
     const drawer = walk(elements.find((el) => el.tag === 'USlideover')!)
     expect(drawer.some((n) => n.tag === 'UIcon' && bound(n, 'name') === 'item.icon')).toBe(true)
     expect(
       drawer.some(
-        (n) => n.tag === 'RouterLink' && bound(n, 'to') === 'spaceSettingsRoute(space.id)',
+        (n) => n.tag === 'RouterLink' && bound(n, 'to') === 'circleSettingsRoute(circle.id)',
       ),
     ).toBe(true)
     const accountLinks = drawer.find(
@@ -224,14 +226,14 @@ describe('保留的逻辑', () => {
         n.props?.some((p) => p.name === 'for' && p.exp?.content.includes('accountNav')),
     )
     expect(accountLinks).toBeDefined()
-    expect(template).toContain('roleName(s.role)')
+    expect(template).toContain('circleBadge(c)')
   })
 
   it('搜索沿用 useConsoleSearch 和 UDashboardSearch', () => {
     expect(script).toContain('useConsoleSearch(')
     expect(template).toContain('<UDashboardSearch')
     expect(template).toContain('<UDashboardSearchButton')
-    // 空状态不用组件库的「没有匹配的数据」：还在搜记忆时说搜索中
+    // 空状态不用组件库的「没有匹配的数据」：还在搜词条时说搜索中
     expect(template).toContain(
       `<template #empty>{{ searching ? '搜索中' : '暂无匹配' }}</template>`,
     )

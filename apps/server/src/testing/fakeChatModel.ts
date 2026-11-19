@@ -20,15 +20,21 @@ export function fakeChatModel(
 // Dream 的请求里给模型看的一条记忆（「## 记忆」下面每行一个 JSON 对象）
 export interface DreamLine {
   id: string
+  shortId: string
+  title: string
   new: boolean
-  kind: 'node' | 'fact' | 'summary'
-  uri?: string
+  kind: 'entry' | 'fact' | 'episode'
+  topics?: string[]
   subject?: string
   trusted?: boolean
   visibility?: string
+  recallCount?: number
+  priority?: number
+  expiringSoon?: boolean
   updated: string
   truncated?: boolean
-  content: string
+  content?: string
+  variants?: { when?: Record<string, string[]>; content: string }[]
 }
 
 export function dreamLines(messages: ChatMessage[]): DreamLine[] {
@@ -43,7 +49,12 @@ export function dreamLines(messages: ChatMessage[]): DreamLine[] {
     .map((line) => JSON.parse(line) as DreamLine)
 }
 
-// 按正文找这次请求里的代号；没给模型看的为 undefined
+// 按正文、多变体切片正文或标题找这次请求里的代号；没给模型看的为 undefined
 export function handleOf(messages: ChatMessage[], content: string): string | undefined {
-  return dreamLines(messages).find((line) => line.content === content)?.id
+  return dreamLines(messages).find(
+    (line) =>
+      line.content === content ||
+      line.variants?.some((v) => v.content === content) ||
+      line.title === content,
+  )?.id
 }

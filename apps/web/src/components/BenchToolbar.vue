@@ -13,18 +13,18 @@ import PageHead from './strata/PageHead.vue'
 import ScopeTags from './strata/ScopeTags.vue'
 import StrataCore from './strata/StrataCore.vue'
 
-// 页头：标题在左，选应用与 Key、切模式在右。只列自己是主人的应用与还有效的 Key
+// 页头：标题在左，选接入实例与 Key、切模式在右。只列自己是所有者的接入实例与还有效的 Key
 const {
-  spaceId,
-  apps,
+  circleId,
+  clients,
   owned,
-  appId,
-  app,
+  clientId,
+  client,
   keys,
   usable,
   keyId,
   key,
-  selectApp,
+  selectClient,
   selectKey,
   selectionNotice,
   real,
@@ -38,8 +38,8 @@ const {
   running,
 } = useBench()
 
-const appItems = computed(() =>
-  owned.value.map((a) => ({ label: `${a.name}（${runtimeName(a.runtimeFamily)}）`, value: a.id })),
+const clientItems = computed(() =>
+  owned.value.map((c) => ({ label: `${c.name}（${runtimeName(c.runtimeFamily)}）`, value: c.id })),
 )
 const keyItems = computed(() =>
   usable.value.map((k) => ({ label: `${k.name}（${k.prefix}）`, value: k.id })),
@@ -52,7 +52,7 @@ const retryOf = (query: { isFetching: Readonly<Ref<boolean>>; refetch: () => unk
     onClick: () => void query.refetch(),
   },
 ]
-const retryApps = computed(() => retryOf(apps))
+const retryClients = computed(() => retryOf(clients))
 const retryKeys = computed(() => retryOf(keys))
 </script>
 
@@ -60,7 +60,7 @@ const retryKeys = computed(() => retryOf(keys))
   <div class="toolbar">
     <PageHead title="测试台">
       <template v-if="owned.length" #note>
-        模拟应用调用 Kioku，不接入真实客户端。
+        模拟接入实例调用 Kioku，不接入真实客户端。
         <Hint>
           工具走真实的 MCP
           服务端，权限按当前访问密钥的有效上限。不记录召回事件，不更新访问密钥的最近使用时间。机密正文与凭据的值一律打码，查看原值请到记忆页、凭据页。
@@ -68,17 +68,17 @@ const retryKeys = computed(() => retryOf(keys))
       </template>
       <template v-if="owned.length" #actions>
         <div class="pickers">
-          <UFormField label="应用" class="w-full sm:w-52 min-[87.5rem]:w-60">
+          <UFormField label="接入实例" class="w-full sm:w-52 min-[87.5rem]:w-60">
             <USelect
-              :model-value="appId"
-              :items="appItems"
+              :model-value="clientId"
+              :items="clientItems"
               :disabled="running"
-              aria-label="应用"
+              aria-label="接入实例"
               class="w-full"
-              @update:model-value="(v) => selectApp(String(v))"
+              @update:model-value="(v) => selectClient(String(v))"
             >
-              <template v-if="app" #leading>
-                <RuntimeIcon :family="app.runtimeFamily" :size="15" />
+              <template v-if="client" #leading>
+                <RuntimeIcon :family="client.runtimeFamily" :size="15" />
               </template>
             </USelect>
           </UFormField>
@@ -122,19 +122,22 @@ const retryKeys = computed(() => retryOf(keys))
       <!-- 后台刷新失败时读到过的内容留着，错误放在上面。「暂无」只在读到空、这次也读成功时说：
            缓存是空的又刷新失败时，不知道到底有没有，不能把人引去再建一个 -->
       <BenchNotice
-        v-if="apps.isError.value"
+        v-if="clients.isError.value"
         color="error"
-        :title="readFailure(apps.error.value, '读取应用失败')"
-        :actions="retryApps"
+        :title="readFailure(clients.error.value, '读取接入实例失败')"
+        :actions="retryClients"
       />
-      <USkeleton v-if="apps.isPending.value" class="h-16 w-full" />
-      <div v-else-if="apps.data.value && !owned.length && !apps.isError.value" class="no-apps">
+      <USkeleton v-if="clients.isPending.value" class="h-16 w-full" />
+      <div
+        v-else-if="clients.data.value && !owned.length && !clients.isError.value"
+        class="no-clients"
+      >
         <p class="text-muted">
-          当前账号在此空间暂无应用。
-          <Hint>测试台仅限应用所有者使用：调用会读取所有者的本人记忆。</Hint>
+          当前账号在此记忆圈暂无接入实例。
+          <Hint>测试台仅限接入实例所有者使用：调用会读取所有者的本人记忆。</Hint>
         </p>
-        <UButton :to="{ name: 'apps', params: { spaceId } }" size="sm" variant="outline">
-          管理应用
+        <UButton :to="{ name: 'clients', params: { circleId } }" size="sm" variant="outline">
+          管理接入实例
         </UButton>
       </div>
       <template v-else-if="owned.length">
@@ -152,8 +155,8 @@ const retryKeys = computed(() => retryOf(keys))
           :actions="retryKeys"
         />
         <p v-if="keys.data.value && !usable.length && !keys.isError.value" class="text-muted">
-          当前应用暂无有效访问密钥，
-          <RouterLink :to="{ name: 'app', params: { spaceId, appId } }" class="text-primary"
+          当前接入实例暂无有效访问密钥，
+          <RouterLink :to="{ name: 'client', params: { circleId, clientId } }" class="text-primary"
             >签发访问密钥</RouterLink
           >
           后可使用测试台。
@@ -169,7 +172,7 @@ const retryKeys = computed(() => retryOf(keys))
       <template #body>
         <div class="space-y-2 text-sm">
           <p>
-            后续调用按「{{ app?.name }}」的访问密钥「{{
+            后续调用按「{{ client?.name }}」的访问密钥「{{
               key?.name
             }}」真实执行，切回回滚模式也无法撤回：
           </p>
@@ -247,7 +250,7 @@ const retryKeys = computed(() => retryOf(keys))
 .toolbar-notes > p {
   padding-bottom: 16px;
 }
-.no-apps {
+.no-clients {
   display: flex;
   flex-direction: column;
   align-items: flex-start;

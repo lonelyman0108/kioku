@@ -13,27 +13,27 @@ import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { consoleMemberFor } from '../memory/context'
 import { bootPreview, recallDebug } from '../recall/debug'
 
-const KeyParams = z.object({ spaceId: z.uuid(), appId: z.uuid(), keyId: z.uuid() })
+const KeyParams = z.object({ circleId: z.uuid(), clientId: z.uuid(), keyId: z.uuid() })
 const errors = {
   403: jsonResponse('没有权限', ErrorResponse),
-  404: jsonResponse('应用或 Key 不存在，或 Key 已作废', ErrorResponse),
+  404: jsonResponse('接入实例或密钥不存在，或密钥已作废', ErrorResponse),
 }
 
 const preview = createRoute({
   method: 'post',
-  path: '/spaces/{spaceId}/apps/{appId}/keys/{keyId}/preview',
-  tags: ['apps'],
-  summary: '启动预览：按这把 Key 模拟会话开始时注入的内容（只给应用主人）',
+  path: '/circles/{circleId}/clients/{clientId}/keys/{keyId}/preview',
+  tags: ['clients'],
+  summary: '启动预览：按这把访问密钥模拟会话开始时注入的内容（只给接入实例所有者）',
   request: { params: KeyParams, body: jsonBody(BootPreviewRequest) },
   responses: { 200: jsonResponse('启动预览', BootPreview), ...errors },
 })
 
 const debug = createRoute({
   method: 'post',
-  path: '/spaces/{spaceId}/apps/{appId}/keys/{keyId}/debug',
-  tags: ['apps'],
+  path: '/circles/{circleId}/clients/{clientId}/keys/{keyId}/debug',
+  tags: ['clients'],
   summary:
-    '召回调试：按这把 Key 模拟一句输入的召回，列出各路得分与被过滤掉的记忆（只给应用主人）；可以带最低分与条数试算',
+    '召回调试：按这把访问密钥模拟一句输入的召回，列出各路得分与被过滤掉的词条（只给接入实例所有者）；可以带最低分与条数试算',
   request: { params: KeyParams, body: jsonBody(RecallDebugRequest) },
   responses: { 200: jsonResponse('召回调试', RecallDebug), ...errors },
 })
@@ -50,12 +50,7 @@ export function previewRoutes(deps: Deps) {
       const params = c.req.valid('param')
       const found = await keyToSimulate(deps, params, accountId)
       if ('error' in found) return c.json({ error: found.error }, found.status)
-      // 管理界面里搜得到的范围按查看者本人（就是应用主人）的权限
-      const { service } = await consoleMemberFor(deps, params.spaceId, accountId)
-      const { query, minScore, limit } = c.req.valid('json')
-      return c.json(
-        await recallDebug(deps, found.key, service.access, query, { minScore, limit }),
-        200,
-      )
+      const { service } = await consoleMemberFor(deps, params.circleId, accountId)
+      return c.json(await recallDebug(deps, found.key, service.access, c.req.valid('json')), 200)
     })
 }

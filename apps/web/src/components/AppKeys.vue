@@ -1,6 +1,17 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import type { CreatedKey, KeyInfo, KeyScopes } from '@kioku/contracts'
+import {
+  normalizeWhen,
+  type CircleKind,
+  type CircleSummary,
+  type FacetVocabularyView,
+  type IssuedKey,
+  type KeyInfo,
+  type LensKeyScopes,
+  type LinkedCircleGrant,
+  type LinkedCircleMode,
+  type PersonaInfo,
+} from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, reactive, ref, toRef, watch } from 'vue'
 
@@ -10,8 +21,10 @@ import { effectiveNote } from '../apps'
 import { useCopy } from '../composables/useCopy'
 import { useKeyMatrices } from '../composables/useKeyMatrices'
 import { icons } from '../icons'
-import { scopesSummary } from '../labels'
+import { circleKindLabels, scopesSummary } from '../labels'
+import { whenLabel } from '../memoryDetail'
 import { formatRelative, formatShort, formatTime } from '../time'
+import FacetWhenPicker from './FacetWhenPicker.vue'
 import Hint from './Hint.vue'
 import KeyScopeEditor from './KeyScopeEditor.vue'
 import {
@@ -29,71 +42,132 @@ import ScopeTags from './strata/ScopeTags.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 import StrataCore from './strata/StrataCore.vue'
 
-const props = defineProps<{
-  spaceId: string
-  appId: string
-  isAppOwner: boolean
-  // 签发还要求应用所有者在空间里是所有者或编辑者；列表与吊销只看归属，被降级的所有者仍能吊销泄露的 Key
-  canIssue: boolean
-  isSpaceOwner: boolean
-  // 右边权限范围看的是哪个 Key
-  selected: string | null
-}>()
+const props = withDefaults(
+  defineProps<{
+    circleId: string
+    circleKind?: CircleKind
+    clientId: string
+    isClientOwner: boolean
+    // 签发与轮换还要求接入实例所有者在记忆圈里是所有者或编辑者；列表与吊销只看归属
+    canIssue: boolean
+    isCircleOwner: boolean
+    // 右边权限范围看的是哪个访问密钥
+    selected: string | null
+    personas?: readonly PersonaInfo[]
+    linkedCircleOptions?: readonly CircleSummary[]
+    vocabulary?: FacetVocabularyView | null
+  }>(),
+  {
+    circleKind: 'shared',
+    personas: () => [],
+    linkedCircleOptions: () => [],
+    vocabulary: null,
+  },
+)
 const emit = defineEmits<{ select: [keyId: string] }>()
 const toast = useToast()
 const queryClient = useQueryClient()
-const queryKey = computed(() => ['keys', props.spaceId, props.appId])
+const queryKey = computed(() => ['keys', props.circleId, props.clientId] as const)
 
-// 只有应用所有者和空间所有者能看 Key 列表
+// 只有接入实例所有者和记忆圈所有者能看访问密钥列表
 const keys = useQuery({
   queryKey,
-  queryFn: () => api.keys(props.spaceId, props.appId),
-  enabled: computed(() => props.isAppOwner || props.isSpaceOwner),
+  queryFn: () => api.keys(props.circleId, props.clientId),
+  enabled: computed(() => props.isClientOwner || props.isCircleOwner),
 })
 const live = computed(() => (keys.data.value ?? []).filter((key) => !key.revokedAt))
 const revoked = computed(() => (keys.data.value ?? []).filter((key) => key.revokedAt))
-// 每个还有效的 Key 一根岩芯，画的是无上下文时的实际范围
+
+// 每个还有效的访问密钥一根岩芯，画的是无上下文时的实际范围
 const { rowsOf, failureOf } = useKeyMatrices(
-  toRef(props, 'spaceId'),
+  toRef(props, 'circleId'),
   computed(() =>
-    live.value.filter((key) => key.effectiveScopes).map((key) => ({ appId: props.appId, key })),
+    live.value
+      .filter((key) => key.effectiveScopes)
+      .map((key) => ({ clientId: props.clientId, key })),
   ),
 )
 
+const realmTerms = computed(() =>
+  (props.vocabulary?.terms ?? [])
+    .filter((t) => t.dimensionKey === 'realm')
+    .map((t) => ({ slug: t.slug, label: t.label })),
+)
+
+const otherCircles = computed(() =>
+  props.linkedCircleOptions.filter((c) => c.id !== props.circleId),
+)
+
+const personaItems = computed(() => [
+  { label: '沿用接入实例默认人格', value: null },
+  ...props.personas.map((p) => ({ label: `${p.name}（${p.slug}）`, value: p.id })),
+])
+
 const issueOpen = ref(false)
-const issued = ref<CreatedKey | null>(null)
+const issued = ref<IssuedKey | null>(null)
+const issuedMode = ref<'create' | 'rotate'>('create')
 const form = reactive({
   name: '',
   preset: keyPresets[0]!.id,
-  scopes: presetScopes(keyPresets[0]!, props.isSpaceOwner) as KeyScopes,
+  scopes: presetScopes(keyPresets[0]!, props.isCircleOwner) as LensKeyScopes,
+  linkedCircles: [] as LinkedCircleGrant[],
+  contextFacets: {} as Record<string, string[]>,
+  personaOverrideId: null as string | null,
 })
-// 不是空间所有者时打开表单就收紧：模板里的「取用」、机密级与跨人格写入都不能带过去
+
 watch(
-  () => props.isSpaceOwner,
+  () => props.isCircleOwner,
   (owner) => {
     form.scopes = tightenScopes(form.scopes, owner)
     form.preset = matchPreset(form.scopes, owner)
   },
   { immediate: true },
 )
-// 底部标签写实际能用到的凭据能力，和表格里的提示一致
-const actualCredentials = computed(() => issuedCredentialCapability(form.scopes))
 
-// 没填名称时用模板的名字
+const actualCredentials = computed(() => issuedCredentialCapability(form.scopes))
 const defaultName = computed(() => keyPresets.find((p) => p.id === form.preset)?.label ?? '自定义')
 
-// 签发中不接受第二次提交：连点两次会签出两个 Key，只有后一个的明文被展示
+function isCircleLinked(cid: string): boolean {
+  return form.linkedCircles.some((g) => g.circleId === cid)
+}
+
+function linkedMode(cid: string): LinkedCircleMode {
+  return form.linkedCircles.find((g) => g.circleId === cid)?.mode ?? 'read'
+}
+
+function toggleLinkedCircle(circle: CircleSummary, checked: boolean) {
+  if (!checked) {
+    form.linkedCircles = form.linkedCircles.filter((g) => g.circleId !== circle.id)
+    return
+  }
+  if (!isCircleLinked(circle.id)) {
+    form.linkedCircles = [...form.linkedCircles, { circleId: circle.id, mode: 'read' }]
+  }
+}
+
+function setLinkedMode(circleId: string, mode: LinkedCircleMode) {
+  form.linkedCircles = form.linkedCircles.map((g) => (g.circleId === circleId ? { ...g, mode } : g))
+}
+
 const issuing = ref(false)
 async function issue() {
   if (issuing.value) return
   issuing.value = true
   try {
-    issued.value = await api.createKey(props.spaceId, props.appId, {
-      name: form.name || defaultName.value,
+    issuedMode.value = 'create'
+    issued.value = await api.createKey(props.circleId, props.clientId, {
+      name: form.name.trim() || defaultName.value,
+      linkedCircles: form.linkedCircles,
+      contextFacets: normalizeWhen(form.contextFacets),
+      personaOverrideId: form.personaOverrideId,
       scopes: form.scopes,
     })
-    await queryClient.invalidateQueries({ queryKey: queryKey.value })
-    // 右边跟着看新签发的这个
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: queryKey.value }),
+      queryClient.invalidateQueries({
+        queryKey: ['key-matrix', props.circleId, props.clientId],
+      }),
+    ])
     emit('select', issued.value.id)
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '签发失败', color: 'error' })
@@ -102,11 +176,51 @@ async function issue() {
   }
 }
 
-// 关掉时只清名称：选的模板与表格里的改动留着，下次打开接着用
 function closeIssue() {
   issueOpen.value = false
   issued.value = null
+  issuedMode.value = 'create'
   form.name = ''
+}
+
+// 轮换访问密钥：生成同名或重命名的新密钥，旧密钥立即吊销，新明文仅展示一次
+const rotatingTarget = ref<KeyInfo | null>(null)
+const rotateName = ref('')
+const rotating = ref(false)
+
+function openRotate(key: KeyInfo) {
+  rotatingTarget.value = key
+  rotateName.value = key.name
+}
+
+async function confirmRotate() {
+  const target = rotatingTarget.value
+  if (!target || rotating.value) return
+  rotating.value = true
+  try {
+    const trimmed = rotateName.value.trim()
+    const result = await api.rotateKey(
+      props.circleId,
+      props.clientId,
+      target.id,
+      trimmed && trimmed !== target.name ? { name: trimmed } : {},
+    )
+    rotatingTarget.value = null
+    issuedMode.value = 'rotate'
+    issued.value = result
+    issueOpen.value = true
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: queryKey.value }),
+      queryClient.invalidateQueries({
+        queryKey: ['key-matrix', props.circleId, props.clientId],
+      }),
+    ])
+    emit('select', result.id)
+  } catch (err) {
+    toast.add({ title: err instanceof ApiError ? err.message : '轮换失败', color: 'error' })
+  } finally {
+    rotating.value = false
+  }
 }
 
 // 剪贴板接口只在 HTTPS 或 localhost 下可用；用局域网 HTTP 地址打开时提示手动复制
@@ -114,17 +228,31 @@ const copyText = useCopy()
 const copy = (text: string) => copyText(text, '浏览器不允许自动复制，请手动选中访问密钥后复制')
 
 const revoking = ref<KeyInfo | null>(null)
+const revokingBusy = ref(false)
 async function revoke() {
-  if (!revoking.value) return
+  if (!revoking.value || revokingBusy.value) return
+  revokingBusy.value = true
   try {
-    await api.revokeKey(props.spaceId, props.appId, revoking.value.id)
+    await api.revokeKey(props.circleId, props.clientId, revoking.value.id)
     revoking.value = null
-    await queryClient.invalidateQueries({ queryKey: queryKey.value })
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: queryKey.value }),
+      queryClient.invalidateQueries({
+        queryKey: ['key-matrix', props.circleId, props.clientId],
+      }),
+    ])
     toast.add({ title: '访问密钥已吊销', color: 'success' })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '吊销失败', color: 'error' })
+  } finally {
+    revokingBusy.value = false
   }
 }
+
+const personaLabel = (id: string | null) =>
+  id ? (props.personas.find((p) => p.id === id)?.name ?? id) : null
+const facetsLabel = (when: Record<string, string[]>) =>
+  Object.keys(when).length ? whenLabel(when, props.vocabulary ?? undefined) : null
 </script>
 
 <template>
@@ -136,7 +264,9 @@ async function revoke() {
         </UButton>
       </template>
     </SectionHeading>
-    <p v-if="!isAppOwner && !isSpaceOwner" class="keys-empty">仅应用所有者可查看和签发访问密钥</p>
+    <p v-if="!isClientOwner && !isCircleOwner" class="keys-empty">
+      仅接入实例所有者或记忆圈所有者可查看访问密钥
+    </p>
     <template v-else>
       <NoteLine v-if="keys.isError.value" class="keys-failed" tone="error">
         {{ readFailure(keys.error.value) }}
@@ -151,7 +281,6 @@ async function revoke() {
       </EmptyState>
       <ul>
         <li v-for="key in live" :key="key.id" class="key-row" :class="{ on: key.id === selected }">
-          <!-- 已作废的 Key 没有权限范围可看，只能吊销 -->
           <component
             :is="key.effectiveScopes ? 'button' : 'div'"
             class="key-main"
@@ -173,6 +302,24 @@ async function revoke() {
                 :scopes="key.scopes"
                 :title="`签发范围：${scopesSummary(key.scopes)}`"
               />
+              <span
+                v-if="
+                  key.linkedCircles.length ||
+                  facetsLabel(key.contextFacets) ||
+                  key.personaOverrideId
+                "
+                class="key-lens"
+              >
+                <template v-if="key.linkedCircles.length">
+                  关联 {{ key.linkedCircles.length }} 个客场圈
+                </template>
+                <template v-if="facetsLabel(key.contextFacets)">
+                  · 切面 {{ facetsLabel(key.contextFacets) }}
+                </template>
+                <template v-if="personaLabel(key.personaOverrideId)">
+                  · 人格 {{ personaLabel(key.personaOverrideId) }}
+                </template>
+              </span>
               <span v-if="key.lastUsedAt" :title="formatTime(key.lastUsedAt)">
                 最近使用 {{ formatRelative(key.lastUsedAt) }}
               </span>
@@ -183,16 +330,28 @@ async function revoke() {
               </span>
             </span>
           </component>
-          <UButton
-            class="key-revoke"
-            size="sm"
-            color="error"
-            variant="outline"
-            :aria-label="`吊销 ${key.name}`"
-            @click="revoking = key"
-          >
-            吊销
-          </UButton>
+          <div class="key-actions">
+            <UButton
+              v-if="canIssue && key.effectiveScopes"
+              size="xs"
+              color="neutral"
+              variant="outline"
+              :icon="icons.rotate"
+              :aria-label="`轮换 ${key.name}`"
+              @click="openRotate(key)"
+            >
+              轮换
+            </UButton>
+            <UButton
+              size="xs"
+              color="error"
+              variant="outline"
+              :aria-label="`吊销 ${key.name}`"
+              @click="revoking = key"
+            >
+              吊销
+            </UButton>
+          </div>
         </li>
       </ul>
       <ul v-if="revoked.length" class="keys-revoked">
@@ -215,18 +374,24 @@ async function revoke() {
       </ul>
     </template>
 
-    <!-- 明文 Key 显示期间不能点遮罩、按 Esc 或右上角关掉，只能点「我已保存」，免得没复制就丢了 -->
+    <!-- 明文访问密钥显示期间不能点遮罩、按 Esc 或右上角关掉，只能点「我已保存」 -->
     <UModal
       :open="issueOpen"
-      title="签发访问密钥"
+      :title="issuedMode === 'rotate' ? '已轮换访问密钥' : '签发访问密钥'"
       :dismissible="!issued"
       :close="!issued"
       :ui="{ content: 'sm:max-w-4xl' }"
-      @update:open="(v) => (v ? (issueOpen = true) : closeIssue())"
+      @update:open="(v) => (v ? (issueOpen = true) : !issued && closeIssue())"
     >
       <template #body>
         <div v-if="issued" class="space-y-3">
-          <NoteLine tone="warning">访问密钥只显示这一次，关闭后无法再次查看，请立即保存。</NoteLine>
+          <NoteLine tone="warning">
+            {{
+              issuedMode === 'rotate'
+                ? '原访问密钥已立即吊销。新访问密钥只显示这一次，关闭后无法再次查看，请立即保存。'
+                : '访问密钥只显示这一次，关闭后无法再次查看，请立即保存。'
+            }}
+          </NoteLine>
           <div class="once">
             <code>{{ issued.key }}</code>
             <UButton
@@ -238,19 +403,81 @@ async function revoke() {
             />
           </div>
         </div>
-        <!--
-          不用表单元素：卡片、分段按钮是单选，读写是勾选框，在它们上面按回车会隐式提交，
-          方向键选到一半就签出访问密钥、明文马上显示。名称框里按回车同样不签发，只有点「签发」才签发
-        -->
+        <!-- 不用表单元素：模板、分段与切面选择器按回车不隐式提交 -->
         <div v-else class="issue">
-          <UFormField label="名称" help="用于辨认，例如设备加工具">
-            <UInput v-model="form.name" class="w-full" :placeholder="defaultName" />
-          </UFormField>
+          <div class="grid gap-3 sm:grid-cols-2">
+            <UFormField label="名称" help="用于辨认，例如设备加工具">
+              <UInput v-model="form.name" class="w-full" :placeholder="defaultName" />
+            </UFormField>
+            <UFormField label="人格覆盖" help="不指定时使用接入实例的默认人格或按群规则">
+              <USelect
+                v-model="form.personaOverrideId"
+                :items="personaItems"
+                value-key="value"
+                class="w-full"
+              />
+            </UFormField>
+          </div>
+
           <KeyScopeEditor
             v-model:scopes="form.scopes"
             v-model:preset="form.preset"
-            :is-space-owner="isSpaceOwner"
+            :is-circle-owner="isCircleOwner"
+            :circle-kind="circleKind"
+            :realm-terms="realmTerms"
           />
+
+          <div v-if="otherCircles.length" class="lens-block">
+            <p class="lens-title">
+              关联客场记忆圈
+              <Hint>
+                为密钥附加其他记忆圈的只读或跨圈写入视野（仅允许写入正式词条、敏感级最高私密，且受当前账号在该圈的角色约束）。
+              </Hint>
+            </p>
+            <ul class="linked-list">
+              <li v-for="circle in otherCircles" :key="circle.id" class="linked-row">
+                <label class="linked-check">
+                  <input
+                    type="checkbox"
+                    :checked="isCircleLinked(circle.id)"
+                    @change="
+                      toggleLinkedCircle(circle, ($event.target as HTMLInputElement).checked)
+                    "
+                  />
+                  <span>{{ circle.name }}</span>
+                  <span class="linked-kind">{{ circleKindLabels[circle.kind] }}</span>
+                </label>
+                <USelect
+                  v-if="isCircleLinked(circle.id)"
+                  :model-value="linkedMode(circle.id)"
+                  :items="[
+                    { label: '仅读取', value: 'read' },
+                    {
+                      label: '可跨圈写入词条',
+                      value: 'read_write',
+                      disabled: circle.role === 'viewer',
+                    },
+                  ]"
+                  value-key="value"
+                  size="xs"
+                  class="w-40"
+                  @update:model-value="(v) => setLinkedMode(circle.id, v as LinkedCircleMode)"
+                />
+              </li>
+            </ul>
+          </div>
+
+          <div class="lens-block">
+            <p class="lens-title">
+              固定切面透镜
+              <Hint>为此访问密钥声明在场切面，影响召回排序与关联个人圈高优词条的穿透过滤。</Hint>
+            </p>
+            <FacetWhenPicker
+              v-model="form.contextFacets"
+              :circle-id="circleId"
+              :vocabulary="vocabulary"
+            />
+          </div>
         </div>
       </template>
       <template #footer>
@@ -272,9 +499,44 @@ async function revoke() {
     </UModal>
 
     <UModal
+      :open="rotatingTarget !== null"
+      title="轮换访问密钥？"
+      :dismissible="!rotating"
+      :close="!rotating"
+      @update:open="(v) => !v && !rotating && (rotatingTarget = null)"
+    >
+      <template #body>
+        <!-- 不用 form -->
+        <div class="space-y-3">
+          <p class="text-sm">
+            轮换后 <code>{{ rotatingTarget?.prefix }}</code
+            >（{{ rotatingTarget?.name }}）立即吊销并生成继承相同权限的新密钥；新明文仅展示一次。
+          </p>
+          <UFormField label="新密钥名称">
+            <UInput v-model="rotateName" class="w-full" />
+          </UFormField>
+        </div>
+      </template>
+      <template #footer>
+        <div class="flex w-full justify-end gap-2">
+          <UButton
+            color="neutral"
+            variant="ghost"
+            :disabled="rotating"
+            @click="rotatingTarget = null"
+          >
+            取消
+          </UButton>
+          <UButton :loading="rotating" @click="confirmRotate">确认轮换</UButton>
+        </div>
+      </template>
+    </UModal>
+
+    <UModal
       :open="revoking !== null"
       title="吊销这个访问密钥？"
-      @update:open="(v) => !v && (revoking = null)"
+      :dismissible="!revokingBusy"
+      @update:open="(v) => !v && !revokingBusy && (revoking = null)"
     >
       <template #body>
         <p class="text-sm">
@@ -284,8 +546,10 @@ async function revoke() {
       </template>
       <template #footer>
         <div class="flex w-full justify-end gap-2">
-          <UButton color="neutral" variant="ghost" @click="revoking = null">取消</UButton>
-          <UButton color="error" @click="revoke">吊销</UButton>
+          <UButton color="neutral" variant="ghost" :disabled="revokingBusy" @click="revoking = null"
+            >取消</UButton
+          >
+          <UButton color="error" :loading="revokingBusy" @click="revoke">吊销</UButton>
         </div>
       </template>
     </UModal>
@@ -309,7 +573,7 @@ async function revoke() {
   display: flex;
   gap: 14px;
   width: 100%;
-  padding: 11px 64px 11px 10px;
+  padding: 11px 116px 11px 10px;
   text-align: left;
 }
 button.key-main:hover {
@@ -340,6 +604,9 @@ button.key-main:focus-visible {
   font-size: 13px;
   color: var(--ui-text);
 }
+.key-lens {
+  font-size: 12px;
+}
 .key-note {
   color: var(--ui-warning);
 }
@@ -351,13 +618,12 @@ button.key-main:focus-visible {
 .key-row.on .key-note {
   color: var(--strata-on-selected);
 }
-.key-revoke {
+.key-actions {
   position: absolute;
   top: 10px;
   right: 8px;
-  background: var(--ui-bg);
-}
-.key-revoke:hover {
+  display: flex;
+  gap: 4px;
   background: var(--ui-bg);
 }
 .keys-revoked {
@@ -389,6 +655,41 @@ button.key-main:focus-visible {
   display: grid;
   gap: 16px;
   min-width: 0;
+}
+.lens-block {
+  display: grid;
+  gap: 8px;
+}
+.lens-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.linked-list {
+  display: grid;
+  gap: 6px;
+}
+.linked-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--ui-border-accented);
+}
+.linked-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.linked-kind {
+  font-size: 12px;
+  color: var(--ui-text-muted);
 }
 .issue-foot {
   display: flex;

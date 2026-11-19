@@ -8,6 +8,7 @@ import { useRoute } from 'vue-router'
 import { ApiError, retryable } from '../api/client'
 import { api } from '../api/endpoints'
 import Hint from '../components/Hint.vue'
+import PromoteFactModal from '../components/PromoteFactModal.vue'
 import SubjectBindings from '../components/SubjectBindings.vue'
 import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import SectionHeading from '../components/strata/SectionHeading.vue'
@@ -30,20 +31,20 @@ import { formatRelative, formatShort, formatTime } from '../time'
 const route = useRoute()
 const toast = useToast()
 const queryClient = useQueryClient()
-const { me, space } = useSession()
-const spaceId = computed(() => String(route.params.spaceId))
+const { me, circle } = useSession()
+const circleId = computed(() => String(route.params.circleId))
 const subjectId = computed(() => String(route.params.subjectId))
-const role = computed(() => space.value?.role ?? 'viewer')
+const role = computed(() => circle.value?.role ?? 'viewer')
 const canEdit = computed(() => role.value === 'owner' || role.value === 'editor')
 
 const subject = useQuery({
-  queryKey: computed(() => ['subject', spaceId.value, subjectId.value]),
-  queryFn: () => api.subject(spaceId.value, subjectId.value),
+  queryKey: computed(() => ['subject', circleId.value, subjectId.value] as const),
+  queryFn: () => api.subject(circleId.value, subjectId.value),
 })
 const data = computed(() => subject.data.value ?? null)
 const linkedToMe = computed(() => data.value?.account?.id === me.data.value?.id)
 
-// 换了对象就重新填；同一个对象只在输入框没被改动时跟着服务端的名字走，刷新时不冲掉正在输入的内容
+// 换了联系人就重新填；同一个联系人只在输入框没被改动时跟着服务端的名字走，刷新时不冲掉正在输入的内容
 const name = ref('')
 let synced = ''
 watch(
@@ -55,25 +56,25 @@ watch(
   { immediate: true },
 )
 
-const refreshSubjectCaches = (sid: string) => refreshCaches(queryClient, sid)
-// 等你确认的绑定：卡片标题上提醒
+const refreshSubjectCaches = (cid: string) => refreshCaches(queryClient, cid, subjectId.value)
+// 待当前账号确认的绑定：卡片标题上提醒
 const waitingForMe = computed(
   () => data.value?.bindings.filter((b) => b.canConfirm || b.canReject).length ?? 0,
 )
 
 const saving = ref(false)
 async function update(body: UpdateSubjectRequest, done: string) {
-  const sid = spaceId.value
+  const cid = circleId.value
   const id = subjectId.value
   saving.value = true
   try {
-    const saved = await api.updateSubject(sid, id, body)
+    const saved = await api.updateSubject(cid, id, body)
     // 服务端会去掉首尾空白：输入框换成保存下来的名字，之后才能接着跟服务端同步
     if (body.displayName !== undefined && id === subjectId.value) {
       name.value = saved.displayName
       synced = saved.displayName
     }
-    await refreshSubjectCaches(sid)
+    await refreshSubjectCaches(cid)
     toast.add({ title: done, color: 'success' })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '保存失败', color: 'error' })
@@ -82,23 +83,32 @@ async function update(body: UpdateSubjectRequest, done: string) {
   }
 }
 
+// 提炼为正式词条
+const promotingFact = ref<SubjectFact | null>(null)
+const promoteOpen = computed({
+  get: () => promotingFact.value !== null,
+  set: (v: boolean) => {
+    if (!v) promotingFact.value = null
+  },
+})
+
 // 删一条事实：确认框打开时记下这一版，期间被改过服务端会返回冲突
 const deletingFact = ref<SubjectFact | null>(null)
 const removing = ref(false)
 async function removeFact() {
   const fact = deletingFact.value
   if (!fact) return
-  const sid = spaceId.value
+  const cid = circleId.value
   removing.value = true
   try {
-    await api.deleteFact(sid, subjectId.value, fact.id, fact.version)
+    await api.deleteFact(cid, subjectId.value, fact.id, fact.version)
     toast.add({ title: '已删除事实', color: 'success' })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '删除失败', color: 'error' })
   } finally {
     removing.value = false
     deletingFact.value = null
-    void refreshSubjectCaches(sid)
+    void refreshSubjectCaches(cid)
   }
 }
 
@@ -106,10 +116,10 @@ async function removeFact() {
 const reactivating = ref<string | null>(null)
 async function reactivateFact(fact: SupersededFact) {
   if (reactivating.value) return
-  const sid = spaceId.value
+  const cid = circleId.value
   reactivating.value = fact.id
   try {
-    await api.reactivateFact(sid, subjectId.value, fact.id, fact.version)
+    await api.reactivateFact(cid, subjectId.value, fact.id, fact.version)
     toast.add({
       title: fact.supersededBy ? '已恢复生效，取代它的事实仍然有效' : '已恢复生效',
       color: 'success',
@@ -118,18 +128,18 @@ async function reactivateFact(fact: SupersededFact) {
     toast.add({ title: err instanceof ApiError ? err.message : '恢复生效失败', color: 'error' })
   } finally {
     reactivating.value = null
-    void refreshSubjectCaches(sid)
+    void refreshSubjectCaches(cid)
   }
 }
 
-// 合并：选同种类的另一个对象并进来。下拉框打开时才按名字或平台账号去查
+// 合并：选同种类的另一个联系人并进来。下拉框打开时才按名字或平台账号去查
 const mergeTerm = ref('')
 const mergeQuery = useDebounced(mergeTerm)
 const mergeOpen = ref(false)
 const candidates = useQuery({
-  queryKey: computed(() => ['merge-picker', spaceId.value, data.value?.kind, mergeQuery.value]),
+  queryKey: computed(() => ['merge-picker', circleId.value, data.value?.kind, mergeQuery.value]),
   queryFn: () =>
-    api.subjects(spaceId.value, { kind: data.value!.kind, q: mergeQuery.value || undefined }),
+    api.subjects(circleId.value, { kind: data.value!.kind, q: mergeQuery.value || undefined }),
   enabled: computed(() => canEdit.value && mergeOpen.value && data.value !== null),
 })
 type Candidate = { label: string; value: string; description: string }
@@ -155,16 +165,17 @@ watch(mergeFrom, (id) => {
 watch(subjectId, () => {
   mergeFrom.value = undefined
   deletingFact.value = null
+  promotingFact.value = null
 })
 const confirmMerge = ref(false)
 const merging = ref(false)
 async function merge() {
   const from = mergeFrom.value
   if (!from) return
-  const sid = spaceId.value
+  const cid = circleId.value
   merging.value = true
   try {
-    await api.mergeSubject(sid, subjectId.value, from)
+    await api.mergeSubject(cid, subjectId.value, from)
     toast.add({ title: `已合并「${mergePicked.value?.label ?? '联系人'}」`, color: 'success' })
     mergeFrom.value = undefined
   } catch (err) {
@@ -172,14 +183,14 @@ async function merge() {
   } finally {
     merging.value = false
     confirmMerge.value = false
-    void refreshSubjectCaches(sid)
+    void refreshSubjectCaches(cid)
   }
 }
 
 // 对话页的联系人分页：面包屑与「返回」都回到那里
 const contactsRoute = computed(() => ({
   name: 'conversations',
-  params: { spaceId: spaceId.value },
+  params: { circleId: circleId.value },
   query: { tab: 'contacts' },
 }))
 </script>
@@ -202,7 +213,7 @@ const contactsRoute = computed(() => ({
       <ReadFailureNote class="mt-3" :query="subject" />
     </div>
     <template v-else>
-      <StrataStrip layer="subject" sensitivity="public" />
+      <StrataStrip band="fact" sensitivity="public" />
       <header class="subject-head">
         <div class="min-w-0">
           <nav class="crumbs" aria-label="路径">
@@ -288,7 +299,7 @@ const contactsRoute = computed(() => ({
                 </template>
                 <template v-else-if="linkedToMe">
                   <span class="mark-me">当前账号</span>
-                  <!-- 取消自己的标记 viewer 也可以 -->
+                  <!-- 取消自己的标记查看者也可以 -->
                   <UButton
                     size="sm"
                     color="neutral"
@@ -312,9 +323,20 @@ const contactsRoute = computed(() => ({
                 </template>
               </div>
               <p class="row-note">
-                标记后，当前账号的应用会将此人的私聊视为本人对话。<Hint>
-                  开启「本人私聊时读取本人记忆」的应用还可读取当前账号的本人记忆（内部及以下）。只能标记为当前账号。
+                标记后，当前账号的接入实例会将此人的私聊视为本人对话。<Hint>
+                  开启「本人私聊提权至内部敏感级」的接入实例还可读取当前账号的内部及以下词条。只能标记为当前账号。
                 </Hint>
+              </p>
+            </div>
+
+            <div v-if="data.kind === 'group'" class="profile-row">
+              <p class="row-label">按群规则与单群隔离锁</p>
+              <p class="row-note">
+                为此群单独指定人格或开启单群隔离锁，需在各
+                <RouterLink :to="{ name: 'clients', params: { circleId } }" class="entry-link">
+                  接入实例
+                </RouterLink>
+                的按群规则中配置。开启单群隔离锁后，其他群开启拟人跨群识人时也不会读到本群的发言人事实。
               </p>
             </div>
 
@@ -356,7 +378,7 @@ const contactsRoute = computed(() => ({
             </p>
             <SubjectBindings
               v-if="data.bindings.length"
-              :space-id="spaceId"
+              :circle-id="circleId"
               :items="data.bindings"
               :subject-id="subjectId"
             />
@@ -373,7 +395,7 @@ const contactsRoute = computed(() => ({
                   data.kind === 'group' ? '群内' : '私聊中'
                 }}记下的内容都转到「{{ data.displayName }}」名下，被合并方随即删除。<template
                   v-if="data.kind === 'group'"
-                  >按群切换人格的规则也随之转移，两边都有规则时保留当前这边的。</template
+                  >按群规则也随之转移，两边同一接入实例都有规则时保留当前这边的。</template
                 >
               </Hint>
             </p>
@@ -411,7 +433,7 @@ const contactsRoute = computed(() => ({
           <section>
             <SectionHeading :title="`记下的事实（${data.factCount}）`">
               <template #actions>
-                <StrataSwatch layer="subject" plain label="layer" />
+                <StrataSwatch band="fact" plain label="band" />
               </template>
             </SectionHeading>
             <p v-if="data.factCount > data.facts.length" class="section-note">
@@ -423,9 +445,10 @@ const contactsRoute = computed(() => ({
                 <div class="entry-body">
                   <p class="entry-text">{{ fact.content }}</p>
                   <p class="entry-meta">
+                    <code v-if="fact.shortId" class="short-id">{{ fact.shortId }}</code>
                     <RouterLink
                       v-if="fact.conversationId"
-                      :to="conversationRoute(spaceId, fact.conversationId)"
+                      :to="conversationRoute(circleId, fact.conversationId)"
                       class="entry-link"
                     >
                       {{ heardFrom(fact.scope) }}
@@ -437,16 +460,26 @@ const contactsRoute = computed(() => ({
                     </time>
                   </p>
                 </div>
-                <UButton
-                  v-if="canEdit"
-                  :icon="icons.remove"
-                  color="neutral"
-                  variant="ghost"
-                  size="sm"
-                  class="shrink-0 text-muted hover:text-error"
-                  :aria-label="`删除事实：${fact.content}`"
-                  @click="deletingFact = fact"
-                />
+                <div v-if="canEdit" class="entry-actions">
+                  <UButton
+                    :icon="icons.promote"
+                    color="neutral"
+                    variant="ghost"
+                    size="sm"
+                    title="提炼为正式词条"
+                    :aria-label="`提炼为正式词条：${fact.content}`"
+                    @click="promotingFact = fact"
+                  />
+                  <UButton
+                    :icon="icons.remove"
+                    color="neutral"
+                    variant="ghost"
+                    size="sm"
+                    class="text-muted hover:text-error"
+                    :aria-label="`删除事实：${fact.content}`"
+                    @click="deletingFact = fact"
+                  />
+                </div>
               </li>
             </ul>
           </section>
@@ -466,6 +499,7 @@ const contactsRoute = computed(() => ({
                     已被「{{ fact.supersededBy }}」取代
                   </p>
                   <p class="entry-meta">
+                    <code v-if="fact.shortId" class="short-id">{{ fact.shortId }}</code>
                     <span>{{ heardFrom(fact.scope) }}</span>
                     <span>{{ provenanceLabels[fact.provenance] }}</span>
                     <span>
@@ -503,7 +537,7 @@ const contactsRoute = computed(() => ({
                 </Hint>
               </template>
               <template #actions>
-                <StrataSwatch layer="episode" plain label="layer" />
+                <StrataSwatch band="episode" plain label="band" />
               </template>
             </SectionHeading>
             <p v-if="!data.conversations.length" class="empty">暂无会话</p>
@@ -511,7 +545,7 @@ const contactsRoute = computed(() => ({
               <li v-for="c in data.conversations" :key="c.id" class="entry-row">
                 <div class="entry-body">
                   <p>
-                    <RouterLink :to="conversationRoute(spaceId, c.id)" class="entry-link">
+                    <RouterLink :to="conversationRoute(circleId, c.id)" class="entry-link">
                       {{ conversationTitle(c) }}
                     </RouterLink>
                   </p>
@@ -537,10 +571,10 @@ const contactsRoute = computed(() => ({
                     <time :datetime="run.createdAt" :title="formatTime(run.createdAt)">
                       {{ formatShort(run.createdAt) }}
                     </time>
-                    <span class="text-default">{{ run.app?.name ?? '已删除的应用' }}</span>
+                    <span class="text-default">{{ run.client?.name ?? '已删除的接入实例' }}</span>
                     <RouterLink
                       v-if="run.conversationId"
-                      :to="conversationRoute(spaceId, run.conversationId)"
+                      :to="conversationRoute(circleId, run.conversationId)"
                       class="entry-link"
                     >
                       {{ originScopeText(run.scope) }}
@@ -559,6 +593,15 @@ const contactsRoute = computed(() => ({
       </div>
     </template>
   </div>
+
+  <PromoteFactModal
+    v-if="data"
+    v-model:open="promoteOpen"
+    :circle-id="circleId"
+    :subject-id="subjectId"
+    :subject-name="data.displayName"
+    :fact="promotingFact"
+  />
 
   <UModal
     :open="deletingFact !== null"
@@ -591,7 +634,7 @@ const contactsRoute = computed(() => ({
       <p v-if="data?.kind === 'group'" class="mt-2 text-sm text-muted">
         「{{ mergePicked?.label }}」群内记下的内容归到「{{
           data?.displayName
-        }}」，此后在这个群的任一平台都能读取。按群切换人格的规则一并转移；两边在同一应用都有规则时，保留「{{
+        }}」，此后在这个群的任一平台都能读取。按群规则一并转移；两边在同一接入实例都有规则时，保留「{{
           data?.displayName
         }}」的规则。
       </p>
@@ -771,6 +814,12 @@ const contactsRoute = computed(() => ({
   flex: 1;
   min-width: 0;
 }
+.entry-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+}
 .entry-text {
   line-height: 1.65;
   white-space: pre-wrap;
@@ -783,6 +832,11 @@ const contactsRoute = computed(() => ({
   line-height: 1.6;
   color: var(--ui-text-muted);
   overflow-wrap: anywhere;
+}
+.short-id {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ui-text-toned);
 }
 .text-default {
   color: var(--ui-text);

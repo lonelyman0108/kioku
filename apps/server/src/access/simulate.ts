@@ -1,56 +1,39 @@
-import { KeyScopes } from '@kioku/contracts'
 import { and, eq } from 'drizzle-orm'
 
-import { keyPrincipal, memberRole } from '../auth/middleware'
-import { withSpace } from '../db/client'
-import { accounts, apiKeys, apps, spaceMembers, spaces } from '../db/schema'
+import { memberRole, principalOf } from '../auth/middleware'
+import { withCircle } from '../db/client'
+import { apiKeys, clients } from '../db/schema'
 import type { Deps, KeyPrincipal } from '../http/env'
-import { keyEffectiveScopes } from './access'
 
 export type SimulatedKey = { key: KeyPrincipal } | { error: string; status: 403 | 404 }
 
-// 模拟用的 Key（启动预览、召回调试、测试台）：只有应用主人能用，因为模拟会读到所有者本人的记忆与提示语（空间 owner 也不行）。
-// 权限按这把 Key 现在的有效上限，作废的 Key 不能模拟
+// 模拟用的密钥（启动预览、召回调试、测试台）：仅接入实例所有者本人可用，防止他人窥探个人圈或私密设置
 export async function keyToSimulate(
   deps: Deps,
-  { spaceId, appId, keyId }: { spaceId: string; appId: string; keyId: string },
+  { circleId, clientId, keyId }: { circleId: string; clientId: string; keyId: string },
   accountId: string,
 ): Promise<SimulatedKey> {
-  if (!(await memberRole(deps, spaceId, accountId))) {
-    return { error: '无权访问此空间', status: 403 }
+  if (!(await memberRole(deps, circleId, accountId))) {
+    return { error: '无权访问此记忆圈', status: 403 }
   }
-  const found = await withSpace(deps.db, spaceId, async (tx) => {
-    const [app] = await tx.select().from(apps).where(eq(apps.id, appId))
-    if (!app) return 'no-app' as const
-    if (app.ownerAccountId !== accountId) return 'forbidden' as const
+  const found = await withCircle(deps.db, circleId, async (tx) => {
+    const [client] = await tx.select().from(clients).where(eq(clients.id, clientId))
+    if (!client) return 'no-client' as const
+    if (client.ownerAccountId !== accountId) return 'forbidden' as const
     const [key] = await tx
       .select()
       .from(apiKeys)
-      .where(and(eq(apiKeys.id, keyId), eq(apiKeys.appId, appId)))
-    return key ? { app, key } : ('no-key' as const)
+      .where(
+        and(eq(apiKeys.id, keyId), eq(apiKeys.clientId, clientId), eq(apiKeys.circleId, circleId)),
+      )
+    return key ?? ('no-key' as const)
   })
-  if (found === 'no-app') return { error: '应用不存在', status: 404 }
-  if (found === 'forbidden') return { error: '仅应用所有者可模拟此应用的访问密钥', status: 403 }
+  if (found === 'no-client') return { error: '接入实例不存在', status: 404 }
+  if (found === 'forbidden')
+    return { error: '仅接入实例所有者可模拟此接入实例的访问密钥', status: 403 }
   if (found === 'no-key') return { error: '访问密钥不存在', status: 404 }
-  const { app, key } = found
-  const [owner] = await deps.db
-    .select({
-      role: spaceMembers.role,
-      memberSince: spaceMembers.createdAt,
-      disabledAt: accounts.disabledAt,
-      accountName: accounts.displayName,
-      spaceName: spaces.name,
-    })
-    .from(spaceMembers)
-    .innerJoin(accounts, eq(accounts.id, spaceMembers.accountId))
-    .innerJoin(spaces, eq(spaces.id, spaceMembers.spaceId))
-    .where(and(eq(spaceMembers.spaceId, spaceId), eq(spaceMembers.accountId, accountId)))
-  const scopes = keyEffectiveScopes({ ...key, scopes: KeyScopes.parse(key.scopes) }, owner)
-  if (!scopes) return { error: '访问密钥已作废', status: 404 }
-  return {
-    key: keyPrincipal(key, app, scopes, {
-      spaceName: owner?.spaceName ?? null,
-      accountName: owner?.accountName ?? null,
-    }),
-  }
+
+  const principal = await principalOf(deps.db, found)
+  if (!principal) return { error: '访问密钥已作废', status: 404 }
+  return { key: principal }
 }

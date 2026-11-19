@@ -3,10 +3,10 @@ import { createHash, createHmac, hkdfSync, randomBytes, randomUUID } from 'node:
 import type {
   BindCode,
   BindResult,
-  CreatedKey,
+  CircleOverview,
+  IssuedKey,
   RecallResponse,
   SessionContextInput,
-  SpaceOverview,
   SubjectBinding,
   SubjectDetail,
   SubjectInfo,
@@ -15,14 +15,15 @@ import { and, eq, sql } from 'drizzle-orm'
 import postgres from 'postgres'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
-import { ACCOUNT_ATTEMPTS, APP_ATTEMPTS, PREVIEWERS, VOID_REQUESTS } from '../../access/binding'
+import { ACCOUNT_ATTEMPTS, CLIENT_ATTEMPTS, PREVIEWERS, VOID_REQUESTS } from '../../access/binding'
 import { createApp } from '../../app'
-import { withSpace, type Database, type Tx } from '../../db/client'
+import { withCircle, type Database, type Tx } from '../../db/client'
 import {
-  memories,
+  circleMembers,
+  circles,
+  entries,
+  entryVariants,
   settings,
-  spaceMembers,
-  spaces,
   subjectBindAttempts,
   subjectBindCodes,
   subjectBindings,
@@ -32,6 +33,7 @@ import {
 import { staticEmbedderSource } from '../../embedding/source'
 import { saveExtractionConfig } from '../../extraction/settings'
 import type { Jobs } from '../../jobs/queue'
+import { generateShortId } from '../../memory/shortId'
 import {
   conversationOfScope,
   openTestDatabase,
@@ -56,7 +58,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
   // 没配主密钥的实例：码的哈希退回不带密钥的 SHA-256
   let keyless: ReturnType<typeof createApp>
   let ws: Workspace
-  let appId: string
+  let clientId: string
   let key: string
   const masterKey = randomBytes(32)
   // 排进抽取队列的批次与延迟，合并之后看有没有按合并后的批次排；failEnqueue 时排队出错
@@ -95,8 +97,8 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
   beforeEach(async () => {
     await resetDatabase(database)
     ws = await bootstrap(app)
-    appId = (await ws.createApp('qq-bot', { name: '群聊 bot', runtimeFamily: 'astrbot' })).id
-    key = await ws.issueKey(appId)
+    clientId = (await ws.createClient('qq-bot', { name: '群聊 bot', runtimeFamily: 'astrbot' })).id
+    key = await ws.issueKey(clientId)
     // 配了抽取模型，私聊的对话才进缓冲：合并时看缓冲有没有跟过去
     await saveExtractionConfig(database.db, masterKey, {
       baseUrl: 'https://llm.example.com/v1',
@@ -106,7 +108,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     failEnqueue = false
   })
 
-  const inSpace = <T>(fn: (tx: Tx) => Promise<T>) => withSpace(database.db, ws.spaceId, fn)
+  const inCircle = <T>(fn: (tx: Tx) => Promise<T>) => withCircle(database.db, ws.circleId, fn)
   const direct = (sender: string, platform = 'qq', name?: string): SessionContextInput => ({
     chatType: 'direct',
     platform,
@@ -139,7 +141,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     expect(res.status, await res.clone().text()).toBe(200)
     return (await res.json()) as BindResult
   }
-  // 先预览、再确认：和插件里先发 /bind <码>、再发 /bind <码> 确认一样
+  // 先预览、再确认
   const bind = async (code: string, context: SessionContextInput, k = key) => {
     expect((await resultOf(await redeem(code, context, k))).status).toBe('preview')
     return resultOf(await redeem(code, context, k, true))
@@ -174,7 +176,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
   }
   // 平台账号现在挂在哪个对象上
   const subjectIdOf = async (platform: string, externalId: string) => {
-    const [row] = await inSpace((tx) =>
+    const [row] = await inCircle((tx) =>
       tx
         .select({ id: subjectIdentities.subjectId })
         .from(subjectIdentities)
@@ -188,43 +190,62 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     return row?.id
   }
   const extracted = (values: {
-    layer: 'subject' | 'episode'
+    kind: 'fact' | 'episode'
     content: string
     originScope: string
     subjectId?: string
+    subjectKind?: 'person' | 'group'
   }) =>
-    inSpace(async (tx) =>
-      tx.insert(memories).values({
-        spaceId: ws.spaceId,
-        form: 'extracted',
+    inCircle(async (tx) => {
+      const [inserted] = await tx
+        .insert(entries)
+        .values({
+          circleId: ws.circleId,
+          shortId: generateShortId(),
+          circleKind: 'shared',
+          kind: values.kind,
+          title: values.content.slice(0, 40),
+          sensitivity: 'public',
+          provenance: 'untrusted',
+          originScope: values.originScope,
+          subjectId: values.kind === 'fact' ? (values.subjectId ?? null) : null,
+          subjectKind: values.kind === 'fact' ? (values.subjectKind ?? 'person') : null,
+          conversationId:
+            values.kind === 'episode'
+              ? await conversationOfScope(tx, ws.circleId, clientId, values.originScope)
+              : null,
+          priority: 2,
+          expiresAt: values.kind === 'episode' ? new Date(Date.now() + DAY) : null,
+        })
+        .returning()
+      await tx.insert(entryVariants).values({
+        circleId: ws.circleId,
+        entryId: inserted!.id,
+        kind: values.kind,
         sensitivity: 'public',
-        provenance: 'untrusted',
-        subjectId: values.subjectId ?? null,
-        // 会话摘要挂在这个作用域的会话上（群里的或和这个人的私聊）
-        conversationId:
-          values.layer === 'episode'
-            ? await conversationOfScope(tx, ws.spaceId, appId, values.originScope)
-            : null,
-        expiresAt: values.layer === 'episode' ? new Date(Date.now() + DAY) : null,
-        ...values,
-      }),
-    )
-  const storedCodes = () => inSpace((tx) => tx.select().from(subjectBindCodes))
+        when: {},
+        whenSignature: '{}',
+        sortOrder: 0,
+        content: values.content,
+      })
+      return inserted!
+    })
+  const storedCodes = () => inCircle((tx) => tx.select().from(subjectBindCodes))
   // 码的哈希：配了主密钥时是用从它派生的密钥算的 HMAC，没配时是不带密钥的 SHA-256
   const plainHash = (code: string) =>
-    createHash('sha256').update(`kioku-bind-code\u0000${appId}\u0000${code}`).digest('hex')
+    createHash('sha256').update(`kioku-bind-code\u0000${clientId}\u0000${code}`).digest('hex')
   const keyedHash = (code: string) =>
     createHmac(
       'sha256',
       Buffer.from(hkdfSync('sha256', masterKey, Buffer.alloc(0), 'kioku-bind-code-hmac', 32)),
     )
-      .update(`kioku-bind-code\u0000${appId}\u0000${code}`)
+      .update(`kioku-bind-code\u0000${clientId}\u0000${code}`)
       .digest('hex')
 
   // 管理界面
   const api = (method: string, path: string, body?: unknown, cookie = ws.cookie) =>
     app.request(
-      `/v1/spaces/${ws.spaceId}${path}`,
+      `/v1/circles/${ws.circleId}${path}`,
       method === 'GET' ? { headers: { cookie } } : jsonRequest(method, body ?? {}, { cookie }),
     )
   const detailOf = async (id: string, cookie = ws.cookie) => {
@@ -235,7 +256,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
   const pendingOf = async (cookie = ws.cookie) => {
     const res = await api('GET', '/overview', undefined, cookie)
     expect(res.status).toBe(200)
-    return ((await res.json()) as SpaceOverview).pendingBindings
+    return ((await res.json()) as CircleOverview).pendingBindings
   }
   const link = async (subjectId: string, cookie = ws.cookie, linkedToMe = true) =>
     expect((await api('PATCH', `/subjects/${subjectId}`, { linkedToMe }, cookie)).status).toBe(200)
@@ -249,7 +270,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
   const counters = async () =>
     Object.fromEntries(
       (
-        await inSpace((tx) =>
+        await inCircle((tx) =>
           tx
             .select({ key: subjectBindAttempts.key, count: subjectBindAttempts.count })
             .from(subjectBindAttempts),
@@ -257,7 +278,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
       ).map((r) => [r.key, r.count]),
     )
   const accountCounter = (platform: string, id: string) => JSON.stringify(['account', platform, id])
-  const APP_COUNTER = JSON.stringify(['app'])
+  const CLIENT_COUNTER = JSON.stringify(['client'])
   const voidCounter = (platform: string, id: string) => JSON.stringify(['void', platform, id])
   const wrongFor = (code: string) => (code === '22222222' ? '33333333' : '22222222')
 
@@ -267,12 +288,13 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     const a = (await subjectIdOf('qq', '1001'))!
     const b = (await subjectIdOf('tg', 'u1'))!
     await extracted({
-      layer: 'subject',
+      kind: 'fact',
       content: '住在上海',
       originScope: `direct:${b}`,
       subjectId: b,
+      subjectKind: 'person',
     })
-    await extracted({ layer: 'episode', content: '私聊里聊了上海', originScope: `direct:${b}` })
+    await extracted({ kind: 'episode', content: '私聊里聊了上海', originScope: `direct:${b}` })
 
     const res = await issue(direct('1001', 'qq', '小明'))
     expect(res.status).toBe(200)
@@ -312,11 +334,12 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
       ['住在上海', 'direct', a],
     ])
     // 私聊里的会话摘要跟着并过来
-    const [summary] = await withSpace(database.db, ws.spaceId, (tx) =>
+    const [summary] = await withCircle(database.db, ws.circleId, (tx) =>
       tx
-        .select({ originScope: memories.originScope })
-        .from(memories)
-        .where(eq(memories.content, '私聊里聊了上海')),
+        .select({ originScope: entries.originScope })
+        .from(entries)
+        .innerJoin(entryVariants, eq(entryVariants.entryId, entries.id))
+        .where(eq(entryVariants.content, '私聊里聊了上海')),
     )
     expect(summary!.originScope).toBe(`direct:${a}`)
     // 缓冲里还没抽取的对话跟过来，按合并后的批次排抽取
@@ -324,7 +347,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     // 合并后用哪个平台账号私聊，都读得到私聊里记下的
     expect(await recallSubjects(direct('1001'))).toEqual(['住在上海'])
     expect(await recallSubjects(direct('u1', 'tg'))).toEqual(['住在上海'])
-    // 对象页的绑定记录：谁、什么时候、用哪个平台账号发码与收码，经由哪个应用
+    // 对象页的绑定记录：谁、什么时候、用哪个平台账号发码与收码，经由哪个接入实例
     expect(merged.bindings).toMatchObject([
       {
         status: 'merged',
@@ -333,7 +356,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
         redeemedBy: { platform: 'tg', externalId: 'u1', displayName: '明' },
         issuedBy: { platform: 'qq', externalId: '1001' },
         issuedAt: new Date(stored!.createdAt).toISOString(),
-        app: { id: appId, name: '群聊 bot' },
+        client: { id: clientId, name: '群聊 bot' },
         confirmer: null,
         decidedBy: null,
         expiresAt: null,
@@ -348,7 +371,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
   it('没预览过就带上确认的只给预览；预览过的账号再确认才合并，别的账号预览过不算', async () => {
     const code = await codeFor(direct('1001'))
     await meet(direct('u1', 'tg'))
-    // 钓鱼的人让对方第一句就发「/bind 码 确认」：照样先看到要并到谁那里
+    // 钓鱼的人让对方第一句就发确认：照样先看到要并到谁那里
     expect((await resultOf(await redeem(code, direct('u1', 'tg'), key, true))).status).toBe(
       'preview',
     )
@@ -380,7 +403,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
 
     const third = await codeFor(direct('1002'))
     expect((await resultOf(await redeem(third, direct('u4', 'tg')))).status).toBe('preview')
-    await inSpace((tx) =>
+    await inCircle((tx) =>
       tx
         .update(subjectBindCodes)
         .set({ expiresAt: sql`now() - interval '1 second'` })
@@ -391,7 +414,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     // 被换掉、用过、过期的码都对得上记录，不算输错；对不上任何一条的才算
     expect(Object.values(await counters()).every((n) => n === 0)).toBe(true)
     expect(await errorOf(await redeem(wrongFor(third), direct('u4', 'tg')), 400)).toBe(INVALID)
-    expect(await counters()).toMatchObject({ [accountCounter('tg', 'u4')]: 1, [APP_COUNTER]: 1 })
+    expect(await counters()).toMatchObject({ [accountCounter('tg', 'u4')]: 1, [CLIENT_COUNTER]: 1 })
   })
 
   it('群里不发码也不收码，不因此建对象', async () => {
@@ -403,7 +426,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
       '只能在私聊中绑定',
     )
     // 群和群里的人都没建出来；码也还在
-    const all = await inSpace((tx) => tx.select().from(subjectIdentities))
+    const all = await inCircle((tx) => tx.select().from(subjectIdentities))
     expect(all.map((i) => i.externalId)).toEqual(['1001'])
     expect((await bind(code, direct('u1', 'tg'))).status).toBe('merged')
   })
@@ -415,7 +438,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     expect(res.status).toBe(204)
     expect(await res.text()).toBe('')
     // 作废就是让它马上过期，留到每小时的清理再删
-    const [voided] = await inSpace((tx) =>
+    const [voided] = await inCircle((tx) =>
       tx.execute<{ dead: boolean }>(
         sql`select expires_at <= now() as dead from subject_bind_codes`,
       ),
@@ -431,7 +454,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     // 作废不碰输错的名额：误把码贴到群里的人在私聊里一次机会也不少；只按发言人计请求次数，格式不对的不计
     expect(await counters()).toEqual({
       [accountCounter('tg', 'u1')]: 0,
-      [APP_COUNTER]: 0,
+      [CLIENT_COUNTER]: 0,
       [voidCounter('qq', '2002')]: 3,
     })
     // 不建对象：群和发言人都没有
@@ -471,55 +494,57 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     expect((await redeem(again, direct('1001'))).status).toBe(409)
   })
 
-  it('Key 在私聊里写不了对象层时不能申请、使用，也不能作废，不建对象', async () => {
-    const episodeOnly = await ws.issueKey(appId, { ...FULL_SCOPES, writeLayers: ['episode'] })
+  it('Key 在私聊里写不了联系人层时不能申请、使用，也不能作废，不建对象', async () => {
+    const entryOnly = await ws.issueKey(clientId, { ...FULL_SCOPES, writeKinds: ['entry'] })
     const notAllowed = '当前 bot 的 Key 无权写入联系人层，无法绑定账号'
-    expect(await errorOf(await issue(direct('1001'), episodeOnly), 403)).toBe(notAllowed)
+    expect(await errorOf(await issue(direct('1001'), entryOnly), 403)).toBe(notAllowed)
     const code = await codeFor(direct('1002'))
-    expect(await errorOf(await redeem(code, direct('u1', 'tg'), episodeOnly), 403)).toBe(notAllowed)
-    expect(await errorOf(await voidIn(code, inGroup('2002'), episodeOnly), 403)).toBe(notAllowed)
+    expect(await errorOf(await redeem(code, direct('u1', 'tg'), entryOnly), 403)).toBe(notAllowed)
+    expect(await errorOf(await voidIn(code, inGroup('2002'), entryOnly), 403)).toBe(notAllowed)
     expect(await subjectIdOf('qq', '1001')).toBeUndefined()
     expect(await subjectIdOf('tg', 'u1')).toBeUndefined()
     expect(await storedCodes()).toHaveLength(1)
 
-    // 应用主人被降为 viewer 之后，他的 Key 什么都写不了
-    const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    // 接入实例主人被降为 viewer 之后，他的 Key 什么都写不了
+    const bob = await addMember(database.db, ws.circleId, 'bob', 'editor')
     const created = await app.request(
-      `/v1/spaces/${ws.spaceId}/apps`,
+      `/v1/circles/${ws.circleId}/clients`,
       jsonRequest(
         'POST',
         { slug: 'bob-bot', name: 'bob', runtimeFamily: 'astrbot' },
-        {
-          cookie: bob.cookie,
-        },
+        { cookie: bob.cookie },
       ),
     )
-    const bobApp = ((await created.json()) as { id: string }).id
+    const bobClient = ((await created.json()) as { id: string }).id
     const issued = await app.request(
-      `/v1/spaces/${ws.spaceId}/apps/${bobApp}/keys`,
+      `/v1/circles/${ws.circleId}/clients/${bobClient}/keys`,
       jsonRequest(
         'POST',
         { name: 'k', scopes: { ...FULL_SCOPES, maxSensitivity: 'private', credentials: 'none' } },
         { cookie: bob.cookie },
       ),
     )
-    const bobKey = ((await issued.json()) as CreatedKey).key
+    const bobKey = ((await issued.json()) as IssuedKey).key
     expect((await issue(direct('1003'), bobKey)).status).toBe(200)
     await database.db
-      .update(spaceMembers)
+      .update(circleMembers)
       .set({ role: 'viewer' })
-      .where(eq(spaceMembers.accountId, bob.accountId))
+      .where(
+        and(eq(circleMembers.circleId, ws.circleId), eq(circleMembers.accountId, bob.accountId)),
+      )
     expect((await issue(direct('1003'), bobKey)).status).toBe(403)
   })
 
   it('收码的对象标记成了别的成员时拒绝，码不作废；两边标记成同一个成员时直接合并，不用等确认', async () => {
-    const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    const bob = await addMember(database.db, ws.circleId, 'bob', 'editor')
     await meet(direct('u1', 'tg'))
     const b = (await subjectIdOf('tg', 'u1'))!
     await link(b, bob.cookie)
     // 发码的没标记，收码的标记成 bob：合并会把发码的账号挂到 bob 名下。预览时就说清
     const code = await codeFor(direct('1001'))
-    expect(await errorOf(await redeem(code, direct('u1', 'tg')), 403)).toContain('已标记为空间成员')
+    expect(await errorOf(await redeem(code, direct('u1', 'tg')), 403)).toContain(
+      '已标记为记忆圈成员',
+    )
     expect(await subjectIdOf('tg', 'u1')).toBe(b)
     expect((await detailOf(b)).account?.id).toBe(bob.accountId)
     // 码没有作废：没标记的账号照样能用
@@ -547,19 +572,20 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     expect((await detailOf(a)).account?.id).toBe(ws.accountId)
   })
 
-  it('发码的对象标记了成员、收码的没标记：收码方确认之后等那个成员本人确认，空间 owner 也不能代办；确认后按合并对象执行', async () => {
-    const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
-    const carol = await addMember(database.db, ws.spaceId, 'carol', 'viewer')
+  it('发码的对象标记了成员、收码的没标记：收码方确认之后等那个成员本人确认，记忆圈 owner 也不能代办；确认后按合并对象执行', async () => {
+    const bob = await addMember(database.db, ws.circleId, 'bob', 'editor')
+    const carol = await addMember(database.db, ws.circleId, 'carol', 'viewer')
     await meet(direct('1001', 'qq', '小明'))
     await meet(direct('u1', 'tg', '明'))
     const a = (await subjectIdOf('qq', '1001'))!
     const b = (await subjectIdOf('tg', 'u1'))!
     await link(a, bob.cookie)
     await extracted({
-      layer: 'subject',
+      kind: 'fact',
       content: '住在上海',
       originScope: `direct:${b}`,
       subjectId: b,
+      subjectKind: 'person',
     })
 
     const code = await codeFor(direct('1001'))
@@ -579,7 +605,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     // 同一对对象再来一次时沿用那一条
     const again = await codeFor(direct('1001'))
     expect(await bind(again, direct('u1', 'tg'))).toEqual(result)
-    expect(await inSpace((tx) => tx.select().from(subjectBindings))).toHaveLength(1)
+    expect(await inCircle((tx) => tx.select().from(subjectBindings))).toHaveLength(1)
 
     // 只有 bob 在概览里看得到、能处理；对象页里大家都看得到这一条在等谁
     const [pending] = await pendingOf(bob.cookie)
@@ -605,7 +631,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     // 收码的那一边也看得到它申请绑到哪里
     expect((await detailOf(b, carol.cookie)).bindings.map((x) => x.id)).toEqual([pending!.id])
 
-    // 空间 owner、viewer 都不能确认或拒绝
+    // 记忆圈 owner、viewer 都不能确认或拒绝
     expect(await errorOf(await confirm(pending!), 403)).toBe(
       '仅此联系人标记的成员本人可处理此次绑定',
     )
@@ -637,7 +663,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
   })
 
   it('拒绝后不合并；过了确认期限作废；被标记的成员是 viewer 时只能拒绝', async () => {
-    const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    const bob = await addMember(database.db, ws.circleId, 'bob', 'editor')
     await meet(direct('1001'))
     const a = (await subjectIdOf('qq', '1001'))!
     await link(a, bob.cookie)
@@ -653,7 +679,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
 
     expect((await bind(await codeFor(direct('1001')), direct('u2', 'tg'))).status).toBe('pending')
     const [second] = await pendingOf(bob.cookie)
-    await inSpace((tx) =>
+    await inCircle((tx) =>
       tx
         .update(subjectBindings)
         .set({ expiresAt: sql`now() - interval '1 second'` })
@@ -672,18 +698,22 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     // 被标记的成员降成了 viewer：合并要写权限，确认不了，能拒绝
     expect((await bind(await codeFor(direct('1001')), direct('u3', 'tg'))).status).toBe('pending')
     await database.db
-      .update(spaceMembers)
+      .update(circleMembers)
       .set({ role: 'viewer' })
-      .where(eq(spaceMembers.accountId, bob.accountId))
+      .where(
+        and(eq(circleMembers.circleId, ws.circleId), eq(circleMembers.accountId, bob.accountId)),
+      )
     const [third] = await pendingOf(bob.cookie)
     expect(third).toMatchObject({ canConfirm: false, canReject: true })
-    expect(await errorOf(await confirm(third!, bob.cookie), 403)).toBe('需要空间所有者或编辑者角色')
+    expect(await errorOf(await confirm(third!, bob.cookie), 403)).toBe(
+      '需要记忆圈所有者或编辑者角色',
+    )
     expect((await reject(third!, bob.cookie)).status).toBe(204)
     expect(await subjectIdOf('tg', 'u3')).not.toBe(a)
   })
 
   it('等确认期间两边被合并或标记变了：确认时作废并说明，不合并', async () => {
-    const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    const bob = await addMember(database.db, ws.circleId, 'bob', 'editor')
     await meet(direct('1001'))
     await meet(direct('u1', 'tg'))
     await meet(direct('u9', 'wx'))
@@ -712,7 +742,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
       '此联系人的成员标记已变更，此次绑定已作废',
     )
     expect(await subjectIdOf('tg', 'u1')).toBe(b)
-    const [row] = await inSpace((tx) =>
+    const [row] = await inCircle((tx) =>
       tx.select().from(subjectBindings).where(eq(subjectBindings.id, next!.id)),
     )
     expect(row).toMatchObject({ status: 'cancelled', decidedBy: null })
@@ -749,7 +779,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     const afterWrong = {
       [accountCounter('tg', 'u8')]: 2,
       [accountCounter('tg', 'u9')]: 3,
-      [APP_COUNTER]: 5,
+      [CLIENT_COUNTER]: 5,
     }
     expect(await counters()).toEqual(afterWrong)
     // 码是对的，只是预览、不能绑自己、标记冲突：都不算输错
@@ -776,15 +806,15 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     })
   })
 
-  it('同一个应用合计一小时 1000 次：换着账号猜也会被挡下，被挡下的不占这个账号的次数、不建对象', async () => {
-    expect(APP_ATTEMPTS).toBe(1000)
+  it('同一个接入实例合计一小时 1000 次：换着账号猜也会被挡下，被挡下的不占这个账号的次数、不建对象', async () => {
+    expect(CLIENT_ATTEMPTS).toBe(1000)
     const code = await codeFor(direct('1001'))
-    await inSpace((tx) =>
+    await inCircle((tx) =>
       tx.insert(subjectBindAttempts).values({
-        spaceId: ws.spaceId,
-        appId,
-        key: APP_COUNTER,
-        count: APP_ATTEMPTS,
+        circleId: ws.circleId,
+        clientId,
+        key: CLIENT_COUNTER,
+        count: CLIENT_ATTEMPTS,
         resetAt: sql`now() + interval '1 hour'`,
       }),
     )
@@ -792,48 +822,49 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     expect(await errorOf(res, 429)).toMatch(/^近期输错绑定码的次数过多，请 \d+ 分钟后重试$/)
     expect(await counters()).toEqual({
       [accountCounter('tg', 'fresh')]: 0,
-      [APP_COUNTER]: APP_ATTEMPTS + 1,
+      [CLIENT_COUNTER]: CLIENT_ATTEMPTS + 1,
     })
     expect(await subjectIdOf('tg', 'fresh')).toBeUndefined()
     // 窗口过了就恢复
-    await inSpace((tx) =>
+    await inCircle((tx) =>
       tx.update(subjectBindAttempts).set({ resetAt: sql`now() - interval '1 second'` }),
     )
     expect((await bind(code, direct('fresh', 'tg'))).status).toBe('merged')
   })
 
-  it('别的应用、别的空间的码不认', async () => {
+  it('别的接入实例、别的记忆圈的码不认', async () => {
     const code = await codeFor(direct('1001'))
-    const otherApp = (await ws.createApp('tg-bot', { runtimeFamily: 'astrbot' })).id
-    const otherKey = await ws.issueKey(otherApp)
+    const otherClient = (await ws.createClient('tg-bot', { runtimeFamily: 'astrbot' })).id
+    const otherKey = await ws.issueKey(otherClient)
     expect(await errorOf(await redeem(code, direct('u1', 'tg'), otherKey), 400)).toBe(INVALID)
 
-    const [space] = await database.db.insert(spaces).values({ name: '别人家' }).returning()
+    const [circle] = await database.db
+      .insert(circles)
+      .values({ slug: 'other-home', name: '别人家', kind: 'shared' })
+      .returning()
     await database.db
-      .insert(spaceMembers)
-      .values({ spaceId: space!.id, accountId: ws.accountId, role: 'owner' })
+      .insert(circleMembers)
+      .values({ circleId: circle!.id, accountId: ws.accountId, role: 'owner' })
     const created = await app.request(
-      `/v1/spaces/${space!.id}/apps`,
+      `/v1/circles/${circle!.id}/clients`,
       jsonRequest(
         'POST',
         { slug: 'qq-bot', name: 'bot', runtimeFamily: 'astrbot' },
-        {
-          cookie: ws.cookie,
-        },
+        { cookie: ws.cookie },
       ),
     )
-    const foreignApp = ((await created.json()) as { id: string }).id
+    const foreignClient = ((await created.json()) as { id: string }).id
     const issued = await app.request(
-      `/v1/spaces/${space!.id}/apps/${foreignApp}/keys`,
+      `/v1/circles/${circle!.id}/clients/${foreignClient}/keys`,
       jsonRequest('POST', { name: 'k', scopes: FULL_SCOPES }, { cookie: ws.cookie }),
     )
-    const foreignKey = ((await issued.json()) as CreatedKey).key
+    const foreignKey = ((await issued.json()) as IssuedKey).key
     expect(await errorOf(await redeem(code, direct('u1', 'tg'), foreignKey), 400)).toBe(INVALID)
-    // 别的应用、别的空间也作废不了它
+    // 别的接入实例、别的记忆圈也作废不了它
     expect((await voidIn(code, inGroup('2002'), otherKey)).status).toBe(204)
     expect((await voidIn(code, inGroup('2002'), foreignKey)).status).toBe(204)
 
-    // 原来的应用里照样能用
+    // 原来的接入实例里照样能用
     expect((await bind(code, direct('u1', 'tg'))).status).toBe('merged')
     expect(await subjectIdOf('tg', 'u1')).toBe(await subjectIdOf('qq', '1001'))
   })
@@ -847,7 +878,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     // 补满上限：之后来的预览照样给，但不记下，也就确认不了
     const [row] = await storedCodes()
     const filler = Array.from({ length: PREVIEWERS - row!.previewedBy.length }, () => randomUUID())
-    await inSpace((tx) =>
+    await inCircle((tx) =>
       tx.update(subjectBindCodes).set({ previewedBy: [...row!.previewedBy, ...filler] }),
     )
     for (let i = 0; i < 2; i++) {
@@ -877,7 +908,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
       await database.db.execute(sql`drop trigger bind_test_fail on subject_bind_codes`)
       await database.db.execute(sql`drop function bind_test_fail()`)
     }
-    expect(await counters()).toEqual({ [accountCounter('tg', 'u1')]: 0, [APP_COUNTER]: 0 })
+    expect(await counters()).toEqual({ [accountCounter('tg', 'u1')]: 0, [CLIENT_COUNTER]: 0 })
     expect((await bind(code, direct('u1', 'tg'))).status).toBe('merged')
   })
 
@@ -887,13 +918,13 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     await resultOf(await redeem(code, direct('u2', 'tg')))
     const a = (await subjectIdOf('qq', '1001'))!
     const [held] = await storedCodes()
-    // 另开一条连接锁住这个码，两个确认都发出去；等它们确实都等在锁上（一个等这个码，
-    // 另一个等前一个锁住的发码的对象）之后放开，不靠睡眠猜时机
+    // 另开一条连接锁住这个码，两个确认都发出去；等它们确实都等在锁上之后放开，不靠睡眠猜时机
     const side = postgres(testDatabaseUrl!, { max: 2, onnotice: () => {} })
     let pending: Promise<Response[]> | undefined
     try {
       await side.begin(async (tx) => {
-        await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
+        await tx`select set_config('app.read_circles', ${ws.circleId}, true)`
+        await tx`select set_config('app.write_circles', ${ws.circleId}, true)`
         await tx`select id from subject_bind_codes where id = ${held!.id} for update`
         pending = Promise.all([
           redeem(code, direct('u1', 'tg'), key, true),
@@ -917,7 +948,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
       expect(await counters()).toEqual({
         [accountCounter('tg', 'u1')]: 0,
         [accountCounter('tg', 'u2')]: 0,
-        [APP_COUNTER]: 0,
+        [CLIENT_COUNTER]: 0,
       })
     } finally {
       await pending?.catch(() => {})
@@ -925,13 +956,13 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     }
     const owners = [await subjectIdOf('tg', 'u1'), await subjectIdOf('tg', 'u2')]
     expect(owners.filter((id) => id === a)).toHaveLength(1)
-    expect(await inSpace((tx) => tx.select().from(subjectBindings))).toHaveLength(1)
+    expect(await inCircle((tx) => tx.select().from(subjectBindings))).toHaveLength(1)
     expect((await storedCodes())[0]!.usedAt).not.toBeNull()
-    expect(await inSpace((tx) => tx.select({ id: subjects.id }).from(subjects))).toHaveLength(2)
+    expect(await inCircle((tx) => tx.select({ id: subjects.id }).from(subjects))).toHaveLength(2)
   })
 
   it('合并已经提交之后排抽取出错：只记日志，接入方与管理界面照样返回成功', async () => {
-    const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    const bob = await addMember(database.db, ws.circleId, 'bob', 'editor')
     await say('你好', direct('1001'))
     await say('我住在上海', direct('u1', 'tg'))
     await say('我住在北京', direct('u2', 'tg'))

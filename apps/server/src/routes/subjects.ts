@@ -1,8 +1,10 @@
 import { createRoute, z } from '@hono/zod-openapi'
 import {
+  ConsoleEntryView,
   DeleteFactQuery,
   ErrorResponse,
   MergeSubjectRequest,
+  PromoteFactRequest,
   ReactivateFactRequest,
   SubjectDetail,
   SubjectInfo,
@@ -25,13 +27,13 @@ import {
   type SQL,
 } from 'drizzle-orm'
 
-import type { Access } from '../access/access'
+import { canRead, type Access } from '../access/access'
+import { confirmBinding, rejectBinding, subjectBindingHistory } from '../access/binding'
 import {
   participatedConversations,
   runInfos,
   visibleConversationIds,
 } from '../access/conversations'
-import { confirmBinding, rejectBinding, subjectBindingHistory } from '../access/binding'
 import {
   enqueueMerged,
   isLockBusy,
@@ -40,7 +42,7 @@ import {
   mergeSubjects,
 } from '../access/subjects'
 import { isInstanceAdmin } from '../auth/middleware'
-import { nowOf, withSpace, type Tx } from '../db/client'
+import { nowOf, withCircle, type Tx } from '../db/client'
 import {
   decodeTimeCursor,
   encodeTimeCursor,
@@ -52,10 +54,11 @@ import {
 } from '../db/paging'
 import {
   accounts,
-  apps,
+  clients,
+  entries,
+  entryEvents,
+  entryVariants,
   extractionRuns,
-  memories,
-  memoryEvents,
   subjectIdentities,
   subjects,
 } from '../db/schema'
@@ -65,30 +68,30 @@ import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { consoleMemberFor, consoleRoleFor } from '../memory/context'
 import { momentSql, readableConditions } from '../memory/filter'
 import { scopeNames } from '../memory/scopes'
+import { parseEntryFacts } from '../memory/service'
 
-const SpaceParams = z.object({ spaceId: z.uuid() })
-const SubjectParams = SpaceParams.extend({ subjectId: z.uuid() })
+const CircleParams = z.object({ circleId: z.uuid() })
+const SubjectParams = CircleParams.extend({ subjectId: z.uuid() })
+const FactParams = SubjectParams.extend({ factId: z.uuid() })
 
 const forbidden = jsonResponse('没有权限', ErrorResponse)
 const notFound = jsonResponse('不存在', ErrorResponse)
 
 const PAGE_SIZE = 50
-// 详情里各部分最多列这么多条
 const DETAIL_FACTS = 200
 const DETAIL_SUPERSEDED = 50
 const DETAIL_RUNS = 20
 const DETAIL_BINDINGS = 20
-// 合并时对象正被抽取或别的写入占着
 const SUBJECTS_BUSY = '这两个联系人正在被其他操作使用（例如抽取），请稍后重试'
 
 const list = createRoute({
   method: 'get',
-  path: '/spaces/{spaceId}/subjects',
+  path: '/circles/{circleId}/subjects',
   tags: ['subjects'],
-  summary: '列出 bot 遇到过的人与群，新的在前',
-  request: { params: SpaceParams, query: SubjectListQuery },
+  summary: '列出接入实例遇到过的联系人与群，新的在前',
+  request: { params: CircleParams, query: SubjectListQuery },
   responses: {
-    200: jsonResponse('对象列表', SubjectList),
+    200: jsonResponse('联系人列表', SubjectList),
     400: jsonResponse('翻页参数无效', ErrorResponse),
     403: forbidden,
   },
@@ -96,18 +99,18 @@ const list = createRoute({
 
 const detail = createRoute({
   method: 'get',
-  path: '/spaces/{spaceId}/subjects/{subjectId}',
+  path: '/circles/{circleId}/subjects/{subjectId}',
   tags: ['subjects'],
   summary: '联系人详情：平台账号、记下的事实、参与的会话与最近的抽取记录',
   request: { params: SubjectParams },
-  responses: { 200: jsonResponse('对象详情', SubjectDetail), 403: forbidden, 404: notFound },
+  responses: { 200: jsonResponse('联系人详情', SubjectDetail), 403: forbidden, 404: notFound },
 })
 
 const update = createRoute({
   method: 'patch',
-  path: '/spaces/{spaceId}/subjects/{subjectId}',
+  path: '/circles/{circleId}/subjects/{subjectId}',
   tags: ['subjects'],
-  summary: '改对象的名字，或把这个人标记为自己（取消自己的标记）',
+  summary: '改联系人的名字，或把这个人标记为自己（取消自己的标记）',
   request: { params: SubjectParams, body: jsonBody(UpdateSubjectRequest) },
   responses: {
     200: jsonResponse('已修改', SubjectInfo),
@@ -120,31 +123,31 @@ const update = createRoute({
 
 const merge = createRoute({
   method: 'post',
-  path: '/spaces/{spaceId}/subjects/{subjectId}/merge',
+  path: '/circles/{circleId}/subjects/{subjectId}/merge',
   tags: ['subjects'],
   summary:
-    '把另一个对象合并进这个：平台账号、事实与私聊（或群）里记下的内容都归到这个对象，另一个删掉',
+    '把另一个联系人合并进这个：平台账号、事实与私聊（或群）里记下的内容都归到这个联系人，另一个删掉',
   request: { params: SubjectParams, body: jsonBody(MergeSubjectRequest) },
   responses: {
-    200: jsonResponse('合并后的对象', SubjectInfo),
+    200: jsonResponse('合并后的联系人', SubjectInfo),
     400: jsonResponse('人和群不能合并，也不能合并自己', ErrorResponse),
-    403: jsonResponse('没有权限，或对象标记成了别的成员', ErrorResponse),
+    403: jsonResponse('没有权限，或联系人标记成了别的成员', ErrorResponse),
     404: notFound,
-    409: jsonResponse('两个对象正在被别的操作使用', ErrorResponse),
+    409: jsonResponse('两个联系人正在被别的操作使用', ErrorResponse),
   },
 })
 
-const BindingParams = SpaceParams.extend({ bindingId: z.uuid() })
+const BindingParams = CircleParams.extend({ bindingId: z.uuid() })
 
 const confirmBindingRoute = createRoute({
   method: 'post',
-  path: '/spaces/{spaceId}/subject-bindings/{bindingId}/confirm',
+  path: '/circles/{circleId}/subject-bindings/{bindingId}/confirm',
   tags: ['subjects'],
   summary:
-    '确认一次绑定：把收码的对象并进发码的对象，规则同合并对象。只有发码的对象标记成的成员本人能确认',
+    '确认一次绑定：把收码的对象并进发码的对象，规则同合并联系人。只有发码对象标记成的成员本人能确认',
   request: { params: BindingParams },
   responses: {
-    200: jsonResponse('合并后的对象', SubjectInfo),
+    200: jsonResponse('合并后的联系人', SubjectInfo),
     403: jsonResponse('不是被标记的成员本人，或者是 viewer', ErrorResponse),
     404: notFound,
     409: jsonResponse('已经处理过、过了期限，或者期间情况变了（已作废）', ErrorResponse),
@@ -153,9 +156,9 @@ const confirmBindingRoute = createRoute({
 
 const rejectBindingRoute = createRoute({
   method: 'post',
-  path: '/spaces/{spaceId}/subject-bindings/{bindingId}/reject',
+  path: '/circles/{circleId}/subject-bindings/{bindingId}/reject',
   tags: ['subjects'],
-  summary: '拒绝一次绑定，两边不合并。只有发码的对象标记成的成员本人能拒绝',
+  summary: '拒绝一次绑定，两边不合并。只有发码对象标记成的成员本人能拒绝',
   request: { params: BindingParams },
   responses: {
     204: { description: '已拒绝' },
@@ -167,13 +170,10 @@ const rejectBindingRoute = createRoute({
 
 const deleteFact = createRoute({
   method: 'delete',
-  path: '/spaces/{spaceId}/subjects/{subjectId}/facts/{factId}',
+  path: '/circles/{circleId}/subjects/{subjectId}/facts/{factId}',
   tags: ['subjects'],
-  summary: '删掉挂在这个对象上的一条事实（确认过的也能删）',
-  request: {
-    params: SubjectParams.extend({ factId: z.uuid() }),
-    query: DeleteFactQuery,
-  },
+  summary: '删掉挂在这个联系人上的一条事实（确认过的也能删）',
+  request: { params: FactParams, query: DeleteFactQuery },
   responses: {
     204: { description: '已删除' },
     403: forbidden,
@@ -184,13 +184,10 @@ const deleteFact = createRoute({
 
 const reactivateFact = createRoute({
   method: 'post',
-  path: '/spaces/{spaceId}/subjects/{subjectId}/facts/{factId}/reactivate',
+  path: '/circles/{circleId}/subjects/{subjectId}/facts/{factId}/reactivate',
   tags: ['subjects'],
-  summary: '让挂在这个对象上的一条被推翻的事实重新生效（推翻它的那条照样有效）',
-  request: {
-    params: SubjectParams.extend({ factId: z.uuid() }),
-    body: jsonBody(ReactivateFactRequest),
-  },
+  summary: '让挂在这个联系人上的一条被推翻的事实重新生效（推翻它的那条照样有效）',
+  request: { params: FactParams, body: jsonBody(ReactivateFactRequest) },
   responses: {
     204: { description: '已重新生效' },
     403: forbidden,
@@ -199,27 +196,34 @@ const reactivateFact = createRoute({
   },
 })
 
-// 联系人的事实与会话摘要不分人格，读权限里的人格限制用不上。有效期按 now 判断（事务开头取的数据库时间），
-// 同一页上现在有效的与被推翻的拿同一个时刻比，一条事实不会两边都在或都不在
+const promoteFact = createRoute({
+  method: 'post',
+  path: '/circles/{circleId}/subjects/{subjectId}/facts/{factId}/promote',
+  tags: ['subjects'],
+  summary: '将联系人的某条事实提炼升级为目标记忆圈的正式词条，原事实保留不动',
+  request: { params: FactParams, body: jsonBody(PromoteFactRequest) },
+  responses: {
+    201: jsonResponse('已升级为正式词条', ConsoleEntryView),
+    400: jsonResponse('请求不合法', ErrorResponse),
+    403: forbidden,
+    404: notFound,
+  },
+})
+
 const readable = (access: Access, now?: Date) =>
-  readableConditions(access, { personaIds: [], ...(now ? { now } : {}) })
+  readableConditions(access, { ...(now ? { now } : {}) })
 
-// 现在有效、查看者读得到的抽取事实
 const factsOf = (access: Access, now?: Date) =>
-  and(eq(memories.form, 'extracted'), eq(memories.layer, 'subject'), readable(access, now))!
+  and(eq(entries.kind, 'fact'), readable(access, now))!
 
-// 被推翻的事实：推翻时设了 valid_to、还没删除、按管理读取（不看有效期）看得到的
-const supersededOf = (access: Access, now?: Date) =>
+const supersededOf = (access: Access) =>
   and(
-    eq(memories.form, 'extracted'),
-    eq(memories.layer, 'subject'),
-    isNull(memories.deletedAt),
-    lte(memories.validTo, momentSql(now)),
-    readableConditions(access, { personaIds: [], management: true }),
+    eq(entries.kind, 'fact'),
+    isNull(entries.deletedAt),
+    lte(entries.validTo, momentSql()),
+    readableConditions(access, { management: true }),
   )!
 
-// 推翻了这些事实的那几条的正文：推翻时在旧事实的修改事件里记下了新事实的 id（supersededBy），取最近的一次。
-// 新的那条已经删掉、或者按管理读取看不到时不给
 async function supersedingContents(
   tx: Tx,
   access: Access,
@@ -227,31 +231,33 @@ async function supersedingContents(
 ): Promise<Map<string, string>> {
   if (!factIds.length) return new Map()
   const links = await tx
-    .selectDistinctOn([memoryEvents.memoryId], {
-      factId: memoryEvents.memoryId,
-      by: sql<string>`${memoryEvents.context} ->> 'supersededBy'`,
+    .selectDistinctOn([entryEvents.entryId], {
+      factId: entryEvents.entryId,
+      by: sql<string>`${entryEvents.context} ->> 'supersededBy'`,
     })
-    .from(memoryEvents)
+    .from(entryEvents)
     .where(
       and(
-        inArray(memoryEvents.memoryId, factIds),
-        sql`(${memoryEvents.context} ->> 'supersededBy') is not null`,
+        inArray(entryEvents.entryId, factIds),
+        sql`(${entryEvents.context} ->> 'supersededBy') is not null`,
       ),
     )
-    .orderBy(memoryEvents.memoryId, desc(memoryEvents.id))
+    .orderBy(entryEvents.entryId, desc(entryEvents.id))
   const ids = [...new Set(links.map((l) => l.by).filter((id) => UUID.test(id)))]
   const rows = ids.length
     ? await tx
-        .select({ id: memories.id, content: memories.content })
-        .from(memories)
+        .selectDistinctOn([entries.id], { id: entries.id, content: entryVariants.content })
+        .from(entries)
+        .innerJoin(entryVariants, eq(entryVariants.entryId, entries.id))
         .where(
           and(
-            inArray(memories.id, ids),
-            eq(memories.form, 'extracted'),
-            isNull(memories.deletedAt),
-            readableConditions(access, { personaIds: [], management: true }),
+            inArray(entries.id, ids),
+            eq(entries.kind, 'fact'),
+            isNull(entries.deletedAt),
+            readableConditions(access, { management: true }),
           ),
         )
+        .orderBy(entries.id, asc(entryVariants.sortOrder))
     : []
   const contents = new Map(rows.map((r) => [r.id, r.content ?? '']))
   return new Map(
@@ -262,7 +268,6 @@ async function supersedingContents(
   )
 }
 
-// 列表与修改后返回的对象信息：平台账号与事实条数按对象一次查出
 async function subjectInfos(
   tx: Tx,
   access: Access,
@@ -280,13 +285,12 @@ async function subjectInfos(
       createdAt: subjects.createdAt,
       updatedAt: subjects.updatedAt,
       createdMicros: sql<string>`${microsOf(subjects.createdAt)}::text`,
-      factCount: sql<number>`(select count(*)::int from ${memories}
-        where ${memories.subjectId} = ${subjects.id} and ${factsOf(access, nowOf(tx))})`,
+      factCount: sql<number>`(select count(*)::int from ${entries}
+        where ${entries.subjectId} = ${subjects.id} and ${factsOf(access, nowOf(tx))})`,
     })
     .from(subjects)
     .leftJoin(accounts, eq(accounts.id, subjects.accountId))
     .where(where)
-    // 按第一次遇到的时间排：改名、标记都不会让对象在翻页时挪位置
     .orderBy(desc(subjects.createdAt), desc(subjects.id))
     .limit(options.limit ?? PAGE_SIZE)
   const ids = rows.map((r) => r.id)
@@ -322,13 +326,13 @@ async function subjectInfos(
 export function subjectRoutes(deps: Deps) {
   return router()
     .openapi(list, async (c) => {
-      const { spaceId } = c.req.valid('param')
+      const { circleId } = c.req.valid('param')
       const query = c.req.valid('query')
-      const { service } = await consoleMemberFor(deps, spaceId, c.get('console').accountId)
+      const { service } = await consoleMemberFor(deps, circleId, c.get('console').accountId)
       const after = decodeTimeCursor(query.cursor, UUID)
       if (after === 'invalid') return c.json({ error: INVALID_CURSOR }, 400)
       const needle = query.q ? `%${escapeLike(query.q)}%` : null
-      const page = await withSpace(deps.db, spaceId, (tx) =>
+      const page = await withCircle(deps.db, circleId, (tx) =>
         subjectInfos(
           tx,
           service.access,
@@ -364,62 +368,73 @@ export function subjectRoutes(deps: Deps) {
       )
     })
     .openapi(detail, async (c) => {
-      const { spaceId, subjectId } = c.req.valid('param')
+      const { circleId, subjectId } = c.req.valid('param')
       const accountId = c.get('console').accountId
-      const { role, service } = await consoleMemberFor(deps, spaceId, accountId)
+      const { role, service } = await consoleMemberFor(deps, circleId, accountId)
       const access = service.access
       const admin = await isInstanceAdmin(deps.db, accountId)
-      // 模型接口或数据库报的原文可能带着内部的地址与响应，抽取模型由实例管理员配，原文只给他看。
-      // 服务端自己判断出的原因（plainRunError）所有成员都看得到，按现在的写法显示
       const errorOf = (stored: string | null) => {
         if (!stored) return stored
         return plainRunError(stored) ?? (admin ? stored : '抽取失败（原因仅实例管理员可见）')
       }
-      const result = await withSpace(deps.db, spaceId, async (tx) => {
+      const result = await withCircle(deps.db, circleId, async (tx, now) => {
         const [found] = await subjectInfos(tx, access, eq(subjects.id, subjectId))
         if (!found) return null
         const [facts, superseded, conversations, runs, bindings] = await Promise.all([
           tx
-            .select()
-            .from(memories)
-            .where(and(eq(memories.subjectId, subjectId), factsOf(access, nowOf(tx))))
-            .orderBy(desc(memories.updatedAt), desc(memories.id))
+            .selectDistinctOn([entries.id], { entry: entries, content: entryVariants.content })
+            .from(entries)
+            .innerJoin(entryVariants, eq(entryVariants.entryId, entries.id))
+            .where(and(eq(entries.subjectId, subjectId), factsOf(access, now)))
+            .orderBy(entries.id, asc(entryVariants.sortOrder))
             .limit(DETAIL_FACTS),
           tx
-            .select()
-            .from(memories)
-            .where(and(eq(memories.subjectId, subjectId), supersededOf(access, nowOf(tx))))
-            .orderBy(desc(memories.validTo), desc(memories.id))
+            .selectDistinctOn([entries.id], { entry: entries, content: entryVariants.content })
+            .from(entries)
+            .innerJoin(entryVariants, eq(entryVariants.entryId, entries.id))
+            .where(and(eq(entries.subjectId, subjectId), supersededOf(access)))
+            .orderBy(entries.id, asc(entryVariants.sortOrder))
             .limit(DETAIL_SUPERSEDED),
           participatedConversations(tx, access, subjectId),
           tx
-            .select({ run: extractionRuns, appName: apps.name })
+            .select({ run: extractionRuns, clientName: clients.name })
             .from(extractionRuns)
-            .leftJoin(apps, eq(apps.id, extractionRuns.appId))
+            .leftJoin(clients, eq(clients.id, extractionRuns.clientId))
             .where(arrayContains(extractionRuns.subjectIds, [subjectId]))
             .orderBy(desc(extractionRuns.createdAt), desc(extractionRuns.id))
             .limit(DETAIL_RUNS),
           subjectBindingHistory(tx, subjectId, { accountId, role }, DETAIL_BINDINGS),
         ])
+        facts.sort(
+          (a, b) =>
+            b.entry.updatedAt.getTime() - a.entry.updatedAt.getTime() ||
+            b.entry.id.localeCompare(a.entry.id),
+        )
+        superseded.sort(
+          (a, b) =>
+            (b.entry.validTo?.getTime() ?? 0) - (a.entry.validTo?.getTime() ?? 0) ||
+            b.entry.id.localeCompare(a.entry.id),
+        )
         const [named, superseding, shown] = await Promise.all([
           scopeNames(tx, [
-            ...facts.map((f) => f.originScope),
-            ...superseded.map((f) => f.originScope),
+            ...facts.map((f) => f.entry.originScope),
+            ...superseded.map((f) => f.entry.originScope),
           ]),
           supersedingContents(
             tx,
             access,
-            superseded.map((f) => f.id),
+            superseded.map((f) => f.entry.id),
           ),
           visibleConversationIds(tx, access, [
-            ...facts.map((f) => f.conversationId),
-            ...superseded.map((f) => f.conversationId),
+            ...facts.map((f) => f.entry.conversationId),
+            ...superseded.map((f) => f.entry.conversationId),
             ...runs.map((r) => r.run.conversationId),
           ]),
         ])
-        const fact = (f: (typeof facts)[number]) => ({
+        const fact = ({ entry: f, content }: (typeof facts)[number]) => ({
           id: f.id,
-          content: f.content ?? '',
+          shortId: f.shortId,
+          content: content ?? '',
           provenance: f.provenance,
           version: f.version,
           scope: named(f.originScope),
@@ -430,10 +445,10 @@ export function subjectRoutes(deps: Deps) {
         return {
           ...found.info,
           facts: facts.map(fact),
-          supersededFacts: superseded.map((f) => ({
-            ...fact(f),
-            supersededAt: f.validTo!.toISOString(),
-            supersededBy: superseding.get(f.id) ?? null,
+          supersededFacts: superseded.map((item) => ({
+            ...fact(item),
+            supersededAt: item.entry.validTo!.toISOString(),
+            supersededBy: superseding.get(item.entry.id) ?? null,
           })),
           conversations,
           runs: await runInfos(tx, runs, shown, errorOf),
@@ -444,17 +459,15 @@ export function subjectRoutes(deps: Deps) {
       return c.json(result, 200)
     })
     .openapi(update, async (c) => {
-      const { spaceId, subjectId } = c.req.valid('param')
+      const { circleId, subjectId } = c.req.valid('param')
       const body = c.req.valid('json')
       const me = c.get('console').accountId
-      const { role, service } = await consoleMemberFor(deps, spaceId, me)
-      // 取消自己的标记谁都可以：被降为 viewer 之后也撤得掉；别的改动要 owner 或 editor
+      const { role, service } = await consoleMemberFor(deps, circleId, me)
       const unlinkOnly = body.displayName === undefined && body.linkedToMe === false
       if (role === 'viewer' && !unlinkOnly) {
-        return c.json({ error: '需要空间所有者或编辑者角色' }, 403)
+        return c.json({ error: '需要记忆圈所有者或编辑者角色' }, 403)
       }
-      const result = await withSpace(deps.db, spaceId, async (tx) => {
-        // 锁住这一行：两个成员同时标记同一个人时只有一个成功
+      const result = await withCircle(deps.db, circleId, async (tx) => {
         const [row] = await tx
           .select()
           .from(subjects)
@@ -475,7 +488,6 @@ export function subjectRoutes(deps: Deps) {
             }
             accountId = me
           } else if (row.accountId && row.accountId !== me && role !== 'owner') {
-            // 空间 owner 可以取消任何人的标记（例如标错了），别人只能取消自己的
             return { status: 403 as const, error: '只能取消标记为当前账号的联系人' }
           } else {
             accountId = null
@@ -497,13 +509,13 @@ export function subjectRoutes(deps: Deps) {
       return c.json(result.info, 200)
     })
     .openapi(merge, async (c) => {
-      const { spaceId, subjectId } = c.req.valid('param')
+      const { circleId, subjectId } = c.req.valid('param')
       const { from } = c.req.valid('json')
       const me = c.get('console').accountId
-      const { role, service } = await consoleMemberFor(deps, spaceId, me)
-      if (role === 'viewer') return c.json({ error: '需要空间所有者或编辑者角色' }, 403)
+      const { role, service } = await consoleMemberFor(deps, circleId, me)
+      if (role === 'viewer') return c.json({ error: '需要记忆圈所有者或编辑者角色' }, 403)
       if (from === subjectId) return c.json({ error: '不能将联系人合并到自身' }, 400)
-      const merged = withSpace(deps.db, spaceId, async (tx) => {
+      const merged = withCircle(deps.db, circleId, async (tx) => {
         const rows = await lockSubjects(tx, [subjectId, from])
         const into = rows.find((r) => r.id === subjectId)
         const gone = rows.find((r) => r.id === from)
@@ -527,14 +539,14 @@ export function subjectRoutes(deps: Deps) {
         throw err
       }
       if (result.status !== 200) return c.json({ error: result.error }, result.status)
-      await enqueueMerged(deps, spaceId, result.outcome)
+      await enqueueMerged(deps, circleId, result.outcome)
       return c.json(result.info, 200)
     })
     .openapi(confirmBindingRoute, async (c) => {
-      const { spaceId, bindingId } = c.req.valid('param')
+      const { circleId, bindingId } = c.req.valid('param')
       const me = c.get('console').accountId
-      const { role, service } = await consoleMemberFor(deps, spaceId, me)
-      const confirmed = await confirmBinding(deps.db, spaceId, bindingId, me, role).catch(
+      const { role, service } = await consoleMemberFor(deps, circleId, me)
+      const confirmed = await confirmBinding(deps.db, circleId, bindingId, me, role).catch(
         (err: unknown) => {
           if (isLockBusy(err))
             return { ok: false as const, status: 409 as const, error: SUBJECTS_BUSY }
@@ -542,36 +554,89 @@ export function subjectRoutes(deps: Deps) {
         },
       )
       if (!confirmed.ok) return c.json({ error: confirmed.error }, confirmed.status)
-      if (confirmed.outcome) await enqueueMerged(deps, spaceId, confirmed.outcome)
-      const [found] = await withSpace(deps.db, spaceId, (tx) =>
+      if (confirmed.outcome) await enqueueMerged(deps, circleId, confirmed.outcome)
+      const [found] = await withCircle(deps.db, circleId, (tx) =>
         subjectInfos(tx, service.access, eq(subjects.id, confirmed.subjectId)),
       )
       if (!found) return c.json({ error: '联系人不存在' }, 404)
       return c.json(found.info, 200)
     })
     .openapi(rejectBindingRoute, async (c) => {
-      const { spaceId, bindingId } = c.req.valid('param')
+      const { circleId, bindingId } = c.req.valid('param')
       const me = c.get('console').accountId
-      // 先确认是成员；拒绝什么角色都可以
-      await consoleRoleFor(deps, spaceId, me)
-      const rejected = await rejectBinding(deps.db, spaceId, bindingId, me)
+      await consoleRoleFor(deps, me, circleId)
+      const rejected = await rejectBinding(deps.db, circleId, bindingId, me)
       if (!rejected.ok) return c.json({ error: rejected.error }, rejected.status)
       return c.body(null, 204)
     })
     .openapi(deleteFact, async (c) => {
-      const { spaceId, subjectId, factId } = c.req.valid('param')
+      const { circleId, subjectId, factId } = c.req.valid('param')
       const { version } = c.req.valid('query')
-      const { role, service } = await consoleMemberFor(deps, spaceId, c.get('console').accountId)
-      if (role === 'viewer') return c.json({ error: '需要空间所有者或编辑者角色' }, 403)
+      const { role, service } = await consoleMemberFor(deps, circleId, c.get('console').accountId)
+      if (role === 'viewer') return c.json({ error: '需要记忆圈所有者或编辑者角色' }, 403)
       await service.deleteFact(subjectId, factId, version)
       return c.body(null, 204)
     })
     .openapi(reactivateFact, async (c) => {
-      const { spaceId, subjectId, factId } = c.req.valid('param')
+      const { circleId, subjectId, factId } = c.req.valid('param')
       const { version } = c.req.valid('json')
-      const { role, service } = await consoleMemberFor(deps, spaceId, c.get('console').accountId)
-      if (role === 'viewer') return c.json({ error: '需要空间所有者或编辑者角色' }, 403)
+      const { role, service } = await consoleMemberFor(deps, circleId, c.get('console').accountId)
+      if (role === 'viewer') return c.json({ error: '需要记忆圈所有者或编辑者角色' }, 403)
       await service.reactivateFact(subjectId, factId, version)
       return c.body(null, 204)
+    })
+    .openapi(promoteFact, async (c) => {
+      const { circleId, subjectId, factId } = c.req.valid('param')
+      const me = c.get('console').accountId
+      const body = c.req.valid('json')
+      const { service: sourceService } = await consoleMemberFor(deps, circleId, me)
+      const sourceFact = await withCircle(deps.db, circleId, async (tx, now) => {
+        const [row] = await tx
+          .select()
+          .from(entries)
+          .where(
+            and(eq(entries.id, factId), eq(entries.kind, 'fact'), eq(entries.subjectId, subjectId)),
+          )
+          .limit(1)
+        if (
+          !row ||
+          row.deletedAt !== null ||
+          !canRead(sourceService.access, parseEntryFacts(row), { now, management: true })
+        ) {
+          return null
+        }
+        const [vRow] = await tx
+          .select({ content: entryVariants.content })
+          .from(entryVariants)
+          .where(eq(entryVariants.entryId, row.id))
+          .orderBy(asc(entryVariants.sortOrder))
+          .limit(1)
+        return { row, content: vRow?.content ?? '' }
+      })
+      if (!sourceFact) return c.json({ error: '未找到事实' }, 404)
+
+      const { role: targetRole, service: targetService } = await consoleMemberFor(
+        deps,
+        body.targetCircleId,
+        me,
+      )
+      if (targetRole === 'viewer') {
+        return c.json({ error: '需要目标记忆圈的所有者或编辑者角色' }, 403)
+      }
+      const nextContent = (body.content ?? sourceFact.content).trim()
+      if (!nextContent) return c.json({ error: '事实正文不能为空' }, 400)
+      const created = await targetService.create({
+        circleId: body.targetCircleId,
+        ...(body.title !== undefined ? { title: body.title } : {}),
+        content: nextContent,
+        when: body.when,
+        topics: body.topics,
+        sensitivity: body.sensitivity,
+        priority: body.priority,
+        ...(body.disclosure !== undefined && body.disclosure !== null
+          ? { disclosure: body.disclosure }
+          : {}),
+      })
+      return c.json(created as ConsoleEntryView, 201)
     })
 }

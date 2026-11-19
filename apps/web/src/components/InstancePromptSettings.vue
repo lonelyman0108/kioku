@@ -40,7 +40,7 @@ import SettingsStageBar from './strata/SettingsStageBar.vue'
 import SettingsSummaryStrip, { type SummaryStripItem } from './strata/SettingsSummaryStrip.vue'
 import SettingsTable from './strata/SettingsTable.vue'
 
-// 实例 › 提示词与默认值：四段提示词的补充（固定部分只读）与所有空间的默认值。空间与应用的覆盖在各自的设置里
+// 实例 › 提示词与默认值：四段提示词的补充（固定部分只读）与所有记忆圈的默认值。记忆圈与接入实例的覆盖在各自的设置里
 const dirty = defineModel<boolean>('dirty', { default: false })
 const toast = useToast()
 const queryClient = useQueryClient()
@@ -144,8 +144,8 @@ const rangeText = (key: TuningKey) => {
 
 const overriddenText = (key: TuningKey) => {
   const by = view.data.value?.overriddenBy[key]
-  if (!by || (!by.spaces && !by.apps)) return '—'
-  return [by.spaces && `${by.spaces} 个空间`, by.apps && `${by.apps} 个应用`]
+  if (!by || (!by.circles && !by.clients)) return '—'
+  return [by.circles && `${by.circles} 个记忆圈`, by.clients && `${by.clients} 个接入实例`]
     .filter(Boolean)
     .join('、')
 }
@@ -186,7 +186,7 @@ const summaryItems = computed<SummaryStripItem[]>(() => [
   {
     label: '全实例兜底召回',
     value: `${liveLimit.value} 条 · ${liveMinScore.value.toFixed(2)}`,
-    sub: '空间与应用未覆盖时使用',
+    sub: '记忆圈与接入实例未覆盖时使用',
   },
   {
     label: '全实例启动预算',
@@ -307,7 +307,7 @@ const flags = Object.fromEntries(
 
 <template>
   <div>
-    <p class="section-note">所有空间的默认值。空间与应用的覆盖在各自的设置里。</p>
+    <p class="section-note">所有记忆圈的默认值。记忆圈与接入实例的覆盖在各自的设置里。</p>
     <ReadFailureNote v-if="view.isError.value" :query="view" />
     <USkeleton v-if="view.isPending.value" class="mt-6 h-64 w-full" />
     <form v-else-if="view.data.value" @submit.prevent="save">
@@ -362,7 +362,7 @@ const flags = Object.fromEntries(
         tone="form"
         wide
       >
-        <template #note>空间、应用未覆盖时使用；更改数值上方配比图实时联动。</template>
+        <template #note>记忆圈、接入实例未覆盖时使用；更改数值上方配比图实时联动。</template>
         <p
           v-if="
             !visibleDefaultKeys.length &&

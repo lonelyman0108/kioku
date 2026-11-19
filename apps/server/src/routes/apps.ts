@@ -1,160 +1,120 @@
 import { createRoute, z } from '@hono/zod-openapi'
 import {
-  AppConfig,
-  AppInfo,
-  CreateAppRequest,
-  CreatedKey,
+  ClientConfig,
+  ClientGroupRuleList,
+  ClientGroupRules,
+  ClientInfo,
+  CreateClientRequest,
   CreateKeyRequest,
   ErrorResponse,
-  GroupPersonaRuleList,
-  GroupPersonaRules,
+  IssuedKey,
   KeyAccessMatrix,
   KeyInfo,
-  KeyScopes,
-  UpdateAppRequest,
+  RotateKeyRequest,
+  UpdateClientRequest,
   type MemberRole,
 } from '@kioku/contracts'
-import { and, asc, count, desc, eq, inArray, isNull, notInArray, sql } from 'drizzle-orm'
+import { and, eq, isNull } from 'drizzle-orm'
 
-import { accessMatrix, keyEffectiveScopes } from '../access/access'
-import { appOwnerOf, issueAppKey, issueDenial } from '../access/issue'
-import { memberRole } from '../auth/middleware'
-import { withSpace } from '../db/client'
+import { accessMatrix } from '../access/access'
 import {
-  accounts,
-  apiKeys,
-  appGroupPersonas,
-  apps,
-  memories,
-  personas,
-  spaceMembers,
-  subjects,
-} from '../db/schema'
-import type { Tx } from '../db/client'
+  createClient as createClientRow,
+  deleteClient as deleteClientRow,
+  listClientGroupRules,
+  listClients as listClientRows,
+  replaceClientGroupRules,
+  updateClient as updateClientRow,
+} from '../access/clients'
+import {
+  buildKeyInfos,
+  clientOwnerOf,
+  describeClientKeys,
+  issueClientKey,
+  issueDenial,
+  linkedCirclesDenial,
+  rotateClientKey,
+} from '../access/issue'
+import { resolveStaticContextRealms } from '../access/realms'
+import { memberRole } from '../auth/middleware'
+import { withCircle } from '../db/client'
+import { apiKeys, circles, clients, facetTerms } from '../db/schema'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
-import { APP_ADVANCED_FIELD, withoutAppGuidance } from '../settings/advanced'
 
-const SpaceParams = z.object({ spaceId: z.uuid() })
-const AppParams = SpaceParams.extend({ appId: z.uuid() })
-const KeyParams = AppParams.extend({ keyId: z.uuid() })
+const CircleParams = z.object({ circleId: z.uuid() })
+const ClientParams = CircleParams.extend({ clientId: z.uuid() })
+const KeyParams = ClientParams.extend({ keyId: z.uuid() })
 
 const forbidden = jsonResponse('没有权限', ErrorResponse)
 const notFound = jsonResponse('不存在', ErrorResponse)
 
-export const toAppInfo = (row: typeof apps.$inferSelect) => ({
-  id: row.id,
-  slug: row.slug,
-  name: row.name,
-  runtimeFamily: row.runtimeFamily,
-  ownerAccountId: row.ownerAccountId,
-  defaultPersonaId: row.defaultPersonaId,
-  config: AppConfig.parse(row.config),
-})
-
-// 应用主人现在在空间里的角色、加入时间与账号的停用时间；不在空间里时为 undefined。Key 的当前有效上限按它算
-type OwnerMembership = { role: MemberRole; memberSince: Date; disabledAt: Date | null } | undefined
-
-const toKeyInfo = (row: typeof apiKeys.$inferSelect, owner: OwnerMembership) => {
-  const scopes = KeyScopes.parse(row.scopes)
-  return {
-    id: row.id,
-    name: row.name,
-    prefix: row.prefix,
-    scopes,
-    effectiveScopes: keyEffectiveScopes({ ...row, scopes }, owner),
-    createdAt: row.createdAt.toISOString(),
-    lastUsedAt: row.lastUsedAt?.toISOString() ?? null,
-    revokedAt: row.revokedAt?.toISOString() ?? null,
-  }
-}
-
-async function ownerMembership(
-  deps: Deps,
-  spaceId: string,
-  accountId: string,
-): Promise<OwnerMembership> {
-  const [row] = await deps.db
-    .select({
-      role: spaceMembers.role,
-      memberSince: spaceMembers.createdAt,
-      disabledAt: accounts.disabledAt,
-    })
-    .from(spaceMembers)
-    .innerJoin(accounts, eq(accounts.id, spaceMembers.accountId))
-    .where(and(eq(spaceMembers.spaceId, spaceId), eq(spaceMembers.accountId, accountId)))
-    .limit(1)
-  return row
-}
-
-const listApps = createRoute({
+const listClients = createRoute({
   method: 'get',
-  path: '/spaces/{spaceId}/apps',
-  tags: ['apps'],
-  summary: '列出空间里的接入应用',
-  request: { params: SpaceParams },
-  responses: { 200: jsonResponse('应用列表', z.array(AppInfo)), 403: forbidden },
+  path: '/circles/{circleId}/clients',
+  tags: ['clients'],
+  summary: '列出记忆圈里的接入实例',
+  request: { params: CircleParams },
+  responses: { 200: jsonResponse('接入实例列表', z.array(ClientInfo)), 403: forbidden },
 })
 
-const createApp = createRoute({
+const createClient = createRoute({
   method: 'post',
-  path: '/spaces/{spaceId}/apps',
-  tags: ['apps'],
-  summary: '新建接入应用，创建者就是这个应用的主人',
-  request: { params: SpaceParams, body: jsonBody(CreateAppRequest) },
+  path: '/circles/{circleId}/clients',
+  tags: ['clients'],
+  summary: '新建接入实例，创建者就是这个接入实例的所有者',
+  request: { params: CircleParams, body: jsonBody(CreateClientRequest) },
   responses: {
-    201: jsonResponse('已创建', AppInfo),
+    201: jsonResponse('已创建', ClientInfo),
     403: forbidden,
     404: jsonResponse('默认人格不存在', ErrorResponse),
     409: jsonResponse('标识已被占用', ErrorResponse),
   },
 })
 
-const updateApp = createRoute({
+const updateClient = createRoute({
   method: 'patch',
-  path: '/spaces/{spaceId}/apps/{appId}',
-  tags: ['apps'],
-  summary: '修改应用名称、默认人格或配置',
-  request: { params: AppParams, body: jsonBody(UpdateAppRequest) },
+  path: '/circles/{circleId}/clients/{clientId}',
+  tags: ['clients'],
+  summary: '修改接入实例的名称、默认人格、配置或转让所有权（转让时吊销该实例下全部密钥）',
+  request: { params: ClientParams, body: jsonBody(UpdateClientRequest) },
   responses: {
-    200: jsonResponse('已修改', AppInfo),
-    400: jsonResponse('新主人不是空间成员', ErrorResponse),
+    200: jsonResponse('已修改', ClientInfo),
+    400: jsonResponse('新所有者不是记忆圈成员，或转移时夹带其他修改', ErrorResponse),
     403: forbidden,
     404: notFound,
   },
 })
 
-const deleteApp = createRoute({
+const deleteClient = createRoute({
   method: 'delete',
-  path: '/spaces/{spaceId}/apps/{appId}',
-  tags: ['apps'],
-  summary: '删除应用：还有这个应用的记忆（含已删除的）时不能删；它的 Key 一起删除',
-  request: { params: AppParams },
+  path: '/circles/{circleId}/clients/{clientId}',
+  tags: ['clients'],
+  summary: '删除接入实例并级联删除其访问密钥、会话缓冲与按群规则',
+  request: { params: ClientParams },
   responses: {
     204: { description: '已删除' },
     403: forbidden,
     404: notFound,
-    409: jsonResponse('还有这个应用的记忆', ErrorResponse),
   },
 })
 
-const listGroupPersonas = createRoute({
+const listGroupRules = createRoute({
   method: 'get',
-  path: '/spaces/{spaceId}/apps/{appId}/group-personas',
-  tags: ['apps'],
-  summary: '按群换人格的规则：应用在这些群（或频道）里用规则里的人格，其余的群与私聊用默认人格',
-  request: { params: AppParams },
-  responses: { 200: jsonResponse('规则', GroupPersonaRuleList), 403: forbidden, 404: notFound },
+  path: '/circles/{circleId}/clients/{clientId}/group-rules',
+  tags: ['clients'],
+  summary: '列出接入实例的按群规则（按群切换人格与单群强隔离锁）',
+  request: { params: ClientParams },
+  responses: { 200: jsonResponse('规则', ClientGroupRuleList), 403: forbidden, 404: notFound },
 })
 
-const replaceGroupPersonas = createRoute({
+const replaceGroupRules = createRoute({
   method: 'put',
-  path: '/spaces/{spaceId}/apps/{appId}/group-personas',
-  tags: ['apps'],
-  summary: '整组替换按群换人格的规则，只有应用主人能改',
-  request: { params: AppParams, body: jsonBody(GroupPersonaRules) },
+  path: '/circles/{circleId}/clients/{clientId}/group-rules',
+  tags: ['clients'],
+  summary: '整组替换按群规则，只有接入实例所有者能改',
+  request: { params: ClientParams, body: jsonBody(ClientGroupRules) },
   responses: {
-    200: jsonResponse('替换后的规则', GroupPersonaRuleList),
+    200: jsonResponse('替换后的规则', ClientGroupRuleList),
     400: jsonResponse('规则不合法', ErrorResponse),
     403: forbidden,
     404: notFound,
@@ -163,27 +123,36 @@ const replaceGroupPersonas = createRoute({
 
 const listKeys = createRoute({
   method: 'get',
-  path: '/spaces/{spaceId}/apps/{appId}/keys',
-  tags: ['apps'],
-  summary: '列出应用的 API Key（不含明文）',
-  request: { params: AppParams },
-  responses: { 200: jsonResponse('Key 列表', z.array(KeyInfo)), 403: forbidden, 404: notFound },
+  path: '/circles/{circleId}/clients/{clientId}/keys',
+  tags: ['clients'],
+  summary: '列出接入实例的访问密钥（不含明文）',
+  request: { params: ClientParams },
+  responses: { 200: jsonResponse('密钥列表', z.array(KeyInfo)), 403: forbidden, 404: notFound },
 })
 
 const createKey = createRoute({
   method: 'post',
-  path: '/spaces/{spaceId}/apps/{appId}/keys',
-  tags: ['apps'],
-  summary: '签发 API Key，明文只在这次响应里出现',
-  request: { params: AppParams, body: jsonBody(CreateKeyRequest) },
-  responses: { 201: jsonResponse('已签发', CreatedKey), 403: forbidden, 404: notFound },
+  path: '/circles/{circleId}/clients/{clientId}/keys',
+  tags: ['clients'],
+  summary: '签发透镜访问密钥，明文只在这次响应里出现',
+  request: { params: ClientParams, body: jsonBody(CreateKeyRequest) },
+  responses: { 201: jsonResponse('已签发', IssuedKey), 403: forbidden, 404: notFound },
+})
+
+const rotateKey = createRoute({
+  method: 'post',
+  path: '/circles/{circleId}/clients/{clientId}/keys/{keyId}/rotate',
+  tags: ['clients'],
+  summary: '轮换访问密钥：同事务吊销旧密钥并继承有效配置签发新密钥，明文仅本次返回',
+  request: { params: KeyParams, body: jsonBody(RotateKeyRequest) },
+  responses: { 201: jsonResponse('已轮换', IssuedKey), 403: forbidden, 404: notFound },
 })
 
 const keyMatrix = createRoute({
   method: 'get',
-  path: '/spaces/{spaceId}/apps/{appId}/keys/{keyId}/matrix',
-  tags: ['apps'],
-  summary: '一把 Key 在各种会话上下文下能读写哪些层、哪些敏感级（按当前有效上限）',
+  path: '/circles/{circleId}/clients/{clientId}/keys/{keyId}/matrix',
+  tags: ['clients'],
+  summary: '一把访问密钥在各种会话上下文下对各记忆圈各类词条、各敏感级的读写权限矩阵',
   request: { params: KeyParams },
   responses: {
     200: jsonResponse('权限矩阵', KeyAccessMatrix),
@@ -194,336 +163,304 @@ const keyMatrix = createRoute({
 
 const revokeKey = createRoute({
   method: 'delete',
-  path: '/spaces/{spaceId}/apps/{appId}/keys/{keyId}',
-  tags: ['apps'],
-  summary: '吊销 API Key',
+  path: '/circles/{circleId}/clients/{clientId}/keys/{keyId}',
+  tags: ['clients'],
+  summary: '吊销访问密钥',
   request: { params: KeyParams },
   responses: { 204: { description: '已吊销' }, 403: forbidden, 404: notFound },
 })
 
-// 外键检查不受 RLS 约束，默认人格必须在 RLS 下可见，也就是同一空间
-async function personaVisible(tx: Tx, personaId: string | null | undefined): Promise<boolean> {
-  if (!personaId) return true
-  const [row] = await tx
-    .select({ id: personas.id })
-    .from(personas)
-    .where(eq(personas.id, personaId))
-  return Boolean(row)
-}
-
-const canManageApps = (role: MemberRole | null) => role === 'owner' || role === 'editor'
-
-function groupPersonaRules(tx: Tx, appId: string) {
-  return tx
-    .select({
-      subjectId: appGroupPersonas.subjectId,
-      personaId: appGroupPersonas.personaId,
-      groupName: subjects.displayName,
-    })
-    .from(appGroupPersonas)
-    .innerJoin(subjects, eq(subjects.id, appGroupPersonas.subjectId))
-    .where(eq(appGroupPersonas.appId, appId))
-    .orderBy(asc(appGroupPersonas.createdAt), asc(appGroupPersonas.subjectId))
-}
-
-// 应用的权限按「主人」算：Key 读到的 owner / private 层就是应用主人的。
-// 所以只有应用主人能改配置、签发和查看 Key；空间 owner 可以吊销任何 Key（止损），但不能签发
-// 签发的规则与锁在 access/issue.ts
-const keepAdvanced = (config: AppConfig) =>
-  sql`${JSON.stringify(config)}::jsonb || jsonb_strip_nulls(jsonb_build_object(${APP_ADVANCED_FIELD}::text, ${apps.config} -> ${APP_ADVANCED_FIELD}::text))`
+const canManageClients = (role: MemberRole | null) => role === 'owner' || role === 'editor'
 
 export function appRoutes(deps: Deps) {
   const app = router()
-
-  const roleOf = (spaceId: string, accountId: string) => memberRole(deps, spaceId, accountId)
+  const roleOf = (circleId: string, accountId: string) => memberRole(deps, circleId, accountId)
 
   return app
-    .openapi(listApps, async (c) => {
-      const { spaceId } = c.req.valid('param')
-      if (!(await roleOf(spaceId, c.get('console').accountId))) {
-        return c.json({ error: '无权访问此空间' }, 403)
+    .openapi(listClients, async (c) => {
+      const { circleId } = c.req.valid('param')
+      if (!(await roleOf(circleId, c.get('console').accountId))) {
+        return c.json({ error: '无权访问此记忆圈' }, 403)
       }
-      const rows = await withSpace(deps.db, spaceId, (tx) =>
-        tx.select().from(apps).orderBy(apps.createdAt),
-      )
-      return c.json(rows.map(toAppInfo), 200)
+      const rows = await withCircle(deps.db, circleId, (tx) => listClientRows(tx))
+      return c.json(rows, 200)
     })
-    .openapi(createApp, async (c) => {
-      const { spaceId } = c.req.valid('param')
+    .openapi(createClient, async (c) => {
+      const { circleId } = c.req.valid('param')
       const body = c.req.valid('json')
       const accountId = c.get('console').accountId
-      if (!canManageApps(await roleOf(spaceId, accountId))) {
-        return c.json({ error: '需要空间所有者或编辑者角色' }, 403)
+      if (!canManageClients(await roleOf(circleId, accountId))) {
+        return c.json({ error: '需要记忆圈所有者或编辑者角色' }, 403)
       }
-      const rows = await withSpace(deps.db, spaceId, async (tx) => {
-        if (!(await personaVisible(tx, body.defaultPersonaId))) return null
-        return tx
-          .insert(apps)
-          .values({ spaceId, ...body, ownerAccountId: accountId })
-          .onConflictDoNothing()
-          .returning()
-      })
-      if (!rows) return c.json({ error: '默认人格不存在' }, 404)
-      if (!rows[0]) return c.json({ error: `标识 ${body.slug} 已被占用` }, 409)
-      return c.json(toAppInfo(rows[0]), 201)
+      const res = await withCircle(deps.db, circleId, (tx) =>
+        createClientRow(tx, {
+          circleId,
+          ownerAccountId: accountId,
+          slug: body.slug,
+          name: body.name,
+          runtimeFamily: body.runtimeFamily,
+          defaultPersonaId: body.defaultPersonaId,
+          config: body.config,
+        }),
+      )
+      if (!res.ok) {
+        return res.reason === 'no-persona'
+          ? c.json({ error: '默认人格不存在' }, 404)
+          : c.json({ error: `标识 ${body.slug} 已被占用` }, 409)
+      }
+      return c.json(res.client, 201)
     })
-    .openapi(updateApp, async (c) => {
-      const { spaceId, appId } = c.req.valid('param')
+    .openapi(updateClient, async (c) => {
+      const { circleId, clientId } = c.req.valid('param')
       const { ownerAccountId, ...changes } = c.req.valid('json')
       const accountId = c.get('console').accountId
-      const role = await roleOf(spaceId, accountId)
-      if (!canManageApps(role)) return c.json({ error: '需要空间所有者或编辑者角色' }, 403)
-      // 转移所有权只有空间 owner 能做，新主人必须是空间成员；转移请求不能夹带别的修改
+      const role = await roleOf(circleId, accountId)
+      if (!canManageClients(role)) return c.json({ error: '需要记忆圈所有者或编辑者角色' }, 403)
       if (ownerAccountId !== undefined) {
-        if (role !== 'owner') return c.json({ error: '仅空间所有者可转移应用' }, 403)
-        if (Object.keys(changes).length)
+        if (role !== 'owner') return c.json({ error: '仅记忆圈所有者可转让接入实例' }, 403)
+        if (Object.keys(changes).length) {
           return c.json({ error: '转移所有权时不能同时修改其他字段' }, 400)
-      }
-      const rows = await withSpace(deps.db, spaceId, async (tx) => {
-        const owner = await appOwnerOf(tx, appId, true)
-        if (!owner) return []
-        if (ownerAccountId !== undefined) {
-          // 在同一个事务里锁住新主人的成员记录再检查角色，避免检查之后、转移之前他被移出空间；
-          // 新主人要能管理应用和签发 Key，所以至少是 editor
-          const [member] = await tx
-            .select({ role: spaceMembers.role })
-            .from(spaceMembers)
-            .where(
-              and(eq(spaceMembers.spaceId, spaceId), eq(spaceMembers.accountId, ownerAccountId)),
-            )
-            .for('update')
-          if (member?.role !== 'owner' && member?.role !== 'editor') return 'bad-owner' as const
-          // Key 的权限按应用当前主人计算：不吊销的话，前一位主人手里的 Key 会转而读到新所有者本人的记忆
-          if (ownerAccountId !== owner) {
-            await tx
-              .update(apiKeys)
-              .set({ revokedAt: new Date() })
-              .where(and(eq(apiKeys.appId, appId), isNull(apiKeys.revokedAt)))
-          }
-          return tx
-            .update(apps)
-            .set({
-              ownerAccountId,
-              // 前一位所有者写的使用指引补充不跟到新所有者的 agent 里（见 withoutAppGuidance）
-              ...(ownerAccountId !== owner && { config: withoutAppGuidance }),
-              updatedAt: new Date(),
-            })
-            .where(eq(apps.id, appId))
-            .returning()
         }
-        if (owner !== accountId) return null
-        if (!(await personaVisible(tx, changes.defaultPersonaId))) return []
-        const { config, ...rest } = changes
-        return tx
-          .update(apps)
-          .set({
-            ...rest,
-            // 配置整个替换，高级设置的覆盖（不在 AppConfig 里，见 settings/advanced.ts）原样留着
-            ...(config && { config: keepAdvanced(config) }),
-            updatedAt: new Date(),
-          })
-          .where(eq(apps.id, appId))
-          .returning()
+      }
+      const res = await withCircle(deps.db, circleId, async (tx) => {
+        const owner = await clientOwnerOf(tx, clientId, true)
+        if (!owner) return 'no-client' as const
+        if (ownerAccountId === undefined && owner !== accountId) return 'forbidden' as const
+        return updateClientRow(tx, {
+          circleId,
+          clientId,
+          ...(ownerAccountId !== undefined ? { ownerAccountId } : {}),
+          ...(changes.name !== undefined ? { name: changes.name } : {}),
+          ...(changes.defaultPersonaId !== undefined
+            ? { defaultPersonaId: changes.defaultPersonaId }
+            : {}),
+          ...(changes.config !== undefined ? { config: changes.config } : {}),
+        })
       })
-      if (rows === 'bad-owner') return c.json({ error: '新所有者须为此空间的所有者或编辑者' }, 400)
-      if (!rows) return c.json({ error: '仅应用所有者可修改此应用' }, 403)
-      if (!rows[0]) return c.json({ error: '应用或默认人格不存在' }, 404)
-      return c.json(toAppInfo(rows[0]), 200)
+      if (res === 'forbidden') return c.json({ error: '仅接入实例所有者可修改此接入实例' }, 403)
+      if (res === 'no-client') return c.json({ error: '接入实例不存在' }, 404)
+      if (!res.ok) {
+        if (res.reason === 'invalid-owner') {
+          return c.json({ error: '新所有者须为此记忆圈的有效所有者或编辑者' }, 400)
+        }
+        return c.json(
+          { error: res.reason === 'no-client' ? '接入实例不存在' : '默认人格不存在' },
+          404,
+        )
+      }
+      return c.json(res.client, 200)
     })
-    .openapi(deleteApp, async (c) => {
-      const { spaceId, appId } = c.req.valid('param')
+    .openapi(deleteClient, async (c) => {
+      const { circleId, clientId } = c.req.valid('param')
       const accountId = c.get('console').accountId
-      const role = await roleOf(spaceId, accountId)
-      if (!canManageApps(role)) return c.json({ error: '需要空间所有者或编辑者角色' }, 403)
-      const result = await withSpace(deps.db, spaceId, async (tx) => {
-        // 锁住应用这一行：写这个应用的记忆时的外键检查要等这把锁，检查之后不会再冒出一条被连带删掉的记忆
-        const owner = await appOwnerOf(tx, appId, true)
+      const role = await roleOf(circleId, accountId)
+      if (!canManageClients(role)) return c.json({ error: '需要记忆圈所有者或编辑者角色' }, 403)
+      const outcome = await withCircle(deps.db, circleId, async (tx) => {
+        const owner = await clientOwnerOf(tx, clientId, true)
         if (!owner) return 'missing' as const
         if (owner !== accountId && role !== 'owner') return 'forbidden' as const
-        // 删除应用会把它的记忆连带硬删除，已删除、还能撤销删除的也算
-        const [stored] = await tx
-          .select({ n: count() })
-          .from(memories)
-          .where(eq(memories.appId, appId))
-        if (stored!.n > 0) return 'stored' as const
-        await tx.delete(apps).where(eq(apps.id, appId))
+        await deleteClientRow(tx, clientId)
         return 'deleted' as const
       })
-      if (result === 'missing') return c.json({ error: '应用不存在' }, 404)
-      if (result === 'forbidden')
-        return c.json({ error: '仅应用所有者或空间所有者可删除应用' }, 403)
-      // 不给条数：空间 owner 写进来的 secret 记忆，应用主人可能读不到
-      if (result === 'stored') {
-        return c.json(
-          {
-            error: '仍有这个应用的记忆（含已删除但可恢复的）。移到别的坐标之后才能删除应用。',
-          },
-          409,
-        )
+      if (outcome === 'missing') return c.json({ error: '接入实例不存在' }, 404)
+      if (outcome === 'forbidden') {
+        return c.json({ error: '仅接入实例所有者或记忆圈所有者可删除接入实例' }, 403)
       }
       return c.body(null, 204)
     })
-    .openapi(listGroupPersonas, async (c) => {
-      const { spaceId, appId } = c.req.valid('param')
-      if (!(await roleOf(spaceId, c.get('console').accountId))) {
-        return c.json({ error: '无权访问此空间' }, 403)
+    .openapi(listGroupRules, async (c) => {
+      const { circleId, clientId } = c.req.valid('param')
+      if (!(await roleOf(circleId, c.get('console').accountId))) {
+        return c.json({ error: '无权访问此记忆圈' }, 403)
       }
-      const rules = await withSpace(deps.db, spaceId, async (tx) => {
-        if (!(await appOwnerOf(tx, appId))) return null
-        return groupPersonaRules(tx, appId)
-      })
-      if (!rules) return c.json({ error: '应用不存在' }, 404)
+      const rules = await withCircle(deps.db, circleId, (tx) =>
+        listClientGroupRules(tx, circleId, clientId),
+      )
+      if (!rules) return c.json({ error: '接入实例不存在' }, 404)
       return c.json({ rules }, 200)
     })
-    .openapi(replaceGroupPersonas, async (c) => {
-      const { spaceId, appId } = c.req.valid('param')
+    .openapi(replaceGroupRules, async (c) => {
+      const { circleId, clientId } = c.req.valid('param')
       const { rules } = c.req.valid('json')
       const accountId = c.get('console').accountId
-      if (!canManageApps(await roleOf(spaceId, accountId))) {
-        return c.json({ error: '需要空间所有者或编辑者角色' }, 403)
+      if (!canManageClients(await roleOf(circleId, accountId))) {
+        return c.json({ error: '需要记忆圈所有者或编辑者角色' }, 403)
       }
-      const subjectIds = [...new Set(rules.map((r) => r.subjectId))]
-      if (subjectIds.length !== rules.length) {
-        return c.json({ error: '同一个群只能有一条规则' }, 400)
-      }
-      const personaIds = [...new Set(rules.map((r) => r.personaId))]
-      const result = await withSpace(deps.db, spaceId, async (tx) => {
-        const owner = await appOwnerOf(tx, appId, true)
-        if (!owner) return 'no-app' as const
+      const result = await withCircle(deps.db, circleId, async (tx) => {
+        const owner = await clientOwnerOf(tx, clientId, true)
+        if (!owner) return 'no-client' as const
         if (owner !== accountId) return 'forbidden' as const
-        // 引用的群与人格加 key share 锁再检查：删除人格先锁住那一行、再数用到它的规则，
-        // 两边按同一行排队，检查过的人格不会在写入规则之前被删掉
-        const groups = subjectIds.length
-          ? await tx
-              .select({ id: subjects.id, kind: subjects.kind })
-              .from(subjects)
-              .where(inArray(subjects.id, subjectIds))
-              .for('key share')
-          : []
-        if (groups.length !== subjectIds.length) return 'no-group' as const
-        if (groups.some((g) => g.kind !== 'group')) return 'not-group' as const
-        const found = personaIds.length
-          ? await tx
-              .select({ id: personas.id })
-              .from(personas)
-              .where(inArray(personas.id, personaIds))
-              .for('key share')
-          : []
-        if (found.length !== personaIds.length) return 'no-persona' as const
-        // 只删掉不要的、改有变化的、加新的：留下的规则保持原来的建立时间，列表顺序不跟着每次保存变
-        await tx
-          .delete(appGroupPersonas)
-          .where(
-            and(
-              eq(appGroupPersonas.appId, appId),
-              subjectIds.length ? notInArray(appGroupPersonas.subjectId, subjectIds) : undefined,
-            ),
-          )
-        if (rules.length) {
-          await tx
-            .insert(appGroupPersonas)
-            .values(rules.map((r) => ({ spaceId, appId, ...r })))
-            .onConflictDoUpdate({
-              target: [appGroupPersonas.appId, appGroupPersonas.subjectId],
-              set: { personaId: sql`excluded.persona_id` },
-              setWhere: sql`${appGroupPersonas.personaId} is distinct from excluded.persona_id`,
-            })
-        }
-        return groupPersonaRules(tx, appId)
+        return replaceClientGroupRules(tx, circleId, clientId, rules)
       })
-      if (result === 'no-app') return c.json({ error: '应用不存在' }, 404)
-      if (result === 'forbidden') return c.json({ error: '仅应用所有者可修改此应用' }, 403)
-      if (result === 'no-group') return c.json({ error: '群不存在' }, 404)
-      if (result === 'not-group') return c.json({ error: '规则只能按群或频道配置' }, 400)
-      if (result === 'no-persona') return c.json({ error: '人格不存在' }, 404)
-      return c.json({ rules: result }, 200)
+      if (result === 'no-client') return c.json({ error: '接入实例不存在' }, 404)
+      if (result === 'forbidden') {
+        return c.json({ error: '仅接入实例所有者可修改此接入实例' }, 403)
+      }
+      if (!result.ok) {
+        if (result.reason === 'duplicate-group') {
+          return c.json({ error: '同一个群只能有一条规则' }, 400)
+        }
+        if (result.reason === 'not-group') {
+          return c.json({ error: '规则只能按群或频道配置' }, 400)
+        }
+        return c.json(
+          {
+            error:
+              result.reason === 'no-client'
+                ? '接入实例不存在'
+                : result.reason === 'no-group'
+                  ? '群不存在'
+                  : '人格不存在',
+          },
+          404,
+        )
+      }
+      return c.json({ rules: result.rules }, 200)
     })
     .openapi(listKeys, async (c) => {
-      const { spaceId, appId } = c.req.valid('param')
+      const { circleId, clientId } = c.req.valid('param')
       const accountId = c.get('console').accountId
-      const role = await roleOf(spaceId, accountId)
-      if (!role) return c.json({ error: '无权访问此空间' }, 403)
-      const owner = await withSpace(deps.db, spaceId, (tx) => appOwnerOf(tx, appId))
-      if (!owner) return c.json({ error: '应用不存在' }, 404)
-      // 列表只有元数据、不含明文；空间 owner 要能看到 Key 编号才能吊销泄露的 Key
+      const role = await roleOf(circleId, accountId)
+      if (!role) return c.json({ error: '无权访问此记忆圈' }, 403)
+      const owner = await withCircle(deps.db, circleId, (tx) => clientOwnerOf(tx, clientId))
+      if (!owner) return c.json({ error: '接入实例不存在' }, 404)
       if (owner !== accountId && role !== 'owner') {
-        return c.json({ error: '仅应用所有者或空间所有者可查看访问密钥' }, 403)
+        return c.json({ error: '仅接入实例所有者或记忆圈所有者可查看访问密钥' }, 403)
       }
-      const rows = await deps.db
-        .select()
-        .from(apiKeys)
-        .where(and(eq(apiKeys.spaceId, spaceId), eq(apiKeys.appId, appId)))
-        .orderBy(desc(apiKeys.createdAt))
-      const membership = await ownerMembership(deps, spaceId, owner)
-      return c.json(
-        rows.map((row) => toKeyInfo(row, membership)),
-        200,
+      const list = await withCircle(deps.db, circleId, (tx) =>
+        describeClientKeys(tx, circleId, clientId),
       )
+      if (!list) return c.json({ error: '接入实例不存在' }, 404)
+      return c.json(list, 200)
     })
     .openapi(createKey, async (c) => {
-      const { spaceId, appId } = c.req.valid('param')
+      const { circleId, clientId } = c.req.valid('param')
       const body = c.req.valid('json')
       const accountId = c.get('console').accountId
-      const role = await roleOf(spaceId, accountId)
-      // 签发的规则与浏览器授权共用（access/issue.ts）
+      const role = await roleOf(circleId, accountId)
       const denial = issueDenial(role, body.scopes)
       if (denial) return c.json({ error: denial }, 403)
-      const result = await withSpace(deps.db, spaceId, (tx) =>
-        issueAppKey(tx, { spaceId, appId, accountId, name: body.name, scopes: body.scopes }),
+      const linkedDenial = await linkedCirclesDenial(
+        deps.db,
+        accountId,
+        circleId,
+        body.linkedCircles,
+      )
+      if (linkedDenial) return c.json({ error: linkedDenial }, 403)
+
+      const result = await withCircle(deps.db, circleId, (tx) =>
+        issueClientKey(tx, {
+          circleId,
+          clientId,
+          accountId,
+          name: body.name,
+          linkedCircles: body.linkedCircles,
+          contextFacets: body.contextFacets,
+          personaOverrideId: body.personaOverrideId,
+          scopes: body.scopes,
+        }),
       )
       if (!result.ok) {
-        return result.reason === 'missing'
-          ? c.json({ error: '应用不存在' }, 404)
-          : c.json({ error: '仅应用所有者可签发此应用的访问密钥' }, 403)
+        if (result.reason === 'missing') return c.json({ error: '接入实例不存在' }, 404)
+        if (result.reason === 'no-persona') return c.json({ error: '覆写人格不存在' }, 404)
+        return c.json({ error: '仅接入实例所有者可签发此接入实例的访问密钥' }, 403)
       }
-      const membership = await ownerMembership(deps, spaceId, accountId)
-      return c.json({ ...toKeyInfo(result.row, membership), key: result.plaintext }, 201)
+      const [info] = await buildKeyInfos(deps.db, circleId, accountId, [result.row])
+      return c.json({ ...info!, key: result.plaintext }, 201)
+    })
+    .openapi(rotateKey, async (c) => {
+      const { circleId, clientId, keyId } = c.req.valid('param')
+      const body = c.req.valid('json')
+      const accountId = c.get('console').accountId
+      const role = await roleOf(circleId, accountId)
+      if (!canManageClients(role)) return c.json({ error: '需要记忆圈所有者或编辑者角色' }, 403)
+
+      const result = await withCircle(deps.db, circleId, (tx) =>
+        rotateClientKey(tx, {
+          circleId,
+          clientId,
+          keyId,
+          accountId,
+          ...(body.name !== undefined ? { name: body.name } : {}),
+        }),
+      )
+      if (!result.ok) {
+        if (result.reason === 'missing') return c.json({ error: '接入实例或访问密钥不存在' }, 404)
+        if (result.reason === 'not-owner') {
+          return c.json({ error: '仅接入实例所有者可轮换此接入实例的访问密钥' }, 403)
+        }
+        return c.json({ error: '当前成员角色已不支持保留原访问密钥的授权范围' }, 403)
+      }
+      const [info] = await buildKeyInfos(deps.db, circleId, accountId, [result.row])
+      return c.json({ ...info!, key: result.plaintext }, 201)
     })
     .openapi(keyMatrix, async (c) => {
-      const { spaceId, appId, keyId } = c.req.valid('param')
+      const { circleId, clientId, keyId } = c.req.valid('param')
       const accountId = c.get('console').accountId
-      const role = await roleOf(spaceId, accountId)
-      if (!role) return c.json({ error: '无权访问此空间' }, 403)
-      const found = await withSpace(deps.db, spaceId, async (tx) => {
-        const [app] = await tx.select().from(apps).where(eq(apps.id, appId))
-        // 和 Key 列表一样，只给应用主人与空间 owner 看；先查权限再找 Key，别人探不出 Key 在不在
-        if (!app) return 'no-app' as const
-        if (app.ownerAccountId !== accountId && role !== 'owner') return 'forbidden' as const
+      const role = await roleOf(circleId, accountId)
+      if (!role) return c.json({ error: '无权访问此记忆圈' }, 403)
+      const found = await withCircle(deps.db, circleId, async (tx) => {
+        const [client] = await tx.select().from(clients).where(eq(clients.id, clientId))
+        if (!client) return 'no-client' as const
+        if (client.ownerAccountId !== accountId && role !== 'owner') return 'forbidden' as const
         const [key] = await tx
           .select()
           .from(apiKeys)
-          .where(and(eq(apiKeys.id, keyId), eq(apiKeys.appId, appId)))
-        return key ? { app, key } : ('missing' as const)
+          .where(and(eq(apiKeys.id, keyId), eq(apiKeys.clientId, clientId)))
+        if (!key) return 'missing' as const
+        const [[circle], terms] = await Promise.all([
+          tx
+            .select({ defaultFacets: circles.defaultFacets })
+            .from(circles)
+            .where(eq(circles.id, circleId))
+            .limit(1),
+          tx
+            .select({
+              dimensionKey: facetTerms.dimensionKey,
+              slug: facetTerms.slug,
+              implies: facetTerms.implies,
+            })
+            .from(facetTerms)
+            .where(eq(facetTerms.circleId, circleId)),
+        ])
+        return { client, key, circle, terms }
       })
-      if (found === 'no-app') return c.json({ error: '应用不存在' }, 404)
+      if (found === 'no-client') return c.json({ error: '接入实例不存在' }, 404)
       if (found === 'missing') return c.json({ error: '访问密钥不存在' }, 404)
       if (found === 'forbidden') {
-        return c.json({ error: '仅应用所有者或空间所有者可查看访问密钥' }, 403)
+        return c.json({ error: '仅接入实例所有者或记忆圈所有者可查看访问密钥' }, 403)
       }
-      const { app, key } = found
-      const scopes = keyEffectiveScopes(
-        { ...key, scopes: KeyScopes.parse(key.scopes) },
-        await ownerMembership(deps, spaceId, app.ownerAccountId),
-      )
-      if (!scopes) return c.json({ error: '访问密钥已作废' }, 404)
-      const config = AppConfig.parse(app.config)
+      const { client, key, circle, terms } = found
+      const [info] = await buildKeyInfos(deps.db, circleId, client.ownerAccountId, [key])
+      if (!info?.effectiveScopes) return c.json({ error: '访问密钥已作废' }, 404)
+      const config = ClientConfig.parse(client.config)
+      const staticContextRealms = resolveStaticContextRealms(key.contextFacets ?? {}, terms)
       return c.json(
-        accessMatrix(scopes, {
-          appId: app.id,
-          ownerAccountId: app.ownerAccountId,
-          personaId: app.defaultPersonaId,
-          ...(config.elevateOwnerDirect ? { elevateOwnerDirect: config.elevateOwnerDirect } : {}),
+        accessMatrix({
+          primaryCircleId: circleId,
+          primaryCircleRealms: circle?.defaultFacets?.realm ?? [],
+          scopes: info.effectiveScopes,
+          grants: info.circleGrants,
+          staticContextRealms,
+          client: {
+            clientId: client.id,
+            ownerAccountId: client.ownerAccountId,
+            personMemoryMode: config.personMemoryMode,
+            ...(config.elevateOwnerDirect ? { elevateOwnerDirect: config.elevateOwnerDirect } : {}),
+          },
         }),
         200,
       )
     })
     .openapi(revokeKey, async (c) => {
-      const { spaceId, appId, keyId } = c.req.valid('param')
+      const { circleId, clientId, keyId } = c.req.valid('param')
       const accountId = c.get('console').accountId
-      const role = await roleOf(spaceId, accountId)
-      const owner = role ? await withSpace(deps.db, spaceId, (tx) => appOwnerOf(tx, appId)) : null
+      const role = await roleOf(circleId, accountId)
+      const owner = role
+        ? await withCircle(deps.db, circleId, (tx) => clientOwnerOf(tx, clientId))
+        : null
       if (role !== 'owner' && owner !== accountId) {
-        return c.json({ error: '仅应用所有者或空间所有者可吊销访问密钥' }, 403)
+        return c.json({ error: '仅接入实例所有者或记忆圈所有者可吊销访问密钥' }, 403)
       }
       const rows = await deps.db
         .update(apiKeys)
@@ -531,8 +468,8 @@ export function appRoutes(deps: Deps) {
         .where(
           and(
             eq(apiKeys.id, keyId),
-            eq(apiKeys.spaceId, spaceId),
-            eq(apiKeys.appId, appId),
+            eq(apiKeys.circleId, circleId),
+            eq(apiKeys.clientId, clientId),
             isNull(apiKeys.revokedAt),
           ),
         )

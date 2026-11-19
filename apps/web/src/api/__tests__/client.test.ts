@@ -1,8 +1,6 @@
-import { URI_FORMAT_MESSAGE } from '@kioku/contracts'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 
-import { URI_FORMAT_HINT } from '../../labels'
 import {
   ApiError,
   NetworkError,
@@ -91,13 +89,13 @@ describe('API 客户端', () => {
     const fetchMock = vi.fn(async () => Response.json({ ok: true }))
     vi.stubGlobal('fetch', fetchMock)
     const result = await request('POST', '/x', {
-      query: { uri: 'core://a b', skip: undefined },
+      query: { q: 'a b', skip: undefined },
       body: { a: 1 },
       schema: z.object({ ok: z.boolean() }),
     })
     expect(result).toEqual({ ok: true })
     const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
-    expect(url).toBe('/v1/x?uri=core%3A%2F%2Fa+b')
+    expect(url).toBe('/v1/x?q=a+b')
     expect(init.body).toBe('{"a":1}')
   })
 
@@ -134,9 +132,9 @@ describe('API 客户端', () => {
     vi.stubGlobal('fetch', fetchMock)
     const controller = new AbortController()
     const body = { model: 'm', messages: [{ role: 'user', content: '你好' }] }
-    expect(await api.benchAgentTurn('s', 'a', 'k', body, controller.signal)).toEqual(turn)
+    expect(await api.benchAgentTurn('c', 'cl', 'k', body, controller.signal)).toEqual(turn)
     const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
-    expect(url).toBe('/v1/spaces/s/apps/a/keys/k/bench/agent/turn')
+    expect(url).toBe('/v1/circles/c/clients/cl/keys/k/bench/agent/turn')
     expect(init.method).toBe('POST')
     expect(init.signal).toBe(controller.signal)
     expect(JSON.parse(init.body as string)).toEqual(body)
@@ -145,7 +143,7 @@ describe('API 客户端', () => {
       'fetch',
       vi.fn(async () => Response.json({ message: { content: '少了 role' } })),
     )
-    await expect(api.benchAgentTurn('s', 'a', 'k', body, controller.signal)).rejects.toThrow()
+    await expect(api.benchAgentTurn('c', 'cl', 'k', body, controller.signal)).rejects.toThrow()
   })
 
   it('模型代理的情况', async () => {
@@ -162,23 +160,23 @@ describe('API 客户端', () => {
     }
     const fetchMock = vi.fn(async () => Response.json(info))
     vi.stubGlobal('fetch', fetchMock)
-    expect(await api.benchAgent('s', 'a', 'k')).toEqual(info)
+    expect(await api.benchAgent('c', 'cl', 'k')).toEqual(info)
     expect((fetchMock.mock.calls[0] as unknown as [string])[0]).toBe(
-      '/v1/spaces/s/apps/a/keys/k/bench/agent',
+      '/v1/circles/c/clients/cl/keys/k/bench/agent',
     )
   })
 
   it('错误响应转成带状态码和提示的 ApiError', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => Response.json({ error: '记忆不存在' }, { status: 404 })),
+      vi.fn(async () => Response.json({ error: '词条不存在' }, { status: 404 })),
     )
     await expect(request('GET', '/x')).rejects.toEqual(
-      new ApiError(404, '记忆不存在', { error: '记忆不存在' }),
+      new ApiError(404, '词条不存在', { error: '词条不存在' }),
     )
   })
 
-  it('错误体原样带在 payload 里：记忆写入被拒时另带疑似明文的位置', async () => {
+  it('错误体原样带在 payload 里：词条写入被拒时另带疑似明文的位置', async () => {
     const body = { error: '正文第 2 行疑似明文', plaintext: [{ line: 2, kind: 'label' }] }
     vi.stubGlobal(
       'fetch',
@@ -198,24 +196,6 @@ describe('API 客户端', () => {
     expect([err.status, err.payload]).toEqual([502, null])
   })
 
-  it('坐标格式的报错是写给接口与 MCP 的：界面上换成只说格式的那句，去掉字段路径', async () => {
-    for (const error of [
-      URI_FORMAT_MESSAGE,
-      `uri：${URI_FORMAT_MESSAGE}`,
-      `to：${URI_FORMAT_MESSAGE}`,
-    ]) {
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(async () => Response.json({ error }, { status: 400 })),
-      )
-      await expect(request('POST', '/x')).rejects.toEqual(
-        new ApiError(400, URI_FORMAT_HINT, { error }),
-      )
-    }
-    expect(URI_FORMAT_HINT).toContain('坐标只能以 core://、user://')
-    expect(URI_FORMAT_HINT).not.toMatch(/domain|path|URI|分区/)
-  })
-
   it('响应不符合契约时直接报错', async () => {
     vi.stubGlobal(
       'fetch',
@@ -229,7 +209,7 @@ describe('API 客户端', () => {
     vi.stubGlobal('fetch', fetchMock)
     const form = new FormData()
     form.set('passphrase', 'x')
-    await request('POST', '/spaces/import', { body: form })
+    await request('POST', '/circles/import', { body: form })
     const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
     expect(init.body).toBe(form)
     expect(init.headers).toEqual({})
@@ -242,26 +222,26 @@ describe('API 客户端', () => {
         async () =>
           new Response(new Uint8Array([1, 2, 3]), {
             headers: {
-              'content-disposition': `attachment; filename="kioku-space.kioku-space"; filename*=UTF-8''${encodeURIComponent('家-20261029T120000Z.kioku-space')}`,
+              'content-disposition': `attachment; filename="kioku-circle.kioku-circle"; filename*=UTF-8''${encodeURIComponent('家-20261029T120000Z.kioku-circle')}`,
             },
           }),
       ),
     )
-    const { blob, filename } = await download('POST', '/spaces/s/export', { passphrase: 'p' })
+    const { blob, filename } = await download('POST', '/circles/c/export', { passphrase: 'p' })
     expect(new Uint8Array(await blob.arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]))
-    expect(filename).toBe('家-20261029T120000Z.kioku-space')
+    expect(filename).toBe('家-20261029T120000Z.kioku-circle')
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => Response.json({ error: '仅空间所有者可导出空间' }, { status: 403 })),
+      vi.fn(async () => Response.json({ error: '仅记忆圈所有者可导出记忆圈' }, { status: 403 })),
     )
-    await expect(download('POST', '/spaces/s/export')).rejects.toEqual(
-      new ApiError(403, '仅空间所有者可导出空间', { error: '仅空间所有者可导出空间' }),
+    await expect(download('POST', '/circles/c/export')).rejects.toEqual(
+      new ApiError(403, '仅记忆圈所有者可导出记忆圈', { error: '仅记忆圈所有者可导出记忆圈' }),
     )
   })
 
   it('文件名优先取 filename*，编码不对时退回 filename', () => {
     expect(attachmentName(null)).toBeNull()
-    expect(attachmentName('attachment; filename="a.kioku-space"')).toBe('a.kioku-space')
+    expect(attachmentName('attachment; filename="a.kioku-circle"')).toBe('a.kioku-circle')
     expect(attachmentName(`attachment; filename="a"; filename*=UTF-8''%E5%AE%B6`)).toBe('家')
     expect(attachmentName(`attachment; filename="a"; filename*=UTF-8''%E5%AE`)).toBe('a')
   })

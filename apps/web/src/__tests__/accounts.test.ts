@@ -16,7 +16,7 @@ import {
   passwordLinkUrl,
   SELF_LOCKED_REASON,
   setPasswordError,
-  soleOwnerSpaces,
+  soleOwnerCircles,
 } from '../accounts'
 import { ApiError } from '../api/client'
 import accountLogin from '../components/AccountLoginSettings.vue?raw'
@@ -63,7 +63,7 @@ const account = (changes: Partial<AdminAccount> = {}): AdminAccount => ({
   disabledAt: null,
   createdAt: NOW.toISOString(),
   lastActiveAt: null,
-  spaces: [],
+  circles: [],
   pendingLink: null,
   ...changes,
 })
@@ -186,19 +186,21 @@ describe('账号列表', () => {
     expect(SELF_LOCKED_REASON).toBe('无法修改当前账号的停用状态与管理员身份')
   })
 
-  it('停用的确认写出后果；唯一可用所有者的空间单独列出', () => {
+  it('停用的确认写出后果；唯一可用所有者的记忆圈单独列出', () => {
     expect(instanceAccounts).toContain(
-      '停用后：无法登录，会话立即失效，其应用的访问密钥停止工作；重新启用后恢复。',
+      '停用后：无法登录，会话立即失效，其接入实例的访问密钥停止工作；重新启用后恢复。',
     )
-    const space = (name: string, n: number, soleActiveOwner: boolean) => ({
+    const circle = (name: string, n: number, soleActiveOwner: boolean) => ({
       id: `00000000-0000-4000-8000-00000000000${n}`,
+      slug: `c${n}`,
       name,
+      kind: 'shared' as const,
       role: 'owner' as const,
       soleActiveOwner,
     })
-    const flagged = account({ spaces: [space('家', 2, true), space('工作', 3, false)] })
-    expect(soleOwnerSpaces(flagged)).toEqual(['家'])
-    expect(soleOwnerSpaces(account({ spaces: [space('工作', 3, false)] }))).toEqual([])
+    const flagged = account({ circles: [circle('家', 2, true), circle('工作', 3, false)] })
+    expect(soleOwnerCircles(flagged)).toEqual(['家'])
+    expect(soleOwnerCircles(account({ circles: [circle('工作', 3, false)] }))).toEqual([])
   })
 
   it('请求成功、弹窗却已经关掉时提示结果与下一步', () => {
@@ -216,9 +218,9 @@ describe('账号列表', () => {
     )
   })
 
-  it('新建账号后实例的空间列表一起刷新', () => {
+  it('新建账号后实例的记忆圈列表一起刷新', () => {
     expect(instanceAccounts).toContain(
-      "queryClient.invalidateQueries({ queryKey: ['instance-spaces'] })",
+      "queryClient.invalidateQueries({ queryKey: ['instance-circles'] })",
     )
   })
 

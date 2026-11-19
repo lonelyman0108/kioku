@@ -1,23 +1,26 @@
 <script setup lang="ts">
 import {
   CREDENTIAL_CAPABILITIES,
-  LAYERS,
+  ENTRY_KINDS,
+  FacetTermSlug,
   SENSITIVITIES,
   sensitivityAllowed,
+  type CircleKind,
   type CredentialCapability,
-  type KeyScopes,
-  type Layer,
+  type EntryKind,
+  type LensKeyScopes,
   type Sensitivity,
 } from '@kioku/contracts'
-import { computed, useId } from 'vue'
+import { computed, ref, useId } from 'vue'
 
 import {
   ADMIN_SCOPE_LABEL,
   credentialCapabilityLabels,
-  layerLabels,
+  entryKindLabels,
   sensitivityLabels,
 } from '../labels'
 import Hint from './Hint.vue'
+import SegmentedChoice from './SegmentedChoice.vue'
 import {
   CUSTOM_PRESET,
   CUSTOM_PRESET_HELP,
@@ -27,36 +30,45 @@ import {
   matchPreset,
   presetScopes,
 } from './keyPresets'
-import NoteLine from './strata/NoteLine.vue'
-import SegmentedChoice from './SegmentedChoice.vue'
 import AccessLegend from './strata/AccessLegend.vue'
+import NoteLine from './strata/NoteLine.vue'
 import ScopeTags from './strata/ScopeTags.vue'
 import StrataCore from './strata/StrataCore.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
 import {
   ACCESS_BAR_PERCENT,
-  accessCellText,
   accessFill,
-  accessKind,
   accessKindLabels,
   accessKindShortLabels,
-  isConversationLayer,
+  isConversationKind,
+  issuedBandRows,
   issuedScopeRows,
-  orderRows,
+  kindAccessCellText,
+  kindAccessKind,
+  kindBandForCircle,
+  orderKindRows,
   paintAccess,
   presentKinds,
   sensitivityHints,
   type AccessKind,
-  type AccessRow,
+  type KindAccessRow,
   type PaintRect,
 } from './strata/strata'
 
-// 签发访问密钥时编辑签发范围：上面四张模板卡片，下面一张权限表直接勾选。
-// 改了任何一格或任何一个控件，就按 matchPreset 重新对：和某个模板完全一样时选中它，否则选中自定义。
-// 格子的判断只用 issuedScopeRows 与 accessKind，和岩芯、权限范围是同一套
-const scopes = defineModel<KeyScopes>('scopes', { required: true })
+// 签发透镜访问密钥时编辑签发范围：四张模板卡片 + 物种×敏感级矩阵 + 静态场域白名单 + 凭据与管理权限
+const scopes = defineModel<LensKeyScopes>('scopes', { required: true })
 const preset = defineModel<string>('preset', { required: true })
-const props = defineProps<{ isSpaceOwner: boolean }>()
+const props = withDefaults(
+  defineProps<{
+    isCircleOwner: boolean
+    circleKind?: CircleKind
+    realmTerms?: readonly { slug: string; label: string }[]
+  }>(),
+  {
+    circleKind: 'shared',
+    realmTerms: () => [],
+  },
+)
 const uid = useId()
 
 const cards = computed(() => [
@@ -64,36 +76,38 @@ const cards = computed(() => [
     id: p.id,
     label: p.label,
     help: p.help,
-    scopes: presetScopes(p, props.isSpaceOwner),
+    scopes: presetScopes(p, props.isCircleOwner),
   })),
   { id: CUSTOM_PRESET, label: '自定义', help: CUSTOM_PRESET_HELP, scopes: scopes.value },
 ])
 
-function update(patch: Partial<KeyScopes>) {
+function update(patch: Partial<LensKeyScopes>) {
   const next = { ...scopes.value, ...patch }
   scopes.value = next
-  preset.value = matchPreset(next, props.isSpaceOwner)
+  preset.value = matchPreset(next, props.isCircleOwner)
 }
 
-// 选模板：换成模板（按签发人收紧之后）的权限；选自定义只换卡片，权限照旧，接着在表格里改
 function pick(id: string) {
   preset.value = id
   const found = keyPresets.find((p) => p.id === id)
-  if (found) scopes.value = presetScopes(found, props.isSpaceOwner)
+  if (found) scopes.value = presetScopes(found, props.isCircleOwner)
 }
 
-// 归属按 LAYERS 的顺序存，先后不影响比较（sameScopes 不看顺序）
-function toggle(field: 'readLayers' | 'writeLayers', layer: Layer, on: boolean) {
+function toggle(field: 'readKinds' | 'writeKinds', kind: EntryKind, on: boolean) {
   const list = scopes.value[field]
-  update({ [field]: LAYERS.filter((l) => (l === layer ? on : list.includes(l))) })
+  update({ [field]: ENTRY_KINDS.filter((k) => (k === kind ? on : list.includes(k))) })
 }
 const checkedOf = (event: Event) => (event.target as HTMLInputElement).checked
 
-const accessRows = computed(() => orderRows(issuedScopeRows(scopes.value)))
-// 边界线画在最高敏感级那一列的右侧
+const accessRows = computed(() => orderKindRows(issuedScopeRows(scopes.value, props.circleKind)))
+const bandRowsForEditor = computed(() =>
+  accessRows.value.map((row) => ({
+    band: kindBandForCircle(row.kind, { circleKind: props.circleKind, isPrimary: true }),
+    cells: row.cells,
+  })),
+)
 const edge = computed(() => SENSITIVITIES.indexOf(scopes.value.maxSensitivity))
 
-// 每一格的种类、能不能有这一级（本人不设公开）、画法与说明，跟着签发范围一次算好，模板只读结果
 interface EditorCell {
   sensitivity: Sensitivity
   kind: AccessKind
@@ -103,42 +117,88 @@ interface EditorCell {
 }
 const FULL = { x: 0, y: 0, width: '100%', height: '100%' }
 const rows = computed(() =>
-  accessRows.value.map((row: AccessRow) => ({
-    layer: row.layer,
-    cells: SENSITIVITIES.map((sensitivity): EditorCell => {
-      const cell = row.cells.find((c) => c.sensitivity === sensitivity)
-      const kind: AccessKind = cell ? accessKind(row.layer, cell) : 'none'
-      const allowed = sensitivityAllowed(row.layer, sensitivity)
-      return {
-        sensitivity,
-        kind,
-        allowed,
-        title: accessCellText(row.layer, sensitivity, kind),
-        paint:
-          allowed && kind !== 'none'
-            ? paintAccess(row.layer, sensitivity, kind, FULL, ACCESS_BAR_PERCENT, 'lg')
-            : [],
-      }
-    }),
-  })),
+  accessRows.value.map((row: KindAccessRow) => {
+    const band = kindBandForCircle(row.kind, { circleKind: props.circleKind, isPrimary: true })
+    const label = entryKindLabels[row.kind]
+    return {
+      kind: row.kind,
+      band,
+      label,
+      cells: SENSITIVITIES.map((sensitivity): EditorCell => {
+        const cell = row.cells.find((c) => c.sensitivity === sensitivity)
+        const accessKindVal: AccessKind = cell ? kindAccessKind(row.kind, cell) : 'none'
+        const allowed = sensitivityAllowed(props.circleKind, row.kind, sensitivity)
+        return {
+          sensitivity,
+          kind: accessKindVal,
+          allowed,
+          title: kindAccessCellText(row.kind, props.circleKind, sensitivity, accessKindVal, label),
+          paint:
+            allowed && accessKindVal !== 'none'
+              ? paintAccess(band, sensitivity, accessKindVal, FULL, ACCESS_BAR_PERCENT, 'lg')
+              : [],
+        }
+      }),
+    }
+  }),
 )
-const legendKinds = computed(() => presentKinds(accessRows.value))
+const legendKinds = computed(() => presentKinds(bandRowsForEditor.value))
 
-// 机密级与跨人格写入只给空间所有者，编辑者签不出来，选项禁用
+// 机密级、凭据与词表人格管理权限仅记忆圈所有者可签发
 const maxItems = computed(() =>
   SENSITIVITIES.map((s) => ({
     value: s,
     label: sensitivityLabels[s],
-    disabled: s === 'secret' && !props.isSpaceOwner,
+    disabled: s === 'secret' && !props.isCircleOwner,
   })),
 )
 
-// 凭据能力只有空间所有者能选取用与管理；别的成员只有不可用可选
+// 静态场域白名单锁定（null 不限定，string[] 仅限所选场域）
+const realmLocked = computed(() => scopes.value.allowedRealms !== null)
+const realmChoices = computed(() => {
+  const known = new Set(props.realmTerms.map((t) => t.slug))
+  const extra = (scopes.value.allowedRealms ?? [])
+    .filter((slug) => !known.has(slug))
+    .map((slug) => ({ slug, label: slug }))
+  return [...props.realmTerms, ...extra]
+})
+const customRealmInput = ref('')
+const customRealmError = ref<string | null>(null)
+
+function setRealmMode(restricted: boolean) {
+  customRealmError.value = null
+  if (!restricted) {
+    update({ allowedRealms: null })
+    return
+  }
+  update({ allowedRealms: scopes.value.allowedRealms ?? [] })
+}
+
+function toggleRealm(slug: string) {
+  const current = scopes.value.allowedRealms ?? []
+  const next = current.includes(slug) ? current.filter((s) => s !== slug) : [...current, slug]
+  update({ allowedRealms: next })
+}
+
+function addCustomRealm() {
+  const parsed = FacetTermSlug.safeParse(customRealmInput.value)
+  if (!parsed.success) {
+    customRealmError.value = parsed.error.issues[0]?.message ?? '场域标识格式有误'
+    return
+  }
+  customRealmError.value = null
+  const current = scopes.value.allowedRealms ?? []
+  if (!current.includes(parsed.data)) {
+    update({ allowedRealms: [...current, parsed.data] })
+  }
+  customRealmInput.value = ''
+}
+
 const credentialItems = computed(() =>
   CREDENTIAL_CAPABILITIES.map((c) => ({
     value: c,
     label: credentialCapabilityLabels[c],
-    disabled: allowedCredentialCapability(c, props.isSpaceOwner) !== c,
+    disabled: allowedCredentialCapability(c, props.isCircleOwner) !== c,
   })),
 )
 const credentialHelp: Record<CredentialCapability, string> = {
@@ -146,7 +206,6 @@ const credentialHelp: Record<CredentialCapability, string> = {
   use: '列出凭据并取值',
   manage: '另可新建、修改、删除凭据',
 }
-// 按签发范围实际能用到的凭据能力，和所选的不同时提示
 const credentialShortfall = computed(() => {
   const actual = issuedCredentialCapability(scopes.value)
   return actual === scopes.value.credentials ? null : actual
@@ -169,7 +228,12 @@ const credentialShortfall = computed(() => {
             :checked="preset === card.id"
             @change="pick(card.id)"
           />
-          <StrataCore :scopes="card.scopes" :width="28" :height="44" aria-hidden="true" />
+          <StrataCore
+            :rows="issuedBandRows(card.scopes, { primaryKind: circleKind })"
+            :width="28"
+            :height="44"
+            aria-hidden="true"
+          />
           <span class="tpl-text">
             <b>{{ card.label }}</b>
             <span class="tpl-help">{{ card.help }}</span>
@@ -183,7 +247,8 @@ const credentialShortfall = computed(() => {
       <div class="field-head">
         <span class="field-label">
           权限<Hint>
-            按归属与敏感级换算的签发范围，不是实际权限：人格、应用与会话上下文另有规则，签发后在权限范围里查看。机密仅可按坐标读取；联系人与会话的写入指对话抽取。粗线右侧超出最高敏感级。
+            按记忆物种与敏感级换算的签发范围，不是实际权限：接入实例与会话上下文另有收紧规则，签发后在权限范围里查看。机密仅可按短
+            ID 读取且仅在主场圈有效；联系人事实与会话摘要的写入指对话抽取。粗线右侧超出最高敏感级。
           </Hint>
         </span>
         <span class="max-label" aria-hidden="true">最高敏感级</span>
@@ -194,12 +259,12 @@ const credentialShortfall = computed(() => {
           @update:model-value="(v) => update({ maxSensitivity: v })"
         />
       </div>
-      <p v-if="!isSpaceOwner" class="field-note block-note">仅空间所有者可签发机密级</p>
+      <p v-if="!isCircleOwner" class="field-note block-note">仅记忆圈所有者可签发机密级</p>
       <div class="mx-scroll">
         <table class="mx">
           <thead>
             <tr>
-              <th scope="col" class="col-layer">归属</th>
+              <th scope="col" class="col-layer">物种</th>
               <th scope="col" class="col-rw">读</th>
               <th scope="col" class="col-rw">写</th>
               <th
@@ -218,32 +283,28 @@ const credentialShortfall = computed(() => {
             </tr>
           </thead>
           <tbody>
-            <tr
-              v-for="row in rows"
-              :key="row.layer"
-              :class="{ 'conv-end': row.layer === 'subject' }"
-            >
+            <tr v-for="row in rows" :key="row.kind" :class="{ 'conv-end': row.kind === 'fact' }">
               <th scope="row" class="col-layer">
                 <span class="lname">
-                  <StrataSwatch :layer="row.layer" plain decorative :width="14" :height="10" />
-                  <span>{{ layerLabels[row.layer] }}</span>
-                  <span v-if="isConversationLayer(row.layer)" class="from-conv">来自对话</span>
+                  <StrataSwatch :band="row.band" plain decorative :width="14" :height="10" />
+                  <span>{{ row.label }}</span>
+                  <span v-if="isConversationKind(row.kind)" class="from-conv">来自对话</span>
                 </span>
               </th>
               <td class="col-rw">
                 <input
                   type="checkbox"
-                  :aria-label="`读 ${layerLabels[row.layer]}`"
-                  :checked="scopes.readLayers.includes(row.layer)"
-                  @change="toggle('readLayers', row.layer, checkedOf($event))"
+                  :aria-label="`读 ${row.label}`"
+                  :checked="scopes.readKinds.includes(row.kind)"
+                  @change="toggle('readKinds', row.kind, checkedOf($event))"
                 />
               </td>
               <td class="col-rw">
                 <input
                   type="checkbox"
-                  :aria-label="`写 ${layerLabels[row.layer]}`"
-                  :checked="scopes.writeLayers.includes(row.layer)"
-                  @change="toggle('writeLayers', row.layer, checkedOf($event))"
+                  :aria-label="`写 ${row.label}`"
+                  :checked="scopes.writeKinds.includes(row.kind)"
+                  @change="toggle('writeKinds', row.kind, checkedOf($event))"
                 />
               </td>
               <td
@@ -251,7 +312,7 @@ const credentialShortfall = computed(() => {
                 :key="cell.sensitivity"
                 class="c"
                 :class="[cell.kind, { edge: i === edge, na: !cell.allowed }]"
-                :style="{ '--c': accessFill(row.layer) }"
+                :style="{ '--c': accessFill(row.band) }"
                 :title="cell.title"
               >
                 <span v-if="!cell.allowed" class="c-na">不适用</span>
@@ -285,6 +346,58 @@ const credentialShortfall = computed(() => {
       <AccessLegend class="mx-legend" :kinds="legendKinds" />
     </div>
 
+    <div class="field">
+      <div class="field-row">
+        <span class="row-label">
+          静态场域白名单<Hint>
+            仅可向下收紧安全边界：设为限定场域后，即使请求或提问携带其他场域信号，也只允许读写白名单内的词条和凭据；选「仅限指定场域」且不勾任何项将阻止访问所有带场域限制的内容。
+          </Hint>
+        </span>
+        <SegmentedChoice
+          :model-value="realmLocked ? 'restricted' : 'open'"
+          :items="[
+            { value: 'open', label: '不限定场域' },
+            { value: 'restricted', label: '仅限指定场域' },
+          ]"
+          label="静态场域白名单"
+          @update:model-value="(v) => setRealmMode(v === 'restricted')"
+        />
+      </div>
+      <div v-if="realmLocked" class="realm-box">
+        <div class="realm-list" role="group" aria-label="允许的场域">
+          <label
+            v-for="item in realmChoices"
+            :key="item.slug"
+            class="realm-chip"
+            :class="{ on: (scopes.allowedRealms ?? []).includes(item.slug) }"
+          >
+            <input
+              type="checkbox"
+              class="sr-only"
+              :checked="(scopes.allowedRealms ?? []).includes(item.slug)"
+              @change="toggleRealm(item.slug)"
+            />
+            <span>{{ item.label }}</span>
+            <code v-if="item.label !== item.slug">{{ item.slug }}</code>
+          </label>
+        </div>
+        <div class="realm-custom">
+          <UInput
+            v-model="customRealmInput"
+            size="xs"
+            class="w-44 font-mono"
+            placeholder="添加场域标识"
+            aria-label="添加场域标识"
+            @keydown.enter.prevent="addCustomRealm"
+          />
+          <UButton size="xs" color="neutral" variant="outline" @click="addCustomRealm"
+            >添加</UButton
+          >
+          <span v-if="customRealmError" class="text-xs text-error">{{ customRealmError }}</span>
+        </div>
+      </div>
+    </div>
+
     <div class="field-row">
       <span class="row-label">凭据能力</span>
       <SegmentedChoice
@@ -294,7 +407,7 @@ const credentialShortfall = computed(() => {
         @update:model-value="(v) => update({ credentials: v })"
       />
       <span class="row-help">
-        <template v-if="!isSpaceOwner">仅空间所有者的应用可以取用或管理凭据。</template>
+        <template v-if="!isCircleOwner">仅记忆圈所有者的接入实例可以取用或管理凭据。</template>
         <template v-else>{{ credentialHelp[scopes.credentials] }}</template>
       </span>
     </div>
@@ -306,12 +419,14 @@ const credentialShortfall = computed(() => {
       <span class="row-label">{{ ADMIN_SCOPE_LABEL }}</span>
       <USwitch
         :model-value="scopes.admin"
-        :disabled="!isSpaceOwner"
+        :disabled="!isCircleOwner"
         :aria-label="ADMIN_SCOPE_LABEL"
         @update:model-value="(v: boolean) => update({ admin: v })"
       />
       <span class="row-help">
-        可写入任意人格与应用的记忆<template v-if="!isSpaceOwner">；仅空间所有者可开启</template>
+        可管理切面词表与独立人格设定<template v-if="!isCircleOwner"
+          >；仅记忆圈所有者可开启</template
+        >
       </span>
     </div>
   </div>
@@ -427,7 +542,7 @@ const credentialShortfall = computed(() => {
   color: var(--strata-on-selected);
 }
 
-/* 权限表：窄屏时横向滚动，归属那一列固定在左边 */
+/* 权限表：窄屏时横向滚动，物种那一列固定在左边 */
 .mx-scroll {
   min-width: 0;
   padding-right: 1px;
@@ -516,7 +631,6 @@ const credentialShortfall = computed(() => {
   position: absolute;
   inset: 0;
 }
-/* 文字压在色带上：标签自己铺一块底色，把纹理挖掉 */
 .c-label {
   position: relative;
   display: inline-block;
@@ -573,6 +687,9 @@ const credentialShortfall = computed(() => {
   gap: 6px 12px;
 }
 .row-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   flex: none;
   min-width: 7em;
   font-size: 14px;
@@ -582,6 +699,42 @@ const credentialShortfall = computed(() => {
   min-width: 0;
   font-size: 13px;
   color: var(--ui-text-muted);
+}
+.realm-box {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--ui-border-accented);
+}
+.realm-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.realm-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border: 1px solid var(--ui-border-accented);
+  font-size: 13px;
+  cursor: pointer;
+}
+.realm-chip.on {
+  border-color: var(--strata-rule);
+  background: var(--strata-selected);
+  color: var(--strata-on-selected);
+}
+.realm-chip code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  opacity: 0.8;
+}
+.realm-custom {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
 }
 .note-line.shortfall {
   margin-top: -8px;

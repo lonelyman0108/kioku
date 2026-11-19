@@ -8,13 +8,13 @@ import {
   errorText,
   loggableError,
   pgErrorCode,
-  withSpace,
+  withCircle,
   type Database,
   type Tx,
 } from '../client'
 import { settings } from '../schema'
 
-// withSpace 只是声明当前空间，这里写的 settings 不是内容表，这个空间不必存在
+// withCircle 只是声明当前记忆圈，这里写的 settings 不是内容表，这个记忆圈不必存在
 const SPACE = '00000000-0000-4000-8000-000000000000'
 const KEY = 'disconnect-test'
 // 等后端执行语句最多等这么久，短于用例的时限：等不到时报这里的错，不是用例超时之后还在轮询
@@ -90,7 +90,7 @@ describe.skipIf(!testDatabaseUrl)('事务进行中连接断开', () => {
     const entered = deferred<number>()
     const resume = deferred()
     const after = deferred<unknown[]>()
-    const running = withSpace(database.db, SPACE, async (tx) => {
+    const running = withCircle(database.db, SPACE, async (tx) => {
       await tx.insert(settings).values({ key: KEY, value: {} })
       entered.resolve(await backendOf(tx))
       await resume.promise
@@ -162,7 +162,7 @@ describe.skipIf(!testDatabaseUrl)('事务进行中连接断开', () => {
     const entered = deferred<number>()
     const resume = deferred()
     const after = deferred<unknown[]>()
-    const running = withSpace(database.db, SPACE, (outer) =>
+    const running = withCircle(database.db, SPACE, (outer) =>
       outer.transaction(async (inner) => {
         await inner.insert(settings).values({ key: KEY, value: {} })
         entered.resolve(await backendOf(inner))

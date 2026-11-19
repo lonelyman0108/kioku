@@ -1,7 +1,7 @@
 import { Tokenizer } from 'marked'
 import { describe, expect, it, vi } from 'vitest'
 
-import { markdownToHtml, rawHtml, splitByValues } from '../markdown'
+import { markdownToHtml, rawHtml, splitByValues, splitWikiLinks } from '../markdown'
 
 describe('rawHtml', () => {
   it('不带属性的排版标签照常渲染', () => {
@@ -223,5 +223,25 @@ describe('疑似明文的值', () => {
   it('找不到时整段不标，空的值不算', () => {
     expect(splitByValues('没有', ['hunter2', ''])).toEqual([{ text: '没有', hit: false }])
     expect(splitByValues('', ['hunter2'])).toEqual([])
+  })
+})
+
+describe('双链切分', () => {
+  it('解析 [[m-xxxxxx]] 与 [[m-xxxxxx|别名]]，短 ID 统一转成小写并裁去别名空白', () => {
+    expect(splitWikiLinks('参考 [[M-ab2345|网络配置]] 与 [[m-345678]]，结束')).toEqual([
+      { text: '参考 ' },
+      { text: '[[M-ab2345|网络配置]]', link: { shortId: 'm-ab2345', alias: '网络配置' } },
+      { text: ' 与 ' },
+      { text: '[[m-345678]]', link: { shortId: 'm-345678', alias: null } },
+      { text: '，结束' },
+    ])
+    expect(splitWikiLinks('普通文本')).toEqual([{ text: '普通文本' }])
+    expect(splitWikiLinks('')).toEqual([])
+  })
+
+  it('别名为全空白时回退为无别名', () => {
+    expect(splitWikiLinks('[[m-234567|   ]]')).toEqual([
+      { text: '[[m-234567|   ]]', link: { shortId: 'm-234567', alias: null } },
+    ])
   })
 })

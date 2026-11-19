@@ -17,8 +17,8 @@ import { firstIssue } from '../http/openapi'
 import { lifecycleEvent, recallRequest, whoamiOf, type ScopeFor } from '../lifecycle/handlers'
 import { PROMPT_SEMANTIC_TIMEOUT_MS } from '../lifecycle/lifecycle'
 import { handleMcpRequest } from '../mcp/server'
-import { memoryServiceForKey, recallScopeForKey } from '../memory/context'
-import { MemoryError } from '../memory/service'
+import { entryServiceForKey, recallScopeForKey } from '../memory/context'
+import { MemoryError } from '../memory/errors'
 import { changeTracker } from './changes'
 import {
   restFailure,
@@ -55,7 +55,7 @@ const mcpRequest = (method: string, params: unknown) =>
 // 真实的 tools/list
 export async function benchTools(deps: Deps, key: KeyPrincipal): Promise<BenchTool[]> {
   const res = await handleMcpRequest(
-    memoryServiceForKey(deps, key),
+    entryServiceForKey(deps, key),
     recallScopeForKey(deps, key),
     credentialServiceForKey(deps, key),
     mcpRequest('tools/list', {}),
@@ -80,16 +80,26 @@ export function inProcessExecutor(
   const eventContext = { bench: { account, run } }
   // 工具步骤和真实的 /v1/mcp 一样不带会话上下文，按 Key 的全部权限读写
   const session = defaultSession(key)
-  const memory = memoryServiceForKey(deps, key, session, { maskSecret: true, eventContext })
+  let replayShortId: string | undefined
+  const entries = entryServiceForKey(deps, key, session, {
+    maskSecret: true,
+    eventContext,
+    takeReplayShortId: () => {
+      const id = replayShortId
+      replayShortId = undefined
+      return id
+    },
+  })
   const credentials = credentialServiceForKey(deps, key, session, {
     bench: true,
     eventContext,
   })
-  const scopeFor: ScopeFor = (s) => ({ ...recallScopeForKey(deps, key, s), record: () => {} })
+  const scopeFor: ScopeFor = (s, opts) =>
+    recallScopeForKey(deps, key, s, { ...opts, recordEvents: false })
   const tracker = changeTracker(
     deps,
     key,
-    memory,
+    entries,
     rollback
       ? { kind: 'transaction' }
       : // 只用来缩小扫描范围，留点余量，应用和数据库的时钟可能差一点
@@ -98,7 +108,7 @@ export function inProcessExecutor(
 
   const callTool = async (tool: string, args: unknown): Promise<StepOutcome> => {
     const res = await handleMcpRequest(
-      memory,
+      entries,
       scopeFor(session),
       credentials,
       mcpRequest('tools/call', { name: tool, arguments: args }),
@@ -115,7 +125,7 @@ export function inProcessExecutor(
     handler: () => Promise<unknown>,
   ): Promise<StepOutcome> => {
     try {
-      // 过一遍 JSON：和接入方收到的一样，Symbol 键上的记忆 id 带不出去
+      // 过一遍 JSON：和接入方收到的一样，Symbol 键上的词条 id 带不出去
       return restSuccess(kind, JSON.parse(JSON.stringify(await handler())))
     } catch (err) {
       if (err instanceof MemoryError) return restFailure(err.status, err.message)
@@ -142,14 +152,26 @@ export function inProcessExecutor(
       case 'boot':
         return rest('boot', () => scopeFor(session).boot())
       case 'whoami':
-        return rest('whoami', async () => whoamiOf(key))
+        return rest('whoami', () => whoamiOf(deps, key))
     }
   }
 
   return {
-    whoami: async () => whoamiOf(key),
+    whoami: () => whoamiOf(deps, key),
     async execute(step, options) {
-      const outcome = await call(step)
+      replayShortId =
+        options?.replaying &&
+        step.kind === 'tool' &&
+        step.tool === 'kioku_create' &&
+        'shortId' in step
+          ? step.shortId
+          : undefined
+      let outcome: StepOutcome
+      try {
+        outcome = await call(step)
+      } finally {
+        replayShortId = undefined
+      }
       // 这一步记下的都取走：被吞掉的错误（例如对象直连读取失败）不能算到下一步头上
       const detail = rollback?.takeDetail() ?? null
       // 重放的结果不返回：列改动是白跑查询，还拉长持锁的时间
@@ -207,12 +229,12 @@ export async function runBench(
   if (request.mode === 'real') {
     return runSteps(inProcessExecutor(deps, key, { run, account, rollback: null }), input)
   }
-  // 外部请求不进事务：事务开着时前面步骤的行锁和 URI 咨询锁都没放
+  // 外部请求不进事务：事务开着时前面步骤的行锁和咨询锁都没放
   const vectors = await prepareQueryVectors(
     deps,
     literalQueries(request.steps, run),
     benchLimits(deps).embedBudgetMs,
-    key.spaceId,
+    key.circleId,
   )
   return inRollback(deps, vectors, (scoped, rollback) =>
     runSteps(inProcessExecutor(scoped, key, { run, account, rollback }), input),

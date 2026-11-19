@@ -1,14 +1,15 @@
 <script setup lang="ts">
-import type { Layer, Sensitivity } from '@kioku/contracts'
+import type { EntryKind, Sensitivity, StrataBand } from '@kioku/contracts'
 
-import { layerLabels } from '../../labels'
+import { bandLabels, entryKindLabels } from '../../labels'
 
-// 目录和列表一行末尾的标记：机密反白，优先级只标最高的两档，层写简称。
-// 色块旁边要有文字，放不下全名时靠这里的简称
+// 目录和列表一行末尾的标记：机密反白，优先级只标最高的两档，变体数量大于 1 时标注，色带或物种写文字
 defineProps<{
-  layer?: Layer | null
+  band?: StrataBand | null
+  kind?: EntryKind | null
   sensitivity?: Sensitivity | null
   priority?: number | null
+  variantCount?: number | null
 }>()
 </script>
 
@@ -21,7 +22,11 @@ defineProps<{
       :class="{ top: priority === 0 }"
       >P{{ priority }}</span
     >
-    <span v-if="layer" class="flag-layer">{{ layerLabels[layer] }}</span>
+    <span v-if="variantCount && variantCount > 1" class="flag-variants"
+      >{{ variantCount }} 切片</span
+    >
+    <span v-if="band" class="flag-layer">{{ bandLabels[band] }}</span>
+    <span v-else-if="kind && kind !== 'entry'" class="flag-layer">{{ entryKindLabels[kind] }}</span>
   </span>
 </template>
 
@@ -50,7 +55,11 @@ defineProps<{
   font-weight: 700;
   color: inherit;
 }
-.flag-layer {
+.flag-layer,
+.flag-variants {
   color: var(--flag-muted, var(--ui-text-muted));
+}
+.flag-variants {
+  font-family: var(--font-mono);
 }
 </style>

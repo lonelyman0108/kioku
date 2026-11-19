@@ -33,7 +33,7 @@ import { formatShort, fromLocalInput, toLocalInput } from './time'
 
 // 凭据页的说法和计算：密码库连接、条目与凭据的访问记录
 
-// 凭据的新建、修改、删除、查看值和密码库连接的全部操作都只给空间所有者，别的成员只看列表：
+// 凭据的新建、修改、删除、查看值和密码库连接的全部操作都只给记忆圈所有者，别的成员只看列表：
 // 他们的访问密钥凭据能力一律是不可用，放开只会让人以为能用。服务端按同一条规则回 403
 export const canManageCredentials = (role: MemberRole | undefined) => role === 'owner'
 
@@ -94,9 +94,9 @@ export function checkNotice(
 // 列条目会对着连不上的密码库再同步一次，失败了还会自动重试。
 // 成功时服务端可能看到条目改过、清掉了「需要轮换」并把版本号加一：只重读条目列表，由它的查询函数
 // （vaultQueries.ts 的 fetchVaultItems）按条目的修改时间判断哪些凭据要重读，不一律让凭据与条数失效
-export function checkRefreshKeys(spaceId: string, succeeded: boolean): string[][] {
-  const connections = ['vault-connections', spaceId]
-  return succeeded ? [connections, ['vault-items', spaceId]] : [connections]
+export function checkRefreshKeys(circleId: string, succeeded: boolean): string[][] {
+  const connections = ['vault-connections', circleId]
+  return succeeded ? [connections, ['vault-items', circleId]] : [connections]
 }
 
 // 停用之后怎么恢复：处理掉原因，再重新检查

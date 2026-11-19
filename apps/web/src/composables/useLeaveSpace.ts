@@ -6,43 +6,43 @@ import { useRoute, useRouter } from 'vue-router'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { ME_KEY, queryClient } from '../query'
+import { dropCircleQueries, nextCircle, refreshCircles, stopCircleQueries } from '../spaces'
 import { hasUnsavedChanges } from './unsavedChanges'
-import { fetchMe, forgetSpace } from './useSession'
-import { dropSpaceQueries, nextSpace, refreshSpaces, stopSpaceQueries } from '../spaces'
+import { fetchMe, forgetCircle } from './useSession'
 
-// 离开或删除空间之后，按这个顺序：
-// 1. 停下这个空间正在取的查询，记住的空间正是它时忘掉；
-// 2. 当前页面属于这个空间时先离开：去别的空间的概览（按缓存里的空间列表挑），没有空间时回首页；
-//    未保存的改动随之作废，不再确认。在别处（实例 › 空间）删掉别的空间时留在原页；
-// 3. 会话只重取一次，空间与账号列表一起刷新；
-// 4. 等页面换完，丢掉这个空间的查询（只丢没有观察者的）。先丢再跳的话，还挂着的页面会为删掉的键重新请求
-export function useAfterSpaceGone() {
+// 离开或删除记忆圈之后，按这个顺序：
+// 1. 停下这个记忆圈正在取的查询，记住的记忆圈正是它时忘掉；
+// 2. 当前页面属于这个记忆圈时先离开：优先去个人记忆圈（否则去别的记忆圈）的概览，没有记忆圈时回首页；
+//    未保存的改动随之作废，不再确认。在别处（实例 › 记忆圈）删掉别的记忆圈时留在原页；
+// 3. 会话只重取一次，记忆圈与账号列表一起刷新；
+// 4. 等页面换完，丢掉这个记忆圈的查询（只丢没有观察者的）。先丢再跳的话，还挂着的页面会为删掉的键重新请求
+export function useAfterCircleGone() {
   const router = useRouter()
   const route = useRoute()
-  return async (spaceId: string) => {
-    await stopSpaceQueries(queryClient, spaceId)
-    forgetSpace(spaceId)
-    if (route.params.spaceId === spaceId) {
+  return async (circleId: string) => {
+    await stopCircleQueries(queryClient, circleId)
+    forgetCircle(circleId)
+    if (route.params.circleId === circleId) {
       const cached = queryClient.getQueryData<Me | null>(ME_KEY)
-      const next = nextSpace(cached?.spaces ?? [], spaceId)
+      const next = nextCircle(cached?.circles ?? [], circleId, cached?.personalCircleId)
       hasUnsavedChanges.value = false
       await router.replace(
-        next ? { name: 'overview', params: { spaceId: next } } : { name: 'home' },
+        next ? { name: 'overview', params: { circleId: next } } : { name: 'home' },
       )
     }
     await Promise.all([
       queryClient.fetchQuery<Me | null>({ queryKey: ME_KEY, queryFn: fetchMe, staleTime: 0 }),
-      refreshSpaces(queryClient, undefined, { me: false, accounts: true }),
+      refreshCircles(queryClient, undefined, { me: false, accounts: true }),
     ])
     await nextTick()
-    dropSpaceQueries(queryClient, spaceId)
+    dropCircleQueries(queryClient, circleId)
   }
 }
 
-// 当前账号离开空间：确认弹窗的状态与执行。失败的原因（例如刚成了唯一的所有者）留在弹窗里
-export function useLeaveSpace(spaceId: Ref<string>, accountId: Ref<string | undefined>) {
+// 当前账号离开共享记忆圈：确认弹窗的状态与执行。失败的原因（例如刚成了唯一的所有者）留在弹窗里
+export function useLeaveCircle(circleId: Ref<string>, accountId: Ref<string | undefined>) {
   const toast = useToast()
-  const afterGone = useAfterSpaceGone()
+  const afterGone = useAfterCircleGone()
   const open = ref(false)
   const busy = ref(false)
   const error = ref<string | null>(null)
@@ -55,12 +55,12 @@ export function useLeaveSpace(spaceId: Ref<string>, accountId: Ref<string | unde
     if (!id || busy.value) return
     busy.value = true
     error.value = null
-    const space = spaceId.value
+    const circle = circleId.value
     try {
-      await api.removeMember(space, id)
+      await api.removeMember(circle, id)
       open.value = false
-      toast.add({ title: '已离开空间', color: 'success' })
-      await afterGone(space)
+      toast.add({ title: '已离开记忆圈', color: 'success' })
+      await afterGone(circle)
     } catch (err) {
       error.value = err instanceof ApiError ? err.message : '离开失败'
     } finally {

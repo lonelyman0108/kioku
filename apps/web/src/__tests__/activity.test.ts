@@ -36,7 +36,7 @@ const item = (id: number, createdAt: string, extra: Partial<ActivityItem> = {}) 
     createdAt,
     type: 'update',
     actorKey: `account:${uuid}`,
-    memoryId: `m-${id}`,
+    entryId: `e-${id}`,
     ...extra,
   }) as ActivityItem
 
@@ -57,8 +57,8 @@ describe('按天分组与折叠', () => {
   it('同一天的放一组，组的先后和里面的先后不动；翻页后接在同一天后面', () => {
     const days = groupByDay(
       [
-        item(5, at(2026, 11, 8, 8), { memoryId: 'a' }),
-        item(4, at(2026, 11, 8, 1), { memoryId: 'b' }),
+        item(5, at(2026, 11, 8, 8), { entryId: 'a' }),
+        item(4, at(2026, 11, 8, 1), { entryId: 'b' }),
         item(3, at(2026, 11, 7, 23)),
         item(2, at(2026, 10, 28)),
         item(1, at(2025, 10, 28)),
@@ -71,16 +71,16 @@ describe('按天分组与折叠', () => {
   })
 
   it('同一个操作者接着修改同一条记忆折叠成一行，别的操作、别人、别的记忆或隔了一条的不折', () => {
-    const same = { memoryId: 'm', actorKey: 'bench' }
+    const same = { entryId: 'm', actorKey: 'bench' }
     const days = groupByDay(
       [
         item(9, at(2026, 11, 8, 10), same),
         item(8, at(2026, 11, 8, 9), same),
         item(7, at(2026, 11, 8, 8), same),
-        item(6, at(2026, 11, 8, 7), { ...same, actorKey: `app:${uuid}` }),
+        item(6, at(2026, 11, 8, 7), { ...same, actorKey: `client:${uuid}` }),
         item(5, at(2026, 11, 8, 6), same),
-        item(4, at(2026, 11, 8, 5), { ...same, type: 'move' }),
-        item(3, at(2026, 11, 8, 4), { ...same, type: 'move' }),
+        item(4, at(2026, 11, 8, 5), { ...same, type: 'transfer_out' }),
+        item(3, at(2026, 11, 8, 4), { ...same, type: 'transfer_out' }),
         item(2, at(2026, 11, 7, 23), same),
       ],
       today,
@@ -114,9 +114,9 @@ describe('地址里的状态', () => {
     const query = {
       from: '2026-11-01',
       to: '2026-11-05',
-      noActor: `app:${uuid},bench`,
+      noActor: `client:${uuid},bench`,
       noType: 'delete',
-      noLayer: 'user',
+      noKind: 'fact',
       noField: 'content,glossary',
       q: '会话',
       event: '42',
@@ -127,9 +127,9 @@ describe('地址里的状态', () => {
       from: '2026-11-01',
       to: '2026-11-05',
       off: {
-        actor: [`app:${uuid}`, 'bench'],
+        actor: [`client:${uuid}`, 'bench'],
         type: ['delete'],
-        layer: ['user'],
+        kind: ['fact'],
         field: ['content', 'glossary'],
       },
       q: '会话',
@@ -148,9 +148,11 @@ describe('地址里的状态', () => {
     expect(parseState({ from: '2026-02-30', to: '2026-03-01' }, today).range).toBe('30')
     expect(parseState({ range: 'year' }, today).range).toBe('30')
     expect(parseState({ range: 'all' }, today).range).toBe('all')
-    expect(parseState({ noType: 'access,update', noLayer: 'episode' }, today).off).toMatchObject({
+    expect(
+      parseState({ noType: 'access,update', noKind: 'unknown_kind' }, today).off,
+    ).toMatchObject({
       type: ['update'],
-      layer: [],
+      kind: [],
     })
     expect(parseState({ event: '3' }, today).event).toBe(3)
     expect(parseState({ event: '0' }, today).event).toBeNull()
@@ -162,10 +164,13 @@ describe('地址里的状态', () => {
       { length: 60 },
       (_, i) => `account:${uuid.slice(0, -2)}${String(i).padStart(2, '0')}`,
     )
-    const state = parseState({ noActor: ['bench', 'key:1', 'app:nope', ...many].join(',') }, today)
+    const state = parseState(
+      { noActor: ['bench', 'key:1', 'client:nope', ...many].join(',') },
+      today,
+    )
     expect(state.off.actor[0]).toBe('bench')
     expect(state.off.actor).not.toContain('key:1')
-    expect(state.off.actor).not.toContain('app:nope')
+    expect(state.off.actor).not.toContain('client:nope')
     expect(state.off.actor).toHaveLength(MAX_ACTOR_FILTER)
   })
 })
@@ -182,25 +187,22 @@ describe('交给接口的筛选', () => {
   it('取消勾选的换成剩下的；字段还带上没有改动字段的；操作者用排除', () => {
     const q = filterQuery(
       parseState(
-        { range: 'all', noLayer: 'user,app', noField: 'content', noActor: 'bench', q: 'x' },
+        { range: 'all', noKind: 'fact,episode', noField: 'content', noActor: 'bench', q: 'x' },
         today,
       ),
       today,
     )
     expect(q).toEqual({
-      layer: 'core,persona',
-      field: 'title,disclosure,priority,sensitivity,layer,uri,glossary,validTo,none',
+      kind: 'entry',
+      field: 'title,variants,topics,disclosure,priority,sensitivity,glossary,validTo,none',
       exceptActor: 'bench',
       q: 'x',
     })
   })
 
   it('固定的一组全部取消勾选（手写的地址）当作没有筛选', () => {
-    const q = filterQuery(
-      parseState({ range: 'all', noLayer: 'core,persona,app,user' }, today),
-      today,
-    )
-    expect(q.layer).toBeUndefined()
+    const q = filterQuery(parseState({ range: 'all', noKind: 'entry,fact,episode' }, today), today)
+    expect(q.kind).toBeUndefined()
   })
 })
 
@@ -279,18 +281,18 @@ describe('日历', () => {
 })
 
 describe('筛选的选项', () => {
-  it('归属与字段列全，操作只列出现过的与取消勾选的，取消勾选的操作者这次没出现也留着', () => {
+  it('类型与字段列全，操作只列出现过的与取消勾选的，取消勾选的操作者这次没出现也留着', () => {
     const facets: ActivityFacets = {
       total: 3,
       actors: [{ key: `account:${uuid}`, kind: 'account', name: '林默', count: 3 }],
       types: [{ type: 'update', count: 3 }],
-      layers: [{ layer: 'core', count: 3 }],
+      kinds: [{ kind: 'entry', count: 3 }],
       fields: [{ field: 'content', count: 2 }],
     }
     const options = facetOptions(facets, {
       actor: ['bench'],
       type: ['delete'],
-      layer: [],
+      kind: [],
       field: [],
     })
     expect(options.actor).toEqual([
@@ -298,11 +300,10 @@ describe('筛选的选项', () => {
       { key: 'bench', count: 0 },
     ])
     expect(options.type.map((t) => t.key)).toEqual(['update', 'delete'])
-    expect(options.layer.map((l) => [l.key, l.count])).toEqual([
-      ['core', 3],
-      ['persona', 0],
-      ['app', 0],
-      ['user', 0],
+    expect(options.kind.map((k) => [k.key, k.count])).toEqual([
+      ['entry', 3],
+      ['fact', 0],
+      ['episode', 0],
     ])
     expect(options.field.find((f) => f.key === 'content')!.count).toBe(2)
     expect(options.field.some((f) => f.key === 'none')).toBe(false)
@@ -310,32 +311,25 @@ describe('筛选的选项', () => {
 })
 
 describe('改动的标签', () => {
-  it('正文给增删行数，机密的不给；优先级、归属、敏感级写前后', () => {
+  it('正文给增删行数，机密的不给；优先级、敏感级写前后，主题与切片给增改删', () => {
     expect(changeSummary({ field: 'content', added: 2, removed: 1 })).toBe('+2 −1')
     expect(changeSummary({ field: 'content', added: 1, removed: 0 })).toBe('+1')
     expect(changeSummary({ field: 'content', added: null, removed: null })).toBe('')
     expect(changeSummary({ field: 'priority', before: 1, after: 0 })).toBe('1 → 0')
-    expect(changeSummary({ field: 'layer', before: 'core', after: 'user' })).toBe('通用 → 本人')
     expect(changeSummary({ field: 'sensitivity', before: 'internal', after: 'secret' })).toBe(
       '内部 → 机密',
     )
+    expect(changeSummary({ field: 'topics', added: ['工作'], removed: ['生活'] })).toBe(
+      '+工作 −生活',
+    )
+    expect(changeSummary({ field: 'variants', added: 1, modified: 2, removed: 1 })).toBe('+1 ~2 −1')
   })
 
-  it('标题、触发场景、坐标、关键词、有效期写成短语', () => {
+  it('标题、触发场景、关键词、有效期写成短语', () => {
     expect(changeSummary({ field: 'title', before: 'a', after: 'b' })).toBe('改名')
     expect(changeSummary({ field: 'disclosure', before: null, after: 'x' })).toBe('新增')
     expect(changeSummary({ field: 'disclosure', before: 'x', after: null })).toBe('清除')
     expect(changeSummary({ field: 'disclosure', before: 'x', after: 'y' })).toBe('改写')
-    expect(
-      changeSummary({
-        field: 'uri',
-        before: 'core://knowledge/pgvector',
-        after: 'core://knowledge/vector/pgvector',
-      }),
-    ).toBe('…/pgvector → …/vector/pgvector')
-    expect(changeSummary({ field: 'uri', before: 'core://a', after: 'core://b' })).toBe(
-      'core://a → core://b',
-    )
     expect(changeSummary({ field: 'glossary', added: ['语气'], removed: [] })).toBe('+语气')
     expect(changeSummary({ field: 'glossary', added: ['甲方', '乙方'], removed: ['丙方'] })).toBe(
       '+2 −丙方',
@@ -409,8 +403,8 @@ describe('退回按 UTC 分天', () => {
 
 describe('详情与时区', () => {
   it('详情按事件 id 读这一条改动，不再取整份历史；增删行数优先用画出来的差异', () => {
-    expect(activityDetail).toContain('api.activityEvent(props.spaceId, props.eventId)')
-    expect(activityDetail).not.toContain('memoryHistory(')
+    expect(activityDetail).toContain('api.activityEvent(props.circleId, props.eventId)')
+    expect(activityDetail).not.toContain('entryHistory(')
     expect(activityDetail).toContain('lineCounts(change).added')
     // 逐行对齐算出了差异才用它的行数；正文太长整段对比时用列表的近似值，并写明
     expect(activityDetail).toContain('return diff.value?.complete ? diff.value : change')
@@ -427,7 +421,7 @@ describe('详情与时区', () => {
     })
     for (const [path, source] of Object.entries(sources)) {
       if (path.includes('__tests__') || path.endsWith('MemoryHistory.vue')) continue
-      if (!source.includes("'memory-history'")) continue
+      if (!source.includes("'entry-history'")) continue
       expect(source.includes("'activity-event'"), path).toBe(true)
     }
   })

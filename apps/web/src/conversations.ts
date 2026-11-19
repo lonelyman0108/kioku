@@ -12,31 +12,54 @@ import { originScopeText } from './labels'
 export const conversationKindLabels: Record<ConversationKind, string> = {
   group: '群聊',
   direct: '私聊',
-  none: '不带会话上下文',
+  channel: '频道',
+  none: '本地会话',
 }
 
-// 列表上的名字：群名或私聊的人。不带会话上下文的会话只有本人看得到，名字总是当前账号，写应用的名字才分得开
-export const conversationTitle = (c: Pick<ConversationInfo, 'kind' | 'app' | 'displayName'>) =>
-  c.kind === 'none' ? c.app.name : c.displayName
+// 列表上的名字：群名、私聊的人、频道名；本地会话按接入实例、项目与设备区分
+export function conversationTitle(
+  c: Pick<
+    ConversationInfo,
+    'kind' | 'client' | 'deviceKey' | 'projectSlug' | 'subject' | 'displayName'
+  >,
+): string {
+  if (c.kind === 'none') {
+    const suffix = [c.projectSlug, c.deviceKey].filter(Boolean).join(' · ')
+    if (c.client?.name) return suffix ? `${c.client.name} · ${suffix}` : c.client.name
+    return c.displayName.trim() || suffix || conversationKindLabels.none
+  }
+  return c.displayName.trim() || c.subject?.displayName || conversationKindLabels[c.kind]
+}
 
-// 群聊还是私聊；不带会话上下文的写「本人」。应用的面板里只写这个，应用不用再说一遍
+// 群聊、私聊或频道；不带会话上下文的写「本人」
 export const conversationKind = (c: Pick<ConversationInfo, 'kind'>) =>
   c.kind === 'none' ? '本人' : conversationKindLabels[c.kind]
 
-// 第二行：哪个应用、群聊还是私聊；不带会话上下文的写「本人」
-export const conversationSubline = (c: Pick<ConversationInfo, 'kind' | 'app'>) =>
-  c.kind === 'none' ? '本人' : `${c.app.name} · ${conversationKind(c)}`
+// 第二行：哪个接入实例、会话类型；本地会话写「本人」
+export const conversationSubline = (c: Pick<ConversationInfo, 'kind' | 'client'>) =>
+  c.kind === 'none' ? '本人' : `${c.client?.name ?? '已删除的接入实例'} · ${conversationKind(c)}`
 
-// 事实听自哪里：群或私聊前面写「听自」，全局与应用写下的照原样说
+// 列表或详情里的附加信息标签：接入实例、项目、设备
+export function conversationMeta(
+  c: Pick<ConversationInfo, 'client' | 'deviceKey' | 'projectSlug'>,
+): string[] {
+  return [
+    c.client?.name ?? null,
+    c.projectSlug ? `项目 ${c.projectSlug}` : null,
+    c.deviceKey ? `设备 ${c.deviceKey}` : null,
+  ].filter((v): v is string => Boolean(v))
+}
+
+// 事实听自哪里：群或私聊前面写「听自」，全局与接入实例写下的照原样说
 export function heardFrom(scope: OriginScope): string {
   const place = originScopeText(scope)
   return scope.kind === 'group' || scope.kind === 'direct' ? `听自${place}` : place
 }
 
 // 地址里的会话：对话页的会话分页打开某个会话
-export const conversationRoute = (spaceId: string, id: string) => ({
+export const conversationRoute = (circleId: string, id: string) => ({
   name: 'conversations',
-  params: { spaceId },
+  params: { circleId },
   query: { id },
 })
 

@@ -88,7 +88,7 @@ const voidRoute = createRoute({
 
 const LIMIT_MESSAGES: Record<AttemptLimit['scope'], string> = {
   account: '输错次数过多',
-  app: '近期输错绑定码的次数过多',
+  client: '近期输错绑定码的次数过多',
   void: '作废请求过多',
 }
 
@@ -195,7 +195,7 @@ export function bindingRoutes(deps: Deps) {
             200,
           )
         case 'merged':
-          await enqueueMerged(deps, key.spaceId, result.outcome)
+          await enqueueMerged(deps, key.circleId, result.outcome)
           return c.json({ status: 'merged' as const, needsApproval: false, expiresAt: null }, 200)
         case 'pending':
           return c.json(
@@ -215,7 +215,7 @@ export function bindingRoutes(deps: Deps) {
             {
               error: result.issuerLinked
                 ? '两个账号已标记为不同成员，无法绑定'
-                : '此账号已标记为空间成员，无法合并到其他账号。可改用此账号申请绑定码。',
+                : '此账号已标记为记忆圈成员，无法合并到其他账号。可改用此账号申请绑定码。',
             },
             403,
           )

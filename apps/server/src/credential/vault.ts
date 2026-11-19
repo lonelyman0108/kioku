@@ -20,9 +20,9 @@ import { and, asc, count, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from
 
 import { decryptSecret, encryptSecret } from '../crypto/envelope'
 import { decryptionKey, encryptionKey, type MasterKey } from '../crypto/keyring'
-import { isUniqueViolation, withSpace, type Db, type Tx } from '../db/client'
+import { isUniqueViolation, withCircle, type Db, type Tx } from '../db/client'
 import { credentials, vaultConnections } from '../db/schema'
-import { MemoryError } from '../memory/service'
+import { MemoryError } from '../memory/errors'
 import { serverUrlProblem } from './bitwarden/http'
 import {
   VaultError,
@@ -206,7 +206,7 @@ function sessionsOf(client: VaultClient): Map<string, CachedSession> {
 
 export interface VaultContext {
   db: Db
-  spaceId: string
+  circleId: string
   ownerAccountId: string
   masterKey: MasterKey | null
   client: VaultClient
@@ -218,7 +218,7 @@ export class VaultConnections {
   constructor(private readonly ctx: VaultContext) {}
 
   private run<T>(fn: (tx: Tx) => Promise<T>): Promise<T> {
-    return withSpace(this.ctx.db, this.ctx.spaceId, fn)
+    return withCircle(this.ctx.db, this.ctx.circleId, fn)
   }
 
   private get cache(): Map<string, CachedSession> {
@@ -315,7 +315,7 @@ export class VaultConnections {
 
   // 连接一个账号。同一个账号（同一服务器上的账号 id）已经有连接时（包括已断开的）复用那一行
   private async exclusive<T>(fn: () => Promise<T>): Promise<T> {
-    const key = `${this.ctx.spaceId}/${this.ctx.ownerAccountId}`
+    const key = `${this.ctx.circleId}/${this.ctx.ownerAccountId}`
     if (LOGINS_IN_FLIGHT.has(key)) {
       throw new MemoryError(409, '正在处理上一次的连接请求，请等它结束后再试')
     }
@@ -462,7 +462,7 @@ export class VaultConnections {
             .insert(vaultConnections)
             .values({
               id,
-              spaceId: this.ctx.spaceId,
+              circleId: this.ctx.circleId,
               ownerAccountId: this.ctx.ownerAccountId,
               serverUrl: input.serverUrl,
               vaultUserId: result.account.userId,

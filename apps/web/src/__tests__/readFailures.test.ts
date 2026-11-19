@@ -22,7 +22,7 @@ import appsPage from '../pages/AppsPage.vue?raw'
 import credentialsPage from '../pages/CredentialsPage.vue?raw'
 import memoriesPage from '../pages/MemoriesPage.vue?raw'
 import overviewPage from '../pages/OverviewPage.vue?raw'
-import memoryRootPanel from '../components/MemoryRootPanel.vue?raw'
+import vocabularyPage from '../pages/VocabularyPage.vue?raw'
 import personaPanel from '../components/PersonaPanel.vue?raw'
 import recallPage from '../pages/RecallPage.vue?raw'
 import subjectsPage from '../components/ContactList.vue?raw'
@@ -204,12 +204,13 @@ describe('读取失败', () => {
     ['记忆列表', memoryListView, 'list'],
     ['已过期的记忆', expiredMemories, 'expired'],
     ['已删除的记忆', deletedMemories, 'deleted'],
-    ['记忆详情', memoryEditor, 'memory'],
+    ['记忆详情', memoryEditor, 'entry'],
     ['待确认内容', inboxReview, 'queue'],
     ['整理建议', dreamSuggestions, 'suggestions'],
     ['疑似明文凭据', inboxPlaintext, 'list'],
     ['账号绑定', inboxBindings, 'overview'],
-    ['人格列表', memoryRootPanel, 'personas'],
+    ['切面词表', vocabularyPage, 'facetsQuery'],
+    ['人格列表', vocabularyPage, 'personasQuery'],
     ['人格详情', personaPanel, 'selected'],
     ['联系人', subjectsPage, 'section.query'],
     ['联系人详情', subjectDetailPage, 'subject'],
@@ -259,7 +260,7 @@ describe('读取失败', () => {
       ['应用详情', appDetailPage],
     ] as const) {
       expect(source, name).toContain(
-        'const failures = computed(() => failedReads([apps, personas, members]))',
+        'const failures = computed(() => failedReads([clients, personas, members]))',
       )
       const [note] = notesOf(source)
       expect(bound(note!, 'query'), name).toBe('failure.read')
@@ -271,25 +272,27 @@ describe('读取失败', () => {
 })
 
 describe('读到过的内容不被错误盖掉', () => {
-  it('记忆目录：根的下一级读失败时树照常显示、展开的节点不丢，错误放在上面', () => {
-    expect(memoriesPage).toContain('<ReadFailureNote :query="rootsRead" />')
-    // 有没有读到过看根节点：有就写刷新失败
-    expect(memoriesPage).toContain(
-      'data: computed(() => (roots.value.length ? roots.value : undefined))',
-    )
+  it('记忆目录：刷新失败时树照常显示、展开的节点不丢，错误放在上面', () => {
+    const errorEl = elementsOf(template(memoriesPage)).find((el) =>
+      el.props?.some((p) => p.name === 'if' && p.exp?.content === 'browse.isError.value'),
+    )!
+    expect(errorEl).toBeDefined()
+    expect(memoriesPage).toContain('<ReadFailureNote :query="browse" />')
     const tree = elementsOf(template(memoriesPage)).find((el) => el.tag === 'UTree')!
-    const condition = tree.props?.find((p) => p.name === 'if')?.exp?.content
-    // 四个根是固定的，一开始就在
-    expect(condition).toBe('roots.length')
-    expect(tree.props?.some((p) => p.name === 'else' || p.name === 'else-if')).toBe(false)
+    const elseIf = tree.props?.find((p) => p.name === 'else-if')?.exp?.content
+    expect(elseIf).toBe('treeItems.length')
+    // 骨架只在 isPending 时占位，不能在 isError 时把已读到的树挡住
+    const pendingEl = elementsOf(template(memoriesPage)).find((el) =>
+      el.props?.some((p) => p.name === 'if' && p.exp?.content === 'browse.isPending.value'),
+    )
+    expect(pendingEl).toBeDefined()
   })
 
-  it('记忆目录：换空间时上一个空间的树和错误都清掉，不拿旧的节点去请求新空间', () => {
-    const watcher = /watch\(spaceId, \(\) => \{[^]*?\n\}\)/.exec(memoriesPage)![0]
-    expect(watcher).toContain('roots.value = []')
-    expect(watcher).toContain('rootsError.value = null')
-    expect(watcher).toContain('expanded.value = [...DEFAULT_EXPANDED]')
-    expect(watcher.indexOf('roots.value = []')).toBeLessThan(watcher.indexOf('serially(loadRoots)'))
+  it('记忆目录：换记忆圈时上一个记忆圈的展开与草稿都清掉', () => {
+    const watcher = /watch\(circleId, \(\) => \{[^]*?\n\}\)/.exec(memoriesPage)![0]
+    expect(watcher).toContain('createOpen.value = false')
+    expect(watcher).toContain('preferredItemKey.value = null')
+    expect(watcher).toContain('expanded.value = []')
   })
 
   it.each([
@@ -334,9 +337,7 @@ describe('读到过的内容不被错误盖掉', () => {
   })
 
   it('记忆详情：刷新失败时表单留着，提示带重试', () => {
-    expect(memoryEditor).toContain(
-      '<ReadFailureNote v-if="memory.isError.value" :query="memory" />',
-    )
+    expect(memoryEditor).toContain('<ReadFailureNote v-if="entry.isError.value" :query="entry" />')
   })
 
   it('哪里都不再自己传 stale：读到过没有由 ReadFailureNote 自己看', () => {

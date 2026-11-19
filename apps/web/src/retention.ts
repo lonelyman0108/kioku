@@ -58,16 +58,11 @@ export function deletionNotice(retention: DeletionRetention): string {
   return `删除超过 ${retention.days} 天后永久清除，之后只能从备份恢复。${pauseNotice(retention)}`
 }
 
-// 已过期列表上方给「坐标已释放」的说明：释放坐标时算作删除，按释放的时间清除；没释放的过期记忆不清除
-export function releasedNotice(retention: DeletionRetention): string {
-  return `标记为「坐标已释放」的记忆，释放超过 ${retention.days} 天后永久清除，之后只能从备份恢复；未释放的记忆一直保留。${pauseNotice(retention)}`
-}
-
 // 一次清理每一类删了多少：卡片上按这个顺序列
 export const retentionLabels: Record<keyof RetentionCounts, string> = {
-  deletedMemories: '已删除的记忆',
+  deletedEntries: '已删除的记忆',
   supersededFacts: '已被取代的事实',
-  expiredSummaries: '过期的会话摘要',
+  expiredEpisodes: '过期的会话摘要',
   orphanEvents: '记忆已不存在的历史',
   scrubbedSnapshots: '已抹除正文的历史快照',
   extractionRuns: '抽取记录',

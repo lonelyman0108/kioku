@@ -35,21 +35,21 @@ const props = defineProps<{
   groups: readonly SettingsFrameGroup[]
   group: string
   current: string
-  spaceId?: string
+  circleId?: string
 }>()
 
 const active = computed(() => props.groups.find((g) => g.key === props.group))
 const panes = computed(() => active.value?.sections ?? [])
 const currentPane = computed(() => panes.value.find((s) => s.key === props.current))
 
-// 各小节共用一个滚动区（右边那一栏）：切走时按组、空间与小节记下位置，切回来时回到原处
+// 各小节共用一个滚动区（右边那一栏）：切走时按组、记忆圈与小节记下位置，切回来时回到原处
 const scroller = ref<HTMLElement | null>(null)
 const treeNav = ref<HTMLElement | null>(null)
 const mobileNav = ref<HTMLElement | null>(null)
 const positions = new Map<string, number>()
 
-const posKey = (group: string, spaceId: string | undefined, section: string) =>
-  `${group}:${spaceId ?? ''}:${section}`
+const posKey = (group: string, circleId: string | undefined, section: string) =>
+  `${group}:${circleId ?? ''}:${section}`
 
 // 窄屏横向滚动条与左栏树中都要把当前小节滚动进可见范围
 function revealCurrent() {
@@ -62,14 +62,14 @@ function revealCurrent() {
 }
 
 watch(
-  [() => props.current, () => props.spaceId],
-  async ([next, nextSpace], [previous, prevSpace]) => {
+  [() => props.current, () => props.circleId],
+  async ([next, nextCircle], [previous, prevCircle]) => {
     // 离开这一页时小节也算变了，等下面这一拍的时候组件可能已经卸载，ref 成了 null
     const area = scroller.value
     if (!area) return
-    positions.set(posKey(props.group, prevSpace, previous), area.scrollTop)
+    positions.set(posKey(props.group, prevCircle, previous), area.scrollTop)
     await nextTick()
-    area.scrollTop = positions.get(posKey(props.group, nextSpace, next)) ?? 0
+    area.scrollTop = positions.get(posKey(props.group, nextCircle, next)) ?? 0
     revealCurrent()
   },
 )

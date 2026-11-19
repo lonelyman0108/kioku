@@ -1,16 +1,23 @@
 import type { BenchScenarioInput } from '@kioku/contracts'
 
-import { EXPIRES, GUIDANCE_START, USER_WRITE, runUri } from './shared'
+import {
+  BENCH_DEVICE_KEY,
+  BENCH_PROJECT,
+  ENTRY_WRITE,
+  EXPIRES,
+  GUIDANCE_START,
+  runTitle,
+} from './shared'
 
-const NOTE = runUri('note')
 const KEYWORD = 'bench${run}'
 const SESSION_ID = 'bench-${run}'
 
-// Claude Code 一次会话：会话开始注入、每轮召回，模型读写记忆。生命周期事件不带会话上下文，和钩子一样
+// Claude Code / Codex 一次会话：会话开始注入、每轮召回，模型用短 ID 读写词条。生命周期事件不带会话上下文，带固定设备与项目标识
 export const claudeCodeSession: BenchScenarioInput = {
   id: 'claude-code-session',
   title: 'Claude Code 一次会话',
-  description: '会话开始时注入启动加载的内容，每轮输入召回，模型用工具读写记忆，最后删掉写下的。',
+  description:
+    '会话开始时注入启动加载的内容，每轮输入召回，模型用工具读写词条并验证短 ID，最后删掉写下的。',
   runtimes: ['claudecode', 'codex'],
   steps: [
     {
@@ -19,14 +26,21 @@ export const claudeCodeSession: BenchScenarioInput = {
       body: {
         event: 'session.start',
         sessionId: SESSION_ID,
-        project: { dirName: 'bench-${run}' },
+        deviceKey: BENCH_DEVICE_KEY,
+        project: BENCH_PROJECT,
       },
       expect: { error: false, contains: [GUIDANCE_START] },
     },
     {
       kind: 'lifecycle',
       label: '每轮输入的召回',
-      body: { event: 'prompt.submit', sessionId: SESSION_ID, prompt: '这个项目的约定是什么？' },
+      body: {
+        event: 'prompt.submit',
+        sessionId: SESSION_ID,
+        deviceKey: BENCH_DEVICE_KEY,
+        project: BENCH_PROJECT,
+        prompt: '这个项目的约定是什么？',
+      },
       expect: { error: false },
     },
     {
@@ -34,38 +48,39 @@ export const claudeCodeSession: BenchScenarioInput = {
       label: '记下一条',
       tool: 'kioku_create',
       arguments: {
-        uri: NOTE,
+        title: runTitle('会话词条'),
         content: '测试台写下的记忆，运行标记 ${run}。',
+        sensitivity: 'private',
         priority: 2,
         disclosure: '测试台的 Claude Code 会话场景',
         glossary: [KEYWORD],
         valid_to: EXPIRES,
       },
-      requires: USER_WRITE,
-      expect: { error: false, contains: [`URI: ${NOTE}`, '版本: 1'] },
-      capture: { version: '版本: ' },
+      requires: ENTRY_WRITE,
+      expect: { error: false, contains: ['版本: 1'] },
+      capture: { id: 'ID: ', version: '版本: ' },
     },
     {
       kind: 'lifecycle',
       label: '下一轮召回得到它',
       body: { event: 'prompt.submit', sessionId: SESSION_ID, prompt: `回忆一下 ${KEYWORD} 这条` },
-      requires: USER_WRITE,
-      expect: { error: false, uris: [NOTE] },
+      requires: ENTRY_WRITE,
+      expect: { error: false, shortIds: ['${id}'] },
     },
     {
       kind: 'tool',
       label: '读正文',
       tool: 'kioku_get',
-      arguments: { uri: NOTE },
-      requires: USER_WRITE,
+      arguments: { id: '${id}' },
+      requires: ENTRY_WRITE,
       expect: { error: false, contains: ['运行标记 ${run}', 'Disclosure: '] },
     },
     {
       kind: 'tool',
       label: '改它',
       tool: 'kioku_update',
-      arguments: { uri: NOTE, priority: 3, expected_version: '${version}' },
-      requires: USER_WRITE,
+      arguments: { id: '${id}', priority: 3, expected_version: '${version}' },
+      requires: ENTRY_WRITE,
       expect: { error: false, contains: ['priority: 3', '版本: 2'] },
     },
     {
@@ -73,15 +88,15 @@ export const claudeCodeSession: BenchScenarioInput = {
       label: '搜得到',
       tool: 'kioku_search',
       arguments: { query: KEYWORD },
-      requires: USER_WRITE,
-      expect: { error: false, uris: [NOTE] },
+      requires: ENTRY_WRITE,
+      expect: { error: false, shortIds: ['${id}'] },
     },
     {
       kind: 'tool',
       label: '删掉',
       tool: 'kioku_delete',
-      arguments: { uri: NOTE },
-      requires: USER_WRITE,
+      arguments: { id: '${id}' },
+      requires: ENTRY_WRITE,
       expect: { error: false },
     },
   ],

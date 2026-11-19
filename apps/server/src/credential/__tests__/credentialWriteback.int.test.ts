@@ -7,10 +7,10 @@ import type {
   CredentialAccess,
   CredentialEventList,
   CredentialSummary,
+  ConsoleEntryView,
   CredentialWriteError,
   KeyCreatedCredential,
   KeyCredentialList,
-  MemoryView,
   VaultCheckResult,
   VaultConnection,
   VaultConnectionList,
@@ -23,7 +23,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 
 import { createApp } from '../../app'
 import { principalForKeyId } from '../../auth/middleware'
-import { isUniqueViolation, pgErrorCode, withSpace, type Database } from '../../db/client'
+import { isUniqueViolation, pgErrorCode, withCircle, type Database } from '../../db/client'
 import { credentials, vaultConnections } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
@@ -32,7 +32,7 @@ import { bearer, bootstrap, FULL_SCOPES, jsonRequest, type Workspace } from '../
 import { credentialServiceForKey } from '../context'
 import { BENCH_VAULT_WRITE, credentialExpiry, CREDENTIAL_ATTENTION } from '../service'
 import { observeRevisions, VaultConnections } from '../vault'
-import { MemoryService } from '../../memory/service'
+import { EntryService } from '../../memory/service'
 
 const EMAIL = 'agent@example.com'
 const MASTER = 'correct-master-password'
@@ -47,7 +47,7 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
   let vault: FakeVault
   let key: string
   let keyId: string
-  let appId: string
+  let clientId: string
 
   beforeAll(async () => {
     database = await openTestDatabase()
@@ -73,8 +73,8 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
       vault: vault.client,
     })
     ws = await bootstrap(app)
-    appId = (await ws.createApp('agent')).id
-    const created = await ws.createKey(appId, FULL_SCOPES)
+    clientId = (await ws.createClient('agent')).id
+    const created = await ws.createKey(clientId, FULL_SCOPES)
     key = created.key
     keyId = created.id
   })
@@ -92,7 +92,9 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
         : jsonRequest(method, body, headers),
     )
   const asMember = (method: string, path: string, body?: unknown) =>
-    send(method, `/v1/spaces/${ws.spaceId}${path}`, body, { cookie: ws.cookie })
+    send(method, `/v1/circles/${ws.circleId}${path}`, body, { cookie: ws.cookie })
+  const asPersonal = (method: string, path: string, body?: unknown) =>
+    send(method, `/v1/circles/${ws.personalCircleId}${path}`, body, { cookie: ws.cookie })
   const asKey = (method: string, path: string, body?: unknown) =>
     send(method, `/v1${path}`, body, bearer(key))
   const ok = async <T>(res: Response, status = 200): Promise<T> => {
@@ -129,13 +131,13 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
     (await ok<ConsoleCredentialList>(await asMember('GET', `/credentials${query}`))).items
   const row = async (id: string) =>
     (
-      await withSpace(database.db, ws.spaceId, (tx) =>
+      await withCircle(database.db, ws.circleId, (tx) =>
         tx.select().from(credentials).where(eq(credentials.id, id)),
       )
     )[0]!
   const connectionRow = async (id: string) =>
     (
-      await withSpace(database.db, ws.spaceId, (tx) =>
+      await withCircle(database.db, ws.circleId, (tx) =>
         tx.select().from(vaultConnections).where(eq(vaultConnections.id, id)),
       )
     )[0]!
@@ -143,7 +145,7 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
     (await ok<CredentialEventList>(await asMember('GET', `/credentials/${id}/events${query}`)))
       .items
   const vaultCount = () =>
-    withSpace(database.db, ws.spaceId, (tx) => tx.select().from(credentials)).then(
+    withCircle(database.db, ws.circleId, (tx) => tx.select().from(credentials)).then(
       (rows) => rows.length,
     )
   const benchService = async () =>
@@ -199,7 +201,7 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
         collectionName: 'Agent',
       })
       // 数据库也挡着第二个去处
-      const err = await withSpace(database.db, ws.spaceId, (tx) =>
+      const err = await withCircle(database.db, ws.circleId, (tx) =>
         tx
           .update(vaultConnections)
           .set({
@@ -267,7 +269,7 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
         uris: [{ uri: 'https://nas.example.com:5001', autofill: true }],
       })
       expect(loginRow).toMatchObject({
-        appIds: [appId],
+        clientIds: [clientId],
         vaultRevision: loginItem.revisionDate,
         fields: [
           { name: 'password', itemField: 'login.password' },
@@ -401,7 +403,7 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
           .items
         await ok(await asMember('DELETE', `/vault-connections/${conn!.id}/destination`))
         await occupy(identifier)()
-        await withSpace(database.db, ws.spaceId, (tx) =>
+        await withCircle(database.db, ws.circleId, (tx) =>
           tx
             .update(vaultConnections)
             .set({
@@ -658,10 +660,10 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
     it('SQL 的待处理条件和 JS 的到期判断逐条一致', async () => {
       const now = Date.now()
       const offsets = [-DAY, -1000, 60_000, 3 * DAY, 7 * DAY - 60_000, 7 * DAY + 60_000, 30 * DAY]
-      await withSpace(database.db, ws.spaceId, (tx) =>
+      await withCircle(database.db, ws.circleId, (tx) =>
         tx.insert(credentials).values(
           offsets.map((offset, i) => ({
-            spaceId: ws.spaceId,
+            circleId: ws.circleId,
             ownerAccountId: ws.accountId,
             identifier: `c${i}`,
             name: `c${i}`,
@@ -672,7 +674,7 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
           })),
         ),
       )
-      const flagged = await withSpace(database.db, ws.spaceId, (tx) =>
+      const flagged = await withCircle(database.db, ws.circleId, (tx) =>
         tx
           .select({ identifier: credentials.identifier })
           .from(credentials)
@@ -810,9 +812,9 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
   describe('转存的新建', () => {
     const BODY = '路由器的密码：hunter2-router'
     const remember = async () =>
-      ok<MemoryView>(
-        await asMember('POST', '/memories', {
-          uri: 'user://notes/router',
+      ok<ConsoleEntryView>(
+        await asPersonal('POST', '/entries', {
+          title: 'notes/router',
           content: BODY,
           sensitivity: 'private',
           allowPlaintext: true,
@@ -821,11 +823,23 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
       )
 
     it('设了去处时写进密码库；转存的事务失败时错误带上留下的条目与原因', async () => {
-      await withDestination()
+      const personalConn = await ok<VaultConnectResult>(
+        await asPersonal('POST', '/vault-connections', {
+          serverUrl: SERVER,
+          email: EMAIL,
+          masterPassword: MASTER,
+        }),
+      )
+      if (personalConn.kind !== 'connected') throw new Error('没有连上')
+      await ok<VaultConnectionList>(
+        await asPersonal('PUT', `/vault-connections/${personalConn.connection.id}/destination`, {
+          collectionId: FAKE_COLLECTION,
+        }),
+      )
       const m = await remember()
       const converted = await ok<{ storedIn: unknown; credential: ConsoleCredential }>(
-        await asMember('POST', '/memories/convert-to-credential', {
-          memoryId: m.id,
+        await asPersonal('POST', '/entries/convert-to-credential', {
+          entryId: m.id,
           expectedVersion: m.version,
           value: 'hunter2-router',
           target: { kind: 'new', identifier: 'router', name: '路由器', field: 'password' },
@@ -834,9 +848,9 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
       expect(converted.storedIn).toEqual({ kind: 'vault', collectionName: 'Agent' })
       expect(converted.credential.source).toBe('vault')
 
-      const other = await ok<MemoryView>(
-        await asMember('POST', '/memories', {
-          uri: 'user://notes/mail',
+      const other = await ok<ConsoleEntryView>(
+        await asPersonal('POST', '/entries', {
+          title: 'notes/mail',
           content: '邮箱密码：mail-secret-1',
           sensitivity: 'private',
           allowPlaintext: true,
@@ -846,8 +860,8 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
       // 能在写条目之前查的先查：版本不对、正文里没有这段值都不往集合里写
       const created = vault.calls.createItem
       const stale = await failure(
-        await asMember('POST', '/memories/convert-to-credential', {
-          memoryId: other.id,
+        await asPersonal('POST', '/entries/convert-to-credential', {
+          entryId: other.id,
           expectedVersion: other.version + 1,
           value: 'mail-secret-1',
           target: { kind: 'new', identifier: 'mail', name: '邮箱', field: 'password' },
@@ -857,8 +871,8 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
       expect(stale.reason).toBe('version')
       expect(stale.vaultItem).toBeUndefined()
       const missing = await failure(
-        await asMember('POST', '/memories/convert-to-credential', {
-          memoryId: other.id,
+        await asPersonal('POST', '/entries/convert-to-credential', {
+          entryId: other.id,
           expectedVersion: other.version,
           value: 'not-in-the-body',
           target: { kind: 'new', identifier: 'mail', name: '邮箱', field: 'password' },
@@ -871,8 +885,8 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
       // 写条目之后、转存的事务之前记忆被改了：按留下的条目报
       vault.state.beforeWrite = async () => {
         await ok(
-          await asMember('PATCH', '/memories', {
-            uri: 'user://notes/mail',
+          await asPersonal('PATCH', '/entries', {
+            id: other.id,
             expectedVersion: other.version,
             content: '邮箱密码：mail-secret-1（改过）',
             allowPlaintext: true,
@@ -880,8 +894,8 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
         )
       }
       const failed = await failure(
-        await asMember('POST', '/memories/convert-to-credential', {
-          memoryId: other.id,
+        await asPersonal('POST', '/entries/convert-to-credential', {
+          entryId: other.id,
           expectedVersion: other.version,
           value: 'mail-secret-1',
           target: { kind: 'new', identifier: 'mail', name: '邮箱', field: 'password' },
@@ -988,26 +1002,26 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
         }),
         201,
       )
-      expect(created.appIds).toBeNull()
+      expect(created.clientIds).toBeNull()
       vault.state.beforeWrite = async () => {
         await ok(
           await asMember('PATCH', `/credentials/${created.id}`, {
             expectedVersion: 1,
-            appIds: [appId],
+            clientIds: [clientId],
           }),
         )
       }
       const err = await failure(
         await asMember('PATCH', `/credentials/${created.id}`, {
           expectedVersion: 1,
-          appIds: null,
+          clientIds: null,
           values: { password: 'new-pass' },
         }),
         409,
       )
       expect(err.reason).toBe('version')
       const after = await row(created.id)
-      expect(after.appIds).toEqual([appId])
+      expect(after.clientIds).toEqual([clientId])
       expect(vault.stored(after.vaultItemId!)!.values['login.password']).toBe('new-pass')
       expect(after.vaultRevision).toBe(vault.stored(after.vaultItemId!)!.revisionDate)
       expect((await events(created.id))[0]).toMatchObject({ type: 'update', changes: ['values'] })
@@ -1064,7 +1078,7 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
       const created = await seed()
       const itemId = (await row(created.id)).vaultItemId!
       const clear = () =>
-        withSpace(database.db, ws.spaceId, (tx) =>
+        withCircle(database.db, ws.circleId, (tx) =>
           tx.update(credentials).set({ vaultRevision: null }).where(eq(credentials.id, created.id)),
         )
       // 值相同：客户端不发修改，读到的修改时间照样记下，版本不变
@@ -1112,10 +1126,10 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
     })
 
     it('转存托管时不先查记忆：预检查只在写进密码库之前跑', async () => {
-      const spy = vi.spyOn(MemoryService.prototype, 'checkConvertible')
-      const m = await ok<MemoryView>(
-        await asMember('POST', '/memories', {
-          uri: 'user://notes/wifi',
+      const spy = vi.spyOn(EntryService.prototype, 'checkConvertible')
+      const m = await ok<ConsoleEntryView>(
+        await asPersonal('POST', '/entries', {
+          title: 'notes/wifi',
           content: '无线密码：wifi-pass-1',
           sensitivity: 'private',
           allowPlaintext: true,
@@ -1123,8 +1137,8 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
         201,
       )
       await ok(
-        await asMember('POST', '/memories/convert-to-credential', {
-          memoryId: m.id,
+        await asPersonal('POST', '/entries/convert-to-credential', {
+          entryId: m.id,
           expectedVersion: m.version,
           value: 'wifi-pass-1',
           target: { kind: 'new', identifier: 'wifi', name: '无线网络', field: 'password' },
@@ -1180,9 +1194,9 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
       await ok(await setDestination(connection.id))
       // 写进密码库之后，同一个标识被直接写进库里占掉
       vault.state.beforeWrite = async () => {
-        await withSpace(database.db, ws.spaceId, (tx) =>
+        await withCircle(database.db, ws.circleId, (tx) =>
           tx.insert(credentials).values({
-            spaceId: ws.spaceId,
+            circleId: ws.circleId,
             ownerAccountId: ws.accountId,
             identifier: 'mail',
             name: '抢先',
@@ -1278,7 +1292,7 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
       const stored = (await row(created.id)).vaultRevision!
       // 像 MySQL 去掉小数秒那样：Kioku 记下的（写入响应里的）比服务器存下的晚
       const later = new Date(Date.parse(stored) + 500).toISOString()
-      await withSpace(database.db, ws.spaceId, (tx) =>
+      await withCircle(database.db, ws.circleId, (tx) =>
         tx
           .update(credentials)
           .set({ vaultRevision: later, rotationRequestedAt: new Date() })
@@ -1314,7 +1328,7 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
       const stored = (await row(created.id)).vaultRevision!
       // 像写入响应那样带着小数秒：比条目的晚半秒
       const fractional = new Date(Date.parse(stored) + 500).toISOString()
-      await withSpace(database.db, ws.spaceId, (tx) =>
+      await withCircle(database.db, ws.circleId, (tx) =>
         tx
           .update(credentials)
           .set({ vaultRevision: fractional })
@@ -1339,7 +1353,7 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
         201,
       )
       // 刚检查过、也没有最近的错误：这次成功的取用不用改连接这一行
-      await withSpace(database.db, ws.spaceId, (tx) =>
+      await withCircle(database.db, ws.circleId, (tx) =>
         tx
           .update(vaultConnections)
           .set({ lastCheckedAt: sql`now()`, lastErrorKind: null, lastErrorAt: null })
@@ -1354,7 +1368,7 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
         await original.apply(this, args)
         // 另开一个连接、不等待地加锁：这一行要被占着
         codes.push(
-          await withSpace(database.db, ws.spaceId, (other) =>
+          await withCircle(database.db, ws.circleId, (other) =>
             other
               .select({ id: vaultConnections.id })
               .from(vaultConnections)
@@ -1388,7 +1402,7 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
         409,
       )
       expect(stale.error).not.toContain('登录条目')
-      const useOnly = await ws.createKey(appId, { ...FULL_SCOPES, credentials: 'use' })
+      const useOnly = await ws.createKey(clientId, { ...FULL_SCOPES, credentials: 'use' })
       const denied = await send(
         'PATCH',
         '/v1/credentials',
@@ -1419,7 +1433,7 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
         201,
       )
       // 取用的第三段每次都要改连接这一行（最近检查已经过了一分钟），条目也改过，两边都要改凭据这一行
-      await withSpace(database.db, ws.spaceId, (tx) =>
+      await withCircle(database.db, ws.circleId, (tx) =>
         tx
           .update(vaultConnections)
           .set({ lastCheckedAt: new Date(Date.now() - 3_600_000) })
@@ -1619,7 +1633,7 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
         ).error,
       ).toContain('只在登录条目里有')
       // 绕过核对直接写进库：写回时客户端拒绝
-      await withSpace(database.db, ws.spaceId, (tx) =>
+      await withCircle(database.db, ws.circleId, (tx) =>
         tx
           .update(credentials)
           .set({ fields: [{ name: 'password', itemField: 'login.password' }] })

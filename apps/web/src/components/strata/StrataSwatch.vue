@@ -1,25 +1,25 @@
 <script setup lang="ts">
-import type { Layer, Sensitivity } from '@kioku/contracts'
+import type { Sensitivity, StrataBand } from '@kioku/contracts'
 import { computed } from 'vue'
 
-import { layerLabels, sensitivityLabels } from '../../labels'
-import { layerHints, paintSwatch, sensitivityHints, swatchText } from './strata'
+import { bandLabels, sensitivityLabels } from '../../labels'
+import { bandHints, paintSwatch, sensitivityHints, swatchText } from './strata'
 
 const props = withDefaults(
   defineProps<{
-    layer?: Layer | null
+    band?: StrataBand | null
     sensitivity?: Sensitivity | null
     // 旁边带什么文字。颜色不单独承担信息：放得下就带上，放不下至少有 title 和 aria-label
-    label?: 'none' | 'layer' | 'sensitivity' | 'both'
+    label?: 'none' | 'band' | 'sensitivity' | 'both'
     width?: number
     height?: number
-    // 只标层。不传时没有敏感级画虚线框，表示敏感级不确定
+    // 只标色带。不传时没有敏感级画虚线框，表示敏感级不确定
     plain?: boolean
     // 旁边的文字已经说全了：只是配图，不读屏、不弹说明
     decorative?: boolean
   }>(),
   {
-    layer: null,
+    band: null,
     sensitivity: null,
     label: 'none',
     width: 18,
@@ -29,19 +29,19 @@ const props = withDefaults(
   },
 )
 
-const rects = computed(() => paintSwatch(props.layer, props.sensitivity, props.width, props.height))
-const name = computed(() => swatchText(props.layer, props.sensitivity))
+const rects = computed(() => paintSwatch(props.band, props.sensitivity, props.width, props.height))
+const name = computed(() => swatchText(props.band, props.sensitivity))
 const title = computed(() =>
   [
     name.value,
-    props.layer && layerHints[props.layer],
+    props.band && bandHints[props.band],
     props.sensitivity && sensitivityHints[props.sensitivity],
   ]
     .filter(Boolean)
     .join('\n'),
 )
 const text = computed(() => {
-  if (props.label === 'layer') return props.layer ? layerLabels[props.layer] : ''
+  if (props.label === 'band') return props.band ? bandLabels[props.band] : ''
   if (props.label === 'sensitivity') {
     return props.sensitivity ? sensitivityLabels[props.sensitivity] : ''
   }

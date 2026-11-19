@@ -1,60 +1,63 @@
 import {
-  APP_TUNING_KEYS,
-  SPACE_TUNING_KEYS,
+  CIRCLE_TUNING_KEYS,
+  CLIENT_TUNING_KEYS,
   TUNING_DEFAULTS,
   TUNING_KEYS,
-  type AppAdvancedSummary,
-  type AppAdvancedView,
+  type CircleAdvancedView,
+  type ClientAdvancedSummary,
+  type ClientAdvancedView,
   type InstanceAdvancedView,
-  type SpaceAdvancedView,
   type TuningKey,
 } from '@kioku/contracts'
 import { eq, sql } from 'drizzle-orm'
 
-import { eachSpace, withSpace, type Db } from '../db/client'
-import { apps, spaces } from '../db/schema'
+import { eachCircle, withCircle, type Db } from '../db/client'
+import { circles, clients } from '../db/schema'
 import { system as dreamSystem } from '../extraction/dreamPrompt'
 import { SUMMARY_SYSTEM, SYSTEM as EXTRACTION_SYSTEM } from '../extraction/prompt'
 import { CHAT_FAMILIES, CHAT_GUIDANCE, GUIDANCE, HOST_CONTEXT_LIMIT } from '../lifecycle/lifecycle'
 import {
-  APP_ADVANCED_FIELD,
-  loadAppLayers,
+  CLIENT_ADVANCED_FIELD,
+  loadClientLayers,
   loadInstanceAdvanced,
-  parseAppAdvanced,
-  parseSpaceAdvanced,
+  parseCircleAdvanced,
+  parseClientAdvanced,
   resolveTuning,
 } from './advanced'
 
 // 管理界面看的高级设置：各级的覆盖、生效值与来源
 
-// 原样的 sql 片段不经过列的解码，jsonb 回来是文本：按 jsonb 列解码
-const appAdvanced = sql<unknown>`${apps.config} -> ${APP_ADVANCED_FIELD}::text`.mapWith(apps.config)
+const clientAdvanced = sql<unknown>`${clients.config} -> ${CLIENT_ADVANCED_FIELD}::text`.mapWith(
+  clients.config,
+)
 
-// 实例：每项被几个空间、几个应用覆盖。空间的覆盖一条语句读出；应用是内容表，经 eachSpace 几个空间同时数
+// 实例：每项被几个记忆圈、几个接入实例覆盖
 async function overriddenBy(db: Db): Promise<InstanceAdvancedView['overriddenBy']> {
-  const counts = Object.fromEntries(TUNING_KEYS.map((k) => [k, { spaces: 0, apps: 0 }])) as Record<
-    TuningKey,
-    { spaces: number; apps: number }
-  >
-  const all = await db.select({ advanced: spaces.advanced }).from(spaces)
-  for (const space of all) {
-    const overrides = parseSpaceAdvanced(space.advanced)
-    for (const key of SPACE_TUNING_KEYS) if (overrides[key] !== undefined) counts[key].spaces++
+  const counts = Object.fromEntries(
+    TUNING_KEYS.map((k) => [k, { circles: 0, clients: 0 }]),
+  ) as Record<TuningKey, { circles: number; clients: number }>
+  const all = await db.select({ advanced: circles.advanced }).from(circles)
+  for (const circle of all) {
+    const overrides = parseCircleAdvanced(circle.advanced)
+    for (const key of CIRCLE_TUNING_KEYS) if (overrides[key] !== undefined) counts[key].circles++
   }
-  await eachSpace(db, async (tx) => {
-    const rows = await tx.select({ advanced: appAdvanced }).from(apps)
+  await eachCircle(db, async (tx) => {
+    const rows = await tx.select({ advanced: clientAdvanced }).from(clients)
     for (const row of rows) {
-      const app = parseAppAdvanced(row.advanced)
-      for (const key of APP_TUNING_KEYS) if (app[key] !== undefined) counts[key].apps++
+      const client = parseClientAdvanced(row.advanced)
+      for (const key of CLIENT_TUNING_KEYS) if (client[key] !== undefined) counts[key].clients++
     }
   })
   return counts
 }
 
-// 抽取与整理规则的固定部分，各有两种场景：抽取与只要摘要；记下的记忆与对话里来的记忆
 const FIXED_RULES = {
   'prompts.extractionRules': [EXTRACTION_SYSTEM, SUMMARY_SYSTEM],
-  'prompts.dreamRules': [dreamSystem({ talk: false }), dreamSystem({ talk: true })],
+  'prompts.dreamRules': [
+    dreamSystem({ mode: 'entry' }),
+    dreamSystem({ mode: 'talk' }),
+    dreamSystem({ mode: 'local_session' }),
+  ],
 }
 
 export async function instanceAdvancedView(db: Db): Promise<InstanceAdvancedView> {
@@ -72,25 +75,25 @@ export async function instanceAdvancedView(db: Db): Promise<InstanceAdvancedView
   }
 }
 
-export async function spaceAdvancedView(
+export async function circleAdvancedView(
   db: Db,
-  spaceId: string,
+  circleId: string,
   canEdit: boolean,
-): Promise<SpaceAdvancedView> {
-  const [instance, [space], appRows] = await Promise.all([
+): Promise<CircleAdvancedView> {
+  const [instance, [circle], clientRows] = await Promise.all([
     loadInstanceAdvanced(db),
-    db.select({ advanced: spaces.advanced }).from(spaces).where(eq(spaces.id, spaceId)),
-    withSpace(db, spaceId, (tx) =>
+    db.select({ advanced: circles.advanced }).from(circles).where(eq(circles.id, circleId)),
+    withCircle(db, circleId, (tx) =>
       tx
-        .select({ id: apps.id, name: apps.name, advanced: appAdvanced })
-        .from(apps)
-        .orderBy(apps.name, apps.id),
+        .select({ id: clients.id, name: clients.name, advanced: clientAdvanced })
+        .from(clients)
+        .orderBy(clients.name, clients.id),
     ),
   ])
-  const overrides = parseSpaceAdvanced(space?.advanced)
-  const resolved = resolveTuning({ instance, space: overrides })
-  const summaries: AppAdvancedSummary[] = appRows.flatMap((row) => {
-    const { 'prompts.guidance': guidance, ...tuning } = parseAppAdvanced(row.advanced)
+  const overrides = parseCircleAdvanced(circle?.advanced)
+  const resolved = resolveTuning({ instance, circle: overrides })
+  const summaries: ClientAdvancedSummary[] = clientRows.flatMap((row) => {
+    const { 'prompts.guidance': guidance, ...tuning } = parseClientAdvanced(row.advanced)
     const hasGuidance = guidance !== undefined && guidance.trim() !== ''
     return Object.keys(tuning).length || hasGuidance
       ? [{ id: row.id, name: row.name, overrides: tuning, hasGuidance }]
@@ -106,8 +109,8 @@ export async function spaceAdvancedView(
       'prompts.dreamRules': instance['prompts.dreamRules'] ?? null,
     },
     fixedPrompts: FIXED_RULES,
-    apps: summaries,
-    hostLimits: Object.entries(HOST_CONTEXT_LIMIT).map(([runtimeFamily, chars]) => ({
+    clients: summaries,
+    clientLimits: Object.entries(HOST_CONTEXT_LIMIT).map(([runtimeFamily, chars]) => ({
       runtimeFamily,
       chars,
     })),
@@ -115,21 +118,21 @@ export async function spaceAdvancedView(
   }
 }
 
-export async function appAdvancedView(
+export async function clientAdvancedView(
   db: Db,
-  spaceId: string,
-  app: { id: string; runtimeFamily: string },
+  circleId: string,
+  client: { id: string; runtimeFamily: string },
   canEdit: boolean,
-): Promise<AppAdvancedView> {
-  const layers = await withSpace(db, spaceId, (tx) => loadAppLayers(tx, spaceId, app.id))
+): Promise<ClientAdvancedView> {
+  const layers = await withCircle(db, circleId, (tx) => loadClientLayers(tx, circleId, client.id))
   const resolved = resolveTuning(layers)
-  const chat = CHAT_FAMILIES.has(app.runtimeFamily)
+  const chat = CHAT_FAMILIES.has(client.runtimeFamily)
   const instanceGuidance = layers.instance[chat ? 'prompts.chatGuidance' : 'prompts.agentGuidance']
   return {
-    overrides: layers.app,
+    overrides: layers.client,
     effective: resolved.values,
     sources: resolved.sources,
-    inherited: resolveTuning({ instance: layers.instance, space: layers.space }).values,
+    inherited: resolveTuning({ instance: layers.instance, circle: layers.circle }).values,
     guidance: {
       kind: chat ? 'chat' : 'agent',
       fixed: chat ? CHAT_GUIDANCE : GUIDANCE,

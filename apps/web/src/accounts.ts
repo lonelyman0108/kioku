@@ -110,12 +110,12 @@ export function setPasswordError(err: unknown): { text: string; invalid: boolean
   return { text: err instanceof ApiError ? err.message : '设置失败', invalid: false }
 }
 
-// 停用之后没有可用所有者的空间：他是这些空间里唯一没停用的所有者。字段由服务端的账号列表给出
-export function soleOwnerSpaces(account: AdminAccount): string[] {
-  return account.spaces.filter((s) => s.soleActiveOwner).map((s) => s.name)
+// 停用之后没有可用所有者的记忆圈：他是这些记忆圈里唯一没停用的所有者。字段由服务端的账号列表给出
+export function soleOwnerCircles(account: AdminAccount): string[] {
+  return account.circles.filter((c) => c.soleActiveOwner).map((c) => c.name)
 }
 export const SOLE_OWNER_TEXT =
-  '停用后这些空间没有可用的所有者，无法管理成员与设置；重新启用后恢复。'
+  '停用后这些记忆圈没有可用的所有者，无法管理成员与设置；重新启用后恢复。'
 
 // 请求成功了、弹窗却已经关掉时的说明：结果与下一步。链接只显示一次，丢掉之后只能重新生成
 export function droppedLinkNotice(kind: 'create' | 'regenerate', displayName: string): string {

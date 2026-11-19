@@ -1,24 +1,41 @@
 import {
+  BUILTIN_FACET_DIMENSIONS,
+  BUILTIN_FACET_KEYS,
   DISPLAY_NAME_MAX,
-  SPACE_NAME_MAX,
+  isBuiltinFacetKey,
+  normalizeWhen,
+  sensitivityRank,
   type LifecycleEvent,
+  type LifecycleProject,
   type RecallRequest,
   type RecallResponse,
+  type SessionContextInput,
+  type WhenCondition,
   type WhoAmI,
 } from '@kioku/contracts'
+import { eq } from 'drizzle-orm'
 
 import { conversationRefOf, touchConversation } from '../access/conversations'
-import { defaultSession, resolveKeySession, type KeySession } from '../access/session'
-import { loggableError, withSpace } from '../db/client'
+import { accessForKey, defaultSession, resolveKeySession, type KeySession } from '../access/session'
+import { loggableError, withCircles } from '../db/client'
+import { personas } from '../db/schema'
 import { bufferTurn, canWriteTurns } from '../extraction/buffer'
 import type { Deps, KeyPrincipal } from '../http/env'
-import { handleLifecycle, type LifecycleResult } from './lifecycle'
+import { resolveScopeFocusIn } from '../memory/context'
+import { loadCircleVocabularies, normalizeProjectSlug } from '../memory/facets'
+import { isRestrictedChatAccess } from '../memory/links'
 import { clipChars, oneLine } from '../recall/text'
+import { handleLifecycle, type LifecycleResult } from './lifecycle'
 import type { RecallScope } from './scope'
 
-// 接入方接口的处理，路由与测试台共用。scope 由调用方按解析出的会话给出，这里不新建：
-// 测试台要用事务里的 deps 建，还要关掉召回事件
-export type ScopeFor = (session: KeySession) => RecallScope
+export interface ScopeRequestOptions {
+  deviceKey?: string | undefined
+  project?: LifecycleProject | undefined
+  facets?: WhenCondition | undefined
+  crossCircle?: boolean | undefined
+}
+
+export type ScopeFor = (session: KeySession, options?: ScopeRequestOptions) => RecallScope
 
 export async function lifecycleEvent(
   deps: Deps,
@@ -26,31 +43,47 @@ export async function lifecycleEvent(
   input: LifecycleEvent,
   scopeFor: ScopeFor,
 ): Promise<LifecycleResult> {
+  const projectSlug = normalizeProjectSlug(input.project) ?? ''
   if (input.event === 'turn.end') {
-    // 写不进抽取结果的 Key 不缓冲，也不解析会话、不建联系人。不带会话上下文的轮次只用来写会话摘要，
-    // 按应用与所属成员缓冲
-    if (canWriteTurns(key.scopes, input.context !== undefined)) {
+    const primaryGrant = key.circleGrants.find((g) => g.circleId === key.circleId && g.active)
+    if (primaryGrant && canWriteTurns(primaryGrant, input.context !== undefined)) {
       const session = input.context
         ? await resolveKeySession(deps, key, input.context)
         : defaultSession(key)
-      await touchConversationOf(deps, key, session)
+      await touchConversationOf(deps, key, session, {
+        deviceKey: input.deviceKey,
+        projectSlug,
+      })
       await bufferTurn(deps, key, session, input)
     }
-    return { hostOutput: { mode: 'none', value: null }, nodeUris: [] }
+    return { hostOutput: { mode: 'none', value: null }, shortIds: [] }
   }
   const session = await resolveKeySession(deps, key, input.context)
-  await touchConversationOf(deps, key, session)
-  return handleLifecycle(scopeFor(session), key.app.runtimeFamily, input)
+  await touchConversationOf(deps, key, session, {
+    deviceKey: input.deviceKey,
+    projectSlug,
+  })
+  const scope = scopeFor(session, {
+    ...(input.deviceKey !== undefined ? { deviceKey: input.deviceKey } : {}),
+    ...(input.project !== undefined ? { project: input.project } : {}),
+  })
+  return handleLifecycle(scope, key.client.runtimeFamily, input)
 }
 
-// 生命周期事件来时建立会话或更新最近活动（定时任务与子 Agent 不算会话）。会话只是对话页的索引，
-// 写不进去时记日志、不影响召回与缓冲；回滚模式下 deps.db 是测试台的事务，在 withSpace 的 savepoint 里写
-async function touchConversationOf(deps: Deps, key: KeyPrincipal, session: KeySession) {
-  const ref = conversationRefOf(session.context, key.app.ownerAccountId)
+async function touchConversationOf(
+  deps: Deps,
+  key: KeyPrincipal,
+  session: KeySession,
+  options: { deviceKey?: string | null | undefined; projectSlug?: string | null | undefined } = {},
+) {
+  const ref = conversationRefOf(session.context, key.client.ownerAccountId, {
+    ...(options.deviceKey !== undefined ? { deviceKey: options.deviceKey } : {}),
+    ...(options.projectSlug !== undefined ? { projectSlug: options.projectSlug } : {}),
+  })
   if (!ref) return
   try {
-    await withSpace(deps.db, key.spaceId, (tx) =>
-      touchConversation(tx, key.spaceId, key.app.id, ref),
+    await withCircles(deps.db, { read: [key.circleId], write: [key.circleId] }, (tx) =>
+      touchConversation(tx, key.circleId, key.client.id, ref),
     )
   } catch (err) {
     console.warn('记下会话的最近活动失败', loggableError(err))
@@ -60,33 +93,172 @@ async function touchConversationOf(deps: Deps, key: KeyPrincipal, session: KeySe
 export async function recallRequest(
   deps: Deps,
   key: KeyPrincipal,
-  { query, limit, context }: RecallRequest,
+  req: RecallRequest,
   scopeFor: ScopeFor,
 ): Promise<RecallResponse> {
-  const scope = scopeFor(await resolveKeySession(deps, key, context))
-  // 请求里给了条数就按给的，否则和每轮召回一样按设置；最低分都按设置
+  const session = await resolveKeySession(deps, key, req.context)
+  const scope = scopeFor(session, {
+    ...(req.project !== undefined ? { project: req.project } : {}),
+    ...(req.facets !== undefined ? { facets: req.facets } : {}),
+    crossCircle: req.crossCircle,
+  })
   const [candidates, subjects] = await Promise.all([
-    scope.recall(query, limit === undefined ? {} : { limit }),
-    scope.subjects(),
+    scope.recall(req.query, {
+      ...(req.limit === undefined ? {} : { limit: req.limit }),
+      ...(req.facets !== undefined ? { facets: req.facets } : {}),
+      crossCircle: req.crossCircle,
+    }),
+    req.includeSubjects ? scope.subjects() : Promise.resolve([]),
   ])
-  scope.record('rest.recall', query, candidates)
+  scope.record('rest.recall', req.query, candidates)
   return { candidates, subjects }
 }
 
-// 给人看的名字：去掉控制字符、压成一行，按契约的上限截断（按字符，不切开代理对）；没有或压完是空的时省略
-const label = (text: string | null | undefined, max: number): string | undefined =>
+const labelText = (text: string | null | undefined, max: number): string | undefined =>
   (text && clipChars(oneLine(text), max)) || undefined
 
-// 空间名与应用所有者的显示名每次鉴权时随应用一起查出来，改名之后下一个请求就是新的，这里不再查库。
-// 只给能读本人归属的 Key：显示名属于应用所有者本人，读不到本人记忆的 Key（群聊机器人这类）也拿不到
-export function whoamiOf(key: KeyPrincipal): WhoAmI {
-  const base = { spaceId: key.spaceId, app: key.app, scopes: key.scopes }
-  if (!key.scopes.readLayers.includes('user')) return base
-  const spaceName = label(key.labels?.spaceName, SPACE_NAME_MAX)
-  const accountName = label(key.labels?.accountName, DISPLAY_NAME_MAX)
+// 返回接入方的当前透镜主体视图：含主场圈、关联客场圈（受限会话隐藏客场名与标识）、在场切面、可见词表与人格
+export async function whoamiOf(
+  deps: Deps,
+  key: KeyPrincipal,
+  options: {
+    session?: KeySession
+    context?: SessionContextInput
+    project?: LifecycleProject
+  } = {},
+): Promise<WhoAmI> {
+  const session =
+    options.session ??
+    (options.context ? await resolveKeySession(deps, key, options.context) : defaultSession(key))
+  const access = accessForKey(key, session)
+  const restricted = isRestrictedChatAccess(access)
+  const activeGrants = key.circleGrants.filter((g) => g.active)
+  const readCircleIds = [...access.circles.keys()]
+  const primaryWriteAllowed = (access.circles.get(key.circleId)?.writeKinds.size ?? 0) > 0
+  const canAutoRegister = Boolean(
+    primaryWriteAllowed && normalizeProjectSlug(options.project) && !restricted,
+  )
+
+  const { persona, resolvedFacets, vocabulary } = await withCircles(
+    deps.db,
+    canAutoRegister ? { read: readCircleIds, write: [key.circleId] } : { read: readCircleIds },
+    async (tx) => {
+      const [personaRow] = session.personaId
+        ? await tx
+            .select({ id: personas.id, slug: personas.slug, name: personas.name })
+            .from(personas)
+            .where(eq(personas.id, session.personaId))
+            .limit(1)
+        : []
+
+      const resolved = await resolveScopeFocusIn(tx, key, access, {
+        project: options.project,
+        canWritePrimary: canAutoRegister,
+      })
+
+      const vocabs = await loadCircleVocabularies(tx, readCircleIds)
+      const orderedIds = [
+        key.circleId,
+        ...activeGrants.filter((g) => !g.isPrimary).map((g) => g.circleId),
+      ]
+
+      const dimMeta = new Map<
+        string,
+        { key: string; name: string; matchMode: 'exclusive' | 'additive' }
+      >()
+      for (const bKey of BUILTIN_FACET_KEYS) {
+        const b = BUILTIN_FACET_DIMENSIONS[bKey]
+        dimMeta.set(b.key, { key: b.key, name: b.name, matchMode: b.matchMode })
+      }
+      const termBuckets = new Map<string, Map<string, string>>()
+
+      for (const cid of orderedIds) {
+        const vocab = vocabs.get(cid)
+        if (!vocab) continue
+        for (const [k, mode] of vocab.dimensions) {
+          if (!isBuiltinFacetKey(k) && !dimMeta.has(k)) {
+            dimMeta.set(k, { key: k, name: vocab.dimensionNames.get(k) ?? k, matchMode: mode })
+          }
+        }
+        for (const t of vocab.terms) {
+          if (
+            restricted &&
+            cid !== key.circleId &&
+            t.dimensionKey === 'project' &&
+            t.autoRegistered
+          ) {
+            continue
+          }
+          if (!dimMeta.has(t.dimensionKey)) {
+            dimMeta.set(t.dimensionKey, {
+              key: t.dimensionKey,
+              name: t.dimensionKey,
+              matchMode: 'exclusive',
+            })
+          }
+          let slugMap = termBuckets.get(t.dimensionKey)
+          if (!slugMap) {
+            slugMap = new Map()
+            termBuckets.set(t.dimensionKey, slugMap)
+          }
+          if (!slugMap.has(t.slug)) slugMap.set(t.slug, t.label)
+        }
+      }
+
+      const vocabList: WhoAmI['vocabulary'] = [...dimMeta.values()].map((d) => ({
+        key: d.key,
+        name: d.name,
+        matchMode: d.matchMode,
+        terms: [...(termBuckets.get(d.key)?.entries() ?? [])]
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([slug, label]) => ({ slug, label })),
+      }))
+
+      return {
+        persona: personaRow ?? null,
+        resolvedFacets: normalizeWhen(resolved),
+        vocabulary: vocabList,
+      }
+    },
+  )
+
+  const showOwnerName =
+    !restricted && sensitivityRank(key.scopes.maxSensitivity) >= sensitivityRank('private')
+  const accountName = showOwnerName
+    ? labelText(key.labels?.accountName, DISPLAY_NAME_MAX)
+    : undefined
+
   return {
-    ...base,
-    ...(spaceName === undefined ? {} : { spaceName }),
-    ...(accountName === undefined ? {} : { accountName }),
+    primaryCircle: {
+      id: key.primaryCircle.id,
+      slug: key.primaryCircle.slug,
+      name: key.primaryCircle.name,
+      kind: key.primaryCircle.kind,
+    },
+    linkedCircles: activeGrants
+      .filter((g) => !g.isPrimary)
+      .map((g) => ({
+        id: g.circleId,
+        slug: restricted ? null : g.circleSlug,
+        name: restricted ? null : g.circleName,
+        kind: g.circleKind,
+        mode: g.mode,
+      })),
+    ...(accountName !== undefined ? { accountName } : {}),
+    client: {
+      id: key.client.id,
+      circleId: key.circleId,
+      slug: key.client.slug,
+      name: key.client.name,
+      runtimeFamily: key.client.runtimeFamily,
+      ownerAccountId: key.client.ownerAccountId,
+      defaultPersonaId: key.client.defaultPersonaId,
+      config: key.client.config,
+    },
+    persona,
+    contextFacets: normalizeWhen(key.contextFacets),
+    resolvedFacets,
+    vocabulary,
+    scopes: key.scopes,
   }
 }

@@ -1,31 +1,31 @@
 <script setup lang="ts">
-import type { Layer } from '@kioku/contracts'
+import type { StrataBand } from '@kioku/contracts'
 
 import KiokuMark from '../KiokuMark.vue'
-import { isConversationLayer, STACK } from './strata'
+import { isConversationBand, STACK } from './strata'
 
 // 登录、初始化、连接失败共用的一屏：文字标在上，内容在下，页面底边压一段地层作为装饰。
-// 只铺归属色，不铺纹理：纹理表示敏感级，这里没有数据。
+// 只铺色带底色，不铺纹理：纹理表示敏感级，这里没有数据。
 // 连接失败页是静态引入的（后端连不上时按需加载的文件也拿不到），这里也不能依赖按需加载的东西
 
 // wide：内容是一张表单（浏览器授权的确认页）时放宽，默认是登录框的宽度
 defineProps<{ wide?: boolean }>()
 
-// 每类归属占多高（百分比），只为好看，不代表任何数据
-const HEIGHTS: Record<Layer, number> = {
+// 各色带高度比例，仅作页面底部视觉装饰
+const HEIGHTS: Record<StrataBand, number> = {
   episode: 9,
-  subject: 14,
-  user: 30,
-  app: 13,
+  fact: 14,
+  personal: 30,
+  'shared-away': 13,
   persona: 14,
-  core: 20,
+  primary: 20,
 }
 
-const bands = STACK.map((layer, index) => ({
-  layer,
-  height: HEIGHTS[layer],
+const bands = STACK.map((band, index) => ({
+  band,
+  height: HEIGHTS[band],
   // 和上面一类的分界。来自对话的两类和下面四类之间用虚线
-  dashed: index > 0 && isConversationLayer(STACK[index - 1]!) !== isConversationLayer(layer),
+  dashed: index > 0 && isConversationBand(STACK[index - 1]!) !== isConversationBand(band),
 }))
 </script>
 
@@ -38,9 +38,9 @@ const bands = STACK.map((layer, index) => ({
     <div class="entry-strata" aria-hidden="true">
       <i
         v-for="band in bands"
-        :key="band.layer"
+        :key="band.band"
         :class="{ dashed: band.dashed }"
-        :style="{ flexGrow: band.height, background: `var(--layer-${band.layer})` }"
+        :style="{ flexGrow: band.height, background: `var(--layer-${band.band})` }"
       />
     </div>
   </div>

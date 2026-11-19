@@ -7,7 +7,7 @@ import type {
   BackupObjectList,
   BackupSettingsView,
   BackupTestResult,
-  SpaceOverview,
+  CircleOverview,
 } from '@kioku/contracts'
 import { eq, inArray, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -167,7 +167,7 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
       400,
     )
 
-    const member = await addMember(database.db, ws.spaceId, 'bob', 'owner')
+    const member = await addMember(database.db, ws.circleId, 'bob', 'owner')
     expect((await send('GET', '', undefined, member.cookie)).status).toBe(403)
     expect((await send('PUT', '', settingsInput(), member.cookie)).status).toBe(403)
     expect((await send('POST', '/run', undefined, member.cookie)).status).toBe(403)
@@ -359,11 +359,11 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
 
   it('概览里的备份情况只给实例管理员看', async () => {
     const overview = async (cookie: string) => {
-      const res = await api.request(`/v1/spaces/${ws.spaceId}/overview`, {
+      const res = await api.request(`/v1/circles/${ws.circleId}/overview`, {
         headers: { cookie, 'sec-fetch-site': 'same-origin' },
       })
       expect(res.status).toBe(200)
-      return ((await res.json()) as SpaceOverview).backup
+      return ((await res.json()) as CircleOverview).backup
     }
     expect(await overview(ws.cookie)).toEqual({
       configured: false,
@@ -378,7 +378,7 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
       lastSuccessAt: status.lastSuccess!.at,
       lastError: null,
     })
-    const member = await addMember(database.db, ws.spaceId, 'bob', 'owner')
+    const member = await addMember(database.db, ws.circleId, 'bob', 'owner')
     expect(await overview(member.cookie)).toBeNull()
   })
 

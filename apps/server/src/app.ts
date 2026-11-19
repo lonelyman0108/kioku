@@ -126,8 +126,8 @@ export function createApp(deps: Deps) {
   app.route('/v1', setupRoutes(deps))
   app.route('/v1', authRoutes(deps))
   app.route('/v1', accountRoutes(deps))
-  // 应用与人格路由共用 /spaces/*，会话鉴权在这里注册一次；各自注册会让每个请求查两次会话
-  app.use('/v1/spaces/*', requireConsole(deps))
+  // 记忆圈管理与控制台接口共用 /circles/*，会话鉴权在这里注册一次；各自注册会让每个请求查两次会话
+  app.use('/v1/circles/*', requireConsole(deps))
   app.route('/v1', appRoutes(deps))
   app.route('/v1', whoamiRoutes(deps))
   app.route('/v1', personaRoutes(deps))

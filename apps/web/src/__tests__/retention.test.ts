@@ -8,15 +8,14 @@ import {
   pauseText,
   purgeAt,
   purgeNote,
-  releasedNotice,
   retentionSummary,
   retentionTotal,
 } from '../retention'
 
 const zero: RetentionCounts = {
-  deletedMemories: 0,
+  deletedEntries: 0,
   supersededFacts: 0,
-  expiredSummaries: 0,
+  expiredEpisodes: 0,
   orphanEvents: 0,
   scrubbedSnapshots: 0,
   extractionRuns: 0,
@@ -37,7 +36,7 @@ describe('保留期清理的结果', () => {
   })
 
   it('只列删了东西的几类，按固定的顺序', () => {
-    const counts = { ...zero, vaultConnections: 1, deletedMemories: 12, credentialEvents: 3 }
+    const counts = { ...zero, vaultConnections: 1, deletedEntries: 12, credentialEvents: 3 }
     expect(retentionSummary(counts)).toEqual([
       { label: '已删除的记忆', count: 12 },
       { label: '凭据事件', count: 3 },
@@ -82,7 +81,7 @@ describe('最近一次没做完的说法', () => {
     at,
     paused: false,
     complete,
-    counts: { ...zero, deletedMemories: 7 },
+    counts: { ...zero, deletedEntries: 7 },
     tries,
   })
 
@@ -156,18 +155,6 @@ describe('已删除的记忆什么时候永久清除', () => {
       text: '至少 20 天后永久清除',
       soon: false,
     })
-  })
-
-  it('已过期列表给「坐标已释放」的说明：按释放的时间算，未释放的一直保留；暂停的说法和已删除的一样', () => {
-    expect(releasedNotice({ days: 7, paused: false, pausedUntil: null })).toBe(
-      '标记为「坐标已释放」的记忆，释放超过 7 天后永久清除，之后只能从备份恢复；未释放的记忆一直保留。',
-    )
-    expect(releasedNotice(pausedOnly)).toBe(
-      '标记为「坐标已释放」的记忆，释放超过 30 天后永久清除，之后只能从备份恢复；未释放的记忆一直保留。清理已暂停，暂不永久清除。',
-    )
-    const paused = releasedNotice(pausedUntil(later(12)))
-    expect(paused).toMatch(/未释放的记忆一直保留。清理暂停至 .+/)
-    expect(paused).toContain('在此之前不会清除任何内容')
   })
 
   it('列表上方说明多少天之后永久清除；暂停中的说暂时不会清除，知道到什么时候的再说出时间', () => {

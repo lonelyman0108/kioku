@@ -27,7 +27,7 @@ const tab = computed<string>({
     void router.replace({ query: { ...route.query, tab: value === 'calls' ? undefined : value } }),
 })
 
-// 换应用时 Key 要重新读，这段时间不算就绪。第一次就绪之后分页组件就不再卸载：卸载会丢掉草稿与文本框里的场景
+// 换接入实例时 Key 要重新读，这段时间不算就绪。第一次就绪之后分页组件就不再卸载：卸载会丢掉草稿与文本框里的场景
 const mounted = ref(false)
 watchEffect(() => {
   if (ready.value) mounted.value = true

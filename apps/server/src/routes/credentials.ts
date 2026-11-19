@@ -51,9 +51,9 @@ const errors = {
   502: jsonResponse('密码库无法连接或返回的内容无法识别', ErrorResponse),
 }
 
-const SpaceParams = z.object({ spaceId: z.uuid() })
-const CredentialParams = SpaceParams.extend({ credentialId: z.uuid() })
-const ConnectionParams = SpaceParams.extend({ connectionId: z.uuid() })
+const CircleParams = z.object({ circleId: z.uuid() })
+const CredentialParams = CircleParams.extend({ credentialId: z.uuid() })
+const ConnectionParams = CircleParams.extend({ connectionId: z.uuid() })
 const VersionQuery = z.object({ expectedVersion: z.coerce.number().int().optional() })
 
 // 带着值的响应不让浏览器和代理缓存
@@ -66,9 +66,9 @@ export function credentialRoutes(deps: Deps) {
   return app
 }
 
-// 管理界面：按 id 访问成员自己的凭据。会话鉴权已在 app.ts 对 /v1/spaces/* 统一注册
+// 管理界面：按 id 访问成员自己的凭据。会话鉴权已在 app.ts 对 /v1/circles/* 统一注册
 function consoleCredentialRoutes(deps: Deps) {
-  const base = '/spaces/{spaceId}/credentials'
+  const base = '/circles/{circleId}/credentials'
   const common = { tags: ['credentials'] }
   const list = createRoute({
     ...common,
@@ -76,7 +76,7 @@ function consoleCredentialRoutes(deps: Deps) {
     path: base,
     summary:
       '列出自己的凭据（不含值）；attention=true 只列快到期、已到期或需要轮换的（待处理的凭据一类）',
-    request: { params: SpaceParams, query: CredentialListQuery },
+    request: { params: CircleParams, query: CredentialListQuery },
     responses: { 200: jsonResponse('凭据', ConsoleCredentialList), ...errors },
   })
   const deleted = createRoute({
@@ -84,7 +84,7 @@ function consoleCredentialRoutes(deps: Deps) {
     method: 'get',
     path: `${base}/deleted`,
     summary: '列出自己已删除的凭据，最近删除的在前，带上保留期（多久之后永久清除）',
-    request: { params: SpaceParams },
+    request: { params: CircleParams },
     responses: { 200: jsonResponse('已删除的凭据', DeletedCredentialList), ...errors },
   })
   const create = createRoute({
@@ -93,7 +93,7 @@ function consoleCredentialRoutes(deps: Deps) {
     path: base,
     summary:
       '新建凭据：带值的设了去处时写进密码库、没设时由 Kioku 托管；或给连接的密码库里的条目起标识。写进密码库之后没建成凭据时，错误体带上留下的条目',
-    request: { params: SpaceParams, body: jsonBody(CreateCredentialRequest) },
+    request: { params: CircleParams, body: jsonBody(CreateCredentialRequest) },
     responses: {
       201: jsonResponse('已创建', CreatedCredential),
       ...errors,
@@ -105,8 +105,8 @@ function consoleCredentialRoutes(deps: Deps) {
     method: 'post',
     path: `${base}/match`,
     summary:
-      '按值查找同值的凭据与密码库条目（只有空间 owner）：托管的解开比，密码库取每个可用连接的全部条目逐个字段比（TOTP 的密钥不比）。不记访问事件，响应不带值',
-    request: { params: SpaceParams, body: jsonBody(MatchCredentialValuesRequest) },
+      '按值查找同值的凭据与密码库条目（只有记忆圈所有者）：托管的解开比，密码库取每个可用连接的全部条目逐个字段比（TOTP 的密钥不比）。不记访问事件，响应不带值',
+    request: { params: CircleParams, body: jsonBody(MatchCredentialValuesRequest) },
     responses: { 200: jsonResponse('每个值对上的地方', CredentialValueMatches), ...errors },
   })
   const get = createRoute({
@@ -121,7 +121,7 @@ function consoleCredentialRoutes(deps: Deps) {
     ...common,
     method: 'patch',
     path: `${base}/{credentialId}`,
-    summary: '修改凭据的名称、说明、限定的应用，托管的值或密码库的字段对应；来源不能改',
+    summary: '修改凭据的名称、说明、限定的接入实例，托管的值或密码库的字段对应；来源不能改',
     request: { params: CredentialParams, body: jsonBody(UpdateCredentialRequest) },
     responses: { 200: jsonResponse('已修改', ConsoleCredential), ...errors },
   })
@@ -161,18 +161,18 @@ function consoleCredentialRoutes(deps: Deps) {
     ...common,
     method: 'get',
     path: `${base}/{credentialId}/references`,
-    summary: '引用这条凭据的记忆（不含已删除、secret 与已失效的）',
+    summary: '引用这条凭据的词条（不含已删除、secret 与已失效的）',
     request: { params: CredentialParams },
-    responses: { 200: jsonResponse('引用它的记忆', CredentialReferenceList), ...errors },
+    responses: { 200: jsonResponse('引用它的词条', CredentialReferenceList), ...errors },
   })
-  const connBase = '/spaces/{spaceId}/vault-connections'
+  const connBase = '/circles/{circleId}/vault-connections'
   const connCommon = { tags: ['vault-connections'] }
   const connections = createRoute({
     ...connCommon,
     method: 'get',
     path: connBase,
     summary: '列出自己的密码库连接',
-    request: { params: SpaceParams },
+    request: { params: CircleParams },
     responses: { 200: jsonResponse('连接', VaultConnectionList), ...errors },
   })
   const connect = createRoute({
@@ -180,7 +180,7 @@ function consoleCredentialRoutes(deps: Deps) {
     method: 'post',
     path: connBase,
     summary: '连接密码库：用主密码登录，保存刷新令牌与账户密钥（不保存主密码）；只接专用账号',
-    request: { params: SpaceParams, body: jsonBody(ConnectVaultRequest) },
+    request: { params: CircleParams, body: jsonBody(ConnectVaultRequest) },
     responses: { 200: jsonResponse('连接的结果', VaultConnectResult), ...errors },
   })
   const reconnect = createRoute({
@@ -235,7 +235,7 @@ function consoleCredentialRoutes(deps: Deps) {
   })
 
   const service = (c: Context<AppEnv>) =>
-    credentialServiceForConsole(deps, c.req.param('spaceId')!, c.get('console').accountId)
+    credentialServiceForConsole(deps, c.req.param('circleId')!, c.get('console').accountId)
   // 密码库连接：列出要凭据能力「取用」，其余要「管理」（目前只有空间 owner）
   const vault = async (c: Context<AppEnv>, manage = true) => {
     const s = await service(c)

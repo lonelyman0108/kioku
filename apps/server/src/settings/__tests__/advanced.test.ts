@@ -1,9 +1,9 @@
 import {
   TUNING_DEFAULTS,
   TUNING_KEYS,
-  UpdateAppAdvanced,
+  UpdateCircleAdvanced,
+  UpdateClientAdvanced,
   UpdateInstanceAdvanced,
-  UpdateSpaceAdvanced,
 } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
@@ -23,11 +23,11 @@ describe('高级设置的取值', () => {
     expect(Object.keys(sources).sort()).toEqual([...TUNING_KEYS].sort())
   })
 
-  it('按「内置 → 实例 → 空间 → 应用」逐项覆盖，每一项记下来源', () => {
+  it('按「内置 → 实例 → 记忆圈 → 接入实例」逐项覆盖，每一项记下来源', () => {
     const { values, sources } = resolveTuning({
       instance: { 'recall.minScore': 0.3, 'recall.limit': 6, 'recallWeights.semantic': 0.5 },
-      space: { 'recall.minScore': 0.25, 'extraction.batchTurns': 4 },
-      app: { 'recall.minScore': 0.4, 'boot.recent.enabled': false },
+      circle: { 'recall.minScore': 0.25, 'extraction.batchTurns': 4 },
+      client: { 'recall.minScore': 0.4, 'boot.recent.enabled': false },
     })
     expect(values).toMatchObject({
       'recall.minScore': 0.4,
@@ -38,43 +38,43 @@ describe('高级设置的取值', () => {
       'boot.charBudget': TUNING_DEFAULTS['boot.charBudget'],
     })
     expect(sources).toMatchObject({
-      'recall.minScore': 'app',
+      'recall.minScore': 'client',
       'recall.limit': 'instance',
       'recallWeights.semantic': 'instance',
-      'extraction.batchTurns': 'space',
-      'boot.recent.enabled': 'app',
+      'extraction.batchTurns': 'circle',
+      'boot.recent.enabled': 'client',
       'boot.charBudget': 'builtin',
     })
   })
 
   it('覆盖成 false 与 0 也算覆盖', () => {
     const { values, sources } = resolveTuning({
-      space: { 'boot.summaries.enabled': false, 'recall.subjectFacts': 0 },
+      circle: { 'boot.summaries.enabled': false, 'recall.subjectFacts': 0 },
     })
     expect(values['boot.summaries.enabled']).toBe(false)
     expect(values['recall.subjectFacts']).toBe(0)
-    expect(sources['recall.subjectFacts']).toBe('space')
+    expect(sources['recall.subjectFacts']).toBe('circle')
   })
 
-  it('补充按级叠加：实例的在前，空间或应用的在后；应用的使用指引只接在它实际用的那一种后面', () => {
+  it('补充按级叠加：实例的在前，记忆圈或接入实例的在后；接入实例的使用指引只接在它实际用的那一种后面', () => {
     const layers = {
       instance: {
         'prompts.agentGuidance': '实例：编码',
         'prompts.chatGuidance': '实例：群聊',
         'prompts.extractionRules': '实例：抽取',
       },
-      space: { 'prompts.extractionRules': '空间：抽取', 'prompts.dreamRules': '空间：整理' },
-      app: { 'prompts.guidance': '应用的指引' },
+      circle: { 'prompts.extractionRules': '记忆圈：抽取', 'prompts.dreamRules': '记忆圈：整理' },
+      client: { 'prompts.guidance': '接入实例的指引' },
     }
     expect(effectiveSettings(layers).prompts).toEqual({
-      agentGuidance: ['实例：编码', '应用的指引'],
+      agentGuidance: ['实例：编码', '接入实例的指引'],
       chatGuidance: ['实例：群聊'],
-      extractionRules: ['实例：抽取', '空间：抽取'],
-      dreamRules: ['空间：整理'],
+      extractionRules: ['实例：抽取', '记忆圈：抽取'],
+      dreamRules: ['记忆圈：整理'],
     })
     expect(effectiveSettings(layers, true).prompts).toMatchObject({
       agentGuidance: ['实例：编码'],
-      chatGuidance: ['实例：群聊', '应用的指引'],
+      chatGuidance: ['实例：群聊', '接入实例的指引'],
     })
     expect(withSupplements('固定', ['甲', '乙'])).toBe('固定\n甲\n乙')
     expect(withSupplements('固定', [])).toBe('固定')
@@ -126,6 +126,8 @@ describe('高级设置的校验', () => {
       ['recall.minScore', 0.29, true],
       ['recall.minScore', 0.255, false],
       ['recall.minScore', 1.01, false],
+      ['recall.relevanceFloor', 0.12, true],
+      ['recall.relevanceFloor', 1.01, false],
       ['recall.subjectFacts', 0, true],
       ['recall.subjectFacts', 21, false],
       ['recall.chatInlineChars', 49, false],
@@ -156,15 +158,15 @@ describe('高级设置的校验', () => {
   })
 
   it('各级只收能覆盖的项，不认识的键拒收', () => {
-    expect(ok(UpdateSpaceAdvanced, { 'recallWeights.semantic': 0.5 })).toBe(false)
-    expect(ok(UpdateSpaceAdvanced, { 'prompts.agentGuidance': '补充' })).toBe(false)
-    expect(ok(UpdateSpaceAdvanced, { 'dream.maxCalls': 5, 'prompts.dreamRules': '补充' })).toBe(
+    expect(ok(UpdateCircleAdvanced, { 'recallWeights.semantic': 0.5 })).toBe(false)
+    expect(ok(UpdateCircleAdvanced, { 'prompts.agentGuidance': '补充' })).toBe(false)
+    expect(ok(UpdateCircleAdvanced, { 'dream.maxCalls': 5, 'prompts.dreamRules': '补充' })).toBe(
       true,
     )
-    expect(ok(UpdateAppAdvanced, { 'extraction.batchTurns': 5 })).toBe(false)
-    expect(ok(UpdateAppAdvanced, { 'dream.maxCalls': 5 })).toBe(false)
-    expect(ok(UpdateAppAdvanced, { 'prompts.extractionRules': '补充' })).toBe(false)
-    expect(ok(UpdateAppAdvanced, { 'boot.charBudget': 3000, 'prompts.guidance': '补充' })).toBe(
+    expect(ok(UpdateClientAdvanced, { 'extraction.batchTurns': 5 })).toBe(false)
+    expect(ok(UpdateClientAdvanced, { 'dream.maxCalls': 5 })).toBe(false)
+    expect(ok(UpdateClientAdvanced, { 'prompts.extractionRules': '补充' })).toBe(false)
+    expect(ok(UpdateClientAdvanced, { 'boot.charBudget': 3000, 'prompts.guidance': '补充' })).toBe(
       true,
     )
     expect(ok(UpdateInstanceAdvanced, { 'recall.unknown': 1 })).toBe(false)

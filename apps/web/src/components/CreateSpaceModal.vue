@@ -1,14 +1,14 @@
 <script setup lang="ts">
-import type { CreatedSpace } from '@kioku/contracts'
+import type { CreatedCircle } from '@kioku/contracts'
 import { computed, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
-import { SPACE_NAME_RANGE, spaceNameIssue } from '../spaces'
+import { CIRCLE_NAME_RANGE, circleNameIssue } from '../spaces'
 
-// 新建空间：只填名称，所有者是当前账号。建好后由调用方决定去哪
+// 新建共享圈：只填名称，所有者是当前账号。建好后由调用方决定去哪
 const props = defineProps<{ open: boolean }>()
-const emit = defineEmits<{ close: []; created: [space: CreatedSpace] }>()
+const emit = defineEmits<{ close: []; created: [circle: CreatedCircle] }>()
 
 const name = ref('')
 const busy = ref(false)
@@ -23,7 +23,7 @@ watch(
 )
 const trimmed = computed(() => name.value.trim())
 // 空着时不提示，只是不能点新建；超出长度时写出范围
-const issue = computed(() => spaceNameIssue(name.value))
+const issue = computed(() => circleNameIssue(name.value))
 const ready = computed(() => issue.value === null && !busy.value)
 
 async function create() {
@@ -31,8 +31,8 @@ async function create() {
   busy.value = true
   error.value = null
   try {
-    const space = await api.createSpace({ name: trimmed.value })
-    emit('created', space)
+    const circle = await api.createCircle({ name: trimmed.value })
+    emit('created', circle)
   } catch (err) {
     error.value = err instanceof ApiError ? err.message : '新建失败'
   } finally {
@@ -44,13 +44,13 @@ async function create() {
 <template>
   <UModal
     :open="open"
-    title="新建空间"
+    title="新建共享圈"
     :dismissible="!busy"
     @update:open="(v) => !v && !busy && emit('close')"
   >
     <template #body>
       <div class="grid gap-4">
-        <UFormField label="名称" :error="issue === 'range' ? SPACE_NAME_RANGE : undefined">
+        <UFormField label="名称" :error="issue === 'range' ? CIRCLE_NAME_RANGE : undefined">
           <UInput
             v-model="name"
             class="w-full"

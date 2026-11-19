@@ -45,7 +45,8 @@ const namesLayer = (row: TemplateNode) =>
   nodesOf(row).some(
     (n) =>
       n.type === INTERPOLATION &&
-      (n.content as { content: string }).content.includes('layerLabels['),
+      ((n.content as { content: string }).content.includes('layerLabels[') ||
+        (n.content as { content: string }).content.includes('entryKindLabels')),
   )
 
 describe('色块旁边的层名', () => {

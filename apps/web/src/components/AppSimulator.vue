@@ -1,35 +1,36 @@
 <script setup lang="ts">
-import type { BootPreview } from '@kioku/contracts'
+import type { BootPreview, EntryKind, FacetVocabularyView } from '@kioku/contracts'
 import { useQuery } from '@tanstack/vue-query'
 import { computed, reactive, ref, watch } from 'vue'
 
 import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { bootUsage, simulatorState } from '../apps'
-import { memoryTitle } from '../coordinates'
-import { layerLabels, sessionExtraLabels } from '../labels'
-import { memoryRoute } from '../routes'
+import { useSession } from '../composables/useSession'
+import { entryKindLabels, sessionExtraLabels } from '../labels'
+import { whenLabel } from '../memoryDetail'
 import { formatShort, formatTime } from '../time'
 import Hint from './Hint.vue'
 import NoteLine from './strata/NoteLine.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
+import { entryBand } from './strata/strata'
 
-// 启动加载预览：按应用的一个 Key 模拟会话开始，只给应用所有者（会读到所有者的私人层）。
-// keyId 是左边选中的 Key，没有有效 Key 时没有。
-// settings 是会影响模拟结果的应用设置（默认人格、本人私聊时读取画像）拼成的串：变了的话，之前的结果就不是现在的样子了
-const props = defineProps<{
-  spaceId: string
-  appId: string
-  keyId: string | undefined
-  settings: string
-}>()
+// 启动加载预览：按接入实例的一个访问密钥模拟会话开始，只给接入实例所有者
+const props = withDefaults(
+  defineProps<{
+    circleId: string
+    clientId: string
+    keyId: string | undefined
+    settings: string
+    vocabulary?: FacetVocabularyView | null
+  }>(),
+  { vocabulary: null },
+)
 
-// 和左边的 Key 列表同一份缓存：没有选中的 Key 时，靠它分清是还在读、读取失败，还是真的没有有效 Key。
-// 这里只说读不到的情况：读到过又刷新失败时，左边的列表已经说了
 const keys = useQuery({
-  queryKey: computed(() => ['keys', props.spaceId, props.appId] as const),
-  queryFn: ({ queryKey: [, sid, aid] }) => api.keys(sid, aid),
+  queryKey: computed(() => ['keys', props.circleId, props.clientId] as const),
+  queryFn: ({ queryKey: [, cid, clid] }) => api.keys(cid, clid),
 })
 const state = computed(() =>
   simulatorState(
@@ -39,8 +40,6 @@ const state = computed(() =>
 )
 
 const failure = ref<string | null>(null)
-// 每次模拟一个序号，current 是进行中的那次：结果、报错与 loading 都只认它；
-// 换了应用、Key 或应用设置时清掉，进行中的那次就作废了
 let counter = 0
 const current = ref<number | null>(null)
 const running = computed(() => current.value !== null)
@@ -69,7 +68,7 @@ function runPreview() {
   const repoName = project.repoName.trim()
   return run(
     () =>
-      api.bootPreview(props.spaceId, props.appId, id, {
+      api.bootPreview(props.circleId, props.clientId, id, {
         ...(dirName || repoName
           ? { project: { ...(dirName ? { dirName } : {}), ...(repoName ? { repoName } : {}) } }
           : {}),
@@ -78,10 +77,8 @@ function runPreview() {
   )
 }
 
-// 换了应用、Key 或应用设置时清掉上一次的结果（它们属于别的 Key，或是改之前的样子），按新的重新模拟。
-// 模拟不写库，也不计入召回记录
 watch(
-  [() => props.spaceId, () => props.appId, () => props.keyId, () => props.settings],
+  [() => props.circleId, () => props.clientId, () => props.keyId, () => props.settings],
   () => {
     current.value = null
     preview.value = null
@@ -92,11 +89,37 @@ watch(
 )
 
 const usage = computed(() => (preview.value ? bootUsage(preview.value) : null))
-// 放不下、没有附上的附加块
 const dropped = computed(() =>
   (preview.value?.dropped ?? []).map((extra) => sessionExtraLabels[extra]).join('、'),
 )
-const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
+const resolvedFacetsText = computed(() => {
+  const f = preview.value?.resolvedFacets
+  return f && Object.keys(f).length ? whenLabel(f, props.vocabulary ?? undefined) : null
+})
+const { me } = useSession()
+const circlesById = computed(() => new Map((me.data.value?.circles ?? []).map((c) => [c.id, c])))
+const entryBandOf = (
+  item: { circleId: string; circleSlug?: string | null },
+  kind: EntryKind = 'entry',
+) => {
+  const currentKind = circlesById.value.get(props.circleId)?.kind ?? 'shared'
+  const targetKind =
+    circlesById.value.get(item.circleId)?.kind ??
+    (item.circleId === props.circleId
+      ? currentKind
+      : item.circleSlug === 'personal'
+        ? 'personal'
+        : 'shared')
+  return entryBand(
+    { kind, circleId: item.circleId, circleKind: targetKind },
+    { id: props.circleId, kind: currentKind },
+  )
+}
+const entryLink = (targetCircleId: string, shortId: string) => ({
+  name: 'memories',
+  params: { circleId: targetCircleId },
+  query: { id: shortId },
+})
 </script>
 
 <template>
@@ -104,7 +127,7 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
     <SectionHeading title="启动加载">
       <template #hint>
         <Hint>
-          按所选访问密钥的当前权限模拟会话开始时注入的内容，不计入召回记录。会话上下文（私聊、群聊）暂不可选，当前按无上下文模拟。
+          按所选访问密钥的当前权限与固定切面透镜模拟会话开始时注入的内容，不计入召回记录。当前按无会话上下文模拟。
         </Hint>
       </template>
       <template v-if="usage" #actions>
@@ -132,6 +155,7 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
       <NoteLine v-if="failure" class="boot-note" tone="error">{{ failure }}</NoteLine>
       <USkeleton v-if="running && !preview" class="mt-3 h-40 w-full" />
       <template v-if="preview && usage">
+        <p v-if="resolvedFacetsText" class="boot-facets">展开切面：{{ resolvedFacetsText }}</p>
         <div
           class="boot-bar"
           role="img"
@@ -139,41 +163,64 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
         >
           <i
             v-for="segment in usage.segments"
-            :key="segment.uri"
-            :style="{ width: `${segment.width}%`, background: `var(--layer-${segment.layer})` }"
-            :title="`${segment.title}：${segment.chars} 字`"
+            :key="segment.shortId"
+            :style="{
+              width: `${segment.width}%`,
+              background: `var(--layer-${entryBandOf(segment)})`,
+            }"
+            :title="`${segment.title}（${segment.shortId}）：${segment.chars} 字`"
           />
           <i
             v-if="usage.other > 0"
             class="boot-other"
             :style="{ width: `${usage.other}%` }"
-            title="标题、会话摘要、近期更新与相关记忆"
+            title="人格设定、会话摘要、近期更新与相关记忆"
           />
         </div>
         <NoteLine v-if="preview.dropped.length" class="boot-note" tone="warning">
           超出客户端接收上限，未附加：{{ dropped }}
         </NoteLine>
 
+        <div v-if="preview.personaTraits.length" class="boot-summaries">
+          <SectionHeading
+            :title="`人格设定段（${preview.personaTraits.length}）`"
+            :level="3"
+            class="boot-sub-head"
+          />
+          <ul class="boot-list">
+            <li v-for="trait in preview.personaTraits" :key="trait.traitKey">
+              <StrataSwatch band="persona" plain />
+              <span class="boot-uri">{{ trait.title }}</span>
+              <code class="boot-id">{{ trait.traitKey }}</code>
+            </li>
+          </ul>
+        </div>
+
         <ul v-if="preview.entries.length" class="boot-list">
-          <li v-for="entry in preview.entries" :key="entry.uri">
-            <StrataSwatch :layer="entry.layer" plain />
-            <RouterLink :to="memoryLink(entry.uri)" class="boot-uri" :title="entry.uri">
+          <li v-for="entry in preview.entries" :key="`${entry.circleId}:${entry.shortId}`">
+            <StrataSwatch :band="entryBandOf(entry)" plain />
+            <RouterLink
+              :to="entryLink(entry.circleId, entry.shortId)"
+              class="boot-uri"
+              :title="entry.shortId"
+            >
               {{ entry.title }}
             </RouterLink>
-            <span class="boot-layer">{{ layerLabels[entry.layer] }}</span>
+            <span class="boot-layer">{{ entry.circleSlug ?? entryKindLabels.entry }}</span>
             <span class="boot-chars">{{ entry.chars.toLocaleString() }}</span>
           </li>
         </ul>
-        <p v-else class="boot-empty">暂无启动加载的节点</p>
+        <p v-else class="boot-empty">暂无启动加载的词条</p>
         <p
           v-if="preview.omitted.length"
           class="boot-omitted"
-          :title="preview.omitted.map((node) => node.uri).join('\n')"
+          :title="preview.omitted.map((item) => item.shortId).join('\n')"
         >
-          超出预算、未展开：{{ preview.omitted.map((node) => memoryTitle(node)).join('、') }}
+          超出预算、未展开：{{
+            preview.omitted.map((item) => `${item.title}（${item.shortId}）`).join('、')
+          }}
         </p>
 
-        <!-- 附在启动加载后面的第一块：同一会话最近的摘要，新的在前 -->
         <div v-if="preview.summaries.length" class="boot-summaries">
           <SectionHeading title="会话摘要" :level="3" class="boot-sub-head">
             <template #hint>
@@ -203,10 +250,15 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
         <div v-if="preview">
           <SectionHeading title="近期更新" :level="3" class="boot-sub-head" />
           <ul v-if="preview.recent.length" class="boot-list">
-            <li v-for="memory in preview.recent" :key="memory.uri">
-              <RouterLink :to="memoryLink(memory.uri)" class="boot-uri" :title="memory.uri">
+            <li v-for="memory in preview.recent" :key="memory.shortId">
+              <RouterLink
+                :to="entryLink(circleId, memory.shortId)"
+                class="boot-uri"
+                :title="memory.shortId"
+              >
                 {{ memory.title }}
               </RouterLink>
+              <span v-if="memory.circleSlug" class="boot-layer">{{ memory.circleSlug }}</span>
             </li>
           </ul>
           <p v-else class="boot-empty">暂无</p>
@@ -226,12 +278,16 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
             </UButton>
           </form>
           <ul v-if="preview?.related.length" class="boot-list">
-            <li v-for="candidate in preview.related" :key="candidate.uri">
-              <StrataSwatch :layer="candidate.layer" plain />
-              <RouterLink :to="memoryLink(candidate.uri)" class="boot-uri" :title="candidate.uri">
+            <li v-for="candidate in preview.related" :key="candidate.entryId">
+              <StrataSwatch :band="entryBandOf(candidate, candidate.kind)" plain />
+              <RouterLink
+                :to="entryLink(candidate.circleId, candidate.shortId)"
+                class="boot-uri"
+                :title="candidate.shortId"
+              >
                 {{ candidate.title }}
               </RouterLink>
-              <span class="boot-layer">{{ layerLabels[candidate.layer] }}</span>
+              <span class="boot-layer">{{ entryKindLabels[candidate.kind] }}</span>
               <span class="boot-chars">{{ candidate.score.toFixed(2) }}</span>
             </li>
           </ul>
@@ -247,7 +303,7 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
     <div class="boot-links">
       <UButton
         v-if="keyId"
-        :to="{ name: 'recall', params: { spaceId }, query: { key: keyId } }"
+        :to="{ name: 'recall', params: { circleId }, query: { key: keyId } }"
         size="sm"
         color="neutral"
         variant="outline"
@@ -255,7 +311,7 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
         召回调试
       </UButton>
       <UButton
-        :to="{ name: 'bench', params: { spaceId }, query: { app: appId, key: keyId } }"
+        :to="{ name: 'bench', params: { circleId }, query: { client: clientId, key: keyId } }"
         size="sm"
         color="neutral"
         variant="outline"
@@ -274,6 +330,11 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
 }
 .boot-total.over {
   color: var(--ui-warning);
+}
+.boot-facets {
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--ui-text-muted);
 }
 .boot-empty {
   padding: 10px 0;
@@ -319,6 +380,12 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
 .boot-uri:hover {
   text-decoration: underline;
   text-underline-offset: 3px;
+}
+.boot-id {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ui-text-muted);
 }
 .boot-layer {
   flex: none;

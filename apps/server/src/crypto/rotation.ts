@@ -4,8 +4,8 @@ import { and, asc, count, eq, gt, isNotNull, isNull, notInArray, sql } from 'dri
 import { BACKUP_LABEL, mapBackupKey, sealedBackupKey } from '../backup/settings'
 import { credentialAad } from '../credential/service'
 import { vaultAad } from '../credential/vault'
-import { eachSpace, withSpace, type Db } from '../db/client'
-import { credentials, memories, settings, spaces, vaultConnections } from '../db/schema'
+import { eachCircle, withCircle, type Db } from '../db/client'
+import { credentials, entryVariants, settings, vaultConnections, circles } from '../db/schema'
 import {
   mapModelProviderKeys,
   mapPrivacyHttpKey,
@@ -25,7 +25,12 @@ import { keyIdOf, keyringOf, type Keyring, type MasterKey } from './keyring'
 // 记忆、凭据与密码库连接：加密的行、aad 怎么算。查询都带上 wrapped_key 不为空：key_id 的索引只建在加密的行上。
 // 已软删除的凭据、断开之外的连接都在里面（断开的没有密文）
 const TABLES = [
-  { field: 'memories', label: '机密记忆', table: memories, aad: (id: string) => id },
+  {
+    field: 'entries',
+    label: '机密记忆',
+    table: entryVariants,
+    aad: (id: string) => `variant:${id}`,
+  },
   { field: 'credentials', label: '托管的凭据', table: credentials, aad: credentialAad },
   {
     field: 'vaultConnections',
@@ -106,8 +111,8 @@ async function inspectMasterKey(db: Db, masterKey: MasterKey | null, fill: boole
     if (n) problems.set(label, (problems.get(label) ?? 0) + n)
   }
 
-  for (const { id: spaceId } of await db.select({ id: spaces.id }).from(spaces)) {
-    const counts = await withSpace(db, spaceId, async (tx) => {
+  for (const { id: circleId } of await db.select({ id: circles.id }).from(circles)) {
+    const counts = await withCircle(db, circleId, async (tx) => {
       const result = []
       for (const t of TABLES) {
         const encrypted = isNotNull(t.table.wrappedKey)
@@ -130,7 +135,7 @@ async function inspectMasterKey(db: Db, masterKey: MasterKey | null, fill: boole
       let after: string | null = null
       for (;;) {
         const cursor: string | null = after
-        const rows: { id: string }[] = await withSpace(db, spaceId, async (tx) => {
+        const rows: { id: string }[] = await withCircle(db, circleId, async (tx) => {
           const batch = await tx
             .select({ id: table.id, wrappedKey: table.wrappedKey })
             .from(table)
@@ -217,12 +222,12 @@ export async function rotateMasterKey(
   const previousId = keyIdOf(previous)
   let rewrapped = 0
   const failures: string[] = []
-  for (const { id: spaceId } of await db.select({ id: spaces.id }).from(spaces)) {
+  for (const { id: circleId } of await db.select({ id: circles.id }).from(circles)) {
     for (const { label, table, aad } of TABLES) {
       let after: string | null = null
       for (;;) {
         const cursor: string | null = after
-        const rows: { id: string }[] = await withSpace(db, spaceId, async (tx) => {
+        const rows: { id: string }[] = await withCircle(db, circleId, async (tx) => {
           // 只改包装与标识，都不是键列，锁用 FOR NO KEY UPDATE：别的表插入指向这一行的记录（记忆的事件、关键词、
           // 向量，凭据的事件）时外键检查加的 KEY SHARE 锁和它不冲突，不会被当成正在改而跳过；
           // 正在改这一行或锁住了要改的事务（UPDATE、DELETE、FOR UPDATE 等）照样和它冲突，这次跳过、之后再换
@@ -298,11 +303,11 @@ export async function masterKeyStatus(
 ): Promise<MasterKeyStatus> {
   const ring = masterKey ? keyringOf(masterKey) : null
   const previousId = ring?.previous ? keyIdOf(ring.previous) : null
-  const remaining = { memories: 0, credentials: 0, vaultConnections: 0, settings: 0 }
+  const remaining = { entries: 0, credentials: 0, vaultConnections: 0, settings: 0 }
   let lastError: MasterKeyStatus['lastError'] = null
   if (previousId) {
-    // 几个空间同时数，和实例的向量覆盖率一样（eachSpace）：轮换时卡片会一直刷新进度
-    await eachSpace(db, async (tx) => {
+    // 几个记忆圈同时数，和实例的向量覆盖率一样（eachCircle）：轮换时卡片会一直刷新进度
+    await eachCircle(db, async (tx) => {
       for (const { field, table } of TABLES) {
         const [row] = await tx
           .select({ n: count() })

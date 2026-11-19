@@ -1,4 +1,10 @@
-import { LAYERS, type KeyScopes } from '@kioku/contracts'
+import {
+  CREDENTIAL_ACCESS_REASONS,
+  ENTRY_KINDS,
+  READ_DENIALS,
+  type CircleEffectiveGrant,
+  type LensKeyScopes,
+} from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
 import {
@@ -11,400 +17,452 @@ import {
   credentialDenial,
   readDenial,
   resolveAccess,
-  type MemoryFacts,
+  type ClientAccessConfig,
+  type EntryFacts,
+  type ResolveAccessInput,
+  type SessionContext,
 } from '../access'
 
 const OWNER = 'owner-account'
-const app = { appId: 'app-1', ownerAccountId: OWNER }
-const fullKey: KeyScopes = {
-  readLayers: [...LAYERS],
-  writeLayers: [...LAYERS],
-  maxSensitivity: 'private',
+const OTHER = 'other-account'
+const PRIMARY_CIRCLE = '11111111-1111-4111-8111-111111111111'
+const PERSONAL_CIRCLE = '22222222-2222-4222-8222-222222222222'
+const HOME_CIRCLE = '33333333-3333-4333-8333-333333333333'
+const CLIENT_1 = '44444444-4444-4444-8444-444444444444'
+const CLIENT_2 = '55555555-5555-4555-8555-555555555555'
+
+const fullScopes: LensKeyScopes = {
+  readKinds: [...ENTRY_KINDS],
+  writeKinds: [...ENTRY_KINDS],
+  maxSensitivity: 'secret',
+  allowedRealms: null,
   admin: false,
-  credentials: 'none',
+  credentials: 'use',
 }
 
-const memory = (over: Partial<MemoryFacts> = {}): MemoryFacts => ({
-  layer: 'core',
+const fullGrants: CircleEffectiveGrant[] = [
+  {
+    circleId: PRIMARY_CIRCLE,
+    circleSlug: 'work',
+    circleName: '工作圈',
+    circleKind: 'shared',
+    isPrimary: true,
+    mode: 'read_write',
+    readKinds: [...ENTRY_KINDS],
+    writeKinds: [...ENTRY_KINDS],
+    maxSensitivity: 'secret',
+    credentials: 'use',
+    active: true,
+  },
+  {
+    circleId: PERSONAL_CIRCLE,
+    circleSlug: 'me',
+    circleName: '个人圈',
+    circleKind: 'personal',
+    isPrimary: false,
+    mode: 'read',
+    readKinds: [...ENTRY_KINDS],
+    writeKinds: [],
+    maxSensitivity: 'private',
+    credentials: 'none',
+    active: true,
+  },
+  {
+    circleId: HOME_CIRCLE,
+    circleSlug: 'home',
+    circleName: '家庭圈',
+    circleKind: 'shared',
+    isPrimary: false,
+    mode: 'read_write',
+    readKinds: ['entry'],
+    writeKinds: ['entry'],
+    maxSensitivity: 'private',
+    credentials: 'none',
+    active: true,
+  },
+]
+
+const baseClient: ClientAccessConfig = {
+  clientId: CLIENT_1,
+  ownerAccountId: OWNER,
+  personMemoryMode: 'strict',
+}
+
+function makeAccess(
+  over: Partial<Omit<ResolveAccessInput, 'context'>> & { context?: SessionContext } = {},
+) {
+  return resolveAccess({
+    primaryCircleId: PRIMARY_CIRCLE,
+    primaryCircleRealms: ['work'],
+    scopes: fullScopes,
+    grants: fullGrants,
+    client: baseClient,
+    ...over,
+  })
+}
+
+const entry = (over: Partial<EntryFacts> = {}): EntryFacts => ({
+  circleId: PRIMARY_CIRCLE,
+  kind: 'entry',
   sensitivity: 'public',
   originScope: 'global',
+  clientId: null,
   ownerAccountId: null,
-  personaId: null,
-  appId: null,
+  subjectKind: null,
+  realms: [],
   validTo: null,
   expiresAt: null,
   deletedAt: null,
   ...over,
 })
-const opts = { personaIds: ['persona-1'] }
-// 本人的私密记忆与内部记忆（原来的私人层与个人画像合并成了本人，按敏感级区分）
-const privateFact = memory({ layer: 'user', sensitivity: 'private', ownerAccountId: OWNER })
-const ownerPref = memory({ layer: 'user', sensitivity: 'internal', ownerAccountId: OWNER })
-const soul = memory({ layer: 'persona', personaId: 'persona-1' })
-// 不带会话上下文的会话摘要：归所属成员、私密
-const localSummary = memory({ layer: 'episode', sensitivity: 'private', ownerAccountId: OWNER })
 
-describe('没有会话上下文（本机 agent）', () => {
-  const access = resolveAccess(fullKey, app)
-
-  it('能读本人的私密与内部记忆', () => {
-    expect(canRead(access, privateFact, opts)).toBe(true)
-    expect(canRead(access, ownerPref, opts)).toBe(true)
-  })
-
-  it('读不到别的成员的本人记忆', () => {
-    expect(canRead(access, { ...privateFact, ownerAccountId: 'someone-else' }, opts)).toBe(false)
-  })
-
-  it('读得到本人不带会话上下文的会话摘要，别的成员的读不到', () => {
-    expect(canRead(access, localSummary, opts)).toBe(true)
-    expect(canRead(access, { ...localSummary, ownerAccountId: 'someone-else' }, opts)).toBe(false)
-  })
-
-  it('不会超过 Key 的敏感级上限', () => {
+describe('本机无上下文编码 Agent 与静态双向场域锁', () => {
+  it('主场全可读、客场普通可读，本地摘要按成员隔离', () => {
+    const access = makeAccess()
+    expect(canRead(access, entry({ sensitivity: 'private' }))).toBe(true)
     expect(
-      canRead(access, { ...privateFact, sensitivity: 'secret' }, { ...opts, explicit: true }),
-    ).toBe(false)
-  })
-})
-
-describe('群聊', () => {
-  const access = resolveAccess(fullKey, app, { chatType: 'group', groupSubjectId: 'g1' })
-
-  it('能借用人格', () => {
-    expect(canRead(access, soul, opts)).toBe(true)
-  })
-
-  it('读不到本人的记忆与不带会话上下文的会话摘要，即使 Key 有权限', () => {
-    expect(canRead(access, privateFact, opts)).toBe(false)
-    expect(canRead(access, ownerPref, opts)).toBe(false)
-    expect(canRead(access, localSummary, opts)).toBe(false)
-  })
-
-  it('只看得到本群和全局来源的联系人事实', () => {
-    const inGroup = memory({ layer: 'subject', originScope: 'group:g1' })
-    expect(canRead(access, inGroup, opts)).toBe(true)
-    expect(canRead(access, { ...inGroup, originScope: 'group:g2' }, opts)).toBe(false)
-    expect(canRead(access, { ...inGroup, originScope: 'direct:alice' }, opts)).toBe(false)
-  })
-
-  it('敏感级封顶在 public', () => {
-    expect(canRead(access, memory({ sensitivity: 'internal' }), opts)).toBe(false)
-  })
-
-  it('只能以 untrusted 身份写联系人的事实与会话摘要', () => {
-    expect(access.writeProvenance).toBe('untrusted')
-    expect(access.writeOriginScope).toBe('group:g1')
-    const intent = { sensitivity: 'public', appId: null, personaId: null } as const
-    expect(canWrite(access, { ...intent, layer: 'subject' })).toBe(true)
-    expect(canWrite(access, { ...intent, layer: 'episode' })).toBe(true)
-    expect(canWrite(access, { ...intent, layer: 'persona' })).toBe(false)
-    expect(canWrite(access, { ...intent, layer: 'user' })).toBe(false)
-  })
-
-  it('只能改动不可信来源写下的记录：受信的（本人确认过的、agent 写的）动不了', () => {
-    const row = { layer: 'subject', sensitivity: 'public', appId: null, personaId: null } as const
-    expect(canModify(access, { ...row, provenance: 'untrusted' })).toBe(true)
-    expect(canModify(access, { ...row, provenance: 'owner' })).toBe(false)
-    expect(canModify(access, { ...row, provenance: 'agent' })).toBe(false)
-    // 受信的写入方不受这条限制
-    const agent = resolveAccess(fullKey, app, {})
-    expect(canModify(agent, { ...row, provenance: 'untrusted' })).toBe(true)
-    expect(canModify(agent, { ...row, provenance: 'owner' })).toBe(true)
-  })
-
-  it('缺少群时拒绝解析', () => {
-    expect(() => resolveAccess(fullKey, app, { chatType: 'group' })).toThrow()
-  })
-})
-
-describe('私聊', () => {
-  it('陌生人私聊只看得到与自己相关的联系人事实', () => {
-    const access = resolveAccess(fullKey, app, { chatType: 'direct', senderSubjectId: 'bob' })
-    const aboutBob = memory({ layer: 'subject', originScope: 'direct:bob' })
-    expect(canRead(access, aboutBob, opts)).toBe(true)
-    expect(canRead(access, { ...aboutBob, originScope: 'direct:alice' }, opts)).toBe(false)
-    expect(canRead(access, ownerPref, opts)).toBe(false)
-  })
-
-  it('本人私聊默认不读本人的记忆', () => {
-    const access = resolveAccess(fullKey, app, {
-      chatType: 'direct',
-      senderSubjectId: 'me',
-      senderIsOwner: true,
-    })
-    expect(access.maxSensitivity).toBe('public')
-    expect(canRead(access, ownerPref, opts)).toBe(false)
-  })
-
-  it('开启「本人私聊时读取本人记忆」后读得到本人的内部记忆，私密的与本机会话的摘要仍读不到', () => {
-    const access = resolveAccess(
-      fullKey,
-      { ...app, elevateOwnerDirect: 'internal' },
-      { chatType: 'direct', senderSubjectId: 'me', senderIsOwner: true },
-    )
-    expect(access.maxSensitivity).toBe('internal')
-    expect(canRead(access, { ...ownerPref, originScope: 'global' }, opts)).toBe(true)
-    expect(canRead(access, privateFact, opts)).toBe(false)
-    expect(canRead(access, localSummary, opts)).toBe(false)
-  })
-
-  it('不是本人时即使应用开了也不读本人的记忆', () => {
-    const access = resolveAccess(
-      fullKey,
-      { ...app, elevateOwnerDirect: 'internal' },
-      { chatType: 'direct', senderSubjectId: 'bob', senderIsOwner: false },
-    )
-    expect(access.maxSensitivity).toBe('public')
-  })
-})
-
-describe('上下文只能收紧', () => {
-  it('Key 只给 public 时，提升也不会超过 public', () => {
-    const access = resolveAccess(
-      { ...fullKey, maxSensitivity: 'public' },
-      { ...app, elevateOwnerDirect: 'internal' },
-      { chatType: 'direct', senderSubjectId: 'me', senderIsOwner: true },
-    )
-    expect(access.maxSensitivity).toBe('public')
-  })
-
-  it('Key 没给的归属，任何上下文都拿不到', () => {
-    const access = resolveAccess({ ...fullKey, readLayers: ['core'] }, app)
-    expect(canRead(access, soul, opts)).toBe(false)
-  })
-})
-
-describe('secret', () => {
-  const secretKey: KeyScopes = { ...fullKey, maxSensitivity: 'secret' }
-  const secret = { ...privateFact, sensitivity: 'secret' as const }
-
-  it('只有显式读取时才返回', () => {
-    const access = resolveAccess(secretKey, app)
-    expect(canRead(access, secret, opts)).toBe(false)
-    expect(canRead(access, secret, { ...opts, explicit: true })).toBe(true)
-  })
-
-  it('任何会话上下文里都读不到', () => {
-    const access = resolveAccess(secretKey, app, { chatType: 'cron' })
-    expect(canRead(access, secret, { ...opts, explicit: true })).toBe(false)
-  })
-})
-
-describe('有效期', () => {
-  const access = resolveAccess(fullKey, app)
-  const now = new Date('2026-10-26T00:00:00Z')
-
-  it('已失效、已过期、已删除的记忆都不可见', () => {
-    const past = new Date('2026-10-01T00:00:00Z')
-    expect(canRead(access, memory({ validTo: past }), { ...opts, now })).toBe(false)
-    expect(canRead(access, memory({ expiresAt: past }), { ...opts, now })).toBe(false)
-    expect(canRead(access, memory({ deletedAt: past }), { ...opts, now })).toBe(false)
-  })
-
-  it('人格的记忆只能读当前人格继承链上的', () => {
-    expect(canRead(access, { ...soul, personaId: 'other' }, opts)).toBe(false)
-  })
-
-  it('应用的记忆只能读本应用的', () => {
-    const appRule = memory({ layer: 'app', appId: 'app-1' })
-    expect(canRead(access, appRule, opts)).toBe(true)
-    expect(canRead(access, { ...appRule, appId: 'app-2' }, opts)).toBe(false)
-  })
-})
-
-describe('应用的记忆的写入', () => {
-  const appRule = (appId: string) => ({
-    layer: 'app' as const,
-    sensitivity: 'internal' as const,
-    appId,
-    personaId: null,
-  })
-
-  it('Key 只能写本应用的记忆，admin Key 不限', () => {
-    const access = resolveAccess(fullKey, app)
-    expect(canWrite(access, appRule('app-1'))).toBe(true)
-    expect(canWrite(access, appRule('app-2'))).toBe(false)
-    expect(canWrite(resolveAccess({ ...fullKey, admin: true }, app), appRule('app-2'))).toBe(true)
-  })
-
-  it('管理界面里 owner 能写所有应用，editor 只能写自己是所有者的应用，viewer 都不能写', () => {
-    expect(canWrite(consoleAccess('owner', OWNER), appRule('app-2'))).toBe(true)
-    const editor = consoleAccess('editor', 'bob', ['app-bob'])
-    expect(canWrite(editor, appRule('app-bob'))).toBe(true)
-    expect(canWrite(editor, appRule('app-1'))).toBe(false)
-    expect(editor.admin).toBe(false)
-    expect(canWrite(consoleAccess('viewer', 'carol', ['app-carol']), appRule('app-carol'))).toBe(
-      false,
-    )
-  })
-})
-
-describe('人格的记忆的写入', () => {
-  const personaRule = (personaId: string) => ({
-    layer: 'persona' as const,
-    sensitivity: 'public' as const,
-    appId: null,
-    personaId,
-  })
-  const withPersona = { ...app, personaId: 'persona-child' }
-
-  it('Key 只能写应用当前的人格，不能写继承链上的祖先；admin Key 不限', () => {
-    const access = resolveAccess(fullKey, withPersona)
-    expect(canWrite(access, personaRule('persona-child'))).toBe(true)
-    expect(canWrite(access, personaRule('persona-parent'))).toBe(false)
-    expect(
-      canWrite(
-        resolveAccess({ ...fullKey, admin: true }, withPersona),
-        personaRule('persona-parent'),
+      canRead(
+        access,
+        entry({ circleId: PERSONAL_CIRCLE, ownerAccountId: OWNER, sensitivity: 'private' }),
       ),
     ).toBe(true)
-  })
-
-  it('应用没有人格时 Key 写不了人格的记忆', () => {
-    expect(canWrite(resolveAccess(fullKey, app), personaRule('persona-child'))).toBe(false)
-  })
-
-  it('管理界面里 owner 与 editor 能写任何人格，viewer 不能写', () => {
-    expect(canWrite(consoleAccess('owner', OWNER), personaRule('persona-parent'))).toBe(true)
-    expect(canWrite(consoleAccess('editor', 'bob'), personaRule('persona-parent'))).toBe(true)
-    expect(canWrite(consoleAccess('viewer', 'carol'), personaRule('persona-parent'))).toBe(false)
-  })
-})
-
-describe('凭据', () => {
-  const useKey: KeyScopes = { ...fullKey, credentials: 'use' }
-  const manageKey: KeyScopes = { ...fullKey, credentials: 'manage' }
-  const own = { appIds: null }
-
-  it('取用要凭据能力至少是取用，并能读本人、至少 private 级；不再借用 secret 级', () => {
-    expect(canUseCredential(resolveAccess(useKey, app), own)).toBe(true)
-    expect(credentialDenial(resolveAccess(fullKey, app), own, 'use')).toBe('capability')
     expect(
-      credentialDenial(resolveAccess({ ...fullKey, maxSensitivity: 'secret' }, app), own, 'use'),
-    ).toBe('capability')
-    expect(
-      credentialDenial(resolveAccess({ ...useKey, maxSensitivity: 'internal' }, app), own, 'use'),
-    ).toBe('scope')
-    expect(
-      credentialDenial(
-        resolveAccess({ ...useKey, readLayers: LAYERS.filter((l) => l !== 'user') }, app),
-        own,
-        'use',
+      canRead(
+        access,
+        entry({ circleId: PERSONAL_CIRCLE, ownerAccountId: OTHER, sensitivity: 'private' }),
       ),
-    ).toBe('scope')
-  })
-
-  it('群聊、私聊（包括开启后的本人私聊）、定时任务与子 agent 都用不了凭据', () => {
-    const contexts = [
-      resolveAccess(manageKey, app, { chatType: 'group', groupSubjectId: 'g1' }),
-      resolveAccess(
-        manageKey,
-        { ...app, elevateOwnerDirect: 'internal' },
-        { chatType: 'direct', senderSubjectId: 's1', senderIsOwner: true },
-      ),
-      resolveAccess(manageKey, app, { chatType: 'cron' }),
-      resolveAccess(manageKey, app, { chatType: 'subagent' }),
-    ]
-    for (const access of contexts) {
-      expect(credentialDenial(access, own, 'use')).toBe('context')
-      expect(credentialDenial(access, own, 'manage')).toBe('context')
-    }
-  })
-
-  it('限定了应用的只给那些应用用，跨人格 / 应用写入的 Key 也不放宽；管理界面不受限', () => {
-    const limited = { appIds: ['app-2'] }
-    expect(credentialDenial(resolveAccess(useKey, app), limited, 'use')).toBe('app')
-    expect(canUseCredential(resolveAccess({ ...useKey, admin: true }, app), limited)).toBe(false)
-    expect(canUseCredential(resolveAccess(useKey, { ...app, appId: 'app-2' }), limited)).toBe(true)
-    expect(canUseCredential(consoleAccess('owner', OWNER), limited)).toBe(true)
-  })
-
-  it('管理要凭据能力是管理，并能读写本人', () => {
-    expect(credentialDenial(resolveAccess(manageKey, app), own, 'manage')).toBeNull()
-    expect(credentialDenial(resolveAccess(useKey, app), own, 'manage')).toBe('capability')
-    expect(
-      credentialDenial(
-        resolveAccess({ ...manageKey, writeLayers: LAYERS.filter((l) => l !== 'user') }, app),
-        own,
-        'manage',
-      ),
-    ).toBe('scope')
-  })
-
-  it('管理界面里只有空间 owner 能管理凭据；editor 与 viewer 只能看自己的', () => {
-    for (const role of ['editor', 'viewer'] as const) {
-      const access = consoleAccess(role, OWNER)
-      expect(canUseCredential(access, own)).toBe(true)
-      expect(credentialDenial(access, own, 'manage')).not.toBeNull()
-    }
-    expect(credentialDenial(consoleAccess('owner', OWNER), own, 'manage')).toBeNull()
-  })
-
-  it('权限范围给出每个会话上下文下实际的凭据能力', () => {
-    const matrix = accessMatrix(manageKey, app)
-    expect(Object.fromEntries(matrix.contexts.map((c) => [c.context, c.credentials]))).toEqual({
-      none: 'manage',
-      direct: 'none',
-      owner_direct: 'none',
-      group: 'none',
-      cron: 'none',
-    })
-    const readOnly = accessMatrix({ ...manageKey, writeLayers: [] }, app)
-    expect(readOnly.contexts.find((c) => c.context === 'none')!.credentials).toBe('use')
-  })
-})
-
-describe('读不到的原因', () => {
-  const access = resolveAccess(fullKey, app)
-
-  it('按 canRead 的顺序给出第一个原因，读得到时为 null', () => {
-    expect(readDenial(access, privateFact, opts)).toBeNull()
-    expect(readDenial(access, memory({ deletedAt: new Date() }), opts)).toBe('deleted')
-    expect(
-      readDenial(access, memory({ validTo: new Date(0) }), { ...opts, now: new Date(1) }),
-    ).toBe('expired')
-    // 有有效期又没给时刻：不拿应用的钟顶替
-    expect(() => readDenial(access, memory({ validTo: new Date(0) }), opts)).toThrow('数据库的时刻')
-    expect(readDenial(resolveAccess({ ...fullKey, readLayers: [] }, app), memory(), opts)).toBe(
-      'layer',
+    ).toBe(false)
+    expect(readDenial(access, entry({ circleId: PERSONAL_CIRCLE, ownerAccountId: OTHER }))).toBe(
+      'owner',
     )
-    expect(readDenial(access, memory({ sensitivity: 'secret' }), opts)).toBe('secret')
+
+    const localEp = entry({ kind: 'episode', sensitivity: 'private', ownerAccountId: OWNER })
+    expect(canRead(access, localEp)).toBe(true)
+    expect(canRead(access, { ...localEp, ownerAccountId: OTHER })).toBe(false)
+  })
+
+  it('secret 仅限主场圈显式读取，客场圈始终拒绝为 circle', () => {
+    const access = makeAccess()
+    const homeSecret = entry({ circleId: HOME_CIRCLE, sensitivity: 'secret', realms: ['work'] })
+    const primarySecret = entry({ circleId: PRIMARY_CIRCLE, sensitivity: 'secret' })
+
+    expect(readDenial(access, homeSecret, { explicit: true })).toBe('circle')
+    expect(readDenial(access, primarySecret, { explicit: false })).toBe('secret')
+    expect(canRead(access, primarySecret, { explicit: true })).toBe(true)
+  })
+
+  it('静态双向场域锁：allowedRealms 拦截未标场域的个人机密与异场域机密', () => {
+    const restricted = makeAccess({
+      primaryCircleRealms: [],
+      scopes: { ...fullScopes, allowedRealms: ['work'] },
+    })
+
+    expect(
+      canRead(restricted, entry({ sensitivity: 'secret', realms: ['work'] }), { explicit: true }),
+    ).toBe(true)
+    expect(
+      readDenial(restricted, entry({ sensitivity: 'secret', realms: ['home'] }), {
+        explicit: true,
+      }),
+    ).toBe('realm')
+    expect(
+      readDenial(restricted, entry({ sensitivity: 'secret', realms: [] }), { explicit: true }),
+    ).toBe('realm')
+
+    // allowedRealms 为空时仍校验目标显式 realms 与 staticContextRealms 的交集
+    const ctxLocked = makeAccess({
+      primaryCircleRealms: [],
+      scopes: { ...fullScopes, allowedRealms: null },
+      staticContextRealms: new Set(['work']),
+    })
+    expect(
+      readDenial(ctxLocked, entry({ sensitivity: 'secret', realms: ['home'] }), { explicit: true }),
+    ).toBe('realm')
+    expect(
+      canRead(ctxLocked, entry({ sensitivity: 'secret', realms: ['work'] }), { explicit: true }),
+    ).toBe(true)
+    expect(
+      canRead(ctxLocked, entry({ sensitivity: 'secret', realms: [] }), { explicit: true }),
+    ).toBe(true)
+  })
+})
+
+describe('群聊、跨群识人双模式、单群锁与私聊提权', () => {
+  const inGroup = (
+    over: Partial<SessionContext> = {},
+    clientOver: Partial<ClientAccessConfig> = {},
+  ) =>
+    makeAccess({
+      client: { ...baseClient, ...clientOver },
+      context: { chatType: 'group', groupSubjectId: 'g1', ...over },
+    })
+
+  it('群聊与外人私聊死锁敏感级于 public，破壁点名也读不出个人圈 internal / private', () => {
+    const access = inGroup()
+    expect(
+      canRead(
+        access,
+        entry({ circleId: PERSONAL_CIRCLE, ownerAccountId: OWNER, sensitivity: 'public' }),
+      ),
+    ).toBe(true)
     expect(
       readDenial(
         access,
-        memory({ layer: 'user', sensitivity: 'private', ownerAccountId: 'x' }),
-        opts,
+        entry({ circleId: PERSONAL_CIRCLE, ownerAccountId: OWNER, sensitivity: 'internal' }),
       ),
-    ).toBe('owner')
-    expect(readDenial(access, memory({ layer: 'persona', personaId: 'other' }), opts)).toBe(
-      'persona',
-    )
+    ).toBe('sensitivity')
     expect(
-      readDenial(access, memory({ layer: 'app', sensitivity: 'internal', appId: 'app-2' }), opts),
-    ).toBe('app')
-    const group = resolveAccess(fullKey, app, { chatType: 'group', groupSubjectId: 'g1' })
-    expect(readDenial(group, memory({ sensitivity: 'internal' }), opts)).toBe('sensitivity')
-    expect(readDenial(group, memory({ originScope: 'group:g2' }), opts)).toBe('origin')
+      readDenial(
+        access,
+        entry({ circleId: PERSONAL_CIRCLE, ownerAccountId: OWNER, sensitivity: 'private' }),
+      ),
+    ).toBe('sensitivity')
+    expect(
+      readDenial(access, entry({ kind: 'episode', sensitivity: 'public', ownerAccountId: OWNER })),
+    ).toBe('owner')
+  })
+
+  it('strict 模式严禁跨群读取人物事实；persona_shared 允许读取同实例未加锁群的人物印象', () => {
+    const otherGroupFact = entry({
+      kind: 'fact',
+      subjectKind: 'person',
+      originScope: 'group:g2',
+      clientId: CLIENT_1,
+      sensitivity: 'public',
+    })
+    const otherBotFact = { ...otherGroupFact, clientId: CLIENT_2 }
+    const otherGroupSelfFact = { ...otherGroupFact, subjectKind: 'group' as const }
+    const directFact = { ...otherGroupFact, originScope: 'direct:u1' }
+
+    const strictAccess = inGroup({}, { personMemoryMode: 'strict' })
+    expect(readDenial(strictAccess, otherGroupFact)).toBe('origin')
+
+    const sharedAccess = inGroup(
+      { sharedGroupScopes: ['group:g2'], lockedGroupScopes: ['group:g3'] },
+      { personMemoryMode: 'persona_shared' },
+    )
+    expect(canRead(sharedAccess, otherGroupFact)).toBe(true)
+    expect(canRead(sharedAccess, { ...otherGroupFact, clientId: null })).toBe(true)
+    expect(readDenial(sharedAccess, otherBotFact)).toBe('client')
+    expect(readDenial(sharedAccess, otherGroupSelfFact)).toBe('origin')
+    expect(readDenial(sharedAccess, directFact)).toBe('origin')
+    expect(readDenial(sharedAccess, { ...otherGroupFact, originScope: 'group:g3' })).toBe(
+      'group_lock',
+    )
+  })
+
+  it('单群强隔离锁启用时禁止任何跨群印象流入，即使共享群名单存在', () => {
+    const isolated = inGroup(
+      {
+        currentGroupIsolated: true,
+        sharedGroupScopes: ['group:g2'],
+        lockedGroupScopes: ['group:g1'],
+      },
+      { personMemoryMode: 'persona_shared' },
+    )
+    const fromG2 = entry({
+      kind: 'fact',
+      subjectKind: 'person',
+      originScope: 'group:g2',
+      clientId: CLIENT_1,
+    })
+    expect(readDenial(isolated, fromG2)).toBe('group_lock')
+  })
+
+  it('本人私聊默认 public；开启 elevateOwnerDirect 后放宽至 internal 且仍拦 private/secret', () => {
+    const normalDirect = makeAccess({
+      client: { ...baseClient, personMemoryMode: 'persona_shared' },
+      context: {
+        chatType: 'direct',
+        senderSubjectId: 'owner-sub',
+        senderIsOwner: true,
+        sharedGroupScopes: ['group:g2'],
+      },
+    })
+    expect(
+      readDenial(
+        normalDirect,
+        entry({ circleId: PERSONAL_CIRCLE, ownerAccountId: OWNER, sensitivity: 'internal' }),
+      ),
+    ).toBe('sensitivity')
+
+    const elevatedDirect = makeAccess({
+      client: { ...baseClient, elevateOwnerDirect: 'internal', personMemoryMode: 'persona_shared' },
+      context: {
+        chatType: 'direct',
+        senderSubjectId: 'owner-sub',
+        senderIsOwner: true,
+        sharedGroupScopes: ['group:g2'],
+        lockedGroupScopes: ['group:g3'],
+      },
+    })
+    expect(
+      canRead(
+        elevatedDirect,
+        entry({ circleId: PERSONAL_CIRCLE, ownerAccountId: OWNER, sensitivity: 'internal' }),
+      ),
+    ).toBe(true)
+    expect(
+      readDenial(
+        elevatedDirect,
+        entry({ circleId: PERSONAL_CIRCLE, ownerAccountId: OWNER, sensitivity: 'private' }),
+      ),
+    ).toBe('sensitivity')
+    expect(
+      canRead(
+        elevatedDirect,
+        entry({ kind: 'fact', subjectKind: 'person', originScope: 'group:g2', clientId: CLIENT_1 }),
+      ),
+    ).toBe(true)
+    expect(
+      readDenial(
+        elevatedDirect,
+        entry({ kind: 'fact', subjectKind: 'person', originScope: 'group:g3', clientId: CLIENT_1 }),
+      ),
+    ).toBe('group_lock')
+
+    // 陌生人开启同样 client 配置也不能提权
+    const strangerDirect = makeAccess({
+      client: { ...baseClient, elevateOwnerDirect: 'internal' },
+      context: { chatType: 'direct', senderSubjectId: 'stranger', senderIsOwner: false },
+    })
+    expect(
+      readDenial(
+        strangerDirect,
+        entry({ circleId: PERSONAL_CIRCLE, ownerAccountId: OWNER, sensitivity: 'internal' }),
+      ),
+    ).toBe('sensitivity')
+  })
+
+  it('定时任务与子 agent 不读个人圈 internal 及任何群/私聊对话来源', () => {
+    const cron = makeAccess({ context: { chatType: 'cron' } })
+    expect(canRead(cron, entry({ sensitivity: 'internal' }))).toBe(true)
+    expect(
+      readDenial(
+        cron,
+        entry({ circleId: PERSONAL_CIRCLE, ownerAccountId: OWNER, sensitivity: 'internal' }),
+      ),
+    ).toBe('sensitivity')
+    expect(
+      canRead(
+        cron,
+        entry({ circleId: PERSONAL_CIRCLE, ownerAccountId: OWNER, sensitivity: 'public' }),
+      ),
+    ).toBe(true)
+    expect(
+      readDenial(cron, entry({ originScope: 'group:g1', kind: 'fact', subjectKind: 'person' })),
+    ).toBe('origin')
   })
 })
 
-describe('本人不设公开', () => {
-  it('写不了本人的公开记忆，权限范围里那一格读写都没有', () => {
-    const access = resolveAccess(fullKey, app)
-    const intent = { layer: 'user', appId: null, personaId: null } as const
-    expect(canWrite(access, { ...intent, sensitivity: 'public' })).toBe(false)
-    expect(canWrite(access, { ...intent, sensitivity: 'internal' })).toBe(true)
-    const none = accessMatrix(fullKey, app).contexts.find((c) => c.context === 'none')!
-    const user = none.rows.find((r) => r.layer === 'user')!
-    expect(user.cells.find((c) => c.sensitivity === 'public')).toEqual({
-      sensitivity: 'public',
-      read: 'none',
-      write: false,
+describe('写入、修改、凭据校验与权限矩阵', () => {
+  it('canWrite 与 canModify 限制可写圈、物种及 untrusted 同作用域', () => {
+    const agent = makeAccess()
+    expect(canWrite(agent, { circleId: HOME_CIRCLE, kind: 'entry', sensitivity: 'private' })).toBe(
+      true,
+    )
+    expect(canWrite(agent, { circleId: HOME_CIRCLE, kind: 'fact', sensitivity: 'public' })).toBe(
+      false,
+    )
+    expect(
+      canWrite(agent, { circleId: PERSONAL_CIRCLE, kind: 'entry', sensitivity: 'public' }),
+    ).toBe(false)
+
+    const groupAccess = makeAccess({ context: { chatType: 'group', groupSubjectId: 'g1' } })
+    expect(
+      canModify(groupAccess, {
+        circleId: PRIMARY_CIRCLE,
+        kind: 'fact',
+        sensitivity: 'public',
+        provenance: 'untrusted',
+        originScope: 'group:g1',
+      }),
+    ).toBe(true)
+    expect(
+      canModify(groupAccess, {
+        circleId: PRIMARY_CIRCLE,
+        kind: 'fact',
+        sensitivity: 'public',
+        provenance: 'owner',
+        originScope: 'group:g1',
+      }),
+    ).toBe(false)
+    expect(
+      canModify(groupAccess, {
+        circleId: PRIMARY_CIRCLE,
+        kind: 'fact',
+        sensitivity: 'public',
+        provenance: 'untrusted',
+        originScope: 'group:g2',
+      }),
+    ).toBe(false)
+  })
+
+  it('credentialDenial 拦会话上下文、客场圈与静态场域锁', () => {
+    const access = makeAccess({
+      primaryCircleRealms: [],
+      scopes: { ...fullScopes, allowedRealms: ['work'], credentials: 'manage' },
     })
-    expect(user.cells.find((c) => c.sensitivity === 'private')).toMatchObject({
-      read: 'recall',
-      write: true,
+    expect(
+      canUseCredential(access, {
+        circleId: PRIMARY_CIRCLE,
+        clientIds: null,
+        allowedRealms: ['work'],
+      }),
+    ).toBe(true)
+    expect(
+      credentialDenial(
+        access,
+        { circleId: PERSONAL_CIRCLE, clientIds: null, allowedRealms: ['work'] },
+        'use',
+      ),
+    ).toBe('circle')
+    expect(
+      credentialDenial(
+        access,
+        { circleId: PRIMARY_CIRCLE, clientIds: null, allowedRealms: null },
+        'use',
+      ),
+    ).toBe('realm')
+    expect(
+      credentialDenial(
+        access,
+        { circleId: PRIMARY_CIRCLE, clientIds: [CLIENT_2], allowedRealms: ['work'] },
+        'use',
+      ),
+    ).toBe('client')
+
+    const groupAccess = makeAccess({
+      scopes: { ...fullScopes, credentials: 'manage' },
+      context: { chatType: 'group', groupSubjectId: 'g1' },
     })
+    expect(
+      credentialDenial(
+        groupAccess,
+        { circleId: PRIMARY_CIRCLE, clientIds: null, allowedRealms: ['work'] },
+        'use',
+      ),
+    ).toBe('context')
+  })
+
+  it('consoleAccess 与 accessMatrix 返回完整结构与全部契约枚举保持一致', () => {
+    const matrix = accessMatrix({
+      primaryCircleId: PRIMARY_CIRCLE,
+      primaryCircleRealms: ['work'],
+      scopes: fullScopes,
+      grants: fullGrants,
+      client: baseClient,
+    })
+    expect(matrix.contexts).toHaveLength(5)
+    expect(matrix.contexts[0]!.circles).toHaveLength(3)
+    expect(matrix.contexts.find((c) => c.context === 'group')!.credentials).toBe('none')
+
+    const viewer = consoleAccess(PRIMARY_CIRCLE, 'shared', 'viewer', OWNER, ['work'])
+    expect(canRead(viewer, entry({ sensitivity: 'private' }))).toBe(true)
+    expect(
+      canWrite(viewer, { circleId: PRIMARY_CIRCLE, kind: 'entry', sensitivity: 'public' }),
+    ).toBe(false)
+    expect(READ_DENIALS.length).toBeGreaterThan(0)
+    expect(CREDENTIAL_ACCESS_REASONS.length).toBeGreaterThan(0)
   })
 })

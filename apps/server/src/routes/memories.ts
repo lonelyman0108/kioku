@@ -9,37 +9,39 @@ import {
   ActivityFilter,
   ActivityList,
   ActivityQuery,
-  ConsoleCreateMemoryRequest,
-  ConsoleMemoryChildren,
-  ConsoleMemoryView,
+  BrowseEntriesQuery,
+  ConsoleCreateEntryRequest,
+  ConsoleEntryView,
   ConsoleSearchRequest,
   ConsoleSearchResponse,
-  ConsoleUpdateMemoryRequest,
+  ConsoleTransferEntryRequest,
+  ConsoleUpdateEntryRequest,
   ConvertedToCredential,
   ConvertToCredentialRequest,
-  CreateMemoryRequest,
-  DeletedMemoryList,
+  CreateEntryRequest,
+  CredentialWriteError,
+  DeletedEntryList,
+  EntryBrowseResponse,
+  EntryHistory,
+  EntryHistoryQuery,
+  EntryList,
+  EntryListQuery,
+  EntryView,
+  EntryWriteError,
   ErrorResponse,
-  ExpiredMemoryList,
+  ExpiredEntryList,
+  GetEntryQuery,
   GlossaryIndex,
-  MemoryChildren,
-  MemoryHistory,
-  MemoryHistoryQuery,
-  MemoryList,
-  MemoryListQuery,
-  MemoryUri,
-  MemoryView,
-  MemoryWriteError,
-  MoveMemoryRequest,
   PageQuery,
   PlaintextIgnoreRequest,
-  ProtectMemoryRequest,
+  ProtectEntryRequest,
   ReactivateRequest,
-  RedactMemoryRequest,
+  RedactEntryRequest,
   RestoreRequest,
-  RevealMemoryRequest,
+  RevealEntryRequest,
+  TransferEntryRequest,
   UndeleteRequest,
-  UpdateMemoryRequest,
+  UpdateEntryRequest,
 } from '@kioku/contracts'
 import type { Context } from 'hono'
 
@@ -48,22 +50,20 @@ import { credentialServiceForConsole } from '../credential/context'
 import type { AppEnv, Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { withDeletionRetention } from '../jobs/retention'
-import { consoleMemberFor, memoryServiceForKey, recallForConsole } from '../memory/context'
 import {
-  UnknownTimeZoneError,
-  type CreateInput,
-  type MemoryService,
-  type UpdateInput,
-} from '../memory/service'
+  consoleCircleFor,
+  consoleMemberFor,
+  entryServiceForKey,
+  recallForConsole,
+  recallScopeForKey,
+} from '../memory/context'
+import { UnknownTimeZoneError } from '../memory/service'
 
-// 快速跳转最多列出的直接命中数
 const MATCH_LIMIT = 10
 
-// URI 里有 :// 和 /，放在查询参数里，省去路径编码的麻烦
-const UriQuery = z.object({ uri: MemoryUri })
-// 删除时可以带上读取时的 id 与版本号：删除后在同一个 URI 重建的、或期间被改过的记忆，不会被当成同一条删掉
-const DeleteQuery = UriQuery.extend({
-  expectedId: z.uuid().optional(),
+const DeleteEntryQuery = z.object({
+  id: z.string().trim().min(1).max(2048),
+  circle: z.string().trim().min(1).max(64).optional(),
   expectedVersion: z.coerce.number().int().optional(),
 })
 
@@ -74,325 +74,381 @@ const errors = {
   404: jsonResponse('不存在或不可见', ErrorResponse),
   409: jsonResponse('冲突', ErrorResponse),
 }
-// 新建与修改：正文里有新增的疑似明文被拒时，400 的错误体带上每一处的行号与类别
+
 const writeErrors = {
   ...errors,
   400: jsonResponse(
     '请求不合法，或正文里有新增的疑似明文凭据（plaintext 列出每一处）',
-    MemoryWriteError,
+    EntryWriteError,
   ),
 }
 
-// 管理界面的响应多两个字段（ConsoleMemoryView），由服务按 MemoryContext.secretRead 给出。
-// 路由这边按 MemoryView 写类型，两套路由和各处的返回值共用一份
-const ConsoleView: z.ZodType<MemoryView> = ConsoleMemoryView
-const ConsoleChildren: z.ZodType<MemoryChildren> = ConsoleMemoryChildren
-
-interface RouteSet {
-  // 路径前缀，例如 '' 或 '/spaces/{spaceId}'
-  prefix: string
-  params: z.ZodObject
-  tag: string
-  security: { bearer: string[] }[] | undefined
-  // 响应里的记忆与子节点
-  view: z.ZodType<MemoryView>
-  children: z.ZodType<MemoryChildren>
-  // 新建与修改的请求：Key 的只有 plaintextOk，管理界面的只有 ignorePlaintext 与 allowPlaintext（见 contracts）
-  createBody: z.ZodType<CreateInput>
-  updateBody: z.ZodType<UpdateInput>
-  resolve: (c: Context<AppEnv>) => Promise<MemoryService>
+export function memoryRoutes(deps: Deps) {
+  const app = router()
+  app.use('/entries/*', requireKey(deps))
+  app.route('/', keyEntryRoutes(deps))
+  app.route('/', consoleEntryRoutes(deps))
+  return app
 }
 
-// 同一套记忆接口挂两次：接入方用 API Key 访问 /memories，管理界面用登录会话访问 /spaces/{spaceId}/memories。
-// 两边共用同一个服务层，只是权限来源不同
-function memoryRouteSet(set: RouteSet) {
-  const base = `${set.prefix}/memories`
-  const common = { tags: [set.tag], ...(set.security ? { security: set.security } : {}) }
-  const params = set.params
-  const view = set.view
+function keyEntryRoutes(deps: Deps) {
+  const common = { tags: ['entries'], security: [{ bearer: [] }] }
+  const get = createRoute({
+    ...common,
+    method: 'get',
+    path: '/entries',
+    summary: '按短 ID（m-xxxxxx）、历史坐标或标题读取词条；默认返回与当前切面焦点相容的变体切片',
+    request: { query: GetEntryQuery },
+    responses: { 200: jsonResponse('词条', EntryView), ...errors },
+  })
+  const browse = createRoute({
+    ...common,
+    method: 'get',
+    path: '/entries/browse',
+    summary: '按维度分组浏览可见的词条索引与多变体切面概览',
+    request: { query: BrowseEntriesQuery },
+    responses: { 200: jsonResponse('分组浏览结果', EntryBrowseResponse), ...errors },
+  })
+  const create = createRoute({
+    ...common,
+    method: 'post',
+    path: '/entries',
+    summary: '新建词条（单切片或多变体切片），可选目标记忆圈，默认进入主场记忆圈',
+    request: { body: jsonBody(CreateEntryRequest) },
+    responses: { 201: jsonResponse('已创建', EntryView), ...writeErrors },
+  })
+  const update = createRoute({
+    ...common,
+    method: 'patch',
+    path: '/entries',
+    summary: '修改词条内容、按切面追加/覆盖或删除变体切片、主题标签、敏感级与有效期',
+    request: { body: jsonBody(UpdateEntryRequest) },
+    responses: { 200: jsonResponse('已修改', EntryView), ...writeErrors },
+  })
+  const remove = createRoute({
+    ...common,
+    method: 'delete',
+    path: '/entries',
+    summary: '软删除词条（保留历史事件）',
+    request: { query: DeleteEntryQuery },
+    responses: { 204: { description: '已删除' }, ...errors },
+  })
+  const transfer = createRoute({
+    ...common,
+    method: 'post',
+    path: '/entries/transfer',
+    summary: '将词条迁移到另一条可写的共享记忆圈（禁止机密词条或跨越个人圈）',
+    request: { body: jsonBody(TransferEntryRequest) },
+    responses: { 200: jsonResponse('迁移后的词条', EntryView), ...errors },
+  })
+
+  return router()
+    .openapi(browse, async (c) => {
+      const key = c.get('key')
+      return c.json(await entryServiceForKey(deps, key).browse(c.req.valid('query')), 200)
+    })
+    .openapi(get, async (c) => {
+      const key = c.get('key')
+      const query = c.req.valid('query')
+      const focus = await recallScopeForKey(deps, key).focus()
+      const entry = (await entryServiceForKey(deps, key).get(
+        {
+          id: query.id,
+          ...(query.circle !== undefined ? { circle: query.circle } : {}),
+          ...(query.allVariants !== undefined ? { allVariants: query.allVariants } : {}),
+          focus,
+        },
+        'rest',
+      )) as EntryView
+      if (entry.sensitivity === 'secret') c.header('Cache-Control', 'no-store')
+      return c.json(entry, 200)
+    })
+    .openapi(create, async (c) => {
+      const key = c.get('key')
+      const created = (await entryServiceForKey(deps, key, undefined, {
+        maskSecret: true,
+      }).create(c.req.valid('json'))) as EntryView
+      return c.json(created, 201)
+    })
+    .openapi(update, async (c) => {
+      const key = c.get('key')
+      const updated = (await entryServiceForKey(deps, key).update(
+        c.req.valid('json'),
+        'rest',
+      )) as EntryView
+      if (updated.sensitivity === 'secret' && updated.variants.some((v) => v.content !== null)) {
+        c.header('Cache-Control', 'no-store')
+      }
+      return c.json(updated, 200)
+    })
+    .openapi(remove, async (c) => {
+      const { id, circle, expectedVersion } = c.req.valid('query')
+      await entryServiceForKey(deps, c.get('key')).remove({
+        id,
+        ...(circle !== undefined ? { circle } : {}),
+        ...(expectedVersion !== undefined ? { expectedVersion } : {}),
+      })
+      return c.body(null, 204)
+    })
+    .openapi(transfer, async (c) => {
+      const transferred = (await entryServiceForKey(deps, c.get('key')).transfer(
+        c.req.valid('json'),
+      )) as EntryView
+      return c.json(transferred, 200)
+    })
+}
+
+async function consoleMember(deps: Deps, c: Context<AppEnv>) {
+  const circleId = c.req.param('circleId')!
+  return { circleId, ...(await consoleMemberFor(deps, circleId, c.get('console').accountId)) }
+}
+
+function consoleEntryRoutes(deps: Deps) {
+  const params = z.object({ circleId: z.uuid() })
+  const base = '/circles/{circleId}/entries'
+  const common = { tags: ['console'] }
+
   const get = createRoute({
     ...common,
     method: 'get',
     path: base,
-    summary: '按坐标（URI）读取一条记忆',
-    request: { params, query: UriQuery },
-    responses: { 200: jsonResponse('记忆', view), ...errors },
+    summary: '按短 ID、UUID 或标题读取词条（默认返回全部变体切片；机密正文不自动解密）',
+    request: { params, query: GetEntryQuery },
+    responses: { 200: jsonResponse('词条', ConsoleEntryView), ...errors },
   })
-  const children = createRoute({
+  const browse = createRoute({
     ...common,
     method: 'get',
-    path: `${base}/children`,
-    summary:
-      '列出直接子节点：of 是开头（core、user、persona、app）或坐标前缀（如 user://projects、persona://default）',
-    request: { params, query: z.object({ of: z.string().min(1) }) },
-    responses: { 200: jsonResponse('子节点', set.children), ...errors },
+    path: `${base}/browse`,
+    summary: '按维度分组浏览词条',
+    request: { params, query: BrowseEntriesQuery },
+    responses: { 200: jsonResponse('分组浏览结果', EntryBrowseResponse), ...errors },
+  })
+  const list = createRoute({
+    ...common,
+    method: 'get',
+    path: `${base}/list`,
+    summary: '按条件筛选并分页列出词条',
+    request: { params, query: EntryListQuery },
+    responses: { 200: jsonResponse('词条列表', EntryList), ...errors },
+  })
+  const search = createRoute({
+    ...common,
+    method: 'post',
+    path: `${base}/search`,
+    summary: '搜索词条：标题/短 ID 直接命中，加上召回候选',
+    request: { params, body: jsonBody(ConsoleSearchRequest) },
+    responses: { 200: jsonResponse('搜索结果', ConsoleSearchResponse), ...errors },
+  })
+  const glossary = createRoute({
+    ...common,
+    method: 'get',
+    path: `${base}/glossary`,
+    summary: '成员可见词条的关键词索引及对应短 ID',
+    request: { params },
+    responses: { 200: jsonResponse('关键词', GlossaryIndex), ...errors },
+  })
+  const history = createRoute({
+    ...common,
+    method: 'get',
+    path: `${base}/history`,
+    summary: '查看一条词条的历史变更事件（按管理读取过滤）',
+    request: { params, query: EntryHistoryQuery },
+    responses: { 200: jsonResponse('历史', EntryHistory), ...errors },
+  })
+  const deleted = createRoute({
+    ...common,
+    method: 'get',
+    path: `${base}/deleted`,
+    summary: '已删除的词条列表，最近删除的在前，附带实例回收保留期',
+    request: { params, query: PageQuery },
+    responses: { 200: jsonResponse('已删除的词条', DeletedEntryList), ...errors },
+  })
+  const restore = createRoute({
+    ...common,
+    method: 'post',
+    path: `${base}/restore`,
+    summary: '恢复到某次历史事件之后的快照',
+    request: { params, body: jsonBody(RestoreRequest) },
+    responses: { 200: jsonResponse('恢复后的词条', ConsoleEntryView), ...errors },
+  })
+  const undelete = createRoute({
+    ...common,
+    method: 'post',
+    path: `${base}/undelete`,
+    summary: '撤销软删除',
+    request: { params, body: jsonBody(UndeleteRequest) },
+    responses: { 200: jsonResponse('恢复后的词条', ConsoleEntryView), ...errors },
+  })
+  const expired = createRoute({
+    ...common,
+    method: 'get',
+    path: `${base}/expired`,
+    summary: '已过期的词条列表，最近过期的在前',
+    request: { params, query: PageQuery },
+    responses: { 200: jsonResponse('已过期的词条', ExpiredEntryList), ...errors },
+  })
+  const reactivate = createRoute({
+    ...common,
+    method: 'post',
+    path: `${base}/reactivate`,
+    summary: '让已过期词条重新生效（清掉有效期）',
+    request: { params, body: jsonBody(ReactivateRequest) },
+    responses: { 200: jsonResponse('重新生效的词条', ConsoleEntryView), ...errors },
+  })
+  const reveal = createRoute({
+    ...common,
+    method: 'post',
+    path: `${base}/reveal`,
+    summary: '显式查看机密词条的全部变体正文并记一次访问审计事件',
+    request: { params, body: jsonBody(RevealEntryRequest) },
+    responses: { 200: jsonResponse('带正文的词条', ConsoleEntryView), ...errors },
+  })
+  const ignorePlaintext = createRoute({
+    ...common,
+    method: 'post',
+    path: `${base}/ignore-plaintext`,
+    summary: '忽略明文提示（误报时用）：正文改动后提示自动恢复',
+    request: { params, body: jsonBody(PlaintextIgnoreRequest) },
+    responses: { 200: jsonResponse('词条', ConsoleEntryView), ...errors },
+  })
+  const unignorePlaintext = createRoute({
+    ...common,
+    method: 'post',
+    path: `${base}/unignore-plaintext`,
+    summary: '撤销忽略明文提示',
+    request: { params, body: jsonBody(PlaintextIgnoreRequest) },
+    responses: { 200: jsonResponse('词条', ConsoleEntryView), ...errors },
+  })
+  const redact = createRoute({
+    ...common,
+    method: 'post',
+    path: `${base}/redact`,
+    summary: '抹除敏感段：不可逆地将疑似明文凭据或个人信息替换为遮盖符',
+    request: { params, body: jsonBody(RedactEntryRequest) },
+    responses: { 200: jsonResponse('词条', ConsoleEntryView), ...errors },
+  })
+  const protect = createRoute({
+    ...common,
+    method: 'post',
+    path: `${base}/protect`,
+    summary: '保护含个人信息的词条：转为个人圈私密或加密存为机密',
+    request: { params, body: jsonBody(ProtectEntryRequest) },
+    responses: { 200: jsonResponse('词条', ConsoleEntryView), ...errors },
+  })
+  const convertToCredential = createRoute({
+    ...common,
+    method: 'post',
+    path: `${base}/convert-to-credential`,
+    summary: '将词条正文中的明文值转存为凭据并替换为占位符（仅记忆圈所有者）',
+    request: { params, body: jsonBody(ConvertToCredentialRequest) },
+    responses: {
+      200: jsonResponse('转存结果', ConvertedToCredential),
+      ...errors,
+      409: jsonResponse('冲突', CredentialWriteError),
+    },
+  })
+  const transfer = createRoute({
+    ...common,
+    method: 'post',
+    path: `${base}/transfer`,
+    summary: '控制台跨圈迁移词条（支持个人圈与共享圈互转及机密迁移）',
+    request: { params, body: jsonBody(ConsoleTransferEntryRequest) },
+    responses: { 200: jsonResponse('迁移后的词条', ConsoleEntryView), ...errors },
   })
   const create = createRoute({
     ...common,
     method: 'post',
     path: base,
-    summary: '新建记忆，坐标的开头决定归属；带 validTo 时到期后不再召回、不进 boot',
-    request: { params, body: jsonBody(set.createBody) },
-    responses: { 201: jsonResponse('已创建', view), ...writeErrors },
+    summary: '新建词条',
+    request: { params, body: jsonBody(ConsoleCreateEntryRequest) },
+    responses: { 201: jsonResponse('已创建', ConsoleEntryView), ...writeErrors },
   })
   const update = createRoute({
     ...common,
     method: 'patch',
     path: base,
-    summary:
-      '修改记忆的标题、正文、敏感级、priority、disclosure、glossary 或有效期；换坐标或归属用 move',
-    request: { params, body: jsonBody(set.updateBody) },
-    responses: { 200: jsonResponse('已修改', view), ...writeErrors },
+    summary: '修改词条或变体切片',
+    request: { params, body: jsonBody(ConsoleUpdateEntryRequest) },
+    responses: { 200: jsonResponse('已修改', ConsoleEntryView), ...writeErrors },
   })
   const remove = createRoute({
     ...common,
     method: 'delete',
     path: base,
-    summary: '删除记忆（保留历史事件）',
-    request: { params, query: DeleteQuery },
+    summary: '删除词条',
+    request: { params, query: DeleteEntryQuery },
     responses: { 204: { description: '已删除' }, ...errors },
   })
-  const move = createRoute({
-    ...common,
-    method: 'post',
-    path: `${base}/move`,
-    summary: '修改记忆的坐标（URI）：换开头就是改归属，Key 不能在共享的归属与本人之间移动',
-    request: { params, body: jsonBody(MoveMemoryRequest) },
-    responses: { 200: jsonResponse('已移动', view), ...errors },
-  })
-
-  const service = set.resolve
-  return router()
-    .openapi(get, async (c) => c.json(await (await service(c)).get(c.req.valid('query').uri), 200))
-    .openapi(children, async (c) =>
-      c.json(await (await service(c)).children(c.req.valid('query').of), 200),
-    )
-    .openapi(create, async (c) => c.json(await (await service(c)).create(c.req.valid('json')), 201))
-    .openapi(update, async (c) => c.json(await (await service(c)).update(c.req.valid('json')), 200))
-    .openapi(remove, async (c) => {
-      const { uri, ...expected } = c.req.valid('query')
-      await (await service(c)).delete(uri, expected)
-      return c.body(null, 204)
-    })
-    .openapi(move, async (c) => c.json(await (await service(c)).move(c.req.valid('json')), 200))
-}
-
-export function memoryRoutes(deps: Deps) {
-  const app = router()
-  // '/memories/*' 同时匹配 /memories 本身；再单独注册 '/memories' 会让鉴权执行两次
-  app.use('/memories/*', requireKey(deps))
-  app.route(
-    '/',
-    memoryRouteSet({
-      prefix: '',
-      params: z.object({}),
-      tag: 'memories',
-      security: [{ bearer: [] }],
-      view: MemoryView,
-      children: MemoryChildren,
-      createBody: CreateMemoryRequest,
-      updateBody: UpdateMemoryRequest,
-      resolve: async (c) => memoryServiceForKey(deps, c.get('key')),
-    }),
-  )
-  // 会话鉴权已在 app.ts 对 /v1/spaces/* 统一注册
-  app.route(
-    '/',
-    memoryRouteSet({
-      prefix: '/spaces/{spaceId}',
-      params: z.object({ spaceId: z.uuid() }),
-      tag: 'console',
-      security: undefined,
-      view: ConsoleView,
-      children: ConsoleChildren,
-      createBody: ConsoleCreateMemoryRequest,
-      updateBody: ConsoleUpdateMemoryRequest,
-      resolve: async (c) => {
-        const { service } = await consoleMember(deps, c)
-        return service
-      },
-    }),
-  )
-  app.route('/', consoleOnlyRoutes(deps))
-  return app
-}
-
-async function consoleMember(deps: Deps, c: Context<AppEnv>) {
-  const spaceId = c.req.param('spaceId')!
-  return { spaceId, ...(await consoleMemberFor(deps, spaceId, c.get('console').accountId)) }
-}
-
-// 只给管理界面的记忆接口：按条件列出、搜索、历史与恢复。Key 有 kioku_list 与召回，用不着这些
-function consoleOnlyRoutes(deps: Deps) {
-  const params = z.object({ spaceId: z.uuid() })
-  const list = createRoute({
-    method: 'get',
-    path: '/spaces/{spaceId}/memories/list',
-    tags: ['console'],
-    summary: '按条件列出记忆，分页返回',
-    request: { params, query: MemoryListQuery },
-    responses: { 200: jsonResponse('记忆列表', MemoryList), ...errors },
-  })
-  const search = createRoute({
-    method: 'post',
-    path: '/spaces/{spaceId}/memories/search',
-    tags: ['console'],
-    summary: '搜索记忆：URI 与关键词的直接命中，加上召回的候选',
-    request: { params, body: jsonBody(ConsoleSearchRequest) },
-    responses: { 200: jsonResponse('搜索结果', ConsoleSearchResponse), ...errors },
-  })
-  const history = createRoute({
-    method: 'get',
-    path: '/spaces/{spaceId}/memories/history',
-    tags: ['console'],
-    summary: '一条记忆的历史，按管理读取过滤',
-    request: { params, query: MemoryHistoryQuery },
-    responses: { 200: jsonResponse('历史', MemoryHistory), ...errors },
-  })
-  const deleted = createRoute({
-    method: 'get',
-    path: '/spaces/{spaceId}/memories/deleted',
-    tags: ['console'],
-    summary: '已删除的记忆，最近删除的在前',
-    request: { params, query: PageQuery },
-    responses: { 200: jsonResponse('已删除的记忆', DeletedMemoryList), ...errors },
-  })
-  const restore = createRoute({
-    method: 'post',
-    path: '/spaces/{spaceId}/memories/restore',
-    tags: ['console'],
-    summary: '恢复到某个事件之后的那一版（只改正文、disclosure、priority 与关键词）',
-    request: { params, body: jsonBody(RestoreRequest) },
-    responses: { 200: jsonResponse('恢复后的记忆', ConsoleView), ...errors },
-  })
-  const undelete = createRoute({
-    method: 'post',
-    path: '/spaces/{spaceId}/memories/undelete',
-    tags: ['console'],
-    summary: '撤销删除',
-    request: { params, body: jsonBody(UndeleteRequest) },
-    responses: { 200: jsonResponse('恢复后的记忆', ConsoleView), ...errors },
-  })
-  const expired = createRoute({
-    method: 'get',
-    path: '/spaces/{spaceId}/memories/expired',
-    tags: ['console'],
-    summary: '已过期的记忆（包括过期之后让出了 URI 的），最近过期的在前',
-    request: { params, query: PageQuery },
-    responses: { 200: jsonResponse('已过期的记忆', ExpiredMemoryList), ...errors },
-  })
-  const reactivate = createRoute({
-    method: 'post',
-    path: '/spaces/{spaceId}/memories/reactivate',
-    tags: ['console'],
-    summary: '让过期的记忆重新生效（清掉有效期；过期之后让出了 URI 的一并撤销删除）',
-    request: { params, body: jsonBody(ReactivateRequest) },
-    responses: { 200: jsonResponse('重新生效的记忆', ConsoleView), ...errors },
-  })
-  const reveal = createRoute({
-    method: 'post',
-    path: '/spaces/{spaceId}/memories/reveal',
-    tags: ['console'],
-    summary: '显式查看 secret 的正文，记一条访问事件（只进这条记忆的历史，不进活动）',
-    request: { params, body: jsonBody(RevealMemoryRequest) },
-    responses: { 200: jsonResponse('带正文的记忆', ConsoleView), ...errors },
-  })
-  const ignorePlaintext = createRoute({
-    method: 'post',
-    path: '/spaces/{spaceId}/memories/ignore-plaintext',
-    tags: ['console'],
-    summary: '忽略明文提示（规则误判时用）：正文改了提示会回来；不加版本号，留一条事件',
-    request: { params, body: jsonBody(PlaintextIgnoreRequest) },
-    responses: { 200: jsonResponse('记忆', ConsoleView), ...errors },
-  })
-  const unignorePlaintext = createRoute({
-    method: 'post',
-    path: '/spaces/{spaceId}/memories/unignore-plaintext',
-    tags: ['console'],
-    summary: '撤销忽略明文提示，留一条事件',
-    request: { params, body: jsonBody(PlaintextIgnoreRequest) },
-    responses: { 200: jsonResponse('记忆', ConsoleView), ...errors },
-  })
-  const redactMemory = createRoute({
-    method: 'post',
-    path: '/spaces/{spaceId}/memories/redact',
-    tags: ['console'],
-    summary: '抹除敏感段：把正文里的疑似明文凭据或个人敏感信息不可逆地替换为遮盖符',
-    request: { params, body: jsonBody(RedactMemoryRequest) },
-    responses: { 200: jsonResponse('记忆', ConsoleView), ...errors },
-  })
-  const protectMemory = createRoute({
-    method: 'post',
-    path: '/spaces/{spaceId}/memories/protect',
-    tags: ['console'],
-    summary: '保护含个人敏感信息的记忆：保留原文并转为本人私密或设为机密',
-    request: { params, body: jsonBody(ProtectMemoryRequest) },
-    responses: { 200: jsonResponse('记忆', ConsoleView), ...errors },
-  })
-  const convertToCredential = createRoute({
-    method: 'post',
-    path: '/spaces/{spaceId}/memories/convert-to-credential',
-    tags: ['console'],
-    summary:
-      '把正文里的一段明文转存成凭据（只有空间 owner）：新建托管的、换成已有凭据的字段，或给密码库的条目起标识。后两种先在事务外核对这个字段现在的值，不等时 400。然后一个事务里建凭据、把值换成占位符、从历史快照里拿掉这个值、删掉旧向量。响应不带值',
-    request: { params, body: jsonBody(ConvertToCredentialRequest) },
-    responses: { 200: jsonResponse('转存的结果', ConvertedToCredential), ...errors },
-  })
-  const glossary = createRoute({
-    method: 'get',
-    path: '/spaces/{spaceId}/memories/glossary',
-    tags: ['console'],
-    summary: '成员看得到的记忆的关键词，以及有这个关键词的记忆',
-    request: { params },
-    responses: { 200: jsonResponse('关键词', GlossaryIndex), ...errors },
-  })
   const activity = createRoute({
+    ...common,
     method: 'get',
-    path: '/spaces/{spaceId}/activity',
-    tags: ['console'],
-    summary: '空间里记忆的改动，最新的在前，可以按时间、操作者、操作、归属、改动的字段与关键字筛选',
+    path: '/circles/{circleId}/activity',
+    summary: '记忆圈内词条变更活动记录，最新的在前',
     request: { params, query: ActivityQuery },
     responses: { 200: jsonResponse('变更记录', ActivityList), ...errors },
   })
   const activityDays = createRoute({
+    ...common,
     method: 'get',
-    path: '/spaces/{spaceId}/activity/days',
-    tags: ['console'],
-    summary: '变更记录按天的条数：筛选与可见性和列表相同，按给的时区分天',
+    path: '/circles/{circleId}/activity/days',
+    summary: '变更记录按天计数',
     request: { params, query: ActivityDaysQuery },
     responses: { 200: jsonResponse('按天的条数', ActivityDays), ...errors },
   })
   const activityFacets = createRoute({
+    ...common,
     method: 'get',
-    path: '/spaces/{spaceId}/activity/facets',
-    tags: ['console'],
-    summary:
-      '变更记录的筛选计数：操作者、操作、归属、改动的字段各自的条数，每一组在除了它自己以外的全部筛选下计算',
+    path: '/circles/{circleId}/activity/facets',
+    summary: '变更记录的筛选维度计数',
     request: { params, query: ActivityFilter },
     responses: { 200: jsonResponse('筛选计数', ActivityFacets), ...errors },
   })
-  // 挂在 days、facets 后面：那两个路径也能被 {eventId} 匹配上
   const activityEvent = createRoute({
+    ...common,
     method: 'get',
-    path: '/spaces/{spaceId}/activity/{eventId}',
-    tags: ['console'],
-    summary:
-      '变更记录里的一条改动连同前后快照，可见性和列表相同：看不到的是 404，超出可见范围的只给改前的快照',
+    path: '/circles/{circleId}/activity/{eventId}',
+    summary: '单条变更活动详情及前后快照',
     request: { params: ActivityEventParams },
     responses: { 200: jsonResponse('一条改动', ActivityEvent), ...errors },
   })
+
   return router()
+    .openapi(browse, async (c) => {
+      const { service } = await consoleMember(deps, c)
+      return c.json(await service.browse(c.req.valid('query')), 200)
+    })
+    .openapi(list, async (c) => {
+      const { service } = await consoleMember(deps, c)
+      return c.json(await service.list(c.req.valid('query')), 200)
+    })
+    .openapi(search, async (c) => {
+      const { circleId, service } = await consoleMember(deps, c)
+      const { query, limit } = c.req.valid('json')
+      const [matches, candidates] = await Promise.all([
+        service.searchMatches(query, MATCH_LIMIT),
+        recallForConsole(deps, circleId, service.access, query, limit),
+      ])
+      return c.json({ matches, candidates }, 200)
+    })
+    .openapi(glossary, async (c) => {
+      const { service } = await consoleMember(deps, c)
+      return c.json(await service.glossary(), 200)
+    })
     .openapi(history, async (c) => {
       const { service } = await consoleMember(deps, c)
       return c.json(await service.history(c.req.valid('query').id), 200)
     })
     .openapi(deleted, async (c) => {
       const { service } = await consoleMember(deps, c)
-      // 保留期是整个实例的设置：列表按成员读得到的算，保留天数与是否暂停对谁都一样，暂停到什么时候只给实例管理员
+      const q = c.req.valid('query')
       return c.json(
         await withDeletionRetention(
           deps.db,
-          service.deleted(c.req.valid('query')),
+          service.deletedList({
+            limit: q.limit,
+            ...(q.cursor !== undefined ? { cursor: q.cursor } : {}),
+          }),
           isInstanceAdmin(deps.db, c.get('console').accountId),
         ),
         200,
@@ -408,13 +464,12 @@ function consoleOnlyRoutes(deps: Deps) {
     })
     .openapi(expired, async (c) => {
       const { service } = await consoleMember(deps, c)
-      // 让出了 URI 的和已删除的一样按保留期清除，带上同样的提示
+      const q = c.req.valid('query')
       return c.json(
-        await withDeletionRetention(
-          deps.db,
-          service.expired(c.req.valid('query')),
-          isInstanceAdmin(deps.db, c.get('console').accountId),
-        ),
+        await service.expiredList({
+          limit: q.limit,
+          ...(q.cursor !== undefined ? { cursor: q.cursor } : {}),
+        }),
         200,
       )
     })
@@ -424,10 +479,9 @@ function consoleOnlyRoutes(deps: Deps) {
     })
     .openapi(reveal, async (c) => {
       const { service } = await consoleMember(deps, c)
-      const memory = await service.reveal(c.req.valid('json').memoryId)
-      // 带着明文的响应不让浏览器和代理缓存
+      const entry = await service.reveal(c.req.valid('json').entryId, 'console')
       c.header('Cache-Control', 'no-store')
-      return c.json(memory, 200)
+      return c.json(entry, 200)
     })
     .openapi(ignorePlaintext, async (c) => {
       const { service } = await consoleMember(deps, c)
@@ -437,62 +491,93 @@ function consoleOnlyRoutes(deps: Deps) {
       const { service } = await consoleMember(deps, c)
       return c.json(await service.unignorePlaintext(c.req.valid('json')), 200)
     })
-    .openapi(redactMemory, async (c) => {
+    .openapi(redact, async (c) => {
       const { service } = await consoleMember(deps, c)
       return c.json(await service.redact(c.req.valid('json')), 200)
     })
-    .openapi(protectMemory, async (c) => {
+    .openapi(protect, async (c) => {
       const { service } = await consoleMember(deps, c)
-      return c.json(await service.protectSensitive(c.req.valid('json')), 200)
+      return c.json(await service.protect(c.req.valid('json')), 200)
     })
     .openapi(convertToCredential, async (c) => {
-      const { spaceId, service } = await consoleMember(deps, c)
+      const { circleId, service } = await consoleMember(deps, c)
       const credentials = await credentialServiceForConsole(
         deps,
-        spaceId,
+        circleId,
         c.get('console').accountId,
       )
       const body = c.req.valid('json')
-      // 去处在事务外准备好：credential 与 vault 要先向密码库核对值，不在事务里请求外部服务
-      // 新建的写进密码库之前，先按看到的版本查一遍记忆（只在写条目之前调用），查不过就不留下条目
-      const sink = await credentials.convertTarget(body.target, body.value, (placeholder) =>
-        service.checkConvertible({ ...body, ...placeholder }),
+      const sink = await credentials.convertTarget(body.target, body.value, () =>
+        service.checkConvertible(body),
       )
-      // 新建的写进了密码库、转存的事务却失败时，错误带上留在集合里的条目
-      const { memory, ...outcome } = await service
-        .convertToCredential(
-          { ...body, identifier: sink.identifier, field: sink.field },
-          { create: sink.apply, view: (tx, id) => credentials.viewIn(tx, id) },
-        )
+      const result = await service
+        .convertToCredential(body, async (tx) => {
+          const credId = await sink.apply(tx)
+          return {
+            identifier: sink.identifier,
+            field: sink.field,
+            loadCredential: (afterTx) => credentials.viewIn(afterTx, credId),
+            created: sink.created,
+            storedIn: sink.storedIn,
+          }
+        })
         .catch((err: unknown) => {
           throw credentials.orphanedConvert(err, sink)
         })
-      // 已经提交了，这里不再做会失败的事。管理界面的服务给出的就是 ConsoleMemoryView（见 ConsoleView）
-      return c.json(
-        {
-          memory: memory as ConsoleMemoryView,
-          ...outcome,
-          created: sink.created,
-          storedIn: sink.storedIn,
-          field: sink.field,
-        },
-        200,
-      )
+      c.header('Cache-Control', 'no-store')
+      return c.json(result, 200)
     })
-    .openapi(glossary, async (c) => {
+    .openapi(transfer, async (c) => {
       const { service } = await consoleMember(deps, c)
-      return c.json(await service.glossaryIndex(), 200)
+      const body = c.req.valid('json')
+      const target = await consoleCircleFor(deps, c.get('console').accountId, body.toCircleId)
+      if (!target) return c.json({ error: '无权访问目标记忆圈' }, 403)
+      return c.json(await service.consoleTransfer(body, target.access), 200)
+    })
+    .openapi(get, async (c) => {
+      const { service } = await consoleMember(deps, c)
+      const query = c.req.valid('query')
+      const entry = (await service.get(
+        {
+          id: query.id,
+          ...(query.circle !== undefined ? { circle: query.circle } : {}),
+          allVariants: query.allVariants ?? true,
+        },
+        'console',
+      )) as ConsoleEntryView
+      return c.json(entry, 200)
+    })
+    .openapi(create, async (c) => {
+      const { service } = await consoleMember(deps, c)
+      return c.json((await service.create(c.req.valid('json'))) as ConsoleEntryView, 201)
+    })
+    .openapi(update, async (c) => {
+      const { service } = await consoleMember(deps, c)
+      return c.json((await service.update(c.req.valid('json'), 'console')) as ConsoleEntryView, 200)
+    })
+    .openapi(remove, async (c) => {
+      const { service } = await consoleMember(deps, c)
+      const { id, circle, expectedVersion } = c.req.valid('query')
+      await service.remove({
+        id,
+        ...(circle !== undefined ? { circle } : {}),
+        ...(expectedVersion !== undefined ? { expectedVersion } : {}),
+      })
+      return c.body(null, 204)
     })
     .openapi(activity, async (c) => {
       const { service } = await consoleMember(deps, c)
-      return c.json(await service.activity(c.req.valid('query')), 200)
+      const { cursor, ...rest } = c.req.valid('query')
+      return c.json(
+        await service.activity({ ...rest, ...(cursor !== undefined ? { cursor } : {}) }),
+        200,
+      )
     })
     .openapi(activityDays, async (c) => {
       const { service } = await consoleMember(deps, c)
       try {
         return c.json(await service.activityDays(c.req.valid('query')), 200)
       } catch (err) {
-        // 时区认不出带上 code，界面只在这种 400 时退回 UTC
         if (err instanceof UnknownTimeZoneError) {
           return c.json({ error: err.message, code: ACTIVITY_UNKNOWN_TIME_ZONE }, 400)
         }
@@ -506,18 +591,5 @@ function consoleOnlyRoutes(deps: Deps) {
     .openapi(activityEvent, async (c) => {
       const { service } = await consoleMember(deps, c)
       return c.json(await service.activityEvent(c.req.valid('param').eventId), 200)
-    })
-    .openapi(list, async (c) => {
-      const { service } = await consoleMember(deps, c)
-      return c.json(await service.list(c.req.valid('query')), 200)
-    })
-    .openapi(search, async (c) => {
-      const { spaceId, service } = await consoleMember(deps, c)
-      const { query, limit } = c.req.valid('json')
-      const [matches, candidates] = await Promise.all([
-        service.matches(query, MATCH_LIMIT),
-        recallForConsole(deps, spaceId, service.access, query, limit),
-      ])
-      return c.json({ matches, candidates }, 200)
     })
 }

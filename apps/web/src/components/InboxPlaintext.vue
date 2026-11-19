@@ -2,9 +2,9 @@
 import {
   CONVERT_SCOPE_TEXT,
   SENSITIVE_KIND_NAMES,
-  isProtectedPersonalMemory,
+  isProtectedPersonalEntry,
   placeholderAllowed,
-  type MemoryListItem,
+  type EntryListItem,
   type RedactMode,
   type SensitiveCategory,
 } from '@kioku/contracts'
@@ -16,7 +16,7 @@ import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
 import { usePlaintextActions } from '../composables/usePlaintextActions'
-import { memoryRoute } from '../routes'
+import { entryRoute } from '../routes'
 import { formatRelative, formatTime } from '../time'
 import ConvertCredentialModal from './ConvertCredentialModal.vue'
 import EmptyState from './strata/EmptyState.vue'
@@ -28,12 +28,13 @@ import RedactConfirmModal from './RedactConfirmModal.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
 import MemoryName from './strata/MemoryName.vue'
+import { entryBand } from './strata/strata'
 
-// 疑似敏感内容：明文凭据建议转存为凭据；个人信息保留原值，建议移入本人私密或设为机密，抹除敏感段作为确认后的清理动作
-const props = defineProps<{ spaceId: string }>()
-const spaceId = toRef(props, 'spaceId')
-const permissions = useMemoryPermissions(spaceId)
-const actions = usePlaintextActions(spaceId)
+// 疑似敏感内容：明文凭据建议转存为凭据；个人信息保留原值，建议移入个人圈私密或设为机密，抹除敏感段作为确认后的清理动作
+const props = defineProps<{ circleId: string }>()
+const circleId = toRef(props, 'circleId')
+const permissions = useMemoryPermissions(circleId)
+const actions = usePlaintextActions(circleId)
 
 type Filter = 'true' | 'ignored'
 type CategoryFilter = 'all' | SensitiveCategory
@@ -49,7 +50,7 @@ const categories = [
   { label: '明文凭据', value: 'credential' },
   { label: '个人信息', value: 'pii' },
 ]
-watch(spaceId, () => {
+watch(circleId, () => {
   filter.value = 'true'
   category.value = 'all'
 })
@@ -59,14 +60,14 @@ const list = useInfiniteQuery({
   queryKey: computed(
     () =>
       [
-        'memory-list',
-        props.spaceId,
+        'entry-list',
+        props.circleId,
         { plaintext: filter.value, category: category.value },
       ] as const,
   ),
   // 参数从键里取：换了筛选之后，旧键剩下的页还在重新拉取时，不会用上新的筛选条件
-  queryFn: ({ pageParam, queryKey: [, sid, f] }) =>
-    api.memoryList(sid, {
+  queryFn: ({ pageParam, queryKey: [, cid, f] }) =>
+    api.entryList(cid, {
       plaintext: f.plaintext,
       ...(f.category !== 'all' ? { sensitiveCategory: f.category } : {}),
       ...(pageParam ? { cursor: pageParam } : {}),
@@ -77,7 +78,7 @@ const list = useInfiniteQuery({
 })
 const items = computed(() => list.data.value?.pages.flatMap((page) => page.items) ?? [])
 
-function findingLabels(item: MemoryListItem): string[] {
+function findingLabels(item: EntryListItem): string[] {
   const seen = new Set<string>()
   for (const f of item.sensitiveFindings ?? []) {
     const name = SENSITIVE_KIND_NAMES[f.kind] ?? f.label ?? f.kind
@@ -88,11 +89,11 @@ function findingLabels(item: MemoryListItem): string[] {
 
 const converting = ref<string | null>(null)
 const convertOpen = ref(false)
-function openConvert(item: MemoryListItem) {
-  converting.value = item.uri
+function openConvert(item: EntryListItem) {
+  converting.value = item.shortId
   convertOpen.value = true
 }
-const redactTarget = ref<MemoryListItem | null>(null)
+const redactTarget = ref<EntryListItem | null>(null)
 async function confirmRedact(mode: RedactMode) {
   const target = redactTarget.value
   if (!target) return
@@ -103,7 +104,13 @@ async function confirmRedact(mode: RedactMode) {
   }
 }
 // 占位符放不进这条记忆时，转存一定失败：这一行的操作换成去调整它
-const convertible = (item: MemoryListItem) => placeholderAllowed(item.layer, item.sensitivity)
+const convertible = (item: EntryListItem) =>
+  placeholderAllowed(permissions.circleKind.value, item.kind, item.sensitivity)
+const bandOf = (item: EntryListItem) =>
+  entryBand(
+    { kind: item.kind, circleId: item.circleId, circleKind: permissions.circleKind.value },
+    permissions.circle.value,
+  )
 </script>
 
 <template>
@@ -111,7 +118,7 @@ const convertible = (item: MemoryListItem) => placeholderAllowed(item.layer, ite
     <SectionHeading title="疑似敏感内容">
       <template #hint>
         <Hint>
-          共享归属或非私密范围内疑似包含明文凭据或个人信息。明文凭据建议转存为凭据并以占位符引用；个人信息建议保留原值并移入本人私密或设为机密，外发至模型与嵌入前会自动脱敏。误粘贴的冗余文本可抹除敏感段；规则误判时可忽略。
+          共享记忆圈或非私密范围内疑似包含明文凭据或个人信息。明文凭据建议转存为凭据并以占位符引用；个人信息建议保留原值并移入个人圈私密或设为机密，外发至模型与嵌入前会自动脱敏。误粘贴的冗余文本可抹除敏感段；规则误判时可忽略。
         </Hint>
       </template>
     </SectionHeading>
@@ -142,11 +149,15 @@ const convertible = (item: MemoryListItem) => placeholderAllowed(item.layer, ite
       <ul v-else>
         <li v-for="item in items" :key="item.id" class="plain-row">
           <div class="plain-uri">
-            <StrataSwatch :layer="item.layer" :sensitivity="item.sensitivity" />
-            <RouterLink :to="memoryRoute(spaceId, item.uri)" class="min-w-0"
-              ><MemoryName :uri="item.uri" :title="item.title"
+            <StrataSwatch :band="bandOf(item)" :sensitivity="item.sensitivity" />
+            <RouterLink :to="entryRoute(circleId, item.shortId)" class="min-w-0"
+              ><MemoryName :short-id="item.shortId" :title="item.title"
             /></RouterLink>
-            <MemoryFlags :layer="item.layer" :sensitivity="item.sensitivity" />
+            <MemoryFlags
+              :band="bandOf(item)"
+              :sensitivity="item.sensitivity"
+              :variant-count="item.variantCount"
+            />
           </div>
           <p class="plain-sub">
             <span v-for="tag in findingLabels(item)" :key="tag" class="finding-tag">{{ tag }}</span>
@@ -181,7 +192,7 @@ const convertible = (item: MemoryListItem) => placeholderAllowed(item.layer, ite
                   v-else
                   color="neutral"
                   variant="outline"
-                  :to="memoryRoute(spaceId, item.uri)"
+                  :to="entryRoute(circleId, item.shortId)"
                 >
                   查看记忆
                 </UButton>
@@ -189,7 +200,11 @@ const convertible = (item: MemoryListItem) => placeholderAllowed(item.layer, ite
               <template
                 v-if="
                   item.sensitivePii &&
-                  !isProtectedPersonalMemory(item.layer, item.sensitivity, item.provenance)
+                  !isProtectedPersonalEntry(
+                    permissions.circleKind.value,
+                    item.sensitivity,
+                    item.provenance,
+                  )
                 "
               >
                 <UButton
@@ -197,9 +212,18 @@ const convertible = (item: MemoryListItem) => placeholderAllowed(item.layer, ite
                   variant="outline"
                   :loading="actions.busy.value === item.id"
                   :disabled="actions.busy.value !== null"
-                  @click="actions.protect(item, 'user_private')"
+                  @click="
+                    actions.protect(
+                      {
+                        id: item.id,
+                        version: item.version,
+                        inPersonal: permissions.circleKind.value === 'personal',
+                      },
+                      'personal_private',
+                    )
+                  "
                 >
-                  {{ item.layer === 'user' ? '设为私密' : '移入本人私密' }}
+                  {{ permissions.circleKind.value === 'personal' ? '设为私密' : '移入个人圈私密' }}
                 </UButton>
               </template>
               <UButton
@@ -259,7 +283,11 @@ const convertible = (item: MemoryListItem) => placeholderAllowed(item.layer, ite
       </div>
     </template>
 
-    <ConvertCredentialModal v-model:open="convertOpen" :space-id="spaceId" :uri="converting" />
+    <ConvertCredentialModal
+      v-model:open="convertOpen"
+      :circle-id="circleId"
+      :short-id="converting"
+    />
     <RedactConfirmModal
       :open="redactTarget !== null"
       :title="redactTarget?.title"

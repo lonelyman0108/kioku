@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import type { Layer, Sensitivity } from '@kioku/contracts'
+import type { Sensitivity, StrataBand } from '@kioku/contracts'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
-import { layerLabels } from '../../labels'
+import { bandLabels } from '../../labels'
 import {
-  isConversationLayer,
-  layerHints,
-  layerTotal,
+  bandHints,
+  bandTotal,
+  isConversationBand,
   paintCell,
   segments,
   stackBands,
@@ -14,9 +14,7 @@ import {
   type StrataCounts,
 } from './strata'
 
-// 地层柱的窄版，兼作层筛选器：点带筛选，再点取消由使用方决定。默认竖排，窄屏放倒横排。
-// 高度或宽度不传时撑满父元素。顶上的「全部」不写总数：列表头已经写了记忆的条数，
-// 柱子里还画了来自对话的两层，写在这里容易看成整根柱子的合计
+// 地层柱的窄版，兼作色带筛选器：点带筛选，再点取消由使用方决定。默认竖排，窄屏放倒横排。
 const props = withDefaults(
   defineProps<{
     // 条数还没读到或读取失败时为 null：带等高、不写数字，筛选照样能点
@@ -24,13 +22,13 @@ const props = withDefaults(
     orientation?: 'vertical' | 'horizontal'
     // 竖排的总高，横排的总宽
     length?: number
-    selected?: Layer | null
+    selected?: StrataBand | null
     // 筛选到某个敏感级时，带里只留这一段
     sensitivity?: Sensitivity | null
-    // 当前打开的记忆在哪一层：带左边一个小三角
-    current?: Layer | null
-    // 外面悬停着的列表行属于哪一层
-    near?: Layer | null
+    // 当前打开的词条在哪条色带：带左边一个小三角
+    current?: StrataBand | null
+    // 外面悬停着的列表行属于哪条色带
+    near?: StrataBand | null
   }>(),
   {
     orientation: 'vertical',
@@ -42,9 +40,9 @@ const props = withDefaults(
   },
 )
 const emit = defineEmits<{
-  select: [layer: Layer]
+  select: [band: StrataBand]
   clear: []
-  hover: [layer: Layer | null]
+  hover: [band: StrataBand | null]
 }>()
 
 const root = ref<HTMLElement | null>(null)
@@ -64,7 +62,7 @@ onBeforeUnmount(() => observer?.disconnect())
 const ALL_HEIGHT = 44
 const THICKNESS = 26
 const FLAT_THICKNESS = 22
-// 竖排的带放得下两行标签（12px 字、1.35 倍行高），横排的带放得下三个字的简称
+// 竖排的带放得下两行标签（12px 字、1.35 倍行高），横排的带放得下四个字的简称
 const MIN_BAND = 34
 const FLAT_MIN_BAND = 38
 const vertical = computed(() => props.orientation === 'vertical')
@@ -88,19 +86,19 @@ const lit = computed(() => Boolean(props.selected))
 const bandSize = (band: Band) =>
   vertical.value ? { w: THICKNESS, h: band.h } : { w: band.h, h: FLAT_THICKNESS }
 const parts = (band: Band) =>
-  props.counts ? segments(props.counts[band.layer], bandSize(band).w, 1) : []
-const countText = (layer: Layer) =>
-  props.counts ? `${layerLabels[layer]} ${layerTotal(props.counts, layer)} 条` : layerLabels[layer]
+  props.counts ? segments(props.counts[band.band], bandSize(band).w, 1) : []
+const countText = (band: StrataBand) =>
+  props.counts ? `${bandLabels[band]} ${bandTotal(props.counts, band)} 条` : bandLabels[band]
 const dividers = (band: Band) =>
   parts(band)
     .filter((p) => p.x > 0)
     .map((p) => `M${p.x + 0.5} 0V${bandSize(band).h}`)
     .join('')
-const hint = (band: Band) => `${countText(band.layer)}\n${layerHints[band.layer]}`
+const hint = (band: Band) => `${countText(band.band)}\n${bandHints[band.band]}`
 const faded = (band: Band, sensitivity: Sensitivity) =>
   Boolean(props.sensitivity) &&
   sensitivity !== props.sensitivity &&
-  (!props.selected || props.selected === band.layer)
+  (!props.selected || props.selected === band.band)
 </script>
 
 <template>
@@ -108,7 +106,7 @@ const faded = (band: Band, sensitivity: Sensitivity) =>
     ref="root"
     class="strata-ribbon"
     :class="[orientation, { lit }]"
-    aria-label="按归属筛选"
+    aria-label="按色带筛选"
     role="group"
   >
     <button
@@ -124,23 +122,23 @@ const faded = (band: Band, sensitivity: Sensitivity) =>
     <div class="rb-stack">
       <button
         v-for="band in bands"
-        :key="band.layer"
+        :key="band.band"
         type="button"
         class="rb-band"
-        :class="{ on: selected === band.layer, near: near === band.layer }"
+        :class="{ on: selected === band.band, near: near === band.band }"
         :style="
           vertical
             ? { top: `${band.y}px`, height: `${band.h}px` }
             : { left: `${band.y}px`, width: `${band.h}px` }
         "
-        :aria-pressed="selected === band.layer"
-        :aria-label="countText(band.layer)"
+        :aria-pressed="selected === band.band"
+        :aria-label="countText(band.band)"
         :title="hint(band)"
-        @click="emit('select', band.layer)"
-        @mouseenter="emit('hover', band.layer)"
+        @click="emit('select', band.band)"
+        @mouseenter="emit('hover', band.band)"
         @mouseleave="emit('hover', null)"
       >
-        <span v-if="vertical && current === band.layer" class="rb-here" aria-hidden="true" />
+        <span v-if="vertical && current === band.band" class="rb-here" aria-hidden="true" />
         <svg
           :width="bandSize(band).w"
           :height="bandSize(band).h"
@@ -154,7 +152,7 @@ const faded = (band: Band, sensitivity: Sensitivity) =>
           >
             <rect
               v-for="(r, i) in paintCell(
-                band.layer,
+                band.band,
                 part.sensitivity,
                 { x: part.x, y: 0, width: part.w, height: bandSize(band).h },
                 'sm',
@@ -174,13 +172,13 @@ const faded = (band: Band, sensitivity: Sensitivity) =>
             :width="Math.max(0, bandSize(band).w - 1)"
             :height="Math.max(0, bandSize(band).h - 1)"
             fill="none"
-            :stroke-dasharray="isConversationLayer(band.layer) ? '3 2' : undefined"
+            :stroke-dasharray="isConversationBand(band.band) ? '3 2' : undefined"
             style="stroke: var(--strata-rule)"
           />
         </svg>
         <i v-if="vertical" class="rb-tick" />
         <span class="rb-label">
-          {{ layerLabels[band.layer] }}<b v-if="counts">{{ layerTotal(counts, band.layer) }}</b>
+          {{ bandLabels[band.band] }}<b v-if="counts">{{ bandTotal(counts, band.band) }}</b>
         </span>
       </button>
     </div>

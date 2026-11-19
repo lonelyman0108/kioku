@@ -1,52 +1,67 @@
 <script setup lang="ts">
-import type { Layer, RecallDebug, Sensitivity } from '@kioku/contracts'
+import {
+  normalizeWhen,
+  type EntryKind,
+  type RecallDebug,
+  type Sensitivity,
+  type StrataBand,
+} from '@kioku/contracts'
 import { useQueries, useQuery } from '@tanstack/vue-query'
 import { computed, ref, toRef, useId, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
-import { ownedApps } from '../benchSession'
+import { ownedClients } from '../apps'
 import { useKeyMatrices } from '../composables/useKeyMatrices'
 import { useSession } from '../composables/useSession'
 import { readDenialLabels } from '../labels'
-import { debugKeyChoices, scoreAxis, scoreParts } from '../recall'
-import { memoryRoute } from '../routes'
+import { whenLabel } from '../memoryDetail'
+import { debugKeyChoices, scoreAxis, scoreParts, type ScorePart } from '../recall'
+import { entryRoute } from '../routes'
+import FacetWhenPicker from './FacetWhenPicker.vue'
 import Hint from './Hint.vue'
 import MemoryFlags from './strata/MemoryFlags.vue'
+import MemoryName from './strata/MemoryName.vue'
 import NoteLine from './strata/NoteLine.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 import StrataCore from './strata/StrataCore.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
-import UriPath from './strata/UriPath.vue'
+import { entryBand } from './strata/strata'
 
-// 召回调试：按一个 Key 模拟一句话的召回。只有应用所有者能用（会读到所有者的私人层，空间所有者也不行），
-// 所以只列自己是所有者的应用的有效 Key，和服务端的 keyToSimulate 一个规则。选的是哪个 Key 记在地址里
-const props = defineProps<{ spaceId: string }>()
+// 召回调试：按一个访问密钥模拟一句话的召回。只有接入实例所有者能用（会读到所有者的个人内容，记忆圈所有者也不行），
+// 所以只列自己是所有者的接入实例的有效访问密钥。选的是哪个访问密钥记在地址里
+const props = defineProps<{ circleId: string }>()
 const route = useRoute()
 const router = useRouter()
-const { me } = useSession()
+const { me, circle } = useSession()
 
-const apps = useQuery({
-  queryKey: computed(() => ['apps', props.spaceId]),
-  queryFn: () => api.apps(props.spaceId),
+const clients = useQuery({
+  queryKey: computed(() => ['clients', props.circleId]),
+  queryFn: () => api.clients(props.circleId),
 })
-const owned = computed(() => ownedApps(apps.data.value ?? [], me.data.value?.id))
-// 和应用详情的 Key 列表同一份缓存
+const facetsQuery = useQuery({
+  queryKey: computed(() => ['facets', props.circleId] as const),
+  queryFn: ({ queryKey: [, cid] }) => api.facets(cid),
+  staleTime: 60_000,
+})
+const vocab = computed(() => facetsQuery.data.value ?? undefined)
+const owned = computed(() => ownedClients(clients.data.value ?? [], me.data.value?.id))
+// 和接入实例详情的访问密钥列表同一份缓存
 const keyResults = useQueries({
   queries: computed(() =>
-    owned.value.map((app) => ({
-      queryKey: ['keys', props.spaceId, app.id] as const,
-      queryFn: ({ queryKey: [, sid, id] }: { queryKey: readonly string[] }) => api.keys(sid!, id!),
+    owned.value.map((client) => ({
+      queryKey: ['keys', props.circleId, client.id] as const,
+      queryFn: ({ queryKey: [, cid, id] }: { queryKey: readonly string[] }) => api.keys(cid!, id!),
     })),
   ),
 })
 const choices = computed(() => debugKeyChoices(owned.value, keyResults.value))
 const options = computed(() => choices.value.options)
-// 所有应用的 Key 都有结果（成功或失败）才显示表单：先到的先显示的话，后到的读到后选中项会变，
-// 进行中和已有的结果都被清掉；地址里的 Key 属于慢的应用时，这段时间还会用错 Key 运行
+// 所有接入实例的访问密钥都有结果（成功或失败）才显示表单：先到的先显示的话，后到的读到后选中项会变，
+// 进行中和已有的结果都被清掉；地址里的访问密钥属于慢的接入实例时，这段时间还会用错密钥运行
 const keysPending = computed(() => keyResults.value.some((result) => result.isPending))
-// 地址里的 Key 不在列表里（失效了、不是自己的）就用第一个
+// 地址里的访问密钥不在列表里（失效了、不是自己的）就用第一个
 const selected = computed(
   () =>
     options.value.find((option) => option.key.id === route.query.key) ?? options.value[0] ?? null,
@@ -55,25 +70,29 @@ function select(keyId: string) {
   void router.replace({ query: { ...route.query, key: keyId } })
 }
 const { rowsOf, failureOf } = useKeyMatrices(
-  toRef(props, 'spaceId'),
-  computed(() => options.value.map(({ app, key }) => ({ appId: app.id, key }))),
+  toRef(props, 'circleId'),
+  computed(() => options.value.map(({ client, key }) => ({ clientId: client.id, key }))),
 )
 
 const query = ref('')
+const facets = ref<Record<string, string[]>>({})
+const crossCircle = ref(true)
 const failure = ref<string | null>(null)
 // 每次模拟一个序号，current 是进行中的那次：结果、报错与 loading 都只认它；
-// 换了 Key 或应用设置时清掉，进行中的那次就作废了
+// 换了访问密钥或接入实例设置时清掉，进行中的那次就作废了
 let counter = 0
 const current = ref<number | null>(null)
 const running = computed(() => current.value !== null)
 const debug = ref<RecallDebug | null>(null)
 
-// 默认人格、本人私聊时读取画像变了的话，之前的结果就不是现在的样子了
+// 默认人格、本人私聊时读取个人内容与认人模式变了的话，之前的结果就不是现在的样子了
 const settings = computed(() => {
-  const app = selected.value?.app
-  return app ? `${app.defaultPersonaId}:${app.config.elevateOwnerDirect ?? ''}` : ''
+  const client = selected.value?.client
+  return client
+    ? `${client.defaultPersonaId}:${client.config.elevateOwnerDirect ?? ''}:${client.config.personMemoryMode ?? ''}`
+    : ''
 })
-watch([() => props.spaceId, () => selected.value?.key.id, settings], () => {
+watch([() => props.circleId, () => selected.value?.key.id, settings], () => {
   current.value = null
   debug.value = null
   failure.value = null
@@ -86,8 +105,13 @@ async function run() {
   const id = ++counter
   current.value = id
   failure.value = null
+  const normalizedFacets = normalizeWhen(facets.value)
   try {
-    const result = await api.recallDebug(props.spaceId, target.app.id, target.key.id, text)
+    const result = await api.recallDebug(props.circleId, target.client.id, target.key.id, {
+      query: text,
+      ...(Object.keys(normalizedFacets).length ? { facets: normalizedFacets } : {}),
+      crossCircle: crossCircle.value,
+    })
     if (id === current.value) debug.value = result
   } catch (err) {
     if (id === current.value) failure.value = err instanceof ApiError ? err.message : '模拟失败'
@@ -104,12 +128,42 @@ const axis = computed(() =>
       )
     : null,
 )
-const widthOf = (score: number) => `${(score / axis.value!.max) * 100}%`
+const widthOf = (score: number) => `${Math.max(0, score / axis.value!.max) * 100}%`
 
-// 悬停一行时，在所选 Key 的岩芯上标出这条记忆的位置：落在空白处就是当前 Key 碰不到
-const hovered = ref<{ layer: Layer; sensitivity: Sensitivity | null } | null>(null)
+// 悬停一行时，在所选访问密钥的岩芯上标出这条记忆的位置：落在空白处就是当前访问密钥碰不到
+const hovered = ref<{ band: StrataBand; sensitivity: Sensitivity | null } | null>(null)
 
-const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
+function bandOf(c: { kind: EntryKind; circleId?: string; circleSlug?: string | null }): StrataBand {
+  const list = me.data.value?.circles ?? []
+  const byId = c.circleId ? list.find((ci) => ci.id === c.circleId) : undefined
+  const bySlug = !byId && c.circleSlug ? list.find((ci) => ci.slug === c.circleSlug) : undefined
+  const matched = byId ?? bySlug
+  const resolvedId = c.circleId ?? matched?.id
+  const resolvedKind =
+    matched?.kind ??
+    (c.circleSlug === 'personal' ? 'personal' : c.circleSlug ? 'shared' : undefined)
+  return entryBand(
+    {
+      kind: c.kind,
+      ...(resolvedId ? { circleId: resolvedId } : {}),
+      ...(resolvedKind ? { circleKind: resolvedKind } : {}),
+    },
+    circle.value,
+  )
+}
+
+const hasFacets = (when: Record<string, readonly string[]> | undefined) =>
+  !!when && Object.keys(normalizeWhen(when)).length > 0
+
+function formatPartValue(part: ScorePart): string {
+  if (part.label === '切面') {
+    if (part.value > 0) return `+${part.value.toFixed(2)}`
+    if (part.value < 0) return part.value.toFixed(2)
+    return '–'
+  }
+  return part.value > 0 ? part.value.toFixed(2) : '–'
+}
+
 const groupName = useId()
 </script>
 
@@ -119,35 +173,35 @@ const groupName = useId()
       召回调试
       <template #hint>
         <Hint>
-          按所选访问密钥的当前权限模拟一句话的召回，不计入召回记录。会话上下文（私聊、群聊）暂不可选，当前按无上下文模拟。模拟会读取应用所有者的本人记忆，只能选当前账号是所有者的应用的访问密钥。
+          按所选访问密钥的当前权限模拟一句话的召回，不计入召回记录。会话上下文（私聊、群聊）暂不可选，当前按无上下文模拟；支持显式切面条件与跨圈关联开关。模拟会读取接入实例所有者的个人内容，只能选当前账号是所有者的接入实例的访问密钥。
         </Hint>
       </template>
     </SectionHeading>
 
-    <NoteLine v-if="apps.isError.value" class="debug-note" tone="error">
-      {{ readFailure(apps.error.value) }}
+    <NoteLine v-if="clients.isError.value" class="debug-note" tone="error">
+      {{ readFailure(clients.error.value) }}
     </NoteLine>
-    <!-- 一个应用的 Key 读取失败不挡别的应用 -->
+    <!-- 一个接入实例的访问密钥读取失败不挡别的 -->
     <NoteLine
       v-for="failed in choices.failures"
-      :key="failed.app.id"
+      :key="failed.client.id"
       class="debug-note"
       tone="error"
     >
-      应用「{{ failed.app.name }}」的访问密钥：{{ failed.text }}
+      接入实例「{{ failed.client.name }}」的访问密钥：{{ failed.text }}
     </NoteLine>
-    <USkeleton v-if="apps.isPending.value || keysPending" class="mt-3 h-40 w-full" />
-    <NoteLine v-else-if="apps.data.value && !owned.length" class="debug-note">
-      当前账号暂无应用，无法调试
-      <template #detail>召回调试只能使用当前账号是所有者的应用的访问密钥。</template>
+    <USkeleton v-if="clients.isPending.value || keysPending" class="mt-3 h-40 w-full" />
+    <NoteLine v-else-if="clients.data.value && !owned.length" class="debug-note">
+      当前账号暂无接入实例，无法调试
+      <template #detail>召回调试只能使用当前账号是所有者的接入实例的访问密钥。</template>
       <template #actions>
         <UButton
-          :to="{ name: 'apps', params: { spaceId } }"
+          :to="{ name: 'clients', params: { circleId } }"
           size="sm"
           color="primary"
           variant="outline"
         >
-          管理应用
+          管理接入实例
         </UButton>
       </template>
     </NoteLine>
@@ -158,7 +212,7 @@ const groupName = useId()
       暂无有效访问密钥。签发后可调试。
       <template #actions>
         <UButton
-          :to="{ name: 'app', params: { spaceId, appId: owned[0]!.id } }"
+          :to="{ name: 'client', params: { circleId, clientId: owned[0]!.id } }"
           size="sm"
           color="primary"
           variant="outline"
@@ -192,7 +246,7 @@ const groupName = useId()
             />
             <span class="debug-key-text">
               <b>{{ option.key.name }}</b>
-              <span>{{ option.app.name }}</span>
+              <span>{{ option.client.name }}</span>
               <span v-if="failureOf(option.key.id)">
                 权限范围：{{ failureOf(option.key.id) }}
               </span>
@@ -209,6 +263,17 @@ const groupName = useId()
             class="w-full"
           />
         </UFormField>
+        <UCheckbox v-model="crossCircle" label="允许跨圈关联召回" />
+        <details class="debug-facets">
+          <summary>显式切面条件（可选）</summary>
+          <div class="debug-facets-body">
+            <FacetWhenPicker
+              v-model="facets"
+              :circle-id="circleId"
+              :vocabulary="facetsQuery.data.value ?? null"
+            />
+          </div>
+        </details>
         <UButton
           type="submit"
           class="self-start"
@@ -227,6 +292,24 @@ const groupName = useId()
           :style="{ '--threshold': `${axis.threshold}%` }"
           @mouseleave="hovered = null"
         >
+          <div
+            v-if="hasFacets(debug.resolvedFacets) || debug.flippedTerms.length"
+            class="debug-resolved"
+          >
+            <span v-if="hasFacets(debug.resolvedFacets)" class="resolved-item">
+              <b>匹配切面</b>{{ whenLabel(debug.resolvedFacets, vocab) }}
+            </span>
+            <span v-if="debug.flippedTerms.length" class="resolved-item">
+              <b>命中别名</b>
+              <span
+                v-for="t in debug.flippedTerms"
+                :key="`${t.dimensionKey}:${t.slug}:${t.alias}`"
+                class="resolved-tag"
+              >
+                {{ t.dimensionKey }}:{{ t.label }} ← 「{{ t.alias }}」
+              </span>
+            </span>
+          </div>
           <div class="ax">
             <div class="ax-left">
               <span>
@@ -266,18 +349,41 @@ const groupName = useId()
             </li>
             <li
               v-for="c in debug.injected"
-              :key="c.uri"
+              :key="c.entryId"
               class="rr"
-              @mouseenter="hovered = { layer: c.layer, sensitivity: null }"
+              @mouseenter="hovered = { band: bandOf(c), sensitivity: null }"
             >
               <div class="rr-uri">
-                <StrataSwatch :layer="c.layer" plain />
+                <StrataSwatch :band="bandOf(c)" plain />
                 <div class="rr-uri-text">
                   <span class="rr-uri-line">
-                    <RouterLink :to="memoryLink(c.uri)"><UriPath :uri="c.uri" /></RouterLink>
-                    <MemoryFlags :layer="c.layer" />
+                    <RouterLink :to="entryRoute(c.circleId, c.shortId)"
+                      ><MemoryName :short-id="c.shortId" :title="c.title"
+                    /></RouterLink>
+                    <code class="rr-id">{{ c.shortId }}</code>
+                    <MemoryFlags :band="bandOf(c)" />
                   </span>
                   <span v-if="c.cues.length" class="rr-cues">{{ c.cues.join('、') }}</span>
+                  <span
+                    v-if="
+                      (c.circleId !== circleId && c.circleSlug) ||
+                      hasFacets(c.matchedWhen) ||
+                      c.otherVariantsCount > 0 ||
+                      c.crossGroup
+                    "
+                    class="rr-tags"
+                  >
+                    <span v-if="c.circleId !== circleId && c.circleSlug" class="rr-tag">{{
+                      c.circleSlug
+                    }}</span>
+                    <span v-if="hasFacets(c.matchedWhen)" class="rr-tag">{{
+                      whenLabel(c.matchedWhen, vocab)
+                    }}</span>
+                    <span v-if="c.otherVariantsCount > 0" class="rr-tag"
+                      >另有 {{ c.otherVariantsCount }} 切片</span
+                    >
+                    <span v-if="c.crossGroup" class="rr-tag">跨群</span>
+                  </span>
                 </div>
               </div>
               <div class="rr-score">{{ c.score.toFixed(2) }}</div>
@@ -285,13 +391,13 @@ const groupName = useId()
                 <div class="bar">
                   <div
                     class="bar-fill"
-                    :style="{ width: widthOf(c.score), background: `var(--layer-${c.layer})` }"
+                    :style="{ width: widthOf(c.score), background: `var(--layer-${bandOf(c)})` }"
                   >
                     <template v-for="part in scoreParts(c)" :key="part.label">
                       <i
                         v-if="part.value > 0"
                         :style="{ width: `${part.share}%` }"
-                        :title="`${part.label} ${part.value.toFixed(2)}`"
+                        :title="`${part.label} ${formatPartValue(part)}`"
                       />
                     </template>
                   </div>
@@ -299,7 +405,7 @@ const groupName = useId()
                 <span class="parts">
                   <span v-for="part in scoreParts(c)" :key="part.label">
                     {{ part.label }}
-                    <b>{{ part.value > 0 ? part.value.toFixed(2) : '–' }}</b>
+                    <b>{{ formatPartValue(part) }}</b>
                   </span>
                 </span>
               </div>
@@ -316,16 +422,39 @@ const groupName = useId()
               </li>
               <li
                 v-for="c in debug.others"
-                :key="c.uri"
+                :key="c.entryId"
                 class="rr below"
-                @mouseenter="hovered = { layer: c.layer, sensitivity: null }"
+                @mouseenter="hovered = { band: bandOf(c), sensitivity: null }"
               >
                 <div class="rr-uri">
-                  <StrataSwatch :layer="c.layer" plain />
+                  <StrataSwatch :band="bandOf(c)" plain />
                   <div class="rr-uri-text">
                     <span class="rr-uri-line">
-                      <RouterLink :to="memoryLink(c.uri)"><UriPath :uri="c.uri" /></RouterLink>
-                      <MemoryFlags :layer="c.layer" />
+                      <RouterLink :to="entryRoute(c.circleId, c.shortId)"
+                        ><MemoryName :short-id="c.shortId" :title="c.title"
+                      /></RouterLink>
+                      <code class="rr-id">{{ c.shortId }}</code>
+                      <MemoryFlags :band="bandOf(c)" />
+                    </span>
+                    <span
+                      v-if="
+                        (c.circleId !== circleId && c.circleSlug) ||
+                        hasFacets(c.matchedWhen) ||
+                        c.otherVariantsCount > 0 ||
+                        c.crossGroup
+                      "
+                      class="rr-tags"
+                    >
+                      <span v-if="c.circleId !== circleId && c.circleSlug" class="rr-tag">{{
+                        c.circleSlug
+                      }}</span>
+                      <span v-if="hasFacets(c.matchedWhen)" class="rr-tag">{{
+                        whenLabel(c.matchedWhen, vocab)
+                      }}</span>
+                      <span v-if="c.otherVariantsCount > 0" class="rr-tag"
+                        >另有 {{ c.otherVariantsCount }} 切片</span
+                      >
+                      <span v-if="c.crossGroup" class="rr-tag">跨群</span>
                     </span>
                   </div>
                 </div>
@@ -334,13 +463,13 @@ const groupName = useId()
                   <div class="bar">
                     <div
                       class="bar-fill"
-                      :style="{ width: widthOf(c.score), background: `var(--layer-${c.layer})` }"
+                      :style="{ width: widthOf(c.score), background: `var(--layer-${bandOf(c)})` }"
                     >
                       <template v-for="part in scoreParts(c)" :key="part.label">
                         <i
                           v-if="part.value > 0"
                           :style="{ width: `${part.share}%` }"
-                          :title="`${part.label} ${part.value.toFixed(2)}`"
+                          :title="`${part.label} ${formatPartValue(part)}`"
                         />
                       </template>
                     </div>
@@ -348,7 +477,7 @@ const groupName = useId()
                   <span class="parts">
                     <span v-for="part in scoreParts(c)" :key="part.label">
                       {{ part.label }}
-                      <b>{{ part.value > 0 ? part.value.toFixed(2) : '–' }}</b>
+                      <b>{{ formatPartValue(part) }}</b>
                     </span>
                   </span>
                 </div>
@@ -366,16 +495,17 @@ const groupName = useId()
             </li>
             <li
               v-for="f in debug.filtered"
-              :key="f.uri"
+              :key="f.shortId"
               class="rr denied"
-              @mouseenter="hovered = { layer: f.layer, sensitivity: f.sensitivity }"
+              @mouseenter="hovered = { band: bandOf(f), sensitivity: f.sensitivity }"
             >
               <div class="rr-uri">
-                <StrataSwatch :layer="f.layer" :sensitivity="f.sensitivity" />
+                <StrataSwatch :band="bandOf(f)" :sensitivity="f.sensitivity" />
                 <div class="rr-uri-text">
                   <span class="rr-uri-line">
-                    <RouterLink :to="memoryLink(f.uri)"><UriPath :uri="f.uri" /></RouterLink>
-                    <MemoryFlags :layer="f.layer" :sensitivity="f.sensitivity" />
+                    <MemoryName :short-id="f.shortId" :title="f.title" />
+                    <code class="rr-id">{{ f.shortId }}</code>
+                    <MemoryFlags :band="bandOf(f)" :sensitivity="f.sensitivity" />
                   </span>
                 </div>
               </div>
@@ -482,6 +612,60 @@ legend {
 }
 .debug-key.on .debug-key-text span {
   color: var(--strata-on-selected-muted);
+}
+.debug-facets {
+  border: 1px solid var(--ui-border);
+  padding: 6px 8px;
+}
+.debug-facets summary {
+  font-size: 13px;
+  color: var(--ui-text-muted);
+  cursor: pointer;
+}
+.debug-facets-body {
+  margin-top: 8px;
+}
+.debug-resolved {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  padding: 6px 0 8px;
+  border-bottom: 1px solid var(--ui-border);
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.resolved-item {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+.resolved-item b {
+  font-weight: 500;
+  color: var(--ui-text);
+}
+.resolved-tag {
+  padding: 1px 6px;
+  border: 1px solid var(--ui-border);
+  font-family: var(--font-mono);
+}
+.rr-id {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.rr-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 2px;
+}
+.rr-tag {
+  padding: 0 5px;
+  border: 1px solid var(--ui-border);
+  font-size: 12px;
+  color: var(--ui-text-muted);
 }
 .debug-result {
   min-width: 0;
@@ -662,8 +846,8 @@ legend {
 }
 .parts {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 0 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 2px 10px;
   font-size: 12px;
   line-height: 1.4;
   color: var(--ui-text-muted);

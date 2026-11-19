@@ -1,7 +1,7 @@
 import {
   addedPlaintextCredentials,
+  EntryWriteError,
   findPlaintextCredentials,
-  MemoryWriteError,
   type PlaintextCredentialMatch,
   type PlaintextFinding,
   type PlaintextKind,
@@ -43,6 +43,37 @@ function groupSpots(content: string, matches: readonly PlaintextCredentialMatch[
 export const addedSpots = (before: string | null, after: string) =>
   groupSpots(after, addedPlaintextCredentials(before, after))
 
+// 多变体切片合并正文（用于多变体写入前的明文比较：同一词条切片间搬移同一值不算新增）
+export function joinVariantContents(
+  variants: readonly { content?: string | null }[] | null | undefined,
+): string | null {
+  if (!variants?.length) return null
+  const texts = variants.map((v) => v.content).filter((c): c is string => typeof c === 'string')
+  return texts.length ? texts.join('\n') : null
+}
+
+// 计算整组变体相对于上一版的新增疑似明文
+export function addedVariantSpots(
+  beforeVariants: readonly { content?: string | null }[] | null,
+  afterVariants: readonly { content: string }[],
+): { content: string; spots: PlaintextSpot[] } {
+  const before = joinVariantContents(beforeVariants)
+  const content = afterVariants.map((v) => v.content).join('\n')
+  return { content, spots: addedSpots(before, content) }
+}
+
+// 逐切片将已转存的值替换为占位符
+export function replaceVariantsValues<T extends { content: string }>(
+  variants: readonly T[],
+  replacements: readonly { value: string; placeholder: string }[],
+): T[] {
+  if (!replacements.length) return [...variants]
+  return variants.map((variant) => ({
+    ...variant,
+    content: replaceValues(variant.content, replacements),
+  }))
+}
+
 // 服务端拒绝了、界面上的判断却没有新增时：按服务端给的行号与类别在正文里找。找不到值的那一处照样列出来
 export function spotsFromFindings(
   content: string,
@@ -61,7 +92,7 @@ export function spotsFromFindings(
 // 保存被拒是不是因为疑似明文：是的话给出服务端指出的那几处
 export function plaintextRejection(err: unknown): PlaintextFinding[] | null {
   if (!(err instanceof ApiError) || err.status !== 400) return null
-  const parsed = MemoryWriteError.safeParse(err.payload)
+  const parsed = EntryWriteError.safeParse(err.payload)
   return parsed.success && parsed.data.plaintext?.length ? parsed.data.plaintext : null
 }
 
@@ -69,7 +100,7 @@ export function plaintextRejection(err: unknown): PlaintextFinding[] | null {
 export type SpotChoice = 'convert' | 'ignore'
 
 // 保存时带的标记。照样保存带 allowPlaintext：能改这条记忆的成员都可以（服务端只拒绝通过访问密钥带的
-// allowPlaintext；从机密强制降级另外要空间所有者）。还有选了不是凭据的带 ignorePlaintext，
+// allowPlaintext；从机密强制降级另外要记忆圈所有者）。还有选了不是凭据的带 ignorePlaintext，
 // 全部转存之后正文里没有新增的疑似明文，不用带
 export type SaveFlags = { allowPlaintext: true } | { ignorePlaintext: true } | Record<string, never>
 

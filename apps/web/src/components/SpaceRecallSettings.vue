@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
 import {
-  APP_TUNING_KEYS,
+  CLIENT_TUNING_KEYS,
   WEIGHT_KEYS,
   type TuningKey,
-  type UpdateSpaceAdvanced,
+  type UpdateCircleAdvanced,
 } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
@@ -12,10 +12,10 @@ import { useRoute } from 'vue-router'
 
 import {
   BOOT_EXTRAS,
+  circleAdvancedKey,
   formatTuning,
   overriddenAt,
   refreshAdvanced,
-  spaceAdvancedKey,
   TUNING_META,
   type BootExtra,
 } from '../advancedSettings'
@@ -41,34 +41,34 @@ import SettingsStageBar from './strata/SettingsStageBar.vue'
 import SettingsSummaryStrip, { type SummaryStripItem } from './strata/SettingsSummaryStrip.vue'
 import SettingsTable from './strata/SettingsTable.vue'
 
-// 空间 › 召回与启动加载：空间内应用的默认值。没覆盖的项沿用实例默认，应用可以再单独覆盖。
-// 只有空间所有者能改（canEdit），别的成员只读：控件禁用，不显示保存条
+// 记忆圈 › 召回与启动加载：记忆圈内接入实例的默认值。没覆盖的项沿用实例默认，接入实例可以再单独覆盖。
+// 只有记忆圈所有者能改（canEdit），别的成员只读：控件禁用，不显示保存条
 const dirty = defineModel<boolean>('dirty', { default: false })
 const route = useRoute()
 const toast = useToast()
 const queryClient = useQueryClient()
-const { space } = useSession()
-const spaceId = computed(() =>
-  typeof route.params.spaceId === 'string' ? route.params.spaceId : '',
+const { circle } = useSession()
+const circleId = computed(() =>
+  typeof route.params.circleId === 'string' ? route.params.circleId : '',
 )
 
 const view = useQuery({
-  queryKey: computed(() => spaceAdvancedKey(spaceId.value)),
-  enabled: computed(() => Boolean(spaceId.value)),
-  queryFn: ({ queryKey: [, , sid] }) => api.spaceAdvanced(sid),
+  queryKey: computed(() => circleAdvancedKey(circleId.value)),
+  enabled: computed(() => Boolean(circleId.value)),
+  queryFn: ({ queryKey: [, , cid] }) => api.circleAdvanced(cid),
 })
-const apps = useQuery({
-  queryKey: computed(() => ['apps', spaceId.value] as const),
-  enabled: computed(() => Boolean(spaceId.value)),
-  queryFn: ({ queryKey: [, sid] }) => api.apps(sid),
+const clients = useQuery({
+  queryKey: computed(() => ['clients', circleId.value] as const),
+  enabled: computed(() => Boolean(circleId.value)),
+  queryFn: ({ queryKey: [, cid] }) => api.clients(cid),
 })
 const editable = computed(() => view.data.value?.canEdit ?? false)
 
 const tuning = useTuningFields(
-  APP_TUNING_KEYS,
+  CLIENT_TUNING_KEYS,
   () => view.data.value?.effective,
   () => view.data.value?.instance,
-  () => overriddenAt(view.data.value?.sources, 'space'),
+  () => overriddenAt(view.data.value?.sources, 'circle'),
 )
 const { fields } = tuning
 const changedCount = computed(() => tuning.changedKeys.value.length)
@@ -79,30 +79,31 @@ watch(
 )
 const inheritedOf = (key: TuningKey) => view.data.value?.instance[key] ?? 0
 
-type StageFilter = 'all' | 'recall' | 'boot' | 'apps'
+type StageFilter = 'all' | 'recall' | 'boot' | 'clients'
 const stage = ref<StageFilter>('all')
 const onlyOverridden = ref(false)
 const STAGES: { key: StageFilter; label: string }[] = [
   { key: 'all', label: '全部' },
   { key: 'recall', label: '每轮召回' },
   { key: 'boot', label: '启动加载' },
-  { key: 'apps', label: '应用覆盖' },
+  { key: 'clients', label: '接入实例覆盖' },
 ]
 
 // 每一行：名称旁边的表单值、来源与恢复
-const row = (key: (typeof APP_TUNING_KEYS)[number]) => ({
+const row = (key: (typeof CLIENT_TUNING_KEYS)[number]) => ({
   setting: key,
   invalid: fields[key].invalid.value,
   source: tuning.sourceOf(key),
   inherited: inheritedOf(key),
 })
 // 「仅看已覆盖」时保留刚点过恢复或正在修改的行，避免鼠标下的行立刻消失
-const rowVisible = (key: (typeof APP_TUNING_KEYS)[number]) =>
+const rowVisible = (key: (typeof CLIENT_TUNING_KEYS)[number]) =>
   !onlyOverridden.value || tuning.sourceOf(key) === 'overridden' || fields[key].changed.value
 
 const RECALL_SECTION_KEYS = [
   'recall.limit',
   'recall.minScore',
+  'recall.relevanceFloor',
   'recall.subjectFacts',
   'recall.chatInlineChars',
 ] as const
@@ -123,12 +124,12 @@ const bootBlockHasVisible = computed(
 
 const restoreExtra = (extra: BootExtra) =>
   [`boot.${extra}.enabled`, `boot.${extra}.count`].forEach((k) =>
-    tuning.restore(k as (typeof APP_TUNING_KEYS)[number]),
+    tuning.restore(k as (typeof CLIENT_TUNING_KEYS)[number]),
   )
-const appCount = computed(() => apps.data.value?.length ?? 0)
-const overriddenApps = computed(() => view.data.value?.apps ?? [])
+const clientCount = computed(() => clients.data.value?.length ?? 0)
+const overriddenClients = computed(() => view.data.value?.clients ?? [])
 const overriddenCount = computed(
-  () => APP_TUNING_KEYS.filter((k) => tuning.sourceOf(k) === 'overridden').length,
+  () => CLIENT_TUNING_KEYS.filter((k) => tuning.sourceOf(k) === 'overridden').length,
 )
 
 const overriddenLabel = (overrides: Record<string, unknown>) =>
@@ -138,7 +139,7 @@ const overriddenLabel = (overrides: Record<string, unknown>) =>
         `${TUNING_META[k as TuningKey].label} ${formatTuning(k as TuningKey, v as number | boolean)}`,
     )
     .join('、')
-const spaceValue = (overrides: Record<string, unknown>) =>
+const circleValue = (overrides: Record<string, unknown>) =>
   Object.keys(overrides)
     .map((k) => formatTuning(k as TuningKey, view.data.value?.effective[k as TuningKey]))
     .join('、')
@@ -182,15 +183,15 @@ const summaryItems = computed<SummaryStripItem[]>(() => [
     sub: '受客户端上限约束',
   },
   {
-    label: '空间覆盖实例项',
+    label: '记忆圈覆盖实例项',
     value: `${overriddenCount.value} 项`,
     sub: overriddenCount.value ? '已覆盖部分实例默认' : '全部沿用实例默认',
     tone: overriddenCount.value ? 'warn' : 'ok',
   },
   {
-    label: '应用独立覆盖',
-    value: `${overriddenApps.value.length} / ${appCount.value} 个`,
-    sub: '各应用可在应用详情单独调整',
+    label: '接入实例独立覆盖',
+    value: `${overriddenClients.value.length} / ${clientCount.value} 个`,
+    sub: '各接入实例可在接入实例详情单独调整',
   },
 ])
 
@@ -212,13 +213,13 @@ const changeDiffs = computed<SaveBarChange[]>(() => {
 const saving = ref(false)
 async function save() {
   if (saving.value || !changedCount.value || tuning.problem.value) return
-  const sid = spaceId.value
+  const cid = circleId.value
   const submitted = tuning.snapshot()
   saving.value = true
   try {
-    const saved = await api.saveSpaceAdvanced(sid, tuning.patch() as UpdateSpaceAdvanced)
-    if (sid === spaceId.value) tuning.commit(submitted, saved.effective)
-    queryClient.setQueryData(spaceAdvancedKey(sid), saved)
+    const saved = await api.saveCircleAdvanced(cid, tuning.patch() as UpdateCircleAdvanced)
+    if (cid === circleId.value) tuning.commit(submitted, saved.effective)
+    queryClient.setQueryData(circleAdvancedKey(cid), saved)
     await refreshAdvanced(queryClient)
     toast.add({ title: '已保存', color: 'success' })
   } catch (err) {
@@ -231,24 +232,26 @@ async function save() {
 
 <template>
   <div>
-    <p class="section-note">空间内应用的默认值。未覆盖的项沿用实例默认，应用可以再单独覆盖。</p>
+    <p class="section-note">
+      记忆圈内接入实例的默认值。未覆盖的项沿用实例默认，接入实例可以再单独覆盖。
+    </p>
     <div class="chain-row">
       <p class="chain" aria-label="取值顺序">
         <span class="chain-step"><UIcon :name="icons.instance" aria-hidden="true" />实例默认</span>
         <UIcon :name="icons.chevronRight" class="chain-arrow" aria-hidden="true" />
         <span class="chain-step on" aria-current="true"
-          ><UIcon :name="icons.space" aria-hidden="true" />空间 · {{ space?.name }}</span
+          ><UIcon :name="icons.circle" aria-hidden="true" />记忆圈 · {{ circle?.name }}</span
         >
         <UIcon :name="icons.chevronRight" class="chain-arrow" aria-hidden="true" />
         <span class="chain-step"
-          ><UIcon :name="icons.apps" aria-hidden="true" />应用 · {{ appCount }} 个，{{
-            overriddenApps.length
+          ><UIcon :name="icons.clients" aria-hidden="true" />接入实例 · {{ clientCount }} 个，{{
+            overriddenClients.length
           }}
           个有覆盖</span
         >
       </p>
       <FlagTag v-if="view.data.value && !editable" class="scope-flag"
-        >只读视角 · 仅空间所有者可修改</FlagTag
+        >只读视角 · 仅记忆圈所有者可修改</FlagTag
       >
     </div>
 
@@ -284,7 +287,7 @@ async function save() {
       <SettingsBlock
         v-show="stage === 'all' || stage === 'recall'"
         title="每轮召回"
-        :badge="editable ? '空间表单 · 提交生效' : '只读'"
+        :badge="editable ? '记忆圈表单 · 提交生效' : '只读'"
         :tone="editable ? 'form' : 'readonly'"
         wide
       >
@@ -308,12 +311,20 @@ async function save() {
           :editable="editable"
           @restore="tuning.restore('recall.minScore')"
         />
+        <TuningRow
+          v-show="rowVisible('recall.relevanceFloor')"
+          v-model="fields['recall.relevanceFloor'].value.value"
+          v-bind="row('recall.relevanceFloor')"
+          level="实例"
+          :editable="editable"
+          @restore="tuning.restore('recall.relevanceFloor')"
+        />
         <RecallTrial
           v-show="!onlyOverridden"
-          :space-id="spaceId"
+          :circle-id="circleId"
           :min-score="trialMinScore"
           :limit="trialLimit"
-          :app-overrides="overriddenApps"
+          :client-overrides="overriddenClients"
         />
         <TuningRow
           v-show="rowVisible('recall.subjectFacts')"
@@ -355,7 +366,7 @@ async function save() {
       <SettingsBlock
         v-show="stage === 'all' || stage === 'boot'"
         title="启动加载"
-        :badge="editable ? '空间表单 · 提交生效' : '只读'"
+        :badge="editable ? '记忆圈表单 · 提交生效' : '只读'"
         :tone="editable ? 'form' : 'readonly'"
         wide
       >
@@ -395,7 +406,7 @@ async function save() {
               </tr>
             </thead>
             <tbody>
-              <tr v-for="h in view.data.value.hostLimits" :key="h.runtimeFamily">
+              <tr v-for="h in view.data.value.clientLimits" :key="h.runtimeFamily">
                 <td><RuntimeLabel :family="h.runtimeFamily" :size="15" /></td>
                 <td class="num">{{ h.chars.toLocaleString('en-US') }} 字</td>
               </tr>
@@ -413,38 +424,40 @@ async function save() {
       </SettingsBlock>
 
       <SettingsBlock
-        v-show="stage === 'all' || stage === 'apps'"
-        title="应用的覆盖"
-        badge="在应用详情中修改"
+        v-show="stage === 'all' || stage === 'clients'"
+        title="接入实例的覆盖"
+        badge="在接入实例详情中修改"
         wide
       >
-        <template #note>已为单个应用单独调整的参数会列在这里。</template>
-        <EmptyState v-if="!overriddenApps.length" title="暂无应用覆盖" />
+        <template #note>已为单个接入实例单独调整的参数会列在这里。</template>
+        <EmptyState v-if="!overriddenClients.length" title="暂无接入实例覆盖" />
         <SettingsTable v-else>
           <thead>
             <tr>
-              <th>应用</th>
-              <th>覆盖的项与应用的值</th>
-              <th>空间的值</th>
+              <th>接入实例</th>
+              <th>覆盖的项与接入实例的值</th>
+              <th>记忆圈的值</th>
               <th>使用指引的补充</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="a in overriddenApps" :key="a.id">
+            <tr v-for="a in overriddenClients" :key="a.id">
               <td>
-                <RouterLink :to="{ name: 'app', params: { spaceId, appId: a.id } }" class="app-link"
-                  ><UIcon :name="icons.apps" aria-hidden="true" />{{ a.name }}</RouterLink
+                <RouterLink
+                  :to="{ name: 'client', params: { circleId, clientId: a.id } }"
+                  class="app-link"
+                  ><UIcon :name="icons.clients" aria-hidden="true" />{{ a.name }}</RouterLink
                 >
               </td>
               <td>{{ overriddenLabel(a.overrides) || '—' }}</td>
-              <td class="font-mono">{{ spaceValue(a.overrides) || '—' }}</td>
+              <td class="font-mono">{{ circleValue(a.overrides) || '—' }}</td>
               <td>{{ a.hasGuidance ? '有' : '—' }}</td>
             </tr>
           </tbody>
         </SettingsTable>
       </SettingsBlock>
 
-      <p v-if="!editable" class="pt-6 text-muted">仅空间所有者可修改。</p>
+      <p v-if="!editable" class="pt-6 text-muted">仅记忆圈所有者可修改。</p>
       <SaveBar
         v-if="editable"
         :count="changedCount"

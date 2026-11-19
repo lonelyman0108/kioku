@@ -156,9 +156,12 @@ describe('Token 会不会明文传输', () => {
 })
 
 const target = (extra: Partial<LorePlanNode['targets'][number]> = {}) => ({
-  uri: 'user://infra/a',
+  legacyUri: 'user://infra/a',
+  targetCircleKind: 'personal' as const,
+  targetCircleId: '00000000-0000-4000-8000-000000000099',
   title: 'a',
-  layer: 'user' as const,
+  topics: [],
+  when: {},
   sensitivity: 'private' as const,
   priority: 2,
   state: 'new' as const,
@@ -189,9 +192,9 @@ const planOf = (
   secretAvailable: true,
   credentialMatch: null,
   persona: { slug: 'default', name: '默认人格', exists: true, imported: [] },
-  apps: [],
-  appsGivenPersona: [],
-  appsOtherPersona: [],
+  clients: [],
+  clientsGivenPersona: [],
+  clientsOtherPersona: [],
   nodes,
   skipped: [],
   droppedKeywords: [],
@@ -200,8 +203,8 @@ const planOf = (
 })
 
 describe('目标的标题', () => {
-  it('写进去的标题；标机密的退回坐标的最后一段，和服务端一样不从正文取', () => {
-    const t = target({ uri: 'user://infra/docker_hosts/kioku', title: 'Kioku 部署' })
+  it('写进去的标题；标机密的退回来源路径的最后一段，和服务端一样不从正文取', () => {
+    const t = target({ legacyUri: 'user://infra/docker_hosts/kioku', title: 'Kioku 部署' })
     expect(targetTitle(t, false)).toBe('Kioku 部署')
     expect(targetTitle(t, true)).toBe('kioku')
   })
@@ -212,7 +215,7 @@ describe('目标的标题', () => {
 })
 
 describe('勾选', () => {
-  const imported = target({ state: 'imported', current: [{ uri: 'infra://a', secret: false }] })
+  const imported = target({ state: 'imported', current: [{ shortId: 'IMP001', secret: false }] })
 
   it('按 uuid 记、发现在的 URI；不导入优先；已导入的 secret 不发；计划里没有的不发', () => {
     const plan = planOf([
@@ -302,11 +305,12 @@ describe('疑似明文换成占位符', () => {
     expect(pruneUnconverted(same, unticked)).toEqual(unticked)
   })
 
-  const importedTarget = (uri: string, current: string | null = uri) =>
-    target({ uri, state: 'imported', current: [{ uri: current, secret: false }] })
-  const updateOf = (n: LorePlanNode, uri: string) => ({
+  const importedTarget = (legacyUri: string, current: string | null = 'IMP001') =>
+    target({ legacyUri, state: 'imported', current: [{ shortId: current, secret: false }] })
+  const updateOf = (n: LorePlanNode, legacyUri: string, shortId = 'IMP001') => ({
     source: n.uri,
-    uri,
+    legacyUri,
+    shortId,
     title: 't',
     state: 'update' as const,
     changes: ['content' as const],
@@ -316,7 +320,9 @@ describe('疑似明文换成占位符', () => {
     const excluded = node('ex')
     const unwritten = node('old', { targets: [importedTarget('user://infra/a')] })
     const synced = node('sync', { targets: [importedTarget('user://infra/s')] })
-    const shared = node('core', { targets: [target({ layer: 'core', sensitivity: 'internal' })] })
+    const shared = node('core', {
+      targets: [target({ targetCircleKind: 'shared', sensitivity: 'internal' })],
+    })
     const internal = node('internal', { targets: [target({ sensitivity: 'internal' })] })
     const plan = planOf([excluded, unwritten, synced, shared, internal], {
       items: [updateOf(synced, 'user://infra/s')],
@@ -334,8 +340,8 @@ describe('疑似明文换成占位符', () => {
   it('有一个新建的目标放得进就能换；放不进的新建目标与同步的目标照原样写，数得出几个', () => {
     const mixed = node('mixed', {
       targets: [
-        target({ layer: 'core', sensitivity: 'internal' }),
-        target({ uri: 'user://infra/b' }),
+        target({ targetCircleKind: 'shared', sensitivity: 'internal' }),
+        target({ legacyUri: 'user://infra/b' }),
         importedTarget('user://infra/c'),
         // 这次不同步的已导入目标不写，不算照原样写
         importedTarget('user://infra/d'),
@@ -343,7 +349,7 @@ describe('疑似明文换成占位符', () => {
     })
     const plan = planOf([mixed], { items: [updateOf(mixed, 'user://infra/c')] })
     expect(spotState(plan, mixed, spot(0), none, none)).toBe('convertible')
-    expect(keptTargets(plan, mixed, none).map((t) => t.uri)).toEqual([
+    expect(keptTargets(plan, mixed, none).map((t) => t.legacyUri)).toEqual([
       'user://infra/a',
       'user://infra/c',
     ])
@@ -351,7 +357,7 @@ describe('疑似明文换成占位符', () => {
     expect(keptTargets(planOf([clean]), clean, none)).toEqual([])
   })
 
-  it('标了机密的按机密算：本人的内部记忆标机密之后能换，也不再算照原样写', () => {
+  it('标了机密的按机密算：个人圈的内部记忆标机密之后能换，也不再算照原样写', () => {
     const internal = node('internal', { targets: [target({ sensitivity: 'internal' })] })
     const plan = planOf([internal])
     const secret = new Set(['internal'])
@@ -379,7 +385,10 @@ describe('疑似明文换成占位符', () => {
     // 另一个新建目标放不进占位符
     const blocked = node('blocked', {
       plaintext: [spot(0)],
-      targets: [target(), target({ uri: 'core://x', layer: 'core', sensitivity: 'internal' })],
+      targets: [
+        target(),
+        target({ legacyUri: 'core://x', targetCircleKind: 'shared', sensitivity: 'internal' }),
+      ],
     })
     expect(plaintextAllConverted(planOf([blocked]), blocked, none, none, noUnconverted)).toBe(false)
     // 同时同步一个已导入的目标
@@ -399,7 +408,7 @@ describe('疑似明文换成占位符', () => {
     expect(template).toMatch(/plaintextState\(node, spot\) === 'unwritten'[^]*?本次不写入/)
     expect(template).toContain('<Hint v-if="syncedStillThere(node)">')
     const script = descriptor.scriptSetup!.content
-    expect(script).toMatch(/syncedStillThere[^]*?c\.uri !== null/)
+    expect(script).toMatch(/syncedStillThere[^]*?c\.shortId !== null/)
   })
 
   it('信任提示的凭据算上这次换成占位符的那几处；取消勾选、不导入的不算', () => {
@@ -466,7 +475,8 @@ describe('跟上契约', () => {
       items: [
         {
           source: 'a',
-          uri: 'user://a',
+          legacyUri: 'user://a',
+          shortId: 'AAA001',
           title: 'a',
           state: 'skipped',
           changes: [],
@@ -474,7 +484,8 @@ describe('跟上契约', () => {
         },
         {
           source: 'b',
-          uri: 'user://b',
+          legacyUri: 'user://b',
+          shortId: 'BBB001',
           title: 'b',
           state: 'unreadable',
           changes: [],
@@ -492,14 +503,19 @@ describe('跟上契约', () => {
 
 describe('勾选之后这次会动什么', () => {
   const none = new Set<string>()
-  const updateOf = (node: LorePlanNode, uri = node.targets[0]!.uri) => ({
+  const updateOf = (
+    node: LorePlanNode,
+    legacyUri = node.targets[0]!.legacyUri,
+    shortId = 'UPD001',
+  ) => ({
     source: node.uri,
-    uri,
+    legacyUri,
+    shortId,
     title: node.targets[0]!.title,
     state: 'update' as const,
     changes: ['content' as const],
   })
-  const current = (uri: string | null, secret = false) => ({ uri, secret })
+  const current = (shortId: string | null, secret = false) => ({ shortId, secret })
 
   it('只算会写的：新建且没勾掉，或者有要更新的同步项；数量与徽章看同一份', () => {
     const fresh = planNode('fresh', { targets: [target({ boot: true })] })
@@ -507,10 +523,10 @@ describe('勾选之后这次会动什么', () => {
     const updated = planNode('updated', {
       targets: [
         target({
-          uri: 'infra://updated',
+          legacyUri: 'infra://updated',
           boot: true,
           state: 'imported',
-          current: [current('infra://updated')],
+          current: [current('UPD001')],
         }),
       ],
     })
@@ -518,10 +534,10 @@ describe('勾选之后这次会动什么', () => {
     const unchanged = planNode('unchanged', {
       targets: [
         target({
-          uri: 'infra://unchanged',
+          legacyUri: 'infra://unchanged',
           boot: true,
           state: 'imported',
-          current: [current('infra://unchanged')],
+          current: [current('UNC001')],
         }),
       ],
     })
@@ -529,14 +545,18 @@ describe('勾选之后这次会动什么', () => {
       targets: [target({ boot: true, state: 'imported', current: [current(null)] })],
     })
     const moved = planNode('moved', {
-      targets: [target({ boot: true, state: 'moved', current: [current('infra://old')] })],
+      targets: [target({ boot: true, state: 'moved', current: [current('MOV001')] })],
     })
     const quiet = planNode('quiet', { targets: [target({ boot: false })] })
     const plan = planOf([fresh, unticked, updated, unchanged, deleted, moved, quiet], {
       items: [
         updateOf(updated),
-        { ...updateOf(unchanged), state: 'current' },
-        { ...updateOf(moved, 'infra://old'), state: 'moved', target: moved.targets[0]!.uri },
+        { ...updateOf(unchanged, 'infra://unchanged', 'UNC001'), state: 'current' },
+        {
+          ...updateOf(moved, 'infra://old', 'MOV001'),
+          state: 'moved',
+          target: moved.targets[0]!.legacyUri,
+        },
       ],
     })
     const effects = selectionEffects(plan, none, new Set(['unticked']))
@@ -555,29 +575,29 @@ describe('勾选之后这次会动什么', () => {
     })
   })
 
-  it('要更新的同步项按来源和 URI 对到目标：同一个节点别的目标不跟着算', () => {
+  it('要更新的同步项按来源和来源 URI 对到目标：同一个节点别的目标不跟着算', () => {
     const node = planNode('multi', {
       targets: [
         target({
-          uri: 'app://a/agent',
+          legacyUri: 'app://a/agent',
           boot: true,
           state: 'imported',
-          current: [current('app://a/agent')],
+          current: [current('APPA01')],
         }),
         target({
-          uri: 'app://b/agent',
+          legacyUri: 'app://b/agent',
           boot: true,
           state: 'imported',
-          current: [current('app://b/agent')],
+          current: [current('APPB01')],
         }),
       ],
     })
     const other = planNode('other')
     const plan = planOf([node, other], {
       items: [
-        updateOf(node, 'app://a/agent'),
-        // URI 相同、来源是别的节点：对不上这个节点的目标
-        updateOf(other, 'app://b/agent'),
+        updateOf(node, 'app://a/agent', 'APPA01'),
+        // 来源 URI 相同、来源是别的节点：对不上这个节点的目标
+        updateOf(other, 'app://b/agent', 'APPB01'),
       ],
     })
     const effects = selectionEffects(plan, none, none)
@@ -585,15 +605,15 @@ describe('勾选之后这次会动什么', () => {
     expect([...effects.boot]).toEqual([node.targets[0]])
   })
 
-  it('secret 不进启动上下文：新建的看这次勾没勾，要更新的看这个 URI 上的记忆现在是不是 secret', () => {
+  it('secret 不进启动上下文：新建的看这次勾没勾，要更新的看对应词条现在是不是 secret', () => {
     const fresh = planNode('fresh', { targets: [target({ boot: true })] })
     const secretNow = planNode('secret_now', {
       targets: [
         target({
-          uri: 'infra://secret_now',
+          legacyUri: 'infra://secret_now',
           boot: true,
           state: 'imported',
-          current: [current('infra://secret_now', true)],
+          current: [current('SEC001', true)],
         }),
       ],
     })
@@ -601,15 +621,18 @@ describe('勾选之后这次会动什么', () => {
     const mixed = planNode('mixed', {
       targets: [
         target({
-          uri: 'infra://mixed',
+          legacyUri: 'infra://mixed',
           boot: true,
           state: 'imported',
-          current: [current('infra://mixed_old', true), current('infra://mixed')],
+          current: [current('MIXOLD', true), current('MIXNEW')],
         }),
       ],
     })
     const plan = planOf([fresh, secretNow, mixed], {
-      items: [updateOf(secretNow), updateOf(mixed)],
+      items: [
+        updateOf(secretNow, 'infra://secret_now', 'SEC001'),
+        updateOf(mixed, 'infra://mixed', 'MIXNEW'),
+      ],
     })
     const plain = selectionEffects(plan, none, none)
     expect([...plain.boot]).toEqual([fresh.targets[0], mixed.targets[0]])
@@ -624,19 +647,19 @@ describe('勾选之后这次会动什么', () => {
     const unticked = planNode('unticked', { credentialRefs: ['unticked'] })
     const unchanged = planNode('unchanged', {
       credentialRefs: ['unchanged'],
-      targets: [target({ state: 'imported', current: [current('infra://a')] })],
+      targets: [target({ state: 'imported', current: [current('UNC001')] })],
     })
     const moved = planNode('moved', {
       credentialRefs: ['moved'],
-      targets: [target({ state: 'moved', current: [current('infra://b')] })],
+      targets: [target({ state: 'moved', current: [current('MOV001')] })],
     })
     const updated = planNode('updated', {
       credentialRefs: ['updated', 'nas'],
       targets: [
         target({
-          uri: 'infra://updated',
+          legacyUri: 'infra://updated',
           state: 'imported',
-          current: [current('infra://updated')],
+          current: [current('UPD001')],
         }),
       ],
     })
@@ -652,55 +675,59 @@ describe('勾选之后这次会动什么', () => {
 
   describe('人格', () => {
     const soulTarget = (extra: Parameters<typeof target>[0] = {}) =>
-      target({ uri: 'persona://default/soul', layer: 'persona', ...extra })
-    const soul = planNode('soul', { targets: [soulTarget()] })
+      target({ legacyUri: 'core://soul', targetCircleKind: 'shared', ...extra })
+    const soul = planNode('soul', { uri: 'core://soul', targets: [soulTarget()] })
     const other = planNode('other')
 
-    it('有要新建的人格层目标才算写入新的 soul：勾掉的、已导入的、换了路径的都不算', () => {
+    it('有要新建的人格目标才算写入新的 soul：勾掉的、已导入的、换了路径的都不算', () => {
       const plan = planOf([soul, other])
       expect(selectionEffects(plan, none, none).writesPersona).toBe(true)
       expect(selectionEffects(plan, none, new Set(['other'])).writesPersona).toBe(true)
       expect(selectionEffects(plan, none, new Set(['soul'])).writesPersona).toBe(false)
       expect(selectionEffects(planOf([other]), none, none).writesPersona).toBe(false)
-      const prior = [current('persona://default/soul')]
+      const prior = [current('SOUL01')]
       for (const state of ['imported', 'moved'] as const) {
-        const old = planNode('soul', { targets: [soulTarget({ state, current: prior })] })
+        const old = planNode('soul', {
+          uri: 'core://soul',
+          targets: [soulTarget({ state, current: prior })],
+        })
         expect(selectionEffects(planOf([old, other]), none, none).writesPersona).toBe(false)
         // 同一个人格下还有要新建的节点
         const style = planNode('style', {
-          targets: [soulTarget({ uri: 'persona://default/soul/style' })],
+          uri: 'core://soul/style',
+          targets: [soulTarget({ legacyUri: 'core://soul/style' })],
         })
         expect(selectionEffects(planOf([old, style]), none, none).writesPersona).toBe(true)
       }
     })
 
-    it('人格已有时跳过 soul 不改变应用用哪个人格；不存在时只有写入新的 soul 才设', () => {
+    it('人格已有时跳过 soul 不改变接入实例用哪个人格；不存在时只有写入新的 soul 才设', () => {
       const claude = planNode('claude', {
         uri: 'core://agent/claude',
-        targets: [target({ uri: 'app://claude/agent', layer: 'app' })],
+        targets: [target({ legacyUri: 'core://agent/claude' })],
       })
       const planWith = (exists: boolean): LoreImportPlan => ({
         ...planOf([soul, claude]),
         persona: { slug: 'default', name: '默认人格', exists, imported: [] },
-        apps: [
+        clients: [
           {
             runtime: 'claude',
-            apps: [
+            clients: [
               { slug: 'claude', create: false, runtimeFamily: 'mcp' },
               { slug: 'claude-work', create: false, runtimeFamily: 'mcp' },
             ],
           },
         ],
-        appsGivenPersona: ['claude'],
-        appsOtherPersona: ['claude-work'],
+        clientsGivenPersona: ['claude'],
+        clientsOtherPersona: ['claude-work'],
       })
       const lists = (plan: LoreImportPlan, excluded: string[]) => {
-        const { appsGivenPersona, appsOtherPersona } = selectionEffects(
+        const { clientsGivenPersona, clientsOtherPersona } = selectionEffects(
           plan,
           none,
           new Set(excluded),
         )
-        return [appsGivenPersona, appsOtherPersona]
+        return [clientsGivenPersona, clientsOtherPersona]
       }
       const both = [['claude'], ['claude-work']]
       const neither = [[], []]
@@ -713,72 +740,74 @@ describe('勾选之后这次会动什么', () => {
     })
   })
 
-  it('勾掉一个运行时下的全部节点，它的应用不再列出；没有节点可勾的已有应用不随勾选变；全部勾掉什么都不动', () => {
-    const appTarget = (slug: string) => target({ uri: `app://${slug}/agent`, layer: 'app' })
+  it('勾掉一个运行时下的全部节点，它的接入实例不再列出；没有节点可勾的已有接入实例不随勾选变；全部勾掉什么都不动', () => {
+    const clientTarget = (slug: string) => target({ legacyUri: `app://${slug}/agent` })
     const claude = planNode('claude', {
       uri: 'core://agent/claude',
-      targets: [appTarget('claude')],
+      targets: [clientTarget('claude')],
     })
     const tools = planNode('tools', {
       uri: 'core://agent/claude/tools',
-      targets: [target({ uri: 'app://claude/agent/tools', layer: 'app' })],
+      targets: [target({ legacyUri: 'app://claude/agent/tools' })],
     })
     // 名字有相同前缀的运行时不算在内
     const longer = planNode('longer', {
       uri: 'core://agent/claude_web',
-      targets: [appTarget('claude-web')],
+      targets: [clientTarget('claude-web')],
     })
-    const zcode = planNode('zcode', { uri: 'core://agent/zcode', targets: [appTarget('zcode')] })
+    const zcode = planNode('zcode', { uri: 'core://agent/zcode', targets: [clientTarget('zcode')] })
     const plan: LoreImportPlan = {
       ...planOf([claude, tools, longer, zcode]),
-      apps: [
-        { runtime: 'claude', apps: [{ slug: 'claude', create: false, runtimeFamily: 'mcp' }] },
+      clients: [
+        { runtime: 'claude', clients: [{ slug: 'claude', create: false, runtimeFamily: 'mcp' }] },
         {
           runtime: 'claude_web',
-          apps: [{ slug: 'claude-web', create: true, runtimeFamily: 'other' }],
+          clients: [{ slug: 'claude-web', create: true, runtimeFamily: 'other' }],
         },
-        { runtime: 'zcode', apps: [{ slug: 'zcode', create: false, runtimeFamily: 'other' }] },
+        { runtime: 'zcode', clients: [{ slug: 'zcode', create: false, runtimeFamily: 'other' }] },
         // 这个运行时的节点都在映射之后被跳过了，服务端照常设默认人格，界面上没有节点可勾
-        { runtime: 'hidden', apps: [{ slug: 'hidden', create: false, runtimeFamily: 'other' }] },
+        { runtime: 'hidden', clients: [{ slug: 'hidden', create: false, runtimeFamily: 'other' }] },
       ],
-      appsGivenPersona: ['claude', 'hidden'],
-      appsOtherPersona: ['zcode'],
+      clientsGivenPersona: ['claude', 'hidden'],
+      clientsOtherPersona: ['zcode'],
     }
     const pick = (excluded: string[]) => {
-      const { apps, appsGivenPersona, appsOtherPersona } = selectionEffects(
+      const { clients, clientsGivenPersona, clientsOtherPersona } = selectionEffects(
         plan,
         none,
         new Set(excluded),
       )
-      return { runtimes: apps.map((m) => m.runtime), appsGivenPersona, appsOtherPersona }
+      return { runtimes: clients.map((m) => m.runtime), clientsGivenPersona, clientsOtherPersona }
     }
     expect(pick([])).toEqual({
       runtimes: ['claude', 'claude_web', 'zcode', 'hidden'],
-      appsGivenPersona: ['claude', 'hidden'],
-      appsOtherPersona: ['zcode'],
+      clientsGivenPersona: ['claude', 'hidden'],
+      clientsOtherPersona: ['zcode'],
     })
     // 还有一个节点留着，这个运行时还在
     expect(pick(['claude']).runtimes).toEqual(['claude', 'claude_web', 'zcode', 'hidden'])
     expect(pick(['claude', 'tools'])).toEqual({
       runtimes: ['claude_web', 'zcode', 'hidden'],
-      appsGivenPersona: ['hidden'],
-      appsOtherPersona: ['zcode'],
+      clientsGivenPersona: ['hidden'],
+      clientsOtherPersona: ['zcode'],
     })
     expect(pick(['zcode'])).toEqual({
       runtimes: ['claude', 'claude_web', 'hidden'],
-      appsGivenPersona: ['claude', 'hidden'],
-      appsOtherPersona: [],
+      clientsGivenPersona: ['claude', 'hidden'],
+      clientsOtherPersona: [],
     })
     expect(pick(['longer']).runtimes).toEqual(['claude', 'zcode', 'hidden'])
     // 全部勾掉就什么都不动，没有节点可勾的也一样
     expect(pick(['claude', 'tools', 'longer', 'zcode'])).toEqual({
       runtimes: [],
-      appsGivenPersona: [],
-      appsOtherPersona: [],
+      clientsGivenPersona: [],
+      clientsOtherPersona: [],
     })
     // 计划里本来就没有节点时没有勾选可言，服务端照常设
     const onlyHidden = { ...plan, nodes: [] }
-    expect(selectionEffects(onlyHidden, none, none).apps.map((m) => m.runtime)).toContain('hidden')
+    expect(selectionEffects(onlyHidden, none, none).clients.map((m) => m.runtime)).toContain(
+      'hidden',
+    )
   })
 })
 
@@ -1030,14 +1059,16 @@ describe('计划的分组', () => {
   it('同步差异每种列出来，已是最新的只给个数，没有的不出现；每行先写标题再写坐标', () => {
     const item = (state: LoreImportPlan['sync']['items'][number]['state'], uri: string) => ({
       source: uri,
-      uri,
+      legacyUri: uri,
+      shortId: `ID${uri.slice(4)}`,
       title: `标题${uri.slice(4)}`,
       state,
       changes: [],
     })
     const line = (n: number, extra: { target?: string; detail?: string } = {}) => ({
       title: `标题${n}`,
-      uri: `a://${n}`,
+      legacyUri: `a://${n}`,
+      shortId: `ID${n}`,
       target: extra.target ?? null,
       detail: extra.detail ?? null,
     })
@@ -1067,7 +1098,7 @@ describe('计划的分组', () => {
       ['unmapped', [line(9)]],
       ['unreadable', [line(10, { detail: '记忆不存在' })]],
       // Lore 里没有这个节点了，取不到标题，只写坐标
-      ['gone', [{ title: null, uri: 'a://11', target: null, detail: null }]],
+      ['gone', [{ title: null, legacyUri: 'a://11', shortId: null, target: null, detail: null }]],
     ])
     expect(groups[0]!.heading).toBe('按 Lore 更新')
     expect(syncGroups(planOf([])).groups).toEqual([])
@@ -1077,7 +1108,7 @@ describe('计划的分组', () => {
     const template = parse(loreImportSource).descriptor.template!.content
     const row = /<li v-for="\(line, i\) in group\.lines"[^]*?<\/li>/.exec(template)![0]
     expect(row).toContain('<span v-if="line.title" class="target-title">{{ line.title }}</span>')
-    expect(row.indexOf('{{ line.title }}')).toBeLessThan(row.indexOf(':uri="line.uri"'))
+    expect(row.indexOf('{{ line.title }}')).toBeLessThan(row.indexOf(':uri="line.legacyUri"'))
   })
 
   it('节点的筛选', () => {

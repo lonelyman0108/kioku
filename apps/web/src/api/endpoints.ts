@@ -3,8 +3,9 @@ import {
   ActivityEvent,
   ActivityFacets,
   ActivityList,
-  AppAdvancedView,
-  AppInfo,
+  AdminAccount,
+  AdminAccountList,
+  AdminCircleList,
   BackupObjectList,
   BackupQueued,
   BackupRunStatus,
@@ -16,22 +17,40 @@ import {
   BenchScenarioList,
   BenchToolList,
   BootPreview,
+  CircleAdvancedView,
+  CircleDetail,
+  CircleImportPreview,
+  CircleImportResult,
+  CircleInfo,
+  CircleLimitView,
+  CircleMember,
+  CircleMemberList,
+  CircleOverview,
+  CirclePrivacySettings,
+  ClientAdvancedView,
+  ClientGroupRuleList,
+  ClientInfo,
   ConsoleCredential,
   ConsoleCredentialList,
-  ConsoleMemoryChildren,
-  ConsoleMemoryView,
+  ConsoleEntryView,
   ConsoleSearchResponse,
   ConversationDetail,
   ConversationList,
   ConvertedToCredential,
+  CreatedAccount,
+  CreatedCircle,
   CreatedCredential,
   CredentialEventList,
   CredentialReferenceList,
   CredentialValueMatches,
   CredentialValues,
-  CreatedKey,
+  DatabaseCheck,
+  DatabaseConnected,
+  DatabaseInspection,
   DeletedCredentialList,
-  DeletedMemoryList,
+  DeletedEntryList,
+  DeviceGrantApproved,
+  DeviceGrantInfo,
   DreamApplied,
   DreamBindingView,
   DreamMemberSettings,
@@ -43,28 +62,37 @@ import {
   EmbeddingSettingsView,
   EmbeddingStatus,
   EmbeddingTestResult,
-  ExpiredMemoryList,
+  EntryBrowseResponse,
+  EntryHistory,
+  EntryList,
+  EntryRecallStat,
+  ExpiredEntryList,
   ExtractionBindingView,
   ExtractionUsage,
-  MasterKeyStatus,
+  FacetDimensionView,
+  FacetTermView,
+  FacetVocabularyView,
   GlossaryIndex,
-  GroupPersonaRuleList,
   HealthResponse,
   InboxCounts,
+  InstanceAdvancedView,
+  IssuedKey,
   KeyAccessMatrix,
   KeyInfo,
+  LoginSessionList,
   LoreImportPlan,
   LoreImportResult,
+  MasterKeyStatus,
   Me,
-  MemoryHistory,
-  MemoryList,
-  MemoryRecallStat,
   ModelChainTestResult,
   ModelProfileTestResult,
   ModelProviderView,
   ModelRegistryView,
+  AccountLink,
+  PasswordLinkInfo,
   PersonaDetail,
   PersonaInfo,
+  PersonaTrait,
   PrivacyBindingView,
   RecallDebug,
   RecallEventList,
@@ -75,15 +103,6 @@ import {
   ReviewList,
   ReviewResult,
   SetupStatus,
-  SpacePrivacySettings,
-  DatabaseCheck,
-  DatabaseConnected,
-  DatabaseInspection,
-  type DatabaseCheckRequest,
-  type DatabaseProvisionRequest,
-  SpaceImportPreview,
-  SpaceImportResult,
-  SpaceOverview,
   SubjectDetail,
   SubjectInfo,
   SubjectList,
@@ -93,78 +112,73 @@ import {
   VaultConnection,
   VaultConnectionList,
   VaultItemList,
+  type AddCircleMemberRequest,
   type ApplyDreamSuggestion,
   type BenchAgentTurnRequest,
   type BenchRunRequest,
   type BootPreviewRequest,
+  type BrowseGroupBy,
+  type ChangePasswordRequest,
+  type ClientGroupRules,
+  type ConnectVaultRequest,
+  type ConsoleCreateEntryRequest,
+  type ConsoleTransferEntryRequest,
+  type ConsoleUpdateEntryRequest,
   type ConversationListQuery,
   type ConvertToCredentialRequest,
-  type CreateAppRequest,
-  type ConnectVaultRequest,
+  type CreateAccountRequest,
+  type CreateCircleRequest,
+  type CreateClientRequest,
   type CreateCredentialRequest,
-  type CredentialListQuery,
+  type CreateFacetDimensionRequest,
+  type CreateFacetTermRequest,
   type CreateKeyRequest,
-  type ConsoleCreateMemoryRequest,
-  type MatchCredentialValuesRequest,
   type CreatePersonaRequest,
-  type GroupPersonaRules,
+  type CredentialListQuery,
+  type DatabaseCheckRequest,
+  type DatabaseProvisionRequest,
+  type DeviceGrantApprove,
+  type EntryKind,
+  type EntryListQuery,
+  type ExtractionBudget,
   type LoreImportApplyRequest,
   type LoreImportPlanRequest,
-  type MemoryListQuery,
-  type MoveMemoryRequest,
+  type MatchCredentialValuesRequest,
+  type MemberRole,
   type PlaintextIgnoreRequest,
-  type ProtectMemoryRequest,
+  type PromoteFactRequest,
+  type ProtectEntryRequest,
   type ReactivateRequest,
-  type RedactMemoryRequest,
+  type RecallDebugRequest,
+  type ReconnectVaultRequest,
+  type RedactEntryRequest,
   type RestoreRequest,
-  type ReviewQuery,
   type RetentionSettings,
+  type ReviewQuery,
   type ReviewRequest,
+  type RotateKeyRequest,
+  type SetVaultDestinationRequest,
   type SetupRequest,
   type SubjectListQuery,
-  type UpdateAppRequest,
+  type UpdateAccountRequest,
   type UpdateBackupSettings,
-  type ReconnectVaultRequest,
-  type SetVaultDestinationRequest,
+  type UpdateCircleAdvanced,
+  type UpdateCirclePrivacySettings,
+  type UpdateCircleRequest,
+  type UpdateClientAdvanced,
+  type UpdateClientRequest,
   type UpdateCredentialRequest,
   type UpdateDreamBinding,
   type UpdateEmbeddingSettings,
   type UpdateExtractionBinding,
-  type UpdatePrivacyBinding,
-  type UpdateSpacePrivacySettings,
-  type UpsertModelProvider,
-  type ExtractionBudget,
-  type ConsoleUpdateMemoryRequest,
-  type UpdatePersonaRequest,
-  type UpdateSubjectRequest,
-  InstanceAdvancedView,
-  SpaceAdvancedView,
-  type UpdateAppAdvanced,
+  type UpdateFacetDimensionRequest,
+  type UpdateFacetTermRequest,
   type UpdateInstanceAdvanced,
-  type UpdateSpaceAdvanced,
-  CreatedSpace,
-  InstanceSpace,
-  SpaceDetail,
-  SpaceInfo,
-  SpaceLimitView,
-  SpaceMember,
-  type AddMemberRequest,
-  type CreateSpaceRequest,
-  type MemberRole,
-} from '@kioku/contracts'
-import {
-  AccountLink,
-  AdminAccount,
-  AdminAccountList,
-  CreatedAccount,
-  DeviceGrantApproved,
-  DeviceGrantInfo,
-  LoginSessionList,
-  PasswordLinkInfo,
-  type ChangePasswordRequest,
-  type CreateAccountRequest,
-  type DeviceGrantApprove,
-  type UpdateAccountRequest,
+  type UpdatePersonaRequest,
+  type UpdatePrivacyBinding,
+  type UpdateSubjectRequest,
+  type UpsertModelProvider,
+  type UpsertPersonaTraitRequest,
 } from '@kioku/contracts'
 import { z } from 'zod'
 
@@ -192,400 +206,492 @@ export const api = {
   logout: () => request('POST', '/auth/logout'),
   me: () => request('GET', '/auth/me', { schema: Me }),
 
-  personas: (spaceId: string) =>
-    request('GET', `/spaces/${spaceId}/personas`, { schema: z.array(PersonaInfo) }),
-  createPersona: (
-    spaceId: string,
-    body: Partial<CreatePersonaRequest> & Pick<CreatePersonaRequest, 'slug' | 'name'>,
-  ) => request('POST', `/spaces/${spaceId}/personas`, { body, schema: PersonaInfo }),
-  persona: (spaceId: string, personaId: string) =>
-    request('GET', `/spaces/${spaceId}/personas/${personaId}`, { schema: PersonaDetail }),
-  updatePersona: (spaceId: string, personaId: string, body: UpdatePersonaRequest) =>
-    request('PATCH', `/spaces/${spaceId}/personas/${personaId}`, { body, schema: PersonaInfo }),
-  deletePersona: (spaceId: string, personaId: string) =>
-    request('DELETE', `/spaces/${spaceId}/personas/${personaId}`),
-  members: (spaceId: string) =>
-    request('GET', `/spaces/${spaceId}/members`, { schema: z.array(SpaceMember) }),
-  // 空间与成员
-  space: (spaceId: string) => request('GET', `/spaces/${spaceId}`, { schema: SpaceDetail }),
-  renameSpace: (spaceId: string, name: string) =>
-    request('PATCH', `/spaces/${spaceId}`, { body: { name }, schema: SpaceInfo }),
-  deleteSpace: (spaceId: string, confirmName: string) =>
-    request('DELETE', `/spaces/${spaceId}`, { body: { confirmName } }),
-  createSpace: (body: CreateSpaceRequest) =>
-    request('POST', '/spaces', { body, schema: CreatedSpace }),
-  addMember: (spaceId: string, body: AddMemberRequest) =>
-    request('POST', `/spaces/${spaceId}/members`, { body, schema: SpaceMember }),
-  updateMember: (spaceId: string, accountId: string, role: MemberRole) =>
-    request('PATCH', `/spaces/${spaceId}/members/${accountId}`, {
+  // 记忆圈与成员
+  circle: (circleId: string) => request('GET', `/circles/${circleId}`, { schema: CircleDetail }),
+  updateCircle: (circleId: string, body: UpdateCircleRequest) =>
+    request('PATCH', `/circles/${circleId}`, { body, schema: CircleInfo }),
+  renameCircle: (circleId: string, name: string) =>
+    request('PATCH', `/circles/${circleId}`, { body: { name }, schema: CircleInfo }),
+  deleteCircle: (circleId: string, confirmName: string) =>
+    request('DELETE', `/circles/${circleId}`, { body: { confirmName } }),
+  createCircle: (body: Partial<CreateCircleRequest> & Pick<CreateCircleRequest, 'name'>) =>
+    request('POST', '/circles', { body, schema: CreatedCircle }),
+  members: async (circleId: string) =>
+    (await request('GET', `/circles/${circleId}/members`, { schema: CircleMemberList })).members,
+  addMember: (circleId: string, body: AddCircleMemberRequest) =>
+    request('POST', `/circles/${circleId}/members`, { body, schema: CircleMember }),
+  updateMember: (circleId: string, accountId: string, role: MemberRole) =>
+    request('PATCH', `/circles/${circleId}/members/${accountId}`, {
       body: { role },
-      schema: SpaceMember,
+      schema: CircleMember,
     }),
-  removeMember: (spaceId: string, accountId: string) =>
-    request('DELETE', `/spaces/${spaceId}/members/${accountId}`),
-  transferOwnership: (spaceId: string, accountId: string) =>
-    request('POST', `/spaces/${spaceId}/transfer-ownership`, {
-      body: { accountId },
-      schema: z.array(SpaceMember),
+  removeMember: (circleId: string, accountId: string) =>
+    request('DELETE', `/circles/${circleId}/members/${accountId}`),
+  transferOwnership: async (circleId: string, accountId: string) =>
+    (
+      await request('POST', `/circles/${circleId}/transfer-ownership`, {
+        body: { accountId },
+        schema: CircleMemberList,
+      })
+    ).members,
+  instanceCircles: async () =>
+    (await request('GET', '/instance/circles', { schema: AdminCircleList })).circles,
+  circleLimit: () => request('GET', '/instance/circle-limit', { schema: CircleLimitView }),
+  saveCircleLimit: (maxOwnedCircles: number) =>
+    request('PUT', '/instance/circle-limit', {
+      body: { maxOwnedCircles },
+      schema: CircleLimitView,
     }),
-  instanceSpaces: () => request('GET', '/instance/spaces', { schema: z.array(InstanceSpace) }),
-  spaceLimit: () => request('GET', '/instance/space-limit', { schema: SpaceLimitView }),
-  saveSpaceLimit: (maxOwnedSpaces: number) =>
-    request('PUT', '/instance/space-limit', { body: { maxOwnedSpaces }, schema: SpaceLimitView }),
   systemInfo: () => request('GET', '/instance/system', { schema: SystemInfo }),
   saveUpdateCheck: (enabled: boolean) =>
     request('PUT', '/instance/update-check', { body: { enabled }, schema: SystemInfo }),
-  apps: (spaceId: string) =>
-    request('GET', `/spaces/${spaceId}/apps`, { schema: z.array(AppInfo) }),
-  createApp: (
-    spaceId: string,
-    body: Partial<CreateAppRequest> & Pick<CreateAppRequest, 'slug' | 'name' | 'runtimeFamily'>,
-  ) => request('POST', `/spaces/${spaceId}/apps`, { body, schema: AppInfo }),
-  updateApp: (spaceId: string, appId: string, body: UpdateAppRequest) =>
-    request('PATCH', `/spaces/${spaceId}/apps/${appId}`, { body, schema: AppInfo }),
-  deleteApp: (spaceId: string, appId: string) =>
-    request('DELETE', `/spaces/${spaceId}/apps/${appId}`),
-  keys: (spaceId: string, appId: string) =>
-    request('GET', `/spaces/${spaceId}/apps/${appId}/keys`, { schema: z.array(KeyInfo) }),
-  createKey: (spaceId: string, appId: string, body: CreateKeyRequest) =>
-    request('POST', `/spaces/${spaceId}/apps/${appId}/keys`, { body, schema: CreatedKey }),
-  revokeKey: (spaceId: string, appId: string, keyId: string) =>
-    request('DELETE', `/spaces/${spaceId}/apps/${appId}/keys/${keyId}`),
-  recallStats: (spaceId: string) =>
-    request('GET', `/spaces/${spaceId}/recall/stats`, { schema: RecallStats }),
-  recallEvents: (spaceId: string, query: { appId?: string; cursor?: string }) =>
-    request('GET', `/spaces/${spaceId}/recall/events`, { query, schema: RecallEventList }),
-  memoryRecallStat: (spaceId: string, memoryId: string) =>
-    request('GET', `/spaces/${spaceId}/recall/memory`, {
-      query: { id: memoryId },
-      schema: MemoryRecallStat,
+
+  // 切面词表
+  facets: (circleId: string) =>
+    request('GET', `/circles/${circleId}/facets`, { schema: FacetVocabularyView }),
+  createFacetDimension: (
+    circleId: string,
+    body: Partial<CreateFacetDimensionRequest> & Pick<CreateFacetDimensionRequest, 'key' | 'name'>,
+  ) =>
+    request('POST', `/circles/${circleId}/facets/dimensions`, { body, schema: FacetDimensionView }),
+  updateFacetDimension: (circleId: string, key: string, body: UpdateFacetDimensionRequest) =>
+    request('PATCH', `/circles/${circleId}/facets/dimensions/${encodeURIComponent(key)}`, {
+      body,
+      schema: FacetDimensionView,
     }),
-  recallSettings: () => request('GET', '/settings/recall', { schema: RecallSettings }),
-  saveRecallSettings: (body: RecallSettings) =>
-    request('PUT', '/settings/recall', { body, schema: RecallSettings }),
-  bootPreview: (spaceId: string, appId: string, keyId: string, body: BootPreviewRequest) =>
-    request('POST', `/spaces/${spaceId}/apps/${appId}/keys/${keyId}/preview`, {
+  deleteFacetDimension: (circleId: string, key: string) =>
+    request('DELETE', `/circles/${circleId}/facets/dimensions/${encodeURIComponent(key)}`),
+  createFacetTerm: (
+    circleId: string,
+    body: Partial<CreateFacetTermRequest> &
+      Pick<CreateFacetTermRequest, 'dimensionKey' | 'slug' | 'label'>,
+  ) => request('POST', `/circles/${circleId}/facets/terms`, { body, schema: FacetTermView }),
+  updateFacetTerm: (circleId: string, termId: string, body: UpdateFacetTermRequest) =>
+    request('PATCH', `/circles/${circleId}/facets/terms/${termId}`, {
+      body,
+      schema: FacetTermView,
+    }),
+  deleteFacetTerm: (circleId: string, termId: string) =>
+    request('DELETE', `/circles/${circleId}/facets/terms/${termId}`),
+
+  // 独立人格与设定段
+  personas: (circleId: string) =>
+    request('GET', `/circles/${circleId}/personas`, { schema: z.array(PersonaInfo) }),
+  createPersona: (
+    circleId: string,
+    body: Partial<CreatePersonaRequest> & Pick<CreatePersonaRequest, 'slug' | 'name'>,
+  ) => request('POST', `/circles/${circleId}/personas`, { body, schema: PersonaInfo }),
+  persona: (circleId: string, personaId: string) =>
+    request('GET', `/circles/${circleId}/personas/${personaId}`, { schema: PersonaDetail }),
+  updatePersona: (circleId: string, personaId: string, body: UpdatePersonaRequest) =>
+    request('PATCH', `/circles/${circleId}/personas/${personaId}`, { body, schema: PersonaInfo }),
+  deletePersona: (circleId: string, personaId: string) =>
+    request('DELETE', `/circles/${circleId}/personas/${personaId}`),
+  upsertPersonaTrait: (circleId: string, personaId: string, body: UpsertPersonaTraitRequest) =>
+    request('PUT', `/circles/${circleId}/personas/${personaId}/traits`, {
+      body,
+      schema: PersonaTrait,
+    }),
+  deletePersonaTrait: (circleId: string, personaId: string, traitKey: string) =>
+    request(
+      'DELETE',
+      `/circles/${circleId}/personas/${personaId}/traits/${encodeURIComponent(traitKey)}`,
+    ),
+
+  // 接入实例、按群规则与访问密钥
+  clients: (circleId: string) =>
+    request('GET', `/circles/${circleId}/clients`, { schema: z.array(ClientInfo) }),
+  createClient: (
+    circleId: string,
+    body: Partial<CreateClientRequest> &
+      Pick<CreateClientRequest, 'slug' | 'name' | 'runtimeFamily'>,
+  ) => request('POST', `/circles/${circleId}/clients`, { body, schema: ClientInfo }),
+  updateClient: (circleId: string, clientId: string, body: UpdateClientRequest) =>
+    request('PATCH', `/circles/${circleId}/clients/${clientId}`, { body, schema: ClientInfo }),
+  deleteClient: (circleId: string, clientId: string) =>
+    request('DELETE', `/circles/${circleId}/clients/${clientId}`),
+  clientGroupRules: (circleId: string, clientId: string) =>
+    request('GET', `/circles/${circleId}/clients/${clientId}/group-rules`, {
+      schema: ClientGroupRuleList,
+    }),
+  saveClientGroupRules: (circleId: string, clientId: string, body: ClientGroupRules) =>
+    request('PUT', `/circles/${circleId}/clients/${clientId}/group-rules`, {
+      body,
+      schema: ClientGroupRuleList,
+    }),
+  keys: (circleId: string, clientId: string) =>
+    request('GET', `/circles/${circleId}/clients/${clientId}/keys`, { schema: z.array(KeyInfo) }),
+  createKey: (circleId: string, clientId: string, body: CreateKeyRequest) =>
+    request('POST', `/circles/${circleId}/clients/${clientId}/keys`, { body, schema: IssuedKey }),
+  rotateKey: (circleId: string, clientId: string, keyId: string, body: RotateKeyRequest = {}) =>
+    request('POST', `/circles/${circleId}/clients/${clientId}/keys/${keyId}/rotate`, {
+      body,
+      schema: IssuedKey,
+    }),
+  revokeKey: (circleId: string, clientId: string, keyId: string) =>
+    request('DELETE', `/circles/${circleId}/clients/${clientId}/keys/${keyId}`),
+  keyMatrix: (circleId: string, clientId: string, keyId: string) =>
+    request('GET', `/circles/${circleId}/clients/${clientId}/keys/${keyId}/matrix`, {
+      schema: KeyAccessMatrix,
+    }),
+  bootPreview: (circleId: string, clientId: string, keyId: string, body: BootPreviewRequest) =>
+    request('POST', `/circles/${circleId}/clients/${clientId}/keys/${keyId}/preview`, {
       body,
       schema: BootPreview,
     }),
-  recallDebug: (spaceId: string, appId: string, keyId: string, query: string) =>
-    request('POST', `/spaces/${spaceId}/apps/${appId}/keys/${keyId}/debug`, {
-      body: { query },
+  recallDebug: (
+    circleId: string,
+    clientId: string,
+    keyId: string,
+    body: Partial<RecallDebugRequest> & Pick<RecallDebugRequest, 'query'>,
+  ) =>
+    request('POST', `/circles/${circleId}/clients/${clientId}/keys/${keyId}/debug`, {
+      body,
       schema: RecallDebug,
     }),
-  keyMatrix: (spaceId: string, appId: string, keyId: string) =>
-    request('GET', `/spaces/${spaceId}/apps/${appId}/keys/${keyId}/matrix`, {
-      schema: KeyAccessMatrix,
-    }),
-  benchTools: (spaceId: string, appId: string, keyId: string) =>
-    request('GET', `/spaces/${spaceId}/apps/${appId}/keys/${keyId}/bench/tools`, {
+  benchTools: (circleId: string, clientId: string, keyId: string) =>
+    request('GET', `/circles/${circleId}/clients/${clientId}/keys/${keyId}/bench/tools`, {
       schema: BenchToolList,
     }),
-  benchRun: (spaceId: string, appId: string, keyId: string, body: BenchRunRequest) =>
-    request('POST', `/spaces/${spaceId}/apps/${appId}/keys/${keyId}/bench/run`, {
+  benchRun: (circleId: string, clientId: string, keyId: string, body: BenchRunRequest) =>
+    request('POST', `/circles/${circleId}/clients/${clientId}/keys/${keyId}/bench/run`, {
       body,
       schema: BenchRunResult,
     }),
-  benchScenarios: (spaceId: string) =>
-    request('GET', `/spaces/${spaceId}/bench/scenarios`, { schema: BenchScenarioList }),
-  benchAgent: (spaceId: string, appId: string, keyId: string) =>
-    request('GET', `/spaces/${spaceId}/apps/${appId}/keys/${keyId}/bench/agent`, {
+  benchScenarios: (circleId: string) =>
+    request('GET', `/circles/${circleId}/bench/scenarios`, { schema: BenchScenarioList }),
+  benchAgent: (circleId: string, clientId: string, keyId: string) =>
+    request('GET', `/circles/${circleId}/clients/${clientId}/keys/${keyId}/bench/agent`, {
       schema: BenchAgentInfo,
     }),
   benchAgentTurn: (
-    spaceId: string,
-    appId: string,
+    circleId: string,
+    clientId: string,
     keyId: string,
     body: BenchAgentTurnRequest,
     signal: AbortSignal,
   ) =>
-    request('POST', `/spaces/${spaceId}/apps/${appId}/keys/${keyId}/bench/agent/turn`, {
+    request('POST', `/circles/${circleId}/clients/${clientId}/keys/${keyId}/bench/agent/turn`, {
       body,
       schema: BenchAgentTurnResult,
       signal,
     }),
 
-  memory: (spaceId: string, uri: string) =>
-    request('GET', `/spaces/${spaceId}/memories`, { query: { uri }, schema: ConsoleMemoryView }),
+  // 召回分析
+  recallStats: (circleId: string) =>
+    request('GET', `/circles/${circleId}/recall/stats`, { schema: RecallStats }),
+  recallEvents: (circleId: string, query: { clientId?: string; cursor?: string }) =>
+    request('GET', `/circles/${circleId}/recall/events`, { query, schema: RecallEventList }),
+  entryRecallStat: (circleId: string, entryId: string) =>
+    request('GET', `/circles/${circleId}/recall/entry`, {
+      query: { id: entryId },
+      schema: EntryRecallStat,
+    }),
+  recallSettings: () => request('GET', '/settings/recall', { schema: RecallSettings }),
+  saveRecallSettings: (body: RecallSettings) =>
+    request('PUT', '/settings/recall', { body, schema: RecallSettings }),
+
+  // 词条（记忆）与变体切片
+  entry: (circleId: string, id: string, query?: { circle?: string; allVariants?: boolean }) =>
+    request('GET', `/circles/${circleId}/entries`, {
+      query: {
+        id,
+        circle: query?.circle,
+        allVariants: query?.allVariants === undefined ? undefined : String(query.allVariants),
+      },
+      schema: ConsoleEntryView,
+    }),
   // 显式查看机密的正文（记一次访问）。结果不要放进 useQuery 的缓存，见 secretContent.ts
-  revealMemory: (spaceId: string, memoryId: string) =>
-    request('POST', `/spaces/${spaceId}/memories/reveal`, {
-      body: { memoryId },
-      schema: ConsoleMemoryView,
+  revealEntry: (circleId: string, entryId: string) =>
+    request('POST', `/circles/${circleId}/entries/reveal`, {
+      body: { entryId },
+      schema: ConsoleEntryView,
     }),
-  memoryChildren: (spaceId: string, of: string) =>
-    request('GET', `/spaces/${spaceId}/memories/children`, {
-      query: { of },
-      schema: ConsoleMemoryChildren,
-    }),
-  createMemory: (
-    spaceId: string,
-    body: Partial<ConsoleCreateMemoryRequest> & Pick<ConsoleCreateMemoryRequest, 'uri' | 'content'>,
-  ) => request('POST', `/spaces/${spaceId}/memories`, { body, schema: ConsoleMemoryView }),
-  updateMemory: (spaceId: string, body: ConsoleUpdateMemoryRequest) =>
-    request('PATCH', `/spaces/${spaceId}/memories`, { body, schema: ConsoleMemoryView }),
-  deleteMemory: (spaceId: string, uri: string, expected: { id: string; version: number }) =>
-    request('DELETE', `/spaces/${spaceId}/memories`, {
-      query: { uri, expectedId: expected.id, expectedVersion: expected.version },
-    }),
-  moveMemory: (spaceId: string, body: MoveMemoryRequest) =>
-    request('POST', `/spaces/${spaceId}/memories/move`, { body, schema: ConsoleMemoryView }),
-  // 列表的筛选都是可选的；查询参数原样是字符串
-  memoryList: (spaceId: string, query: Partial<Record<keyof MemoryListQuery, string | number>>) =>
-    request('GET', `/spaces/${spaceId}/memories/list`, { query, schema: MemoryList }),
-  searchMemories: (spaceId: string, query: string) =>
-    request('POST', `/spaces/${spaceId}/memories/search`, {
-      body: { query },
+  browseEntries: (
+    circleId: string,
+    query: {
+      groupBy?: BrowseGroupBy
+      circle?: string
+      kind?: EntryKind
+      topic?: string
+      query?: string
+      limit?: number
+    } = {},
+  ) =>
+    request('GET', `/circles/${circleId}/entries/browse`, { query, schema: EntryBrowseResponse }),
+  createEntry: (circleId: string, body: Partial<ConsoleCreateEntryRequest>) =>
+    request('POST', `/circles/${circleId}/entries`, { body, schema: ConsoleEntryView }),
+  updateEntry: (circleId: string, body: ConsoleUpdateEntryRequest) =>
+    request('PATCH', `/circles/${circleId}/entries`, { body, schema: ConsoleEntryView }),
+  deleteEntry: (circleId: string, id: string, expectedVersion?: number) =>
+    request('DELETE', `/circles/${circleId}/entries`, { query: { id, expectedVersion } }),
+  transferEntry: (circleId: string, body: ConsoleTransferEntryRequest) =>
+    request('POST', `/circles/${circleId}/entries/transfer`, { body, schema: ConsoleEntryView }),
+  // 列表的筛选都是可选的；查询参数原样是字符串或数字
+  entryList: (circleId: string, query: Partial<Record<keyof EntryListQuery, string | number>>) =>
+    request('GET', `/circles/${circleId}/entries/list`, { query, schema: EntryList }),
+  searchEntries: (circleId: string, query: string, limit?: number) =>
+    request('POST', `/circles/${circleId}/entries/search`, {
+      body: limit === undefined ? { query } : { query, limit },
       schema: ConsoleSearchResponse,
     }),
-  glossaryIndex: (spaceId: string) =>
-    request('GET', `/spaces/${spaceId}/memories/glossary`, { schema: GlossaryIndex }),
-  memoryHistory: (spaceId: string, id: string) =>
-    request('GET', `/spaces/${spaceId}/memories/history`, { query: { id }, schema: MemoryHistory }),
-  deletedMemories: (spaceId: string, cursor?: string) =>
-    request('GET', `/spaces/${spaceId}/memories/deleted`, {
+  glossaryIndex: (circleId: string) =>
+    request('GET', `/circles/${circleId}/entries/glossary`, { schema: GlossaryIndex }),
+  entryHistory: (circleId: string, id: string) =>
+    request('GET', `/circles/${circleId}/entries/history`, { query: { id }, schema: EntryHistory }),
+  deletedEntries: (circleId: string, cursor?: string) =>
+    request('GET', `/circles/${circleId}/entries/deleted`, {
       query: { cursor },
-      schema: DeletedMemoryList,
+      schema: DeletedEntryList,
     }),
-  restoreMemory: (spaceId: string, body: RestoreRequest) =>
-    request('POST', `/spaces/${spaceId}/memories/restore`, { body, schema: ConsoleMemoryView }),
-  undeleteMemory: (spaceId: string, memoryId: string) =>
-    request('POST', `/spaces/${spaceId}/memories/undelete`, {
-      body: { memoryId },
-      schema: ConsoleMemoryView,
+  restoreEntry: (circleId: string, body: RestoreRequest) =>
+    request('POST', `/circles/${circleId}/entries/restore`, { body, schema: ConsoleEntryView }),
+  undeleteEntry: (circleId: string, entryId: string) =>
+    request('POST', `/circles/${circleId}/entries/undelete`, {
+      body: { entryId },
+      schema: ConsoleEntryView,
     }),
-  expiredMemories: (spaceId: string, cursor?: string) =>
-    request('GET', `/spaces/${spaceId}/memories/expired`, {
+  expiredEntries: (circleId: string, cursor?: string) =>
+    request('GET', `/circles/${circleId}/entries/expired`, {
       query: { cursor },
-      schema: ExpiredMemoryList,
+      schema: ExpiredEntryList,
     }),
-  reactivateMemory: (spaceId: string, body: ReactivateRequest) =>
-    request('POST', `/spaces/${spaceId}/memories/reactivate`, { body, schema: ConsoleMemoryView }),
-  ignorePlaintext: (spaceId: string, body: PlaintextIgnoreRequest) =>
-    request('POST', `/spaces/${spaceId}/memories/ignore-plaintext`, {
+  reactivateEntry: (circleId: string, body: ReactivateRequest) =>
+    request('POST', `/circles/${circleId}/entries/reactivate`, { body, schema: ConsoleEntryView }),
+  ignorePlaintext: (circleId: string, body: PlaintextIgnoreRequest) =>
+    request('POST', `/circles/${circleId}/entries/ignore-plaintext`, {
       body,
-      schema: ConsoleMemoryView,
+      schema: ConsoleEntryView,
     }),
-  unignorePlaintext: (spaceId: string, body: PlaintextIgnoreRequest) =>
-    request('POST', `/spaces/${spaceId}/memories/unignore-plaintext`, {
+  unignorePlaintext: (circleId: string, body: PlaintextIgnoreRequest) =>
+    request('POST', `/circles/${circleId}/entries/unignore-plaintext`, {
       body,
-      schema: ConsoleMemoryView,
+      schema: ConsoleEntryView,
     }),
-  redactMemory: (spaceId: string, body: RedactMemoryRequest) =>
-    request('POST', `/spaces/${spaceId}/memories/redact`, {
+  redactEntry: (circleId: string, body: RedactEntryRequest) =>
+    request('POST', `/circles/${circleId}/entries/redact`, {
       body,
-      schema: ConsoleMemoryView,
+      schema: ConsoleEntryView,
     }),
-  protectMemory: (spaceId: string, body: ProtectMemoryRequest) =>
-    request('POST', `/spaces/${spaceId}/memories/protect`, {
+  protectEntry: (circleId: string, body: ProtectEntryRequest) =>
+    request('POST', `/circles/${circleId}/entries/protect`, {
       body,
-      schema: ConsoleMemoryView,
+      schema: ConsoleEntryView,
     }),
-  convertToCredential: (spaceId: string, body: ConvertToCredentialRequest) =>
-    request('POST', `/spaces/${spaceId}/memories/convert-to-credential`, {
+  convertToCredential: (circleId: string, body: ConvertToCredentialRequest) =>
+    request('POST', `/circles/${circleId}/entries/convert-to-credential`, {
       body,
       schema: ConvertedToCredential,
     }),
 
   // attention：只列待处理的「凭据」一类（快到期、已到期、需要轮换），和条数同一个条件
-  credentials: (spaceId: string, query: CredentialListQuery = {}) =>
-    request('GET', `/spaces/${spaceId}/credentials`, {
+  credentials: (circleId: string, query: CredentialListQuery = {}) =>
+    request('GET', `/circles/${circleId}/credentials`, {
       query: { attention: query.attention },
       schema: ConsoleCredentialList,
     }),
   // 按值查找同值的凭据与密码库条目：值只在请求体里，结果不进缓存
-  matchCredentialValues: (spaceId: string, body: MatchCredentialValuesRequest) =>
-    request('POST', `/spaces/${spaceId}/credentials/match`, {
+  matchCredentialValues: (circleId: string, body: MatchCredentialValuesRequest) =>
+    request('POST', `/circles/${circleId}/credentials/match`, {
       body,
       schema: CredentialValueMatches,
     }),
-  deletedCredentials: (spaceId: string) =>
-    request('GET', `/spaces/${spaceId}/credentials/deleted`, { schema: DeletedCredentialList }),
-  credential: (spaceId: string, id: string) =>
-    request('GET', `/spaces/${spaceId}/credentials/${id}`, { schema: ConsoleCredential }),
-  createCredential: (spaceId: string, body: CreateCredentialRequest) =>
-    request('POST', `/spaces/${spaceId}/credentials`, { body, schema: CreatedCredential }),
-  updateCredential: (spaceId: string, id: string, body: UpdateCredentialRequest) =>
-    request('PATCH', `/spaces/${spaceId}/credentials/${id}`, { body, schema: ConsoleCredential }),
-  deleteCredential: (spaceId: string, id: string, expectedVersion: number) =>
-    request('DELETE', `/spaces/${spaceId}/credentials/${id}`, { query: { expectedVersion } }),
-  undeleteCredential: (spaceId: string, id: string) =>
-    request('POST', `/spaces/${spaceId}/credentials/${id}/undelete`, {
+  deletedCredentials: (circleId: string) =>
+    request('GET', `/circles/${circleId}/credentials/deleted`, { schema: DeletedCredentialList }),
+  credential: (circleId: string, id: string) =>
+    request('GET', `/circles/${circleId}/credentials/${id}`, { schema: ConsoleCredential }),
+  createCredential: (circleId: string, body: CreateCredentialRequest) =>
+    request('POST', `/circles/${circleId}/credentials`, { body, schema: CreatedCredential }),
+  updateCredential: (circleId: string, id: string, body: UpdateCredentialRequest) =>
+    request('PATCH', `/circles/${circleId}/credentials/${id}`, { body, schema: ConsoleCredential }),
+  deleteCredential: (circleId: string, id: string, expectedVersion: number) =>
+    request('DELETE', `/circles/${circleId}/credentials/${id}`, { query: { expectedVersion } }),
+  undeleteCredential: (circleId: string, id: string) =>
+    request('POST', `/circles/${circleId}/credentials/${id}/undelete`, {
       schema: ConsoleCredential,
     }),
-  revealCredential: (spaceId: string, id: string) =>
-    request('POST', `/spaces/${spaceId}/credentials/${id}/reveal`, { schema: CredentialValues }),
+  revealCredential: (circleId: string, id: string) =>
+    request('POST', `/circles/${circleId}/credentials/${id}/reveal`, { schema: CredentialValues }),
   // sinceValueChange：只列上次改值以来交出值的访问事件
-  credentialEvents: (spaceId: string, id: string, cursor?: string, sinceValueChange = false) =>
-    request('GET', `/spaces/${spaceId}/credentials/${id}/events`, {
+  credentialEvents: (circleId: string, id: string, cursor?: string, sinceValueChange = false) =>
+    request('GET', `/circles/${circleId}/credentials/${id}/events`, {
       query: { cursor, sinceValueChange: sinceValueChange ? 'true' : undefined },
       schema: CredentialEventList,
     }),
-  credentialReferences: (spaceId: string, id: string) =>
-    request('GET', `/spaces/${spaceId}/credentials/${id}/references`, {
+  credentialReferences: (circleId: string, id: string) =>
+    request('GET', `/circles/${circleId}/credentials/${id}/references`, {
       schema: CredentialReferenceList,
     }),
   // 密码库连接：只给连接的所有者。主密码只在请求体里，不进缓存
-  vaultConnections: (spaceId: string) =>
-    request('GET', `/spaces/${spaceId}/vault-connections`, { schema: VaultConnectionList }),
-  connectVault: (spaceId: string, body: ConnectVaultRequest) =>
-    request('POST', `/spaces/${spaceId}/vault-connections`, { body, schema: VaultConnectResult }),
-  reconnectVault: (spaceId: string, id: string, body: ReconnectVaultRequest) =>
-    request('POST', `/spaces/${spaceId}/vault-connections/${id}/reconnect`, {
+  vaultConnections: (circleId: string) =>
+    request('GET', `/circles/${circleId}/vault-connections`, { schema: VaultConnectionList }),
+  connectVault: (circleId: string, body: ConnectVaultRequest) =>
+    request('POST', `/circles/${circleId}/vault-connections`, { body, schema: VaultConnectResult }),
+  reconnectVault: (circleId: string, id: string, body: ReconnectVaultRequest) =>
+    request('POST', `/circles/${circleId}/vault-connections/${id}/reconnect`, {
       body,
       schema: VaultConnectResult,
     }),
-  checkVault: (spaceId: string, id: string) =>
-    request('POST', `/spaces/${spaceId}/vault-connections/${id}/check`, {
+  checkVault: (circleId: string, id: string) =>
+    request('POST', `/circles/${circleId}/vault-connections/${id}/check`, {
       schema: VaultCheckResult,
     }),
-  disconnectVault: (spaceId: string, id: string) =>
-    request('POST', `/spaces/${spaceId}/vault-connections/${id}/disconnect`, {
+  disconnectVault: (circleId: string, id: string) =>
+    request('POST', `/circles/${circleId}/vault-connections/${id}/disconnect`, {
       schema: VaultConnection,
     }),
-  vaultItems: (spaceId: string, id: string) =>
-    request('GET', `/spaces/${spaceId}/vault-connections/${id}/items`, { schema: VaultItemList }),
+  vaultItems: (circleId: string, id: string) =>
+    request('GET', `/circles/${circleId}/vault-connections/${id}/items`, { schema: VaultItemList }),
   // 新凭据的去处：设在一个连接上，同一个成员别的连接上的去处一起清掉；响应是这个成员的全部连接
-  setVaultDestination: (spaceId: string, id: string, body: SetVaultDestinationRequest) =>
-    request('PUT', `/spaces/${spaceId}/vault-connections/${id}/destination`, {
+  setVaultDestination: (circleId: string, id: string, body: SetVaultDestinationRequest) =>
+    request('PUT', `/circles/${circleId}/vault-connections/${id}/destination`, {
       body,
       schema: VaultConnectionList,
     }),
-  clearVaultDestination: (spaceId: string, id: string) =>
-    request('DELETE', `/spaces/${spaceId}/vault-connections/${id}/destination`, {
+  clearVaultDestination: (circleId: string, id: string) =>
+    request('DELETE', `/circles/${circleId}/vault-connections/${id}/destination`, {
       schema: VaultConnectionList,
     }),
 
-  overview: (spaceId: string) =>
-    request('GET', `/spaces/${spaceId}/overview`, { schema: SpaceOverview }),
-  inboxCounts: (spaceId: string) =>
-    request('GET', `/spaces/${spaceId}/inbox/counts`, { schema: InboxCounts }),
-  // 会话按最近活动从新到旧；按应用或联系人筛
-  conversations: (spaceId: string, query: ConversationListQuery) =>
-    request('GET', `/spaces/${spaceId}/conversations`, { query, schema: ConversationList }),
-  conversation: (spaceId: string, id: string) =>
-    request('GET', `/spaces/${spaceId}/conversations/${id}`, { schema: ConversationDetail }),
-  subjects: (spaceId: string, query: SubjectListQuery) =>
-    request('GET', `/spaces/${spaceId}/subjects`, { query, schema: SubjectList }),
-  subject: (spaceId: string, id: string) =>
-    request('GET', `/spaces/${spaceId}/subjects/${id}`, { schema: SubjectDetail }),
-  updateSubject: (spaceId: string, id: string, body: UpdateSubjectRequest) =>
-    request('PATCH', `/spaces/${spaceId}/subjects/${id}`, { body, schema: SubjectInfo }),
-  mergeSubject: (spaceId: string, id: string, from: string) =>
-    request('POST', `/spaces/${spaceId}/subjects/${id}/merge`, {
+  overview: (circleId: string) =>
+    request('GET', `/circles/${circleId}/overview`, { schema: CircleOverview }),
+  inboxCounts: (circleId: string) =>
+    request('GET', `/circles/${circleId}/inbox/counts`, { schema: InboxCounts }),
+  // 会话按最近活动从新到旧；按接入实例或联系人筛
+  conversations: (circleId: string, query: ConversationListQuery) =>
+    request('GET', `/circles/${circleId}/conversations`, { query, schema: ConversationList }),
+  conversation: (circleId: string, id: string) =>
+    request('GET', `/circles/${circleId}/conversations/${id}`, { schema: ConversationDetail }),
+  subjects: (circleId: string, query: SubjectListQuery) =>
+    request('GET', `/circles/${circleId}/subjects`, { query, schema: SubjectList }),
+  subject: (circleId: string, id: string) =>
+    request('GET', `/circles/${circleId}/subjects/${id}`, { schema: SubjectDetail }),
+  updateSubject: (circleId: string, id: string, body: UpdateSubjectRequest) =>
+    request('PATCH', `/circles/${circleId}/subjects/${id}`, { body, schema: SubjectInfo }),
+  mergeSubject: (circleId: string, id: string, from: string) =>
+    request('POST', `/circles/${circleId}/subjects/${id}/merge`, {
       body: { from },
       schema: SubjectInfo,
     }),
-  deleteFact: (spaceId: string, subjectId: string, factId: string, version: number) =>
-    request('DELETE', `/spaces/${spaceId}/subjects/${subjectId}/facts/${factId}`, {
+  deleteFact: (circleId: string, subjectId: string, factId: string, version: number) =>
+    request('DELETE', `/circles/${circleId}/subjects/${subjectId}/facts/${factId}`, {
       query: { version },
     }),
-  reactivateFact: (spaceId: string, subjectId: string, factId: string, version: number) =>
-    request('POST', `/spaces/${spaceId}/subjects/${subjectId}/facts/${factId}/reactivate`, {
+  reactivateFact: (circleId: string, subjectId: string, factId: string, version: number) =>
+    request('POST', `/circles/${circleId}/subjects/${subjectId}/facts/${factId}/reactivate`, {
       body: { version },
     }),
-  confirmBinding: (spaceId: string, bindingId: string) =>
-    request('POST', `/spaces/${spaceId}/subject-bindings/${bindingId}/confirm`, {
+  promoteFact: (
+    circleId: string,
+    subjectId: string,
+    factId: string,
+    body: Partial<PromoteFactRequest> & Pick<PromoteFactRequest, 'targetCircleId'>,
+  ) =>
+    request('POST', `/circles/${circleId}/subjects/${subjectId}/facts/${factId}/promote`, {
+      body,
+      schema: ConsoleEntryView,
+    }),
+  confirmBinding: (circleId: string, bindingId: string) =>
+    request('POST', `/circles/${circleId}/subject-bindings/${bindingId}/confirm`, {
       schema: SubjectInfo,
     }),
-  rejectBinding: (spaceId: string, bindingId: string) =>
-    request('POST', `/spaces/${spaceId}/subject-bindings/${bindingId}/reject`),
-  reviewQueue: (spaceId: string, query: ReviewQuery) =>
-    request('GET', `/spaces/${spaceId}/review`, { query, schema: ReviewList }),
-  review: (spaceId: string, body: ReviewRequest) =>
-    request('POST', `/spaces/${spaceId}/review`, { body, schema: ReviewResult }),
-  dreamSuggestions: (spaceId: string, cursor?: string) =>
-    request('GET', `/spaces/${spaceId}/dream/suggestions`, {
+  rejectBinding: (circleId: string, bindingId: string) =>
+    request('POST', `/circles/${circleId}/subject-bindings/${bindingId}/reject`),
+  reviewQueue: (circleId: string, query: ReviewQuery = {}) =>
+    request('GET', `/circles/${circleId}/review`, { query, schema: ReviewList }),
+  review: (circleId: string, body: ReviewRequest) =>
+    request('POST', `/circles/${circleId}/review`, { body, schema: ReviewResult }),
+  dreamSuggestions: (circleId: string, cursor?: string) =>
+    request('GET', `/circles/${circleId}/dream/suggestions`, {
       query: { cursor },
       schema: DreamSuggestionList,
     }),
-  applyDreamSuggestion: (spaceId: string, id: string, body: ApplyDreamSuggestion) =>
-    request('POST', `/spaces/${spaceId}/dream/suggestions/${id}/apply`, {
+  applyDreamSuggestion: (circleId: string, id: string, body: ApplyDreamSuggestion) =>
+    request('POST', `/circles/${circleId}/dream/suggestions/${id}/apply`, {
       body,
       schema: DreamApplied,
     }),
-  rejectDreamSuggestion: (spaceId: string, id: string) =>
-    request('POST', `/spaces/${spaceId}/dream/suggestions/${id}/reject`),
-  startDream: (spaceId: string) =>
-    request('POST', `/spaces/${spaceId}/dream/runs`, { schema: DreamQueued }),
-  dreamRun: (spaceId: string, runId: string) =>
-    request('GET', `/spaces/${spaceId}/dream/runs/${runId}`, { schema: DreamRunStatus }),
-  dreamRuns: (spaceId: string) =>
-    request('GET', `/spaces/${spaceId}/dream/runs`, { schema: DreamRunList }),
-  // 自己在这个空间里的 Dream 设置（只有本人能看、能改）
-  dreamSettings: (spaceId: string) =>
-    request('GET', `/spaces/${spaceId}/me/dream`, { schema: DreamMemberSettings }),
-  saveDreamSettings: (spaceId: string, body: DreamMemberSettings) =>
-    request('PUT', `/spaces/${spaceId}/me/dream`, { body, schema: DreamMemberSettings }),
-  groupPersonas: (spaceId: string, appId: string) =>
-    request('GET', `/spaces/${spaceId}/apps/${appId}/group-personas`, {
-      schema: GroupPersonaRuleList,
-    }),
-  saveGroupPersonas: (spaceId: string, appId: string, body: GroupPersonaRules) =>
-    request('PUT', `/spaces/${spaceId}/apps/${appId}/group-personas`, {
-      body,
-      schema: GroupPersonaRuleList,
-    }),
+  rejectDreamSuggestion: (circleId: string, id: string) =>
+    request('POST', `/circles/${circleId}/dream/suggestions/${id}/reject`),
+  startDream: (circleId: string) =>
+    request('POST', `/circles/${circleId}/dream/runs`, { schema: DreamQueued }),
+  dreamRun: (circleId: string, runId: string) =>
+    request('GET', `/circles/${circleId}/dream/runs/${runId}`, { schema: DreamRunStatus }),
+  dreamRuns: (circleId: string) =>
+    request('GET', `/circles/${circleId}/dream/runs`, { schema: DreamRunList }),
+  // 自己在这个记忆圈里的 Dream 设置（只有本人能看、能改）
+  dreamSettings: (circleId: string) =>
+    request('GET', `/circles/${circleId}/me/dream`, { schema: DreamMemberSettings }),
+  saveDreamSettings: (circleId: string, body: DreamMemberSettings) =>
+    request('PUT', `/circles/${circleId}/me/dream`, { body, schema: DreamMemberSettings }),
+
   // 变更记录：列表、按天计数与筛选计数用同一套筛选（多个值用逗号连起来，见 activity.ts 的 filterQuery）
-  activity: (spaceId: string, filter: Record<string, string | undefined>, cursor?: string) =>
-    request('GET', `/spaces/${spaceId}/activity`, {
+  activity: (circleId: string, filter: Record<string, string | undefined>, cursor?: string) =>
+    request('GET', `/circles/${circleId}/activity`, {
       query: { ...filter, cursor },
       schema: ActivityList,
     }),
-  activityDays: (spaceId: string, filter: Record<string, string | undefined>, tz: string) =>
-    request('GET', `/spaces/${spaceId}/activity/days`, {
+  activityDays: (circleId: string, filter: Record<string, string | undefined>, tz: string) =>
+    request('GET', `/circles/${circleId}/activity/days`, {
       query: { ...filter, tz },
       schema: ActivityDays,
     }),
-  activityFacets: (spaceId: string, filter: Record<string, string | undefined>) =>
-    request('GET', `/spaces/${spaceId}/activity/facets`, {
+  activityFacets: (circleId: string, filter: Record<string, string | undefined>) =>
+    request('GET', `/circles/${circleId}/activity/facets`, {
       query: filter,
       schema: ActivityFacets,
     }),
-  activityEvent: (spaceId: string, eventId: number) =>
-    request('GET', `/spaces/${spaceId}/activity/${eventId}`, { schema: ActivityEvent }),
-  // 高级设置：实例默认（实例管理员）、空间的覆盖（成员可看，所有者可改）、应用的覆盖（应用所有者可改）
+  activityEvent: (circleId: string, eventId: number) =>
+    request('GET', `/circles/${circleId}/activity/${eventId}`, { schema: ActivityEvent }),
+
+  // 高级设置：实例默认（实例管理员）、记忆圈的覆盖（成员可看，所有者可改）、接入实例的覆盖（所有者可改）
   instanceAdvanced: () => request('GET', '/settings/advanced', { schema: InstanceAdvancedView }),
   saveInstanceAdvanced: (body: UpdateInstanceAdvanced) =>
     request('PUT', '/settings/advanced', { body, schema: InstanceAdvancedView }),
-  spaceAdvanced: (spaceId: string) =>
-    request('GET', `/spaces/${spaceId}/settings/advanced`, { schema: SpaceAdvancedView }),
-  saveSpaceAdvanced: (spaceId: string, body: UpdateSpaceAdvanced) =>
-    request('PUT', `/spaces/${spaceId}/settings/advanced`, { body, schema: SpaceAdvancedView }),
-  appAdvanced: (spaceId: string, appId: string) =>
-    request('GET', `/spaces/${spaceId}/apps/${appId}/settings/advanced`, {
-      schema: AppAdvancedView,
+  circleAdvanced: (circleId: string) =>
+    request('GET', `/circles/${circleId}/settings/advanced`, { schema: CircleAdvancedView }),
+  saveCircleAdvanced: (circleId: string, body: UpdateCircleAdvanced) =>
+    request('PUT', `/circles/${circleId}/settings/advanced`, { body, schema: CircleAdvancedView }),
+  clientAdvanced: (circleId: string, clientId: string) =>
+    request('GET', `/circles/${circleId}/clients/${clientId}/settings/advanced`, {
+      schema: ClientAdvancedView,
     }),
-  saveAppAdvanced: (spaceId: string, appId: string, body: UpdateAppAdvanced) =>
-    request('PUT', `/spaces/${spaceId}/apps/${appId}/settings/advanced`, {
+  saveClientAdvanced: (circleId: string, clientId: string, body: UpdateClientAdvanced) =>
+    request('PUT', `/circles/${circleId}/clients/${clientId}/settings/advanced`, {
       body,
-      schema: AppAdvancedView,
+      schema: ClientAdvancedView,
     }),
-  extractionBudget: (spaceId: string) =>
-    request('GET', `/spaces/${spaceId}/extraction-budget`, { schema: ExtractionUsage }),
-  saveExtractionBudget: (spaceId: string, body: ExtractionBudget) =>
-    request('PUT', `/spaces/${spaceId}/extraction-budget`, { body, schema: ExtractionUsage }),
+  extractionBudget: (circleId: string) =>
+    request('GET', `/circles/${circleId}/extraction-budget`, { schema: ExtractionUsage }),
+  saveExtractionBudget: (circleId: string, body: ExtractionBudget) =>
+    request('PUT', `/circles/${circleId}/extraction-budget`, { body, schema: ExtractionUsage }),
+
   // 导出文件是用口令加密的二进制文件，整个下载下来交给浏览器保存
-  exportSpace: (spaceId: string, passphrase: string) =>
-    download('POST', `/spaces/${spaceId}/export`, { passphrase }),
-  // 导入之前先检查：是谁导出的、有多少，导入后哪些归你；不写库
-  inspectSpaceImport: (file: File, passphrase: string) => {
+  exportCircle: (circleId: string, passphrase: string) =>
+    download('POST', `/circles/${circleId}/export`, { passphrase }),
+  // 导入之前先检查：是谁导出的、属于个人圈还是共享圈、有多少；不写库
+  inspectCircleImport: (file: File, passphrase: string) => {
     const form = new FormData()
     form.set('file', file)
     form.set('passphrase', passphrase)
-    return request('POST', '/spaces/import/inspect', { body: form, schema: SpaceImportPreview })
+    return request('POST', '/circles/import/inspect', { body: form, schema: CircleImportPreview })
   },
-  importSpace: (file: File, passphrase: string, name: string) => {
+  importCircle: (
+    file: File,
+    passphrase: string,
+    options: { name?: string; intoPersonalCircle?: boolean } = {},
+  ) => {
     const form = new FormData()
     form.set('file', file)
     form.set('passphrase', passphrase)
-    if (name.trim()) form.set('name', name.trim())
-    return request('POST', '/spaces/import', { body: form, schema: SpaceImportResult })
+    if (options.name?.trim()) form.set('name', options.name.trim())
+    if (options.intoPersonalCircle) form.set('intoPersonalCircle', 'true')
+    return request('POST', '/circles/import', { body: form, schema: CircleImportResult })
   },
-  lorePlan: (spaceId: string, body: LoreImportPlanRequest) =>
-    request('POST', `/spaces/${spaceId}/lore-import/plan`, { body, schema: LoreImportPlan }),
-  loreApply: (spaceId: string, body: LoreImportApplyRequest) =>
-    request('POST', `/spaces/${spaceId}/lore-import/apply`, { body, schema: LoreImportResult }),
+  lorePlan: (circleId: string, body: LoreImportPlanRequest) =>
+    request('POST', `/circles/${circleId}/lore-import/plan`, { body, schema: LoreImportPlan }),
+  loreApply: (circleId: string, body: LoreImportApplyRequest) =>
+    request('POST', `/circles/${circleId}/lore-import/apply`, { body, schema: LoreImportResult }),
 
   embeddingSettings: () => request('GET', '/settings/embedding', { schema: EmbeddingSettingsView }),
   saveEmbeddingSettings: (body: UpdateEmbeddingSettings) =>
@@ -640,12 +746,12 @@ export const api = {
   testPrivacyBinding: () =>
     request('POST', '/settings/models/bindings/privacy/test', { schema: ModelChainTestResult }),
 
-  spacePrivacy: (spaceId: string) =>
-    request('GET', `/spaces/${spaceId}/privacy`, { schema: SpacePrivacySettings }),
-  saveSpacePrivacy: (spaceId: string, body: UpdateSpacePrivacySettings) =>
-    request('PUT', `/spaces/${spaceId}/privacy`, { body, schema: SpacePrivacySettings }),
-  rescanSpacePrivacy: (spaceId: string) =>
-    request('POST', `/spaces/${spaceId}/privacy/rescan`, {
+  circlePrivacy: (circleId: string) =>
+    request('GET', `/circles/${circleId}/privacy`, { schema: CirclePrivacySettings }),
+  saveCirclePrivacy: (circleId: string, body: UpdateCirclePrivacySettings) =>
+    request('PUT', `/circles/${circleId}/privacy`, { body, schema: CirclePrivacySettings }),
+  rescanCirclePrivacy: (circleId: string) =>
+    request('POST', `/circles/${circleId}/privacy/rescan`, {
       schema: z.object({ queued: z.boolean(), updated: z.number().int().optional() }),
     }),
 

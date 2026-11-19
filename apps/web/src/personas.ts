@@ -1,14 +1,4 @@
-import type { PersonaDetail, PersonaInfo, PersonaNode } from '@kioku/contracts'
-
-// 人格层节点的 priority 不超过这个数就进启动上下文，与服务端 boot 的挑选一致
-export const PERSONA_BOOT_PRIORITY = 1
-
-// 被覆盖的节点本来会进启动上下文、覆盖它的那条却进不了时，返回覆盖它的那条的 priority；否则为 null
-export function lostFromBoot(node: PersonaNode, nodes: readonly PersonaNode[]): number | null {
-  if (!node.overriddenBy || node.priority > PERSONA_BOOT_PRIORITY) return null
-  const by = nodes.find((n) => n.uri === node.overriddenBy)
-  return by && by.priority > PERSONA_BOOT_PRIORITY ? by.priority : null
-}
+import type { PersonaDetail, PersonaInfo, ResolvedPersonaTrait } from '@kioku/contracts'
 
 // 人格列表的一行：缩进几层，以及画引线要知道的事（含义同记忆目录的 TreeRowPlace）
 export interface PersonaRow {
@@ -18,8 +8,84 @@ export interface PersonaRow {
   last: boolean
 }
 
+export interface PersonaTreeNode {
+  persona: PersonaInfo
+  children: PersonaTreeNode[]
+}
+
+// 检查 candidateParentId 作为 targetId 的父人格时是否成环
+export function hasCycle(
+  personas: readonly PersonaInfo[],
+  targetId: string,
+  candidateParentId: string | null,
+): boolean {
+  if (!candidateParentId) return false
+  const byId = new Map(personas.map((p) => [p.id, p]))
+  const seen = new Set<string>([targetId])
+  let cur: string | null = candidateParentId
+  while (cur) {
+    if (seen.has(cur)) return true
+    seen.add(cur)
+    cur = byId.get(cur)?.extendsId ?? null
+  }
+  return false
+}
+
+export function canBeParent(
+  personas: readonly PersonaInfo[],
+  targetId: string | null,
+  candidateParentId: string,
+): boolean {
+  if (!targetId) return true
+  return !hasCycle(personas, targetId, candidateParentId)
+}
+
+export function personaChildren(
+  personas: readonly PersonaInfo[],
+  parentId: string | null,
+): PersonaInfo[] {
+  return personas.filter((p) => p.extendsId === parentId)
+}
+
+export function personaTree(personas: readonly PersonaInfo[]): PersonaTreeNode[] {
+  const byId = new Map(personas.map((p) => [p.id, p]))
+  const childrenMap = new Map<string | null, PersonaInfo[]>()
+  for (const p of personas) {
+    const key = p.extendsId && byId.has(p.extendsId) ? p.extendsId : null
+    childrenMap.set(key, [...(childrenMap.get(key) ?? []), p])
+  }
+  const placed = new Set<string>()
+  const build = (list: readonly PersonaInfo[]): PersonaTreeNode[] =>
+    list
+      .filter((p) => !placed.has(p.id))
+      .map((p) => {
+        placed.add(p.id)
+        return { persona: p, children: build(childrenMap.get(p.id) ?? []) }
+      })
+  const roots = build(childrenMap.get(null) ?? [])
+  for (const p of personas) {
+    if (!placed.has(p.id)) {
+      placed.add(p.id)
+      roots.push({ persona: p, children: build(childrenMap.get(p.id) ?? []) })
+    }
+  }
+  return roots
+}
+
+export function personaOptionItems(
+  personas: readonly PersonaInfo[],
+  excludeId: string | null = null,
+): { label: string; value: string | null }[] {
+  return [
+    { label: '不继承', value: null },
+    ...personas
+      .filter((p) => canBeParent(personas, excludeId, p.id))
+      .map((p) => ({ label: `${p.name}（${p.slug}）`, value: p.id })),
+  ]
+}
+
 // 人格排成继承树：被继承的在上，子人格缩进在它下面，同一级保持接口的顺序。
-// 每个人格只出现一次：从根走不到的（继承的人格不在列表里，列表还没刷新；万一成环）接在后面各算一棵树
+// 每个人格只出现一次：从根走不到的（继承的人格不在列表里，或成环）接在后面各算一棵树
 export function personaRows(personas: readonly PersonaInfo[]): PersonaRow[] {
   const children = new Map<string, PersonaInfo[]>()
   const roots: PersonaInfo[] = []
@@ -40,7 +106,7 @@ export function personaRows(personas: readonly PersonaInfo[]): PersonaRow[] {
     })
   }
   walk(roots, 0, [])
-  // 从树顶开始走，排在前面的子人格才不会被拆出去。树顶：继承的人格不在列表里，或者往上走回了走过的
+  // 从树顶开始走，排在前面的子人格才不会被拆出去
   const byId = new Map(personas.map((p) => [p.id, p]))
   const topOf = (persona: PersonaInfo) => {
     const seen = new Set<string>()
@@ -57,30 +123,36 @@ export function personaRows(personas: readonly PersonaInfo[]): PersonaRow[] {
   return rows
 }
 
-export interface InheritedGroup {
-  id: string
-  name: string
-  nodes: PersonaNode[]
+export interface InheritedTraitGroup {
+  persona: PersonaInfo
+  traits: ResolvedPersonaTrait[]
 }
 
-// 继承来的节点按来自哪个祖先分组，由近到远，没有节点的祖先不列。
-// 接口保证节点都来自 ancestors；对不上时也不丢，算在一个说不出名字的祖先下面
+// 继承来的设定段按来自哪个祖先分组，由近到远；没有设定段的祖先不列
 export function inheritedGroups(
-  detail: Pick<PersonaDetail, 'ancestors' | 'inherited'>,
-): InheritedGroup[] {
+  detail: Pick<PersonaDetail, 'ancestors' | 'inheritedTraits'>,
+): InheritedTraitGroup[] {
   const order = detail.ancestors.map((a) => a.id)
-  const groups = new Map<string, InheritedGroup>()
-  for (const node of detail.inherited) {
-    const group = groups.get(node.personaId)
-    if (group) group.nodes.push(node)
-    else {
-      const name = detail.ancestors.find((a) => a.id === node.personaId)?.name ?? '祖先人格'
-      groups.set(node.personaId, { id: node.personaId, name, nodes: [node] })
+  const groups = new Map<string, InheritedTraitGroup>()
+  for (const trait of detail.inheritedTraits) {
+    const existing = groups.get(trait.personaId)
+    if (existing) {
+      existing.traits.push(trait)
+    } else {
+      const ancestor = detail.ancestors.find((a) => a.id === trait.personaId) ?? {
+        id: trait.personaId,
+        circleId: detail.ancestors[0]?.circleId ?? '',
+        slug: trait.personaId.slice(0, 8),
+        name: '祖先人格',
+        extendsId: null,
+        description: null,
+      }
+      groups.set(trait.personaId, { persona: ancestor, traits: [trait] })
     }
   }
   const rank = (id: string) => {
     const at = order.indexOf(id)
     return at < 0 ? order.length : at
   }
-  return [...groups.values()].sort((a, b) => rank(a.id) - rank(b.id))
+  return [...groups.values()].sort((a, b) => rank(a.persona.id) - rank(b.persona.id))
 }

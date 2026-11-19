@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { Writable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 
-import type { CredentialValues, MemoryList, MemoryView } from '@kioku/contracts'
+import type { CredentialValues, EntryList, EntryView } from '@kioku/contracts'
 import { and, eq, ne, sql } from 'drizzle-orm'
 import { readMigrationFiles } from 'drizzle-orm/migrator'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
@@ -14,21 +14,23 @@ import { createApp } from '../../app'
 import { encryptSecret } from '../../crypto/envelope'
 import { encryptionKey } from '../../crypto/keyring'
 import { prepareMasterKey } from '../../crypto/rotation'
-import { withSpace, type Database, type Tx } from '../../db/client'
+import { withCircle, type Database, type Tx } from '../../db/client'
 import { lastMigration, pendingMigrations, runMigrations } from '../../db/migrate'
 import {
   accountLinks,
+  circleMembers,
+  circles,
   conversations,
   credentials,
   dreamMarks,
   dreamRuns,
   dreamSuggestions,
+  entries,
+  entryRecallStats,
+  entryVariants,
   extractionRuns,
-  memories,
-  memoryRecallStats,
+  legacyUris,
   settings,
-  spaceMembers,
-  spaces,
   subjectBindings,
   subjects,
   vaultConnections,
@@ -69,7 +71,7 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
   async function wipe(recallStarted: string) {
     await settleRecallEvents()
     await database.db.execute(
-      sql`truncate spaces, accounts, login_attempts, settings restart identity cascade`,
+      sql`truncate circles, accounts, login_attempts, settings restart identity cascade`,
     )
     await database.db.insert(settings).values({ key: 'recall-started', value: recallStarted })
   }
@@ -95,7 +97,7 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
   beforeEach(async () => {
     await wipe('2001-01-01T00:00:00.000Z')
     ws = await bootstrap(api)
-    agentId = (await ws.createApp('agent')).id
+    agentId = (await ws.createClient('agent')).id
     key = await ws.issueKey(agentId)
   })
 
@@ -107,19 +109,19 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
         : jsonRequest(method, body, headers),
     )
   const write = async (method: 'POST' | 'PATCH', body: object) => {
-    const res = await send(method, '/v1/memories', body, bearer(key))
+    const res = await send(method, '/v1/entries', body, bearer(key))
     expect(res.status, await res.clone().text()).toBe(method === 'POST' ? 201 : 200)
-    return (await res.json()) as MemoryView
+    return (await res.json()) as EntryView
   }
-  const inSpace = <T>(fn: (tx: Tx) => Promise<T>) => withSpace(database.db, ws.spaceId, fn)
+  const inCircle = <T>(fn: (tx: Tx) => Promise<T>) => withCircle(database.db, ws.circleId, fn)
 
-  // 每张进备份的表都写上数据：成员（有一个关掉了 Dream 整理本人的记忆）、继承的人格、两个应用与 Key、
-  // 各种记忆（secret、带关键词与凭据引用、改过的、删掉的）、密码库连接、托管与密码库的凭据、召回记录与命中、群聊里认出的联系人、
-  // 按群换人格、群聊与不带会话上下文的会话（挂着会话摘要与听到的事实）、召回统计、抽取记录、等确认的绑定、
-  // 嵌入接口与抽取模型的设置，以及（不进备份的）向量
+  // 每张进备份的表都写上数据：成员（有一个关掉了 Dream 整理本人的记忆）、继承的人格与设定段、切面维度与词条、
+  // 两个客户端与 Key、各种记忆（secret、带关键词与互链与凭据引用、旧坐标映射、改过的、删掉的）、
+  // 密码库连接、托管与密码库的凭据、召回记录与命中、群聊里认出的联系人、按群规则、群聊与不带会话上下文的会话、
+  // 召回统计、抽取记录、等确认的绑定、嵌入接口与抽取模型的设置，以及（不进备份的）向量
   async function seed() {
     const cookie = { cookie: ws.cookie }
-    const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    const bob = await addMember(database.db, ws.circleId, 'bob', 'editor')
     // 一次性链接不进备份
     await database.db.insert(accountLinks).values({
       accountId: bob.accountId,
@@ -132,19 +134,19 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
       (
         await send(
           'PUT',
-          `/v1/spaces/${ws.spaceId}/me/dream`,
+          `/v1/circles/${ws.circleId}/me/dream`,
           { includePrivate: false },
           { cookie: bob.cookie },
         )
       ).status,
     ).toBe(200)
-    // 离开了空间的成员：离开记录要跟着恢复，满期的清理才知道从什么时候算
-    const dave = await addMember(database.db, ws.spaceId, 'dave', 'viewer')
+    // 离开了记忆圈的成员：离开记录要跟着恢复，满期的清理才知道从什么时候算
+    const dave = await addMember(database.db, ws.circleId, 'dave', 'viewer')
     expect(
       (
         await send(
           'DELETE',
-          `/v1/spaces/${ws.spaceId}/members/${dave.accountId}`,
+          `/v1/circles/${ws.circleId}/members/${dave.accountId}`,
           undefined,
           cookie,
         )
@@ -158,18 +160,48 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
       (
         await send(
           'PATCH',
-          `/v1/spaces/${ws.spaceId}/personas/${base.id}`,
+          `/v1/circles/${ws.circleId}/personas/${base.id}`,
           { name: '基础' },
           cookie,
         )
       ).status,
     ).toBe(200)
-    const bot = await ws.createApp('qq-bot', { name: '群聊 bot', runtimeFamily: 'astrbot' })
+    expect(
+      (
+        await send(
+          'PUT',
+          `/v1/circles/${ws.circleId}/personas/${base.id}/traits`,
+          { traitKey: 'tone', title: '说话风格', content: '温和' },
+          cookie,
+        )
+      ).status,
+    ).toBe(200)
+    expect(
+      (
+        await send(
+          'POST',
+          `/v1/circles/${ws.circleId}/facets/dimensions`,
+          { key: 'mood', name: '心情', matchMode: 'additive' },
+          cookie,
+        )
+      ).status,
+    ).toBe(201)
+    expect(
+      (
+        await send(
+          'POST',
+          `/v1/circles/${ws.circleId}/facets/terms`,
+          { dimensionKey: 'realm', slug: 'home', label: '家里' },
+          cookie,
+        )
+      ).status,
+    ).toBe(201)
+    const bot = await ws.createClient('qq-bot', { name: '群聊 bot', runtimeFamily: 'astrbot' })
     const botKey = await ws.issueKey(bot.id)
 
     const credential = await send(
       'POST',
-      `/v1/spaces/${ws.spaceId}/credentials`,
+      `/v1/circles/${ws.personalCircleId}/credentials`,
       {
         identifier: 'nas',
         name: 'NAS',
@@ -179,27 +211,40 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
     )
     expect(credential.status).toBe(201)
     const credentialId = ((await credential.json()) as { id: string }).id
+    // 凭据占位符仅允许放在个人圈、敏感级不低于 private 的正式词条中
+    expect(
+      (
+        await send(
+          'POST',
+          `/v1/circles/${ws.personalCircleId}/entries`,
+          {
+            title: '个人凭据备忘',
+            content: '家里的 NAS 密码见 {{cred:nas}}',
+            sensitivity: 'private',
+          },
+          cookie,
+        )
+      ).status,
+    ).toBe(201)
 
     await write('POST', {
-      uri: 'user://home/wifi',
+      title: 'home/wifi',
       content: '无线密码 hunter2',
       sensitivity: 'secret',
     })
     const nas = await write('POST', {
-      uri: 'user://home/nas',
       title: '书房的 NAS',
-      content: 'NAS 在书房，密码见 {{cred:nas}}',
+      content: 'NAS 在书房',
       sensitivity: 'private',
       glossary: ['书房存储'],
     })
     await write('POST', {
-      uri: 'user://home/notes',
       title: '笔记 "引号" \\ 😀',
-      content: '第一行\n第二行 "引号" \\ 反斜杠 😀',
+      content: `第一行\n第二行 "引号" \\ 反斜杠 😀，参见 [[${nas.shortId}]]`,
     })
-    // 忽略过明文提示的：哈希在记忆表上，要跟着恢复
+    // 忽略过明文提示的：哈希在变体切片上，要跟着恢复
     const dismissed = await write('POST', {
-      uri: 'user://home/dismissed',
+      title: 'home/dismissed',
       content: 'token = tokenizer 的说明',
       plaintextOk: true,
     })
@@ -207,18 +252,20 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
       (
         await send(
           'POST',
-          `/v1/spaces/${ws.spaceId}/memories/ignore-plaintext`,
-          { memoryId: dismissed.id, expectedVersion: dismissed.version },
+          `/v1/circles/${ws.circleId}/entries/ignore-plaintext`,
+          { entryId: dismissed.id, expectedVersion: dismissed.version },
           cookie,
         )
       ).status,
     ).toBe(200)
-    await write('PATCH', { uri: 'user://home/notes', content: '改过的笔记\t带制表符' })
-    await write('POST', { uri: 'user://home/old', content: '要删掉的' })
-    expect(
-      (await send('DELETE', '/v1/memories?uri=user%3A%2F%2Fhome%2Fold', undefined, bearer(key)))
-        .status,
-    ).toBe(204)
+    await write('PATCH', {
+      id: '笔记 "引号" \\ 😀',
+      content: `改过的笔记\t带制表符，参见 [[${nas.shortId}]]`,
+    })
+    await write('POST', { title: 'home/old', content: '要删掉的' })
+    expect((await send('DELETE', '/v1/entries?id=home%2Fold', undefined, bearer(key))).status).toBe(
+      204,
+    )
 
     expect((await send('POST', '/v1/recall', { query: 'NAS 在书房吗' }, bearer(key))).status).toBe(
       200,
@@ -233,20 +280,22 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
       (await send('POST', '/v1/recall', { query: '你好', context }, bearer(botKey))).status,
     ).toBe(200)
     await settleRecallEvents()
-    const [group] = await inSpace((tx) =>
+    const [group] = await inCircle((tx) =>
       tx.select().from(subjects).where(eq(subjects.kind, 'group')),
     )
     expect(
       (
         await send(
           'PUT',
-          `/v1/spaces/${ws.spaceId}/apps/${bot.id}/group-personas`,
-          { rules: [{ subjectId: group!.id, personaId: child.id }] },
+          `/v1/circles/${ws.circleId}/clients/${bot.id}/group-rules`,
+          {
+            rules: [{ groupSubjectId: group!.id, personaId: child.id, isolateGroupMemory: false }],
+          },
           cookie,
         )
       ).status,
     ).toBe(200)
-    const [person] = await inSpace((tx) =>
+    const [person] = await inCircle((tx) =>
       tx.select().from(subjects).where(eq(subjects.kind, 'person')),
     )
     expect(
@@ -262,16 +311,22 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
         )
       ).status,
     ).toBe(200)
-    const [other] = await inSpace((tx) =>
+    const [other] = await inCircle((tx) =>
       tx
         .select()
         .from(subjects)
         .where(and(eq(subjects.kind, 'person'), ne(subjects.id, person!.id))),
     )
-    await inSpace(async (tx) => {
+    await inCircle(async (tx) => {
+      await tx.insert(legacyUris).values({
+        circleId: ws.circleId,
+        entryId: nas.id,
+        legacyUri: 'user://home/nas',
+        source: 'kioku-legacy',
+      })
       await tx.insert(subjectBindings).values({
-        spaceId: ws.spaceId,
-        appId: bot.id,
+        circleId: ws.circleId,
+        clientId: bot.id,
         keyId: bot.id,
         subjectId: person!.id,
         fromSubjectId: other!.id,
@@ -286,11 +341,15 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
         expiresAt: new Date(Date.now() + 86_400_000),
       })
       await tx
-        .insert(memoryRecallStats)
-        .values({ memoryId: nas.id, spaceId: ws.spaceId, count: 3, lastRecalledAt: new Date() })
+        .insert(entryRecallStats)
+        .values({ entryId: nas.id, circleId: ws.circleId, count: 3, lastRecalledAt: new Date() })
+        .onConflictDoUpdate({
+          target: entryRecallStats.entryId,
+          set: { count: 3, lastRecalledAt: new Date() },
+        })
       await tx.insert(extractionRuns).values({
-        spaceId: ws.spaceId,
-        appId: bot.id,
+        circleId: ws.circleId,
+        clientId: bot.id,
         scope: `group:${group!.id}`,
         subjectIds: [group!.id],
         turns: 4,
@@ -301,43 +360,88 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
       // 记忆指向会话：写回时会话要排在记忆前面
       const [talk] = await tx
         .insert(conversations)
-        .values({ spaceId: ws.spaceId, appId: bot.id, kind: 'group', subjectId: group!.id })
+        .values({ circleId: ws.circleId, clientId: bot.id, kind: 'group', subjectId: group!.id })
         .returning({ id: conversations.id })
       const [local] = await tx
         .insert(conversations)
-        .values({ spaceId: ws.spaceId, appId: agentId, kind: 'none', ownerAccountId: ws.accountId })
+        .values({
+          circleId: ws.circleId,
+          clientId: agentId,
+          kind: 'none',
+          ownerAccountId: ws.accountId,
+        })
         .returning({ id: conversations.id })
-      const heard = {
-        spaceId: ws.spaceId,
-        form: 'extracted' as const,
-        provenance: 'untrusted' as const,
-        sensitivity: 'public' as const,
-        originScope: `group:${group!.id}`,
-        conversationId: talk!.id,
-      }
-      await tx.insert(memories).values([
+      const ep1Id = randomUUID()
+      const factId = randomUUID()
+      const ep2Id = randomUUID()
+      await tx.insert(entries).values([
         {
-          ...heard,
-          layer: 'episode',
-          content: '读书会定了下周的书目',
+          id: ep1Id,
+          circleId: ws.circleId,
+          circleKind: 'shared',
+          shortId: 'm-234567',
+          kind: 'episode',
+          title: '读书会会话摘要',
+          sensitivity: 'public',
+          provenance: 'untrusted',
+          originScope: `group:${group!.id}`,
+          conversationId: talk!.id,
           expiresAt: new Date(Date.now() + 30 * 86_400_000),
         },
-        { ...heard, layer: 'subject', subjectId: person!.id, content: '小明在学日语' },
         {
-          spaceId: ws.spaceId,
-          form: 'extracted',
-          layer: 'episode',
+          id: factId,
+          circleId: ws.circleId,
+          circleKind: 'shared',
+          shortId: 'm-234568',
+          kind: 'fact',
+          title: '小明学日语',
+          sensitivity: 'public',
+          provenance: 'untrusted',
+          originScope: `group:${group!.id}`,
+          subjectId: person!.id,
+          subjectKind: 'person',
+          conversationId: talk!.id,
+        },
+        {
+          id: ep2Id,
+          circleId: ws.circleId,
+          circleKind: 'shared',
+          shortId: 'm-234569',
+          kind: 'episode',
+          title: '架构改版讨论',
           sensitivity: 'private',
           provenance: 'agent',
           ownerAccountId: ws.accountId,
           conversationId: local!.id,
+        },
+      ])
+      await tx.insert(entryVariants).values([
+        {
+          circleId: ws.circleId,
+          entryId: ep1Id,
+          sensitivity: 'public',
+          kind: 'episode',
+          content: '读书会定了下周的书目',
+        },
+        {
+          circleId: ws.circleId,
+          entryId: factId,
+          sensitivity: 'public',
+          kind: 'fact',
+          content: '小明在学日语',
+        },
+        {
+          circleId: ws.circleId,
+          entryId: ep2Id,
+          sensitivity: 'private',
+          kind: 'episode',
           content: '讨论了记忆架构改版',
         },
       ])
       // Dream 的运行记录、一条拒绝过的建议（指纹要跟着恢复，不然同样的建议会再提）与整理过的标记
       const scope = `user:${ws.accountId}`
       await tx.insert(dreamRuns).values({
-        spaceId: ws.spaceId,
+        circleId: ws.circleId,
         runId: randomUUID(),
         trigger: 'scheduled',
         scope,
@@ -349,11 +453,11 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
         suggested: 1,
       })
       await tx.insert(dreamSuggestions).values({
-        spaceId: ws.spaceId,
+        circleId: ws.circleId,
         scope,
         ownerAccountId: ws.accountId,
         kind: 'stale',
-        memoryIds: [nas.id],
+        entryIds: [nas.id],
         versions: [nas.version],
         reason: '可能已经搬走了',
         fingerprint: 'stale-fingerprint',
@@ -363,13 +467,13 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
       })
       await tx
         .insert(dreamMarks)
-        .values({ spaceId: ws.spaceId, memoryId: nas.id, version: nas.version })
+        .values({ circleId: ws.circleId, entryId: nas.id, version: nas.version })
       // 密码库连接（令牌与账户密钥加密保存）与给它的一个条目起的标识
       const connectionId = randomUUID()
       const { key: dataKey, id: keyId } = encryptionKey(masterKey)
       await tx.insert(vaultConnections).values({
         id: connectionId,
-        spaceId: ws.spaceId,
+        circleId: ws.circleId,
         ownerAccountId: ws.accountId,
         serverUrl: 'https://vault.example.com',
         email: 'agent@example.com',
@@ -384,7 +488,7 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
         lastCheckedAt: new Date(),
       })
       await tx.insert(credentials).values({
-        spaceId: ws.spaceId,
+        circleId: ws.circleId,
         ownerAccountId: ws.accountId,
         identifier: 'file-server',
         name: '文件服务器',
@@ -424,21 +528,21 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
       expect((await send('PUT', path, body, cookie)).status).toBe(200)
     }
     await backfillJob(database.db, staticEmbedderSource(fakeEmbedder('m')), async () => [])
-    return { credentialId, base, child, bob }
+    return { credentialId, nasShortId: nas.shortId, base, child, bob }
   }
 
-  // 每张表的全部数据（按空间的表逐个空间读），排好序方便比较。Key 的最后使用时间是请求返回之后才异步写的，
+  // 每张表的全部数据（按记忆圈的表逐个记忆圈读），排好序方便比较。Key 的最后使用时间是请求返回之后才异步写的，
   // 不参与比较
   async function snapshot() {
-    const ids = (await database.db.select({ id: spaces.id }).from(spaces)).map((r) => r.id)
+    const ids = (await database.db.select({ id: circles.id }).from(circles)).map((r) => r.id)
     const result: Record<string, string[]> = {}
     for (const table of BACKUP_TABLES) {
       const skip = table.name === 'api_keys' ? sql` - 'last_used_at'` : sql``
       const query = sql`select (to_jsonb(t)${skip})::text as row from ${sql.identifier(table.name)} t`
       const rows: string[] = []
-      for (const space of table.perSpace ? ids : [null]) {
-        const batch = space
-          ? await withSpace(database.db, space, (tx) => tx.execute<{ row: string }>(query))
+      for (const circle of table.perCircle ? ids : [null]) {
+        const batch = circle
+          ? await withCircle(database.db, circle, (tx) => tx.execute<{ row: string }>(query))
           : await database.db.execute<{ row: string }>(query)
         rows.push(...batch.map((r) => r.row))
       }
@@ -447,8 +551,8 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
     return result
   }
   const embeddings = async () => {
-    const [row] = await inSpace((tx) =>
-      tx.execute<{ n: number }>(sql`select count(*)::int as n from memory_embeddings`),
+    const [row] = await inCircle((tx) =>
+      tx.execute<{ n: number }>(sql`select count(*)::int as n from entry_embeddings`),
     )
     return row!.n
   }
@@ -499,7 +603,7 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
   }
 
   it('恢复到新实例后数据与备份时一致：登录、Key、secret、托管的凭据、历史都在，向量重新补齐', async () => {
-    const { credentialId, base, child, bob } = await seed()
+    const { credentialId, nasShortId, base, child, bob } = await seed()
     const vectors = await embeddings()
     expect(vectors).toBeGreaterThan(0)
     const before = await snapshot()
@@ -508,10 +612,10 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
       expect(summary.rows[table.name], table.name).toBeGreaterThan(0)
     expect(summary.rows).not.toHaveProperty('sessions')
     expect(summary.rows).not.toHaveProperty('account_links')
-    expect(summary.rows).not.toHaveProperty('memory_embeddings')
+    expect(summary.rows).not.toHaveProperty('entry_embeddings')
 
     // 人格按继承关系排：表里 child 在 base 前面，备份里 base 在前
-    const physical = await inSpace((tx) =>
+    const physical = await inCircle((tx) =>
       tx.execute<{ id: string }>(
         sql`select id from personas where id in (${base.id}, ${child.id}) order by ctid`,
       ),
@@ -525,8 +629,8 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
       .map((line) => (JSON.parse(line) as { id: string }).id)
     expect(order.indexOf(base.id)).toBeLessThan(order.indexOf(child.id))
 
-    const [events] = await inSpace((tx) =>
-      tx.execute<{ max: number }>(sql`select max(id)::int as max from memory_events`),
+    const [events] = await inCircle((tx) =>
+      tx.execute<{ max: number }>(sql`select max(id)::int as max from entry_events`),
     )
     await wipe('2030-01-01T00:00:00.000Z')
     const started = Date.now()
@@ -548,8 +652,9 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
     await prepareMasterKey(database.db, masterKey)
     // 成员的设置跟着恢复：bob 关掉的 Dream 整理还关着，别人的照旧开着
     const members = await database.db
-      .select({ id: spaceMembers.accountId, dreamPrivate: spaceMembers.dreamPrivate })
-      .from(spaceMembers)
+      .select({ id: circleMembers.accountId, dreamPrivate: circleMembers.dreamPrivate })
+      .from(circleMembers)
+      .where(eq(circleMembers.circleId, ws.circleId))
     expect(Object.fromEntries(members.map((m) => [m.id, m.dreamPrivate]))).toEqual({
       [ws.accountId]: true,
       [bob.accountId]: false,
@@ -569,16 +674,11 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
       .find((c) => c.startsWith('kioku_session='))!
       .split(';')[0]!
     // Key 照常可用，secret 与托管的凭据都解得开
-    const wifi = await send(
-      'GET',
-      '/v1/memories?uri=user%3A%2F%2Fhome%2Fwifi',
-      undefined,
-      bearer(key),
-    )
-    expect(((await wifi.json()) as MemoryView).content).toBe('无线密码 hunter2')
+    const wifi = await send('GET', '/v1/entries?id=home%2Fwifi', undefined, bearer(key))
+    expect(((await wifi.json()) as EntryView).variants[0]!.content).toBe('无线密码 hunter2')
     const revealed = await send(
       'POST',
-      `/v1/spaces/${ws.spaceId}/credentials/${credentialId}/reveal`,
+      `/v1/circles/${ws.personalCircleId}/credentials/${credentialId}/reveal`,
       undefined,
       { cookie },
     )
@@ -586,17 +686,17 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
     // 明文提示的忽略跟着恢复，还对得上正文
     const dismissed = await send(
       'GET',
-      `/v1/spaces/${ws.spaceId}/memories/list?plaintext=ignored`,
+      `/v1/circles/${ws.circleId}/entries/list?plaintext=ignored`,
       undefined,
       { cookie },
     )
-    expect(((await dismissed.json()) as MemoryList).items.map((m) => m.uri)).toEqual([
-      'user://home/dismissed',
+    expect(((await dismissed.json()) as EntryList).items.map((m) => m.title)).toEqual([
+      'home/dismissed',
     ])
     // 序列推到了写回的最大值：之后写下的历史接着编号。上面 Key 读 secret 记了一条访问事件，这次修改是下一条
-    await write('PATCH', { uri: 'user://home/nas', content: '恢复之后改的' })
-    const [after] = await inSpace((tx) =>
-      tx.execute<{ max: number }>(sql`select max(id)::int as max from memory_events`),
+    await write('PATCH', { id: nasShortId, content: '恢复之后改的' })
+    const [after] = await inCircle((tx) =>
+      tx.execute<{ max: number }>(sql`select max(id)::int as max from entry_events`),
     )
     expect(after!.max).toBe(events!.max + 2)
     // 向量不在备份里，由补齐任务重新生成
@@ -605,7 +705,7 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
     expect(await embeddings()).toBe(vectors)
 
     // 已经初始化的实例拒绝再恢复
-    await expect(restore(file)).rejects.toThrow('这个实例已经初始化过（3 个账号、1 个空间）')
+    await expect(restore(file)).rejects.toThrow('这个实例已经初始化过（3 个账号、4 个记忆圈）')
   })
 
   it('实例级的表在备份里是空的：新库里迁移写下的默认值也以备份为准清掉', async () => {
@@ -620,15 +720,22 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
 
   // 先写两万条再备份、恢复，CI 的机器上要五秒上下，单独放宽时限
   it('两万条记忆也在一个事务里写回', async () => {
-    await inSpace((tx) =>
+    await inCircle((tx) =>
       tx.execute(sql`
-        insert into memories (space_id, form, layer, sensitivity, provenance, domain, path, title, content)
-        select ${ws.spaceId}, 'curated', 'core', 'public', 'owner', 'core', 'bulk/n' || g, 'n' || g,
-          '第 ' || g || ' 条'
-        from generate_series(0, 19999) g`),
+        with ins as (
+          insert into entries (circle_id, circle_kind, short_id, kind, title, sensitivity, provenance)
+          select ${ws.circleId}, 'shared',
+            'm-' || translate(lpad(to_hex(g + 100000), 6, '0'), '01', 'gh'),
+            'entry', 'n' || g, 'public', 'owner'
+          from generate_series(0, 19999) g
+          returning circle_id, id, sensitivity, kind, title
+        )
+        insert into entry_variants (circle_id, entry_id, sensitivity, kind, content)
+        select circle_id, id, sensitivity, kind, '第 ' || substring(title from 2) || ' 条'
+        from ins`),
     )
     const { file, summary } = await backup()
-    expect(summary.rows.memories).toBe(20_000)
+    expect(summary.rows.entries).toBe(20_000)
 
     // 写出中途出错（例如磁盘满了）：备份失败，读正文的查询停在事务里，连接照常可用
     let chunks = 0
@@ -644,17 +751,17 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
     expect(state!.open).toBe(0)
 
     await wipe('2030-01-01T00:00:00.000Z')
-    expect((await restore(file)).rows.memories).toBe(20_000)
-  }, 30_000)
+    expect((await restore(file)).rows.entries).toBe(20_000)
+  }, 90_000)
 
   it('主密钥不对、格式版本或迁移对不上、内容不对时拒绝；写回到一半失败时什么都不留下', async () => {
-    await write('POST', { uri: 'user://home/wifi', content: '无线密码', sensitivity: 'secret' })
-    await write('POST', { uri: 'user://home/nas', content: 'NAS 在书房', glossary: ['书房存储'] })
+    await write('POST', { title: 'home/wifi', content: '无线密码', sensitivity: 'secret' })
+    await write('POST', { title: 'home/nas', content: 'NAS 在书房', glossary: ['书房存储'] })
     // 会话表上有触发器：写回期间停用，失败后要照常开着
-    await inSpace((tx) =>
+    await inCircle((tx) =>
       tx.insert(conversations).values({
-        spaceId: ws.spaceId,
-        appId: agentId,
+        circleId: ws.circleId,
+        clientId: agentId,
         kind: 'none',
         ownerAccountId: ws.accountId,
       }),
@@ -667,8 +774,8 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
     await wipe('2030-01-01T00:00:00.000Z')
 
     await expect(restore(file, randomBytes(32))).rejects.toThrow('另一把主密钥')
-    await expect(restore(await reseal({ ...header, version: 2 }))).rejects.toThrow(
-      '备份的格式版本是 2',
+    await expect(restore(await reseal({ ...header, version: 3 }))).rejects.toThrow(
+      '备份的格式版本是 3',
     )
     const migrated = (migrations: { hash: string; at: number }) => reseal({ ...header, migrations })
     await expect(
@@ -694,23 +801,18 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
     )
 
     // 关键词那一段多出一行重复的：前面的账号、会话、记忆都已写下，失败后整个撤销，触发器也照常开着
-    const at = lines.findIndex((l) => l.startsWith('["memory_glossary"'))
+    const at = lines.findIndex((l) => l.startsWith('["entry_glossary"'))
     const duplicated = [...lines.slice(1, at + 2), lines[at + 1]!, ...lines.slice(at + 2)]
     await expect(restore(await reseal(header, duplicated))).rejects.toThrow()
     const [state] = await database.db.execute<{ accounts: number; trigger: string }>(sql`
       select (select count(*) from accounts)::int as accounts,
-        (select tgenabled from pg_trigger where tgname = 'conversations_delete_summaries') as trigger`)
+        (select tgenabled from pg_trigger where tgname = 'conversations_delete_episodes') as trigger`)
     expect(state).toEqual({ accounts: 0, trigger: 'O' })
 
     // 原样的备份照常恢复
     await restore(file)
-    const wifi = await send(
-      'GET',
-      '/v1/memories?uri=user%3A%2F%2Fhome%2Fwifi',
-      undefined,
-      bearer(key),
-    )
-    expect(((await wifi.json()) as MemoryView).content).toBe('无线密码')
+    const wifi = await send('GET', '/v1/entries?id=home%2Fwifi', undefined, bearer(key))
+    expect(((await wifi.json()) as EntryView).variants[0]!.content).toBe('无线密码')
   })
 
   it('改版之前的库与备份：启动时不迁移、恢复时拒绝，都说清是改版之前的结构，要清空数据库重建后从 Lore 重新导入', async () => {
@@ -732,7 +834,7 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
     )
     await wipe('2030-01-01T00:00:00.000Z')
     await expect(restore(before)).rejects.toThrow(
-      /^备份来自记忆架构改版之前的版本（.+），这个版本不兼容旧数据，无法恢复.*从 Lore 重新导入/,
+      /^备份来自记忆圈重构之前的版本（.+），这个版本不兼容旧数据，无法恢复.*迁入工具导入数据/,
     )
 
     // 改版之前的库：迁移记录里只有这个版本没有的、更早的迁移。照常迁移的话 drizzle 从基线开始建表，
@@ -754,7 +856,7 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
         { hash: 'before-2', at: String(old) },
       ])
       await expect(runMigrations(database, migrationsFolder)).rejects.toThrow(
-        /^数据库是记忆架构改版之前的结构.*清空数据库重建.*从 Lore 重新导入/,
+        /^数据库是记忆圈重构之前的结构.*清空或新建空库.*迁入工具导入数据/,
       )
       // 库里有这个版本没有、却不早于基线的迁移（更新的版本，或者合并之后改过的迁移文件）：同样不迁移
       await rewrite([...saved, { hash: 'newer', at: String(latest.folderMillis + 1000) }])
@@ -769,7 +871,7 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
   })
 
   it('较早的备份：写回之后在同一个事务里执行这个版本新增的迁移；新增的迁移失败时数据一条也不留下', async () => {
-    await write('POST', { uri: 'user://home/nas', content: 'NAS 在书房' })
+    await write('POST', { title: 'home/nas', content: 'NAS 在书房' })
     const { file } = await backup()
     try {
       // 新增的迁移读写回的数据：能看出它是在写回之后执行的

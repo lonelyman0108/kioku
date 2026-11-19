@@ -15,15 +15,15 @@ const EXCLUDED = new Set([
   'device_grants',
   'login_attempts',
   'conversation_turns',
-  'memory_embeddings',
+  'entry_embeddings',
   'subject_bind_codes',
   'subject_bind_attempts',
 ])
 
 export interface BackupTable {
   name: string
-  // 受行级安全约束的表要按空间读
-  perSpace: boolean
+  // 受行级安全约束的表要按记忆圈读
+  perCircle: boolean
   // 数据库生成的列（全文检索）不进备份，写回时由数据库重新算
   omitted: string[]
   // 指向同一张表的外键（例如人格的继承）：导出时被指向的行排在前面，按文件里的顺序写回就不违反外键
@@ -51,7 +51,7 @@ function describe(table: PgTable): { table: BackupTable; dependsOn: string[] } {
   return {
     table: {
       name: config.name,
-      perSpace: (RLS_TABLES as readonly string[]).includes(config.name),
+      perCircle: (RLS_TABLES as readonly string[]).includes(config.name),
       omitted: config.columns.filter((c) => c.generated).map(columnName),
       selfRef,
     },

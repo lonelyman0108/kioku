@@ -2,17 +2,17 @@ import { TurnEndEvent, type BenchChanges } from '@kioku/contracts'
 import { and, asc, eq, gt, gte, sql, type SQL } from 'drizzle-orm'
 import type { AnyPgColumn } from 'drizzle-orm/pg-core'
 
-import { logInternalError, withSpace } from '../db/client'
+import { logInternalError, withCircles } from '../db/client'
 import {
   conversationTurns,
   credentialEvents,
   credentials,
-  memoryEvents,
+  entryEvents,
   subjectIdentities,
   subjects,
 } from '../db/schema'
 import type { Deps, KeyPrincipal } from '../http/env'
-import type { MemoryService } from '../memory/service'
+import type { EntryService } from '../memory/service'
 import type { ResolvedStep } from './executor'
 
 // 「真执行会改什么」。回滚模式按 created_at = now() 认这个事务写下的行：事务里 now() 固定，这几张表都用默认值，
@@ -30,14 +30,17 @@ const NOW = sql`now()`
 export function changeTracker(
   deps: Deps,
   key: KeyPrincipal,
-  memory: MemoryService,
+  entries: EntryService,
   window: RunWindow,
 ): ChangeTracker {
-  let lastMemoryEvent = 0
+  let lastEntryEvent = 0
   let lastCredentialEvent = 0
   let lastTurn = 0
   const seenSubjects = new Set<string>()
   const seenIdentities = new Set<string>()
+  const readCircles = [
+    ...new Set([key.circleId, ...key.circleGrants.filter((g) => g.active).map((g) => g.circleId)]),
+  ]
 
   // 这次运行写下的事件
   const written = (columns: {
@@ -53,11 +56,11 @@ export function changeTracker(
         )
 
   async function collect(step: ResolvedStep): Promise<BenchChanges> {
-    const events = await memory.eventChanges(
-      and(written(memoryEvents), gt(memoryEvents.id, lastMemoryEvent))!,
+    const events = await entries.eventChanges(
+      and(written(entryEvents), gt(entryEvents.id, lastEntryEvent))!,
     )
-    lastMemoryEvent = Math.max(lastMemoryEvent, events.lastId)
-    return withSpace(deps.db, key.spaceId, async (tx) => {
+    lastEntryEvent = Math.max(lastEntryEvent, events.lastId)
+    return withCircles(deps.db, { read: readCircles }, async (tx) => {
       const credentialRows = await tx
         .select({
           id: credentialEvents.id,
@@ -71,8 +74,7 @@ export function changeTracker(
         .orderBy(asc(credentialEvents.id))
       lastCredentialEvent = credentialRows.at(-1)?.id ?? lastCredentialEvent
       const changes: BenchChanges = {
-        memories: events.memories,
-        hiddenReleased: events.hiddenReleased,
+        entries: events.entries,
         hiddenOther: events.hiddenOther,
         credentials: credentialRows.map((r) => ({
           type: r.type,

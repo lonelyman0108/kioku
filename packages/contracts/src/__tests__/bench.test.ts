@@ -58,6 +58,37 @@ describe('步骤的契约', () => {
       false,
     )
   })
+
+  it('shortIds / notShortIds 支持规范短 ID 与 capture 变量引用，拒绝非法格式与内置变量', () => {
+    expect(
+      BenchStep.safeParse({
+        kind: 'tool',
+        tool: 'kioku_search',
+        expect: { shortIds: ['m-234567', '${id}'], notShortIds: ['${other}'] },
+      }).success,
+    ).toBe(true)
+    expect(
+      BenchStep.safeParse({
+        kind: 'tool',
+        tool: 'kioku_search',
+        expect: { shortIds: ['not-an-id'] },
+      }).success,
+    ).toBe(false)
+    expect(
+      BenchStep.safeParse({
+        kind: 'tool',
+        tool: 'kioku_search',
+        expect: { shortIds: ['${run}'] },
+      }).success,
+    ).toBe(false)
+    expect(
+      BenchStep.safeParse({
+        kind: 'tool',
+        tool: 'kioku_get',
+        requires: { circleKind: 'personal' },
+      }).success,
+    ).toBe(true)
+  })
 })
 
 describe('运行请求', () => {
@@ -76,7 +107,7 @@ describe('运行请求', () => {
   })
 
   it('真实模式不支持重放', () => {
-    const replay = [{ kind: 'tool', tool: 'kioku_delete', arguments: { uri: 'a://b' } }]
+    const replay = [{ kind: 'tool', tool: 'kioku_delete', arguments: { id: 'm-234567' } }]
     expect(BenchRunRequest.safeParse({ mode: 'real', steps, replay }).success).toBe(false)
     expect(BenchRunRequest.safeParse({ mode: 'rollback', steps, replay }).success).toBe(true)
   })
@@ -86,12 +117,12 @@ describe('运行请求', () => {
     expect(replayOf({ kind: 'tool', tool: 'kioku_get', arguments: {} }).success).toBe(false)
     expect(replayOf({ kind: 'lifecycle', body: { event: 'session.start' } }).success).toBe(false)
     expect(replayOf({ kind: 'lifecycle', body: turnEnd }).success).toBe(true)
-    const big = { uri: 'a://b', content: '字'.repeat(BENCH_MAX_REPLAY_BYTES / 3) }
+    const big = { content: '字'.repeat(BENCH_MAX_REPLAY_BYTES / 3) }
     expect(replayOf({ kind: 'tool', tool: 'kioku_create', arguments: big }).success).toBe(false)
   })
 
   it('重放超过条数或字节上限时都提示清空', () => {
-    const entry = { kind: 'tool', tool: 'kioku_delete', arguments: { uri: 'a://b' } }
+    const entry = { kind: 'tool', tool: 'kioku_delete', arguments: { id: 'm-234567' } }
     const replayOf = (length: number) => Array.from({ length }, () => entry)
     expect(
       BenchRunRequest.safeParse({ steps, replay: replayOf(BENCH_MAX_REPLAY_STEPS) }).success,
@@ -101,7 +132,7 @@ describe('运行请求', () => {
       replay: replayOf(BENCH_MAX_REPLAY_STEPS + 1),
     })
     expect(tooMany.error?.issues[0]?.message).toContain('清空')
-    const big = { uri: 'a://b', content: '字'.repeat(BENCH_MAX_REPLAY_BYTES / 3) }
+    const big = { content: '字'.repeat(BENCH_MAX_REPLAY_BYTES / 3) }
     const tooBig = BenchRunRequest.safeParse({
       steps,
       replay: [{ kind: 'tool', tool: 'kioku_create', arguments: big }],
@@ -175,14 +206,14 @@ describe('isReplayStep：只有写工具与 turn.end', () => {
     'kioku_create',
     'kioku_update',
     'kioku_delete',
-    'kioku_move',
+    'kioku_transfer',
     'kioku_credential_save',
     'kioku_credential_delete',
   ])('%s 要记', (name) => {
     expect(isReplayStep(tool(name))).toBe(true)
   })
 
-  it.each(['kioku_boot', 'kioku_get', 'kioku_list', 'kioku_search', 'kioku_credential', 'nope'])(
+  it.each(['kioku_boot', 'kioku_get', 'kioku_browse', 'kioku_search', 'kioku_credential', 'nope'])(
     '%s 不记',
     (name) => {
       expect(isReplayStep(tool(name))).toBe(false)
@@ -199,8 +230,17 @@ describe('isReplayStep：只有写工具与 turn.end', () => {
   })
 
   it('重放日志里的步骤也认得', () => {
-    const entry: BenchReplayStep = { kind: 'tool', tool: 'kioku_move', arguments: {} }
+    const entry: BenchReplayStep = { kind: 'tool', tool: 'kioku_transfer', arguments: {} }
     expect(isReplayStep(entry)).toBe(true)
+    const created: BenchReplayStep = {
+      kind: 'tool',
+      tool: 'kioku_create',
+      arguments: { content: 'x' },
+      shortId: 'm-234567',
+    }
+    expect(
+      BenchRunRequest.safeParse({ steps: [{ kind: 'whoami' }], replay: [created] }).success,
+    ).toBe(true)
   })
 })
 
@@ -212,7 +252,7 @@ describe('mayWrite：命令行要不要 --allow-writes', () => {
   })
 
   it('只读工具不算，kioku_get 可能记访问事件也不算', () => {
-    for (const name of ['kioku_boot', 'kioku_get', 'kioku_list', 'kioku_search']) {
+    for (const name of ['kioku_boot', 'kioku_get', 'kioku_browse', 'kioku_search']) {
       expect(mayWrite(tool(name))).toBe(false)
     }
   })

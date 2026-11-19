@@ -1,59 +1,69 @@
-import type { AppInfo, KeyScopes } from '@kioku/contracts'
+import type { ClientInfo, LensKeyScopes } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
 import {
+  allowedRealmsLabel,
   benchAccountLabel,
+  entryViaLabels,
   eventLabel,
-  memoryViaLabels,
-  restrictedAppsLabel,
+  originScopeText,
+  restrictedClientsLabel,
   scopeTagText,
   scopeTags,
   scopesSummary,
 } from '../labels'
 
-const app = (id: string, name: string, owner: string): AppInfo => ({
+const client = (id: string, name: string, owner: string): ClientInfo => ({
   id,
+  circleId: '00000000-0000-4000-8000-000000000001',
   slug: name,
   name,
   runtimeFamily: 'mcp',
   ownerAccountId: owner,
   defaultPersonaId: null,
-  config: {},
+  config: { personMemoryMode: 'strict' },
 })
 
-describe('凭据限定的应用', () => {
-  const apps = [app('a', '编码 agent', 'me'), app('b', '别人的机器人', 'other')]
+describe('凭据限定的接入实例与场域', () => {
+  const clients = [client('a', '编码 agent', 'me'), client('b', '别人的机器人', 'other')]
 
-  it('不限定、不开放给任何应用、应用还没读出来时不下结论', () => {
-    expect(restrictedAppsLabel(null, apps, 'me')).toBe('不限定')
-    expect(restrictedAppsLabel([], apps, 'me')).toBe('不开放给任何应用')
-    expect(restrictedAppsLabel(['a'], undefined, 'me')).toBe('…')
+  it('不限定、不开放给任何接入实例、接入实例列表还没读出来时不下结论', () => {
+    expect(restrictedClientsLabel(null, clients, 'me')).toBe('不限定')
+    expect(restrictedClientsLabel([], clients, 'me')).toBe('不开放给任何接入实例')
+    expect(restrictedClientsLabel(['a'], undefined, 'me')).toBe('…')
   })
 
-  it('不是自己的应用标出来，找不到的算已删除', () => {
-    expect(restrictedAppsLabel(['a', 'b', 'gone'], apps, 'me')).toBe(
-      '编码 agent、别人的机器人（非当前账号的应用，不可用）、已删除的应用',
+  it('不是自己的接入实例标出来，找不到的算已删除', () => {
+    expect(restrictedClientsLabel(['a', 'b', 'gone'], clients, 'me')).toBe(
+      '编码 agent、别人的机器人（非当前账号的接入实例，不可用）、已删除的接入实例',
     )
   })
+
+  it('允许的场域说清不限定、空数组与列表', () => {
+    expect(allowedRealmsLabel(null)).toBe('不限定')
+    expect(allowedRealmsLabel([])).toBe('禁止所有场域')
+    expect(allowedRealmsLabel(['work', 'home'])).toBe('work、home')
+  })
 })
 
-describe('Key 的权限', () => {
-  const scopes: KeyScopes = {
-    readLayers: ['core', 'user'],
-    writeLayers: ['user'],
+describe('访问密钥的权限', () => {
+  const scopes: LensKeyScopes = {
+    readKinds: ['entry', 'fact'],
+    writeKinds: ['entry'],
     maxSensitivity: 'private',
+    allowedRealms: null,
     admin: false,
-    credentials: 'none' as const,
+    credentials: 'none',
   }
 
-  it('拆成标签，凭据能力与跨人格写入有才写', () => {
+  it('拆成标签，场域白名单、凭据能力与管理词表有才写', () => {
     expect(scopeTags(scopes).map(scopeTagText)).toEqual(['读 2 类', '写 1 类', '至私密'])
     expect(scopesSummary(scopes)).toBe('读 2 类，写 1 类，至私密')
     expect(scopesSummary({ ...scopes, admin: true })).toBe(
-      '读 2 类，写 1 类，至私密，跨人格 / 应用写入',
+      '读 2 类，写 1 类，至私密，管理词表与人格',
     )
-    expect(scopesSummary({ ...scopes, credentials: 'use' })).toBe(
-      '读 2 类，写 1 类，至私密，凭据取用',
+    expect(scopesSummary({ ...scopes, allowedRealms: ['work'], credentials: 'use' })).toBe(
+      '读 2 类，写 1 类，至私密，场域 work，凭据取用',
     )
   })
 
@@ -69,10 +79,12 @@ describe('Key 的权限', () => {
   })
 })
 
-describe('记忆事件', () => {
-  it('转存、忽略明文提示与访问有自己的说法，不把类型名显示出来', () => {
+describe('词条事件与来源', () => {
+  it('转存、跨圈迁移、忽略明文提示与访问有自己的说法，不把类型名显示出来', () => {
+    expect(eventLabel('transfer_out').label).toBe('迁出记忆圈')
+    expect(eventLabel('transfer_in').label).toBe('迁入记忆圈')
     expect(eventLabel('convert_credential').label).toBe('转存为凭据')
-    expect(eventLabel('protect').label).toBe('保护敏感内容')
+    expect(eventLabel('protect').label).toBe('提高保护')
     expect(eventLabel('redact').label).toBe('抹除敏感段')
     expect(eventLabel('ignore_plaintext').label).toBe('忽略明文提示')
     expect(eventLabel('unignore_plaintext').label).toBe('撤销忽略')
@@ -85,17 +97,23 @@ describe('记忆事件', () => {
       'export',
       'rest',
       'kioku_get',
-      'kioku_list',
+      'kioku_browse',
       'kioku_update',
-      'kioku_move',
+      'kioku_transfer',
     ]
-    expect(Object.keys(memoryViaLabels).sort()).toEqual([...vias].sort())
+    expect(Object.keys(entryViaLabels).sort()).toEqual([...vias].sort())
+  })
+
+  it('来源作用域按群、私聊、接入实例与全局显示', () => {
+    expect(originScopeText({ kind: 'client', id: 'c1', name: 'Codex' })).toBe('接入实例「Codex」')
+    expect(originScopeText({ kind: 'client', id: 'c1', name: null })).toBe('已删除的接入实例')
+    expect(originScopeText({ kind: 'global', id: '', name: null })).toBe('全局')
   })
 })
 
 describe('测试台写下的事件', () => {
   it('操作的账号，账号已经删掉时说一声', () => {
-    expect(benchAccountLabel({ accountName: '主人', run: 'abcd1234' })).toBe('主人')
+    expect(benchAccountLabel({ accountName: 'Alice', run: 'abcd1234' })).toBe('Alice')
     expect(benchAccountLabel({ accountName: null, run: 'abcd1234' })).toBe('已删除的账号')
   })
 })

@@ -2,15 +2,21 @@ import { BenchScenario } from '@kioku/contracts'
 
 import { astrbotRound } from './astrbot'
 import { claudeCodeSession } from './claudeCode'
+import { contextIsolation } from './contextIsolation'
 import { credentialFlow } from './credentialFlow'
+import { linksAndRecall } from './linksAndRecall'
 import { memoryCrud } from './memoryCrud'
 import { permissionProbe } from './permissionProbe'
+import { variantsAndFacets } from './variantsAndFacets'
 
 // 内置预设放在代码里，不存库；过一遍契约，写错了启动时就报出来
 export const BENCH_SCENARIOS: readonly BenchScenario[] = [
   claudeCodeSession,
   astrbotRound,
   memoryCrud,
+  variantsAndFacets,
+  linksAndRecall,
+  contextIsolation,
   permissionProbe,
   credentialFlow,
 ].map((scenario) => BenchScenario.parse(scenario))

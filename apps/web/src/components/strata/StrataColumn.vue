@@ -1,15 +1,15 @@
 <script setup lang="ts">
-import { SENSITIVITIES, type Layer, type Sensitivity } from '@kioku/contracts'
+import { SENSITIVITIES, type Sensitivity, type StrataBand } from '@kioku/contracts'
 import { computed, ref } from 'vue'
 
-import { layerLabels, sensitivityLabels } from '../../labels'
+import { bandLabels, sensitivityLabels } from '../../labels'
 import StrataSwatch from './StrataSwatch.vue'
 import {
+  bandHints,
+  bandTotal,
   conversationTotal,
   curatedTotal,
-  isConversationLayer,
-  layerHints,
-  layerTotal,
+  isConversationBand,
   paintCell,
   segments,
   sensitivityHints,
@@ -37,26 +37,26 @@ const emit = defineEmits<{
 }>()
 
 const GAP = 28
-// 一行放得下层名和数字按钮：14px 字、1.4 倍行高、上下各 1px 内边距，加 1px 分隔线
+// 一行放得下标签和数字按钮：14px 字、1.4 倍行高、上下各 1px 内边距，加 1px 分隔线
 const MIN_ROW = 24
 const bands = computed(() => stackBands(props.counts, props.height, GAP, MIN_ROW))
-const conversation = computed(() => bands.value.filter((b) => isConversationLayer(b.layer)))
-const curated = computed(() => bands.value.filter((b) => !isConversationLayer(b.layer)))
+const conversation = computed(() => bands.value.filter((b) => isConversationBand(b.band)))
+const curated = computed(() => bands.value.filter((b) => !isConversationBand(b.band)))
 const cuts = computed(() =>
   bands.value.map((band) => ({
     band,
-    parts: segments(props.counts[band.layer], props.width, 2),
+    parts: segments(props.counts[band.band], props.width, 2),
   })),
 )
 const hovered = ref<StrataSelection | null>(null)
 const highlight = computed(() => hovered.value ?? props.selected)
-const lit = (layer: Layer, sensitivity: Sensitivity) => {
+const lit = (band: StrataBand, sensitivity: Sensitivity) => {
   const on = highlight.value
   if (!on) return true
-  return (!on.layer || on.layer === layer) && (!on.sensitivity || on.sensitivity === sensitivity)
+  return (!on.band || on.band === band) && (!on.sensitivity || on.sensitivity === sensitivity)
 }
-const numberOn = (layer: Layer, sensitivity: Sensitivity) =>
-  highlight.value?.layer === layer && highlight.value.sensitivity === sensitivity
+const numberOn = (band: StrataBand, sensitivity: Sensitivity) =>
+  highlight.value?.band === band && highlight.value.sensitivity === sensitivity
 
 // 带边框的两组：来自对话的用虚线
 function frame(list: typeof bands.value) {
@@ -98,8 +98,13 @@ function leave() {
 const body = ref<HTMLElement | null>(null)
 const NOTE_MAX_WIDTH = 300
 const note = ref<{ x: number; y: number; width: number; tip: number; lines: string[] } | null>(null)
-function enterSegment(event: MouseEvent, layer: Layer, sensitivity: Sensitivity, count: number) {
-  enter({ layer, sensitivity })
+function enterSegment(
+  event: MouseEvent,
+  band: StrataBand,
+  sensitivity: Sensitivity,
+  count: number,
+) {
+  enter({ band, sensitivity })
   const rect = body.value?.getBoundingClientRect()
   const figure = body.value?.closest('figure')?.getBoundingClientRect()
   const left = rect?.left ?? 0
@@ -115,8 +120,8 @@ function enterSegment(event: MouseEvent, layer: Layer, sensitivity: Sensitivity,
     tip: pointer - (x - width / 2),
     y: event.clientY - (rect?.top ?? 0),
     lines: [
-      `${layerLabels[layer]} ${sensitivityLabels[sensitivity]} ${count} 条`,
-      layerHints[layer],
+      `${bandLabels[band]} ${sensitivityLabels[sensitivity]} ${count} 条`,
+      bandHints[band],
       sensitivityHints[sensitivity],
     ],
   }
@@ -134,11 +139,11 @@ function enterSegment(event: MouseEvent, layer: Layer, sensitivity: Sensitivity,
         type="button"
         class="fig-key"
         :title="sensitivityHints[s]"
-        @mouseenter="enter({ layer: null, sensitivity: s })"
+        @mouseenter="enter({ band: null, sensitivity: s })"
         @mouseleave="leave"
-        @focus="enter({ layer: null, sensitivity: s })"
+        @focus="enter({ band: null, sensitivity: s })"
         @blur="leave"
-        @click="emit('select', { layer: null, sensitivity: s })"
+        @click="emit('select', { band: null, sensitivity: s })"
       >
         <StrataSwatch :sensitivity="s" :width="22" :height="12" />
         <span>{{ sensitivityLabels[s] }}</span>
@@ -153,19 +158,19 @@ function enterSegment(event: MouseEvent, layer: Layer, sensitivity: Sensitivity,
         :viewBox="`0 0 ${width} ${height}`"
         aria-hidden="true"
       >
-        <template v-for="{ band, parts } in cuts" :key="band.layer">
+        <template v-for="{ band, parts } in cuts" :key="band.band">
           <g
             v-for="part in parts"
             :key="part.sensitivity"
             class="seg"
-            :class="{ dim: !lit(band.layer, part.sensitivity) }"
-            @mouseenter="enterSegment($event, band.layer, part.sensitivity, part.count)"
+            :class="{ dim: !lit(band.band, part.sensitivity) }"
+            @mouseenter="enterSegment($event, band.band, part.sensitivity, part.count)"
             @mouseleave="leave"
-            @click="emit('select', { layer: band.layer, sensitivity: part.sensitivity })"
+            @click="emit('select', { band: band.band, sensitivity: part.sensitivity })"
           >
             <rect
               v-for="(r, i) in paintCell(
-                band.layer,
+                band.band,
                 part.sensitivity,
                 { x: part.x, y: band.y, width: part.w, height: band.h },
                 'lg',
@@ -208,52 +213,52 @@ function enterSegment(event: MouseEvent, layer: Layer, sensitivity: Sensitivity,
 
       <div
         v-for="band in bands"
-        :key="band.layer"
+        :key="band.band"
         class="fig-row"
-        :class="{ conv: isConversationLayer(band.layer) }"
+        :class="{ conv: isConversationBand(band.band) }"
         :style="{ top: `${band.y}px`, height: `${band.h}px` }"
       >
         <button
           type="button"
           class="fig-name"
-          :title="layerHints[band.layer]"
-          @mouseenter="enter({ layer: band.layer, sensitivity: null })"
+          :title="bandHints[band.band]"
+          @mouseenter="enter({ band: band.band, sensitivity: null })"
           @mouseleave="leave"
-          @focus="enter({ layer: band.layer, sensitivity: null })"
+          @focus="enter({ band: band.band, sensitivity: null })"
           @blur="leave"
-          @click="emit('select', { layer: band.layer, sensitivity: null })"
+          @click="emit('select', { band: band.band, sensitivity: null })"
         >
-          {{ layerLabels[band.layer] }}
+          {{ bandLabels[band.band] }}
         </button>
         <button
-          v-if="layerTotal(counts, band.layer)"
+          v-if="bandTotal(counts, band.band)"
           type="button"
           class="fig-total"
-          :class="{ on: highlight?.layer === band.layer && !highlight.sensitivity }"
-          :aria-label="`${layerLabels[band.layer]} ${layerTotal(counts, band.layer)} 条`"
-          @mouseenter="enter({ layer: band.layer, sensitivity: null })"
+          :class="{ on: highlight?.band === band.band && !highlight.sensitivity }"
+          :aria-label="`${bandLabels[band.band]} ${bandTotal(counts, band.band)} 条`"
+          @mouseenter="enter({ band: band.band, sensitivity: null })"
           @mouseleave="leave"
-          @focus="enter({ layer: band.layer, sensitivity: null })"
+          @focus="enter({ band: band.band, sensitivity: null })"
           @blur="leave"
-          @click="emit('select', { layer: band.layer, sensitivity: null })"
+          @click="emit('select', { band: band.band, sensitivity: null })"
         >
-          {{ layerTotal(counts, band.layer) }}
+          {{ bandTotal(counts, band.band) }}
         </button>
         <span v-else class="fig-total" aria-label="0">0</span>
         <template v-for="s in SENSITIVITIES" :key="s">
           <button
-            v-if="counts[band.layer][s]"
+            v-if="counts[band.band][s]"
             type="button"
             class="fig-n"
-            :class="{ sec: s === 'secret', on: numberOn(band.layer, s) }"
-            :aria-label="`${layerLabels[band.layer]} ${sensitivityLabels[s]} ${counts[band.layer][s]} 条`"
-            @mouseenter="enter({ layer: band.layer, sensitivity: s })"
+            :class="{ sec: s === 'secret', on: numberOn(band.band, s) }"
+            :aria-label="`${bandLabels[band.band]} ${sensitivityLabels[s]} ${counts[band.band][s]} 条`"
+            @mouseenter="enter({ band: band.band, sensitivity: s })"
             @mouseleave="leave"
-            @focus="enter({ layer: band.layer, sensitivity: s })"
+            @focus="enter({ band: band.band, sensitivity: s })"
             @blur="leave"
-            @click="emit('select', { layer: band.layer, sensitivity: s })"
+            @click="emit('select', { band: band.band, sensitivity: s })"
           >
-            {{ counts[band.layer][s] }}
+            {{ counts[band.band][s] }}
           </button>
           <span v-else class="fig-z" aria-label="0">–</span>
         </template>

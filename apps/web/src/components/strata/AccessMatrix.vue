@@ -1,8 +1,21 @@
 <script setup lang="ts">
-import { SENSITIVITIES, sensitivityAllowed, type Sensitivity } from '@kioku/contracts'
+import {
+  SENSITIVITIES,
+  sensitivityAllowed,
+  type AccessCell,
+  type CircleAccessMatrix,
+  type Sensitivity,
+  type StrataBand,
+} from '@kioku/contracts'
 import { computed } from 'vue'
 
-import { layerLabels, sensitivityLabels } from '../../labels'
+import {
+  bandLabels,
+  circleKindLabels,
+  credentialCapabilityLabels,
+  entryKindLabels,
+  sensitivityLabels,
+} from '../../labels'
 import AccessLegend from './AccessLegend.vue'
 import StrataSwatch from './StrataSwatch.vue'
 import {
@@ -11,102 +24,195 @@ import {
   accessFill,
   accessKind,
   accessKindLabels,
+  bandHints,
+  bandSensitivityAllowed,
   deepestColumn,
-  isConversationLayer,
-  layerHints,
+  entryKindHints,
+  isConversationBand,
+  kindAccessCellText,
+  kindAccessKind,
+  kindBandForCircle,
+  orderKindRows,
   orderRows,
   paintAccess,
   presentKinds,
   sensitivityHints,
-  type AccessRow,
+  type AccessKind,
+  type BandAccessRow,
 } from './strata'
 
-// 权限范围矩阵：6 类归属乘 4 个敏感级。行序和地层柱一样，格子用同一套编码，文字压在色带上时挖掉纹理保证可读。
-// 这份权限碰得到的最高敏感级画一条边界线。切换会话上下文由使用方传不同的 rows
-const props = withDefaults(defineProps<{ rows: readonly AccessRow[]; legend?: boolean }>(), {
-  legend: true,
+// 权限范围矩阵：支持多圈明细（circles：每个记忆圈 3 物种 × 4 敏感级）与单表 6 色带视图（rows）。
+const props = withDefaults(
+  defineProps<{
+    circles?: readonly CircleAccessMatrix[] | null
+    rows?: readonly BandAccessRow[] | null
+    legend?: boolean
+  }>(),
+  { circles: null, rows: null, legend: true },
+)
+
+interface DisplayRow {
+  key: string
+  band: StrataBand
+  label: string
+  hint: string
+  conv: boolean
+  convEnd: boolean
+  cells: CircleAccessMatrix['rows'][number]['cells']
+  kindOf: (cell: AccessCell) => AccessKind
+  allowed: (sensitivity: Sensitivity) => boolean
+  titleOf: (sensitivity: Sensitivity, kind: AccessKind) => string
+}
+
+interface DisplaySection {
+  key: string
+  title?: string
+  badges?: string[]
+  rows: DisplayRow[]
+  deepest: number
+}
+
+const sections = computed<DisplaySection[]>(() => {
+  if (props.circles?.length) {
+    return props.circles.map((circle) => {
+      const ordered = orderKindRows(circle.rows)
+      return {
+        key: circle.circleId,
+        title: circle.circleName,
+        badges: [
+          circle.isPrimary ? '主场' : '客场',
+          circleKindLabels[circle.circleKind],
+          ...(circle.credentials !== 'none'
+            ? [`凭据${credentialCapabilityLabels[circle.credentials]}`]
+            : []),
+        ],
+        deepest: deepestColumn(ordered),
+        rows: ordered.map((row) => {
+          const band = kindBandForCircle(row.kind, circle)
+          const label = entryKindLabels[row.kind]
+          return {
+            key: `${circle.circleId}-${row.kind}`,
+            band,
+            label,
+            hint: entryKindHints[row.kind],
+            conv: isConversationBand(band),
+            convEnd: row.kind === 'fact',
+            cells: row.cells,
+            kindOf: (cell) => kindAccessKind(row.kind, cell),
+            allowed: (s) => sensitivityAllowed(circle.circleKind, row.kind, s),
+            titleOf: (s, k) => kindAccessCellText(row.kind, circle.circleKind, s, k, label),
+          }
+        }),
+      }
+    })
+  }
+  const ordered = orderRows(props.rows ?? [])
+  return [
+    {
+      key: 'bands',
+      deepest: deepestColumn(ordered),
+      rows: ordered.map((row) => ({
+        key: row.band,
+        band: row.band,
+        label: bandLabels[row.band],
+        hint: bandHints[row.band],
+        conv: isConversationBand(row.band),
+        convEnd: row.band === 'fact',
+        cells: row.cells,
+        kindOf: (cell) => accessKind(row.band, cell),
+        allowed: (s) => bandSensitivityAllowed(row.band, s),
+        titleOf: (s, k) => accessCellText(row.band, s, k),
+      })),
+    },
+  ]
 })
 
-const ordered = computed(() => orderRows(props.rows))
-const deepest = computed(() => deepestColumn(props.rows))
-const cellOf = (row: AccessRow, sensitivity: Sensitivity) => {
+const cellOf = (row: DisplayRow, sensitivity: Sensitivity): AccessKind => {
   const cell = row.cells.find((c) => c.sensitivity === sensitivity)
-  return cell ? accessKind(row.layer, cell) : 'none'
+  return cell ? row.kindOf(cell) : 'none'
 }
-// 这一类归属没有这一级（本人不设公开）：不是没给权限，格子写明不适用，不和无权限画成一样
-const allowed = (row: AccessRow, sensitivity: Sensitivity) =>
-  sensitivityAllowed(row.layer, sensitivity)
-const cellTitle = (row: AccessRow, sensitivity: Sensitivity) =>
-  accessCellText(row.layer, sensitivity, cellOf(row, sensitivity))
+
 const FULL = { x: 0, y: 0, width: '100%', height: '100%' }
-const legendKinds = computed(() => presentKinds(props.rows))
+const legendKinds = computed(() =>
+  props.circles?.length ? presentKinds(props.circles) : presentKinds(props.rows ?? []),
+)
 </script>
 
 <template>
   <div class="strata-matrix">
     <div class="mx-scroll">
-      <table class="mx">
-        <thead>
-          <tr>
-            <th scope="col"><span class="sr-only">归属</span></th>
-            <th
-              v-for="(s, i) in SENSITIVITIES"
-              :key="s"
-              scope="col"
-              :class="{ edge: i === deepest }"
-              :title="sensitivityHints[s]"
+      <div v-for="section in sections" :key="section.key" class="mx-section">
+        <div v-if="section.title" class="mx-circle-head">
+          <span class="mx-circle-name">{{ section.title }}</span>
+          <span v-for="badge in section.badges" :key="badge" class="mx-circle-badge">{{
+            badge
+          }}</span>
+        </div>
+        <table class="mx">
+          <thead>
+            <tr>
+              <th scope="col"><span class="sr-only">范围</span></th>
+              <th
+                v-for="(s, i) in SENSITIVITIES"
+                :key="s"
+                scope="col"
+                :class="{ edge: i === section.deepest }"
+                :title="sensitivityHints[s]"
+              >
+                <span class="mx-key">
+                  <StrataSwatch :sensitivity="s" :width="22" :height="12" />
+                  <span>{{ sensitivityLabels[s] }}</span>
+                </span>
+                <span v-if="i === section.deepest && section.deepest < 3" class="mx-limit"
+                  >最高</span
+                >
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="row in section.rows"
+              :key="row.key"
+              :class="{ conv: row.conv, 'conv-end': row.convEnd }"
             >
-              <span class="mx-key">
-                <StrataSwatch :sensitivity="s" :width="22" :height="12" />
-                <span>{{ sensitivityLabels[s] }}</span>
-              </span>
-              <span v-if="i === deepest && deepest < 3" class="mx-limit">最高</span>
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr
-            v-for="row in ordered"
-            :key="row.layer"
-            :class="{ conv: isConversationLayer(row.layer), 'conv-end': row.layer === 'subject' }"
-          >
-            <th scope="row" :title="layerHints[row.layer]">{{ layerLabels[row.layer] }}</th>
-            <td
-              v-for="(s, i) in SENSITIVITIES"
-              :key="s"
-              class="c"
-              :class="[cellOf(row, s), { edge: i === deepest, na: !allowed(row, s) }]"
-              :style="{ '--c': accessFill(row.layer) }"
-              :title="cellTitle(row, s)"
-            >
-              <span v-if="!allowed(row, s)" class="c-na">不适用</span>
-              <template v-else-if="cellOf(row, s) !== 'none'">
-                <svg width="100%" height="100%" aria-hidden="true">
-                  <rect
-                    v-for="(r, k) in paintAccess(
-                      row.layer,
-                      s,
-                      cellOf(row, s),
-                      FULL,
-                      ACCESS_BAR_PERCENT,
-                      'lg',
-                    )"
-                    :key="k"
-                    :x="r.x"
-                    :y="r.y"
-                    :width="r.width"
-                    :height="r.height"
-                    :opacity="r.opacity"
-                    :style="{ fill: r.fill }"
-                  />
-                </svg>
-                <span class="c-label">{{ accessKindLabels[cellOf(row, s)] }}</span>
-              </template>
-              <span v-else class="sr-only">{{ accessKindLabels.none }}</span>
-            </td>
-          </tr>
-        </tbody>
-      </table>
+              <th scope="row" :title="row.hint">{{ row.label }}</th>
+              <td
+                v-for="(s, i) in SENSITIVITIES"
+                :key="s"
+                class="c"
+                :class="[cellOf(row, s), { edge: i === section.deepest, na: !row.allowed(s) }]"
+                :style="{ '--c': accessFill(row.band) }"
+                :title="row.titleOf(s, cellOf(row, s))"
+              >
+                <span v-if="!row.allowed(s)" class="c-na">不适用</span>
+                <template v-else-if="cellOf(row, s) !== 'none'">
+                  <svg width="100%" height="100%" aria-hidden="true">
+                    <rect
+                      v-for="(r, k) in paintAccess(
+                        row.band,
+                        s,
+                        cellOf(row, s),
+                        FULL,
+                        ACCESS_BAR_PERCENT,
+                        'lg',
+                      )"
+                      :key="k"
+                      :x="r.x"
+                      :y="r.y"
+                      :width="r.width"
+                      :height="r.height"
+                      :opacity="r.opacity"
+                      :style="{ fill: r.fill }"
+                    />
+                  </svg>
+                  <span class="c-label">{{ accessKindLabels[cellOf(row, s)] }}</span>
+                </template>
+                <span v-else class="sr-only">{{ accessKindLabels.none }}</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </div>
     <AccessLegend v-if="legend" class="mx-legend" :kinds="legendKinds" />
   </div>
@@ -125,6 +231,28 @@ const legendKinds = computed(() => presentKinds(props.rows))
   /* 边界线和合并的边框压出去 1px，不留这一点放得下时也会出滚动条 */
   padding-right: 1px;
   overflow-x: auto;
+}
+.mx-section + .mx-section {
+  margin-top: 16px;
+}
+.mx-circle-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.mx-circle-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ui-text-highlighted);
+}
+.mx-circle-badge {
+  padding: 1px 6px;
+  border: 1px solid var(--ui-border);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ui-text-muted);
 }
 /* 自动布局加百分比列：放得下时四列等宽，放不下时文字不折行，表格撑开，由外层横向滚动 */
 .mx {

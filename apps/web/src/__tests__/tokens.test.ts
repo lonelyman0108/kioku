@@ -76,9 +76,9 @@ describe('文字链接', () => {
 })
 
 describe('两套主题的令牌', () => {
-  it('六个归属各一种颜色，原来的层色不留', () => {
+  it('六个色带各一种颜色，原来的层色不留', () => {
     expect(STACK).toHaveLength(6)
-    for (const name of ['base', 'owner', 'private']) {
+    for (const name of ['base', 'owner', 'private', 'core', 'app', 'user', 'subject']) {
       expect(css).not.toContain(`--layer-${name}`)
       expect(css).not.toContain(`--access-${name}`)
     }

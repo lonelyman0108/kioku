@@ -1,1 +1,0 @@
-ALTER TABLE "spaces" ADD COLUMN "advanced" jsonb DEFAULT '{}'::jsonb NOT NULL;

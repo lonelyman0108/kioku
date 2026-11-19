@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vitest'
 
 import {
   addedSensitiveContent,
-  isProtectedPersonalMemory,
+  isProtectedPersonalEntry,
   maskSensitiveContent,
   needsSensitiveInboxAlert,
   normalizeRuleKind,
-  resolveSpacePrivacy,
+  resolveCirclePrivacy,
   scanSensitiveContent,
   validateCustomRules,
 } from '../sensitive'
@@ -186,7 +186,7 @@ describe('自定义规则、白名单与打码', () => {
     expect(checked.ok).toBe(true)
     if (!checked.ok) return
 
-    const opts = resolveSpacePrivacy({
+    const opts = resolveCirclePrivacy({
       customRules: checked.rules,
       allowlist: ['13800138000'],
     })
@@ -225,16 +225,16 @@ describe('自定义规则、白名单与打码', () => {
     expect(added.map((h) => h.kind)).toEqual(['bank_card'])
   })
 
-  it('needsSensitiveInboxAlert 仅对本人私密边界外的 PII 或明文凭据触发待处理告警', () => {
-    expect(isProtectedPersonalMemory('user', 'private', 'owner')).toBe(true)
-    expect(isProtectedPersonalMemory('user', 'private', 'untrusted')).toBe(false)
-    expect(isProtectedPersonalMemory('user', 'internal', 'owner')).toBe(false)
-    expect(isProtectedPersonalMemory('core', 'private', 'owner')).toBe(false)
+  it('needsSensitiveInboxAlert 仅对个人圈私密边界外的 PII 或明文凭据触发待处理告警', () => {
+    expect(isProtectedPersonalEntry('personal', 'private', 'owner')).toBe(true)
+    expect(isProtectedPersonalEntry('personal', 'private', 'untrusted')).toBe(false)
+    expect(isProtectedPersonalEntry('personal', 'internal', 'owner')).toBe(false)
+    expect(isProtectedPersonalEntry('shared', 'private', 'owner')).toBe(false)
 
-    // 本人私密受信任的 PII 不进待处理告警
+    // 个人圈私密受信任的 PII 不进待处理告警
     expect(
       needsSensitiveInboxAlert({
-        layer: 'user',
+        circleKind: 'personal',
         sensitivity: 'private',
         provenance: 'owner',
         sensitiveCredential: false,
@@ -243,10 +243,10 @@ describe('自定义规则、白名单与打码', () => {
       }),
     ).toBe(false)
 
-    // 共享、非私密或未确认来源的 PII 需要告警
+    // 共享圈、非私密或未确认来源的 PII 需要告警
     expect(
       needsSensitiveInboxAlert({
-        layer: 'core',
+        circleKind: 'shared',
         sensitivity: 'internal',
         provenance: 'owner',
         sensitivePii: true,
@@ -254,7 +254,7 @@ describe('自定义规则、白名单与打码', () => {
     ).toBe(true)
     expect(
       needsSensitiveInboxAlert({
-        layer: 'user',
+        circleKind: 'personal',
         sensitivity: 'internal',
         provenance: 'owner',
         sensitivePii: true,
@@ -262,17 +262,17 @@ describe('自定义规则、白名单与打码', () => {
     ).toBe(true)
     expect(
       needsSensitiveInboxAlert({
-        layer: 'user',
+        circleKind: 'personal',
         sensitivity: 'private',
         provenance: 'untrusted',
         sensitivePii: true,
       }),
     ).toBe(true)
 
-    // 明文凭据即使在本人私密中也必须进待处理（非机密且未忽略）
+    // 明文凭据即使在个人圈私密中也必须进待处理（非机密且未忽略）
     expect(
       needsSensitiveInboxAlert({
-        layer: 'user',
+        circleKind: 'personal',
         sensitivity: 'private',
         provenance: 'owner',
         sensitiveCredential: true,
@@ -283,7 +283,7 @@ describe('自定义规则、白名单与打码', () => {
     // 已设为机密或已忽略均不提示
     expect(
       needsSensitiveInboxAlert({
-        layer: 'user',
+        circleKind: 'personal',
         sensitivity: 'secret',
         provenance: 'owner',
         sensitiveCredential: true,

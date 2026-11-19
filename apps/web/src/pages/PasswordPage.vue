@@ -15,7 +15,7 @@ import { readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import EntryFrame from '../components/strata/EntryFrame.vue'
 import SectionHeading from '../components/strata/SectionHeading.vue'
-import { forgetSpace, ME_KEY } from '../composables/useSession'
+import { forgetCircle, ME_KEY } from '../composables/useSession'
 import { queryClient } from '../query'
 
 // 设置密码页：打开管理员给的一次性链接。先核对链接，写清给谁设置；设好之后已经登录，进首页。
@@ -59,7 +59,7 @@ async function submit() {
   try {
     const me = await api.usePasswordLink(token.value, form.password)
     // 换了账号：之前缓存的内容都不能再用
-    forgetSpace()
+    forgetCircle()
     queryClient.clear()
     queryClient.setQueryData(ME_KEY, me)
     await router.replace('/')

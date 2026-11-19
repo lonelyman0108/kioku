@@ -26,7 +26,7 @@ type Header = z.infer<typeof Header>
 // 一段：哪张表、哪个空间，记录行在正文里的位置 [start, end) 与行数
 interface Section {
   table: string
-  space: string | null
+  circle: string | null
   rows: number
   start: number
   end: number
@@ -81,8 +81,8 @@ export function readBackup(
   for (let next = ranges.next(); !next.done; next = ranges.next()) {
     const [start, end] = next.value
     if (plain[start] === OPEN_BRACKET) {
-      const [table, space] = parseLine(plain, next.value, SectionHead)
-      current = { table, space, rows: 0, start: end + 1, end: end + 1 }
+      const [table, circle] = parseLine(plain, next.value, SectionHead)
+      current = { table, circle, rows: 0, start: end + 1, end: end + 1 }
       sections.push(current)
     } else if (plain[start] === OPEN_BRACE && current) {
       current.rows++
@@ -106,15 +106,15 @@ export interface RestoreSummary {
   retentionPausedUntil: Date
 }
 
-const initializedError = (accounts: number, spaces: number) =>
+const initializedError = (accounts: number, circles: number) =>
   new Error(
-    `这个实例已经初始化过（${accounts} 个账号、${spaces} 个空间）：只能恢复到没有账号和空间的新实例`,
+    `这个实例已经初始化过（${accounts} 个账号、${circles} 个记忆圈）：只能恢复到没有账号和记忆圈的新实例`,
   )
 
 // 实例初始化过（有账号或空间）时报错：恢复只能写到新实例
 async function assertNoAccounts(db: Db | Tx): Promise<void> {
   const content = await instanceContent((query) => db.execute(sql.raw(query)))
-  if (isInitialized(content)) throw initializedError(content.accounts, content.spaces)
+  if (isInitialized(content)) throw initializedError(content.accounts, content.circles)
 }
 
 // 恢复之前先看一眼：库还没建表、或者没有账号和空间才能恢复。写回时在事务里锁住表再查一遍
@@ -142,7 +142,7 @@ export async function restoreBackup(
   // 改版之前的备份：迁移早于这个版本的第一个迁移（基线），见 db/migrate.ts 的 PRE_BASELINE_DATABASE
   if (!position && backup.at < local[0]!.folderMillis) {
     throw new Error(
-      `备份来自记忆架构改版之前的版本（${header.kioku}），这个版本不兼容旧数据，无法恢复：在新建的空库上启动这个版本，从 Lore 重新导入（见 docs/migrate-from-lore.md）；要用这份备份，用做备份的版本恢复`,
+      `备份来自记忆圈重构之前的版本（${header.kioku}），这个版本不兼容旧数据，无法恢复：请清空或新建空库启动后，使用旧版 Kioku / Lore 迁入工具导入数据；要用这份备份，用做备份的版本恢复`,
     )
   }
   if (!position && backup.at > local[local.length - 1]!.folderMillis) {
@@ -174,7 +174,9 @@ export async function restoreBackup(
     }
     const counts = await writeSections(tx, plain, sections)
     // 迁移按没有设置空间的连接执行，和服务启动时一样
-    await tx.execute(sql`select set_config('app.space_id', '', true)`)
+    await tx.execute(
+      sql`select set_config('app.read_circles', '', true), set_config('app.write_circles', '', true)`,
+    )
     await applyMigrations(tx, local.slice(position))
     return {
       rows: counts,
@@ -230,7 +232,7 @@ async function writeSections(
 ): Promise<Record<string, number>> {
   const tables = [...new Set(sections.map((s) => s.table))]
   // 恢复期间别的连接（例如没停的服务）不能初始化这个实例
-  await tx.execute(sql`lock table public.accounts, public.spaces in share mode`)
+  await tx.execute(sql`lock table public.accounts, public.circles in share mode`)
   await assertNoAccounts(tx)
   // 写回的是做备份时库里已有、已经通过检查的数据，表上的触发器不再执行：触发器写下的派生数据本身也在备份里，
   // 再执行一遍会重复（现在的触发器只管删除，写回时本来也不触发）。外键照常检查。
@@ -241,7 +243,7 @@ async function writeSections(
   const columns = new Map<string, TableColumns>()
   for (const table of tables) columns.set(table, await tableColumns(tx, table))
   // 没初始化的实例里，实例级的表只会有迁移或服务写下的默认值（例如开始记录召回的时间），以备份为准
-  for (const table of new Set(sections.filter((s) => !s.space).map((s) => s.table))) {
+  for (const table of new Set(sections.filter((s) => !s.circle).map((s) => s.table))) {
     await tx.execute(sql`delete from ${tableRef(table)}`)
   }
 
@@ -254,7 +256,9 @@ async function writeSections(
       names.map((c) => sql.identifier(c)),
       sql`, `,
     )
-    await tx.execute(sql`select set_config('app.space_id', ${section.space ?? ''}, true)`)
+    await tx.execute(
+      sql`select set_config('app.read_circles', ${section.circle ?? ''}, true), set_config('app.write_circles', ${section.circle ?? ''}, true)`,
+    )
     const insert = async (batch: string[]) => {
       const statement = sql`insert into ${name} (${list})
         select ${list} from jsonb_populate_recordset(null::${name}, ${`[${batch.join(',')}]`}::jsonb)`
@@ -295,6 +299,8 @@ async function writeSections(
   for (const [sequence, max] of maxima) {
     await tx.execute(sql`select setval(${sequence}::regclass, ${max.toString()}::bigint)`)
   }
+  // 刷清延迟约束触发器队列（如 entry_variants_state_fk），否则 Postgres 拒绝在同一事务里启用触发器
+  await tx.execute(sql`set constraints all immediate`)
   for (const table of tables) {
     await tx.execute(sql`alter table ${tableRef(table)} enable trigger user`)
   }

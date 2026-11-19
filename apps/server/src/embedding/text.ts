@@ -1,15 +1,24 @@
 import { createHash } from 'node:crypto'
 
+import { normalizeWhen, type WhenCondition } from '@kioku/contracts'
+
 const MAX_CHARS = 6000
 
-// 嵌入文本：URI、disclosure、glossary 与正文。URI 和 disclosure 放前面，过长时截掉的是正文尾部
+// 变体切片嵌入文本：标题、主题、切面条件、disclosure、glossary 与切片正文，过长时截掉正文尾部
 export function embeddingText(input: {
-  uri: string
+  title: string
+  topics?: readonly string[]
+  when?: WhenCondition
   disclosure: string | null
-  glossary: string[]
+  glossary: readonly string[]
   content: string
 }): string {
-  const parts = [input.uri]
+  const parts = [input.title]
+  const topics = input.topics?.filter(Boolean) ?? []
+  if (topics.length) parts.push(`主题：${topics.join('、')}`)
+  const when = normalizeWhen(input.when)
+  const whenTags = Object.entries(when).map(([dim, slugs]) => `${dim}:${slugs.join(',')}`)
+  if (whenTags.length) parts.push(`切面：${whenTags.join(' ')}`)
   if (input.disclosure) parts.push(`何时想起：${input.disclosure}`)
   if (input.glossary.length) parts.push(`关键词：${input.glossary.join('、')}`)
   parts.push(input.content)

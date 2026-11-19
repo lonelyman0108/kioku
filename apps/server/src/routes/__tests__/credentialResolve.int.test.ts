@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto'
 import type {
   ConsoleCredential,
   CredentialEventList,
-  KeyScopes,
+  LensKeyScopes,
   ResolvedCredentials,
   VaultConnection,
 } from '@kioku/contracts'
@@ -16,7 +16,7 @@ import { defaultSession } from '../../access/session'
 import { credentialServiceForKey } from '../../credential/context'
 import { CredentialService } from '../../credential/service'
 import { VaultConnections } from '../../credential/vault'
-import { withSpace, type Database } from '../../db/client'
+import { withCircle, type Database } from '../../db/client'
 import { credentials } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import type { Deps } from '../../http/env'
@@ -79,7 +79,7 @@ describe.skipIf(!testDatabaseUrl)('kioku run 的取值接口', () => {
         : jsonRequest(method, body, headers ?? {}),
     )
   const asMember = (method: string, path: string, body?: unknown) =>
-    send(method, `/v1/spaces/${ws.spaceId}${path}`, body, { cookie: ws.cookie })
+    send(method, `/v1/circles/${ws.circleId}${path}`, body, { cookie: ws.cookie })
   const resolve = (body: unknown, as = key) =>
     send('POST', '/v1/credentials/resolve', body, bearer(as))
   const ok = async <T>(res: Response, status = 200): Promise<T> => {
@@ -93,8 +93,8 @@ describe.skipIf(!testDatabaseUrl)('kioku run 的取值接口', () => {
     expect(text).not.toContain(ROUTER_PASSWORD)
     return (JSON.parse(text) as { error: string }).error
   }
-  const keyFor = async (scopes: KeyScopes = FULL_SCOPES, slug = 'agent') =>
-    ws.issueKey((await ws.createApp(slug)).id, scopes)
+  const keyFor = async (scopes: LensKeyScopes = FULL_SCOPES, slug = 'agent') =>
+    ws.issueKey((await ws.createClient(slug)).id, scopes)
 
   const hosted = async (identifier = 'file-server') =>
     ok<ConsoleCredential>(
@@ -283,11 +283,11 @@ describe.skipIf(!testDatabaseUrl)('kioku run 的取值接口', () => {
     )
     expect(denied).toMatch(/^router#password：访问密钥的凭据能力不足/)
 
-    // 限定给别的应用的和不存在一样
+    // 限定给别的接入实例的和不存在一样
     await ok(
       await asMember('PATCH', `/credentials/${fileServer.id}`, {
         expectedVersion: fileServer.version,
-        appIds: [],
+        clientIds: [],
       }),
     )
     expect(
@@ -308,7 +308,7 @@ describe.skipIf(!testDatabaseUrl)('kioku run 的取值接口', () => {
       { ...deniedEvent, purpose: '试试', reason: 'capability' },
     ])
     expect(await accessEvents(fileServer.id)).toEqual([
-      { ...deniedEvent, purpose: null, reason: 'app' },
+      { ...deniedEvent, purpose: null, reason: 'client' },
       { ...deniedEvent, purpose: '试试', reason: 'capability' },
     ])
   })
@@ -396,7 +396,7 @@ describe.skipIf(!testDatabaseUrl)('kioku run 的取值接口', () => {
 
   it('托管的凭据声明了字段却没有存值：按条目里缺字段算失败、记一条失败；没声明的照旧 404、不记', async () => {
     const fileServer = await hosted()
-    await withSpace(database.db, ws.spaceId, (tx) =>
+    await withCircle(database.db, ws.circleId, (tx) =>
       tx
         .update(credentials)
         .set({ fields: [...fileServer.fields, { name: 'pin', itemField: null }] })
@@ -626,7 +626,7 @@ describe.skipIf(!testDatabaseUrl)('kioku run 的取值接口', () => {
 
   it('同一个字段要了几次时只取一次，访问事件里只记一次', async () => {
     const fileServer = await hosted()
-    const created = await ws.createKey((await ws.createApp('direct')).id, FULL_SCOPES)
+    const created = await ws.createKey((await ws.createClient('direct')).id, FULL_SCOPES)
     const principal = (await principalForKeyId(database.db, created.id))!
     const service = credentialServiceForKey(deps, principal)
     // 契约不收重复的项，直接调服务
@@ -654,7 +654,7 @@ describe.skipIf(!testDatabaseUrl)('kioku run 的取值接口', () => {
 
   it('测试台里不能用：回 400，不给值', async () => {
     await hosted()
-    const created = await ws.createKey((await ws.createApp('bench')).id, FULL_SCOPES)
+    const created = await ws.createKey((await ws.createClient('bench')).id, FULL_SCOPES)
     const principal = (await principalForKeyId(database.db, created.id))!
     const service = credentialServiceForKey(deps, principal, defaultSession(principal), {
       bench: true,

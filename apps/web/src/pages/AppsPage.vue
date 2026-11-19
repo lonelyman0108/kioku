@@ -7,9 +7,8 @@ import { useRoute } from 'vue-router'
 
 import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
-import { refreshAppCaches } from '../appQueries'
-import { lastUsedAt } from '../apps'
-import { usableKeys } from '../benchSession'
+import { refreshClientCaches } from '../appQueries'
+import { lastUsedAt, usableKeys } from '../apps'
 import Hint from '../components/Hint.vue'
 import RuntimeIcon from '../components/RuntimeIcon.vue'
 import RuntimeLabel from '../components/RuntimeLabel.vue'
@@ -19,7 +18,7 @@ import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import ScopeTags from '../components/strata/ScopeTags.vue'
 import StrataCore from '../components/strata/StrataCore.vue'
 import StrataSwatch from '../components/strata/StrataSwatch.vue'
-import { presentKinds, type AccessRow } from '../components/strata/strata'
+import { presentKinds, type BandAccessRow } from '../components/strata/strata'
 import { useKeyMatrices } from '../composables/useKeyMatrices'
 import { useSession } from '../composables/useSession'
 import { scopesSummary, sensitivityLabels } from '../labels'
@@ -30,23 +29,23 @@ import { formatRelative, formatTime } from '../time'
 const route = useRoute()
 const toast = useToast()
 const queryClient = useQueryClient()
-const { me, space } = useSession()
-const spaceId = computed(() => String(route.params.spaceId))
-const role = computed(() => space.value?.role ?? 'viewer')
-const isSpaceOwner = computed(() => role.value === 'owner')
+const { me, circle } = useSession()
+const circleId = computed(() => String(route.params.circleId))
+const role = computed(() => circle.value?.role ?? 'viewer')
+const isCircleOwner = computed(() => role.value === 'owner')
 const canCreate = computed(() => role.value === 'owner' || role.value === 'editor')
 
-const apps = useQuery({
-  queryKey: computed(() => ['apps', spaceId.value]),
-  queryFn: () => api.apps(spaceId.value),
+const clients = useQuery({
+  queryKey: computed(() => ['clients', circleId.value] as const),
+  queryFn: () => api.clients(circleId.value),
 })
 const personas = useQuery({
-  queryKey: computed(() => ['personas', spaceId.value]),
-  queryFn: () => api.personas(spaceId.value),
+  queryKey: computed(() => ['personas', circleId.value] as const),
+  queryFn: () => api.personas(circleId.value),
 })
 const members = useQuery({
-  queryKey: computed(() => ['members', spaceId.value]),
-  queryFn: () => api.members(spaceId.value),
+  queryKey: computed(() => ['members', circleId.value] as const),
+  queryFn: () => api.members(circleId.value),
 })
 const personaItems = computed(() => [
   { label: '不使用人格', value: null },
@@ -57,29 +56,27 @@ const personaName = (id: string | null) =>
 const ownerName = (id: string) =>
   members.data.value?.find((m) => m.accountId === id)?.displayName ?? '–'
 
-// 只有应用所有者和空间所有者能看 Key：别人的应用不去请求，请求了也是 403
-const visibleApps = computed(() =>
-  (apps.data.value ?? []).filter(
-    (app) => isSpaceOwner.value || app.ownerAccountId === me.data.value?.id,
+// 只有接入实例所有者和记忆圈所有者能看访问密钥：别人的接入实例不去请求，请求了也是 403
+const visibleClients = computed(() =>
+  (clients.data.value ?? []).filter(
+    (c) => isCircleOwner.value || c.ownerAccountId === me.data.value?.id,
   ),
 )
-// 和应用详情的 Key 列表同一份缓存
 const keyResults = useQueries({
   queries: computed(() =>
-    visibleApps.value.map((app) => ({
-      queryKey: ['keys', spaceId.value, app.id] as const,
-      queryFn: ({ queryKey: [, sid, id] }: { queryKey: readonly string[] }) => api.keys(sid!, id!),
+    visibleClients.value.map((c) => ({
+      queryKey: ['keys', circleId.value, c.id] as const,
+      queryFn: ({ queryKey: [, cid, id] }: { queryKey: readonly string[] }) => api.keys(cid!, id!),
     })),
   ),
 })
-// 表格的每一行。keys 为 null：看不到 Key，或者还没读到、读取失败
 const rows = computed(() =>
-  (apps.data.value ?? []).map((app) => {
-    const index = visibleApps.value.findIndex((a) => a.id === app.id)
+  (clients.data.value ?? []).map((client) => {
+    const index = visibleClients.value.findIndex((c) => c.id === client.id)
     const result = index < 0 ? undefined : keyResults.value[index]
     const keys = result?.data ?? null
     return {
-      app,
+      client,
       canSeeKeys: index >= 0,
       keys,
       keysFailure: result?.isError ? readFailure(result.error) : null,
@@ -89,16 +86,13 @@ const rows = computed(() =>
   }),
 )
 const liveKeys = computed(() =>
-  rows.value.flatMap((row) => row.usable.map((key) => ({ appId: row.app.id, key }))),
+  rows.value.flatMap((row) => row.usable.map((key) => ({ clientId: row.client.id, key }))),
 )
-// 每个有效的 Key 一根岩芯，画的是无上下文时的实际范围
-const { rowsOf, failureOf } = useKeyMatrices(spaceId, liveKeys)
+const { rowsOf, failureOf } = useKeyMatrices(circleId, liveKeys)
 const legendKinds = computed(() =>
-  presentKinds(liveKeys.value.flatMap(({ key }): readonly AccessRow[] => rowsOf(key.id) ?? [])),
+  presentKinds(liveKeys.value.flatMap(({ key }): readonly BandAccessRow[] => rowsOf(key.id) ?? [])),
 )
-// 默认人格和所有者只显示名字，读不到时是「–」：要说出来，不然分不清是没有还是没读到
-// 同一句说法只提示一次，每条的重试只重读说这句话的那几样
-const failures = computed(() => failedReads([apps, personas, members]))
+const failures = computed(() => failedReads([clients, personas, members]))
 
 function failed(err: unknown, fallback: string) {
   toast.add({ title: err instanceof ApiError ? err.message : fallback, color: 'error' })
@@ -113,23 +107,21 @@ const form = reactive({
 })
 const resetForm = () =>
   Object.assign(form, { slug: '', name: '', runtimeFamily: 'claudecode', defaultPersonaId: null })
-// 切换空间时关掉新建窗口并清掉表单：默认人格属于上一个空间
-watch(spaceId, () => {
+watch(circleId, () => {
   open.value = false
   resetForm()
 })
-// 创建中不接受第二次提交：连点两次会先成功、再报标识已被占用
 const creating = ref(false)
 async function create() {
   if (creating.value) return
   creating.value = true
-  const sid = spaceId.value
+  const cid = circleId.value
   try {
-    await api.createApp(sid, { ...form })
+    await api.createClient(cid, { ...form })
     open.value = false
     resetForm()
-    await refreshAppCaches(queryClient, sid)
-    toast.add({ title: '已创建应用', color: 'success' })
+    await refreshClientCaches(queryClient, cid)
+    toast.add({ title: '已创建接入实例', color: 'success' })
   } catch (err) {
     failed(err, '创建失败')
   } finally {
@@ -142,11 +134,11 @@ async function create() {
   <div class="apps-page">
     <header class="apps-head">
       <div>
-        <h1>应用</h1>
+        <h1>接入实例</h1>
         <p>
-          每个接入的客户端（如 Claude Code、AstrBot）对应一个应用。
+          每个接入的工具或机器人（如 Claude Code、AstrBot）对应一个接入实例。
           <Hint>
-            应用读写的本人记忆属于应用所有者。访问密钥的权限在签发时确定，且不超过所有者当前的角色。点击名称可进入应用的设置、访问密钥与权限范围。
+            访问密钥的权限由签发透镜范围与所有者当前角色共同决定，并可关联客场记忆圈与固定切面。点击名称进入设置、访问密钥与按群规则。
           </Hint>
         </p>
       </div>
@@ -157,20 +149,20 @@ async function create() {
         variant="outline"
         @click="open = true"
       >
-        新建应用
+        新建接入实例
       </UButton>
     </header>
 
     <ReadFailureNote v-for="failure in failures" :key="failure.key" :query="failure.read" />
-    <USkeleton v-if="apps.isPending.value" class="h-40 w-full" />
-    <EmptyState v-else-if="apps.data.value && !apps.data.value.length" title="暂无应用">
+    <USkeleton v-if="clients.isPending.value" class="h-40 w-full" />
+    <EmptyState v-else-if="clients.data.value && !clients.data.value.length" title="暂无接入实例">
       <template v-if="canCreate" #actions>
         <UButton size="sm" color="primary" variant="outline" @click="open = true">
-          新建应用
+          新建接入实例
         </UButton>
       </template>
     </EmptyState>
-    <template v-else-if="apps.data.value">
+    <template v-else-if="clients.data.value">
       <div class="apps-table">
         <table>
           <thead>
@@ -185,19 +177,19 @@ async function create() {
           </thead>
           <tbody>
             <tr
-              v-for="{ app, canSeeKeys, keys, keysFailure, usable, lastUsed } in rows"
-              :key="app.id"
+              v-for="{ client, canSeeKeys, keys, keysFailure, usable, lastUsed } in rows"
+              :key="client.id"
             >
               <td class="cell-name">
-                <RouterLink :to="{ name: 'app', params: { spaceId, appId: app.id } }">
-                  <b>{{ app.name }}</b>
-                  <code>app://{{ app.slug }}</code>
+                <RouterLink :to="{ name: 'client', params: { circleId, clientId: client.id } }">
+                  <b>{{ client.name }}</b>
+                  <code>{{ client.slug }}</code>
                 </RouterLink>
               </td>
               <td class="cell-runtime">
-                <RuntimeLabel :family="app.runtimeFamily" />
+                <RuntimeLabel :family="client.runtimeFamily" />
               </td>
-              <td class="cell-persona">{{ personaName(app.defaultPersonaId) }}</td>
+              <td class="cell-persona">{{ personaName(client.defaultPersonaId) }}</td>
               <td class="cell-keys">
                 <div v-if="canSeeKeys" class="keys-inner">
                   <span class="key-count">{{ keys ? usable.length : '–' }}</span>
@@ -205,8 +197,8 @@ async function create() {
                     <li v-for="key in usable" :key="key.id">
                       <RouterLink
                         :to="{
-                          name: 'app',
-                          params: { spaceId, appId: app.id },
+                          name: 'client',
+                          params: { circleId, clientId: client.id },
                           query: { key: key.id },
                         }"
                       >
@@ -236,7 +228,7 @@ async function create() {
                     </li>
                   </ul>
                 </div>
-                <span v-else class="key-hidden">仅应用所有者可查看访问密钥</span>
+                <span v-else class="key-hidden">仅接入实例所有者可查看访问密钥</span>
                 <p v-if="keysFailure" class="key-failed">{{ keysFailure }}</p>
               </td>
               <td class="cell-used">
@@ -246,8 +238,10 @@ async function create() {
                 <template v-else>–</template>
               </td>
               <td class="cell-owner">
-                {{ ownerName(app.ownerAccountId)
-                }}<span v-if="app.ownerAccountId === me.data.value?.id" class="app-mine">我的</span>
+                {{ ownerName(client.ownerAccountId)
+                }}<span v-if="client.ownerAccountId === me.data.value?.id" class="app-mine"
+                  >我的</span
+                >
               </td>
             </tr>
           </tbody>
@@ -267,14 +261,14 @@ async function create() {
 
   <UModal
     v-model:open="open"
-    title="新建应用"
+    title="新建接入实例"
     :dismissible="!creating"
     :close="!creating"
     :ui="{ content: 'sm:max-w-xl' }"
   >
     <template #body>
-      <form id="create-app" class="space-y-4" @submit.prevent="create">
-        <UFormField label="标识" help="小写字母、数字和连字符；这个应用的记忆位于 app://<标识>/ 下">
+      <form id="create-client" class="space-y-4" @submit.prevent="create">
+        <UFormField label="标识" help="小写字母、数字和连字符，例如 claudecode、qqbot">
           <UInput v-model="form.slug" class="w-full font-mono" required />
         </UFormField>
         <UFormField label="名称">
@@ -291,7 +285,7 @@ async function create() {
               <input
                 v-model="form.runtimeFamily"
                 type="radio"
-                name="app-runtime-family"
+                name="client-runtime-family"
                 :value="opt.value"
                 class="sr-only"
               />
@@ -304,7 +298,12 @@ async function create() {
           </div>
         </UFormField>
         <UFormField label="默认人格">
-          <USelect v-model="form.defaultPersonaId" :items="personaItems" class="w-full" />
+          <USelect
+            v-model="form.defaultPersonaId"
+            :items="personaItems"
+            value-key="value"
+            class="w-full"
+          />
         </UFormField>
       </form>
     </template>
@@ -313,7 +312,7 @@ async function create() {
         <UButton color="neutral" variant="ghost" :disabled="creating" @click="open = false">
           取消
         </UButton>
-        <UButton type="submit" form="create-app" :loading="creating">创建</UButton>
+        <UButton type="submit" form="create-client" :loading="creating">创建</UButton>
       </div>
     </template>
   </UModal>

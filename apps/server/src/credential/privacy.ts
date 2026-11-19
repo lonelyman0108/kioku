@@ -1,31 +1,31 @@
 import {
-  DEFAULT_SPACE_PRIVACY,
+  DEFAULT_CIRCLE_PRIVACY,
   maskSensitiveContent,
-  resolveSpacePrivacy,
+  resolveCirclePrivacy,
   scanSensitiveContent,
   toStoredFindings,
   validateCustomRules,
+  type CirclePrivacySettings,
   type ModelChainTestResult,
   type ModelProfileTestResult,
   type PiiKind,
   type SensitiveMatch,
-  type SpacePrivacySettings,
   type StoredSensitiveFinding,
   type ToggleablePiiKind,
-  type UpdateSpacePrivacySettings,
+  type UpdateCirclePrivacySettings,
 } from '@kioku/contracts'
 import { eq, sql } from 'drizzle-orm'
 
 import type { MasterKey } from '../crypto/keyring'
 import type { Db, Tx } from '../db/client'
-import { spaces } from '../db/schema'
+import { circles } from '../db/schema'
 import { textOfContent } from '../models/common'
 import { callChatFallback, callChatProfile } from '../models/execute'
 import { loadPrivacyBindingResolved } from '../models/store'
 import type { ResolvedChatProfile } from '../models/types'
 import { fetchFailure, SettingsInputError, withoutKey } from '../settings/endpoint'
 
-// 内置识别引擎版本号：每次内置规则或反误报逻辑调整时递增，配合空间 privacyRevision 判定存量记忆是否需要回扫
+// 内置识别引擎版本号：每次内置规则或反误报逻辑调整时递增，配合记忆圈 privacyRevision 判定存量记忆是否需要回扫
 export const SENSITIVE_ENGINE_VERSION = 1
 
 const MODEL_TIMEOUT_MS = 10_000
@@ -104,7 +104,6 @@ const PRIVACY_PROMPT_SYSTEM =
   'Return JSON only: {"entities":[{"text":"exact substring","label":"person|address|account","score":0.9}]}. ' +
   'Return {"entities":[]} if none.'
 
-// 调用实例配置的本地 HTTP NER 服务（兼容 pf-serve / Presidio 风格）或已配置对话模型辅助抽取人名/住址/账号
 export async function detectWithPrivacyModel(
   config: PrivacyModelConfig,
   text: string,
@@ -275,54 +274,54 @@ export async function testPrivacyModel(
   return { ok: results.some((r) => r.ok), results }
 }
 
-// ---- 空间级隐私设置与内容扫描 ----
+// ---- 记忆圈级隐私设置与内容扫描 ----
 
-export async function loadSpacePrivacy(
+export async function loadCirclePrivacy(
   db: Db | Tx,
-  spaceId: string,
-): Promise<{ settings: SpacePrivacySettings; revision: number }> {
+  circleId: string,
+): Promise<{ settings: CirclePrivacySettings; revision: number }> {
   const [row] = await db
-    .select({ privacy: spaces.privacy, revision: spaces.privacyRevision })
-    .from(spaces)
-    .where(eq(spaces.id, spaceId))
+    .select({ privacy: circles.privacy, revision: circles.privacyRevision })
+    .from(circles)
+    .where(eq(circles.id, circleId))
   if (!row) {
-    return { settings: { ...DEFAULT_SPACE_PRIVACY }, revision: SENSITIVE_ENGINE_VERSION }
+    return { settings: { ...DEFAULT_CIRCLE_PRIVACY }, revision: SENSITIVE_ENGINE_VERSION }
   }
-  const settings = resolveSpacePrivacy(row.privacy as Partial<SpacePrivacySettings>)
+  const settings = resolveCirclePrivacy(row.privacy as Partial<CirclePrivacySettings>)
   return { settings, revision: currentRevision(row.revision) }
 }
 
-export function currentRevision(spacePrivacyRevision: number): number {
-  return spacePrivacyRevision * 1000 + SENSITIVE_ENGINE_VERSION
+export function currentRevision(circlePrivacyRevision: number): number {
+  return circlePrivacyRevision * 1000 + SENSITIVE_ENGINE_VERSION
 }
 
-export async function bumpSpacePrivacyRevision(db: Db, spaceId: string): Promise<void> {
+export async function bumpCirclePrivacyRevision(db: Db, circleId: string): Promise<void> {
   await db
-    .update(spaces)
-    .set({ privacyRevision: sql`${spaces.privacyRevision} + 1` })
-    .where(eq(spaces.id, spaceId))
+    .update(circles)
+    .set({ privacyRevision: sql`${circles.privacyRevision} + 1` })
+    .where(eq(circles.id, circleId))
 }
 
 export async function bumpPrivacyModelRevisions(db: Db): Promise<void> {
   await db
-    .update(spaces)
-    .set({ privacyRevision: sql`${spaces.privacyRevision} + 1` })
-    .where(sql`coalesce((${spaces.privacy}->>'usePrivacyModel')::boolean, false)`)
+    .update(circles)
+    .set({ privacyRevision: sql`${circles.privacyRevision} + 1` })
+    .where(sql`coalesce((${circles.privacy}->>'usePrivacyModel')::boolean, false)`)
 }
 
-export async function saveSpacePrivacy(
+export async function saveCirclePrivacy(
   db: Db,
-  spaceId: string,
-  input: UpdateSpacePrivacySettings,
-): Promise<{ settings: SpacePrivacySettings; revision: number }> {
-  const current = await loadSpacePrivacy(db, spaceId)
+  circleId: string,
+  input: UpdateCirclePrivacySettings,
+): Promise<{ settings: CirclePrivacySettings; revision: number }> {
+  const current = await loadCirclePrivacy(db, circleId)
   const piiKinds = { ...current.settings.piiKinds }
   if (input.piiKinds) {
     for (const [k, v] of Object.entries(input.piiKinds)) {
       if (v !== undefined) piiKinds[k as ToggleablePiiKind] = v
     }
   }
-  const merged = resolveSpacePrivacy({
+  const merged = resolveCirclePrivacy({
     ...current.settings,
     ...(input.credentials !== undefined ? { credentials: input.credentials } : {}),
     ...(input.pii !== undefined ? { pii: input.pii } : {}),
@@ -338,19 +337,19 @@ export async function saveSpacePrivacy(
   const allowlist = [
     ...new Set(merged.allowlist.map((w) => w.trim()).filter((w) => w.length >= 2)),
   ].slice(0, 200)
-  const next: SpacePrivacySettings = {
+  const next: CirclePrivacySettings = {
     ...merged,
     customRules: checked.rules,
     allowlist,
   }
   const [updated] = await db
-    .update(spaces)
+    .update(circles)
     .set({
       privacy: next,
-      privacyRevision: sql`${spaces.privacyRevision} + 1`,
+      privacyRevision: sql`${circles.privacyRevision} + 1`,
     })
-    .where(eq(spaces.id, spaceId))
-    .returning({ revision: spaces.privacyRevision })
+    .where(eq(circles.id, circleId))
+    .returning({ revision: circles.privacyRevision })
   return {
     settings: next,
     revision: currentRevision(updated?.revision ?? 1),
@@ -367,7 +366,7 @@ export interface SensitiveScanOutcome {
 
 export function evaluateSensitiveContent(
   text: string,
-  privacy: SpacePrivacySettings,
+  privacy: CirclePrivacySettings,
   modelSpans: readonly ModelEntitySpan[] = [],
 ): SensitiveScanOutcome {
   const matches = scanSensitiveContent(text, {
@@ -409,10 +408,9 @@ export function evaluateSensitiveContent(
   }
 }
 
-// 发往外部模型或向量服务前的同步脱敏（仅替换命中片段，不修改本地原文）
 export function maskForOutbound(
   text: string,
-  privacy: SpacePrivacySettings,
+  privacy: CirclePrivacySettings,
   modelSpans: readonly ModelEntitySpan[] = [],
 ): string {
   if (!text) return text
@@ -430,14 +428,13 @@ export function maskForOutbound(
   )
 }
 
-// 构建空间级出站脱敏器：按空间隐私策略脱敏，并在启用隐私识别模型时附加模型实体检测
 export async function loadOutboundRedactor(
   db: Db,
   masterKey: MasterKey | null,
-  spaceId: string,
+  circleId: string,
   signal?: AbortSignal,
 ): Promise<(text: string) => Promise<string>> {
-  const { settings: privacy } = await loadSpacePrivacy(db, spaceId)
+  const { settings: privacy } = await loadCirclePrivacy(db, circleId)
   let modelConfig: PrivacyModelConfig | null = null
   if (privacy.pii && privacy.usePrivacyModel) {
     try {

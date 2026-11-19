@@ -19,13 +19,13 @@ import NoteLine from './strata/NoteLine.vue'
 // 保存记忆之前逐处处理新增的疑似明文，状态和规则在 usePlaintextSave。
 // 没有表单：单选在表单里时回车会隐式提交，没选完就保存了。只有点按钮才继续
 // canConvert：能不能转存为凭据；canSaveAnyway：能不能照样保存
-const props = defineProps<{ spaceId: string; canConvert: boolean; canSaveAnyway: boolean }>()
+const props = defineProps<{ circleId: string; canConvert: boolean; canSaveAnyway: boolean }>()
 const request = defineModel<PlaintextSaveRequest | null>('request', { required: true })
 const emit = defineEmits<{ proceed: [result: PlaintextSaveResult] }>()
 
 const toast = useToast()
 const save = usePlaintextSave(
-  toRef(props, 'spaceId'),
+  toRef(props, 'circleId'),
   request,
   toRef(props, 'canConvert'),
   toRef(props, 'canSaveAnyway'),

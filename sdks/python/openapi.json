@@ -23,10 +23,14 @@
           "error"
         ]
       },
-      "AppInfo": {
+      "ClientInfo": {
         "type": "object",
         "properties": {
           "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "circleId": {
             "type": "string",
             "format": "uuid"
           },
@@ -51,11 +55,12 @@
             "format": "uuid"
           },
           "config": {
-            "$ref": "#/components/schemas/AppConfig"
+            "$ref": "#/components/schemas/ClientConfig"
           }
         },
         "required": [
           "id",
+          "circleId",
           "slug",
           "name",
           "runtimeFamily",
@@ -64,7 +69,7 @@
           "config"
         ]
       },
-      "AppConfig": {
+      "ClientConfig": {
         "type": "object",
         "properties": {
           "elevateOwnerDirect": {
@@ -72,6 +77,14 @@
             "enum": [
               "internal"
             ]
+          },
+          "personMemoryMode": {
+            "type": "string",
+            "enum": [
+              "persona_shared",
+              "strict"
+            ],
+            "default": "strict"
           },
           "recordPrompt": {
             "type": "boolean"
@@ -81,51 +94,202 @@
       "WhoAmI": {
         "type": "object",
         "properties": {
-          "spaceId": {
-            "type": "string",
-            "format": "uuid"
+          "primaryCircle": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "slug": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "personal",
+                  "shared"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "slug",
+              "name",
+              "kind"
+            ]
           },
-          "spaceName": {
-            "type": "string",
-            "maxLength": 64
+          "linkedCircles": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "slug": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "name": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "personal",
+                    "shared"
+                  ]
+                },
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "read",
+                    "read_write"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "slug",
+                "name",
+                "kind",
+                "mode"
+              ]
+            }
           },
           "accountName": {
             "type": "string",
             "maxLength": 64
           },
-          "app": {
-            "$ref": "#/components/schemas/AppInfo"
+          "client": {
+            "$ref": "#/components/schemas/ClientInfo"
+          },
+          "persona": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "slug": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "slug",
+              "name"
+            ]
+          },
+          "contextFacets": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9._\\-\\u3040-\\u30ff\\u3400-\\u4dbf\\u4e00-\\u9fff]{1,64}$"
+              },
+              "maxItems": 16
+            }
+          },
+          "resolvedFacets": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9._\\-\\u3040-\\u30ff\\u3400-\\u4dbf\\u4e00-\\u9fff]{1,64}$"
+              },
+              "maxItems": 16
+            }
+          },
+          "vocabulary": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "matchMode": {
+                  "type": "string",
+                  "enum": [
+                    "exclusive",
+                    "additive"
+                  ]
+                },
+                "terms": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "slug": {
+                        "type": "string"
+                      },
+                      "label": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "slug",
+                      "label"
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "key",
+                "name",
+                "matchMode",
+                "terms"
+              ]
+            }
           },
           "scopes": {
             "type": "object",
             "properties": {
-              "readLayers": {
+              "readKinds": {
                 "type": "array",
                 "items": {
                   "type": "string",
                   "enum": [
-                    "core",
-                    "persona",
-                    "app",
-                    "user",
-                    "subject",
+                    "entry",
+                    "fact",
                     "episode"
                   ]
-                }
+                },
+                "maxItems": 3
               },
-              "writeLayers": {
+              "writeKinds": {
                 "type": "array",
                 "items": {
                   "type": "string",
                   "enum": [
-                    "core",
-                    "persona",
-                    "app",
-                    "user",
-                    "subject",
+                    "entry",
+                    "fact",
                     "episode"
                   ]
-                }
+                },
+                "maxItems": 3
               },
               "maxSensitivity": {
                 "type": "string",
@@ -135,6 +299,19 @@
                   "private",
                   "secret"
                 ]
+              },
+              "allowedRealms": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "maxItems": 32,
+                "default": null
               },
               "admin": {
                 "type": "boolean"
@@ -150,38 +327,74 @@
               }
             },
             "required": [
-              "readLayers",
-              "writeLayers",
+              "readKinds",
+              "writeKinds",
               "maxSensitivity",
               "admin"
             ]
           }
         },
         "required": [
-          "spaceId",
-          "app",
+          "primaryCircle",
+          "linkedCircles",
+          "client",
+          "persona",
+          "contextFacets",
+          "resolvedFacets",
+          "vocabulary",
           "scopes"
         ]
+      },
+      "ShortId": {
+        "type": "string"
       },
       "RecallCandidate": {
         "type": "object",
         "properties": {
-          "uri": {
-            "type": "string"
+          "entryId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "shortId": {
+            "$ref": "#/components/schemas/ShortId"
           },
           "title": {
             "type": "string"
           },
-          "layer": {
+          "circleId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "circleSlug": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
             "type": "string",
             "enum": [
-              "core",
-              "persona",
-              "app",
-              "user",
-              "subject",
+              "entry",
+              "fact",
               "episode"
             ]
+          },
+          "matchedWhen": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9._\\-\\u3040-\\u30ff\\u3400-\\u4dbf\\u4e00-\\u9fff]{1,64}$"
+              },
+              "maxItems": 16
+            }
+          },
+          "otherVariantsCount": {
+            "type": "integer"
+          },
+          "crossGroup": {
+            "type": "boolean"
           },
           "priority": {
             "type": "integer"
@@ -209,9 +422,14 @@
           }
         },
         "required": [
-          "uri",
+          "entryId",
+          "shortId",
           "title",
-          "layer",
+          "circleId",
+          "circleSlug",
+          "kind",
+          "matchedWhen",
+          "otherVariantsCount",
           "priority",
           "disclosure",
           "score",
@@ -224,7 +442,8 @@
         "enum": [
           "semantic",
           "fulltext",
-          "glossary"
+          "glossary",
+          "link"
         ]
       },
       "LifecycleProject": {
@@ -240,29 +459,181 @@
           }
         }
       },
-      "MemoryView": {
+      "EntryBrowseResponse": {
+        "type": "object",
+        "properties": {
+          "groupBy": {
+            "type": "string",
+            "enum": [
+              "circle",
+              "realm",
+              "env",
+              "runtime",
+              "project",
+              "topic",
+              "kind"
+            ]
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EntryBrowseGroup"
+            }
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "groupBy",
+          "groups",
+          "truncated"
+        ]
+      },
+      "EntryBrowseGroup": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EntryBrowseItem"
+            }
+          }
+        },
+        "required": [
+          "key",
+          "label",
+          "count",
+          "items"
+        ]
+      },
+      "EntryBrowseItem": {
         "type": "object",
         "properties": {
           "id": {
             "type": "string",
             "format": "uuid"
           },
-          "uri": {
-            "type": "string"
+          "shortId": {
+            "$ref": "#/components/schemas/ShortId"
           },
           "title": {
             "type": "string"
           },
-          "layer": {
+          "circleId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "circleSlug": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
             "type": "string",
             "enum": [
-              "core",
-              "persona",
-              "app",
-              "user",
-              "subject",
+              "entry",
+              "fact",
               "episode"
             ]
+          },
+          "sensitivity": {
+            "type": "string",
+            "enum": [
+              "public",
+              "internal",
+              "private",
+              "secret"
+            ]
+          },
+          "priority": {
+            "type": "integer"
+          },
+          "topics": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "disclosure": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "variantCount": {
+            "type": "integer"
+          },
+          "variantsSummary": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9._\\-\\u3040-\\u30ff\\u3400-\\u4dbf\\u4e00-\\u9fff]{1,64}$"
+                },
+                "maxItems": 16
+              }
+            }
+          }
+        },
+        "required": [
+          "id",
+          "shortId",
+          "title",
+          "circleId",
+          "circleSlug",
+          "kind",
+          "sensitivity",
+          "priority",
+          "topics",
+          "disclosure",
+          "variantCount",
+          "variantsSummary"
+        ]
+      },
+      "EntryView": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "shortId": {
+            "$ref": "#/components/schemas/ShortId"
+          },
+          "circleId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "circleSlug": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "entry",
+              "fact",
+              "episode"
+            ]
+          },
+          "title": {
+            "type": "string"
           },
           "sensitivity": {
             "type": "string",
@@ -285,11 +656,17 @@
           "originScope": {
             "type": "string"
           },
-          "content": {
-            "type": [
-              "string",
-              "null"
-            ]
+          "topics": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "realms": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           },
           "priority": {
             "type": "integer"
@@ -318,6 +695,46 @@
           "version": {
             "type": "integer"
           },
+          "variants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EntryVariantView"
+            }
+          },
+          "otherVariants": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "when": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9._\\-\\u3040-\\u30ff\\u3400-\\u4dbf\\u4e00-\\u9fff]{1,64}$"
+                    },
+                    "maxItems": 16
+                  }
+                },
+                "whenSignature": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "when",
+                "whenSignature"
+              ]
+            },
+            "default": []
+          },
+          "links": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EntryLinkNeighbor"
+            },
+            "default": []
+          },
           "createdAt": {
             "type": "string"
           },
@@ -327,131 +744,130 @@
         },
         "required": [
           "id",
-          "uri",
+          "shortId",
+          "circleId",
+          "circleSlug",
+          "kind",
           "title",
-          "layer",
           "sensitivity",
           "provenance",
           "originScope",
-          "content",
+          "topics",
+          "realms",
           "priority",
           "disclosure",
           "glossary",
           "validFrom",
           "validTo",
           "version",
+          "variants",
           "createdAt",
           "updatedAt"
         ]
       },
-      "MemoryChildren": {
+      "EntryVariantView": {
         "type": "object",
         "properties": {
-          "parent": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/MemoryView"
-              },
-              {
-                "type": "null"
-              }
-            ]
+          "id": {
+            "type": "string",
+            "format": "uuid"
           },
-          "children": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/MemorySummary"
+          "when": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9._\\-\\u3040-\\u30ff\\u3400-\\u4dbf\\u4e00-\\u9fff]{1,64}$"
+              },
+              "maxItems": 16
             }
           },
-          "truncated": {
-            "type": "boolean"
+          "whenSignature": {
+            "type": "string"
+          },
+          "sortOrder": {
+            "type": "integer"
+          },
+          "content": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updatedAt": {
+            "type": "string"
           }
         },
         "required": [
-          "parent",
-          "children",
-          "truncated"
+          "id",
+          "when",
+          "whenSignature",
+          "sortOrder",
+          "content",
+          "updatedAt"
         ]
       },
-      "MemorySummary": {
+      "EntryLinkNeighbor": {
         "type": "object",
         "properties": {
-          "uri": {
+          "shortId": {
+            "$ref": "#/components/schemas/ShortId"
+          },
+          "title": {
             "type": "string"
           },
-          "exists": {
-            "type": "boolean"
+          "circleId": {
+            "type": "string",
+            "format": "uuid"
           },
-          "id": {
+          "circleSlug": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "entry",
+              "fact",
+              "episode"
+            ]
+          },
+          "sensitivity": {
+            "type": "string",
+            "enum": [
+              "public",
+              "internal",
+              "private",
+              "secret"
+            ]
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "outgoing",
+              "incoming"
+            ]
+          },
+          "sourceVariantId": {
             "type": [
               "string",
               "null"
             ],
             "format": "uuid"
-          },
-          "title": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "layer": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "enum": [
-              "core",
-              "persona",
-              "app",
-              "user",
-              "subject",
-              "episode",
-              null
-            ]
-          },
-          "sensitivity": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "enum": [
-              "public",
-              "internal",
-              "private",
-              "secret",
-              null
-            ]
-          },
-          "priority": {
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "disclosure": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "childCount": {
-            "type": "integer"
           }
         },
         "required": [
-          "uri",
-          "exists",
-          "id",
+          "shortId",
           "title",
-          "layer",
+          "circleId",
+          "circleSlug",
+          "kind",
           "sensitivity",
-          "priority",
-          "disclosure",
-          "childCount"
+          "direction",
+          "sourceVariantId"
         ]
       },
-      "MemoryWriteError": {
+      "EntryWriteError": {
         "type": "object",
         "properties": {
           "error": {
@@ -500,23 +916,54 @@
           "kind"
         ]
       },
-      "CreateMemoryRequest": {
+      "CreateEntryRequest": {
         "type": "object",
         "properties": {
-          "uri": {
+          "circle": {
             "type": "string",
-            "pattern": "^(?!(?:persona|app):\\/\\/[a-z0-9_-]{1,64}$)(core|persona|app|user):\\/\\/([a-z0-9_-]{1,64}(?:\\/[a-z0-9_-]{1,64}){0,15})$"
+            "minLength": 1,
+            "maxLength": 64
           },
           "title": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 80,
+            "maxLength": 200,
             "pattern": "^\\P{Cc}*$/u"
           },
           "content": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 20000
+            "maxLength": 100000
+          },
+          "when": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9._\\-\\u3040-\\u30ff\\u3400-\\u4dbf\\u4e00-\\u9fff]{1,64}$"
+              },
+              "maxItems": 16
+            }
+          },
+          "variants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VariantInput"
+            },
+            "minItems": 1,
+            "maxItems": 20
+          },
+          "topics": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[^\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}\\s]+$/u"
+            },
+            "maxItems": 32,
+            "default": []
           },
           "sensitivity": {
             "type": "string",
@@ -544,7 +991,7 @@
               "minLength": 2,
               "maxLength": 64
             },
-            "maxItems": 32,
+            "maxItems": 50,
             "default": []
           },
           "validTo": {
@@ -554,38 +1001,120 @@
           },
           "plaintextOk": {
             "type": "boolean",
-            "description": "正文里新增的疑似明文确实不是凭据时设为 true：照常写入，这条记忆进待处理。是凭据时先存成凭据，正文写占位符"
+            "description": "正文里新增的疑似明文确实不是凭据时设为 true：照常写入，这条词条进待处理。是凭据时先存成凭据，正文写占位符"
+          }
+        }
+      },
+      "VariantInput": {
+        "type": "object",
+        "properties": {
+          "when": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9._\\-\\u3040-\\u30ff\\u3400-\\u4dbf\\u4e00-\\u9fff]{1,64}$"
+              },
+              "maxItems": 16
+            },
+            "default": {}
+          },
+          "content": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100000
+          },
+          "sortOrder": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 999,
+            "default": 0
           }
         },
         "required": [
-          "uri",
           "content"
         ]
       },
-      "UpdateMemoryRequest": {
+      "UpdateEntryRequest": {
         "type": "object",
         "properties": {
-          "uri": {
+          "id": {
             "type": "string",
-            "pattern": "^(?!(?:persona|app):\\/\\/[a-z0-9_-]{1,64}$)(core|persona|app|user):\\/\\/([a-z0-9_-]{1,64}(?:\\/[a-z0-9_-]{1,64}){0,15})$"
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "circle": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
           },
           "expectedVersion": {
             "type": "integer"
           },
-          "expectedId": {
-            "type": "string",
-            "format": "uuid"
-          },
           "title": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 80,
+            "maxLength": 200,
             "pattern": "^\\P{Cc}*$/u"
           },
           "content": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 20000
+            "maxLength": 100000
+          },
+          "when": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9._\\-\\u3040-\\u30ff\\u3400-\\u4dbf\\u4e00-\\u9fff]{1,64}$"
+              },
+              "maxItems": 16
+            }
+          },
+          "variants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VariantInput"
+            },
+            "minItems": 1,
+            "maxItems": 20
+          },
+          "upsertVariants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VariantInput"
+            },
+            "minItems": 1,
+            "maxItems": 20
+          },
+          "removeVariantWhens": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9._\\-\\u3040-\\u30ff\\u3400-\\u4dbf\\u4e00-\\u9fff]{1,64}$"
+                },
+                "maxItems": 16
+              }
+            },
+            "minItems": 1,
+            "maxItems": 20
+          },
+          "topics": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[^\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}\\s]+$/u"
+            },
+            "maxItems": 32
           },
           "sensitivity": {
             "type": "string",
@@ -615,7 +1144,7 @@
               "minLength": 2,
               "maxLength": 64
             },
-            "maxItems": 32
+            "maxItems": 50
           },
           "glossaryRemove": {
             "type": "array",
@@ -624,7 +1153,7 @@
               "minLength": 1,
               "maxLength": 64
             },
-            "maxItems": 32
+            "maxItems": 50
           },
           "validTo": {
             "type": [
@@ -636,35 +1165,38 @@
           },
           "plaintextOk": {
             "type": "boolean",
-            "description": "正文里新增的疑似明文确实不是凭据时设为 true：照常写入，这条记忆进待处理。是凭据时先存成凭据，正文写占位符"
+            "description": "正文里新增的疑似明文确实不是凭据时设为 true：照常写入，这条词条进待处理。是凭据时先存成凭据，正文写占位符"
           }
         },
         "required": [
-          "uri"
+          "id"
         ]
       },
-      "MoveMemoryRequest": {
+      "TransferEntryRequest": {
         "type": "object",
         "properties": {
-          "from": {
+          "id": {
             "type": "string",
-            "pattern": "^(?!(?:persona|app):\\/\\/[a-z0-9_-]{1,64}$)(core|persona|app|user):\\/\\/([a-z0-9_-]{1,64}(?:\\/[a-z0-9_-]{1,64}){0,15})$"
+            "minLength": 1,
+            "maxLength": 2048
           },
-          "to": {
+          "fromCircle": {
             "type": "string",
-            "pattern": "^(?!(?:persona|app):\\/\\/[a-z0-9_-]{1,64}$)(core|persona|app|user):\\/\\/([a-z0-9_-]{1,64}(?:\\/[a-z0-9_-]{1,64}){0,15})$"
+            "minLength": 1,
+            "maxLength": 64
           },
-          "expectedId": {
+          "toCircle": {
             "type": "string",
-            "format": "uuid"
+            "minLength": 1,
+            "maxLength": 64
           },
           "expectedVersion": {
             "type": "integer"
           }
         },
         "required": [
-          "from",
-          "to"
+          "id",
+          "toCircle"
         ]
       },
       "RecallResponse": {
@@ -709,8 +1241,14 @@
             "items": {
               "type": "object",
               "properties": {
+                "shortId": {
+                  "$ref": "#/components/schemas/ShortId"
+                },
                 "content": {
                   "type": "string"
+                },
+                "crossGroup": {
+                  "type": "boolean"
                 },
                 "updatedAt": {
                   "type": "string"
@@ -741,6 +1279,28 @@
             "type": "integer",
             "minimum": 1,
             "maximum": 50
+          },
+          "facets": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9._\\-\\u3040-\\u30ff\\u3400-\\u4dbf\\u4e00-\\u9fff]{1,64}$"
+              },
+              "maxItems": 16
+            }
+          },
+          "crossCircle": {
+            "type": "boolean",
+            "default": true
+          },
+          "includeSubjects": {
+            "type": "boolean",
+            "default": true
+          },
+          "project": {
+            "$ref": "#/components/schemas/LifecycleProject"
           },
           "context": {
             "$ref": "#/components/schemas/SessionContext"
@@ -801,6 +1361,29 @@
       "BootResponse": {
         "type": "object",
         "properties": {
+          "personaTraits": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "traitKey": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "content": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "traitKey",
+                "title",
+                "content"
+              ]
+            },
+            "default": []
+          },
           "entries": {
             "type": "array",
             "items": {
@@ -810,7 +1393,7 @@
           "omitted": {
             "type": "array",
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/ShortId"
             }
           }
         },
@@ -822,20 +1405,27 @@
       "BootEntry": {
         "type": "object",
         "properties": {
-          "uri": {
-            "type": "string"
+          "shortId": {
+            "$ref": "#/components/schemas/ShortId"
           },
           "title": {
             "type": "string"
           },
-          "layer": {
+          "circleId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "circleSlug": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
             "type": "string",
             "enum": [
-              "core",
-              "persona",
-              "app",
-              "user",
-              "subject",
+              "entry",
+              "fact",
               "episode"
             ]
           },
@@ -844,9 +1434,11 @@
           }
         },
         "required": [
-          "uri",
+          "shortId",
           "title",
-          "layer",
+          "circleId",
+          "circleSlug",
+          "kind",
           "content"
         ]
       },
@@ -856,16 +1448,16 @@
           "hostOutput": {
             "$ref": "#/components/schemas/HostOutput"
           },
-          "nodeUris": {
+          "shortIds": {
             "type": "array",
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/ShortId"
             }
           }
         },
         "required": [
           "hostOutput",
-          "nodeUris"
+          "shortIds"
         ]
       },
       "HostOutput": {
@@ -899,6 +1491,10 @@
             "type": "string",
             "maxLength": 200
           },
+          "deviceKey": {
+            "type": "string",
+            "maxLength": 128
+          },
           "context": {
             "$ref": "#/components/schemas/SessionContext"
           },
@@ -922,6 +1518,13 @@
           "sessionId": {
             "type": "string",
             "maxLength": 200
+          },
+          "deviceKey": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "project": {
+            "$ref": "#/components/schemas/LifecycleProject"
           },
           "context": {
             "$ref": "#/components/schemas/SessionContext"
@@ -950,6 +1553,13 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 200
+          },
+          "deviceKey": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "project": {
+            "$ref": "#/components/schemas/LifecycleProject"
           },
           "context": {
             "$ref": "#/components/schemas/SessionContext"
@@ -1100,7 +1710,7 @@
         "tags": [
           "auth"
         ],
-        "summary": "当前 API Key 对应的空间、应用与授权上限；能读本人归属的 Key 还带空间名与应用所有者的显示名",
+        "summary": "当前访问密钥对应的主场圈、关联客场圈、接入实例、人格、解析后的在场切面、可见词表与授权上限",
         "security": [
           {
             "bearer": []
@@ -1130,35 +1740,222 @@
         }
       }
     },
-    "/v1/memories": {
+    "/v1/entries/browse": {
       "get": {
         "tags": [
-          "memories"
+          "entries"
         ],
         "security": [
           {
             "bearer": []
           }
         ],
-        "summary": "按坐标（URI）读取一条记忆",
+        "summary": "按维度分组浏览可见的词条索引与多变体切面概览",
         "parameters": [
           {
             "schema": {
               "type": "string",
-              "pattern": "^(?!(?:persona|app):\\/\\/[a-z0-9_-]{1,64}$)(core|persona|app|user):\\/\\/([a-z0-9_-]{1,64}(?:\\/[a-z0-9_-]{1,64}){0,15})$"
+              "enum": [
+                "circle",
+                "realm",
+                "env",
+                "runtime",
+                "project",
+                "topic",
+                "kind"
+              ],
+              "default": "topic"
             },
-            "required": true,
-            "name": "uri",
+            "required": false,
+            "name": "groupBy",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "required": false,
+            "name": "circle",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "entry",
+                "fact",
+                "episode"
+              ]
+            },
+            "required": false,
+            "name": "kind",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[^\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}\\s]+$/u"
+            },
+            "required": false,
+            "name": "topic",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9._\\-\\u3040-\\u30ff\\u3400-\\u4dbf\\u4e00-\\u9fff]{1,64}$"
+                },
+                "maxItems": 16
+              }
+            },
+            "required": false,
+            "name": "facets",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "required": false,
+            "name": "query",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100
+            },
+            "required": false,
+            "name": "limit",
             "in": "query"
           }
         ],
         "responses": {
           "200": {
-            "description": "记忆",
+            "description": "分组浏览结果",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/MemoryView"
+                  "$ref": "#/components/schemas/EntryBrowseResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未登录或凭据无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "没有权限",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "不存在或不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/entries": {
+      "get": {
+        "tags": [
+          "entries"
+        ],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "按短 ID（m-xxxxxx）、历史坐标或标题读取词条；默认返回与当前切面焦点相容的变体切片",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            },
+            "required": true,
+            "name": "id",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "required": false,
+            "name": "circle",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "required": false,
+            "name": "allVariants",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "词条",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntryView"
                 }
               }
             }
@@ -1217,20 +2014,20 @@
       },
       "post": {
         "tags": [
-          "memories"
+          "entries"
         ],
         "security": [
           {
             "bearer": []
           }
         ],
-        "summary": "新建记忆，坐标的开头决定归属；带 validTo 时到期后不再召回、不进 boot",
+        "summary": "新建词条（单切片或多变体切片），可选目标记忆圈，默认进入主场记忆圈",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CreateMemoryRequest"
+                "$ref": "#/components/schemas/CreateEntryRequest"
               }
             }
           }
@@ -1241,7 +2038,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/MemoryView"
+                  "$ref": "#/components/schemas/EntryView"
                 }
               }
             }
@@ -1251,7 +2048,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/MemoryWriteError"
+                  "$ref": "#/components/schemas/EntryWriteError"
                 }
               }
             }
@@ -1300,20 +2097,20 @@
       },
       "patch": {
         "tags": [
-          "memories"
+          "entries"
         ],
         "security": [
           {
             "bearer": []
           }
         ],
-        "summary": "修改记忆的标题、正文、敏感级、priority、disclosure、glossary 或有效期；换坐标或归属用 move",
+        "summary": "修改词条内容、按切面追加/覆盖或删除变体切片、主题标签、敏感级与有效期",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/UpdateMemoryRequest"
+                "$ref": "#/components/schemas/UpdateEntryRequest"
               }
             }
           }
@@ -1324,7 +2121,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/MemoryView"
+                  "$ref": "#/components/schemas/EntryView"
                 }
               }
             }
@@ -1334,7 +2131,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/MemoryWriteError"
+                  "$ref": "#/components/schemas/EntryWriteError"
                 }
               }
             }
@@ -1383,31 +2180,33 @@
       },
       "delete": {
         "tags": [
-          "memories"
+          "entries"
         ],
         "security": [
           {
             "bearer": []
           }
         ],
-        "summary": "删除记忆（保留历史事件）",
+        "summary": "软删除词条（保留历史事件）",
         "parameters": [
           {
             "schema": {
               "type": "string",
-              "pattern": "^(?!(?:persona|app):\\/\\/[a-z0-9_-]{1,64}$)(core|persona|app|user):\\/\\/([a-z0-9_-]{1,64}(?:\\/[a-z0-9_-]{1,64}){0,15})$"
+              "minLength": 1,
+              "maxLength": 2048
             },
             "required": true,
-            "name": "uri",
+            "name": "id",
             "in": "query"
           },
           {
             "schema": {
               "type": "string",
-              "format": "uuid"
+              "minLength": 1,
+              "maxLength": 64
             },
             "required": false,
-            "name": "expectedId",
+            "name": "circle",
             "in": "query"
           },
           {
@@ -1479,120 +2278,34 @@
         }
       }
     },
-    "/v1/memories/children": {
-      "get": {
-        "tags": [
-          "memories"
-        ],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
-        "summary": "列出直接子节点：of 是开头（core、user、persona、app）或坐标前缀（如 user://projects、persona://default）",
-        "parameters": [
-          {
-            "schema": {
-              "type": "string",
-              "minLength": 1
-            },
-            "required": true,
-            "name": "of",
-            "in": "query"
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "子节点",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/MemoryChildren"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "请求不合法",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "未登录或凭据无效",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "没有权限",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "不存在或不可见",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "冲突",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v1/memories/move": {
+    "/v1/entries/transfer": {
       "post": {
         "tags": [
-          "memories"
+          "entries"
         ],
         "security": [
           {
             "bearer": []
           }
         ],
-        "summary": "修改记忆的坐标（URI）：换开头就是改归属，Key 不能在共享的归属与本人之间移动",
+        "summary": "将词条迁移到另一条可写的共享记忆圈（禁止机密词条或跨越个人圈）",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/MoveMemoryRequest"
+                "$ref": "#/components/schemas/TransferEntryRequest"
               }
             }
           }
         },
         "responses": {
           "200": {
-            "description": "已移动",
+            "description": "迁移后的词条",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/MemoryView"
+                  "$ref": "#/components/schemas/EntryView"
                 }
               }
             }
@@ -1655,7 +2368,7 @@
         "tags": [
           "recall"
         ],
-        "summary": "按一段文本召回候选记忆（只返回 URI 与线索，正文用 GET /memories 读）；带了会话上下文时按它收紧权限，并附上当前发言人与本群的事实",
+        "summary": "按一段文本召回候选词条（只返回短 ID 与线索，正文用 GET /entries 读）；带了会话上下文或切面时按它收紧权限并调制排序，并附上当前发言人与本群的事实",
         "security": [
           {
             "bearer": []
@@ -1710,7 +2423,7 @@
         "tags": [
           "recall"
         ],
-        "summary": "会话开始时应注入的启动节点",
+        "summary": "会话开始时应注入的人格特质与启动词条",
         "security": [
           {
             "bearer": []
@@ -1718,7 +2431,7 @@
         ],
         "responses": {
           "200": {
-            "description": "启动节点",
+            "description": "启动词条",
             "content": {
               "application/json": {
                 "schema": {
@@ -1755,7 +2468,7 @@
         "tags": [
           "lifecycle"
         ],
-        "summary": "插件转发宿主的生命周期事件，返回宿主可直接使用的输出；turn.end 把这一轮对话放进会话缓冲，攒批后抽取",
+        "summary": "插件转发宿主的生命周期事件，返回宿主可直接使用的输出与短 ID 列表；turn.end 把这一轮对话放进会话缓冲，攒批后抽取",
         "security": [
           {
             "bearer": []

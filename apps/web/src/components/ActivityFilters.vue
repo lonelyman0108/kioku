@@ -1,19 +1,21 @@
 <script setup lang="ts">
-import type { ActivityFacets, Layer } from '@kioku/contracts'
+import type { ActivityFacets, EntryKind } from '@kioku/contracts'
 import { computed, nextTick } from 'vue'
 
 import { MAX_ACTOR_FILTER, type FacetOption, type FilterGroup } from '../activity'
+import { useSession } from '../composables/useSession'
 import {
   activityActorIcons,
   activityActorKind,
   activityActorName,
   changeLabels,
+  entryKindLabels,
   eventLabel,
-  layerLabels,
 } from '../labels'
 import StrataSwatch from './strata/StrataSwatch.vue'
+import { entryBand } from './strata/strata'
 
-// 变更记录的筛选：操作者、操作、归属、改动的字段，每项带条数，勾选的才列出。
+// 变更记录的筛选：操作者、操作、类型、改动的字段，每项带条数，勾选的才列出。
 // 条数在除了这一组以外的全部筛选下算（服务端的筛选计数），取消勾选一项不影响同一组别的条数
 const props = defineProps<{
   options: Record<FilterGroup, FacetOption[]>
@@ -25,10 +27,12 @@ const emit = defineEmits<{
   reset: [group: FilterGroup]
 }>()
 
+const { circle } = useSession()
+
 const titles: Record<FilterGroup, string> = {
   actor: '操作者',
   type: '操作',
-  layer: '归属',
+  kind: '类型',
   field: '改动的字段',
 }
 // 取消勾选的操作者这次不在计数里时，名字从上次的计数里也找不到，退回按类别的说法
@@ -41,8 +45,8 @@ function labelOf(group: FilterGroup, key: string): string {
       return activityActorName(activityActorKind(key), actorNames.value.get(key) ?? null)
     case 'type':
       return eventLabel(key).label
-    case 'layer':
-      return layerLabels[key as Layer]
+    case 'kind':
+      return entryKindLabels[key as EntryKind] ?? key
     default:
       return changeLabels[key] ?? key
   }
@@ -102,8 +106,8 @@ const groups = computed(() =>
         <input type="checkbox" :checked="item.on" @change="(e) => onChange(g.group, item.key, e)" />
         <span class="option-label">
           <StrataSwatch
-            v-if="g.group === 'layer'"
-            :layer="item.key as Layer"
+            v-if="g.group === 'kind'"
+            :band="entryBand({ kind: item.key as EntryKind }, circle)"
             plain
             decorative
             :width="14"

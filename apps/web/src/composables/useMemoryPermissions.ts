@@ -1,50 +1,80 @@
-import { SENSITIVITIES, type MemoryView } from '@kioku/contracts'
+import {
+  SENSITIVITIES,
+  type CircleKind,
+  type ConsoleEntryView,
+  type MemberRole,
+} from '@kioku/contracts'
 import { useQuery } from '@tanstack/vue-query'
 import { computed, type Ref } from 'vue'
 
 import { api } from '../api/endpoints'
 import { useSession } from './useSession'
 
-// 成员在管理界面里能对记忆做什么，规则与服务端的 consoleAccess 一致：
-// owner 都能写；editor 最高到 private，应用的记忆只能写自己是所有者的应用；viewer 只读。
-// 服务端仍会逐条校验，这里只决定显示哪些操作，免得点了才报没有权限
-export function useMemoryPermissions(spaceId: Ref<string>) {
-  const { me, space } = useSession()
-  const apps = useQuery({
-    queryKey: computed(() => ['apps', spaceId.value]),
-    queryFn: () => api.apps(spaceId.value),
+// 成员在管理界面里能对词条做什么：
+// owner 都能写；editor 最高到 private，viewer 只读。跨圈关联只读，若条目位于别的记忆圈则按对应记忆圈角色判断
+export function useMemoryPermissions(circleId: Ref<string>) {
+  const { me, circle } = useSession()
+  const activeCircle = computed(
+    () =>
+      me.data.value?.circles.find((c) => c.id === circleId.value) ??
+      (circle.value?.id === circleId.value ? circle.value : null),
+  )
+  const circleKind = computed<CircleKind>(() => activeCircle.value?.kind ?? 'shared')
+  const role = computed<MemberRole>(() => activeCircle.value?.role ?? 'viewer')
+  const clients = useQuery({
+    queryKey: computed(() => ['clients', circleId.value] as const),
+    queryFn: ({ queryKey: [, cid] }) => api.clients(cid),
   })
-  const role = computed(() => space.value?.role ?? 'viewer')
-  const canWrite = computed(() => role.value !== 'viewer')
+  const canWrite = computed(() => role.value === 'owner' || role.value === 'editor')
+  const canEditPersonas = computed(() => role.value === 'owner')
+  const canEditVocabulary = computed(() => role.value === 'owner' || role.value === 'editor')
   const sensitivities = computed(() =>
     SENSITIVITIES.filter((s) => role.value === 'owner' || s !== 'secret'),
   )
 
-  function canWriteUri(uri: string): boolean {
-    if (!canWrite.value) return false
-    if (role.value === 'owner') return true
-    const slug = /^app:\/\/([^/]+)/.exec(uri)?.[1]
-    if (!slug) return true
+  function roleForCircle(targetCircleId?: string): MemberRole {
+    if (!targetCircleId || targetCircleId === circleId.value) return role.value
+    return me.data.value?.circles.find((c) => c.id === targetCircleId)?.role ?? 'viewer'
+  }
+
+  function kindForCircle(targetCircleId?: string, fallbackSlug?: string | null): CircleKind {
+    if (!targetCircleId || targetCircleId === circleId.value) return circleKind.value
     return (
-      apps.data.value?.some((a) => a.slug === slug && a.ownerAccountId === me.data.value?.id) ??
-      false
+      me.data.value?.circles.find((c) => c.id === targetCircleId)?.kind ??
+      (fallbackSlug === 'personal' ? 'personal' : 'shared')
     )
   }
 
+  function canWriteEntry(entry: Pick<ConsoleEntryView, 'sensitivity' | 'circleId'>): boolean {
+    const r = roleForCircle(entry.circleId)
+    if (r === 'viewer') return false
+    if (entry.sensitivity === 'secret' && r !== 'owner') return false
+    return true
+  }
+
   // 不能改时给出原因，显示在编辑器上方
-  function readOnlyReason(memory: Pick<MemoryView, 'uri' | 'sensitivity'>): string | null {
-    if (!canWrite.value) return '当前账号是此空间的查看者，无法修改。'
-    if (!canWriteUri(memory.uri)) {
-      // editor 要知道应用是不是自己的，得先读到应用列表
-      if (apps.isPending.value) return '正在确认应用所有者……'
-      if (apps.isError.value) return '应用列表读取失败，无法确认应用的记忆的修改权限，请刷新重试。'
-      return '这条记忆属于其他成员的应用，仅应用所有者和空间所有者可修改。'
-    }
-    if (memory.sensitivity === 'secret' && role.value !== 'owner') {
-      return '机密记忆仅空间所有者可修改。'
+  function readOnlyReason(
+    entry: Pick<ConsoleEntryView, 'sensitivity' | 'circleId'>,
+  ): string | null {
+    const r = roleForCircle(entry.circleId)
+    if (r === 'viewer') return '当前账号是此记忆圈的查看者，无法修改。'
+    if (entry.sensitivity === 'secret' && r !== 'owner') {
+      return '机密记忆仅记忆圈所有者可修改。'
     }
     return null
   }
 
-  return { apps, role, canWrite, sensitivities, canWriteUri, readOnlyReason }
+  return {
+    circle: activeCircle,
+    circleKind,
+    clients,
+    role,
+    canWrite,
+    canEditPersonas,
+    canEditVocabulary,
+    sensitivities,
+    kindForCircle,
+    canWriteEntry,
+    readOnlyReason,
+  }
 }

@@ -2,10 +2,12 @@ import {
   ConvertibleValue,
   ConvertToCredentialRequest,
   placeholderAllowed,
-  type ConsoleMemoryView,
+  type CircleKind,
+  type ConsoleEntryView,
   type ConvertedToCredential,
   type ConvertTarget,
   type CredentialValueMatch,
+  type Me,
   type OrphanVaultItem,
 } from '@kioku/contracts'
 import { useQueryClient } from '@tanstack/vue-query'
@@ -13,6 +15,8 @@ import { computed, onScopeDispose, reactive, ref, watch, type Ref } from 'vue'
 
 import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
+import { entryText } from '../memoryDetail'
+import { placeholderOf } from '../placeholders'
 import {
   convertDestinations,
   convertLeftovers,
@@ -21,7 +25,7 @@ import {
   NEW_DESTINATION,
   occurrences,
   plaintextCandidates,
-  suggestIdentifier,
+  suggestEntryIdentifier,
   suggestItemIdentifiers,
   suggestName,
   valueContext,
@@ -29,12 +33,12 @@ import {
   type ConvertDestination,
   type PlaintextCandidate,
 } from '../plaintext'
-import { placeholderOf } from '../placeholders'
+import { ME_KEY } from '../query'
 import { fromLocalInput } from '../time'
 import {
+  hasWriteReason,
   optionalExpiresProblem,
   orphanVaultItem,
-  hasWriteReason,
   storeBlocker,
   writeFailureNext,
 } from '../vault'
@@ -49,17 +53,15 @@ import { refreshAfterPlaintext } from './usePlaintextActions'
 // （设了去处写进密码库，没有时由 Kioku 托管）。
 // 按值查找的结果也只在这里，不进查询的缓存
 export function useConvertCredential(
-  spaceId: Ref<string>,
-  uri: Ref<string | null>,
-  onConverted: (memory: ConsoleMemoryView, result: ConvertedToCredential) => void,
+  circleId: Ref<string>,
+  shortId: Ref<string | null>,
+  onConverted: (entry: ConsoleEntryView, result: ConvertedToCredential) => void,
 ) {
   const queryClient = useQueryClient()
 
-  const memory = ref<ConsoleMemoryView | null>(null)
+  const entry = ref<ConsoleEntryView | null>(null)
   const loading = ref(false)
   const loadFailure = ref<string | null>(null)
-  // url 与 expires 只给新建凭据；expires 是 datetime-local 的本地时间，空的是不到期，
-  // expiresBad 是输入框填了一半（这时 expires 也是空的）
   const form = reactive({
     value: '',
     field: 'password',
@@ -69,38 +71,29 @@ export function useConvertCredential(
     expires: '',
     expiresBad: false,
   })
-  // 新建的凭据写到哪里，读不到时不能新建
   const newStore = useNewCredentialStore(
-    spaceId,
-    computed(() => uri.value !== null),
+    circleId,
+    computed(() => shortId.value !== null),
   )
   const candidates = ref<PlaintextCandidate[]>([])
-  // 当前显示着值吗。核对过的那个值记在 checkedValue：隐藏之后改过，要再显示一次才算核对过
   const shown = ref(false)
   const checkedValue = ref<string | null>(null)
   const failure = ref<string | null>(null)
-  // 只在 409 之后可能给：重新读取解决不了别的失败
   const canReload = ref(false)
   const submitting = ref(false)
   const result = ref<ConvertedToCredential | null>(null)
-  // 新建时写进了密码库、之后的事务却失败了：条目留在集合里（CredentialWriteError.vaultItem）
   const orphan = ref<OrphanVaultItem | null>(null)
-  // 失败之后的下一步说明（集合只读、值太长），见 vault.ts 的 writeFailureNext
   const failureDetail = ref<string | null>(null)
 
-  // 每次读取一个序号：关掉或者换了一条之后，晚到的读取结果与匹配结果不算
   let loadId = 0
 
-  // 按值查找：值到结果；正在查的值；查不了时的说明；读不了的连接数
   const matches = ref(new Map<string, CredentialValueMatch>())
   const pendingValues = ref(new Set<string>())
   const matchFailure = ref<string | null>(null)
   const unavailableConnections = ref(0)
   const unreadableCredentials = ref(0)
-  // 选中的去处（ConvertDestination 的 key）。手动选过就不再跟着匹配结果换默认的
   const destination = ref<string>(NEW_DESTINATION.key)
   const destinationTouched = ref(false)
-  // 给条目起的标识，按条目记
   const vaultIdentifiers = reactive<Record<string, string>>({})
   const existingIdentifiers = ref<string[]>([])
 
@@ -112,16 +105,14 @@ export function useConvertCredential(
     destinationTouched.value = false
   }
 
-  // 查还没查过、也不在查的值。结果按发出时的读取序号认：重新读取之后晚到的不算，
-  // 重新读取时 pendingValues 清空，由 load 把要用的值再查一次
   async function matchValues(values: string[]) {
     const id = loadId
-    const sid = spaceId.value
+    const cid = circleId.value
     const wanted = values.filter((v) => !matches.value.has(v) && !pendingValues.value.has(v))
     if (!wanted.length) return
     pendingValues.value = new Set([...pendingValues.value, ...wanted])
     const found = await matchByValue(wanted, (chunk) =>
-      api.matchCredentialValues(sid, { values: chunk }),
+      api.matchCredentialValues(cid, { values: chunk }),
     )
     if (id !== loadId) return
     const rest = new Set(pendingValues.value)
@@ -134,65 +125,75 @@ export function useConvertCredential(
     matchFailure.value = found.failure ? readFailure(found.failure, '查找同值的凭据失败') : null
   }
 
-  const readMemory = (sid: string, target: string) =>
+  const readEntry = (cid: string, sid: string) =>
     queryClient.fetchQuery({
-      queryKey: ['memory', sid, target],
-      queryFn: () => api.memory(sid, target),
+      queryKey: ['entry', cid, sid],
+      queryFn: () => api.entry(cid, sid, { allVariants: true }),
       staleTime: 0,
     })
 
-  // 占位符放不进这条记忆：服务端一定拒绝，值不显示，也不让提交
-  const scopeBlocked = (view: Pick<ConsoleMemoryView, 'layer' | 'sensitivity'>) =>
-    !placeholderAllowed(view.layer, view.sensitivity)
+  // 判断词条所在的记忆圈类型：优先从会话缓存认，回退按 circleSlug === 'personal' 判断
+  function resolveCircleKind(view: Pick<ConsoleEntryView, 'circleId' | 'circleSlug'>): CircleKind {
+    const me = queryClient.getQueryData<Me | null>(ME_KEY)
+    const found = me?.circles.find((c) => c.id === view.circleId)?.kind
+    if (found) return found
+    return view.circleSlug === 'personal' ? 'personal' : 'shared'
+  }
 
-  // 已经读到过时是重新读取：
-  // 填好的留着；值在新的正文里还有就连同字段名留下，没有了就重新猜；都要再核对一次
+  // 占位符放不进这条记忆：服务端一定拒绝，值不显示，也不让提交
+  const entryCircleKind = computed<CircleKind>(() =>
+    entry.value ? resolveCircleKind(entry.value) : 'shared',
+  )
+  const scopeBlocked = (
+    view: Pick<ConsoleEntryView, 'circleId' | 'circleSlug' | 'kind' | 'sensitivity'>,
+  ) => !placeholderAllowed(resolveCircleKind(view), view.kind, view.sensitivity)
+
   async function load() {
-    const target = uri.value
+    const target = shortId.value
     if (!target) return
     const id = ++loadId
-    const sid = spaceId.value
-    const previous = memory.value ? { value: form.value, field: form.field } : null
+    const cid = circleId.value
+    const previous = entry.value ? { value: form.value, field: form.field } : null
     loading.value = true
     loadFailure.value = null
     failure.value = null
     canReload.value = false
-    // 重新读取（例如 409 之后）时去处可能变了（条目刚被别处起了标识）：查过的结果都不算，重新查；
-    // 上一次读取发出的匹配也作废了（见 matchValues 的序号）
     pendingValues.value = new Set()
     matches.value = new Map()
     try {
       const [view, existing] = await Promise.all([
-        readMemory(sid, target),
-        // 建议的标识避开已有的。只是建议，读不到也不影响转存，冲突以服务端为准
+        readEntry(cid, target),
         queryClient
           .fetchQuery({
-            queryKey: ['credentials', sid],
-            queryFn: () => api.credentials(sid),
+            queryKey: ['credentials', cid],
+            queryFn: () => api.credentials(cid),
             staleTime: 60_000,
           })
           .catch(() => null),
       ])
       if (id !== loadId) return
-      memory.value = view
+      entry.value = view
       if (scopeBlocked(view)) {
         candidates.value = []
         pick(undefined)
-        // 只有列表读旧了才走到这里：让那一行也换成去调整
-        refreshAfterPlaintext(queryClient, sid)
+        refreshAfterPlaintext(queryClient, cid)
         return
       }
-      candidates.value = plaintextCandidates(view.content ?? '')
+      const joined = entryText(view)
+      candidates.value = plaintextCandidates(joined)
       pick(candidates.value[0])
       existingIdentifiers.value = (existing?.items ?? []).map((c) => c.identifier)
       void matchValues(candidates.value.map((c) => c.value))
       if (previous) {
-        if (occurrences(view.content ?? '', previous.value)) Object.assign(form, previous)
-        // 恢复回来的值可能是手输的：上一次读取时发出的查找已经作废，这里再查一次
+        if (occurrences(joined, previous.value)) Object.assign(form, previous)
         void matchValues([form.value])
         return
       }
-      form.identifier = suggestIdentifier(view.uri, form.field, existingIdentifiers.value)
+      form.identifier = suggestEntryIdentifier(
+        { title: view.title, shortId: view.shortId },
+        form.field,
+        existingIdentifiers.value,
+      )
       form.name = suggestName(view)
     } catch (err) {
       if (id === loadId) loadFailure.value = readFailure(err)
@@ -205,7 +206,7 @@ export function useConvertCredential(
     loadId++
     submitId++
     submitting.value = false
-    memory.value = null
+    entry.value = null
     loading.value = false
     candidates.value = []
     result.value = null
@@ -236,18 +237,16 @@ export function useConvertCredential(
     for (const key of Object.keys(vaultIdentifiers)) delete vaultIdentifiers[key]
   }
 
-  // 显示着的值才算核对过
   watch([shown, () => form.value], () => {
     if (shown.value) checkedValue.value = form.value
   })
 
-  // 值改过之后再查一次：停下来一会儿才查，免得每敲一个字发一次
   let matchTimer: ReturnType<typeof setTimeout> | null = null
   watch(
     () => form.value,
     (value) => {
       if (matchTimer) clearTimeout(matchTimer)
-      if (!memory.value || !value || matches.value.has(value)) return
+      if (!entry.value || !value || matches.value.has(value)) return
       matchTimer = setTimeout(() => void matchValues([value]), 400)
     },
   )
@@ -267,7 +266,6 @@ export function useConvertCredential(
   const selected = computed<ConvertDestination>(
     () => choices.value.destinations.find((d) => d.key === destination.value) ?? NEW_DESTINATION,
   )
-  // 匹配结果到了、或者换了值：没手动选过就换成第一个对上的；选过的去处没有了也换
   watch(
     () => choices.value.destinations,
     (list) => {
@@ -283,8 +281,8 @@ export function useConvertCredential(
     destinationTouched.value = true
   }
 
-  const blocked = computed(() => !!memory.value && scopeBlocked(memory.value))
-  const content = computed(() => memory.value?.content ?? '')
+  const blocked = computed(() => !!entry.value && scopeBlocked(entry.value))
+  const content = computed(() => (entry.value ? entryText(entry.value) : ''))
   const replaced = computed(() => occurrences(content.value, form.value))
   const context = computed(() => (shown.value ? valueContext(content.value, form.value) : null))
   const placeholder = computed(() => {
@@ -303,7 +301,6 @@ export function useConvertCredential(
       return { kind: 'credential', credentialId: d.credentialId, field: d.field }
     }
     if (d.kind === 'vault') {
-      // 名称不给时服务端用条目的名称
       return {
         kind: 'vault',
         connectionId: d.connectionId,
@@ -324,14 +321,14 @@ export function useConvertCredential(
     }
   })
   const body = computed(() => ({
-    memoryId: memory.value?.id ?? '',
-    expectedVersion: memory.value?.version ?? 0,
+    entryId: entry.value?.id ?? '',
+    expectedVersion: entry.value?.version ?? 0,
     value: form.value,
     target: target.value,
   }))
-  // 提交前在界面上能看出来的问题，服务端照样会检查。规则直接用接口的定义，提示与服务端一致
+
   const problem = computed<string | null>(() => {
-    if (!memory.value || blocked.value) return null
+    if (!entry.value || blocked.value) return null
     if (selected.value.kind === 'new') {
       const blocker = storeBlocker({
         store: newStore.store.value,
@@ -348,64 +345,56 @@ export function useConvertCredential(
     if (matchingValue.value) return '正在查找同值的凭据'
     return null
   })
-  // 重新读取进行中或者失败时，手里的是旧版本，表单也藏着：不能把看不见的值和旧版本发出去
   const canSubmit = computed(
     () =>
-      !!memory.value &&
+      !!entry.value &&
       !loading.value &&
       !loadFailure.value &&
       !blocked.value &&
-      memory.value.content !== null &&
+      !entry.value.contentHidden &&
       !problem.value,
   )
 
-  // 每次提交一个序号，和 loadId 一样：关掉或者换了空间之后，迟到的响应不碰这时的状态
   let submitId = 0
   async function submit() {
     if (submitting.value || !canSubmit.value) return
     const id = ++submitId
-    const sid = spaceId.value
-    const seen = memory.value!
+    const cid = circleId.value
+    const seen = entry.value!
     submitting.value = true
     failure.value = null
     failureDetail.value = null
     orphan.value = null
     canReload.value = false
     try {
-      const done = await api.convertToCredential(sid, body.value)
-      // 服务端已经写了，对话框还在不在，那个空间的缓存都要刷新
-      refreshAfterPlaintext(queryClient, sid, done.memory)
-      // 版本变了，涉及这条记忆的整理建议随之作废；给条目起了标识，条目列表也变了
+      const done = await api.convertToCredential(cid, body.value)
+      refreshAfterPlaintext(queryClient, cid, done.entry)
       for (const key of ['credentials', 'dream-suggestions', 'vault-items']) {
-        void queryClient.invalidateQueries({ queryKey: [key, sid] })
+        void queryClient.invalidateQueries({ queryKey: [key, cid] })
       }
       if (id !== submitId) return
       form.value = ''
       shown.value = false
       checkedValue.value = null
       result.value = done
-      onConverted(done.memory, done)
+      onConverted(done.entry, done)
     } catch (err) {
       if (err instanceof ApiError && (err.status === 404 || err.status === 409)) {
-        refreshAfterPlaintext(queryClient, sid)
+        refreshAfterPlaintext(queryClient, cid)
       }
-      // 留下的条目出现在条目列表里，可以起标识
       const left = orphanVaultItem(err)
-      if (left) void queryClient.invalidateQueries({ queryKey: ['vault-items', sid] })
+      if (left) void queryClient.invalidateQueries({ queryKey: ['vault-items', cid] })
       if (id !== submitId) return
       failure.value = err instanceof ApiError ? err.message : '转存失败'
       orphan.value = left
-      // 错误体带 reason 时按它给下一步：version、item_conflict 重新读取，read_only、value_too_long 说明该改什么
       const next = writeFailureNext(err, 'create')
       failureDetail.value = next.detail
       if (hasWriteReason(err)) {
         canReload.value = next.reload
         return
       }
-      // 不带原因的 409（例如标识冲突）：读一次比版本，不看文字。读到了且版本没变才不给重新读取；
-      // 读取失败时分不清，留着入口，不然提示让人重新读取却没有按钮，再提交一直 409
       if (err instanceof ApiError && err.status === 409) {
-        const latest = await readMemory(sid, seen.uri).catch(() => null)
+        const latest = await readEntry(cid, seen.shortId).catch(() => null)
         if (id !== submitId) return
         canReload.value = !latest || latest.id !== seen.id || latest.version !== seen.version
       }
@@ -417,7 +406,8 @@ export function useConvertCredential(
   const leftovers = computed(() => (result.value ? convertLeftovers(result.value) : []))
 
   return {
-    memory,
+    entry,
+    entryCircleKind,
     loading,
     loadFailure,
     form,

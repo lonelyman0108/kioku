@@ -1,8 +1,11 @@
 <script setup lang="ts">
 import type {
+  CircleSummary,
   DeviceGrantApproved,
   DeviceGrantInfo,
-  KeyScopes,
+  LensKeyScopes,
+  LinkedCircleGrant,
+  LinkedCircleMode,
   RuntimeFamily,
 } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
@@ -10,34 +13,35 @@ import { computed, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { api } from '../api/endpoints'
-import { refreshAppCaches } from '../appQueries'
+import { refreshClientCaches } from '../appQueries'
 import {
   DUPLICATE_SLUG,
   GRANT_GONE,
-  NEW_APP,
+  NEW_CLIENT,
   NOTHING_SELECTED,
   USER_CODE_PROBLEM,
-  appSlugProblem,
   approveBody,
-  defaultAppChoice,
-  defaultAppName,
+  clientSlugProblem,
+  defaultCircleId,
+  defaultClientChoice,
+  defaultClientName,
   defaultGrantPreset,
   defaultGrantScopes,
   defaultKeyName,
-  defaultSpaceId,
   displayUserCode,
-  grantApps,
+  grantClients,
   grantFailure,
   isGrantExpired,
-  issuableSpaces,
+  issuableCircles,
   lookupFailure,
   nameProblem,
+  newClientSlugs,
   normalizeUserCode,
-  newAppSlugs,
   nothingSelected,
   runtimeNames,
   type PlatformChoice,
 } from '../authorize'
+import FacetWhenPicker from '../components/FacetWhenPicker.vue'
 import Hint from '../components/Hint.vue'
 import KeyScopeEditor from '../components/KeyScopeEditor.vue'
 import {
@@ -46,28 +50,25 @@ import {
   matchPreset,
   tightenScopes,
 } from '../components/keyPresets'
-import EntryFrame from '../components/strata/EntryFrame.vue'
 import RuntimeIcon from '../components/RuntimeIcon.vue'
 import RuntimeLabel from '../components/RuntimeLabel.vue'
+import EntryFrame from '../components/strata/EntryFrame.vue'
 import NoteLine from '../components/strata/NoteLine.vue'
-import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import PropertyList, { type Property } from '../components/strata/PropertyList.vue'
+import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import ScopeTags from '../components/strata/ScopeTags.vue'
 import SectionHeading from '../components/strata/SectionHeading.vue'
 import { useNow } from '../composables/useNow'
 import { useSession } from '../composables/useSession'
+import { circleKindLabels } from '../labels'
 import { formatTime } from '../time'
 
-// 浏览器授权的确认页：输入终端里显示的确认码，看到这条申请，选空间，再给申请里的每个平台选应用与签发范围，
-// 确认一次或拒绝。访问密钥由命令行取走，这里拿不到、也不显示。
-// 确认码只从输入框来，不从地址读：别人发来的链接带不了确认码，要对着自己的终端输入。
-// 不在外壳里（不带空间），但要登录：路由守卫带人去登录页，登录后回到这里
+// 浏览器授权的确认页：确认码只从输入框来，不在地址或路由参数里传递
 const route = useRoute()
 const router = useRouter()
 const queryClient = useQueryClient()
-const { me, space: lastSpace } = useSession()
+const { me, circle: lastCircle } = useSession()
 
-// 会话失效（过期、在别的标签页退出）：回登录页，登录后回来重新输入确认码
 watch(
   () => me.data.value,
   (value) => {
@@ -78,13 +79,10 @@ watch(
 type Step = 'code' | 'review' | 'approved' | 'denied'
 const step = ref<Step>('code')
 
-// 第一步：输入确认码
 const codeInput = ref('')
 const codeError = ref<string | null>(null)
-// 从第二步退回来时的说明（申请过期了）
 const notice = ref<string | null>(null)
 const looking = ref(false)
-// 规整后的确认码与查到的申请；确认、拒绝都带着这个确认码
 const userCode = ref('')
 const info = ref<DeviceGrantInfo | null>(null)
 
@@ -110,7 +108,6 @@ async function lookup() {
   }
 }
 
-// 回到第一步：确认码、申请与上一次的选择都清掉
 function restart(message: string | null = null) {
   step.value = 'code'
   codeInput.value = ''
@@ -119,76 +116,112 @@ function restart(message: string | null = null) {
   userCode.value = ''
   info.value = null
   rows.value = []
+  linkedCircles.value = []
+  contextFacets.value = {}
   approved.value = null
   error.value = null
 }
 
-// 第二步：空间，所有平台共用
-const spaces = computed(() => issuableSpaces(me.data.value?.spaces ?? []))
-const spaceId = ref<string>()
-const spaceItems = computed(() => spaces.value.map((s) => ({ label: s.name, value: s.id })))
-const space = computed(() => spaces.value.find((s) => s.id === spaceId.value) ?? null)
-const isSpaceOwner = computed(() => space.value?.role === 'owner')
+// 第二步：主场记忆圈与客场关联
+const allCircles = computed(() => me.data.value?.circles ?? [])
+const circles = computed(() => issuableCircles(allCircles.value))
+const circleId = ref<string>()
+const circleItems = computed(() =>
+  circles.value.map((s) => ({
+    label: s.kind === 'personal' ? `${s.name}（个人圈）` : s.name,
+    value: s.id,
+  })),
+)
+const activeCircle = computed(() => circles.value.find((s) => s.id === circleId.value) ?? null)
+const isCircleOwner = computed(() => activeCircle.value?.role === 'owner')
 
-// 这个空间里的应用：每个平台能直接选当前账号自己的、运行时一致的，另有新建
-const apps = useQuery({
-  queryKey: computed(() => ['apps', spaceId.value]),
-  queryFn: () => api.apps(spaceId.value!),
-  enabled: computed(() => step.value === 'review' && spaceId.value !== undefined),
+const linkedCircles = ref<LinkedCircleGrant[]>([])
+const contextFacets = ref<Record<string, string[]>>({})
+const otherCircles = computed(() => allCircles.value.filter((c) => c.id !== circleId.value))
+
+watch(circleId, (cid) => {
+  linkedCircles.value = linkedCircles.value.filter((g) => g.circleId !== cid)
 })
-const takenSlugs = computed(() => (apps.data.value ?? []).map((app) => app.slug))
+
+function isCircleLinked(cid: string): boolean {
+  return linkedCircles.value.some((g) => g.circleId === cid)
+}
+function linkedMode(cid: string): LinkedCircleMode {
+  return linkedCircles.value.find((g) => g.circleId === cid)?.mode ?? 'read'
+}
+function toggleLinkedCircle(c: CircleSummary, checked: boolean) {
+  if (!checked) {
+    linkedCircles.value = linkedCircles.value.filter((g) => g.circleId !== c.id)
+    return
+  }
+  if (!isCircleLinked(c.id)) {
+    linkedCircles.value = [...linkedCircles.value, { circleId: c.id, mode: 'read' }]
+  }
+}
+function setLinkedMode(cid: string, mode: LinkedCircleMode) {
+  linkedCircles.value = linkedCircles.value.map((g) => (g.circleId === cid ? { ...g, mode } : g))
+}
+
+const clients = useQuery({
+  queryKey: computed(() => ['clients', circleId.value] as const),
+  queryFn: () => api.clients(circleId.value!),
+  enabled: computed(() => step.value === 'review' && circleId.value !== undefined),
+})
+const facets = useQuery({
+  queryKey: computed(() => ['facets', circleId.value] as const),
+  queryFn: () => api.facets(circleId.value!),
+  enabled: computed(() => step.value === 'review' && circleId.value !== undefined),
+})
+const realmTerms = computed(() =>
+  (facets.data.value?.terms ?? [])
+    .filter((t) => t.dimensionKey === 'realm')
+    .map((t) => ({ slug: t.slug, label: t.label })),
+)
+
+const takenSlugs = computed(() => (clients.data.value ?? []).map((c) => c.slug))
 const machine = computed(() => info.value?.clientName ?? null)
 
-// 每个平台一行。没改过的名称跟着默认值（标识被占用就换下一个），改过的保留输入
 interface ScopeForm {
   preset: string
-  scopes: KeyScopes
+  scopes: LensKeyScopes
 }
 interface PlatformRow {
   runtimeFamily: RuntimeFamily
-  // 这个平台自报的名字
   clientName: string | null
   selected: boolean
-  // 选过的应用；null 是没选过，用默认的（defaultAppChoice）
   picked: string | null
-  typed: { slug: string | null; appName: string | null; keyName: string | null }
-  // 不统一权限时这个平台自己的签发范围
+  typed: { slug: string | null; clientName: string | null; keyName: string | null }
   form: ScopeForm
-  // 服务端说被占用的那个标识与它给的说明。只在输入框里还是这个标识时显示：
-  // 重取列表之后默认值换成了下一个，旧的说明不该压着新的标识
   slugRejected: { slug: string; text: string } | null
 }
 const rows = ref<PlatformRow[]>([])
 
-const ownApps = (runtimeFamily: RuntimeFamily) =>
-  grantApps(apps.data.value ?? [], me.data.value?.id, runtimeFamily)
-const appItems = (runtimeFamily: RuntimeFamily) => [
-  ...ownApps(runtimeFamily).map((app) => ({
-    label: `${app.name}（app://${app.slug}）`,
-    value: app.id,
+const ownClients = (runtimeFamily: RuntimeFamily) =>
+  grantClients(clients.data.value ?? [], me.data.value?.id, runtimeFamily)
+const clientItems = (runtimeFamily: RuntimeFamily) => [
+  ...ownClients(runtimeFamily).map((c) => ({
+    label: `${c.name}（${c.slug}）`,
+    value: c.id,
   })),
-  { label: '新建应用', value: NEW_APP },
+  { label: '新建接入实例', value: NEW_CLIENT },
 ]
-// 没选过、或者选过的应用不在了（换了空间、被删、转给别人）时用默认的：
-// 优先同一台机器上次建的应用，其次第一个自己的同运行时应用，都没有才新建
-const appChoice = (row: PlatformRow) =>
+const clientChoice = (row: PlatformRow) =>
   row.picked !== null &&
-  (row.picked === NEW_APP || ownApps(row.runtimeFamily).some((app) => app.id === row.picked))
+  (row.picked === NEW_CLIENT || ownClients(row.runtimeFamily).some((c) => c.id === row.picked))
     ? row.picked
-    : defaultAppChoice(ownApps(row.runtimeFamily), row.runtimeFamily, machine.value)
-const appName = (row: PlatformRow) =>
-  row.typed.appName ?? defaultAppName(row.runtimeFamily, machine.value)
+    : defaultClientChoice(ownClients(row.runtimeFamily), row.runtimeFamily, machine.value)
+const clientName = (row: PlatformRow) =>
+  row.typed.clientName ?? defaultClientName(row.runtimeFamily, machine.value)
 const keyName = (row: PlatformRow) =>
   row.typed.keyName ?? defaultKeyName(machine.value, row.runtimeFamily)
 
-// 新建应用的标识：手填的先预留，没改过的由应用名称生成并依次避开
 const slugs = computed(() =>
-  newAppSlugs(
+  newClientSlugs(
     rows.value.map((row) => ({
-      isNew: row.selected && appChoice(row) === NEW_APP,
+      isNew: row.selected && clientChoice(row) === NEW_CLIENT,
       typed: row.typed.slug,
       runtimeFamily: row.runtimeFamily,
-      appName: appName(row),
+      clientName: clientName(row),
     })),
     takenSlugs.value,
   ),
@@ -199,7 +232,7 @@ const slugProblems = computed(() =>
     if (slug == null) return null
     if (row.slugRejected?.slug === slug) return row.slugRejected.text
     return (
-      appSlugProblem(slug, takenSlugs.value) ??
+      clientSlugProblem(slug, takenSlugs.value) ??
       (slugs.value.some((other, j) => j !== index && other === slug) ? DUPLICATE_SLUG : null)
     )
   }),
@@ -209,8 +242,6 @@ function setSlug(row: PlatformRow, value: string) {
   row.slugRejected = null
 }
 
-// 签发范围：和签发访问密钥的弹窗是同一个编辑器、同一套模板与收紧规则。
-// 默认所有平台用同一套；关掉之后每个平台从这一套开始各自改
 const sameScopes = ref(true)
 const shared = reactive<ScopeForm>({
   preset: defaultGrantPreset(false),
@@ -223,30 +254,30 @@ watch(sameScopes, (same) => {
     row.form = { preset: shared.preset, scopes: { ...shared.scopes } }
   }
 })
-// 换到不是所有者的空间时收紧：凭据能力、机密级与跨人格写入都不能带过去
 const tighten = (form: ScopeForm, owner: boolean) => {
   form.scopes = tightenScopes(form.scopes, owner)
   form.preset = matchPreset(form.scopes, owner)
 }
-watch(isSpaceOwner, (owner) => {
+watch(isCircleOwner, (owner) => {
   tighten(shared, owner)
   for (const row of rows.value) tighten(row.form, owner)
 })
 const sharedCredentials = computed(() => issuedCredentialCapability(shared.scopes))
 
-// 每条申请从默认值开始，不沿用上一条的选择：平台默认全选、新建应用、统一权限
 function resetChoice() {
-  spaceId.value = defaultSpaceId(me.data.value?.spaces ?? [], lastSpace.value?.id) ?? undefined
-  const owner = isSpaceOwner.value
+  circleId.value = defaultCircleId(me.data.value?.circles ?? [], lastCircle.value?.id) ?? undefined
+  const owner = isCircleOwner.value
   shared.scopes = defaultGrantScopes(owner)
   shared.preset = defaultGrantPreset(owner)
   sameScopes.value = true
+  linkedCircles.value = []
+  contextFacets.value = {}
   rows.value = (info.value?.platforms ?? []).map((platform) => ({
     runtimeFamily: platform.runtimeFamily,
     clientName: platform.clientName,
     selected: true,
     picked: null,
-    typed: { slug: null, appName: null, keyName: null },
+    typed: { slug: null, clientName: null, keyName: null },
     form: { preset: shared.preset, scopes: { ...shared.scopes } },
     slugRejected: null,
   }))
@@ -257,8 +288,8 @@ const choices = computed<PlatformChoice[]>(() =>
   rows.value.map((row, index) => ({
     runtimeFamily: row.runtimeFamily,
     selected: row.selected,
-    appChoice: appChoice(row),
-    newApp: { slug: slugs.value[index] ?? '', name: appName(row) },
+    clientChoice: clientChoice(row),
+    newClient: { slug: slugs.value[index] ?? '', name: clientName(row) },
     keyName: keyName(row),
     scopes: scopesOf(row),
   })),
@@ -267,9 +298,9 @@ const noneSelected = computed(() => nothingSelected(rows.value))
 const rowProblem = (row: PlatformRow, index: number) =>
   row.selected &&
   (!!nameProblem(keyName(row)) ||
-    (appChoice(row) === NEW_APP && (!!slugProblems.value[index] || !!nameProblem(appName(row)))))
+    (clientChoice(row) === NEW_CLIENT &&
+      (!!slugProblems.value[index] || !!nameProblem(clientName(row)))))
 
-// 申请的事实：一项一行，不拼成一句
 const facts = computed<Property[][]>(() => {
   const i = info.value
   if (!i) return []
@@ -290,47 +321,46 @@ const expired = computed(() => (info.value ? isGrantExpired(info.value, now.valu
 
 const error = ref<string | null>(null)
 const busy = ref<'approve' | 'deny' | null>(null)
-const approved = ref<(DeviceGrantApproved & { spaceId: string }) | null>(null)
+const approved = ref<(DeviceGrantApproved & { circleId: string }) | null>(null)
 
 const ready = computed(
   () =>
-    !!space.value &&
+    !!activeCircle.value &&
     !expired.value &&
-    apps.isSuccess.value &&
+    clients.isSuccess.value &&
     !noneSelected.value &&
     !rows.value.some(rowProblem),
 )
 
 async function approve() {
-  if (busy.value || !ready.value || !spaceId.value) return
+  if (busy.value || !ready.value || !circleId.value) return
   busy.value = 'approve'
   error.value = null
-  const body = approveBody(userCode.value, spaceId.value, choices.value)
+  const body = approveBody(userCode.value, circleId.value, choices.value, {
+    linkedCircles: linkedCircles.value,
+    contextFacets: contextFacets.value,
+  })
   try {
     const result = await api.approveDeviceGrant(body)
-    approved.value = { ...result, spaceId: body.spaceId }
+    approved.value = { ...result, circleId: body.circleId }
     step.value = 'approved'
-    // 可能新建了应用：应用列表要重取
-    void refreshAppCaches(queryClient, body.spaceId)
+    void refreshClientCaches(queryClient, body.circleId)
   } catch (err) {
     const failure = grantFailure(err, '确认失败')
     const row = rows.value.find((r) => r.runtimeFamily === failure.runtimeFamily)
     const item = body.items.find((i) => i.runtimeFamily === failure.runtimeFamily)
-    if (failure.kind === 'slug' && row && item && 'app' in item && 'slug' in item.app) {
-      // 409 且是新建应用：标识被占用，写在那个平台的标识一栏
-      row.slugRejected = { slug: item.app.slug, text: failure.text }
-      row.picked = NEW_APP
-      void apps.refetch()
+    if (failure.kind === 'slug' && row && item && 'client' in item && 'slug' in item.client) {
+      row.slugRejected = { slug: item.client.slug, text: failure.text }
+      row.picked = NEW_CLIENT
+      void clients.refetch()
     } else if (failure.kind === 'slug') {
-      // 409 且选的是已有的应用：它的运行时与申请的不一致（列表过时了），显示说明并重取列表
       error.value = failure.text
-      void apps.refetch()
+      void clients.refetch()
     } else if (failure.kind === 'gone') {
-      // 404 可能是申请没了，也可能是选的应用没了：按确认码再查一次才分得清
       try {
         info.value = await api.lookupDeviceGrant(userCode.value)
         error.value = failure.text
-        void apps.refetch()
+        void clients.refetch()
       } catch (again) {
         restart(lookupFailure(again))
       }
@@ -389,7 +419,7 @@ async function deny() {
       </form>
     </template>
 
-    <!-- 不用表单元素：模板卡片、分段按钮是单选，读写是勾选框，输入框里按回车会隐式提交，没看完就确认了。只有点「确认」才确认 -->
+    <!-- 不用表单元素：卡片、分段与勾选框里按回车不隐式确认 -->
     <div v-else-if="step === 'review' && info" class="review" data-state="review">
       <SectionHeading title="确认浏览器授权" :level="1" />
       <PropertyList class="facts" :groups="facts">
@@ -428,20 +458,26 @@ async function deny() {
         </template>
       </NoteLine>
 
-      <NoteLine v-if="!spaces.length" data-state="no-space">
-        暂无可签发访问密钥的空间
-        <template #detail>签发需要空间所有者或编辑者角色。</template>
+      <NoteLine v-if="!circles.length" data-state="no-circle">
+        暂无可签发访问密钥的记忆圈
+        <template #detail>签发需要记忆圈所有者或编辑者角色。</template>
       </NoteLine>
       <template v-else>
-        <UFormField label="空间" class="space-field">
-          <USelect v-if="spaces.length > 1" v-model="spaceId" :items="spaceItems" class="w-full" />
-          <p v-else class="only">{{ space?.name }}</p>
+        <UFormField label="主场记忆圈" class="space-field">
+          <USelect
+            v-if="circles.length > 1"
+            v-model="circleId"
+            :items="circleItems"
+            value-key="value"
+            class="w-full"
+          />
+          <p v-else class="only">{{ activeCircle?.name }}</p>
         </UFormField>
         <ReadFailureNote
-          v-if="apps.isError.value"
-          :query="apps"
-          fallback="应用读取失败"
-          data-state="apps-failed"
+          v-if="clients.isError.value"
+          :query="clients"
+          fallback="接入实例读取失败"
+          data-state="clients-failed"
         />
 
         <div class="platforms-head">
@@ -477,21 +513,22 @@ async function deny() {
               <div class="fields">
                 <UFormField>
                   <template #label>
-                    应用<Hint v-if="apps.isSuccess.value" label="应用列表说明">{{
-                      ownApps(row.runtimeFamily).length
-                        ? `仅列出当前账号的 ${runtimeNames[row.runtimeFamily]} 应用`
-                        : `当前账号在此空间暂无 ${runtimeNames[row.runtimeFamily]} 应用`
+                    接入实例<Hint v-if="clients.isSuccess.value" label="接入实例列表说明">{{
+                      ownClients(row.runtimeFamily).length
+                        ? `仅列出当前账号的 ${runtimeNames[row.runtimeFamily]} 接入实例`
+                        : `当前账号在此记忆圈暂无 ${runtimeNames[row.runtimeFamily]} 接入实例`
                     }}</Hint>
                   </template>
-                  <USkeleton v-if="apps.isPending.value" class="h-8 w-full" />
+                  <USkeleton v-if="clients.isPending.value" class="h-8 w-full" />
                   <USelect
-                    v-else-if="ownApps(row.runtimeFamily).length"
-                    :model-value="appChoice(row)"
-                    :items="appItems(row.runtimeFamily)"
+                    v-else-if="ownClients(row.runtimeFamily).length"
+                    :model-value="clientChoice(row)"
+                    :items="clientItems(row.runtimeFamily)"
+                    value-key="value"
                     class="w-full"
                     @update:model-value="(value: string) => (row.picked = value)"
                   />
-                  <p v-else class="only">新建应用</p>
+                  <p v-else class="only">新建接入实例</p>
                 </UFormField>
                 <UFormField :error="nameProblem(keyName(row)) ?? undefined">
                   <template #label>
@@ -503,18 +540,21 @@ async function deny() {
                     @update:model-value="(value: string) => (row.typed.keyName = value)"
                   />
                 </UFormField>
-                <template v-if="apps.isSuccess.value && appChoice(row) === NEW_APP">
-                  <UFormField label="应用名称" :error="nameProblem(appName(row)) ?? undefined">
+                <template v-if="clients.isSuccess.value && clientChoice(row) === NEW_CLIENT">
+                  <UFormField
+                    label="接入实例名称"
+                    :error="nameProblem(clientName(row)) ?? undefined"
+                  >
                     <UInput
-                      :model-value="appName(row)"
+                      :model-value="clientName(row)"
                       class="w-full"
-                      @update:model-value="(value: string) => (row.typed.appName = value)"
+                      @update:model-value="(value: string) => (row.typed.clientName = value)"
                     />
                   </UFormField>
                   <UFormField :error="slugProblems[index] ?? undefined">
                     <template #label>
-                      应用标识<Hint label="应用标识说明"
-                        >这个应用的记忆位于 app://&lt;标识&gt;/ 下</Hint
+                      接入实例标识<Hint label="接入实例标识说明"
+                        >用于命令行与接口中识别这个接入实例</Hint
                       >
                     </template>
                     <UInput
@@ -530,7 +570,9 @@ async function deny() {
                 v-if="!sameScopes"
                 v-model:scopes="row.form.scopes"
                 v-model:preset="row.form.preset"
-                :is-space-owner="isSpaceOwner"
+                :is-circle-owner="isCircleOwner"
+                :circle-kind="activeCircle?.kind ?? 'shared'"
+                :realm-terms="realmTerms"
               />
             </template>
           </div>
@@ -544,14 +586,54 @@ async function deny() {
           <KeyScopeEditor
             v-model:scopes="shared.scopes"
             v-model:preset="shared.preset"
-            :is-space-owner="isSpaceOwner"
+            :is-circle-owner="isCircleOwner"
+            :circle-kind="activeCircle?.kind ?? 'shared'"
+            :realm-terms="realmTerms"
           />
         </template>
+
+        <div v-if="otherCircles.length" class="lens-extra">
+          <SectionHeading title="关联客场记忆圈" :level="2" />
+          <ul class="linked-list">
+            <li v-for="c in otherCircles" :key="c.id" class="linked-row">
+              <UCheckbox
+                :model-value="isCircleLinked(c.id)"
+                :label="`${c.name}（${circleKindLabels[c.kind]}）`"
+                @update:model-value="(v) => toggleLinkedCircle(c, Boolean(v))"
+              />
+              <USelect
+                v-if="isCircleLinked(c.id)"
+                :model-value="linkedMode(c.id)"
+                :items="[
+                  { label: '仅读取', value: 'read' },
+                  {
+                    label: '可跨圈写入词条',
+                    value: 'read_write',
+                    disabled: c.role === 'viewer',
+                  },
+                ]"
+                value-key="value"
+                size="xs"
+                class="w-40"
+                @update:model-value="(v) => setLinkedMode(c.id, v as LinkedCircleMode)"
+              />
+            </li>
+          </ul>
+        </div>
+
+        <div v-if="circleId" class="lens-extra">
+          <SectionHeading title="固定切面透镜" :level="2" />
+          <FacetWhenPicker
+            v-model="contextFacets"
+            :circle-id="circleId"
+            :vocabulary="facets.data.value ?? null"
+          />
+        </div>
       </template>
 
       <p v-if="error" class="text-error" role="alert" data-state="failed">{{ error }}</p>
       <div class="foot">
-        <div v-if="spaces.length && sameScopes" class="summary">
+        <div v-if="circles.length && sameScopes" class="summary">
           <span class="sr-only">签发范围</span>
           <ScopeTags :scopes="shared.scopes" :credentials="sharedCredentials" />
           <Hint label="凭据能力说明">{{ CREDENTIAL_CAPABILITY_HINT }}</Hint>
@@ -561,7 +643,7 @@ async function deny() {
             拒绝
           </UButton>
           <UButton
-            v-if="spaces.length"
+            v-if="circles.length"
             :loading="busy === 'approve'"
             :disabled="!ready"
             @click="approve"
@@ -583,19 +665,22 @@ async function deny() {
             :groups="[
               [
                 { key: 'platform', label: '平台' },
-                { key: 'app', label: '应用' },
-                { key: 'key', label: '访问密钥', value: item.keyName },
+                { key: 'client', label: '接入实例' },
+                { key: 'access', label: '访问密钥', value: item.keyName },
               ],
             ]"
           >
             <template #platform>
               <RuntimeLabel :family="item.runtimeFamily" :size="15" />
             </template>
-            <template #app>
+            <template #client>
               <ULink
-                :to="{ name: 'app', params: { spaceId: approved.spaceId, appId: item.app.id } }"
+                :to="{
+                  name: 'client',
+                  params: { circleId: approved.circleId, clientId: item.client.id },
+                }"
               >
-                {{ item.app.name }}
+                {{ item.client.name }}
               </ULink>
             </template>
           </PropertyList>
@@ -619,59 +704,24 @@ async function deny() {
 <style scoped>
 .review {
   display: grid;
-  gap: 16px;
-  min-width: 0;
+  gap: 18px;
 }
-.facts {
-  max-width: 34rem;
+.facts,
+.caution {
+  margin-top: 0;
 }
 .code {
-  font-size: 16px;
+  font-family: var(--font-mono);
   font-weight: 600;
   letter-spacing: 0.08em;
-  color: var(--ui-text-highlighted);
 }
 .aside {
   margin-left: 8px;
   font-size: 12px;
   color: var(--ui-text-muted);
 }
-.note-line {
-  margin-bottom: 0;
-}
 .space-field {
   max-width: 24rem;
-}
-.platforms {
-  display: grid;
-  border-top: 1px solid var(--strata-rule);
-}
-.platform {
-  display: grid;
-  gap: 12px;
-  padding: 12px 0;
-  border-bottom: 1px solid var(--strata-rule);
-}
-.platform-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 8px;
-}
-.platform-head .aside {
-  margin-left: 0;
-}
-.platform-scopes {
-  margin-left: auto;
-}
-.platform[data-selected='false'] :deep(label),
-.platform[data-selected='false'] .platform-icon {
-  color: var(--ui-text-muted);
-}
-.fields {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px 20px;
 }
 .only {
   font-size: 14px;
@@ -684,20 +734,61 @@ async function deny() {
   justify-content: space-between;
   gap: 8px 16px;
 }
-.done {
+.platforms {
+  display: grid;
+  gap: 10px;
+}
+.platform {
+  border: 1px solid var(--ui-border-accented);
+  padding: 12px 14px;
   display: grid;
   gap: 12px;
 }
-.done > li + li {
-  padding-top: 12px;
-  border-top: 1px solid var(--strata-rule);
+.platform[data-selected='false'] {
+  opacity: 0.72;
+}
+.platform-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+.platform-icon {
+  display: inline-block;
+  flex: none;
+  color: var(--ui-text-muted);
+}
+.platform-scopes {
+  margin-left: auto;
+}
+.fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.lens-extra {
+  display: grid;
+  gap: 10px;
+}
+.linked-list {
+  display: grid;
+  gap: 6px;
+}
+.linked-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--ui-border-accented);
 }
 .foot {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 10px 16px;
-  padding-top: 12px;
+  gap: 12px 16px;
+  padding-top: 8px;
   border-top: 1px solid var(--strata-rule);
 }
 .summary {
@@ -711,6 +802,10 @@ async function deny() {
   display: flex;
   gap: 8px;
   margin-left: auto;
+}
+.done {
+  display: grid;
+  gap: 14px;
 }
 @media (max-width: 639.98px) {
   .fields {

@@ -6,14 +6,15 @@ import type {
   ActivityFacets,
   ActivityItem,
   ActivityList,
-  MemoryView,
+  ConsoleEntryView,
+  EntryView,
 } from '@kioku/contracts'
 import { eq, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
-import { withSpace, type Database } from '../../db/client'
-import { memories, memoryEvents } from '../../db/schema'
+import { withCircle, type Database } from '../../db/client'
+import { entries, entryEvents, entryGlossary, entryVariants, subjects } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
@@ -54,14 +55,13 @@ describe.skipIf(!testDatabaseUrl)('变更记录的筛选、按天计数与筛选
     ws = await bootstrap(app)
   })
 
-  const space = () => `/v1/spaces/${ws.spaceId}`
+  const circle = () => `/v1/circles/${ws.circleId}`
   const ok = async <T>(res: Response, status = 200) => {
     if (res.status !== status) throw new Error(`HTTP ${res.status}: ${await res.text()}`)
     return (await res.json()) as T
   }
   const get = (cookie: string, path: string, query: Record<string, string> = {}) =>
-    app.request(`${space()}${path}?${new URLSearchParams(query)}`, { headers: { cookie } })
-  // 一页一页读完
+    app.request(`${circle()}${path}?${new URLSearchParams(query)}`, { headers: { cookie } })
   const list = async (cookie: string, query: Record<string, string> = {}) => {
     const items: ActivityItem[] = []
     let cursor: string | null = null
@@ -79,110 +79,175 @@ describe.skipIf(!testDatabaseUrl)('变更记录的筛选、按天计数与筛选
   const facets = async (cookie: string, query: Record<string, string> = {}) =>
     ok<ActivityFacets>(await get(cookie, '/activity/facets', query))
   const create = async (cookie: string, body: Record<string, unknown>) =>
-    ok<MemoryView>(
-      await app.request(`${space()}/memories`, jsonRequest('POST', body, { cookie })),
+    ok<ConsoleEntryView>(
+      await app.request(`${circle()}/entries`, jsonRequest('POST', body, { cookie })),
       201,
     )
   const patch = async (cookie: string, body: Record<string, unknown>) =>
-    ok<MemoryView>(await app.request(`${space()}/memories`, jsonRequest('PATCH', body, { cookie })))
-  const move = async (cookie: string, from: string, to: string) =>
-    ok<MemoryView>(
-      await app.request(`${space()}/memories/move`, jsonRequest('POST', { from, to }, { cookie })),
+    ok<ConsoleEntryView>(
+      await app.request(`${circle()}/entries`, jsonRequest('PATCH', body, { cookie })),
     )
-  const remove = async (cookie: string, m: MemoryView) => {
-    const query = `uri=${encodeURIComponent(m.uri)}&expectedId=${m.id}&expectedVersion=${m.version}`
-    const res = await app.request(`${space()}/memories?${query}`, {
+  const remove = async (cookie: string, m: ConsoleEntryView) => {
+    const query = `id=${encodeURIComponent(m.shortId)}&expectedVersion=${m.version}`
+    const res = await app.request(`${circle()}/entries?${query}`, {
       method: 'DELETE',
       headers: { cookie, 'sec-fetch-site': 'same-origin' },
     })
     expect(res.status).toBe(204)
   }
   const setTimes = (ids: number[], at: string) =>
-    withSpace(database.db, ws.spaceId, (tx) =>
+    withCircle(database.db, ws.circleId, (tx) =>
       tx
-        .update(memoryEvents)
+        .update(entryEvents)
         .set({ createdAt: new Date(at) })
-        .where(sql`${memoryEvents.id} in ${ids}`),
+        .where(sql`${entryEvents.id} in ${ids}`),
     )
-  const eventIds = (memoryId: string) =>
-    withSpace(database.db, ws.spaceId, async (tx) =>
+  const eventIds = (entryId: string) =>
+    withCircle(database.db, ws.circleId, async (tx) =>
       (
         await tx
-          .select({ id: memoryEvents.id })
-          .from(memoryEvents)
-          .where(eq(memoryEvents.memoryId, memoryId))
+          .select({ id: entryEvents.id })
+          .from(entryEvents)
+          .where(eq(entryEvents.entryId, entryId))
       ).map((r) => r.id),
     )
 
-  // 一个空间里各种情况都有一点：共享的、本人的（两个成员的）、机密、删除、过期、移进别人的本人（离开）、
-  // 通过访问密钥写的、测试台写的
+  // 构造共享词条、机密、已删除、已过期、转为 secret（对 editor 离开）、联系人事实、Key 与测试台写入
   async function seed() {
-    const eve = await addMember(database.db, ws.spaceId, 'eve', 'editor')
-    const vic = await addMember(database.db, ws.spaceId, 'vic', 'viewer')
-    const appId = (await ws.createApp('agent')).id
-    const key = await ws.issueKey(appId)
+    const eve = await addMember(database.db, ws.circleId, 'eve', 'editor')
+    const vic = await addMember(database.db, ws.circleId, 'vic', 'viewer')
+    const clientId = (await ws.createClient('agent')).id
+    const key = await ws.issueKey(clientId)
     const viaKey = async (body: Record<string, unknown>) =>
-      ok<MemoryView>(await app.request('/v1/memories', jsonRequest('POST', body, bearer(key))), 201)
+      ok<EntryView>(await app.request('/v1/entries', jsonRequest('POST', body, bearer(key))), 201)
+
     const shared = await create(ws.cookie, {
-      uri: 'core://kb/shared',
-      content: '一\n二',
       title: '共享',
+      content: '一\n二',
+      topics: ['alpha'],
     })
     await patch(ws.cookie, {
-      uri: shared.uri,
+      id: shared.shortId,
       content: '一\n三\n四',
       priority: 3,
+      topics: ['alpha', 'beta'],
       glossaryAdd: ['词语'],
     })
+
     const secret = await create(ws.cookie, {
-      uri: 'core://kb/vault',
+      title: 'vault',
       content: '机密正文',
       sensitivity: 'secret',
     })
-    await patch(ws.cookie, { uri: secret.uri, content: '新的机密正文' })
-    const mine = await create(ws.cookie, { uri: 'user://notes/alice', content: 'alice 的' })
-    const theirs = await create(eve.cookie, { uri: 'user://notes/eve', content: 'eve 的' })
-    await patch(eve.cookie, { uri: theirs.uri, title: 'eve 的笔记' })
-    const gone = await create(ws.cookie, { uri: 'core://kb/gone', content: '要删掉' })
+    await patch(ws.cookie, { id: secret.shortId, content: '新的机密正文' })
+
+    const eveNote = await create(eve.cookie, { title: 'eve 笔记', content: 'eve 的' })
+    await patch(eve.cookie, { id: eveNote.shortId, title: 'eve 笔记新版' })
+
+    const gone = await create(ws.cookie, { title: '要删掉', content: '要删掉' })
     await remove(ws.cookie, gone)
-    const stale = await create(ws.cookie, { uri: 'core://kb/stale', content: '会过期' })
-    await withSpace(database.db, ws.spaceId, (tx) =>
+
+    const stale = await create(ws.cookie, { title: '会过期', content: '会过期' })
+    await withCircle(database.db, ws.circleId, (tx) =>
       tx
-        .update(memories)
+        .update(entries)
         .set({ validTo: new Date(Date.now() - 60_000) })
-        .where(eq(memories.id, stale.id)),
+        .where(eq(entries.id, stale.id)),
     )
-    // eve 把共享的记忆移进自己的本人：对别人是离开
-    const taken = await create(ws.cookie, {
-      uri: 'core://kb/taken',
-      content: '会被移走',
+
+    // eve 建的词条被 owner 升为 secret：对 eve 与 vic 来说是「离开」
+    const taken = await create(eve.cookie, {
+      title: '将被保护',
+      content: '会被隐藏',
       sensitivity: 'internal',
     })
-    await move(eve.cookie, taken.uri, 'user://notes/taken')
-    await viaKey({ uri: 'core://kb/agent', content: '应用写的' })
-    const bench = await create(ws.cookie, { uri: 'core://bench/sample', content: '测试台' })
-    await withSpace(database.db, ws.spaceId, (tx) =>
+    await patch(ws.cookie, { id: taken.shortId, sensitivity: 'secret' })
+
+    const fromKey = await viaKey({ title: '应用写的', content: '应用写的' })
+    const bench = await create(ws.cookie, { title: '测试台样例', content: '测试台' })
+    await withCircle(database.db, ws.circleId, (tx) =>
       tx
-        .update(memoryEvents)
+        .update(entryEvents)
         .set({ context: { bench: { account: ws.accountId, run: 'r-1' } } })
-        .where(eq(memoryEvents.memoryId, bench.id)),
+        .where(eq(entryEvents.entryId, bench.id)),
     )
-    // 分散到几天：每条记忆的事件放在不同的日子，零点前后都有
+
+    const factEntry = await withCircle(database.db, ws.circleId, async (tx) => {
+      const [sub] = await tx
+        .insert(subjects)
+        .values({ circleId: ws.circleId, kind: 'person', displayName: '张三' })
+        .returning()
+      const [f] = await tx
+        .insert(entries)
+        .values({
+          circleId: ws.circleId,
+          circleKind: 'shared',
+          shortId: 'm-ft2222',
+          kind: 'fact',
+          title: '喜欢咖啡',
+          subjectId: sub!.id,
+          subjectKind: 'person',
+          sensitivity: 'public',
+          provenance: 'owner',
+          originScope: 'global',
+        })
+        .returning()
+      await tx.insert(entryVariants).values({
+        circleId: ws.circleId,
+        entryId: f!.id,
+        kind: 'fact',
+        sensitivity: 'public',
+        content: '喜欢咖啡',
+      })
+      await tx.insert(entryEvents).values({
+        circleId: ws.circleId,
+        entryId: f!.id,
+        shortId: f!.shortId,
+        eventType: 'create',
+        actorAccountId: ws.accountId,
+        provenance: 'owner',
+        before: null,
+        after: {
+          shortId: f!.shortId,
+          title: f!.title,
+          kind: 'fact',
+          sensitivity: 'public',
+          priority: 2,
+          disclosure: null,
+          topics: [],
+          realms: [],
+          glossary: [],
+          variants: [{ when: {}, content: '喜欢咖啡' }],
+          version: 1,
+          deleted: false,
+          validTo: null,
+          circleId: ws.circleId,
+          originScope: 'global',
+          clientId: null,
+          ownerAccountId: null,
+          subjectKind: 'person',
+          deletedAt: null,
+          expiresAt: null,
+        },
+      })
+      return f!
+    })
+
     const spread: [string, string][] = [
       [shared.id, '2026-11-01T15:30:00Z'],
       [secret.id, '2026-11-01T16:30:00Z'],
-      [mine.id, '2026-11-02T03:00:00Z'],
-      [theirs.id, '2026-11-02T23:59:00Z'],
-      [gone.id, '2026-11-03T00:01:00Z'],
-      [stale.id, '2026-11-04T12:00:00Z'],
-      [taken.id, '2026-11-05T08:00:00Z'],
+      [eveNote.id, '2026-11-02T03:00:00Z'],
+      [gone.id, '2026-11-02T23:59:00Z'],
+      [stale.id, '2026-11-03T00:01:00Z'],
+      [taken.id, '2026-11-04T12:00:00Z'],
+      [fromKey.id, '2026-11-05T08:00:00Z'],
       [bench.id, '2026-11-06T10:00:00Z'],
+      [factEntry.id, '2026-11-06T12:00:00Z'],
     ]
     for (const [id, at] of spread) await setTimes(await eventIds(id), at)
-    return { eve, vic, appId }
+    return { eve, vic, clientId, shared, secret, gone, stale, taken, fromKey, bench, factEntry }
   }
 
-  // 按列表算出的筛选计数：每一组在除了它自己以外的筛选下
   function expectedFacets(items: ActivityItem[], filter: JsFilter) {
     const pass = (i: ActivityItem, skip: keyof JsFilter | null) =>
       (Object.keys(filter) as (keyof JsFilter)[]).every(
@@ -197,7 +262,7 @@ describe.skipIf(!testDatabaseUrl)('变更记录的筛选、按天计数与筛选
       total: items.filter((i) => pass(i, null)).length,
       actors: tally(items.filter((i) => pass(i, 'actor')).map((i) => i.actorKey)),
       types: tally(items.filter((i) => pass(i, 'type')).map((i) => i.type)),
-      layers: tally(items.filter((i) => pass(i, 'layer')).map((i) => i.layer)),
+      kinds: tally(items.filter((i) => pass(i, 'kind')).map((i) => i.kind)),
       fields: tally(
         items
           .filter((i) => pass(i, 'field'))
@@ -209,29 +274,27 @@ describe.skipIf(!testDatabaseUrl)('变更记录的筛选、按天计数与筛选
     total: f.total,
     actors: f.actors.map((a) => [a.key, a.count] as const).sort((a, b) => a[0].localeCompare(b[0])),
     types: f.types.map((a) => [a.type, a.count] as const).sort((a, b) => a[0].localeCompare(b[0])),
-    layers: f.layers
-      .map((a) => [a.layer, a.count] as const)
-      .sort((a, b) => a[0].localeCompare(b[0])),
+    kinds: f.kinds.map((a) => [a.kind, a.count] as const).sort((a, b) => a[0].localeCompare(b[0])),
     fields: f.fields
       .map((a) => [a.field, a.count] as const)
       .sort((a, b) => a[0].localeCompare(b[0])),
   })
 
   it('计数和列表一致：每个成员、每个筛选组合，看不到的不算，离开的照常算', async () => {
-    const { eve, vic, appId } = await seed()
+    const { eve, vic, clientId, secret, gone, stale, taken, fromKey, bench } = await seed()
     const filters: JsFilter[] = [
       {},
       { type: ['update'] },
-      { layer: ['core'] },
-      { layer: ['user'], type: ['create', 'move'] },
+      { kind: ['entry'] },
+      { kind: ['fact'], type: ['create'] },
       { actor: [`account:${ws.accountId}`] },
-      { actor: [`app:${appId}`, 'bench'] },
-      { exceptActor: [`account:${ws.accountId}`], layer: ['core'] },
+      { actor: [`client:${clientId}`, 'bench'] },
+      { exceptActor: [`account:${ws.accountId}`], kind: ['entry'] },
       { field: ['content'] },
       { field: ['priority', 'none'] },
-      { q: 'kb/s' },
-      { q: '笔记', layer: ['user'] },
-      { from: '2026-11-02T00:00:00Z', to: '2026-11-04T00:00:00Z' },
+      { q: '笔记' },
+      { q: gone.shortId },
+      { from: '2026-11-02T00:00:00Z', to: '2026-11-05T00:00:00Z' },
       {
         from: '2026-11-01T00:00:00Z',
         to: '2026-11-07T00:00:00Z',
@@ -262,23 +325,20 @@ describe.skipIf(!testDatabaseUrl)('变更记录的筛选、按天计数与筛选
       }
     }
 
-    // 各个成员看到的确实不同：别人的本人、机密只有读得到的人有，离开的只给改前看得到的
     const alice = await list(ws.cookie)
     const eveItems = await list(eve.cookie)
     const vicItems = await list(vic.cookie)
-    expect(alice.some((i) => i.uri === 'user://notes/eve')).toBe(false)
-    expect(eveItems.some((i) => i.uri === 'user://notes/alice')).toBe(false)
-    expect(eveItems.some((i) => i.uri === 'core://kb/vault')).toBe(false)
-    expect(alice.some((i) => i.uri === 'core://kb/vault')).toBe(true)
-    const left = alice.find((i) => i.left)!
-    expect(left).toMatchObject({ uri: 'core://kb/taken', layer: 'core', changes: [] })
+    expect(eveItems.some((i) => i.shortId === secret.shortId)).toBe(false)
+    expect(alice.some((i) => i.shortId === secret.shortId)).toBe(true)
+    const left = eveItems.find((i) => i.shortId === taken.shortId && i.left)!
+    expect(left).toMatchObject({ kind: 'entry', changes: [] })
     expect(left.fieldChanges).toEqual([])
-    expect(vicItems.some((i) => i.left)).toBe(true)
-    expect(eveItems.some((i) => i.uri === 'user://notes/taken' && !i.left)).toBe(true)
-    expect(alice.find((i) => i.uri === 'core://kb/gone')?.deleted).toBe(true)
-    expect(alice.find((i) => i.uri === 'core://kb/stale')?.expired).toBe(true)
-    expect(alice.find((i) => i.uri === 'core://bench/sample')?.actorKey).toBe('bench')
-    expect(alice.find((i) => i.uri === 'core://kb/agent')?.actorKey).toBe(`app:${appId}`)
+    expect(vicItems.some((i) => i.shortId === taken.shortId && i.left)).toBe(true)
+    expect(alice.some((i) => i.shortId === taken.shortId && !i.left)).toBe(true)
+    expect(alice.find((i) => i.shortId === gone.shortId)?.deleted).toBe(true)
+    expect(alice.find((i) => i.shortId === stale.shortId)?.expired).toBe(true)
+    expect(alice.find((i) => i.shortId === bench.shortId)?.actorKey).toBe('bench')
+    expect(alice.find((i) => i.shortId === fromKey.shortId)?.actorKey).toBe(`client:${clientId}`)
   })
 
   it('按时区分天：零点前后的事件分在各自的那一天', async () => {
@@ -287,11 +347,9 @@ describe.skipIf(!testDatabaseUrl)('变更记录的筛选、按天计数与筛选
     const shanghai = await days(ws.cookie, { ...range, tz: 'Asia/Shanghai' })
     const utc = await days(ws.cookie, { ...range, tz: 'UTC' })
     const la = await days(ws.cookie, { ...range, tz: 'America/Los_Angeles' })
-    // 11-01 15:30Z 与 16:30Z 各两条：上海是 11-01 23:30 与 11-02 00:30；11-02 03:00Z 一条是上海的 11-02
     expect(utc.find((d) => d.day === '2026-11-01')!.count).toBe(4)
     expect(shanghai.find((d) => d.day === '2026-11-01')!.count).toBe(2)
-    expect(shanghai.find((d) => d.day === '2026-11-02')!.count).toBe(3)
-    // 洛杉矶 11-03 00:01Z 是 11-02 17:01
+    expect(shanghai.find((d) => d.day === '2026-11-02')!.count).toBe(4)
     expect(la.find((d) => d.day === '2026-11-03')).toBeUndefined()
     const total = (list: ActivityDays['days']) => list.reduce((sum, d) => sum + d.count, 0)
     expect(total(shanghai)).toBe(total(utc))
@@ -299,41 +357,69 @@ describe.skipIf(!testDatabaseUrl)('变更记录的筛选、按天计数与筛选
   })
 
   it('改动字段的 SQL 判断和 JS 的 changedFields 逐条一致', async () => {
-    const m = await create(ws.cookie, { uri: 'core://kb/fields', content: '一' })
-    const [row] = await withSpace(database.db, ws.spaceId, (tx) =>
-      tx.select().from(memories).where(eq(memories.id, m.id)),
+    const m = await create(ws.cookie, { title: 'fields', content: '一' })
+    const [r, gRows] = await withCircle(database.db, ws.circleId, async (tx) => [
+      (await tx.select().from(entries).where(eq(entries.id, m.id)))[0]!,
+      await tx
+        .select({ keyword: entryGlossary.keyword })
+        .from(entryGlossary)
+        .where(eq(entryGlossary.entryId, m.id)),
+    ])
+    const base: Record<string, unknown> = JSON.parse(
+      JSON.stringify({
+        shortId: r.shortId,
+        title: r.title,
+        kind: r.kind,
+        sensitivity: r.sensitivity,
+        priority: r.priority,
+        disclosure: r.disclosure,
+        topics: r.topics,
+        realms: r.realms,
+        glossary: ['a'],
+        variants: [{ when: {}, whenSignature: '{}', content: '一' }],
+        version: r.version,
+        deleted: false,
+        validTo: null,
+        circleId: r.circleId,
+        originScope: r.originScope,
+        clientId: r.clientId,
+        ownerAccountId: r.ownerAccountId,
+        subjectKind: r.subjectKind,
+        deletedAt: null,
+        expiresAt: null,
+      }),
     )
-    const base: Record<string, unknown> = JSON.parse(JSON.stringify({ ...row, glossary: ['a'] }))
-    for (const k of ['ciphertext', 'wrappedKey', 'keyId', 'fts', 'plaintextIgnoredHash'])
-      delete base[k]
+    expect(gRows).toEqual([])
     const variants: Record<string, unknown>[] = [
       {},
-      { domain: 'core', path: 'kb/other' },
-      { path: null },
       { title: 'x' },
       { title: null },
       { title: 3 },
       { sensitivity: 'private' },
-      { priority: 2 },
-      { priority: '2' },
+      { priority: 1 },
+      { priority: '1' },
       { priority: null },
       { disclosure: '当' },
+      { topics: [] },
+      { topics: ['a', 'b'] },
+      { topics: ['b', 'a'] },
       { glossary: [] },
       { glossary: ['a', 'b'] },
       { glossary: ['b', 'a'] },
       { glossary: ['a', 1] },
       { glossary: 'a' },
-      { content: null },
-      { content: '二' },
-      { content: 1 },
+      { variants: [{ when: {}, whenSignature: '{}', content: null }] },
+      { variants: [{ when: {}, whenSignature: '{}', content: '二' }] },
+      { variants: [{ when: { env: ['prod'] }, whenSignature: '{"env":["prod"]}', content: '一' }] },
       { validTo: '2030-01-01T00:00:00.000Z' },
     ]
-    await withSpace(database.db, ws.spaceId, async (tx) => {
+    await withCircle(database.db, ws.circleId, async (tx) => {
       for (const b of variants) {
         for (const a of variants) {
-          await tx.insert(memoryEvents).values({
-            spaceId: ws.spaceId,
-            memoryId: m.id,
+          await tx.insert(entryEvents).values({
+            circleId: ws.circleId,
+            entryId: m.id,
+            shortId: m.shortId,
             eventType: 'update',
             provenance: 'owner',
             before: { ...base, ...b },
@@ -347,11 +433,11 @@ describe.skipIf(!testDatabaseUrl)('变更记录的筛选、按天计数与筛选
     const fields = [
       'content',
       'title',
+      'variants',
+      'topics',
       'disclosure',
       'priority',
       'sensitivity',
-      'layer',
-      'uri',
       'glossary',
       'validTo',
       'none',
@@ -367,26 +453,26 @@ describe.skipIf(!testDatabaseUrl)('变更记录的筛选、按天计数与筛选
         field,
       ).toEqual(want)
     }
-    // 每一种都既有改了的、也有没改的（layer 在这里不变，只有没改的）
-    for (const field of fields.filter((f) => f !== 'layer')) {
+    for (const field of fields) {
       expect(count.get(field), field).toBeGreaterThan(0)
       expect(count.get(field), field).toBeLessThan(all.length)
     }
   })
 
-  it('字段的前后值：正文给增删行数，机密不给，关键词给增删的词，标量给前后', async () => {
+  it('字段的前后值：正文给增删行数，机密不给，主题与关键词给增删词，变体给增删改，标量给前后', async () => {
     const m = await create(ws.cookie, {
-      uri: 'core://kb/values',
-      content: '一\n二\n三',
       title: '旧标题',
+      content: '一\n二\n三',
+      topics: ['t1'],
       glossary: ['甲方', '乙方'],
     })
     await patch(ws.cookie, {
-      uri: m.uri,
+      id: m.shortId,
       content: '一\n二改\n三\n四',
       title: '新标题',
       priority: 4,
       disclosure: '写代码时',
+      topics: ['t2'],
       glossaryAdd: ['丙方'],
       glossaryRemove: ['甲方'],
     })
@@ -397,22 +483,22 @@ describe.skipIf(!testDatabaseUrl)('变更记录的筛选、按天计数与筛选
         { field: 'title', before: '旧标题', after: '新标题' },
         { field: 'priority', before: m.priority, after: 4 },
         { field: 'disclosure', before: null, after: '写代码时' },
+        { field: 'topics', added: ['t2'], removed: ['t1'] },
         { field: 'glossary', added: ['丙方'], removed: ['甲方'] },
       ]),
     )
     expect(edit!.fieldChanges.map((c) => c.field)).toEqual(edit!.changes)
     expect(edit).toMatchObject({ versionBefore: 1, versionAfter: 2 })
 
-    // 机密：改成机密时之前快照里的正文抹掉，机密期间的改动看不出正文改没改；从机密降回来时正文只给字段名
     const s = await create(ws.cookie, {
-      uri: 'core://kb/vault',
+      title: 'vault',
       content: '明文',
       sensitivity: 'internal',
     })
-    await patch(ws.cookie, { uri: s.uri, sensitivity: 'secret' })
-    await patch(ws.cookie, { uri: s.uri, content: '机密之后' })
-    await patch(ws.cookie, { uri: s.uri, sensitivity: 'private' })
-    const [down, inSecret, toSecret] = await list(ws.cookie, { q: 'vault' })
+    await patch(ws.cookie, { id: s.shortId, sensitivity: 'secret' })
+    await patch(ws.cookie, { id: s.shortId, content: '机密之后' })
+    await patch(ws.cookie, { id: s.shortId, sensitivity: 'private' })
+    const [down, inSecret, toSecret] = await list(ws.cookie, { q: s.shortId })
     expect(toSecret!.fieldChanges).toEqual([
       { field: 'sensitivity', before: 'internal', after: 'secret' },
     ])
@@ -424,57 +510,49 @@ describe.skipIf(!testDatabaseUrl)('变更记录的筛选、按天计数与筛选
   })
 
   it('单条改动：和列表同样的可见性，带前后快照；看不到的 404，离开的只给改前，机密没有正文', async () => {
-    const eve = await addMember(database.db, ws.spaceId, 'eve', 'editor')
+    const eve = await addMember(database.db, ws.circleId, 'eve', 'editor')
     const event = (cookie: string, id: number) => get(cookie, `/activity/${id}`)
-    const shared = await create(ws.cookie, { uri: 'core://kb/one', content: '一\n二' })
-    await patch(ws.cookie, { uri: shared.uri, content: '一\n三' })
-    const [edit] = await list(ws.cookie, { q: 'kb/one' })
+    const shared = await create(ws.cookie, { title: 'one', content: '一\n二' })
+    await patch(ws.cookie, { id: shared.shortId, content: '一\n三' })
+    const [edit] = await list(ws.cookie, { q: shared.shortId })
     const body = await ok<ActivityEvent>(await event(ws.cookie, edit!.id))
     expect(body.item).toEqual(edit)
-    expect(body.before?.content).toBe('一\n二')
-    expect(body.after?.content).toBe('一\n三')
+    expect(body.before?.variants[0]!.content).toBe('一\n二')
+    expect(body.after?.variants[0]!.content).toBe('一\n三')
 
-    // 别的成员的本人记忆：和不存在一样
-    const theirs = await create(eve.cookie, { uri: 'user://notes/eve', content: 'eve 的' })
-    const [theirEvent] = await list(eve.cookie, { q: 'notes/eve' })
-    expect(theirEvent!.memoryId).toBe(theirs.id)
-    expect((await event(ws.cookie, theirEvent!.id)).status).toBe(404)
-    expect((await event(eve.cookie, theirEvent!.id)).status).toBe(200)
     expect((await event(ws.cookie, 999_999_999)).status).toBe(404)
 
-    // 机密：快照里没有正文
     const vault = await create(ws.cookie, {
-      uri: 'core://kb/vault',
+      title: 'vault',
       content: '机密正文',
       sensitivity: 'secret',
     })
-    await patch(ws.cookie, { uri: vault.uri, content: '新的机密正文' })
-    const [secretEdit] = await list(ws.cookie, { q: 'kb/vault' })
+    await patch(ws.cookie, { id: vault.shortId, content: '新的机密正文' })
+    const [secretEdit] = await list(ws.cookie, { q: vault.shortId })
     const secretBody = await ok<ActivityEvent>(await event(ws.cookie, secretEdit!.id))
-    expect(secretBody.before?.content).toBeNull()
-    expect(secretBody.after?.content).toBeNull()
+    expect(secretBody.before?.variants[0]!.content).toBeNull()
+    expect(secretBody.after?.variants[0]!.content).toBeNull()
     expect((await event(eve.cookie, secretEdit!.id)).status).toBe(404)
 
-    // 离开：eve 把共享的移进自己的本人，对 alice 只给改前
-    const taken = await create(ws.cookie, {
-      uri: 'core://kb/taken',
-      content: '会被移走',
+    const taken = await create(eve.cookie, {
+      title: 'taken',
+      content: '会被隐藏',
       sensitivity: 'internal',
     })
-    await move(eve.cookie, taken.uri, 'user://notes/taken')
-    const [leftItem] = (await list(ws.cookie, { q: 'kb/taken' })).filter((i) => i.left)
-    const leftBody = await ok<ActivityEvent>(await event(ws.cookie, leftItem!.id))
+    await patch(ws.cookie, { id: taken.shortId, sensitivity: 'secret' })
+    const [leftItem] = (await list(eve.cookie, { q: taken.shortId })).filter((i) => i.left)
+    const leftBody = await ok<ActivityEvent>(await event(eve.cookie, leftItem!.id))
     expect(leftBody.item.left).toBe(true)
-    expect(leftBody.before?.uri).toBe('core://kb/taken')
+    expect(leftBody.before?.shortId).toBe(taken.shortId)
     expect(leftBody.after).toBeNull()
 
-    // 访问事件不进变更记录
-    const [access] = await withSpace(database.db, ws.spaceId, (tx) =>
+    const [access] = await withCircle(database.db, ws.circleId, (tx) =>
       tx
-        .insert(memoryEvents)
+        .insert(entryEvents)
         .values({
-          spaceId: ws.spaceId,
-          memoryId: shared.id,
+          circleId: ws.circleId,
+          entryId: shared.id,
+          shortId: shared.shortId,
           eventType: 'access',
           provenance: 'owner',
           before: null,
@@ -486,23 +564,25 @@ describe.skipIf(!testDatabaseUrl)('变更记录的筛选、按天计数与筛选
     expect((await get(ws.cookie, '/activity/abc')).status).toBe(400)
   })
 
-  it('查看者也能看；访问密钥的名字只给应用所有者与空间所有者，计数按应用分组', async () => {
-    const eve = await addMember(database.db, ws.spaceId, 'eve', 'editor')
-    const vic = await addMember(database.db, ws.spaceId, 'vic', 'viewer')
-    const appId = (await ws.createApp('agent')).id
-    const key = await ws.issueKey(appId)
+  it('查看者也能看；访问密钥的名字只给接入实例主人与记忆圈 owner，计数按接入实例分组', async () => {
+    const eve = await addMember(database.db, ws.circleId, 'eve', 'editor')
+    const vic = await addMember(database.db, ws.circleId, 'vic', 'viewer')
+    const clientId = (await ws.createClient('agent')).id
+    const key = await ws.issueKey(clientId)
     await ok(
       await app.request(
-        '/v1/memories',
-        jsonRequest('POST', { uri: 'core://kb/k', content: '应用写的' }, bearer(key)),
+        '/v1/entries',
+        jsonRequest('POST', { title: 'k', content: '应用写的' }, bearer(key)),
       ),
       201,
     )
     for (const member of [eve, vic]) {
       const [item] = await list(member.cookie)
-      expect(item!.actor).toEqual({ accountName: null, keyName: null, appName: 'agent' })
+      expect(item!.actor).toEqual({ accountName: null, keyName: null, clientName: 'agent' })
       const f = await facets(member.cookie)
-      expect(f.actors).toEqual([{ key: `app:${appId}`, kind: 'app', name: 'agent', count: 1 }])
+      expect(f.actors).toEqual([
+        { key: `client:${clientId}`, kind: 'client', name: 'agent', count: 1 },
+      ])
     }
     expect((await list(ws.cookie))[0]!.actor.keyName).toBe('test')
   })
@@ -511,7 +591,7 @@ describe.skipIf(!testDatabaseUrl)('变更记录的筛选、按天计数与筛选
     const bad: Record<string, string>[] = [
       { type: 'access' },
       { actor: 'key:1' },
-      { layer: 'nope' },
+      { kind: 'nope' },
       { field: 'version' },
       { q: 'x'.repeat(101) },
       { from: '2026-11-02T00:00:00Z', to: '2026-11-01T00:00:00Z' },
@@ -523,14 +603,11 @@ describe.skipIf(!testDatabaseUrl)('变更记录的筛选、按天计数与筛选
       expect((await get(ws.cookie, '/activity/facets', query)).status).toBe(400)
     }
     expect((await get(ws.cookie, '/activity/days', {})).status).toBe(400)
-    // 时区以 PostgreSQL 的时区库为准：库里没有的名字回 400，不落到 at time zone 报错成 500；
-    // 库里没有的名字带上 code，界面只在这种 400 时退回 UTC
     for (const tz of ['Mars/Base', 'America/Nowhere']) {
       const res = await get(ws.cookie, '/activity/days', { tz })
       expect(res.status, tz).toBe(400)
       expect(((await res.json()) as { code?: string }).code).toBe('unknown_time_zone')
     }
-    // 裸偏移写法在 PostgreSQL 里正负号相反，写法本身就不收，这种 400 不带 code
     for (const tz of ["UTC'; select 1", '+08', 'UTC+8']) {
       const res = await get(ws.cookie, '/activity/days', { tz })
       expect(res.status, tz).toBe(400)
@@ -540,26 +617,24 @@ describe.skipIf(!testDatabaseUrl)('变更记录的筛选、按天计数与筛选
     for (const tz of ['UTC', 'Asia/Shanghai', 'America/Argentina/Buenos_Aires', 'Etc/UTC']) {
       expect((await get(ws.cookie, '/activity/days', { ...window, tz })).status, tz).toBe(200)
     }
-    // IANA 的 Etc/GMT-8 在 PostgreSQL 里就是 UTC+8，和浏览器一样：UTC 16:30 分到第二天
-    await create(ws.cookie, { uri: 'core://kb/etc', content: '一' })
-    const etc = await list(ws.cookie, { q: 'kb/etc' })
+    const etcEntry = await create(ws.cookie, { title: 'etc', content: '一' })
+    const etc = await list(ws.cookie, { q: etcEntry.shortId })
     await setTimes(
       etc.map((i) => i.id),
       '2026-11-01T16:30:00Z',
     )
-    expect(await days(ws.cookie, { ...window, q: 'kb/etc', tz: 'Etc/GMT-8' })).toEqual([
+    expect(await days(ws.cookie, { ...window, q: etcEntry.shortId, tz: 'Etc/GMT-8' })).toEqual([
       { day: '2026-11-02', count: 1 },
     ])
-    // 跨过夏令时回拨的 400 个本地日比 400×24 小时多一个小时，照样收
     const berlin = { from: '2025-09-30T22:00:00Z', to: '2026-11-04T23:00:00Z' }
     expect((await get(ws.cookie, '/activity', berlin)).status).toBe(200)
     expect(
       (await get(ws.cookie, '/activity/days', { ...berlin, tz: 'Europe/Berlin' })).status,
     ).toBe(200)
-    // q 里的 % 与 _ 照字面找
-    await create(ws.cookie, { uri: 'core://kb/a_b', content: '一' })
-    await create(ws.cookie, { uri: 'core://kb/axb', content: '一' })
-    expect((await list(ws.cookie, { q: 'a_b' })).map((i) => i.uri)).toEqual(['core://kb/a_b'])
+
+    await create(ws.cookie, { title: 'prefix_a_b', content: '一' })
+    await create(ws.cookie, { title: 'prefix_axb', content: '一' })
+    expect((await list(ws.cookie, { q: 'a_b' })).map((i) => i.title)).toEqual(['prefix_a_b'])
     expect(await list(ws.cookie, { q: '%' })).toEqual([])
   })
 })
@@ -570,7 +645,7 @@ interface JsFilter {
   actor?: string[]
   exceptActor?: string[]
   type?: string[]
-  layer?: string[]
+  kind?: string[]
   field?: string[]
   q?: string
 }
@@ -593,15 +668,15 @@ function matches(i: ActivityItem, group: keyof JsFilter, filter: JsFilter): bool
       return !filter.exceptActor!.includes(i.actorKey)
     case 'type':
       return filter.type!.includes(i.type)
-    case 'layer':
-      return filter.layer!.includes(i.layer)
+    case 'kind':
+      return filter.kind!.includes(i.kind)
     case 'field':
       return i.changes.length
         ? i.changes.some((c) => filter.field!.includes(c))
         : filter.field!.includes('none')
     case 'q': {
       const q = filter.q!.toLowerCase()
-      return i.title.toLowerCase().includes(q) || i.uri.toLowerCase().includes(q)
+      return i.title.toLowerCase().includes(q) || i.shortId.toLowerCase().includes(q)
     }
   }
 }

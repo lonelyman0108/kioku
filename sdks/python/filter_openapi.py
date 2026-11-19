@@ -1,4 +1,4 @@
-"""从服务端的完整 OpenAPI 文档里挑出接入方用的接口：Key 鉴权的生命周期、召回、记忆、绑定码与 whoami，
+"""从服务端的完整 OpenAPI 文档里挑出接入方用的接口：Key 鉴权的生命周期、召回、词条、绑定码与 whoami，
 组件只留这些接口用得到的。
 
 管理界面（Cookie 会话）的接口不收；凭据接口（包括 kioku run 用的取值接口）也不收，
@@ -9,7 +9,7 @@
 import json
 import sys
 
-KEEP_TAGS = {"lifecycle", "recall", "memories", "auth", "binding"}
+KEEP_TAGS = {"lifecycle", "recall", "entries", "auth", "binding"}
 
 
 def keyed(operation: dict) -> bool:

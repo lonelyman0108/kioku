@@ -14,7 +14,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 
 import { loadConfig, type Config } from '../config'
 import type { Database } from '../db/client'
-import { accounts, spaces } from '../db/schema'
+import { accounts, circles } from '../db/schema'
 import { summarize } from '../db/probe'
 import { FatalStartupError, startRuntime, type Runtime } from '../runtime'
 import { StartupError, startService } from '../service'
@@ -42,7 +42,7 @@ const admin = {
   username: 'alice',
   displayName: 'Alice',
   password: 'correct horse battery',
-  spaceName: '家',
+  circleName: '家',
 }
 
 // 每个用例都起停一次完整的服务（迁移、后台任务），负载高时要好几秒
@@ -97,7 +97,7 @@ describe.skipIf(!testDatabaseUrl)(
         masterKey: false,
       })
       expect((await call('/health')).status).toBe(200)
-      for (const path of ['/auth/me', '/spaces', '/openapi.json']) {
+      for (const path of ['/auth/me', '/instance/circles', '/openapi.json']) {
         const res = await call(path)
         expect(res.status).toBe(503)
         expect(await res.json()).toMatchObject({ code: DATABASE_UNAVAILABLE_CODE })
@@ -148,38 +148,42 @@ describe.skipIf(!testDatabaseUrl)(
         'database_missing',
       )
       const ok = await check(conn)
-      // 测试库执行过迁移、没有账号也没有空间：是空的 Kioku 库，不是已有的数据
+      // 测试库执行过迁移、没有账号也没有记忆圈：是空的 Kioku 库，不是已有的数据
       expect(ok).toMatchObject({
         failure: null,
         role: { superuser: false, bypassRls: false },
         existing: 'migrated',
         accounts: 0,
-        spaces: 0,
+        circles: 0,
         unrelatedTables: 0,
         ready: true,
       })
       expect(ok.extensions.every((e) => e.state === 'installed')).toBe(true)
-      // 有空间、没有账号：已有的数据
-      await database.db.insert(spaces).values({ name: '孤立的空间' })
+      // 有记忆圈、没有账号：已有的数据
+      await database.db.insert(circles).values({
+        slug: 'isolated',
+        name: '孤立的记忆圈',
+        kind: 'shared',
+      })
       expect(await check(conn)).toMatchObject({
         existing: 'kioku',
         accounts: 0,
-        spaces: 1,
+        circles: 1,
         ready: true,
       })
       // 有账号：已有的数据，带上账号数
-      await database.db.delete(spaces)
+      await database.db.delete(circles)
       await database.db
         .insert(accounts)
         .values({ username: 'bob', displayName: 'Bob', passwordHash: 'x' })
-      expect(await check(conn)).toMatchObject({ existing: 'kioku', accounts: 1, spaces: 0 })
-      // 账号与空间都有
-      await database.db.insert(spaces).values({ name: '家' })
-      expect(await check(conn)).toMatchObject({ existing: 'kioku', accounts: 1, spaces: 1 })
+      expect(await check(conn)).toMatchObject({ existing: 'kioku', accounts: 1, circles: 0 })
+      // 账号与记忆圈都有
+      await database.db.insert(circles).values({ slug: 'home', name: '家', kind: 'shared' })
+      expect(await check(conn)).toMatchObject({ existing: 'kioku', accounts: 1, circles: 1 })
       // 清空之后回到空的 Kioku 库
-      await database.db.delete(spaces)
+      await database.db.delete(circles)
       await database.db.delete(accounts)
-      expect(await check(conn)).toMatchObject({ existing: 'migrated', accounts: 0, spaces: 0 })
+      expect(await check(conn)).toMatchObject({ existing: 'migrated', accounts: 0, circles: 0 })
     })
 
     it('保存后当场接上：写 kioku.json（600），能建管理员，之后初始化码作废；重启后从文件接上', async () => {
@@ -237,7 +241,7 @@ describe.skipIf(!testDatabaseUrl)(
       expect(inspected).toMatchObject({
         source: 'env',
         state: 'ready',
-        check: { ready: true, existing: 'migrated', accounts: 0, spaces: 0 },
+        check: { ready: true, existing: 'migrated', accounts: 0, circles: 0 },
       })
       expect(inspected.summary).toMatchObject({
         database: testConnection().database,

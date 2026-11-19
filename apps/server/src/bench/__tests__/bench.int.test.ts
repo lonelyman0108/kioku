@@ -15,28 +15,35 @@ import { eq, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../../app'
-import { connect, withSpace, type Database, type Db } from '../../db/client'
+import { keyToSimulate } from '../../access/simulate'
+import { connect, withCircle, type Database, type Db } from '../../db/client'
 import {
   apiKeys,
+  circleMembers,
   conversations,
   conversationTurns,
-  memories,
+  entries,
   recallEvents,
   settings,
-  spaceMembers,
   subjects,
 } from '../../db/schema'
 import { staticEmbedderSource, type EmbedderSource } from '../../embedding/source'
 import { saveExtractionConfig } from '../../extraction/settings'
 import type { Deps } from '../../http/env'
 import type { Jobs } from '../../jobs/queue'
-import { memoryServiceForKey } from '../../memory/context'
-import { MemoryService } from '../../memory/service'
-import { keyToSimulate } from '../../access/simulate'
+import { entryServiceForKey } from '../../memory/context'
+import { EntryService } from '../../memory/service'
 import { openTestDatabase, resetDatabase, tableDigests, testDatabaseUrl } from '../../testing/db'
 import { deferred } from '../../testing/deferred'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
-import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
+import {
+  addMember,
+  bearer,
+  bootstrap,
+  FULL_SCOPES,
+  jsonRequest,
+  type Workspace,
+} from '../../testing/fixtures'
 import { changeTracker } from '../changes'
 import { inProcessExecutor, runBench } from '../inProcess'
 import { inRollback, type BenchLimits } from '../rollback'
@@ -70,13 +77,14 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
   let deps: Deps
   let app: ReturnType<typeof createApp>
   let ws: Workspace
-  let appId: string
+  let clientId: string
   let keyId: string
   let plainKey: string
+  let workCircleId: string
   const masterKey = randomBytes(32)
 
-  const runPath = (id = keyId, app_ = appId) =>
-    `/v1/spaces/${ws.spaceId}/apps/${app_}/keys/${id}/bench/run`
+  const runPath = (id = keyId, client_ = clientId) =>
+    `/v1/circles/${ws.circleId}/clients/${client_}/keys/${id}/bench/run`
 
   const postRun = (body: unknown, cookie = ws.cookie, target = app, id = keyId) =>
     target.request(runPath(id), jsonRequest('POST', body, { cookie }))
@@ -113,6 +121,18 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
     return { text: result.content[0]!.text, isError: result.isError === true }
   }
 
+  const issueSharedKey = async (
+    scopes = FULL_SCOPES,
+    linkedCircles: { circleId: string; mode: 'read' | 'read_write' }[] = [],
+  ) => {
+    const res = await app.request(
+      `/v1/circles/${ws.circleId}/clients/${clientId}/keys`,
+      jsonRequest('POST', { name: 'k', linkedCircles, scopes }, { cookie: ws.cookie }),
+    )
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`)
+    return (await res.json()) as { id: string; key: string }
+  }
+
   beforeAll(async () => {
     database = await openTestDatabase()
     other = connect(testDatabaseUrl!, { max: 2 })
@@ -135,13 +155,22 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
     await resetDatabase(database)
     await database.db.delete(settings)
     ws = await bootstrap(app)
-    appId = (await ws.createApp('cc', { runtimeFamily: 'claudecode' })).id
-    const created = await ws.createKey(appId)
+    const workRes = await app.request(
+      '/v1/circles',
+      jsonRequest('POST', { slug: 'work', name: '公司' }, { cookie: ws.cookie }),
+    )
+    expect(workRes.status).toBe(201)
+    workCircleId = ((await workRes.json()) as { id: string }).id
+
+    clientId = (await ws.createClient('cc', { runtimeFamily: 'claudecode' })).id
+    const created = await issueSharedKey(FULL_SCOPES, [
+      { circleId: workCircleId, mode: 'read_write' },
+    ])
     keyId = created.id
     plainKey = created.key
   })
 
-  const fingerprint = () => tableDigests(database, ws.spaceId)
+  const fingerprint = () => tableDigests(database, ws.circleId)
   const lastUsedAt = async () => {
     const [row] = await database.db
       .select({ at: apiKeys.lastUsedAt })
@@ -150,32 +179,37 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
     return row!.at
   }
   const recallEventCount = () =>
-    withSpace(database.db, ws.spaceId, async (tx) => (await tx.select().from(recallEvents)).length)
+    withCircle(
+      database.db,
+      ws.circleId,
+      async (tx) => (await tx.select().from(recallEvents)).length,
+    )
 
   describe('权限', () => {
-    it('只给应用主人：空间 owner 不是这个应用的主人时也是 403', async () => {
-      const editor = await addMember(database.db, ws.spaceId, 'bob', 'editor')
-      const bobApp = (await (
+    it('只给接入实例主人：记忆圈 owner 不是这个接入实例的主人时也是 403', async () => {
+      const editor = await addMember(database.db, ws.circleId, 'bob', 'editor')
+      const bobClient = (await (
         await app.request(
-          `/v1/spaces/${ws.spaceId}/apps`,
+          `/v1/circles/${ws.circleId}/clients`,
           jsonRequest(
             'POST',
-            { slug: 'bob-app', name: 'bob', runtimeFamily: 'mcp' },
+            { slug: 'bob-client', name: 'bob', runtimeFamily: 'mcp' },
             { cookie: editor.cookie },
           ),
         )
       ).json()) as { id: string }
       const bobKey = (await (
         await app.request(
-          `/v1/spaces/${ws.spaceId}/apps/${bobApp.id}/keys`,
+          `/v1/circles/${ws.circleId}/clients/${bobClient.id}/keys`,
           jsonRequest(
             'POST',
             {
               name: 'k',
               scopes: {
-                readLayers: ['user'],
-                writeLayers: ['user'],
+                readKinds: ['entry'],
+                writeKinds: ['entry'],
                 maxSensitivity: 'private',
+                allowedRealms: null,
                 admin: false,
               },
             },
@@ -188,26 +222,26 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
       // 别的成员用不了主人的 Key
       const denied = await postRun({ steps }, editor.cookie)
       expect(denied.status).toBe(403)
-      // 空间 owner 也用不了 editor 的应用的 Key
+      // 记忆圈 owner 也用不了 editor 的接入实例的 Key
       const ownerDenied = await app.request(
-        `/v1/spaces/${ws.spaceId}/apps/${bobApp.id}/keys/${bobKey.id}/bench/run`,
+        `/v1/circles/${ws.circleId}/clients/${bobClient.id}/keys/${bobKey.id}/bench/run`,
         jsonRequest('POST', { steps }, { cookie: ws.cookie }),
       )
       expect(ownerDenied.status).toBe(403)
       const toolsDenied = await app.request(
-        `/v1/spaces/${ws.spaceId}/apps/${appId}/keys/${keyId}/bench/tools`,
+        `/v1/circles/${ws.circleId}/clients/${clientId}/keys/${keyId}/bench/tools`,
         { headers: { cookie: editor.cookie } },
       )
       expect(toolsDenied.status).toBe(403)
-      // editor 是自己应用的主人，能用
+      // editor 是自己接入实例的主人，能用
       const allowed = await app.request(
-        `/v1/spaces/${ws.spaceId}/apps/${bobApp.id}/keys/${bobKey.id}/bench/run`,
+        `/v1/circles/${ws.circleId}/clients/${bobClient.id}/keys/${bobKey.id}/bench/run`,
         jsonRequest('POST', { steps }, { cookie: editor.cookie }),
       )
       expect(allowed.status).toBe(200)
     })
 
-    it('没登录是 401，不是空间成员是 403；Key 明文当不了登录状态', async () => {
+    it('没登录是 401，不是记忆圈成员是 403；Key 明文当不了登录状态', async () => {
       const res = await app.request(runPath(), jsonRequest('POST', { steps: [{ kind: 'whoami' }] }))
       expect(res.status).toBe(401)
       const withKey = await app.request(
@@ -218,9 +252,12 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
     })
 
     it('作废的 Key 与不存在的 Key 都是 404，不能运行', async () => {
-      const revoked = await app.request(`/v1/spaces/${ws.spaceId}/apps/${appId}/keys/${keyId}`, {
-        ...jsonRequest('DELETE', {}, { cookie: ws.cookie }),
-      })
+      const revoked = await app.request(
+        `/v1/circles/${ws.circleId}/clients/${clientId}/keys/${keyId}`,
+        {
+          ...jsonRequest('DELETE', {}, { cookie: ws.cookie }),
+        },
+      )
       expect(revoked.ok).toBe(true)
       const res = await postRun({ steps: [{ kind: 'whoami' }] })
       expect(res.status).toBe(404)
@@ -234,8 +271,8 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
       expect(missing.status).toBe(404)
     })
 
-    it('场景列表给空间成员，不是成员 403', async () => {
-      const res = await app.request(`/v1/spaces/${ws.spaceId}/bench/scenarios`, {
+    it('场景列表给记忆圈成员，不是成员 403', async () => {
+      const res = await app.request(`/v1/circles/${ws.circleId}/bench/scenarios`, {
         headers: { cookie: ws.cookie },
       })
       expect(res.status).toBe(200)
@@ -244,23 +281,26 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
         [
           'astrbot-group-round',
           'claude-code-session',
+          'context-cap-and-isolation',
           'credential-flow',
+          'links-and-recall',
           'memory-crud',
           'permission-probe',
+          'variants-and-facets',
         ].sort(),
       )
       const stranger = await bootstrapStranger()
-      const denied = await app.request(`/v1/spaces/${ws.spaceId}/bench/scenarios`, {
+      const denied = await app.request(`/v1/circles/${ws.circleId}/bench/scenarios`, {
         headers: { cookie: stranger },
       })
       expect(denied.status).toBe(403)
     })
 
-    // 空间之外的账号：直接写一个账号与会话，不用走 setup
+    // 记忆圈之外的账号：直接写一个账号与会话，不用走 setup
     async function bootstrapStranger() {
-      const member = await addMember(database.db, ws.spaceId, 'stranger', 'viewer')
+      const member = await addMember(database.db, ws.circleId, 'stranger', 'viewer')
       await database.db.execute(
-        sql`delete from space_members where account_id = ${member.accountId}`,
+        sql`delete from circle_members where account_id = ${member.accountId} and circle_id = ${ws.circleId}`,
       )
       return member.cookie
     }
@@ -313,7 +353,7 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
 
   it('工具列表来自真实的 tools/list：和 /v1/mcp 的一样', async () => {
     const res = await app.request(
-      `/v1/spaces/${ws.spaceId}/apps/${appId}/keys/${keyId}/bench/tools`,
+      `/v1/circles/${ws.circleId}/clients/${clientId}/keys/${keyId}/bench/tools`,
       { headers: { cookie: ws.cookie } },
     )
     expect(res.status).toBe(200)
@@ -344,21 +384,22 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
 
   it('权限按 Key 现在的有效上限：主人被降级之后，secret 级的 Key 按 private 算', async () => {
     await database.db
-      .update(spaceMembers)
+      .update(circleMembers)
       .set({ role: 'editor' })
-      .where(eq(spaceMembers.accountId, ws.accountId))
+      .where(eq(circleMembers.accountId, ws.accountId))
     const result = await run({
       steps: [
         { kind: 'whoami' },
         { kind: 'boot', requires: { maxSensitivity: 'secret' } },
         tool(
           'kioku_create',
-          { uri: 'user://notes/x', content: 'x', sensitivity: 'secret' },
+          { title: 'x', content: 'x', sensitivity: 'secret' },
           { expect: { error: true } },
         ),
       ],
     })
     expect(result.whoami.scopes.maxSensitivity).toBe('private')
+    expect(result.scopes.maxSensitivity).toBe('private')
     expect(result.steps.map((s) => s.status)).toEqual(['passed', 'skipped', 'passed'])
   })
 
@@ -370,18 +411,18 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
         apiKey: 'x',
       })
       await realTool('kioku_create', {
-        uri: 'user://notes/existing',
+        title: 'existing',
         content: '已有的',
         priority: 2,
       })
       await realTool('kioku_create', {
-        uri: 'user://notes/sealed',
+        title: 'sealed',
         content: SECRET_BODY,
         sensitivity: 'secret',
       })
       // 走过真实接口之后等最后使用时间写完：它不等请求结束。这一次写下的时间不早于发请求的时间
       const since = Date.now()
-      await realTool('kioku_list')
+      await realTool('kioku_browse')
       await vi.waitFor(async () =>
         expect((await lastUsedAt())?.getTime()).toBeGreaterThanOrEqual(since),
       )
@@ -397,17 +438,17 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
           { kind: 'boot' },
           { kind: 'whoami' },
           tool('kioku_create', {
-            uri: 'user://notes/new',
+            title: 'new-entry',
             content: '新的',
             glossary: ['新的关键词'],
           }),
           tool('kioku_update', {
-            uri: 'user://notes/existing',
+            id: 'existing',
             content: '改了',
             sensitivity: 'secret',
           }),
-          tool('kioku_update', { uri: 'user://notes/sealed', priority: 9 }),
-          tool('kioku_move', { from: 'user://notes/new', to: 'user://notes/moved' }),
+          tool('kioku_update', { id: 'sealed', priority: 9 }),
+          tool('kioku_transfer', { id: 'new-entry', to_circle: 'work' }),
           tool('kioku_search', { query: '新的关键词' }),
           tool('kioku_credential_save', {
             identifier: 'nas',
@@ -415,7 +456,7 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
             values: { password: 'hunter2-value' },
           }),
           tool('kioku_credential', { identifier: 'nas' }),
-          tool('kioku_delete', { uri: 'user://notes/moved' }),
+          tool('kioku_delete', { id: 'new-entry', circle: 'work' }),
         ],
       })
       expect(result.steps.map((s) => [s.label, s.status, s.isError])).toEqual(
@@ -426,21 +467,25 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
       expect(await recallEventCount()).toBe(0)
     })
 
-    it('后面的步骤读得到前面的写入，同一次运行里 URI 冲突照常 409 且事务还能继续', async () => {
+    it('后面的步骤读得到前面的写入，同一次运行里版本冲突照常 409 且事务还能继续', async () => {
       const result = await run({
         steps: [
-          tool('kioku_create', { uri: 'user://notes/a', content: '第一次' }),
-          tool('kioku_get', { uri: 'user://notes/a' }, { expect: { contains: ['第一次'] } }),
           tool(
             'kioku_create',
-            { uri: 'user://notes/a', content: '再来一次' },
+            { title: 'a', content: '第一次' },
+            { capture: { id: 'ID: ', ver: '版本: ' } },
+          ),
+          tool('kioku_get', { id: '${id}' }, { expect: { contains: ['第一次'] } }),
+          tool(
+            'kioku_update',
+            { id: '${id}', content: '抢先修改', expected_version: 99 },
             {
-              expect: { error: true, contains: ['已被占用'] },
+              expect: { error: true, contains: ['重新读取'] },
             },
           ),
           tool(
             'kioku_update',
-            { uri: 'user://notes/a', content: '改过' },
+            { id: '${id}', content: '改过', expected_version: '${ver}' },
             {
               expect: { contains: ['版本: 2'] },
             },
@@ -450,38 +495,38 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
       expect(result.ok).toBe(true)
     })
 
-    it('重放：先执行、结果不返回，当前步骤读得到；有步骤报错就停下，当前步骤不执行', async () => {
+    it('重放：先执行、结果不返回，当前步骤按原 shortId 读得到；有步骤报错就停下，当前步骤不执行', async () => {
       const first = await run({
-        steps: [tool('kioku_create', { uri: 'user://notes/${run}', content: '第一轮写的' })],
+        steps: [tool('kioku_create', { title: 'replay-${run}', content: '第一轮写的' })],
       })
       const entry = first.steps[0]!.replay!
       expect(entry).toMatchObject({ kind: 'tool', tool: 'kioku_create' })
-      const uri = (entry.kind === 'tool' ? entry.arguments.uri : null) as string
-      expect(uri).toBe(`user://notes/${first.run}`)
+      const shortId = (entry.kind === 'tool' ? entry.shortId : undefined)!
+      expect(shortId).toMatch(/^m-/)
 
-      // 第二轮：带上第一轮的写入，读得到，真实的库里没有
+      // 第二轮：带上第一轮的写入，按原 shortId 读得到，真实的库里没有
       const second = await run({
-        steps: [tool('kioku_get', { uri }, { expect: { contains: ['第一轮写的'] } })],
+        steps: [tool('kioku_get', { id: shortId }, { expect: { contains: ['第一轮写的'] } })],
         replay: [entry],
       })
       expect(second.ok).toBe(true)
       expect(second.steps).toHaveLength(1)
       expect(second.replayDiverged).toBeNull()
-      expect((await realTool('kioku_get', { uri })).isError).toBe(true)
+      expect((await realTool('kioku_get', { id: shortId })).isError).toBe(true)
 
-      // 重放里同一条写两次：第二条报错，后面不执行
+      // 重放里同一条带 shortId 的新建写两次：第二条撞短 ID 报错，后面不执行
       const diverged = await run({
-        steps: [tool('kioku_get', { uri })],
+        steps: [tool('kioku_get', { id: shortId })],
         replay: [entry, entry],
       })
       expect(diverged.replayDiverged).toMatchObject({ index: 1, internalError: false })
-      expect(diverged.replayDiverged!.text).toContain('已被占用')
+      expect(diverged.replayDiverged!.text).toContain('已被其他词条占用')
       expect(diverged.steps[0]).toMatchObject({ status: 'notRun', isError: false })
       expect(diverged.ok).toBe(false)
 
       const replayed = await run({
         mode: 'real',
-        steps: [tool('kioku_get', { uri })],
+        steps: [tool('kioku_get', { id: shortId })],
         replay: [entry],
       }).catch((err: Error) => err.message)
       expect(replayed).toContain('HTTP 400')
@@ -489,7 +534,7 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
 
     it('取用凭据：两种模式都不给值、不记访问，也不列进 changes', async () => {
       const res = await app.request(
-        `/v1/spaces/${ws.spaceId}/credentials`,
+        `/v1/circles/${ws.circleId}/credentials`,
         jsonRequest(
           'POST',
           {
@@ -503,7 +548,7 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
       const credential = (await res.json()) as { id: string }
       const accessEvents = async () => {
         const res = await app.request(
-          `/v1/spaces/${ws.spaceId}/credentials/${credential.id}/events`,
+          `/v1/circles/${ws.circleId}/credentials/${credential.id}/events`,
           { headers: { cookie: ws.cookie } },
         )
         return ((await res.json()) as CredentialEventList).items.filter((e) => e.type === 'access')
@@ -522,27 +567,27 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
 
     it('打码：secret 正文与托管的值不出现在结果里，降级与改正文被拒，重放也一样', async () => {
       await realTool('kioku_create', {
-        uri: 'user://notes/sealed',
+        title: 'sealed',
         content: SECRET_BODY,
         sensitivity: 'secret',
+        topics: ['bench'],
       })
       const steps = [
-        tool('kioku_get', { uri: 'user://notes/sealed' }),
-        tool('kioku_list', { of: 'user://notes/sealed' }),
-        tool('kioku_update', { uri: 'user://notes/sealed', priority: 5 }),
-        tool('kioku_move', { from: 'user://notes/sealed', to: 'user://notes/sealed2' }),
+        tool('kioku_get', { id: 'sealed' }),
+        tool('kioku_browse', { group_by: 'topic', topic: 'bench' }),
+        tool('kioku_update', { id: 'sealed', priority: 5 }),
         tool(
           'kioku_update',
-          { uri: 'user://notes/sealed2', sensitivity: 'private' },
+          { id: 'sealed', sensitivity: 'private' },
           {
-            expect: { error: true, contains: ['记忆页'] },
+            expect: { error: true, contains: ['禁止降级或改写机密词条正文'] },
           },
         ),
         tool(
           'kioku_update',
-          { uri: 'user://notes/sealed2', content: '占位' },
+          { id: 'sealed', content: '占位' },
           {
-            expect: { error: true, contains: ['记忆页'] },
+            expect: { error: true, contains: ['禁止降级或改写机密词条正文'] },
           },
         ),
         tool('kioku_credential_save', {
@@ -569,9 +614,7 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
       expect(JSON.stringify(real.steps.map((s) => [s.text, s.raw, s.changes]))).not.toContain(
         'hunter2-value',
       )
-      expect((await realTool('kioku_get', { uri: 'user://notes/sealed2' })).text).toContain(
-        SECRET_BODY,
-      )
+      expect((await realTool('kioku_get', { id: 'sealed' })).text).toContain(SECRET_BODY)
 
       const replay = await run({
         steps: [{ kind: 'whoami' }],
@@ -579,28 +622,28 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
           {
             kind: 'tool',
             tool: 'kioku_update',
-            arguments: { uri: 'user://notes/sealed2', content: 'x' },
+            arguments: { id: 'sealed', content: 'x' },
           },
         ],
       })
-      expect(replay.replayDiverged!.text).toContain('记忆页')
+      expect(replay.replayDiverged!.text).toContain('禁止降级或改写机密词条正文')
     })
 
     it.each(['rollback', 'real'] as const)(
       '占位文字写回被拒（%s）：模型照抄读到的结果，什么都不写',
       async (mode) => {
         await realTool('kioku_create', {
-          uri: 'user://notes/sealed',
+          title: 'sealed',
           content: SECRET_BODY,
           sensitivity: 'secret',
         })
-        const seen = await step(tool('kioku_get', { uri: 'user://notes/sealed' }), mode)
+        const seen = await step(tool('kioku_get', { id: 'sealed' }), mode)
         const result = await run({
           mode,
           steps: [
             tool(
               'kioku_create',
-              { uri: 'user://notes/copied', content: seen.text },
+              { title: 'copied', content: seen.text },
               { expect: { error: true, contains: ['占位文字'] } },
             ),
             tool(
@@ -612,42 +655,40 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
         })
         expect(result.ok).toBe(true)
         expect(result.steps.flatMap((s) => (s.replay ? [s.replay] : []))).toEqual([])
-        expect((await realTool('kioku_get', { uri: 'user://notes/copied' })).isError).toBe(true)
+        expect((await realTool('kioku_get', { id: 'copied' })).isError).toBe(true)
         expect((await realTool('kioku_credential', { identifier: 'copied' })).isError).toBe(true)
       },
     )
 
     it('同一组调用和走真实 /v1/mcp 的输出相同（工具不带会话上下文）', async () => {
       await realTool('kioku_create', {
-        uri: 'core://agent',
+        title: 'agent-rule',
         content: '先读正文再信任',
         sensitivity: 'public',
         priority: 0,
       })
       const calls: [string, Record<string, unknown>][] = [
         ['kioku_boot', {}],
-        ['kioku_list', {}],
-        ['kioku_get', { uri: 'core://agent' }],
-        ['kioku_get', { uri: 'core://missing' }],
+        ['kioku_browse', {}],
+        ['kioku_get', { id: 'agent-rule' }],
+        ['kioku_get', { id: 'missing-title' }],
         [
           'kioku_create',
           {
-            uri: 'user://notes/same',
+            title: 'same-title',
             content: '正文',
             disclosure: '什么时候想起',
             glossary: ['同一组调用'],
           },
         ],
-        ['kioku_create', { uri: 'user://notes/same', content: '重复' }],
-        ['kioku_create', { uri: 'bad uri', content: '格式不对' }],
-        ['kioku_update', { uri: 'user://notes/same', content: '改过', glossary_add: ['又一个词'] }],
-        ['kioku_update', { uri: 'user://notes/same', priority: 3, expected_version: 99 }],
+        ['kioku_create', { title: '', content: '空标题被拒绝' }],
+        ['kioku_update', { id: 'same-title', content: '改过', glossary_add: ['又一个词'] }],
+        ['kioku_update', { id: 'same-title', priority: 3, expected_version: 99 }],
         ['kioku_search', { query: '同一组调用' }],
-        ['kioku_list', { of: 'notes' }],
-        ['kioku_move', { from: 'user://notes/same', to: 'user://notes/moved' }],
-        ['kioku_get', { uri: 'user://notes/moved' }],
-        ['kioku_delete', { uri: 'user://notes/moved' }],
-        ['kioku_get', { uri: 'user://notes/moved' }],
+        ['kioku_transfer', { id: 'same-title', to_circle: 'work' }],
+        ['kioku_get', { id: 'same-title', circle: 'work' }],
+        ['kioku_delete', { id: 'same-title', circle: 'work' }],
+        ['kioku_get', { id: 'same-title', circle: 'work' }],
         ['kioku_credential', {}],
         ['kioku_unknown', {}],
       ]
@@ -656,15 +697,21 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
       })
       const expected: { text: string; isError: boolean }[] = []
       for (const [name, args] of calls) expected.push(await realTool(name, args))
-      expect(benched.steps.map((s) => ({ text: s.text, isError: s.isError }))).toEqual(expected)
+      // 除了每次随机生成的 shortId 本身外，两边的行为与结构输出一致
+      const stripId = (s: string) => s.replace(/m-[2-9a-hjkmnp-tv-z]{6,8}/g, 'm-xxxxxx')
+      expect(benched.steps.map((s) => ({ text: stripId(s.text), isError: s.isError }))).toEqual(
+        expected.map((e) => ({ text: stripId(e.text), isError: e.isError })),
+      )
     })
 
-    it('同一把 Key、群聊上下文下 prompt.submit 召回不到私人层，kioku_get 读得到', async () => {
-      await realTool('kioku_create', {
-        uri: 'user://notes/lan',
+    it('同一把 Key、群聊上下文下 prompt.submit 召回不到私有词条，kioku_get 读得到', async () => {
+      const created = await realTool('kioku_create', {
+        title: '家里的内网',
         content: '家里的内网地址',
+        sensitivity: 'private',
         glossary: ['内网'],
       })
+      const shortId = /^ID: (m-[2-9a-hjkmnp-tv-z]{6,8})/m.exec(created.text)![1]!
       const result = await run({
         steps: [
           lifecycle(
@@ -672,131 +719,123 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
             {
               expect: {
                 error: false,
-                notUris: ['user://notes/lan'],
-                notContains: ['user://notes/lan'],
+                notShortIds: [shortId],
+                notContains: [shortId],
               },
             },
           ),
           {
             kind: 'recall',
             body: { query: '内网', context: GROUP },
-            expect: { notUris: ['user://notes/lan'] },
+            expect: { notShortIds: [shortId] },
           },
           tool(
             'kioku_get',
-            { uri: 'user://notes/lan' },
+            { id: shortId },
             {
               expect: { error: false, contains: ['家里的内网地址'] },
             },
           ),
           lifecycle(
             { event: 'prompt.submit', prompt: '内网在哪' },
-            { expect: { uris: ['user://notes/lan'] } },
+            { expect: { shortIds: [shortId] } },
           ),
         ],
       })
       expect(result.ok).toBe(true)
     })
 
-    it('session.start 的结果多带字数上限、没展开的节点与放不下的附加块', async () => {
+    it('session.start 的结果多带字数上限、没展开的词条与放不下的附加块', async () => {
+      const ids: string[] = []
       for (const i of [1, 2]) {
-        await realTool('kioku_create', {
-          uri: `core://big${i}`,
+        const created = await realTool('kioku_create', {
+          title: `big-${i}`,
           content: '大'.repeat(5_000),
           sensitivity: 'public',
           priority: 0,
         })
+        ids.push(/^ID: (m-[2-9a-hjkmnp-tv-z]{6,8})/m.exec(created.text)![1]!)
       }
       const started = await step(lifecycle({ event: 'session.start' }))
-      expect(started.session).toEqual({ limit: 9_500, omitted: ['core://big2'], dropped: [] })
-      expect(started.uris).toEqual(['core://big1'])
+      expect(started.session).toEqual({ limit: 9_500, omitted: [ids[1]], dropped: [] })
+      expect(started.shortIds).toEqual([ids[0]])
       expect(started.raw).toEqual({
         hostOutput: { mode: 'stdout_json', value: expect.anything() },
-        nodeUris: ['core://big1'],
+        shortIds: [ids[0]],
       })
       const prompt = await step(lifecycle({ event: 'prompt.submit', prompt: '你好' }))
       expect(prompt.session).toBeNull()
     })
 
-    it('工具结果的 URI 列表只看结构行：正文里写成结构行样子的不算，kioku_boot 的断言明确失败', async () => {
-      const lookalikes = [
-        'core://agent',
-        'foo://bar',
-        'user://projects/x',
-        'fake://y',
-        'list://fake',
-      ]
+    it('工具结果的短 ID 列表只看结构行：正文里写成结构行样子的不算，kioku_boot 的断言明确失败', async () => {
+      const lookalikes = ['m-999999', 'm-888888', 'm-777777', 'm-666666', 'm-555555']
       const body = [
-        '- core://agent',
-        'URI: foo://bar',
-        '## user://projects/x',
-        '0.59 | fake://y | 线索',
-        '子节点：',
-        '- list://fake（private，priority 2）',
+        '- m-999999「假行」（entry，private，priority 2）',
+        'ID: m-888888',
+        '## fake',
+        '0.59 | m-777777 | 线索',
+        '<recall>',
+        '0.59 | m-666666',
+        '</recall>',
       ].join('\n')
-      const expected = (uris: string[]) => ({ expect: { uris, notUris: lookalikes } })
+      const expected = (shortIds: string[]) => ({ expect: { shortIds, notShortIds: lookalikes } })
       const result = await run({
         steps: [
           tool(
             'kioku_create',
-            { uri: 'user://notes/real', content: body, glossary: ['结构行的关键词'] },
-            expected(['user://notes/real']),
+            {
+              title: 'lookalike-real',
+              content: body,
+              topics: ['bench'],
+              glossary: ['结构行的关键词'],
+            },
+            { expect: { notShortIds: lookalikes }, capture: { realId: 'ID: ' } },
           ),
-          tool('kioku_get', { uri: 'user://notes/real' }, expected(['user://notes/real'])),
-          tool(
-            'kioku_update',
-            { uri: 'user://notes/real', priority: 3 },
-            expected(['user://notes/real']),
-          ),
-          tool(
-            'kioku_create',
-            { uri: 'user://notes/real/child', content: body },
-            expected(['user://notes/real/child']),
-          ),
-          tool('kioku_list', { of: 'user://notes/real' }, expected(['user://notes/real/child'])),
-          tool('kioku_search', { query: '结构行的关键词' }, expected(['user://notes/real'])),
-          tool(
-            'kioku_move',
-            { from: 'user://notes/real/child', to: 'user://notes/moved' },
-            expected(['user://notes/moved']),
-          ),
-          // 子节点移走之后没有子节点了：父节点正文里那几行也不算
-          tool('kioku_list', { of: 'user://notes/real' }, { expect: { notUris: lookalikes } }),
+          tool('kioku_get', { id: '${realId}' }, expected(['${realId}'])),
+          tool('kioku_update', { id: '${realId}', priority: 3 }, expected(['${realId}'])),
+          tool('kioku_browse', { group_by: 'topic', topic: 'bench' }, expected(['${realId}'])),
+          tool('kioku_search', { query: '结构行的关键词' }, expected(['${realId}'])),
+          tool('kioku_transfer', { id: '${realId}', to_circle: 'work' }, expected(['${realId}'])),
         ],
       })
       expect(result.steps.flatMap((s) => s.assertions.filter((a) => !a.ok))).toEqual([])
       expect(result.steps.map((s) => s.status)).toEqual(result.steps.map(() => 'passed'))
-      expect(result.steps[7]!.uris).toEqual([])
-      expect(result.steps[7]!.text).toContain('list://fake')
+      const realId = result.steps[0]!.captured.realId!
+      expect(result.steps[5]!.shortIds).toEqual([realId])
 
-      // 启动节点的正文里写着标题的样子：工具分不清，/boot 有结构化的 entries
-      await realTool('kioku_create', {
-        uri: 'core://boot-node',
+      // 启动词条的正文里写着标题的样子：工具分不清，/boot 有结构化的 entries
+      const bootCreated = await realTool('kioku_create', {
+        title: 'boot-entry',
         content: body,
         sensitivity: 'public',
         priority: 0,
       })
+      const bootId = /^ID: (m-[2-9a-hjkmnp-tv-z]{6,8})/m.exec(bootCreated.text)![1]!
       const boot = await run({
         steps: [
-          tool('kioku_boot', {}, { expect: { uris: ['core://boot-node'] } }),
-          tool('kioku_boot', {}, { expect: { notUris: ['user://projects/x'] } }),
-          { kind: 'boot', expect: { uris: ['core://boot-node'], notUris: ['user://projects/x'] } },
+          tool('kioku_boot', {}, { expect: { shortIds: [bootId] } }),
+          tool('kioku_boot', {}, { expect: { notShortIds: ['m-999999'] } }),
+          { kind: 'boot', expect: { shortIds: [bootId], notShortIds: lookalikes } },
           lifecycle(
             { event: 'session.start' },
-            { expect: { uris: ['core://boot-node'], notUris: ['user://projects/x'] } },
+            { expect: { shortIds: [bootId], notShortIds: lookalikes } },
           ),
         ],
       })
       expect(boot.steps.map((s) => s.status)).toEqual(['failed', 'failed', 'passed', 'passed'])
-      expect(boot.steps[0]!.uris).toBeNull()
+      expect(boot.steps[0]!.shortIds).toBeNull()
       expect(boot.steps[0]!.assertions[0]!.message).toContain('无法区分')
       expect(boot.steps[1]!.assertions[0]!.message).toContain('无法区分')
       // 界面按契约校验响应：没有列表（null）也要过
       expect(BenchRunResult.safeParse(boot).success).toBe(true)
     })
 
-    it('跑过一步之后，根事务上不经 withSpace 查内容表返回空，和真实一样', async () => {
-      const found = await keyToSimulate(deps, { spaceId: ws.spaceId, appId, keyId }, ws.accountId)
+    it('跑过一步之后，根事务上不经 withCircle 查内容表返回空，和真实一样', async () => {
+      const found = await keyToSimulate(
+        deps,
+        { circleId: ws.circleId, clientId, keyId },
+        ws.accountId,
+      )
       if ('error' in found) throw new Error(found.error)
       await inRollback(deps, { model: null, vectors: new Map() }, async (scoped, rollback) => {
         const executor = inProcessExecutor(scoped, found.key, {
@@ -807,26 +846,28 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
         const created = await executor.execute({
           kind: 'tool',
           tool: 'kioku_create',
-          arguments: { uri: 'user://notes/written', content: '这一步写的' },
+          arguments: { title: 'written', content: '这一步写的' },
         })
         expect(created.isError).toBe(false)
-        await expect(scoped.db.select().from(memories)).resolves.toEqual([])
+        await expect(scoped.db.select().from(entries)).resolves.toEqual([])
         // 下一步照常读得到
         const read = await executor.execute({
           kind: 'tool',
           tool: 'kioku_get',
-          arguments: { uri: 'user://notes/written' },
+          arguments: { id: 'written' },
         })
         expect(read.text).toContain('这一步写的')
       })
     })
 
     it('只读与不满足 requires 的步骤记跳过，不算失败', async () => {
-      const readonly = await ws.createKey(appId, {
-        readLayers: ['core'],
-        writeLayers: [],
+      const readonly = await issueSharedKey({
+        readKinds: ['entry'],
+        writeKinds: [],
         maxSensitivity: 'public',
+        allowedRealms: null,
         admin: false,
+        credentials: 'none',
       })
       const res = await postRun(
         {
@@ -834,9 +875,9 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
             { kind: 'whoami' },
             tool(
               'kioku_create',
-              { uri: 'user://notes/x', content: 'x' },
+              { title: 'x', content: 'x' },
               {
-                requires: { writeLayers: ['user'] },
+                requires: { writeKinds: ['entry'] },
               },
             ),
           ],
@@ -847,8 +888,8 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
       )
       const result = (await res.json()) as BenchRunResult
       expect(result.steps.map((s) => s.status)).toEqual(['passed', 'skipped'])
-      expect(result.steps[1]!.reason).toContain('无权写入本人（user）')
-      expect(result.whoami.scopes.writeLayers).toEqual([])
+      expect(result.steps[1]!.reason).toContain('无权写入词条（entry）')
+      expect(result.whoami.scopes.writeKinds).toEqual([])
       expect(result.ok).toBe(true)
     })
   })
@@ -873,13 +914,13 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
 
     it('工具步骤等锁超时：只有固定文字，标 internalError 与等锁超时，「应当报错」也算失败，后面的步骤照常', async () => {
       const error = vi.spyOn(console, 'error').mockImplementation(() => {})
-      await realTool('kioku_create', { uri: 'user://notes/locked', content: '不该出现的正文' })
-      const release = await holdLock('memories')
+      await realTool('kioku_create', { title: 'locked', content: '不该出现的正文' })
+      const release = await holdLock('entries')
       try {
         const result = await run(
           {
             steps: [
-              tool('kioku_get', { uri: 'user://notes/locked' }, { expect: { error: true } }),
+              tool('kioku_get', { id: 'locked' }, { expect: { error: true } }),
               { kind: 'whoami' },
             ],
           },
@@ -920,7 +961,7 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
               { kind: 'whoami' },
               tool(
                 'kioku_create',
-                { uri: 'user://notes/never', content: '不会执行' },
+                { title: 'never', content: '不会执行' },
                 {
                   requires: { maxSensitivity: 'secret' },
                 },
@@ -948,14 +989,11 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
 
     it('总时长到了：后面的步骤记为没有执行，已经结束的步骤结果保留', async () => {
       const error = vi.spyOn(console, 'error').mockImplementation(() => {})
-      const release = await holdLock('memories')
+      const release = await holdLock('entries')
       try {
         const result = await run(
           {
-            steps: [
-              tool('kioku_get', { uri: 'user://notes/locked' }),
-              tool('kioku_get', { uri: 'user://notes/locked' }),
-            ],
+            steps: [tool('kioku_get', { id: 'locked' }), tool('kioku_get', { id: 'locked' })],
           },
           // 第一步开始时还没到总时长，等锁等到时限时已经过了
           limited({ lockTimeoutMs: 800, runMs: 400 }),
@@ -971,9 +1009,13 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
 
     it('列改动时记下的错误原因当场取走，不留到下一步', async () => {
       const error = vi.spyOn(console, 'error').mockImplementation(() => {})
-      const found = await keyToSimulate(deps, { spaceId: ws.spaceId, appId, keyId }, ws.accountId)
+      const found = await keyToSimulate(
+        deps,
+        { circleId: ws.circleId, clientId, keyId },
+        ws.accountId,
+      )
       if ('error' in found) throw new Error(found.error)
-      const release = await holdLock('memory_events')
+      const release = await holdLock('entry_events')
       try {
         await inRollback(
           { ...deps, benchLimits: { lockTimeoutMs: 100 } },
@@ -1003,9 +1045,13 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
 
     it('这一步自己的内部错误不算到列改动的超时头上', async () => {
       const error = vi.spyOn(console, 'error').mockImplementation(() => {})
-      const found = await keyToSimulate(deps, { spaceId: ws.spaceId, appId, keyId }, ws.accountId)
+      const found = await keyToSimulate(
+        deps,
+        { circleId: ws.circleId, clientId, keyId },
+        ws.accountId,
+      )
       if ('error' in found) throw new Error(found.error)
-      const release = await holdLock('memory_events')
+      const release = await holdLock('entry_events')
       try {
         await inRollback(
           { ...deps, benchLimits: { lockTimeoutMs: 100 } },
@@ -1021,7 +1067,7 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
               kind: 'tool',
               tool: 'kioku_create',
               arguments: {
-                uri: 'user://projects/bench/nul',
+                title: 'nul',
                 content: 'a\u0000b',
                 priority: 2,
                 glossary: [],
@@ -1045,17 +1091,17 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
       const big = connect(testDatabaseUrl!, { max: 6 })
       try {
         const target = createApp({ ...deps, db: big.db })
-        await realTool('kioku_create', { uri: 'user://notes/busy', content: '被占着的' })
+        await realTool('kioku_create', { title: 'busy', content: '被占着的' })
         // 两个运行都卡在等行锁上
         const release = deferred()
         const held = deferred()
-        const hold = withSpace(other.db, ws.spaceId, async (tx) => {
-          await tx.update(memories).set({ priority: 7 }).where(eq(memories.path, 'notes/busy'))
+        const hold = withCircle(other.db, ws.circleId, async (tx) => {
+          await tx.update(entries).set({ priority: 7 }).where(eq(entries.title, 'busy'))
           held.resolve()
           await release.promise
         })
         await held.promise
-        const update = { steps: [tool('kioku_update', { uri: 'user://notes/busy', priority: 8 })] }
+        const update = { steps: [tool('kioku_update', { id: 'busy', priority: 8 })] }
         const blocked = [postRun(update, ws.cookie, target), postRun(update, ws.cookie, target)]
         let waiting = 0
         for (let i = 0; i < 200 && waiting < 2; i++) {
@@ -1106,14 +1152,18 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
       return { deps: { ...deps, db, embedder: source }, order }
     }
     const principal = async () => {
-      const found = await keyToSimulate(deps, { spaceId: ws.spaceId, appId, keyId }, ws.accountId)
+      const found = await keyToSimulate(
+        deps,
+        { circleId: ws.circleId, clientId, keyId },
+        ws.accountId,
+      )
       if ('error' in found) throw new Error(found.error)
       return found.key
     }
 
     it('开事务之前算好，事务里不请求嵌入接口；运行时才知道的查询只走全文与关键词并标明', async () => {
       await realTool('kioku_create', {
-        uri: 'user://notes/hit',
+        title: 'hit',
         content: '向量也能命中的正文',
         glossary: ['字面量查询'],
       })
@@ -1126,7 +1176,7 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
         steps: [
           tool(
             'kioku_create',
-            { uri: 'user://notes/${run}/new', content: '查询的来源：运行时' },
+            { title: 'new-${run}', content: '查询的来源：运行时' },
             {
               capture: { query: '查询的来源：' },
             },
@@ -1184,11 +1234,14 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
       })
       const result = await run({
         steps: [
-          tool('kioku_create', { uri: 'user://notes/a', content: '正文一', disclosure: '想起一' }),
-          tool('kioku_update', { uri: 'user://notes/a', content: '正文二', priority: 5 }),
-          tool('kioku_move', { from: 'user://notes/a', to: 'user://notes/b' }),
-          tool('kioku_get', { uri: 'user://notes/b' }),
-          tool('kioku_update', { uri: 'user://notes/b', sensitivity: 'secret' }),
+          tool(
+            'kioku_create',
+            { title: 'a', content: '正文一', disclosure: '想起一' },
+            { capture: { id: 'ID: ' } },
+          ),
+          tool('kioku_update', { id: '${id}', content: '正文二', priority: 5 }),
+          tool('kioku_get', { id: '${id}' }),
+          tool('kioku_update', { id: '${id}', sensitivity: 'secret' }),
           tool('kioku_credential_save', {
             identifier: 'nas',
             name: 'NAS',
@@ -1202,46 +1255,40 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
           lifecycle(TURN_END),
           lifecycle({ ...TURN_END, user: '第二轮' }),
           lifecycle({ event: 'prompt.submit', prompt: '你好' }),
-          tool('kioku_delete', { uri: 'user://notes/b' }),
+          tool('kioku_delete', { id: '${id}' }),
         ],
       })
       expect(result.ok).toBe(true)
-      const [create, update, move, get, secret, saved, changed, turn, nextTurn, prompt, removed] =
+      const [create, update, get, secret, saved, changed, turn, nextTurn, prompt, removed] =
         result.steps.map(changesOf)
+      const shortId = result.steps[0]!.shortIds![0]!
 
-      expect(create!.memories).toEqual([
+      expect(create!.entries).toEqual([
         {
           type: 'create',
-          uri: 'user://notes/a',
+          shortId,
           title: 'a',
           fields: [],
           left: false,
           becameSecret: false,
         },
       ])
-      expect(update!.memories).toEqual([
+      expect(update!.entries).toEqual([
         {
           type: 'update',
-          uri: 'user://notes/a',
+          shortId,
           title: 'a',
           fields: ['priority', 'content'],
           left: false,
           becameSecret: false,
         },
       ])
-      // 标题就是旧的标识，移动时跟着换成新的
-      expect(move!.memories[0]).toMatchObject({
-        type: 'move',
-        uri: 'user://notes/b',
-        title: 'b',
-        fields: ['uri', 'title'],
-      })
-      expect(get!.memories).toEqual([])
-      expect(secret!.memories).toEqual([
+      expect(get!.entries).toEqual([])
+      expect(secret!.entries).toEqual([
         {
           type: 'update',
-          uri: 'user://notes/b',
-          title: 'b',
+          shortId,
+          title: 'a',
           fields: ['sensitivity'],
           left: false,
           becameSecret: true,
@@ -1265,8 +1312,8 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
       // 第二轮：对象已经有了，不再算新建；缓冲只算这一轮
       expect(nextTurn!).toMatchObject({ subjects: 0, identities: [], turns: 1 })
       expect(nextTurn!.turn!.user).toBe('第二轮')
-      expect(prompt!).toMatchObject({ memories: [], subjects: 0, turns: 0, turn: null })
-      expect(removed!.memories[0]).toMatchObject({ type: 'delete', uri: 'user://notes/b' })
+      expect(prompt!).toMatchObject({ entries: [], subjects: 0, turns: 0, turn: null })
+      expect(removed!.entries[0]).toMatchObject({ type: 'delete', shortId })
 
       const allChanges = JSON.stringify(result.steps.map(changesOf))
       for (const content of [
@@ -1306,7 +1353,7 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
         turn: { sessionId: 'cc-session', user: '本机说的话', reply: '回复' },
       })
       expect(second).toMatchObject({ subjects: 0, turns: 1, turn: { user: '第二轮' } })
-      const left = await withSpace(database.db, ws.spaceId, async (tx) => ({
+      const left = await withCircle(database.db, ws.circleId, async (tx) => ({
         turns: await tx.select().from(conversationTurns),
         conversations: await tx.select().from(conversations),
       }))
@@ -1319,19 +1366,20 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
         model: 'fake',
         apiKey: 'x',
       })
-      const eventChanges = vi.spyOn(MemoryService.prototype, 'eventChanges')
+      const eventChanges = vi.spyOn(EntryService.prototype, 'eventChanges')
       try {
         const result = await run({
           replay: [
             {
               kind: 'tool',
               tool: 'kioku_create',
-              arguments: { uri: 'user://notes/replayed', content: '重放写的' },
+              arguments: { title: 'replayed', content: '重放写的' },
+              shortId: 'm-234567',
             },
             {
               kind: 'tool',
               tool: 'kioku_update',
-              arguments: { uri: 'user://notes/replayed', priority: 4 },
+              arguments: { id: 'm-234567', priority: 4 },
             },
             {
               kind: 'tool',
@@ -1341,12 +1389,8 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
             { kind: 'lifecycle', body: TURN_END },
           ],
           steps: [
-            tool(
-              'kioku_get',
-              { uri: 'user://notes/replayed' },
-              { expect: { contains: ['重放写的'] } },
-            ),
-            tool('kioku_create', { uri: 'user://notes/mine', content: '这一步写的' }),
+            tool('kioku_get', { id: 'm-234567' }, { expect: { contains: ['重放写的'] } }),
+            tool('kioku_create', { title: 'mine', content: '这一步写的' }),
             lifecycle({ ...TURN_END, user: '这一步说的' }),
           ],
         })
@@ -1354,8 +1398,7 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
         expect(result.replayDiverged).toBeNull()
         const [read, created, turn] = result.steps.map(changesOf)
         expect(read!).toEqual({
-          memories: [],
-          hiddenReleased: 0,
+          entries: [],
           hiddenOther: 0,
           credentials: [],
           subjects: 0,
@@ -1363,10 +1406,10 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
           turns: 0,
           turn: null,
         })
-        expect(created!.memories).toEqual([
+        expect(created!.entries).toEqual([
           {
             type: 'create',
-            uri: 'user://notes/mine',
+            shortId: result.steps[1]!.shortIds![0]!,
             title: 'mine',
             fields: [],
             left: false,
@@ -1383,12 +1426,13 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
     })
 
     it('重放分叉时不列改动，也不推进水位', async () => {
-      const eventChanges = vi.spyOn(MemoryService.prototype, 'eventChanges')
+      const eventChanges = vi.spyOn(EntryService.prototype, 'eventChanges')
       try {
         const entry = {
           kind: 'tool',
           tool: 'kioku_create',
-          arguments: { uri: 'user://notes/twice', content: '写两次' },
+          arguments: { title: 'twice', content: '写两次' },
+          shortId: 'm-234567',
         }
         const result = await run({ replay: [entry, entry], steps: [{ kind: 'whoami' }] })
         expect(result.replayDiverged).toMatchObject({ index: 1 })
@@ -1403,119 +1447,60 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
       expect(turn.changes).toMatchObject({ subjects: 2, turns: 0, turn: null })
     })
 
-    it('让出这把 Key 读不到的过期记录：只说让出了几条看不到的，不给任何字段', async () => {
-      const member = await addMember(database.db, ws.spaceId, 'bob', 'editor')
-      const bobMemory = {
-        uri: 'core://projects/acme',
-        content: '别人的正文',
-        disclosure: '别人的 disclosure',
-        glossary: ['别人的关键词'],
-      }
-      const created = await app.request(
-        `/v1/spaces/${ws.spaceId}/memories`,
-        jsonRequest('POST', bobMemory, { cookie: member.cookie }),
-      )
-      expect(created.status).toBe(201)
-      await withSpace(database.db, ws.spaceId, (tx) =>
-        tx
-          .update(memories)
-          .set({ validTo: new Date(Date.now() - 60_000) })
-          .where(eq(memories.path, 'projects/acme')),
-      )
-      // 写得了通用、读不到通用的 Key：让出的那条与新建的这条都看不到
-      const blind = await ws.createKey(appId, {
-        readLayers: ['user'],
-        writeLayers: ['core', 'user'],
+    it('这把 Key 读不到的改动只数条数；改后读不到的只给改前的短 ID 与标题', async () => {
+      // 主场可读写的 Key，但没有把「公司」圈放进 read/linked，无法读取迁出目标；另一把仅写不可读
+      const blindWrite = await issueSharedKey({
+        readKinds: [],
+        writeKinds: ['entry'],
         maxSensitivity: 'private',
+        allowedRealms: null,
         admin: false,
+        credentials: 'none',
       })
-      const res = await postRun(
+      const writeRes = await postRun(
         {
           steps: [
             tool('kioku_create', {
-              uri: 'core://projects/acme',
-              content: '共享的新正文',
-              sensitivity: 'public',
-            }),
-          ],
-        },
-        ws.cookie,
-        app,
-        blind.id,
-      )
-      const result = (await res.json()) as BenchRunResult
-      const changes = result.steps[0]!.changes!
-      expect(result.steps[0]!.isError).toBe(false)
-      expect(changes).toMatchObject({ memories: [], hiddenReleased: 1, hiddenOther: 1 })
-      const text = JSON.stringify(result)
-      for (const hidden of ['别人的正文', '别人的 disclosure', '别人的关键词', member.accountId]) {
-        expect(text).not.toContain(hidden)
-      }
-    })
-
-    it('这把 Key 读不到的改动只数条数；改后读不到的只给改前的 URI', async () => {
-      // 读得到通用、读不到应用的 Key：移进应用的那条「离开」，新建在应用里的只数条数
-      const narrow = await ws.createKey(appId, {
-        readLayers: ['core'],
-        writeLayers: ['core', 'app'],
-        maxSensitivity: 'private',
-        admin: false,
-      })
-      const res = await postRun(
-        {
-          steps: [
-            tool('kioku_create', {
-              uri: 'core://notes/a',
+              title: 'hidden-note',
               sensitivity: 'internal',
-              content: '通用的正文',
+              content: '不可读正文',
             }),
-            tool('kioku_move', { from: 'core://notes/a', to: 'app://cc/notes/b' }),
-            tool('kioku_create', { uri: 'app://cc/notes/c', content: '应用的正文' }),
           ],
         },
         ws.cookie,
         app,
-        narrow.id,
+        blindWrite.id,
       )
-      const result = (await res.json()) as BenchRunResult
-      expect(result.steps.map((s) => s.isError)).toEqual([false, false, false])
-      const [created, moved, hidden] = result.steps.map(changesOf)
-      expect(created!.memories).toEqual([
-        {
-          type: 'create',
-          uri: 'core://notes/a',
-          title: 'a',
-          fields: [],
-          left: false,
-          becameSecret: false,
-        },
-      ])
-      expect(moved!.memories).toEqual([
-        {
-          type: 'move',
-          uri: 'core://notes/a',
-          title: 'a',
-          fields: [],
-          left: true,
-          becameSecret: false,
-        },
-      ])
-      expect(hidden).toMatchObject({ memories: [], hiddenReleased: 0, hiddenOther: 1 })
-    })
+      const writeResult = (await writeRes.json()) as BenchRunResult
+      expect(writeResult.steps[0]!.isError).toBe(false)
+      expect(writeResult.steps[0]!.changes).toMatchObject({ entries: [], hiddenOther: 1 })
 
-    it('让出自己的过期记录：看得到，照常列出', async () => {
-      await realTool('kioku_create', { uri: 'user://notes/mine', content: '旧的' })
-      await withSpace(database.db, ws.spaceId, (tx) =>
-        tx
-          .update(memories)
-          .set({ validTo: new Date(Date.now() - 60_000) })
-          .where(eq(memories.path, 'notes/mine')),
+      // 迁出到已链接的「公司」共享圈：源圈记 transfer_out（after 为空 => left: true），目标圈记 transfer_in
+      const transferred = await step(
+        tool(
+          'kioku_create',
+          { title: 'move-me', content: '准备迁走' },
+          { capture: { id: 'ID: ' } },
+        ),
       )
-      const created = await step(
-        tool('kioku_create', { uri: 'user://notes/mine', content: '新的' }),
-      )
-      expect(created.changes!.hiddenReleased).toBe(0)
-      expect(created.changes!.memories.map((m) => m.type)).toEqual(['expire', 'create'])
+      expect(transferred.isError).toBe(false)
+      // 同一 run 中新建再迁出
+      const runMoved = await run({
+        steps: [
+          tool(
+            'kioku_create',
+            { title: 'will-leave', content: '内容' },
+            { capture: { id: 'ID: ' } },
+          ),
+          tool('kioku_transfer', { id: '${id}', to_circle: 'work' }),
+        ],
+      })
+      expect(runMoved.ok).toBe(true)
+      const leaveEvents = runMoved.steps[1]!.changes!.entries
+      expect(leaveEvents.map((e) => [e.type, e.left])).toEqual([
+        ['transfer_out', true],
+        ['transfer_in', false],
+      ])
     })
 
     it('运行期间另一条连接提交的事件、对象与缓冲都不进 changes（同一把 Key 也一样）', async () => {
@@ -1524,28 +1509,32 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
         model: 'fake',
         apiKey: 'x',
       })
-      const found = await keyToSimulate(deps, { spaceId: ws.spaceId, appId, keyId }, ws.accountId)
+      const found = await keyToSimulate(
+        deps,
+        { circleId: ws.circleId, clientId, keyId },
+        ws.accountId,
+      )
       if ('error' in found) throw new Error(found.error)
       const { key } = found
       const concurrent = { ...deps, db: other.db }
       const seen = await inRollback(deps, { model: null, vectors: new Map() }, async (scoped) => {
-        const memory = memoryServiceForKey(scoped, key)
-        const tracker = changeTracker(scoped, key, memory, { kind: 'transaction' })
+        const svc = entryServiceForKey(scoped, key)
+        const tracker = changeTracker(scoped, key, svc, { kind: 'transaction' })
         // 事务开始之后，另一条连接用同一把 Key 真实写入并提交；读已提交隔离下这里读得到
-        await memoryServiceForKey(concurrent, key).create({
-          uri: 'user://notes/concurrent',
+        await entryServiceForKey(concurrent, key).create({
+          title: 'concurrent',
           content: '别的连接写的',
           priority: 2,
           glossary: [],
         })
-        await withSpace(other.db, ws.spaceId, async (tx) => {
+        await withCircle(other.db, ws.circleId, async (tx) => {
           const [subject] = await tx
             .insert(subjects)
-            .values({ spaceId: ws.spaceId, kind: 'person', displayName: '别的连接的对象' })
+            .values({ circleId: ws.circleId, kind: 'person', displayName: '别的连接的对象' })
             .returning({ id: subjects.id })
           await tx.insert(conversationTurns).values({
-            spaceId: ws.spaceId,
-            appId,
+            circleId: ws.circleId,
+            clientId,
             keyId,
             scope: `direct:${subject!.id}`,
             sessionId: 's',
@@ -1555,22 +1544,26 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
             replyText: '回复',
           })
         })
-        await memory.create({
-          uri: 'user://notes/mine',
+        const created = await svc.create({
+          title: 'mine',
           content: '这个事务写的',
           priority: 2,
           glossary: [],
         })
-        const visible = await withSpace(scoped.db, ws.spaceId, async (tx) => ({
-          memories: (await tx.select().from(memories)).length,
+        const visible = await withCircle(scoped.db, ws.circleId, async (tx) => ({
+          entries: (await tx.select().from(entries)).length,
           turns: (await tx.select().from(conversationTurns)).length,
         }))
-        return { visible, changes: await tracker.collect({ kind: 'whoami' }) }
+        return {
+          shortId: created.shortId,
+          visible,
+          changes: await tracker.collect({ kind: 'whoami' }),
+        }
       })
       // 确实读得到别的连接提交的
-      expect(seen.visible).toEqual({ memories: 2, turns: 1 })
+      expect(seen.visible).toEqual({ entries: 2, turns: 1 })
       expect(seen.changes).toMatchObject({
-        memories: [{ type: 'create', uri: 'user://notes/mine' }],
+        entries: [{ type: 'create', shortId: seen.shortId }],
         subjects: 0,
         identities: [],
         turns: 0,
@@ -1584,7 +1577,7 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
       const state = {
         embeds: [] as string[],
         extractions: 0,
-        enqueueEmbed: (_spaceId: string, memoryId: string) => void state.embeds.push(memoryId),
+        enqueueEmbed: (_circleId: string, entryId: string) => void state.embeds.push(entryId),
         enqueueBackfill: async () => true,
         enqueueSwitch: async () => true,
         enqueuePrune: async () => true,
@@ -1612,31 +1605,34 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
         {
           mode: 'real',
           steps: [
-            tool('kioku_create', {
-              uri: 'user://notes/real-${run}',
-              content: '真的写了',
-              glossary: ['真实关键词'],
-            }),
+            tool(
+              'kioku_create',
+              {
+                title: 'real-${run}',
+                content: '真的写了',
+                glossary: ['真实关键词'],
+              },
+              { capture: { id: 'ID: ' } },
+            ),
             tool('kioku_search', { query: '真实关键词' }),
             lifecycle({ event: 'prompt.submit', prompt: '真实关键词' }),
             lifecycle(TURN_END),
-            tool('kioku_update', { uri: 'user://notes/real-${run}', priority: 4 }),
+            tool('kioku_update', { id: '${id}', priority: 4 }),
           ],
         },
         target,
       )
       expect(result.mode).toBe('real')
       expect(result.ok).toBe(true)
-      const uri = `user://notes/real-${result.run}`
+      const shortId = result.steps[0]!.captured.id!
       const title = `real-${result.run}`
-      expect((await realToolAfterCheck(uri)).text).toContain('真的写了')
+      expect((await realAfterCheck(shortId)).text).toContain('真的写了')
       expect(queue.embeds).toHaveLength(2)
       expect(queue.extractions).toBe(1)
 
       // 这一步改了什么按标记列；对象与对话缓冲没有标记，这个模式不列
       expect(result.steps[0]!.changes).toEqual({
-        memories: [{ type: 'create', uri, title, fields: [], left: false, becameSecret: false }],
-        hiddenReleased: 0,
+        entries: [{ type: 'create', shortId, title, fields: [], left: false, becameSecret: false }],
         hiddenOther: 0,
         credentials: [],
         subjects: null,
@@ -1644,12 +1640,12 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
         turns: null,
         turn: null,
       })
-      expect(result.steps[3]!.changes).toMatchObject({ memories: [], subjects: null, turns: null })
-      expect(result.steps[4]!.changes!.memories).toEqual([
-        { type: 'update', uri, title, fields: ['priority'], left: false, becameSecret: false },
+      expect(result.steps[3]!.changes).toMatchObject({ entries: [], subjects: null, turns: null })
+      expect(result.steps[4]!.changes!.entries).toEqual([
+        { type: 'update', shortId, title, fields: ['priority'], left: false, becameSecret: false },
       ])
 
-      const activity = await app.request(`/v1/spaces/${ws.spaceId}/activity`, {
+      const activity = await app.request(`/v1/circles/${ws.circleId}/activity`, {
         headers: { cookie: ws.cookie },
       })
       const { items } = (await activity.json()) as ActivityList
@@ -1663,23 +1659,27 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
     })
 
     // 核对写进去了：这一步会更新最后使用时间，放在断言它之前的话要读库
-    const realToolAfterCheck = async (uri: string) => {
-      const found = await keyToSimulate(deps, { spaceId: ws.spaceId, appId, keyId }, ws.accountId)
+    const realAfterCheck = async (id: string) => {
+      const found = await keyToSimulate(
+        deps,
+        { circleId: ws.circleId, clientId, keyId },
+        ws.accountId,
+      )
       if ('error' in found) throw new Error(found.error)
-      const view = await memoryServiceForKey(deps, found.key).get(uri)
-      return { text: view.content ?? '' }
+      const view = await entryServiceForKey(deps, found.key).get({ id })
+      return { text: view.variants[0]?.content ?? '' }
     }
 
     it('事件的标记只认这次运行：同一把 Key 之前的真实写入不算', async () => {
-      await realTool('kioku_create', { uri: 'user://notes/before', content: '之前真实写的' })
+      await realTool('kioku_create', { title: 'before', content: '之前真实写的' })
       const [mine] = (
         await run({
           mode: 'real',
-          steps: [tool('kioku_create', { uri: 'user://notes/during-${run}', content: '这次写的' })],
+          steps: [tool('kioku_create', { title: 'during-${run}', content: '这次写的' })],
         })
       ).steps
-      expect(mine!.changes!.memories).toHaveLength(1)
-      expect(mine!.changes!.memories[0]!.uri).toContain('during')
+      expect(mine!.changes!.entries).toHaveLength(1)
+      expect(mine!.changes!.entries[0]!.title).toContain('during')
     })
 
     it('回滚模式不排任务', async () => {
@@ -1691,10 +1691,7 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
       })
       const result = await run(
         {
-          steps: [
-            tool('kioku_create', { uri: 'user://notes/x', content: 'x' }),
-            lifecycle(TURN_END),
-          ],
+          steps: [tool('kioku_create', { title: 'x', content: 'x' }), lifecycle(TURN_END)],
         },
         createApp({ ...deps, jobs: queue }),
       )

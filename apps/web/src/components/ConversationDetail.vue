@@ -14,12 +14,12 @@ import StrataStrip from './strata/StrataStrip.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
 
 // 会话详情：会话摘要的时间线、在这里记下的事实、抽取记录，都是新的在前。
-// 事实挂在各自的联系人上，删、确认都去联系人详情或待处理
-const props = defineProps<{ spaceId: string; id: string }>()
+// 事实挂在各自的联系人上，删、确认或提炼都去联系人详情或待处理
+const props = defineProps<{ circleId: string; id: string }>()
 
 const detail = useQuery({
-  queryKey: computed(() => ['conversation', props.spaceId, props.id] as const),
-  queryFn: ({ queryKey: [, spaceId, id] }) => api.conversation(spaceId, id),
+  queryKey: computed(() => ['conversation', props.circleId, props.id] as const),
+  queryFn: ({ queryKey: [, circleId, id] }) => api.conversation(circleId, id),
 })
 const data = computed(() =>
   detail.data.value && detail.data.value.id === props.id ? detail.data.value : null,
@@ -37,7 +37,7 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
       <USkeleton class="h-7 w-1/3" />
       <USkeleton class="h-40 w-full" />
     </div>
-    <!-- 没读到过，或者是确定的结果（别处删掉、看不到之后的 404）：整块报错，旧内容不留 -->
+    <!-- 没读到过，或者是确定的结果（别处删掉、失效后的 404）：整块报错，旧内容不留 -->
     <div
       v-else-if="!data || (detail.isError.value && !retryable(detail.error.value))"
       class="detail-note"
@@ -46,17 +46,24 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
       <ReadFailureNote :query="detail" />
     </div>
     <template v-else>
-      <StrataStrip layer="episode" :sensitivity="data.kind === 'none' ? 'private' : 'public'" />
+      <StrataStrip band="episode" :sensitivity="data.kind === 'none' ? 'private' : 'public'" />
       <header class="detail-head">
         <slot name="nav" />
         <h2 ref="titleEl" tabindex="-1">{{ conversationTitle(data) }}</h2>
         <p class="head-meta">
-          <!-- 不带会话上下文的会话，名字就是应用 -->
-          <span v-if="data.kind !== 'none'">{{ data.app.name }}</span>
+          <RouterLink
+            v-if="data.kind !== 'none'"
+            :to="{ name: 'client', params: { circleId, clientId: data.client.id } }"
+            class="head-link"
+          >
+            {{ data.client.name }}
+          </RouterLink>
           <span>{{ data.kind === 'none' ? '本人' : conversationKindLabels[data.kind] }}</span>
+          <span v-if="data.projectSlug" class="font-mono">项目 {{ data.projectSlug }}</span>
+          <span v-if="data.deviceKey" class="font-mono">设备 {{ data.deviceKey }}</span>
           <RouterLink
             v-if="data.subject"
-            :to="{ name: 'contact', params: { spaceId, subjectId: data.subject.id } }"
+            :to="{ name: 'contact', params: { circleId, subjectId: data.subject.id } }"
             class="head-link"
           >
             {{ data.subject.kind === 'group' ? '群的联系人详情' : '联系人详情' }}
@@ -82,12 +89,12 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
                 {{
                   data.kind === 'none'
                     ? '不带会话上下文的会话只写摘要，不记联系人的事实。'
-                    : '群聊、私聊的摘要来自未确认来源，不进入启动加载。'
+                    : '群聊、频道与私聊的摘要来自未确认来源，不进入启动加载。'
                 }}会话摘要到期后清除。
               </Hint>
             </template>
             <template #actions>
-              <StrataSwatch layer="episode" plain label="layer" />
+              <StrataSwatch band="episode" plain label="band" />
             </template>
           </SectionHeading>
           <p v-if="!data.summaries.length" class="empty">暂无会话摘要</p>
@@ -103,6 +110,7 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
               <div class="entry-body">
                 <p class="entry-text">{{ summary.content }}</p>
                 <p class="entry-meta">
+                  <code v-if="summary.shortId" class="short-id">{{ summary.shortId }}</code>
                   <span>{{ provenanceLabels[summary.provenance] }}</span>
                   <span v-if="summary.expiresAt">{{ formatTime(summary.expiresAt) }} 到期</span>
                 </p>
@@ -114,10 +122,10 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
         <section v-if="data.kind !== 'none'">
           <SectionHeading :title="`在这里记下的事实（${data.facts.length}）`">
             <template #hint>
-              <Hint>事实挂在各自的联系人上，在联系人详情中删除或恢复生效。</Hint>
+              <Hint>事实挂在各自的联系人上，在联系人详情中提炼、删除或恢复生效。</Hint>
             </template>
             <template #actions>
-              <StrataSwatch layer="subject" plain label="layer" />
+              <StrataSwatch band="fact" plain label="band" />
             </template>
           </SectionHeading>
           <p v-if="!data.facts.length" class="empty">暂无事实</p>
@@ -126,8 +134,9 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
               <div class="entry-body">
                 <p class="entry-text">{{ fact.content }}</p>
                 <p class="entry-meta">
+                  <code v-if="fact.shortId" class="short-id">{{ fact.shortId }}</code>
                   <RouterLink
-                    :to="{ name: 'contact', params: { spaceId, subjectId: fact.subject.id } }"
+                    :to="{ name: 'contact', params: { circleId, subjectId: fact.subject.id } }"
                     class="entry-link"
                   >
                     {{ fact.subject.displayName }}
@@ -152,6 +161,7 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
                   <time :datetime="run.createdAt" :title="formatTime(run.createdAt)">
                     {{ formatShort(run.createdAt) }}
                   </time>
+                  <span v-if="run.client">{{ run.client.name }}</span>
                   <span v-if="run.summaryOnly" class="text-warning">预算已用完，仅写入摘要</span>
                   <span v-else-if="run.summarized">已写入摘要</span>
                 </p>
@@ -257,6 +267,11 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
   line-height: 1.6;
   color: var(--ui-text-muted);
   overflow-wrap: anywhere;
+}
+.short-id {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ui-text-toned);
 }
 @media (max-width: 1023.98px) {
   .detail-note {

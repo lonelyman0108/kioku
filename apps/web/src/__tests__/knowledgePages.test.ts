@@ -1,8 +1,12 @@
 import type { ActivityItem } from '@kioku/contracts'
-import { describe, expect, it } from 'vitest'
-import { createSSRApp, defineComponent, h, type Component } from 'vue'
+import { describe, expect, it, vi } from 'vitest'
+import { createSSRApp, defineComponent, h, ref, type Component } from 'vue'
 import { parse } from 'vue/compiler-sfc'
 import { renderToString } from 'vue/server-renderer'
+
+vi.mock('../composables/useSession', () => ({
+  useSession: () => ({ circle: ref({ id: 'circle', kind: 'personal' }) }),
+}))
 
 import ActivityEntry from '../components/ActivityEntry.vue'
 import activityEntry from '../components/ActivityEntry.vue?raw'
@@ -13,7 +17,7 @@ import credentialFormModal from '../components/CredentialFormModal.vue?raw'
 import deletedMemories from '../components/DeletedMemories.vue?raw'
 import expiredMemories from '../components/ExpiredMemories.vue?raw'
 import memoryListView from '../components/MemoryListView.vue?raw'
-import memoryRootPanel from '../components/MemoryRootPanel.vue?raw'
+import vocabularyPage from '../pages/VocabularyPage.vue?raw'
 import personaDetail from '../components/PersonaDetail.vue?raw'
 import personaPanel from '../components/PersonaPanel.vue?raw'
 import MemoryRow from '../components/strata/MemoryRow.vue'
@@ -75,14 +79,14 @@ describe('变更记录的一行', () => {
   const item = (changes: Partial<ActivityItem> = {}): ActivityItem => ({
     id: 1,
     type: 'update',
-    memoryId: '00000000-0000-4000-8000-000000000000',
-    uri: 'user://projects/atlas/release',
+    entryId: '00000000-0000-4000-8000-000000000000',
+    shortId: 'm-abc123',
     title: '发布步骤',
-    layer: 'user',
+    kind: 'entry',
     sensitivity: 'private',
     createdAt: new Date(2026, 9, 31, 7, 5).toISOString(),
-    actor: { accountName: null, keyName: 'MacBook', appName: 'Claude Code' },
-    actorKey: 'app:00000000-0000-4000-8000-000000000001',
+    actor: { accountName: null, keyName: 'MacBook', clientName: 'Claude Code' },
+    actorKey: 'client:00000000-0000-4000-8000-000000000001',
     changes: ['content', 'priority'],
     fieldChanges: [
       { field: 'content', added: 2, removed: 1 },
@@ -99,15 +103,15 @@ describe('变更记录的一行', () => {
   const entry = (changes: Partial<ActivityItem> = {}, props: Record<string, unknown> = {}) =>
     render(ActivityEntry, { item: item(changes), ...props })
   const recent = (changes: Partial<ActivityItem> = {}) =>
-    render(RecentChange, { item: item(changes), spaceId: 'space' })
+    render(RecentChange, { item: item(changes), circleId: 'circle' })
 
-  it('时间、操作者、操作、标题、改动各占一列，坐标与访问密钥放在悬停里', async () => {
+  it('时间、操作者、操作、标题、改动各占一列，短 ID 与访问密钥放在悬停里', async () => {
     const html = await entry()
     expect(html).toContain('Claude Code')
     expect(html).toContain('title="Claude Code，访问密钥：MacBook"')
     expect(html).toContain('修改')
     expect(html).toContain('>发布步骤</span>')
-    expect(html).toContain('title="发布步骤\nuser://projects/atlas/release"')
+    expect(html).toContain('title="发布步骤\nm-abc123"')
     expect(html).toMatch(/正文<em[^>]*>\+2 −1<\/em>/)
     expect(html).toMatch(/优先级<em[^>]*>1 → 0<\/em>/)
     expect(html).toContain('07:05')
@@ -151,7 +155,9 @@ describe('变更记录的一行', () => {
   it('超出可见范围的后果留在提示层里', async () => {
     expect(await entry({ left: true, changes: [], fieldChanges: [] })).toContain('超出可见范围')
     expect(await entry()).not.toContain('超出可见范围')
-    expect(activityFlags).toContain('这条记忆超出当前账号的可见范围（例如移入其他成员的本人记忆')
+    expect(activityFlags).toContain(
+      '这条记忆超出当前账号的可见范围（例如移入其他记忆圈，或改为机密）',
+    )
   })
 
   it('测试台写下的事件标出测试台和操作账号', async () => {
@@ -168,9 +174,9 @@ describe('变更记录的一行', () => {
 })
 
 describe('记忆的一行', () => {
-  const props = { uri: 'persona://a/soul', layer: 'persona', sensitivity: 'internal' }
+  const props = { shortId: 'm-abc123', title: '标题', band: 'persona', sensitivity: 'internal' }
 
-  it('给了 to 时 URI 是链接，没给时不是', async () => {
+  it('给了 to 时整行主标题是链接，没给时不是', async () => {
     const linked = await render(MemoryRow, { ...props, to: '/somewhere' })
     expect(linked).toContain('<a')
     expect(linked).toContain('linked')
@@ -239,7 +245,7 @@ describe('列表读取失败', () => {
   })
 
   it.each([
-    ['人格', memoryRootPanel, 'personas'],
+    ['人格', vocabularyPage, 'personasQuery'],
     ['凭据', credentialsPage, 'credentials'],
     ['已删除的凭据', credentialsPage, 'deleted'],
   ])('%s：错误和读到过的列表可以同时显示，没读到时不说是空的', (_, source, query) => {
@@ -248,7 +254,7 @@ describe('列表读取失败', () => {
     // 读到空才显示「暂无」：空状态挂在 data 上，不挂在 v-else 上
     expect(source).toMatch(
       new RegExp(
-        `(<EmptyState\\s+v-else-if="${query}\\.data\\.value"|v-else-if="${query}\\.data\\.value" class="[\\w-]*empty")`,
+        `(<EmptyState\\s+v-else-if="${query}\\.data\\.value(?:\\s*&&|")|v-else-if="${query}\\.data\\.value" class="[\\w-]*empty")`,
       ),
     )
   })
@@ -268,7 +274,7 @@ describe('列表读取失败', () => {
 
 describe('改版之后的约束', () => {
   it.each([
-    ['人格的根', memoryRootPanel],
+    ['词表与人格页', vocabularyPage],
     ['人格面板', personaPanel],
     ['人格详情', personaDetail],
     ['联系人页', subjectsPage],
@@ -284,12 +290,11 @@ describe('改版之后的约束', () => {
     }
   })
 
-  it('人格：有引用时不能删，原因和缺失启动加载的提示都在', () => {
+  it('人格：有引用时不能删，原因与删除后果的提示都在', () => {
     expect(bound(personaDetail, 'UButton', 'disabled')).toBe('blockers.length > 0')
     expect(personaDetail).toContain('无法删除：')
-    expect(personaDetail).toContain('此记忆本应进入启动加载')
-    expect(personaDetail).toContain('会话开始时此位置将缺失')
     expect(personaPanel).toContain('可用于新人格')
+    expect(personaPanel).toContain('仍有子人格或接入实例引用时无法删除')
   })
 
   it('人格：窄屏切换后焦点不掉到 body，标题接得住焦点', () => {
@@ -310,13 +315,13 @@ describe('改版之后的约束', () => {
   it('联系人：合并的确认框写明后果，按人和群分开说', () => {
     expect(subjectDetailPage).toContain('此操作不可撤销')
     expect(subjectDetailPage).toContain('v-if="data?.kind === \'group\'"')
-    expect(subjectDetailPage).toContain('按群切换人格的规则一并转移')
+    expect(subjectDetailPage).toContain('按群规则一并转移')
     expect(subjectDetailPage).toContain('合并后这些平台账号算同一个人')
     expect(subjectDetailPage).toContain('不再注入对话，也无法在管理界面恢复')
   })
 
   it('联系人：人和群各翻各的页，查询的键还在 subjects 下面，改动之后跟着失效', () => {
-    expect(subjectsPage).toContain("['subjects', spaceId.value, kind, q.value]")
+    expect(subjectsPage).toContain("['subjects', circleId.value, kind, q.value]")
   })
 
   it('凭据：值只放在详情组件里，不进查询缓存；关掉面板就卸载', () => {

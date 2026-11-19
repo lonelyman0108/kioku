@@ -106,7 +106,7 @@ export function errorNote(
   }
 }
 
-// turn.end 成功了却没有写进缓冲：这种情况不报错（宿主不用管），看不到原因的话会以为抽取的链路通了。
+// turn.end 成功了却没有写进缓冲：这种情况不报错（客户端不用管），看不到原因的话会以为抽取的链路通了。
 // 真实模式下 turns 是 null，不列
 export const turnNotBuffered = (step: BenchStepResult) =>
   step.replay?.kind === 'lifecycle' && step.changes?.turns === 0
@@ -114,7 +114,7 @@ export const turnNotBuffered = (step: BenchStepResult) =>
 export const VECTOR_SKIPPED_NOTE =
   '此步只使用全文与关键词：查询向量在事务开始前计算，此查询未计算到（依赖前面步骤的结果，或嵌入接口出错、超时）。'
 
-// session.start 多带的三项：宿主能完整接收的字数、没展开的节点、放不下的附加块
+// session.start 多带的三项：客户端能完整接收的字数、未包含的节点、放不下的附加块
 export function sessionNotes(session: BenchSessionStart, text: string) {
   return {
     size:
@@ -151,22 +151,17 @@ export function changeItems(changes: BenchChanges): ChangeItem[] {
   const add = (item: Partial<ChangeItem> & { action: string }) =>
     items.push({ target: null, fields: [], warnings: [], notes: [], ...item })
 
-  for (const m of changes.memories) {
+  for (const m of changes.entries) {
     add({
       action: eventLabel(m.type).label,
-      target: m.uri,
+      target: m.shortId,
       fields: m.fields.map((f) => changeLabels[f] ?? f),
-      warnings: m.becameSecret ? ['改为机密：此记忆历史中的正文将被抹除，向量将被删除'] : [],
-      notes: m.left
-        ? ['修改后当前访问密钥无法读取此记忆：此处为修改前的 URI，不提供修改后的任何内容']
-        : [],
+      warnings: m.becameSecret ? ['改为机密：此词条历史中的正文将被抹除，向量将被删除'] : [],
+      notes: m.left ? ['修改后当前访问密钥无法读取此词条：不提供修改后的任何内容'] : [],
     })
   }
-  if (changes.hiddenReleased) {
-    add({ action: `已释放 ${changes.hiddenReleased} 条不可见过期记录的 URI（属于其他成员）` })
-  }
   if (changes.hiddenOther) {
-    add({ action: `另有 ${changes.hiddenOther} 处不可见的改动（当前访问密钥可写但不可读的归属）` })
+    add({ action: `另有 ${changes.hiddenOther} 处不可见的改动（当前访问密钥可写但不可读的范围）` })
   }
   for (const c of changes.credentials) {
     add({

@@ -23,7 +23,7 @@ const facts: DatabaseFacts = {
   ],
   existing: 'empty',
   accounts: null,
-  spaces: null,
+  circles: null,
   unrelatedTables: 0,
 }
 

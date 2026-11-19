@@ -1,61 +1,99 @@
-import type { ActivityField, ActivityFieldChange, MemorySnapshot } from '@kioku/contracts'
+import {
+  whenSignature,
+  type ActivityField,
+  type ActivityFieldChange,
+  type EntrySnapshot,
+} from '@kioku/contracts'
 import { sql, type SQL, type SQLWrapper } from 'drizzle-orm'
 
-import { apiKeys, memoryEvents } from '../db/schema'
+import { apiKeys, entryEvents } from '../db/schema'
 
-// 前后两版之间改了哪些字段；正文两边都没有（secret）时看不出改没改，不算。
-// SQL 版是 changedFieldsSql，两份按同一条规则写，activity.int.test.ts 逐条比对
+function variantMap(snapshot: EntrySnapshot): Map<string, string | null> {
+  const map = new Map<string, string | null>()
+  for (const v of snapshot.variants) {
+    map.set(whenSignature(v.when), v.content)
+  }
+  return map
+}
+
+function variantSignaturesKey(snapshot: EntrySnapshot): string {
+  return snapshot.variants
+    .map((v) => whenSignature(v.when))
+    .sort()
+    .join('\n')
+}
+
+// 前后两版之间改了哪些字段；SQL 版为 changedFieldsSql，两份规则逐字段对齐
 export function changedFields(
-  before: MemorySnapshot | null,
-  after: MemorySnapshot | null,
+  before: EntrySnapshot | null,
+  after: EntrySnapshot | null,
 ): ActivityField[] {
   if (!before || !after) return []
   const changes: ActivityField[] = []
-  if (before.uri !== after.uri) changes.push('uri')
-  if (before.title !== after.title) changes.push('title')
-  if (before.layer !== after.layer) changes.push('layer')
+  if ((before.title ?? null) !== (after.title ?? null)) changes.push('title')
   if (before.sensitivity !== after.sensitivity) changes.push('sensitivity')
   if (before.priority !== after.priority) changes.push('priority')
-  if (before.disclosure !== after.disclosure) changes.push('disclosure')
+  if ((before.disclosure ?? null) !== (after.disclosure ?? null)) changes.push('disclosure')
+  if (before.topics.join('\n') !== after.topics.join('\n')) changes.push('topics')
   if (before.glossary.join('\n') !== after.glossary.join('\n')) changes.push('glossary')
-  if (before.content !== after.content && (before.content !== null || after.content !== null)) {
-    changes.push('content')
-  }
-  if (before.validTo !== after.validTo) changes.push('validTo')
+  if (variantSignaturesKey(before) !== variantSignaturesKey(after)) changes.push('variants')
+
+  const beforeMap = variantMap(before)
+  const contentChanged = after.variants.some((v) => {
+    const sig = whenSignature(v.when)
+    if (!beforeMap.has(sig)) return false
+    const prev = beforeMap.get(sig)!
+    return prev !== v.content && (prev !== null || v.content !== null)
+  })
+  if (contentChanged) changes.push('content')
+
+  if ((before.validTo ?? null) !== (after.validTo ?? null)) changes.push('validTo')
   return changes
 }
 
-// 快照里取一个字符串字段，不是字符串的当作没有（和 toSnapshot 一样）。键名是代码里的常量
+// 快照里取一个字符串字段，不是字符串的当作没有（和 toSnapshot 一样）
 export const text = (snapshot: SQLWrapper, key: string) =>
   sql`(case when jsonb_typeof(${snapshot} -> ${sql.raw(`'${key}'`)}) = 'string' then ${snapshot} ->> ${sql.raw(`'${key}'`)} end)`
 
-export const uriOf = (s: SQLWrapper) =>
-  sql`(coalesce(${text(s, 'domain')}, '') || '://' || coalesce(${text(s, 'path')}, ''))`
-
 const priorityOf = (s: SQLWrapper) =>
-  sql`(case when jsonb_typeof(${s} -> 'priority') = 'number' then (${s} -> 'priority')::numeric else 0 end)`
+  sql`(case when jsonb_typeof(${s} -> 'priority') = 'number' then (${s} -> 'priority')::numeric else 2 end)`
 
-// 关键词按 stringList 的规则：只留字符串，按顺序用换行连起来比
-const glossaryOf = (s: SQLWrapper) =>
-  sql`coalesce((select string_agg(g.value #>> '{}', E'\\n' order by g.ord) from jsonb_array_elements(case when jsonb_typeof(${s} -> 'glossary') = 'array' then ${s} -> 'glossary' end) with ordinality as g(value, ord) where jsonb_typeof(g.value) = 'string'), '')`
+// 字符串列表（topics、glossary）：只留字符串，按数组先后用换行连起来对比
+const stringListOf = (s: SQLWrapper, key: string) =>
+  sql`coalesce((select string_agg(g.value #>> '{}', E'\\n' order by g.ord) from jsonb_array_elements(case when jsonb_typeof(${s} -> ${sql.raw(`'${key}'`)}) = 'array' then ${s} -> ${sql.raw(`'${key}'`)} end) with ordinality as g(value, ord) where jsonb_typeof(g.value) = 'string'), '')`
+
+const variantSigExpr = (v: SQLWrapper) =>
+  sql`coalesce(nullif(case when jsonb_typeof(${v} -> 'whenSignature') = 'string' then ${v} ->> 'whenSignature' end, ''), (${v} -> 'when')::text, '{}')`
+
+const variantSigsOf = (s: SQLWrapper) =>
+  sql`coalesce((select string_agg(t.sig, E'\\n' order by t.sig) from (select ${variantSigExpr(sql`v.value`)} as sig from jsonb_array_elements(case when jsonb_typeof(${s} -> 'variants') = 'array' then ${s} -> 'variants' end) as v(value)) t), '')`
+
+const variantsContentChangedSql = (before: SQLWrapper, after: SQLWrapper) =>
+  sql`exists (
+    select 1
+    from jsonb_array_elements(case when jsonb_typeof(${before} -> 'variants') = 'array' then ${before} -> 'variants' end) as bv(value),
+         jsonb_array_elements(case when jsonb_typeof(${after} -> 'variants') = 'array' then ${after} -> 'variants' end) as av(value)
+    where ${variantSigExpr(sql`bv.value`)} = ${variantSigExpr(sql`av.value`)}
+      and ${text(sql`bv.value`, 'content')} is distinct from ${text(sql`av.value`, 'content')}
+  )`
 
 // changedFields 的 SQL 版：两个快照都是对象时，按同样的顺序列出改了的字段，否则为空数组
 export function changedFieldsSql(before: SQLWrapper, after: SQLWrapper): SQL<string[]> {
   const pairs: [ActivityField, SQL][] = [
-    ['uri', sql`(${uriOf(before)} <> ${uriOf(after)})`],
     ['title', sql`(${text(before, 'title')} is distinct from ${text(after, 'title')})`],
-    ['layer', sql`((${before} ->> 'layer') is distinct from (${after} ->> 'layer'))`],
     [
       'sensitivity',
-      sql`((${before} ->> 'sensitivity') is distinct from (${after} ->> 'sensitivity'))`,
+      sql`(${text(before, 'sensitivity')} is distinct from ${text(after, 'sensitivity')})`,
     ],
     ['priority', sql`(${priorityOf(before)} <> ${priorityOf(after)})`],
     [
       'disclosure',
       sql`(${text(before, 'disclosure')} is distinct from ${text(after, 'disclosure')})`,
     ],
-    ['glossary', sql`(${glossaryOf(before)} <> ${glossaryOf(after)})`],
-    ['content', sql`(${text(before, 'content')} is distinct from ${text(after, 'content')})`],
+    ['topics', sql`(${stringListOf(before, 'topics')} <> ${stringListOf(after, 'topics')})`],
+    ['glossary', sql`(${stringListOf(before, 'glossary')} <> ${stringListOf(after, 'glossary')})`],
+    ['variants', sql`(${variantSigsOf(before)} <> ${variantSigsOf(after)})`],
+    ['content', variantsContentChangedSql(before, after)],
     ['validTo', sql`(${text(before, 'validTo')} is distinct from ${text(after, 'validTo')})`],
   ]
   const items = sql.join(
@@ -67,19 +105,16 @@ export function changedFieldsSql(before: SQLWrapper, after: SQLWrapper): SQL<str
   >`(case when jsonb_typeof(${before}) = 'object' and jsonb_typeof(${after}) = 'object' then array_remove(array[${items}]::text[], null) else '{}'::text[] end)`
 }
 
-// 操作者的标识（见 contracts 的 ActivityActorKey）：测试台优先，其次访问密钥所在的应用，再次成员。
-// 要和 api_keys 连起来用（left join，访问密钥删掉时 app_id 为空）
+// 操作者的标识（见 contracts 的 ActivityActorKey）：测试台优先，其次访问密钥所属的接入实例，再次成员。
+// 要和 api_keys 连起来用（left join，访问密钥删掉时 client_id 为空）
 export const ACTOR_KEY = sql<string>`(case
-  when jsonb_typeof(${memoryEvents.context} #> '{bench,run}') = 'string' and jsonb_typeof(${memoryEvents.context} #> '{bench,account}') = 'string' then 'bench'
-  when ${memoryEvents.actorKeyId} is not null then (case when ${apiKeys.appId} is not null then 'app:' || ${apiKeys.appId}::text else 'unknown' end)
-  when ${memoryEvents.actorAccountId} is not null then 'account:' || ${memoryEvents.actorAccountId}::text
+  when jsonb_typeof(${entryEvents.context} #> '{bench,run}') = 'string' and jsonb_typeof(${entryEvents.context} #> '{bench,account}') = 'string' then 'bench'
+  when ${entryEvents.actorKeyId} is not null then (case when ${apiKeys.clientId} is not null then 'client:' || ${apiKeys.clientId}::text else 'unknown' end)
+  when ${entryEvents.actorAccountId} is not null then 'account:' || ${entryEvents.actorAccountId}::text
   else 'unknown'
 end)`
 
-// 两版正文之间大约增删了几行，表格里的「正文 +a −r」用。按行做多重集合的差：新增是改后比改前多出来的行，
-// 删除反过来，不管行的先后。只是近似：行挪了位置不算改动，同一行删掉又在别处加回来也不算；准确的按行对比
-// 在详情里由界面对这一条做（diff.ts）。不做最长公共子序列：那是 O(n·m)，列表一页最多 200 条、概览也算，
-// 任何成员写一段很长的正文就能把整个进程（登录、召回、MCP）卡住；这里是 O(n + m)
+// 两版正文之间大约增删了几行：按行做多重集合的差，O(n + m) 复杂度
 export function lineChanges(before: string, after: string): { added: number; removed: number } {
   const counts = new Map<string, number>()
   for (const line of before.split('\n')) counts.set(line, (counts.get(line) ?? 0) + 1)
@@ -94,21 +129,53 @@ export function lineChanges(before: string, after: string): { added: number; rem
   return { added, removed }
 }
 
-// 各字段的前后值，按 fields 的顺序。正文只给增删的行数，有一边没有正文（机密）时不给；关键词给增删的词
+// 各字段的前后变更明细，按 fields 的顺序输出
 export function fieldChanges(
-  before: MemorySnapshot,
-  after: MemorySnapshot,
+  before: EntrySnapshot,
+  after: EntrySnapshot,
   fields: readonly ActivityField[],
 ): ActivityFieldChange[] {
+  const beforeMap = variantMap(before)
+  const afterMap = variantMap(after)
   return fields.map((field): ActivityFieldChange => {
     switch (field) {
       case 'content': {
         const secret = before.sensitivity === 'secret' || after.sensitivity === 'secret'
-        if (secret || before.content === null || after.content === null) {
-          return { field, added: null, removed: null }
+        if (secret) return { field, added: null, removed: null }
+        let added = 0
+        let removed = 0
+        for (const [sig, afterText] of afterMap) {
+          if (!beforeMap.has(sig)) continue
+          const beforeText = beforeMap.get(sig)!
+          if (beforeText === null || afterText === null)
+            return { field, added: null, removed: null }
+          if (beforeText !== afterText) {
+            const diff = lineChanges(beforeText, afterText)
+            added += diff.added
+            removed += diff.removed
+          }
         }
-        return { field, ...lineChanges(before.content, after.content) }
+        return { field, added, removed }
       }
+      case 'variants': {
+        let added = 0
+        let removed = 0
+        let modified = 0
+        for (const [sig, afterText] of afterMap) {
+          if (!beforeMap.has(sig)) added++
+          else if (beforeMap.get(sig)! !== afterText) modified++
+        }
+        for (const sig of beforeMap.keys()) {
+          if (!afterMap.has(sig)) removed++
+        }
+        return { field, added, removed, modified }
+      }
+      case 'topics':
+        return {
+          field,
+          added: after.topics.filter((k) => !before.topics.includes(k)),
+          removed: before.topics.filter((k) => !after.topics.includes(k)),
+        }
       case 'glossary':
         return {
           field,
@@ -117,18 +184,16 @@ export function fieldChanges(
         }
       case 'priority':
         return { field, before: before.priority, after: after.priority }
-      case 'layer':
-        return { field, before: before.layer, after: after.layer }
       case 'sensitivity':
         return { field, before: before.sensitivity, after: after.sensitivity }
-      default:
+      case 'title':
+      case 'disclosure':
+      case 'validTo':
         return { field, before: before[field], after: after[field] }
     }
   })
 }
 
-// PostgreSQL 认得的时区名。只缓存查成功的结果：查询用调用方自己的事务，某个请求的事务出错（断连、超时）
-// 只让那个请求失败，不把失败的 promise 留给别的请求共用。时区库随数据库升级才变，进程里留着
 let timeZones: ReadonlySet<string> | null = null
 export async function knownTimeZone(
   tx: { execute: (query: SQL) => PromiseLike<unknown> },

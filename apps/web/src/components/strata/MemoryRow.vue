@@ -1,29 +1,36 @@
 <script setup lang="ts">
-import type { Layer, Sensitivity } from '@kioku/contracts'
+import type { EntryKind, Sensitivity, StrataBand } from '@kioku/contracts'
 import type { RouteLocationRaw } from 'vue-router'
 
 import MemoryFlags from './MemoryFlags.vue'
 import StrataSwatch from './StrataSwatch.vue'
-import UriPath from './UriPath.vue'
 
-// 列表、已过期、已删除共用的一行：色块、标题、标记，第二行的内容和右下的操作由使用方给。
-// 有标题时写标题（目录以外的列表都给），坐标放在悬停里；只有坐标的（测试台、召回调试）照样写坐标。
-// data-layer、data-uri 给记忆页：悬停一行时窄柱上对应的归属跟着亮，窄屏返回时焦点放回这一行。
-// 给了 to 时名字是链接，点击区撑满整行，第二行里的链接和按钮、右下的操作压在点击区上面。
-// 这一页的标记和默认的不一样时用 flags 插槽换掉；flush 让行贴着区块标题的左右边，不留边距
+// 列表、已过期、已删除共用的一行：色块、标题与短 ID、标记，第二行的内容和右下的操作由使用方给。
+// data-band、data-short-id 给记忆页：悬停一行时窄柱上对应的色带跟着亮，窄屏返回时焦点放回这一行。
 withDefaults(
   defineProps<{
-    uri: string
+    shortId: string
     title?: string | null
-    layer: Layer
+    band: StrataBand
+    kind?: EntryKind | null
     sensitivity: Sensitivity
     priority?: number | null
+    variantCount?: number | null
     selected?: boolean
     as?: string
     to?: RouteLocationRaw | null
     flush?: boolean
   }>(),
-  { title: null, priority: null, selected: false, as: 'div', to: null, flush: false },
+  {
+    title: null,
+    kind: null,
+    priority: null,
+    variantCount: null,
+    selected: false,
+    as: 'div',
+    to: null,
+    flush: false,
+  },
 )
 </script>
 
@@ -32,24 +39,31 @@ withDefaults(
     :is="as"
     class="memory-row"
     :class="{ selected, flush, linked: to }"
-    :data-layer="layer"
-    :data-uri="uri"
+    :data-band="band"
+    :data-short-id="shortId"
   >
-    <StrataSwatch class="row-swatch" :layer="layer" :sensitivity="sensitivity" />
-    <!-- 点击区盖着里面的名字，放不下时看全名的 title 放在链接上 -->
+    <StrataSwatch class="row-swatch" :band="band" :sensitivity="sensitivity" />
     <RouterLink
       v-if="to"
       :to="to"
-      class="row-uri row-link"
-      :title="title ? `${title}\n${uri}` : uri"
+      class="row-main row-link"
+      :title="title ? `${title}\n${shortId}` : shortId"
     >
-      <span v-if="title" class="row-title">{{ title }}</span>
-      <UriPath v-else :uri="uri" />
+      <span class="row-title">{{ title || shortId }}</span>
+      <code class="row-id">{{ shortId }}</code>
     </RouterLink>
-    <span v-else-if="title" class="row-uri row-title" :title="`${title}\n${uri}`">{{ title }}</span>
-    <UriPath v-else class="row-uri" :uri="uri" />
+    <span v-else class="row-main" :title="title ? `${title}\n${shortId}` : shortId">
+      <span class="row-title">{{ title || shortId }}</span>
+      <code class="row-id">{{ shortId }}</code>
+    </span>
     <slot name="flags">
-      <MemoryFlags :layer="layer" :sensitivity="sensitivity" :priority="priority" />
+      <MemoryFlags
+        :band="band"
+        :kind="kind"
+        :sensitivity="sensitivity"
+        :priority="priority"
+        :variant-count="variantCount"
+      />
     </slot>
     <!-- 整行可能是按钮，里面只放行内元素 -->
     <span class="row-sub"><slot /></span>
@@ -104,24 +118,32 @@ withDefaults(
 .memory-row.selected,
 .memory-row.selected:hover {
   --strata-frame: var(--strata-selected-frame);
-  --uri-parent: var(--strata-on-selected-muted);
   --flag-muted: var(--strata-on-selected-muted);
   --flag-solid: var(--strata-on-selected);
   --flag-on-solid: var(--strata-selected);
   background: var(--strata-selected);
   color: var(--strata-on-selected);
 }
-.row-uri {
+.row-main {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
   font-size: 14px;
   line-height: 1.5;
 }
 .row-title {
-  display: block;
   min-width: 0;
   overflow: hidden;
   font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.row-id {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--flag-muted, var(--ui-text-muted));
 }
 .row-sub {
   grid-column: 2 / -1;

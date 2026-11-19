@@ -14,7 +14,7 @@ const binding = (extra: Partial<SubjectBinding>): SubjectBinding => ({
   redeemedBy: { platform: 'telegram', externalId: 'u1', displayName: '明' },
   issuedBy: { platform: 'aiocqhttp', externalId: '1001' },
   issuedAt: at(9),
-  app: { id: 'a', name: '群聊 bot' },
+  client: { id: 'c1', name: '群聊 bot' },
   confirmer: { id: 'bob', displayName: 'bob' },
   decidedBy: null,
   createdAt: at(10),
@@ -34,7 +34,7 @@ describe('绑定记录的说法', () => {
     expect(accountText({ platform: 'aiocqhttp', externalId: '1001' })).toBe('aiocqhttp 1001')
   })
 
-  it('说清绑定码是谁、什么时候申请的，经由哪个应用', () => {
+  it('说清绑定码是谁、什么时候申请的，经由哪个接入实例', () => {
     expect(bindingSource(binding({}), now)).toBe(
       'aiocqhttp 1001 于 10-29 09:30 申请绑定码，经由「群聊 bot」',
     )

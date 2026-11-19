@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
-import { splitUri } from '../memoryTree'
+function splitUri(uri: string): { parent: string; leaf: string } {
+  const slash = uri.lastIndexOf('/')
+  if (slash < 0) return { parent: '', leaf: uri }
+  return { parent: uri.slice(0, slash + 1), leaf: uri.slice(slash + 1) }
+}
 
 // URI 是地址：等宽字，上一级路径退一级灰度。一行放不下时先缩上一级路径，名字留到最后；
 // wrap：要看全的地方（确认写到哪里、测试台的结果）不缩，折行显示

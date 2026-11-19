@@ -3,10 +3,11 @@ import {
   ConvertibleValue,
   CreateCredentialRequest,
   placeholderAllowed,
+  type CircleKind,
   type ConsoleCredential,
   type CredentialStoredIn,
   type CredentialValueMatch,
-  type Layer,
+  type EntryKind,
   type OrphanVaultItem,
   type Sensitivity,
 } from '@kioku/contracts'
@@ -23,7 +24,7 @@ import {
   matchByValue,
   NEW_DESTINATION,
   replaceValues,
-  suggestIdentifier,
+  suggestEntryIdentifier,
   suggestItemIdentifiers,
   suggestName,
   vaultFieldName,
@@ -39,12 +40,13 @@ import { useNewCredentialStore } from './useNewCredentialStore'
 // 保存记忆之前逐处处理新增的疑似明文：转存为凭据或不是凭据。转存的先建好凭据，再把正文里的值换成占位符，
 // 最后才保存，明文不会先进历史。对话框只管长相，规则都在这里
 
-// 要保存的样子：正文、坐标、标题，以及保存之后的归属与敏感级（占位符放不放得进看它们）
+// 要保存的样子：正文、可选短 ID、标题，以及保存之后的记忆圈类型、物种与敏感级（占位符放不放得进看它们）
 export interface PlaintextSaveRequest {
   content: string
-  uri: string
+  shortId?: string
   title: string
-  layer: Layer
+  circleKind: CircleKind
+  kind: EntryKind
   sensitivity: Sensitivity
   spots: PlaintextSpot[]
   // 服务端拒绝之后才打开的：界面上的判断和服务端有出入
@@ -53,7 +55,6 @@ export interface PlaintextSaveRequest {
   ignored?: string[]
 }
 
-// 见 plaintextSave.ts 的 GateOutcome：调用方的正文这时已经不是 source 时，交给 afterGate 处理
 export type PlaintextSaveResult = GateOutcome
 
 export interface SpotRow {
@@ -67,10 +68,8 @@ export interface SpotRow {
   created: boolean
 }
 
-// 去处里写成明文的部分不能含这个值，和转存的接口同一条规则
 const TEXTS_HAVE_VALUE = '标识、名称、字段名与网址不能包含要转存的值'
 
-// 这次新建了的凭据写到了哪里：保存之后提示
 export interface StoredCredential {
   identifier: string
   storedIn: CredentialStoredIn
@@ -79,7 +78,7 @@ export interface StoredCredential {
 // canConvert：能不能转存为凭据（vault.ts 的 canManageCredentials）；
 // canSaveAnyway：能不能照样保存（allowPlaintext），能改这条记忆的成员都可以
 export function usePlaintextSave(
-  spaceId: Ref<string>,
+  circleId: Ref<string>,
   request: Ref<PlaintextSaveRequest | null>,
   canConvert: Ref<boolean>,
   canSaveAnyway: Ref<boolean>,
@@ -93,33 +92,28 @@ export function usePlaintextSave(
   const matchFailure = ref<string | null>(null)
   const unavailableConnections = ref(0)
   const unreadableCredentials = ref(0)
-  // 已有凭据的标识：新建的不能和它们重复
   const taken = ref<string[]>([])
-  // 给条目起的标识，按条目记：同一个条目的几个字段共用一条凭据
   const vaultIdentifiers = reactive<Record<string, string>>({})
-  // 已经起好标识的条目：保存中途失败之后再点，不重建
   const createdVault = ref(new Map<string, ConsoleCredential>())
   const busy = ref(false)
   const failure = ref<string | null>(null)
-  // 新建时写进了密码库、凭据却没建成：条目留在集合里
   const orphan = ref<OrphanVaultItem | null>(null)
-  // 失败之后的下一步说明（集合只读、值太长），见 vault.ts 的 writeFailureNext
   const failureDetail = ref<string | null>(null)
   const stored = ref<StoredCredential[]>([])
 
-  // 新建的凭据写到哪里，读不到时不能新建
   const newStore = useNewCredentialStore(
-    spaceId,
+    circleId,
     computed(() => request.value !== null && canConvert.value),
   )
 
   const scopeAllowed = computed(
-    () => !!request.value && placeholderAllowed(request.value.layer, request.value.sensitivity),
+    () =>
+      !!request.value &&
+      placeholderAllowed(request.value.circleKind, request.value.kind, request.value.sensitivity),
   )
 
-  // 这一处为什么不能转存，能转存时是 null
   function convertBlocker(row: SpotRow): string | null {
-    if (!canConvert.value) return '仅空间所有者可转存为凭据'
+    if (!canConvert.value) return '仅记忆圈所有者可转存为凭据'
     if (!scopeAllowed.value) return CONVERT_SCOPE_TEXT
     if (row.spot.value === null) return '无法定位这一处的值'
     const parsed = ConvertibleValue.safeParse(row.spot.value)
@@ -135,7 +129,6 @@ export function usePlaintextSave(
     )
   }
 
-  // 每次打开一个序号：关掉或者换了一次保存之后，晚到的匹配结果和创建结果不算
   let runId = 0
   watch(
     request,
@@ -163,7 +156,7 @@ export function usePlaintextSave(
         destination: NEW_DESTINATION.key,
         fresh: {
           identifier: '',
-          name: suggestName(req),
+          name: suggestName({ title: req.title, shortId: req.shortId ?? '' }),
           field: spot.field,
           url: '',
           expires: '',
@@ -176,24 +169,23 @@ export function usePlaintextSave(
     { immediate: true },
   )
 
-  // 查已有的标识与同值的凭据。查不了也能转存成新建的凭据
   async function prepare(id: number, req: PlaintextSaveRequest) {
     if (!canConvert.value || !scopeAllowed.value) return
-    const sid = spaceId.value
+    const cid = circleId.value
     const values = rows.value.flatMap((r) =>
       r.spot.value && !convertBlocker(r) ? [r.spot.value] : [],
     )
     matching.value = true
     const existing = queryClient
       .fetchQuery({
-        queryKey: ['credentials', sid],
-        queryFn: () => api.credentials(sid),
+        queryKey: ['credentials', cid],
+        queryFn: () => api.credentials(cid),
         staleTime: 60_000,
       })
       .then((list) => list.items.map((c) => c.identifier))
       .catch(() => [] as string[])
     const found = await matchByValue(values, (chunk) =>
-      api.matchCredentialValues(sid, { values: chunk }),
+      api.matchCredentialValues(cid, { values: chunk }),
     )
     const identifiers = await existing
     if (id !== runId) return
@@ -205,24 +197,25 @@ export function usePlaintextSave(
       unreadableCredentials.value = found.unreadableCredentials
     }
     taken.value = identifiers
-    // 建议的标识避开已有的，也避开这次别处建议过的
     const suggested = [...identifiers]
     for (const row of rows.value) {
       suggestItemIdentifiers(destinationsOf(row).destinations, vaultIdentifiers, suggested)
     }
     for (const row of rows.value) {
-      row.fresh.identifier = suggestIdentifier(req.uri, row.spot.field, suggested)
+      row.fresh.identifier = suggestEntryIdentifier(
+        { title: req.title, ...(req.shortId ? { shortId: req.shortId } : {}) },
+        row.spot.field,
+        suggested,
+      )
       suggested.push(row.fresh.identifier)
       const first = destinationsOf(row).destinations[0]!
       row.destination = first.key
-      // 和已有凭据同值的默认转存成它；别的要逐处选
       if (first.kind === 'credential' && !convertBlocker(row) && row.choice === null) {
         row.choice = 'convert'
       }
     }
   }
 
-  // 这次要新建的凭据的标识：新建的每处一条，条目的每个条目一条
   const newIdentifiers = computed(() => {
     const ids: string[] = []
     const items = new Set<string>()
@@ -244,7 +237,6 @@ export function usePlaintextSave(
     return null
   }
 
-  // 新建的凭据的请求，界面上先按接口的定义检查
   function newBody(row: SpotRow) {
     const url = row.fresh.url.trim()
     const expiresAt =
@@ -269,7 +261,6 @@ export function usePlaintextSave(
     }
   }
 
-  // 一处的问题：没选、转存的去处填得不对
   function rowProblem(row: SpotRow): string | null {
     if (!row.choice) return '请选择转存为凭据或不是凭据'
     if (row.choice === 'ignore') return null
@@ -283,7 +274,6 @@ export function usePlaintextSave(
       const body = vaultBody(d)
       const parsed = CreateCredentialRequest.safeParse(body)
       if (!parsed.success) return parsed.error.issues[0]?.message ?? '填写内容有误'
-      // 名称取条目名称，和标识一样是明文
       if ([body.identifier, body.name].some((t) => t.includes(value))) return TEXTS_HAVE_VALUE
       return identifierProblem(body.identifier)
     }
@@ -301,7 +291,6 @@ export function usePlaintextSave(
     return identifierProblem(f.identifier)
   }
 
-  // 预览：这一处会换成的占位符。条目的字段名在建好之前是推出来的
   function placeholderFor(row: SpotRow): string {
     const d = selectedOf(row)
     if (d.kind === 'credential') return placeholderOf(d.identifier, d.field)
@@ -324,12 +313,11 @@ export function usePlaintextSave(
   })
   const ready = computed(() => !!request.value && !busy.value && !matching.value && !problem.value)
 
-  // 先建好要转存的凭据，再换掉正文里的值，交给调用方保存。中途失败时建好的留着，再点不重建
   async function proceed() {
     const req = request.value
     if (!req || !ready.value) return
     const id = runId
-    const sid = spaceId.value
+    const cid = circleId.value
     busy.value = true
     failure.value = null
     failureDetail.value = null
@@ -340,12 +328,12 @@ export function usePlaintextSave(
         if (row.choice !== 'convert') continue
         const d = selectedOf(row)
         if (d.kind === 'vault' && !createdVault.value.has(itemKey(d))) {
-          const credential = await api.createCredential(sid, vaultBody(d))
+          const credential = await api.createCredential(cid, vaultBody(d))
           createdAny = true
           if (id !== runId) return
           createdVault.value = new Map(createdVault.value).set(itemKey(d), credential)
         } else if (d.kind === 'new' && !row.created) {
-          const done = await api.createCredential(sid, newBody(row))
+          const done = await api.createCredential(cid, newBody(row))
           createdAny = true
           if (id !== runId) return
           row.created = true
@@ -385,8 +373,7 @@ export function usePlaintextSave(
       })
     } catch (err) {
       const left = orphanVaultItem(err)
-      // 留下的条目出现在条目列表里，可以起标识
-      if (left) void queryClient.invalidateQueries({ queryKey: ['vault-items', sid] })
+      if (left) void queryClient.invalidateQueries({ queryKey: ['vault-items', cid] })
       if (id !== runId) return
       failure.value = err instanceof ApiError ? err.message : '新建凭据失败'
       failureDetail.value = writeFailureNext(err, 'create').detail
@@ -394,16 +381,14 @@ export function usePlaintextSave(
     } finally {
       if (createdAny) {
         for (const key of ['credentials', 'vault-items']) {
-          void queryClient.invalidateQueries({ queryKey: [key, sid] })
+          void queryClient.invalidateQueries({ queryKey: [key, cid] })
         }
-        // 新建的凭据可能设了快到期的到期时间
-        void invalidateInboxCounts(queryClient, sid)
+        void invalidateInboxCounts(queryClient, cid)
       }
       if (id === runId) busy.value = false
     }
   }
 
-  // 照样保存：正文不改，这条记忆进待处理
   function saveAnyway() {
     const req = request.value
     if (!req || !canSaveAnyway.value || busy.value) return
@@ -416,7 +401,6 @@ export function usePlaintextSave(
     })
   }
 
-  // 已经起好标识的条目，不能再改标识
   const lockedItems = computed(() => new Set(createdVault.value.keys()))
 
   return {

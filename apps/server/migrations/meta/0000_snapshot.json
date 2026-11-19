@@ -1,9 +1,129 @@
 {
-  "id": "8f5187cb-515c-45ca-93be-2ef5e4d86a0b",
+  "id": "3aad2330-4856-4499-a551-68ecf1606def",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
+    "public.account_links": {
+      "name": "account_links",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "account_id": {
+          "name": "account_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "purpose": {
+          "name": "purpose",
+          "type": "account_link_purpose",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "token_hash": {
+          "name": "token_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_by": {
+          "name": "created_by",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "used_at": {
+          "name": "used_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "account_links_account_id_index": {
+          "name": "account_links_account_id_index",
+          "columns": [
+            {
+              "expression": "account_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "account_links_expires_at_index": {
+          "name": "account_links_expires_at_index",
+          "columns": [
+            {
+              "expression": "expires_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "account_links_account_id_accounts_id_fk": {
+          "name": "account_links_account_id_accounts_id_fk",
+          "tableFrom": "account_links",
+          "tableTo": "accounts",
+          "columnsFrom": ["account_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "account_links_created_by_accounts_id_fk": {
+          "name": "account_links_created_by_accounts_id_fk",
+          "tableFrom": "account_links",
+          "tableTo": "accounts",
+          "columnsFrom": ["created_by"],
+          "columnsTo": ["id"],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "account_links_tokenHash_unique": {
+          "name": "account_links_tokenHash_unique",
+          "nullsNotDistinct": false,
+          "columns": ["token_hash"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.accounts": {
       "name": "accounts",
       "schema": "",
@@ -31,7 +151,7 @@
           "name": "password_hash",
           "type": "text",
           "primaryKey": false,
-          "notNull": true
+          "notNull": false
         },
         "is_admin": {
           "name": "is_admin",
@@ -39,6 +159,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": false
+        },
+        "disabled_at": {
+          "name": "disabled_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
         },
         "created_at": {
           "name": "created_at",
@@ -73,14 +199,8 @@
           "notNull": true,
           "default": "gen_random_uuid()"
         },
-        "space_id": {
-          "name": "space_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "app_id": {
-          "name": "app_id",
+        "client_id": {
+          "name": "client_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
@@ -102,6 +222,26 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
+        },
+        "linked_circles": {
+          "name": "linked_circles",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
+        },
+        "context_facets": {
+          "name": "context_facets",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "persona_override_id": {
+          "name": "persona_override_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
         },
         "scopes": {
           "name": "scopes",
@@ -130,11 +270,11 @@
         }
       },
       "indexes": {
-        "api_keys_space_id_index": {
-          "name": "api_keys_space_id_index",
+        "api_keys_client_id_index": {
+          "name": "api_keys_client_id_index",
           "columns": [
             {
-              "expression": "space_id",
+              "expression": "client_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -147,22 +287,22 @@
         }
       },
       "foreignKeys": {
-        "api_keys_space_id_spaces_id_fk": {
-          "name": "api_keys_space_id_spaces_id_fk",
+        "api_keys_client_id_clients_id_fk": {
+          "name": "api_keys_client_id_clients_id_fk",
           "tableFrom": "api_keys",
-          "tableTo": "spaces",
-          "columnsFrom": ["space_id"],
+          "tableTo": "clients",
+          "columnsFrom": ["client_id"],
           "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "api_keys_space_id_app_id_apps_space_id_id_fk": {
-          "name": "api_keys_space_id_app_id_apps_space_id_id_fk",
+        "api_keys_persona_override_id_personas_id_fk": {
+          "name": "api_keys_persona_override_id_personas_id_fk",
           "tableFrom": "api_keys",
-          "tableTo": "apps",
-          "columnsFrom": ["space_id", "app_id"],
-          "columnsTo": ["space_id", "id"],
-          "onDelete": "cascade",
+          "tableTo": "personas",
+          "columnsFrom": ["persona_override_id"],
+          "columnsTo": ["id"],
+          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },
@@ -178,33 +318,237 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.app_group_personas": {
-      "name": "app_group_personas",
+    "public.circle_departures": {
+      "name": "circle_departures",
       "schema": "",
       "columns": {
-        "space_id": {
-          "name": "space_id",
+        "circle_id": {
+          "name": "circle_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
         },
-        "app_id": {
-          "name": "app_id",
+        "account_id": {
+          "name": "account_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
         },
-        "subject_id": {
-          "name": "subject_id",
+        "left_at": {
+          "name": "left_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "dream_private": {
+          "name": "dream_private",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "purge_started_at": {
+          "name": "purge_started_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "circle_departures_left_at_index": {
+          "name": "circle_departures_left_at_index",
+          "columns": [
+            {
+              "expression": "left_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "circle_departures_circle_id_circles_id_fk": {
+          "name": "circle_departures_circle_id_circles_id_fk",
+          "tableFrom": "circle_departures",
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "circle_departures_account_id_accounts_id_fk": {
+          "name": "circle_departures_account_id_accounts_id_fk",
+          "tableFrom": "circle_departures",
+          "tableTo": "accounts",
+          "columnsFrom": ["account_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "circle_departures_circle_id_account_id_pk": {
+          "name": "circle_departures_circle_id_account_id_pk",
+          "columns": ["circle_id", "account_id"]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.circle_members": {
+      "name": "circle_members",
+      "schema": "",
+      "columns": {
+        "circle_id": {
+          "name": "circle_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
         },
-        "persona_id": {
-          "name": "persona_id",
+        "account_id": {
+          "name": "account_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
+        },
+        "role": {
+          "name": "role",
+          "type": "member_role",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "dream_private": {
+          "name": "dream_private",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "circle_members_circle_id_circles_id_fk": {
+          "name": "circle_members_circle_id_circles_id_fk",
+          "tableFrom": "circle_members",
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "circle_members_account_id_accounts_id_fk": {
+          "name": "circle_members_account_id_accounts_id_fk",
+          "tableFrom": "circle_members",
+          "tableTo": "accounts",
+          "columnsFrom": ["account_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "circle_members_circle_id_account_id_pk": {
+          "name": "circle_members_circle_id_account_id_pk",
+          "columns": ["circle_id", "account_id"]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.circles": {
+      "name": "circles",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "slug": {
+          "name": "slug",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "kind": {
+          "name": "kind",
+          "type": "circle_kind",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "owner_account_id": {
+          "name": "owner_account_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "default_facets": {
+          "name": "default_facets",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "extraction_monthly_tokens": {
+          "name": "extraction_monthly_tokens",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 2000000
+        },
+        "extraction_daily_writes": {
+          "name": "extraction_daily_writes",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 20
+        },
+        "advanced": {
+          "name": "advanced",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "privacy": {
+          "name": "privacy",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "privacy_revision": {
+          "name": "privacy_revision",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
         },
         "created_at": {
           "name": "created_at",
@@ -215,8 +559,109 @@
         }
       },
       "indexes": {
-        "app_group_personas_persona_id_index": {
-          "name": "app_group_personas_persona_id_index",
+        "circles_personal_owner_idx": {
+          "name": "circles_personal_owner_idx",
+          "columns": [
+            {
+              "expression": "owner_account_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"circles\".\"kind\" = 'personal'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "circles_owner_account_id_accounts_id_fk": {
+          "name": "circles_owner_account_id_accounts_id_fk",
+          "tableFrom": "circles",
+          "tableTo": "accounts",
+          "columnsFrom": ["owner_account_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "circles_slug_unique": {
+          "name": "circles_slug_unique",
+          "nullsNotDistinct": false,
+          "columns": ["slug"]
+        },
+        "circles_id_kind_unique": {
+          "name": "circles_id_kind_unique",
+          "nullsNotDistinct": false,
+          "columns": ["id", "kind"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "circles_owner_by_kind": {
+          "name": "circles_owner_by_kind",
+          "value": "(\"circles\".\"kind\" = 'personal') = (\"circles\".\"owner_account_id\" is not null)"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.client_group_rules": {
+      "name": "client_group_rules",
+      "schema": "",
+      "columns": {
+        "circle_id": {
+          "name": "circle_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "client_id": {
+          "name": "client_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "group_subject_id": {
+          "name": "group_subject_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "persona_id": {
+          "name": "persona_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "isolate_group_memory": {
+          "name": "isolate_group_memory",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "client_group_rules_persona_idx": {
+          "name": "client_group_rules_persona_idx",
           "columns": [
             {
               "expression": "persona_id",
@@ -230,11 +675,11 @@
           "method": "btree",
           "with": {}
         },
-        "app_group_personas_subject_id_index": {
-          "name": "app_group_personas_subject_id_index",
+        "client_group_rules_group_idx": {
+          "name": "client_group_rules_group_idx",
           "columns": [
             {
-              "expression": "subject_id",
+              "expression": "group_subject_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -247,47 +692,47 @@
         }
       },
       "foreignKeys": {
-        "app_group_personas_space_id_spaces_id_fk": {
-          "name": "app_group_personas_space_id_spaces_id_fk",
-          "tableFrom": "app_group_personas",
-          "tableTo": "spaces",
-          "columnsFrom": ["space_id"],
+        "client_group_rules_circle_id_circles_id_fk": {
+          "name": "client_group_rules_circle_id_circles_id_fk",
+          "tableFrom": "client_group_rules",
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
           "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "app_group_personas_space_id_app_id_apps_space_id_id_fk": {
-          "name": "app_group_personas_space_id_app_id_apps_space_id_id_fk",
-          "tableFrom": "app_group_personas",
-          "tableTo": "apps",
-          "columnsFrom": ["space_id", "app_id"],
-          "columnsTo": ["space_id", "id"],
+        "client_group_rules_client_fk": {
+          "name": "client_group_rules_client_fk",
+          "tableFrom": "client_group_rules",
+          "tableTo": "clients",
+          "columnsFrom": ["circle_id", "client_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "app_group_personas_space_id_subject_id_subjects_space_id_id_fk": {
-          "name": "app_group_personas_space_id_subject_id_subjects_space_id_id_fk",
-          "tableFrom": "app_group_personas",
+        "client_group_rules_subject_fk": {
+          "name": "client_group_rules_subject_fk",
+          "tableFrom": "client_group_rules",
           "tableTo": "subjects",
-          "columnsFrom": ["space_id", "subject_id"],
-          "columnsTo": ["space_id", "id"],
+          "columnsFrom": ["circle_id", "group_subject_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "app_group_personas_space_id_persona_id_personas_space_id_id_fk": {
-          "name": "app_group_personas_space_id_persona_id_personas_space_id_id_fk",
-          "tableFrom": "app_group_personas",
+        "client_group_rules_persona_fk": {
+          "name": "client_group_rules_persona_fk",
+          "tableFrom": "client_group_rules",
           "tableTo": "personas",
-          "columnsFrom": ["space_id", "persona_id"],
-          "columnsTo": ["space_id", "id"],
-          "onDelete": "no action",
+          "columnsFrom": ["circle_id", "persona_id"],
+          "columnsTo": ["circle_id", "id"],
+          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
-        "app_group_personas_app_id_subject_id_pk": {
-          "name": "app_group_personas_app_id_subject_id_pk",
-          "columns": ["app_id", "subject_id"]
+        "client_group_rules_client_id_group_subject_id_pk": {
+          "name": "client_group_rules_client_id_group_subject_id_pk",
+          "columns": ["client_id", "group_subject_id"]
         }
       },
       "uniqueConstraints": {},
@@ -295,8 +740,8 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.apps": {
-      "name": "apps",
+    "public.clients": {
+      "name": "clients",
       "schema": "",
       "columns": {
         "id": {
@@ -306,8 +751,8 @@
           "notNull": true,
           "default": "gen_random_uuid()"
         },
-        "space_id": {
-          "name": "space_id",
+        "circle_id": {
+          "name": "circle_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
@@ -347,7 +792,7 @@
           "type": "jsonb",
           "primaryKey": false,
           "notNull": true,
-          "default": "'{}'::jsonb"
+          "default": "'{\"personMemoryMode\":\"strict\"}'::jsonb"
         },
         "created_at": {
           "name": "created_at",
@@ -365,11 +810,11 @@
         }
       },
       "indexes": {
-        "apps_space_id_slug_index": {
-          "name": "apps_space_id_slug_index",
+        "clients_circle_slug_idx": {
+          "name": "clients_circle_slug_idx",
           "columns": [
             {
-              "expression": "space_id",
+              "expression": "circle_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -388,40 +833,40 @@
         }
       },
       "foreignKeys": {
-        "apps_space_id_spaces_id_fk": {
-          "name": "apps_space_id_spaces_id_fk",
-          "tableFrom": "apps",
-          "tableTo": "spaces",
-          "columnsFrom": ["space_id"],
+        "clients_circle_id_circles_id_fk": {
+          "name": "clients_circle_id_circles_id_fk",
+          "tableFrom": "clients",
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
           "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "apps_owner_account_id_accounts_id_fk": {
-          "name": "apps_owner_account_id_accounts_id_fk",
-          "tableFrom": "apps",
+        "clients_owner_account_id_accounts_id_fk": {
+          "name": "clients_owner_account_id_accounts_id_fk",
+          "tableFrom": "clients",
           "tableTo": "accounts",
           "columnsFrom": ["owner_account_id"],
           "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         },
-        "apps_default_persona_id_personas_id_fk": {
-          "name": "apps_default_persona_id_personas_id_fk",
-          "tableFrom": "apps",
+        "clients_default_persona_fk": {
+          "name": "clients_default_persona_fk",
+          "tableFrom": "clients",
           "tableTo": "personas",
-          "columnsFrom": ["default_persona_id"],
-          "columnsTo": ["id"],
+          "columnsFrom": ["circle_id", "default_persona_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
-        "apps_spaceId_id_unique": {
-          "name": "apps_spaceId_id_unique",
+        "clients_circle_id_unique": {
+          "name": "clients_circle_id_unique",
           "nullsNotDistinct": false,
-          "columns": ["space_id", "id"]
+          "columns": ["circle_id", "id"]
         }
       },
       "policies": {},
@@ -438,14 +883,14 @@
           "primaryKey": true,
           "notNull": true
         },
-        "space_id": {
-          "name": "space_id",
+        "circle_id": {
+          "name": "circle_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
         },
-        "app_id": {
-          "name": "app_id",
+        "client_id": {
+          "name": "client_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
@@ -519,11 +964,11 @@
         }
       },
       "indexes": {
-        "conversation_turns_app_id_scope_id_index": {
-          "name": "conversation_turns_app_id_scope_id_index",
+        "conversation_turns_client_scope_idx": {
+          "name": "conversation_turns_client_scope_idx",
           "columns": [
             {
-              "expression": "app_id",
+              "expression": "client_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -548,11 +993,11 @@
         }
       },
       "foreignKeys": {
-        "conversation_turns_space_id_spaces_id_fk": {
-          "name": "conversation_turns_space_id_spaces_id_fk",
+        "conversation_turns_circle_id_circles_id_fk": {
+          "name": "conversation_turns_circle_id_circles_id_fk",
           "tableFrom": "conversation_turns",
-          "tableTo": "spaces",
-          "columnsFrom": ["space_id"],
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
           "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
@@ -575,12 +1020,12 @@
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "conversation_turns_space_id_app_id_apps_space_id_id_fk": {
-          "name": "conversation_turns_space_id_app_id_apps_space_id_id_fk",
+        "conversation_turns_client_fk": {
+          "name": "conversation_turns_client_fk",
           "tableFrom": "conversation_turns",
-          "tableTo": "apps",
-          "columnsFrom": ["space_id", "app_id"],
-          "columnsTo": ["space_id", "id"],
+          "tableTo": "clients",
+          "columnsFrom": ["circle_id", "client_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -588,8 +1033,8 @@
           "name": "conversation_turns_group_fk",
           "tableFrom": "conversation_turns",
           "tableTo": "subjects",
-          "columnsFrom": ["space_id", "group_subject_id"],
-          "columnsTo": ["space_id", "id"],
+          "columnsFrom": ["circle_id", "group_subject_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -597,8 +1042,8 @@
           "name": "conversation_turns_sender_fk",
           "tableFrom": "conversation_turns",
           "tableTo": "subjects",
-          "columnsFrom": ["space_id", "sender_subject_id"],
-          "columnsTo": ["space_id", "id"],
+          "columnsFrom": ["circle_id", "sender_subject_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -625,14 +1070,14 @@
           "notNull": true,
           "default": "gen_random_uuid()"
         },
-        "space_id": {
-          "name": "space_id",
+        "circle_id": {
+          "name": "circle_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
         },
-        "app_id": {
-          "name": "app_id",
+        "client_id": {
+          "name": "client_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
@@ -643,6 +1088,20 @@
           "typeSchema": "public",
           "primaryKey": false,
           "notNull": true
+        },
+        "device_key": {
+          "name": "device_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "''"
+        },
+        "project_slug": {
+          "name": "project_slug",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "''"
         },
         "subject_id": {
           "name": "subject_id",
@@ -676,7 +1135,7 @@
           "name": "conversations_subject_idx",
           "columns": [
             {
-              "expression": "app_id",
+              "expression": "client_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -689,15 +1148,16 @@
             }
           ],
           "isUnique": true,
+          "where": "\"conversations\".\"kind\" <> 'none'",
           "concurrently": false,
           "method": "btree",
           "with": {}
         },
-        "conversations_owner_idx": {
-          "name": "conversations_owner_idx",
+        "conversations_none_idx": {
+          "name": "conversations_none_idx",
           "columns": [
             {
-              "expression": "app_id",
+              "expression": "client_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -707,18 +1167,31 @@
               "isExpression": false,
               "asc": true,
               "nulls": "last"
+            },
+            {
+              "expression": "device_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "project_slug",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
             }
           ],
           "isUnique": true,
+          "where": "\"conversations\".\"kind\" = 'none'",
           "concurrently": false,
           "method": "btree",
           "with": {}
         },
-        "conversations_space_id_last_active_at_index": {
-          "name": "conversations_space_id_last_active_at_index",
+        "conversations_circle_active_idx": {
+          "name": "conversations_circle_active_idx",
           "columns": [
             {
-              "expression": "space_id",
+              "expression": "circle_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -735,8 +1208,8 @@
           "method": "btree",
           "with": {}
         },
-        "conversations_subject_id_index": {
-          "name": "conversations_subject_id_index",
+        "conversations_subject_lookup_idx": {
+          "name": "conversations_subject_lookup_idx",
           "columns": [
             {
               "expression": "subject_id",
@@ -752,11 +1225,11 @@
         }
       },
       "foreignKeys": {
-        "conversations_space_id_spaces_id_fk": {
-          "name": "conversations_space_id_spaces_id_fk",
+        "conversations_circle_id_circles_id_fk": {
+          "name": "conversations_circle_id_circles_id_fk",
           "tableFrom": "conversations",
-          "tableTo": "spaces",
-          "columnsFrom": ["space_id"],
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
           "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
@@ -770,38 +1243,38 @@
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "conversations_space_id_app_id_apps_space_id_id_fk": {
-          "name": "conversations_space_id_app_id_apps_space_id_id_fk",
+        "conversations_client_fk": {
+          "name": "conversations_client_fk",
           "tableFrom": "conversations",
-          "tableTo": "apps",
-          "columnsFrom": ["space_id", "app_id"],
-          "columnsTo": ["space_id", "id"],
+          "tableTo": "clients",
+          "columnsFrom": ["circle_id", "client_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "conversations_space_id_subject_id_subjects_space_id_id_fk": {
-          "name": "conversations_space_id_subject_id_subjects_space_id_id_fk",
+        "conversations_subject_fk": {
+          "name": "conversations_subject_fk",
           "tableFrom": "conversations",
           "tableTo": "subjects",
-          "columnsFrom": ["space_id", "subject_id"],
-          "columnsTo": ["space_id", "id"],
+          "columnsFrom": ["circle_id", "subject_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
-        "conversations_spaceId_id_unique": {
-          "name": "conversations_spaceId_id_unique",
+        "conversations_circle_id_unique": {
+          "name": "conversations_circle_id_unique",
           "nullsNotDistinct": false,
-          "columns": ["space_id", "id"]
+          "columns": ["circle_id", "id"]
         }
       },
       "policies": {},
       "checkConstraints": {
         "conversations_kind_shape": {
           "name": "conversations_kind_shape",
-          "value": "case when \"conversations\".\"kind\" = 'none'\n        then \"conversations\".\"subject_id\" is null and \"conversations\".\"owner_account_id\" is not null\n        else \"conversations\".\"subject_id\" is not null and \"conversations\".\"owner_account_id\" is null end"
+          "value": "case when \"conversations\".\"kind\" = 'none'\n        then \"conversations\".\"subject_id\" is null and \"conversations\".\"owner_account_id\" is not null\n        else \"conversations\".\"subject_id\" is not null and \"conversations\".\"owner_account_id\" is null and \"conversations\".\"device_key\" = '' and \"conversations\".\"project_slug\" = '' end"
         }
       },
       "isRLSEnabled": false
@@ -816,8 +1289,8 @@
           "primaryKey": true,
           "notNull": true
         },
-        "space_id": {
-          "name": "space_id",
+        "circle_id": {
+          "name": "circle_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
@@ -885,11 +1358,11 @@
         }
       },
       "foreignKeys": {
-        "credential_events_space_id_spaces_id_fk": {
-          "name": "credential_events_space_id_spaces_id_fk",
+        "credential_events_circle_id_circles_id_fk": {
+          "name": "credential_events_circle_id_circles_id_fk",
           "tableFrom": "credential_events",
-          "tableTo": "spaces",
-          "columnsFrom": ["space_id"],
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
           "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
@@ -898,133 +1371,14 @@
           "name": "credential_events_credential_fk",
           "tableFrom": "credential_events",
           "tableTo": "credentials",
-          "columnsFrom": ["space_id", "credential_id"],
-          "columnsTo": ["space_id", "id"],
+          "columnsFrom": ["circle_id", "credential_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.credential_providers": {
-      "name": "credential_providers",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "space_id": {
-          "name": "space_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "owner_account_id": {
-          "name": "owner_account_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "kind": {
-          "name": "kind",
-          "type": "credential_provider_kind",
-          "typeSchema": "public",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "name": {
-          "name": "name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "instructions": {
-          "name": "instructions",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "''"
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "deleted_at": {
-          "name": "deleted_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        }
-      },
-      "indexes": {
-        "credential_providers_space_id_owner_account_id_index": {
-          "name": "credential_providers_space_id_owner_account_id_index",
-          "columns": [
-            {
-              "expression": "space_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "owner_account_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "credential_providers_space_id_spaces_id_fk": {
-          "name": "credential_providers_space_id_spaces_id_fk",
-          "tableFrom": "credential_providers",
-          "tableTo": "spaces",
-          "columnsFrom": ["space_id"],
-          "columnsTo": ["id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "credential_providers_owner_account_id_accounts_id_fk": {
-          "name": "credential_providers_owner_account_id_accounts_id_fk",
-          "tableFrom": "credential_providers",
-          "tableTo": "accounts",
-          "columnsFrom": ["owner_account_id"],
-          "columnsTo": ["id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {
-        "credential_providers_spaceId_ownerAccountId_id_unique": {
-          "name": "credential_providers_spaceId_ownerAccountId_id_unique",
-          "nullsNotDistinct": false,
-          "columns": ["space_id", "owner_account_id", "id"]
-        }
-      },
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
@@ -1040,8 +1394,8 @@
           "notNull": true,
           "default": "gen_random_uuid()"
         },
-        "space_id": {
-          "name": "space_id",
+        "circle_id": {
+          "name": "circle_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
@@ -1077,14 +1431,14 @@
           "primaryKey": false,
           "notNull": true
         },
-        "provider_id": {
-          "name": "provider_id",
+        "vault_connection_id": {
+          "name": "vault_connection_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": false
         },
-        "location": {
-          "name": "location",
+        "vault_item_id": {
+          "name": "vault_item_id",
           "type": "text",
           "primaryKey": false,
           "notNull": false
@@ -1114,9 +1468,15 @@
           "primaryKey": false,
           "notNull": false
         },
-        "app_ids": {
-          "name": "app_ids",
+        "client_ids": {
+          "name": "client_ids",
           "type": "uuid[]",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "allowed_realms": {
+          "name": "allowed_realms",
+          "type": "text[]",
           "primaryKey": false,
           "notNull": false
         },
@@ -1126,6 +1486,37 @@
           "primaryKey": false,
           "notNull": true,
           "default": 1
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "rotation_requested_at": {
+          "name": "rotation_requested_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "value_version": {
+          "name": "value_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
+        },
+        "value_changed_at": {
+          "name": "value_changed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "vault_revision": {
+          "name": "vault_revision",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         },
         "created_at": {
           "name": "created_at",
@@ -1153,7 +1544,7 @@
           "name": "credentials_identifier_live_idx",
           "columns": [
             {
-              "expression": "space_id",
+              "expression": "circle_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -1177,18 +1568,39 @@
           "method": "btree",
           "with": {}
         },
-        "credentials_provider_live_idx": {
-          "name": "credentials_provider_live_idx",
+        "credentials_vault_item_live_idx": {
+          "name": "credentials_vault_item_live_idx",
           "columns": [
             {
-              "expression": "provider_id",
+              "expression": "vault_connection_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "vault_item_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"credentials\".\"deleted_at\" is null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "credentials_vault_connection_idx": {
+          "name": "credentials_vault_connection_idx",
+          "columns": [
+            {
+              "expression": "vault_connection_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
             }
           ],
           "isUnique": false,
-          "where": "\"credentials\".\"deleted_at\" is null",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -1197,7 +1609,7 @@
           "name": "credentials_key_id_idx",
           "columns": [
             {
-              "expression": "space_id",
+              "expression": "circle_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -1217,11 +1629,11 @@
         }
       },
       "foreignKeys": {
-        "credentials_space_id_spaces_id_fk": {
-          "name": "credentials_space_id_spaces_id_fk",
+        "credentials_circle_id_circles_id_fk": {
+          "name": "credentials_circle_id_circles_id_fk",
           "tableFrom": "credentials",
-          "tableTo": "spaces",
-          "columnsFrom": ["space_id"],
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
           "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
@@ -1235,29 +1647,261 @@
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "credentials_provider_fk": {
-          "name": "credentials_provider_fk",
+        "credentials_vault_connection_fk": {
+          "name": "credentials_vault_connection_fk",
           "tableFrom": "credentials",
-          "tableTo": "credential_providers",
-          "columnsFrom": ["space_id", "owner_account_id", "provider_id"],
-          "columnsTo": ["space_id", "owner_account_id", "id"],
+          "tableTo": "vault_connections",
+          "columnsFrom": ["circle_id", "owner_account_id", "vault_connection_id"],
+          "columnsTo": ["circle_id", "owner_account_id", "id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
-        "credentials_spaceId_id_unique": {
-          "name": "credentials_spaceId_id_unique",
+        "credentials_circle_id_unique": {
+          "name": "credentials_circle_id_unique",
           "nullsNotDistinct": false,
-          "columns": ["space_id", "id"]
+          "columns": ["circle_id", "id"]
         }
       },
       "policies": {},
       "checkConstraints": {
         "credentials_source_shape": {
           "name": "credentials_source_shape",
-          "value": "case when \"credentials\".\"source\" = 'hosted'\n        then \"credentials\".\"ciphertext\" is not null and \"credentials\".\"wrapped_key\" is not null and \"credentials\".\"provider_id\" is null and \"credentials\".\"location\" is null\n        else \"credentials\".\"ciphertext\" is null and \"credentials\".\"wrapped_key\" is null and \"credentials\".\"provider_id\" is not null and \"credentials\".\"location\" is not null end"
+          "value": "case when \"credentials\".\"source\" = 'hosted'\n        then \"credentials\".\"ciphertext\" is not null and \"credentials\".\"wrapped_key\" is not null and \"credentials\".\"vault_connection_id\" is null and \"credentials\".\"vault_item_id\" is null\n        else \"credentials\".\"ciphertext\" is null and \"credentials\".\"wrapped_key\" is null and \"credentials\".\"vault_connection_id\" is not null and \"credentials\".\"vault_item_id\" is not null end"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.device_grants": {
+      "name": "device_grants",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "device_hash": {
+          "name": "device_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "user_hash": {
+          "name": "user_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "runtime_family": {
+          "name": "runtime_family",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "platforms": {
+          "name": "platforms",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "client_name": {
+          "name": "client_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "client_address": {
+          "name": "client_address",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "client_key": {
+          "name": "client_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'pending'"
+        },
+        "approved_by": {
+          "name": "approved_by",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "selections": {
+          "name": "selections",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "approved_at": {
+          "name": "approved_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "circle_id": {
+          "name": "circle_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "client_id": {
+          "name": "client_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "linked_circles": {
+          "name": "linked_circles",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "context_facets": {
+          "name": "context_facets",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "key_name": {
+          "name": "key_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "scopes": {
+          "name": "scopes",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "last_polled_at": {
+          "name": "last_polled_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "device_grants_expires_at_index": {
+          "name": "device_grants_expires_at_index",
+          "columns": [
+            {
+              "expression": "expires_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "device_grants_client_key_index": {
+          "name": "device_grants_client_key_index",
+          "columns": [
+            {
+              "expression": "client_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "device_grants_circle_id_index": {
+          "name": "device_grants_circle_id_index",
+          "columns": [
+            {
+              "expression": "circle_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "device_grants_approved_by_accounts_id_fk": {
+          "name": "device_grants_approved_by_accounts_id_fk",
+          "tableFrom": "device_grants",
+          "tableTo": "accounts",
+          "columnsFrom": ["approved_by"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "device_grants_circle_id_circles_id_fk": {
+          "name": "device_grants_circle_id_circles_id_fk",
+          "tableFrom": "device_grants",
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "device_grants_circle_client_fk": {
+          "name": "device_grants_circle_client_fk",
+          "tableFrom": "device_grants",
+          "tableTo": "clients",
+          "columnsFrom": ["circle_id", "client_id"],
+          "columnsTo": ["circle_id", "id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "device_grants_deviceHash_unique": {
+          "name": "device_grants_deviceHash_unique",
+          "nullsNotDistinct": false,
+          "columns": ["device_hash"]
+        },
+        "device_grants_userHash_unique": {
+          "name": "device_grants_userHash_unique",
+          "nullsNotDistinct": false,
+          "columns": ["user_hash"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "device_grants_platforms_shape": {
+          "name": "device_grants_platforms_shape",
+          "value": "(\"device_grants\".\"runtime_family\" is null) <> (\"device_grants\".\"platforms\" is null)"
         }
       },
       "isRLSEnabled": false
@@ -1266,14 +1910,14 @@
       "name": "dream_marks",
       "schema": "",
       "columns": {
-        "memory_id": {
-          "name": "memory_id",
+        "entry_id": {
+          "name": "entry_id",
           "type": "uuid",
           "primaryKey": true,
           "notNull": true
         },
-        "space_id": {
-          "name": "space_id",
+        "circle_id": {
+          "name": "circle_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
@@ -1287,21 +1931,21 @@
       },
       "indexes": {},
       "foreignKeys": {
-        "dream_marks_space_id_spaces_id_fk": {
-          "name": "dream_marks_space_id_spaces_id_fk",
+        "dream_marks_circle_id_circles_id_fk": {
+          "name": "dream_marks_circle_id_circles_id_fk",
           "tableFrom": "dream_marks",
-          "tableTo": "spaces",
-          "columnsFrom": ["space_id"],
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
           "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "dream_marks_memory_fk": {
-          "name": "dream_marks_memory_fk",
+        "dream_marks_entry_fk": {
+          "name": "dream_marks_entry_fk",
           "tableFrom": "dream_marks",
-          "tableTo": "memories",
-          "columnsFrom": ["space_id", "memory_id"],
-          "columnsTo": ["space_id", "id"],
+          "tableTo": "entries",
+          "columnsFrom": ["circle_id", "entry_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -1322,8 +1966,8 @@
           "primaryKey": true,
           "notNull": true
         },
-        "space_id": {
-          "name": "space_id",
+        "circle_id": {
+          "name": "circle_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
@@ -1435,11 +2079,11 @@
         }
       },
       "indexes": {
-        "dream_runs_space_id_created_at_index": {
-          "name": "dream_runs_space_id_created_at_index",
+        "dream_runs_circle_id_created_at_index": {
+          "name": "dream_runs_circle_id_created_at_index",
           "columns": [
             {
-              "expression": "space_id",
+              "expression": "circle_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -1458,11 +2102,11 @@
         }
       },
       "foreignKeys": {
-        "dream_runs_space_id_spaces_id_fk": {
-          "name": "dream_runs_space_id_spaces_id_fk",
+        "dream_runs_circle_id_circles_id_fk": {
+          "name": "dream_runs_circle_id_circles_id_fk",
           "tableFrom": "dream_runs",
-          "tableTo": "spaces",
-          "columnsFrom": ["space_id"],
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
           "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
@@ -1499,8 +2143,8 @@
           "notNull": true,
           "default": "gen_random_uuid()"
         },
-        "space_id": {
-          "name": "space_id",
+        "circle_id": {
+          "name": "circle_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
@@ -1523,8 +2167,8 @@
           "primaryKey": false,
           "notNull": true
         },
-        "memory_ids": {
-          "name": "memory_ids",
+        "entry_ids": {
+          "name": "entry_ids",
           "type": "uuid[]",
           "primaryKey": false,
           "notNull": true
@@ -1541,15 +2185,33 @@
           "primaryKey": false,
           "notNull": false
         },
+        "title": {
+          "name": "title",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "content": {
           "name": "content",
           "type": "text",
           "primaryKey": false,
           "notNull": false
         },
-        "uri": {
-          "name": "uri",
-          "type": "text",
+        "variants": {
+          "name": "variants",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "when": {
+          "name": "when",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "topics": {
+          "name": "topics",
+          "type": "text[]",
           "primaryKey": false,
           "notNull": false
         },
@@ -1562,6 +2224,12 @@
         "verdict": {
           "name": "verdict",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "target_priority": {
+          "name": "target_priority",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false
         },
@@ -1609,7 +2277,7 @@
           "name": "dream_suggestions_fingerprint_idx",
           "columns": [
             {
-              "expression": "space_id",
+              "expression": "circle_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -1626,11 +2294,11 @@
           "method": "btree",
           "with": {}
         },
-        "dream_suggestions_space_id_status_created_at_index": {
-          "name": "dream_suggestions_space_id_status_created_at_index",
+        "dream_suggestions_circle_id_status_created_at_index": {
+          "name": "dream_suggestions_circle_id_status_created_at_index",
           "columns": [
             {
-              "expression": "space_id",
+              "expression": "circle_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -1655,11 +2323,11 @@
         }
       },
       "foreignKeys": {
-        "dream_suggestions_space_id_spaces_id_fk": {
-          "name": "dream_suggestions_space_id_spaces_id_fk",
+        "dream_suggestions_circle_id_circles_id_fk": {
+          "name": "dream_suggestions_circle_id_circles_id_fk",
           "tableFrom": "dream_suggestions",
-          "tableTo": "spaces",
-          "columnsFrom": ["space_id"],
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
           "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
@@ -1689,15 +2357,1310 @@
       "checkConstraints": {
         "dream_suggestions_kind": {
           "name": "dream_suggestions_kind",
-          "value": "\"dream_suggestions\".\"kind\" in ('merge', 'distill', 'stale', 'review')"
+          "value": "\"dream_suggestions\".\"kind\" in ('merge', 'merge_variants', 'facet_tag', 'generalize', 'distill', 'distill_episode', 'stale', 'review', 'promote')"
         },
         "dream_suggestions_status": {
           "name": "dream_suggestions_status",
           "value": "\"dream_suggestions\".\"status\" in ('pending', 'applied', 'rejected')"
         },
-        "dream_suggestions_memories": {
-          "name": "dream_suggestions_memories",
-          "value": "cardinality(\"dream_suggestions\".\"memory_ids\") >= 1 and cardinality(\"dream_suggestions\".\"memory_ids\") = cardinality(\"dream_suggestions\".\"versions\")"
+        "dream_suggestions_entries": {
+          "name": "dream_suggestions_entries",
+          "value": "cardinality(\"dream_suggestions\".\"entry_ids\") >= 1 and cardinality(\"dream_suggestions\".\"entry_ids\") = cardinality(\"dream_suggestions\".\"versions\")"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.entries": {
+      "name": "entries",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "circle_id": {
+          "name": "circle_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "circle_kind": {
+          "name": "circle_kind",
+          "type": "circle_kind",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "short_id": {
+          "name": "short_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "kind": {
+          "name": "kind",
+          "type": "entry_kind",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "title": {
+          "name": "title",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "sensitivity": {
+          "name": "sensitivity",
+          "type": "sensitivity",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "provenance": {
+          "name": "provenance",
+          "type": "provenance",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "origin_scope": {
+          "name": "origin_scope",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'global'"
+        },
+        "client_id": {
+          "name": "client_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "owner_account_id": {
+          "name": "owner_account_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "subject_id": {
+          "name": "subject_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "subject_kind": {
+          "name": "subject_kind",
+          "type": "subject_kind",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "conversation_id": {
+          "name": "conversation_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "realms": {
+          "name": "realms",
+          "type": "text[]",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'"
+        },
+        "topics": {
+          "name": "topics",
+          "type": "text[]",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'"
+        },
+        "priority": {
+          "name": "priority",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 2
+        },
+        "disclosure": {
+          "name": "disclosure",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "valid_from": {
+          "name": "valid_from",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "valid_to": {
+          "name": "valid_to",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "deleted_at": {
+          "name": "deleted_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "entries_circle_kind_idx": {
+          "name": "entries_circle_kind_idx",
+          "columns": [
+            {
+              "expression": "circle_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "kind",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "entries_subject_idx": {
+          "name": "entries_subject_idx",
+          "columns": [
+            {
+              "expression": "subject_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"entries\".\"subject_id\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "entries_conversation_idx": {
+          "name": "entries_conversation_idx",
+          "columns": [
+            {
+              "expression": "conversation_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"entries\".\"conversation_id\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "entries_topics_gin_idx": {
+          "name": "entries_topics_gin_idx",
+          "columns": [
+            {
+              "expression": "topics",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "gin",
+          "with": {}
+        },
+        "entries_realms_gin_idx": {
+          "name": "entries_realms_gin_idx",
+          "columns": [
+            {
+              "expression": "realms",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "gin",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "entries_circle_id_circles_id_fk": {
+          "name": "entries_circle_id_circles_id_fk",
+          "tableFrom": "entries",
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "entries_owner_account_id_accounts_id_fk": {
+          "name": "entries_owner_account_id_accounts_id_fk",
+          "tableFrom": "entries",
+          "tableTo": "accounts",
+          "columnsFrom": ["owner_account_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "entries_circle_kind_fk": {
+          "name": "entries_circle_kind_fk",
+          "tableFrom": "entries",
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id", "circle_kind"],
+          "columnsTo": ["id", "kind"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "entries_client_fk": {
+          "name": "entries_client_fk",
+          "tableFrom": "entries",
+          "tableTo": "clients",
+          "columnsFrom": ["circle_id", "client_id"],
+          "columnsTo": ["circle_id", "id"],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "entries_subject_fk": {
+          "name": "entries_subject_fk",
+          "tableFrom": "entries",
+          "tableTo": "subjects",
+          "columnsFrom": ["circle_id", "subject_id", "subject_kind"],
+          "columnsTo": ["circle_id", "id", "kind"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "entries_conversation_fk": {
+          "name": "entries_conversation_fk",
+          "tableFrom": "entries",
+          "tableTo": "conversations",
+          "columnsFrom": ["circle_id", "conversation_id"],
+          "columnsTo": ["circle_id", "id"],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "entries_short_id_unique": {
+          "name": "entries_short_id_unique",
+          "nullsNotDistinct": false,
+          "columns": ["short_id"]
+        },
+        "entries_circle_id_unique": {
+          "name": "entries_circle_id_unique",
+          "nullsNotDistinct": false,
+          "columns": ["circle_id", "id"]
+        },
+        "entries_circle_id_sens_kind_unique": {
+          "name": "entries_circle_id_sens_kind_unique",
+          "nullsNotDistinct": false,
+          "columns": ["circle_id", "id", "sensitivity", "kind"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "entries_short_id_format": {
+          "name": "entries_short_id_format",
+          "value": "\"entries\".\"short_id\" ~ '^m-[2-9a-hjkmnp-tv-z]{6,8}$'"
+        },
+        "entries_subject_kind_pair": {
+          "name": "entries_subject_kind_pair",
+          "value": "(\"entries\".\"subject_id\" is null) = (\"entries\".\"subject_kind\" is null)"
+        },
+        "entries_shape_by_kind": {
+          "name": "entries_shape_by_kind",
+          "value": "case \"entries\".\"kind\"\n        when 'entry' then ((\"entries\".\"circle_kind\" = 'personal' and \"entries\".\"owner_account_id\" is not null)\n          or (\"entries\".\"circle_kind\" = 'shared' and \"entries\".\"owner_account_id\" is null))\n          and \"entries\".\"subject_id\" is null and \"entries\".\"subject_kind\" is null and \"entries\".\"conversation_id\" is null\n        when 'fact' then \"entries\".\"subject_id\" is not null and \"entries\".\"subject_kind\" is not null\n          and \"entries\".\"owner_account_id\" is null\n        when 'episode' then \"entries\".\"conversation_id\" is not null\n          and \"entries\".\"subject_id\" is null and \"entries\".\"subject_kind\" is null\n        else false end"
+        },
+        "entries_untrusted_kinds": {
+          "name": "entries_untrusted_kinds",
+          "value": "\"entries\".\"provenance\" <> 'untrusted' or \"entries\".\"kind\" in ('fact', 'episode')"
+        },
+        "entries_episode_not_secret": {
+          "name": "entries_episode_not_secret",
+          "value": "\"entries\".\"kind\" <> 'episode' or \"entries\".\"sensitivity\" <> 'secret'"
+        },
+        "entries_episode_priority": {
+          "name": "entries_episode_priority",
+          "value": "\"entries\".\"kind\" <> 'episode' or \"entries\".\"priority\" >= 1"
+        },
+        "entries_priority_nonneg": {
+          "name": "entries_priority_nonneg",
+          "value": "\"entries\".\"priority\" >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.entry_credential_refs": {
+      "name": "entry_credential_refs",
+      "schema": "",
+      "columns": {
+        "circle_id": {
+          "name": "circle_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "entry_id": {
+          "name": "entry_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "identifier": {
+          "name": "identifier",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "entry_credential_refs_circle_id_identifier_index": {
+          "name": "entry_credential_refs_circle_id_identifier_index",
+          "columns": [
+            {
+              "expression": "circle_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "identifier",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "entry_credential_refs_circle_id_circles_id_fk": {
+          "name": "entry_credential_refs_circle_id_circles_id_fk",
+          "tableFrom": "entry_credential_refs",
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "entry_credential_refs_entry_fk": {
+          "name": "entry_credential_refs_entry_fk",
+          "tableFrom": "entry_credential_refs",
+          "tableTo": "entries",
+          "columnsFrom": ["circle_id", "entry_id"],
+          "columnsTo": ["circle_id", "id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "entry_credential_refs_entry_id_identifier_pk": {
+          "name": "entry_credential_refs_entry_id_identifier_pk",
+          "columns": ["entry_id", "identifier"]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.entry_embeddings": {
+      "name": "entry_embeddings",
+      "schema": "",
+      "columns": {
+        "circle_id": {
+          "name": "circle_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "variant_id": {
+          "name": "variant_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "entry_id": {
+          "name": "entry_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "model": {
+          "name": "model",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "content_hash": {
+          "name": "content_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "embedding": {
+          "name": "embedding",
+          "type": "vector(1024)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "entry_embeddings_hnsw_idx": {
+          "name": "entry_embeddings_hnsw_idx",
+          "columns": [
+            {
+              "expression": "embedding",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last",
+              "opclass": "vector_cosine_ops"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "hnsw",
+          "with": {}
+        },
+        "entry_embeddings_entry_idx": {
+          "name": "entry_embeddings_entry_idx",
+          "columns": [
+            {
+              "expression": "circle_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "entry_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "entry_embeddings_circle_id_circles_id_fk": {
+          "name": "entry_embeddings_circle_id_circles_id_fk",
+          "tableFrom": "entry_embeddings",
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "entry_embeddings_variant_fk": {
+          "name": "entry_embeddings_variant_fk",
+          "tableFrom": "entry_embeddings",
+          "tableTo": "entry_variants",
+          "columnsFrom": ["circle_id", "variant_id"],
+          "columnsTo": ["circle_id", "id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "entry_embeddings_entry_fk": {
+          "name": "entry_embeddings_entry_fk",
+          "tableFrom": "entry_embeddings",
+          "tableTo": "entries",
+          "columnsFrom": ["circle_id", "entry_id"],
+          "columnsTo": ["circle_id", "id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "entry_embeddings_variant_id_model_pk": {
+          "name": "entry_embeddings_variant_id_model_pk",
+          "columns": ["variant_id", "model"]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.entry_events": {
+      "name": "entry_events",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "bigserial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "circle_id": {
+          "name": "circle_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "entry_id": {
+          "name": "entry_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "short_id": {
+          "name": "short_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "event_type": {
+          "name": "event_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "actor_key_id": {
+          "name": "actor_key_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "actor_account_id": {
+          "name": "actor_account_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "provenance": {
+          "name": "provenance",
+          "type": "provenance",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "before": {
+          "name": "before",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "after": {
+          "name": "after",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "context": {
+          "name": "context",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "entry_events_circle_id_created_at_index": {
+          "name": "entry_events_circle_id_created_at_index",
+          "columns": [
+            {
+              "expression": "circle_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "entry_events_entry_id_created_at_index": {
+          "name": "entry_events_entry_id_created_at_index",
+          "columns": [
+            {
+              "expression": "entry_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "entry_events_circle_id_short_id_created_at_index": {
+          "name": "entry_events_circle_id_short_id_created_at_index",
+          "columns": [
+            {
+              "expression": "circle_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "short_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "entry_events_circle_id_circles_id_fk": {
+          "name": "entry_events_circle_id_circles_id_fk",
+          "tableFrom": "entry_events",
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "entry_events_entry_id_entries_id_fk": {
+          "name": "entry_events_entry_id_entries_id_fk",
+          "tableFrom": "entry_events",
+          "tableTo": "entries",
+          "columnsFrom": ["entry_id"],
+          "columnsTo": ["id"],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.entry_glossary": {
+      "name": "entry_glossary",
+      "schema": "",
+      "columns": {
+        "circle_id": {
+          "name": "circle_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "entry_id": {
+          "name": "entry_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "keyword": {
+          "name": "keyword",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "entry_glossary_circle_id_keyword_index": {
+          "name": "entry_glossary_circle_id_keyword_index",
+          "columns": [
+            {
+              "expression": "circle_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "keyword",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "entry_glossary_circle_id_circles_id_fk": {
+          "name": "entry_glossary_circle_id_circles_id_fk",
+          "tableFrom": "entry_glossary",
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "entry_glossary_entry_fk": {
+          "name": "entry_glossary_entry_fk",
+          "tableFrom": "entry_glossary",
+          "tableTo": "entries",
+          "columnsFrom": ["circle_id", "entry_id"],
+          "columnsTo": ["circle_id", "id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "entry_glossary_entry_id_keyword_pk": {
+          "name": "entry_glossary_entry_id_keyword_pk",
+          "columns": ["entry_id", "keyword"]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.entry_links": {
+      "name": "entry_links",
+      "schema": "",
+      "columns": {
+        "circle_id": {
+          "name": "circle_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source_variant_id": {
+          "name": "source_variant_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source_entry_id": {
+          "name": "source_entry_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "target_short_id": {
+          "name": "target_short_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "entry_links_target_idx": {
+          "name": "entry_links_target_idx",
+          "columns": [
+            {
+              "expression": "target_short_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "entry_links_source_entry_idx": {
+          "name": "entry_links_source_entry_idx",
+          "columns": [
+            {
+              "expression": "circle_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "source_entry_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "entry_links_circle_id_circles_id_fk": {
+          "name": "entry_links_circle_id_circles_id_fk",
+          "tableFrom": "entry_links",
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "entry_links_variant_fk": {
+          "name": "entry_links_variant_fk",
+          "tableFrom": "entry_links",
+          "tableTo": "entry_variants",
+          "columnsFrom": ["circle_id", "source_variant_id"],
+          "columnsTo": ["circle_id", "id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "entry_links_entry_fk": {
+          "name": "entry_links_entry_fk",
+          "tableFrom": "entry_links",
+          "tableTo": "entries",
+          "columnsFrom": ["circle_id", "source_entry_id"],
+          "columnsTo": ["circle_id", "id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "entry_links_source_variant_id_target_short_id_pk": {
+          "name": "entry_links_source_variant_id_target_short_id_pk",
+          "columns": ["source_variant_id", "target_short_id"]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "entry_links_target_format": {
+          "name": "entry_links_target_format",
+          "value": "\"entry_links\".\"target_short_id\" ~ '^m-[2-9a-hjkmnp-tv-z]{6,8}$'"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.entry_recall_stats": {
+      "name": "entry_recall_stats",
+      "schema": "",
+      "columns": {
+        "entry_id": {
+          "name": "entry_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "circle_id": {
+          "name": "circle_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "count": {
+          "name": "count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "last_recalled_at": {
+          "name": "last_recalled_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "entry_recall_stats_circle_id_circles_id_fk": {
+          "name": "entry_recall_stats_circle_id_circles_id_fk",
+          "tableFrom": "entry_recall_stats",
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "entry_recall_stats_entry_fk": {
+          "name": "entry_recall_stats_entry_fk",
+          "tableFrom": "entry_recall_stats",
+          "tableTo": "entries",
+          "columnsFrom": ["circle_id", "entry_id"],
+          "columnsTo": ["circle_id", "id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.entry_variants": {
+      "name": "entry_variants",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "circle_id": {
+          "name": "circle_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "entry_id": {
+          "name": "entry_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "sensitivity": {
+          "name": "sensitivity",
+          "type": "sensitivity",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "kind": {
+          "name": "kind",
+          "type": "entry_kind",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "when": {
+          "name": "when",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "when_signature": {
+          "name": "when_signature",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'"
+        },
+        "sort_order": {
+          "name": "sort_order",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "search_header": {
+          "name": "search_header",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "''"
+        },
+        "content": {
+          "name": "content",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "ciphertext": {
+          "name": "ciphertext",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "wrapped_key": {
+          "name": "wrapped_key",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "key_id": {
+          "name": "key_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "plaintext_ignored_hash": {
+          "name": "plaintext_ignored_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "sensitive_revision": {
+          "name": "sensitive_revision",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "sensitive_credential": {
+          "name": "sensitive_credential",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "sensitive_pii": {
+          "name": "sensitive_pii",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "sensitive_findings": {
+          "name": "sensitive_findings",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "fts": {
+          "name": "fts",
+          "type": "tsvector",
+          "primaryKey": false,
+          "notNull": false,
+          "generated": {
+            "as": "to_tsvector('kioku_zh'::regconfig, coalesce(search_header, '') || ' ' || coalesce(content, ''))",
+            "type": "stored"
+          }
+        }
+      },
+      "indexes": {
+        "entry_variants_entry_when_idx": {
+          "name": "entry_variants_entry_when_idx",
+          "columns": [
+            {
+              "expression": "entry_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "when_signature",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "entry_variants_episode_single_idx": {
+          "name": "entry_variants_episode_single_idx",
+          "columns": [
+            {
+              "expression": "entry_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"entry_variants\".\"kind\" = 'episode'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "entry_variants_fts_idx": {
+          "name": "entry_variants_fts_idx",
+          "columns": [
+            {
+              "expression": "fts",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "gin",
+          "with": {}
+        },
+        "entry_variants_key_id_idx": {
+          "name": "entry_variants_key_id_idx",
+          "columns": [
+            {
+              "expression": "circle_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "key_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"entry_variants\".\"wrapped_key\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "entry_variants_sensitive_idx": {
+          "name": "entry_variants_sensitive_idx",
+          "columns": [
+            {
+              "expression": "circle_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "sensitive_credential",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "sensitive_pii",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "entry_variants_circle_id_circles_id_fk": {
+          "name": "entry_variants_circle_id_circles_id_fk",
+          "tableFrom": "entry_variants",
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "entry_variants_entry_fk": {
+          "name": "entry_variants_entry_fk",
+          "tableFrom": "entry_variants",
+          "tableTo": "entries",
+          "columnsFrom": ["circle_id", "entry_id"],
+          "columnsTo": ["circle_id", "id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "entry_variants_state_fk": {
+          "name": "entry_variants_state_fk",
+          "tableFrom": "entry_variants",
+          "tableTo": "entries",
+          "columnsFrom": ["circle_id", "entry_id", "sensitivity", "kind"],
+          "columnsTo": ["circle_id", "id", "sensitivity", "kind"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "entry_variants_circle_id_unique": {
+          "name": "entry_variants_circle_id_unique",
+          "nullsNotDistinct": false,
+          "columns": ["circle_id", "id"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "entry_variants_secret_encrypted": {
+          "name": "entry_variants_secret_encrypted",
+          "value": "case when \"entry_variants\".\"sensitivity\" = 'secret'\n        then \"entry_variants\".\"content\" is null and \"entry_variants\".\"search_header\" = '' and \"entry_variants\".\"ciphertext\" is not null and \"entry_variants\".\"wrapped_key\" is not null\n        else \"entry_variants\".\"content\" is not null and \"entry_variants\".\"ciphertext\" is null and \"entry_variants\".\"wrapped_key\" is null end"
+        },
+        "entry_variants_episode_unconditional": {
+          "name": "entry_variants_episode_unconditional",
+          "value": "\"entry_variants\".\"kind\" <> 'episode' or (\"entry_variants\".\"when\" = '{}'::jsonb and \"entry_variants\".\"when_signature\" = '{}')"
         }
       },
       "isRLSEnabled": false
@@ -1712,14 +3675,14 @@
           "primaryKey": true,
           "notNull": true
         },
-        "space_id": {
-          "name": "space_id",
+        "circle_id": {
+          "name": "circle_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
         },
-        "app_id": {
-          "name": "app_id",
+        "client_id": {
+          "name": "client_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
@@ -1839,11 +3802,11 @@
         }
       },
       "indexes": {
-        "extraction_runs_space_id_created_at_index": {
-          "name": "extraction_runs_space_id_created_at_index",
+        "extraction_runs_circle_id_created_at_index": {
+          "name": "extraction_runs_circle_id_created_at_index",
           "columns": [
             {
-              "expression": "space_id",
+              "expression": "circle_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -1899,21 +3862,21 @@
         }
       },
       "foreignKeys": {
-        "extraction_runs_space_id_spaces_id_fk": {
-          "name": "extraction_runs_space_id_spaces_id_fk",
+        "extraction_runs_circle_id_circles_id_fk": {
+          "name": "extraction_runs_circle_id_circles_id_fk",
           "tableFrom": "extraction_runs",
-          "tableTo": "spaces",
-          "columnsFrom": ["space_id"],
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
           "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "extraction_runs_space_id_app_id_apps_space_id_id_fk": {
-          "name": "extraction_runs_space_id_app_id_apps_space_id_id_fk",
+        "extraction_runs_client_fk": {
+          "name": "extraction_runs_client_fk",
           "tableFrom": "extraction_runs",
-          "tableTo": "apps",
-          "columnsFrom": ["space_id", "app_id"],
-          "columnsTo": ["space_id", "id"],
+          "tableTo": "clients",
+          "columnsFrom": ["circle_id", "client_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -1921,8 +3884,8 @@
           "name": "extraction_runs_conversation_fk",
           "tableFrom": "extraction_runs",
           "tableTo": "conversations",
-          "columnsFrom": ["space_id", "conversation_id"],
-          "columnsTo": ["space_id", "id"],
+          "columnsFrom": ["circle_id", "conversation_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         }
@@ -1931,6 +3894,359 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.facet_dimensions": {
+      "name": "facet_dimensions",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "circle_id": {
+          "name": "circle_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "key": {
+          "name": "key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "match_mode": {
+          "name": "match_mode",
+          "type": "facet_match_mode",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'exclusive'"
+        },
+        "description": {
+          "name": "description",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "facet_dimensions_circle_key_idx": {
+          "name": "facet_dimensions_circle_key_idx",
+          "columns": [
+            {
+              "expression": "circle_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "facet_dimensions_circle_id_circles_id_fk": {
+          "name": "facet_dimensions_circle_id_circles_id_fk",
+          "tableFrom": "facet_dimensions",
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "facet_dimensions_not_builtin": {
+          "name": "facet_dimensions_not_builtin",
+          "value": "\"facet_dimensions\".\"key\" not in ('realm', 'env', 'runtime', 'project')"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.facet_terms": {
+      "name": "facet_terms",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "circle_id": {
+          "name": "circle_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "dimension_key": {
+          "name": "dimension_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "slug": {
+          "name": "slug",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "label": {
+          "name": "label",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "implies": {
+          "name": "implies",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "aliases": {
+          "name": "aliases",
+          "type": "text[]",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'"
+        },
+        "auto_registered": {
+          "name": "auto_registered",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "facet_terms_circle_dim_slug_idx": {
+          "name": "facet_terms_circle_dim_slug_idx",
+          "columns": [
+            {
+              "expression": "circle_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "dimension_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "slug",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "facet_terms_aliases_gin_idx": {
+          "name": "facet_terms_aliases_gin_idx",
+          "columns": [
+            {
+              "expression": "aliases",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "gin",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "facet_terms_circle_id_circles_id_fk": {
+          "name": "facet_terms_circle_id_circles_id_fk",
+          "tableFrom": "facet_terms",
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.legacy_uris": {
+      "name": "legacy_uris",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "circle_id": {
+          "name": "circle_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "entry_id": {
+          "name": "entry_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "legacy_uri": {
+          "name": "legacy_uri",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source": {
+          "name": "source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "legacy_uris_circle_uri_idx": {
+          "name": "legacy_uris_circle_uri_idx",
+          "columns": [
+            {
+              "expression": "circle_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "legacy_uri",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "legacy_uris_entry_idx": {
+          "name": "legacy_uris_entry_idx",
+          "columns": [
+            {
+              "expression": "circle_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "entry_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "legacy_uris_circle_id_circles_id_fk": {
+          "name": "legacy_uris_circle_id_circles_id_fk",
+          "tableFrom": "legacy_uris",
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "legacy_uris_entry_fk": {
+          "name": "legacy_uris_entry_fk",
+          "tableFrom": "legacy_uris",
+          "tableTo": "entries",
+          "columnsFrom": ["circle_id", "entry_id"],
+          "columnsTo": ["circle_id", "id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "legacy_uris_source_check": {
+          "name": "legacy_uris_source_check",
+          "value": "\"legacy_uris\".\"source\" in ('lore', 'kioku-legacy')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.login_attempts": {
@@ -1980,181 +4296,46 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.memories": {
-      "name": "memories",
+    "public.persona_traits": {
+      "name": "persona_traits",
       "schema": "",
       "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "space_id": {
-          "name": "space_id",
+        "circle_id": {
+          "name": "circle_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
-        },
-        "form": {
-          "name": "form",
-          "type": "memory_form",
-          "typeSchema": "public",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "layer": {
-          "name": "layer",
-          "type": "memory_layer",
-          "typeSchema": "public",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "sensitivity": {
-          "name": "sensitivity",
-          "type": "sensitivity",
-          "typeSchema": "public",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "provenance": {
-          "name": "provenance",
-          "type": "provenance",
-          "typeSchema": "public",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "origin_scope": {
-          "name": "origin_scope",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'global'"
-        },
-        "owner_account_id": {
-          "name": "owner_account_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
         },
         "persona_id": {
           "name": "persona_id",
           "type": "uuid",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
-        "app_id": {
-          "name": "app_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "subject_id": {
-          "name": "subject_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "conversation_id": {
-          "name": "conversation_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "domain": {
-          "name": "domain",
+        "trait_key": {
+          "name": "trait_key",
           "type": "text",
           "primaryKey": false,
-          "notNull": false
-        },
-        "path": {
-          "name": "path",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
         "title": {
           "name": "title",
           "type": "text",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
         "content": {
           "name": "content",
           "type": "text",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
-        "ciphertext": {
-          "name": "ciphertext",
-          "type": "bytea",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "wrapped_key": {
-          "name": "wrapped_key",
-          "type": "bytea",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "key_id": {
-          "name": "key_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "plaintext_ignored_hash": {
-          "name": "plaintext_ignored_hash",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "priority": {
-          "name": "priority",
+        "sort_order": {
+          "name": "sort_order",
           "type": "integer",
           "primaryKey": false,
           "notNull": true,
-          "default": 2
-        },
-        "disclosure": {
-          "name": "disclosure",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "valid_from": {
-          "name": "valid_from",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "valid_to": {
-          "name": "valid_to",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "expires_at": {
-          "name": "expires_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "version": {
-          "name": "version",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 1
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
+          "default": 0
         },
         "updated_at": {
           "name": "updated_at",
@@ -2162,702 +4343,63 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
-        },
-        "deleted_at": {
-          "name": "deleted_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "fts": {
-          "name": "fts",
-          "type": "tsvector",
-          "primaryKey": false,
-          "notNull": false,
-          "generated": {
-            "as": "to_tsvector('kioku_zh'::regconfig, coalesce(title, '') || ' ' || coalesce(domain, '') || ' ' || coalesce(path, '') || ' ' || coalesce(disclosure, '') || ' ' || coalesce(content, ''))",
-            "type": "stored"
-          }
         }
       },
       "indexes": {
-        "memories_fts_idx": {
-          "name": "memories_fts_idx",
+        "persona_traits_circle_idx": {
+          "name": "persona_traits_circle_idx",
           "columns": [
             {
-              "expression": "fts",
+              "expression": "circle_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "persona_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "sort_order",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
             }
           ],
           "isUnique": false,
-          "concurrently": false,
-          "method": "gin",
-          "with": {}
-        },
-        "memories_uri_live_idx": {
-          "name": "memories_uri_live_idx",
-          "columns": [
-            {
-              "expression": "space_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "domain",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "path",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "coalesce(\"owner_account_id\", '00000000-0000-0000-0000-000000000000'::uuid)",
-              "asc": true,
-              "isExpression": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "\"memories\".\"deleted_at\" is null",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "memories_space_id_layer_index": {
-          "name": "memories_space_id_layer_index",
-          "columns": [
-            {
-              "expression": "space_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "layer",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "memories_subject_id_index": {
-          "name": "memories_subject_id_index",
-          "columns": [
-            {
-              "expression": "subject_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "memories_conversation_idx": {
-          "name": "memories_conversation_idx",
-          "columns": [
-            {
-              "expression": "conversation_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "where": "\"memories\".\"conversation_id\" is not null",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "memories_key_id_idx": {
-          "name": "memories_key_id_idx",
-          "columns": [
-            {
-              "expression": "space_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "key_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "where": "\"memories\".\"wrapped_key\" is not null",
           "concurrently": false,
           "method": "btree",
           "with": {}
         }
       },
       "foreignKeys": {
-        "memories_space_id_spaces_id_fk": {
-          "name": "memories_space_id_spaces_id_fk",
-          "tableFrom": "memories",
-          "tableTo": "spaces",
-          "columnsFrom": ["space_id"],
+        "persona_traits_circle_id_circles_id_fk": {
+          "name": "persona_traits_circle_id_circles_id_fk",
+          "tableFrom": "persona_traits",
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
           "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "memories_owner_account_id_accounts_id_fk": {
-          "name": "memories_owner_account_id_accounts_id_fk",
-          "tableFrom": "memories",
-          "tableTo": "accounts",
-          "columnsFrom": ["owner_account_id"],
-          "columnsTo": ["id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "memories_space_id_persona_id_personas_space_id_id_fk": {
-          "name": "memories_space_id_persona_id_personas_space_id_id_fk",
-          "tableFrom": "memories",
+        "persona_traits_persona_fk": {
+          "name": "persona_traits_persona_fk",
+          "tableFrom": "persona_traits",
           "tableTo": "personas",
-          "columnsFrom": ["space_id", "persona_id"],
-          "columnsTo": ["space_id", "id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "memories_space_id_app_id_apps_space_id_id_fk": {
-          "name": "memories_space_id_app_id_apps_space_id_id_fk",
-          "tableFrom": "memories",
-          "tableTo": "apps",
-          "columnsFrom": ["space_id", "app_id"],
-          "columnsTo": ["space_id", "id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "memories_space_id_subject_id_subjects_space_id_id_fk": {
-          "name": "memories_space_id_subject_id_subjects_space_id_id_fk",
-          "tableFrom": "memories",
-          "tableTo": "subjects",
-          "columnsFrom": ["space_id", "subject_id"],
-          "columnsTo": ["space_id", "id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "memories_conversation_fk": {
-          "name": "memories_conversation_fk",
-          "tableFrom": "memories",
-          "tableTo": "conversations",
-          "columnsFrom": ["space_id", "conversation_id"],
-          "columnsTo": ["space_id", "id"],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {
-        "memories_spaceId_id_unique": {
-          "name": "memories_spaceId_id_unique",
-          "nullsNotDistinct": false,
-          "columns": ["space_id", "id"]
-        }
-      },
-      "policies": {},
-      "checkConstraints": {
-        "memories_form_by_layer": {
-          "name": "memories_form_by_layer",
-          "value": "(\"memories\".\"form\" = 'curated') = (\"memories\".\"layer\" in ('core', 'persona', 'app', 'user'))"
-        },
-        "memories_uri_by_form": {
-          "name": "memories_uri_by_form",
-          "value": "(\"memories\".\"form\" = 'curated') = (\"memories\".\"domain\" is not null and \"memories\".\"path\" is not null)"
-        },
-        "memories_domain_by_layer": {
-          "name": "memories_domain_by_layer",
-          "value": "\"memories\".\"domain\" is null or \"memories\".\"domain\" = \"memories\".\"layer\"::text"
-        },
-        "memories_title_by_form": {
-          "name": "memories_title_by_form",
-          "value": "(\"memories\".\"form\" = 'curated') = (\"memories\".\"title\" is not null)"
-        },
-        "memories_secret_encrypted": {
-          "name": "memories_secret_encrypted",
-          "value": "case when \"memories\".\"sensitivity\" = 'secret'\n        then \"memories\".\"content\" is null and \"memories\".\"ciphertext\" is not null and \"memories\".\"wrapped_key\" is not null\n        else \"memories\".\"content\" is not null and \"memories\".\"ciphertext\" is null and \"memories\".\"wrapped_key\" is null end"
-        },
-        "memories_owner_by_layer": {
-          "name": "memories_owner_by_layer",
-          "value": "case \"memories\".\"layer\" when 'user' then \"memories\".\"owner_account_id\" is not null\n          when 'episode' then true\n          else \"memories\".\"owner_account_id\" is null end\n        and (\"memories\".\"layer\" = 'persona') = (\"memories\".\"persona_id\" is not null)\n        and (\"memories\".\"layer\" = 'app') = (\"memories\".\"app_id\" is not null)\n        and (\"memories\".\"layer\" = 'subject') = (\"memories\".\"subject_id\" is not null)"
-        },
-        "memories_conversation_by_layer": {
-          "name": "memories_conversation_by_layer",
-          "value": "\"memories\".\"conversation_id\" is null or \"memories\".\"layer\" in ('subject', 'episode')"
-        },
-        "memories_episode_conversation": {
-          "name": "memories_episode_conversation",
-          "value": "\"memories\".\"layer\" <> 'episode' or \"memories\".\"conversation_id\" is not null"
-        },
-        "memories_user_not_public": {
-          "name": "memories_user_not_public",
-          "value": "\"memories\".\"layer\" <> 'user' or \"memories\".\"sensitivity\" <> 'public'"
-        },
-        "memories_untrusted_layers": {
-          "name": "memories_untrusted_layers",
-          "value": "\"memories\".\"provenance\" <> 'untrusted' or \"memories\".\"layer\" in ('subject', 'episode')"
-        },
-        "memories_priority_nonneg": {
-          "name": "memories_priority_nonneg",
-          "value": "\"memories\".\"priority\" >= 0"
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.memory_credential_refs": {
-      "name": "memory_credential_refs",
-      "schema": "",
-      "columns": {
-        "space_id": {
-          "name": "space_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "memory_id": {
-          "name": "memory_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "identifier": {
-          "name": "identifier",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        }
-      },
-      "indexes": {
-        "memory_credential_refs_space_id_identifier_index": {
-          "name": "memory_credential_refs_space_id_identifier_index",
-          "columns": [
-            {
-              "expression": "space_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "identifier",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "memory_credential_refs_space_id_spaces_id_fk": {
-          "name": "memory_credential_refs_space_id_spaces_id_fk",
-          "tableFrom": "memory_credential_refs",
-          "tableTo": "spaces",
-          "columnsFrom": ["space_id"],
-          "columnsTo": ["id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "memory_credential_refs_memory_fk": {
-          "name": "memory_credential_refs_memory_fk",
-          "tableFrom": "memory_credential_refs",
-          "tableTo": "memories",
-          "columnsFrom": ["space_id", "memory_id"],
-          "columnsTo": ["space_id", "id"],
+          "columnsFrom": ["circle_id", "persona_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
-        "memory_credential_refs_memory_id_identifier_pk": {
-          "name": "memory_credential_refs_memory_id_identifier_pk",
-          "columns": ["memory_id", "identifier"]
+        "persona_traits_persona_id_trait_key_pk": {
+          "name": "persona_traits_persona_id_trait_key_pk",
+          "columns": ["persona_id", "trait_key"]
         }
       },
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.memory_embeddings": {
-      "name": "memory_embeddings",
-      "schema": "",
-      "columns": {
-        "space_id": {
-          "name": "space_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "memory_id": {
-          "name": "memory_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "model": {
-          "name": "model",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "content_hash": {
-          "name": "content_hash",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "embedding": {
-          "name": "embedding",
-          "type": "vector(1024)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "memory_embeddings_hnsw_idx": {
-          "name": "memory_embeddings_hnsw_idx",
-          "columns": [
-            {
-              "expression": "embedding",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last",
-              "opclass": "vector_cosine_ops"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "hnsw",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "memory_embeddings_space_id_spaces_id_fk": {
-          "name": "memory_embeddings_space_id_spaces_id_fk",
-          "tableFrom": "memory_embeddings",
-          "tableTo": "spaces",
-          "columnsFrom": ["space_id"],
-          "columnsTo": ["id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "memory_embeddings_space_id_memory_id_memories_space_id_id_fk": {
-          "name": "memory_embeddings_space_id_memory_id_memories_space_id_id_fk",
-          "tableFrom": "memory_embeddings",
-          "tableTo": "memories",
-          "columnsFrom": ["space_id", "memory_id"],
-          "columnsTo": ["space_id", "id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {
-        "memory_embeddings_memory_id_model_pk": {
-          "name": "memory_embeddings_memory_id_model_pk",
-          "columns": ["memory_id", "model"]
-        }
-      },
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.memory_events": {
-      "name": "memory_events",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "bigserial",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "space_id": {
-          "name": "space_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "memory_id": {
-          "name": "memory_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "event_type": {
-          "name": "event_type",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "actor_key_id": {
-          "name": "actor_key_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "actor_account_id": {
-          "name": "actor_account_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "provenance": {
-          "name": "provenance",
-          "type": "provenance",
-          "typeSchema": "public",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "before": {
-          "name": "before",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "after": {
-          "name": "after",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "context": {
-          "name": "context",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'{}'::jsonb"
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "memory_events_space_id_created_at_index": {
-          "name": "memory_events_space_id_created_at_index",
-          "columns": [
-            {
-              "expression": "space_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "memory_events_memory_id_created_at_index": {
-          "name": "memory_events_memory_id_created_at_index",
-          "columns": [
-            {
-              "expression": "memory_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "memory_events_space_id_spaces_id_fk": {
-          "name": "memory_events_space_id_spaces_id_fk",
-          "tableFrom": "memory_events",
-          "tableTo": "spaces",
-          "columnsFrom": ["space_id"],
-          "columnsTo": ["id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "memory_events_memory_id_memories_id_fk": {
-          "name": "memory_events_memory_id_memories_id_fk",
-          "tableFrom": "memory_events",
-          "tableTo": "memories",
-          "columnsFrom": ["memory_id"],
-          "columnsTo": ["id"],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.memory_glossary": {
-      "name": "memory_glossary",
-      "schema": "",
-      "columns": {
-        "space_id": {
-          "name": "space_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "memory_id": {
-          "name": "memory_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "keyword": {
-          "name": "keyword",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        }
-      },
-      "indexes": {
-        "memory_glossary_space_id_keyword_index": {
-          "name": "memory_glossary_space_id_keyword_index",
-          "columns": [
-            {
-              "expression": "space_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "keyword",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "memory_glossary_space_id_spaces_id_fk": {
-          "name": "memory_glossary_space_id_spaces_id_fk",
-          "tableFrom": "memory_glossary",
-          "tableTo": "spaces",
-          "columnsFrom": ["space_id"],
-          "columnsTo": ["id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "memory_glossary_space_id_memory_id_memories_space_id_id_fk": {
-          "name": "memory_glossary_space_id_memory_id_memories_space_id_id_fk",
-          "tableFrom": "memory_glossary",
-          "tableTo": "memories",
-          "columnsFrom": ["space_id", "memory_id"],
-          "columnsTo": ["space_id", "id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {
-        "memory_glossary_memory_id_keyword_pk": {
-          "name": "memory_glossary_memory_id_keyword_pk",
-          "columns": ["memory_id", "keyword"]
-        }
-      },
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.memory_recall_stats": {
-      "name": "memory_recall_stats",
-      "schema": "",
-      "columns": {
-        "memory_id": {
-          "name": "memory_id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "space_id": {
-          "name": "space_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "count": {
-          "name": "count",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "last_recalled_at": {
-          "name": "last_recalled_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "memory_recall_stats_space_id_spaces_id_fk": {
-          "name": "memory_recall_stats_space_id_spaces_id_fk",
-          "tableFrom": "memory_recall_stats",
-          "tableTo": "spaces",
-          "columnsFrom": ["space_id"],
-          "columnsTo": ["id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "memory_recall_stats_memory_fk": {
-          "name": "memory_recall_stats_memory_fk",
-          "tableFrom": "memory_recall_stats",
-          "tableTo": "memories",
-          "columnsFrom": ["space_id", "memory_id"],
-          "columnsTo": ["space_id", "id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
@@ -2874,8 +4416,8 @@
           "notNull": true,
           "default": "gen_random_uuid()"
         },
-        "space_id": {
-          "name": "space_id",
+        "circle_id": {
+          "name": "circle_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
@@ -2920,11 +4462,11 @@
         }
       },
       "indexes": {
-        "personas_space_id_slug_index": {
-          "name": "personas_space_id_slug_index",
+        "personas_circle_slug_idx": {
+          "name": "personas_circle_slug_idx",
           "columns": [
             {
-              "expression": "space_id",
+              "expression": "circle_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -2943,11 +4485,11 @@
         }
       },
       "foreignKeys": {
-        "personas_space_id_spaces_id_fk": {
-          "name": "personas_space_id_spaces_id_fk",
+        "personas_circle_id_circles_id_fk": {
+          "name": "personas_circle_id_circles_id_fk",
           "tableFrom": "personas",
-          "tableTo": "spaces",
-          "columnsFrom": ["space_id"],
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
           "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
@@ -2964,10 +4506,10 @@
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
-        "personas_spaceId_id_unique": {
-          "name": "personas_spaceId_id_unique",
+        "personas_circle_id_unique": {
+          "name": "personas_circle_id_unique",
           "nullsNotDistinct": false,
-          "columns": ["space_id", "id"]
+          "columns": ["circle_id", "id"]
         }
       },
       "policies": {},
@@ -2984,15 +4526,27 @@
           "primaryKey": false,
           "notNull": true
         },
-        "space_id": {
-          "name": "space_id",
+        "circle_id": {
+          "name": "circle_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
         },
-        "memory_id": {
-          "name": "memory_id",
+        "target_circle_id": {
+          "name": "target_circle_id",
           "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "entry_id": {
+          "name": "entry_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "short_id": {
+          "name": "short_id",
+          "type": "text",
           "primaryKey": false,
           "notNull": true
         },
@@ -3016,17 +4570,17 @@
         }
       },
       "indexes": {
-        "recall_event_hits_space_id_memory_id_index": {
-          "name": "recall_event_hits_space_id_memory_id_index",
+        "recall_event_hits_target_idx": {
+          "name": "recall_event_hits_target_idx",
           "columns": [
             {
-              "expression": "space_id",
+              "expression": "target_circle_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
             },
             {
-              "expression": "memory_id",
+              "expression": "entry_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -3048,29 +4602,29 @@
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "recall_event_hits_space_id_spaces_id_fk": {
-          "name": "recall_event_hits_space_id_spaces_id_fk",
+        "recall_event_hits_circle_id_circles_id_fk": {
+          "name": "recall_event_hits_circle_id_circles_id_fk",
           "tableFrom": "recall_event_hits",
-          "tableTo": "spaces",
-          "columnsFrom": ["space_id"],
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
           "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "recall_event_hits_memory_fk": {
-          "name": "recall_event_hits_memory_fk",
+        "recall_event_hits_target_circle_id_circles_id_fk": {
+          "name": "recall_event_hits_target_circle_id_circles_id_fk",
           "tableFrom": "recall_event_hits",
-          "tableTo": "memories",
-          "columnsFrom": ["space_id", "memory_id"],
-          "columnsTo": ["space_id", "id"],
+          "tableTo": "circles",
+          "columnsFrom": ["target_circle_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
-        "recall_event_hits_event_id_memory_id_pk": {
-          "name": "recall_event_hits_event_id_memory_id_pk",
-          "columns": ["event_id", "memory_id"]
+        "recall_event_hits_event_id_entry_id_pk": {
+          "name": "recall_event_hits_event_id_entry_id_pk",
+          "columns": ["event_id", "entry_id"]
         }
       },
       "uniqueConstraints": {},
@@ -3088,14 +4642,14 @@
           "primaryKey": true,
           "notNull": true
         },
-        "space_id": {
-          "name": "space_id",
+        "circle_id": {
+          "name": "circle_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
         },
-        "app_id": {
-          "name": "app_id",
+        "client_id": {
+          "name": "client_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
@@ -3133,11 +4687,11 @@
         }
       },
       "indexes": {
-        "recall_events_space_id_created_at_index": {
-          "name": "recall_events_space_id_created_at_index",
+        "recall_events_circle_id_created_at_index": {
+          "name": "recall_events_circle_id_created_at_index",
           "columns": [
             {
-              "expression": "space_id",
+              "expression": "circle_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -3154,11 +4708,11 @@
           "method": "btree",
           "with": {}
         },
-        "recall_events_app_id_created_at_index": {
-          "name": "recall_events_app_id_created_at_index",
+        "recall_events_client_id_created_at_index": {
+          "name": "recall_events_client_id_created_at_index",
           "columns": [
             {
-              "expression": "app_id",
+              "expression": "client_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -3175,11 +4729,11 @@
           "method": "btree",
           "with": {}
         },
-        "recall_events_space_id_owner_account_id_app_id_id_index": {
-          "name": "recall_events_space_id_owner_account_id_app_id_id_index",
+        "recall_events_circle_id_owner_account_id_client_id_id_index": {
+          "name": "recall_events_circle_id_owner_account_id_client_id_id_index",
           "columns": [
             {
-              "expression": "space_id",
+              "expression": "circle_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -3191,7 +4745,7 @@
               "nulls": "last"
             },
             {
-              "expression": "app_id",
+              "expression": "client_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -3210,11 +4764,11 @@
         }
       },
       "foreignKeys": {
-        "recall_events_space_id_spaces_id_fk": {
-          "name": "recall_events_space_id_spaces_id_fk",
+        "recall_events_circle_id_circles_id_fk": {
+          "name": "recall_events_circle_id_circles_id_fk",
           "tableFrom": "recall_events",
-          "tableTo": "spaces",
-          "columnsFrom": ["space_id"],
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
           "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
@@ -3258,8 +4812,27 @@
           "primaryKey": false,
           "notNull": true
         },
+        "client_address": {
+          "name": "client_address",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "user_agent": {
+          "name": "user_agent",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "last_active_at": {
+          "name": "last_active_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
@@ -3344,135 +4917,18 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.space_members": {
-      "name": "space_members",
-      "schema": "",
-      "columns": {
-        "space_id": {
-          "name": "space_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "account_id": {
-          "name": "account_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "role": {
-          "name": "role",
-          "type": "member_role",
-          "typeSchema": "public",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "dream_private": {
-          "name": "dream_private",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": true
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "space_members_space_id_spaces_id_fk": {
-          "name": "space_members_space_id_spaces_id_fk",
-          "tableFrom": "space_members",
-          "tableTo": "spaces",
-          "columnsFrom": ["space_id"],
-          "columnsTo": ["id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "space_members_account_id_accounts_id_fk": {
-          "name": "space_members_account_id_accounts_id_fk",
-          "tableFrom": "space_members",
-          "tableTo": "accounts",
-          "columnsFrom": ["account_id"],
-          "columnsTo": ["id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {
-        "space_members_space_id_account_id_pk": {
-          "name": "space_members_space_id_account_id_pk",
-          "columns": ["space_id", "account_id"]
-        }
-      },
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.spaces": {
-      "name": "spaces",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "name": {
-          "name": "name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "extraction_monthly_tokens": {
-          "name": "extraction_monthly_tokens",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 2000000
-        },
-        "extraction_daily_writes": {
-          "name": "extraction_daily_writes",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 20
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
     "public.subject_bind_attempts": {
       "name": "subject_bind_attempts",
       "schema": "",
       "columns": {
-        "space_id": {
-          "name": "space_id",
+        "circle_id": {
+          "name": "circle_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
         },
-        "app_id": {
-          "name": "app_id",
+        "client_id": {
+          "name": "client_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
@@ -3514,29 +4970,29 @@
         }
       },
       "foreignKeys": {
-        "subject_bind_attempts_space_id_spaces_id_fk": {
-          "name": "subject_bind_attempts_space_id_spaces_id_fk",
+        "subject_bind_attempts_circle_id_circles_id_fk": {
+          "name": "subject_bind_attempts_circle_id_circles_id_fk",
           "tableFrom": "subject_bind_attempts",
-          "tableTo": "spaces",
-          "columnsFrom": ["space_id"],
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
           "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "subject_bind_attempts_space_id_app_id_apps_space_id_id_fk": {
-          "name": "subject_bind_attempts_space_id_app_id_apps_space_id_id_fk",
+        "subject_bind_attempts_client_fk": {
+          "name": "subject_bind_attempts_client_fk",
           "tableFrom": "subject_bind_attempts",
-          "tableTo": "apps",
-          "columnsFrom": ["space_id", "app_id"],
-          "columnsTo": ["space_id", "id"],
+          "tableTo": "clients",
+          "columnsFrom": ["circle_id", "client_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
-        "subject_bind_attempts_app_id_key_pk": {
-          "name": "subject_bind_attempts_app_id_key_pk",
-          "columns": ["app_id", "key"]
+        "subject_bind_attempts_client_id_key_pk": {
+          "name": "subject_bind_attempts_client_id_key_pk",
+          "columns": ["client_id", "key"]
         }
       },
       "uniqueConstraints": {},
@@ -3555,14 +5011,14 @@
           "notNull": true,
           "default": "gen_random_uuid()"
         },
-        "space_id": {
-          "name": "space_id",
+        "circle_id": {
+          "name": "circle_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
         },
-        "app_id": {
-          "name": "app_id",
+        "client_id": {
+          "name": "client_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
@@ -3625,11 +5081,11 @@
         }
       },
       "indexes": {
-        "subject_bind_codes_app_id_code_hash_index": {
-          "name": "subject_bind_codes_app_id_code_hash_index",
+        "subject_bind_codes_client_hash_idx": {
+          "name": "subject_bind_codes_client_hash_idx",
           "columns": [
             {
-              "expression": "app_id",
+              "expression": "client_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -3678,21 +5134,21 @@
         }
       },
       "foreignKeys": {
-        "subject_bind_codes_space_id_spaces_id_fk": {
-          "name": "subject_bind_codes_space_id_spaces_id_fk",
+        "subject_bind_codes_circle_id_circles_id_fk": {
+          "name": "subject_bind_codes_circle_id_circles_id_fk",
           "tableFrom": "subject_bind_codes",
-          "tableTo": "spaces",
-          "columnsFrom": ["space_id"],
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
           "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "subject_bind_codes_space_id_app_id_apps_space_id_id_fk": {
-          "name": "subject_bind_codes_space_id_app_id_apps_space_id_id_fk",
+        "subject_bind_codes_client_fk": {
+          "name": "subject_bind_codes_client_fk",
           "tableFrom": "subject_bind_codes",
-          "tableTo": "apps",
-          "columnsFrom": ["space_id", "app_id"],
-          "columnsTo": ["space_id", "id"],
+          "tableTo": "clients",
+          "columnsFrom": ["circle_id", "client_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -3700,8 +5156,8 @@
           "name": "subject_bind_codes_subject_fk",
           "tableFrom": "subject_bind_codes",
           "tableTo": "subjects",
-          "columnsFrom": ["space_id", "subject_id"],
-          "columnsTo": ["space_id", "id"],
+          "columnsFrom": ["circle_id", "subject_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -3723,14 +5179,14 @@
           "notNull": true,
           "default": "gen_random_uuid()"
         },
-        "space_id": {
-          "name": "space_id",
+        "circle_id": {
+          "name": "circle_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
         },
-        "app_id": {
-          "name": "app_id",
+        "client_id": {
+          "name": "client_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
@@ -3882,11 +5338,11 @@
         }
       },
       "foreignKeys": {
-        "subject_bindings_space_id_spaces_id_fk": {
-          "name": "subject_bindings_space_id_spaces_id_fk",
+        "subject_bindings_circle_id_circles_id_fk": {
+          "name": "subject_bindings_circle_id_circles_id_fk",
           "tableFrom": "subject_bindings",
-          "tableTo": "spaces",
-          "columnsFrom": ["space_id"],
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
           "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
@@ -3909,12 +5365,12 @@
           "onDelete": "set null",
           "onUpdate": "no action"
         },
-        "subject_bindings_space_id_app_id_apps_space_id_id_fk": {
-          "name": "subject_bindings_space_id_app_id_apps_space_id_id_fk",
+        "subject_bindings_client_fk": {
+          "name": "subject_bindings_client_fk",
           "tableFrom": "subject_bindings",
-          "tableTo": "apps",
-          "columnsFrom": ["space_id", "app_id"],
-          "columnsTo": ["space_id", "id"],
+          "tableTo": "clients",
+          "columnsFrom": ["circle_id", "client_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -3922,8 +5378,8 @@
           "name": "subject_bindings_subject_fk",
           "tableFrom": "subject_bindings",
           "tableTo": "subjects",
-          "columnsFrom": ["space_id", "subject_id"],
-          "columnsTo": ["space_id", "id"],
+          "columnsFrom": ["circle_id", "subject_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -3931,8 +5387,8 @@
           "name": "subject_bindings_from_subject_fk",
           "tableFrom": "subject_bindings",
           "tableTo": "subjects",
-          "columnsFrom": ["space_id", "from_subject_id"],
-          "columnsTo": ["space_id", "id"],
+          "columnsFrom": ["circle_id", "from_subject_id"],
+          "columnsTo": ["circle_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -3959,8 +5415,8 @@
           "notNull": true,
           "default": "gen_random_uuid()"
         },
-        "space_id": {
-          "name": "space_id",
+        "circle_id": {
+          "name": "circle_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
@@ -4005,11 +5461,11 @@
         }
       },
       "indexes": {
-        "subject_identities_space_id_platform_kind_external_id_index": {
-          "name": "subject_identities_space_id_platform_kind_external_id_index",
+        "subject_identities_platform_idx": {
+          "name": "subject_identities_platform_idx",
           "columns": [
             {
-              "expression": "space_id",
+              "expression": "circle_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -4038,8 +5494,8 @@
           "method": "btree",
           "with": {}
         },
-        "subject_identities_subject_id_index": {
-          "name": "subject_identities_subject_id_index",
+        "subject_identities_subject_idx": {
+          "name": "subject_identities_subject_idx",
           "columns": [
             {
               "expression": "subject_id",
@@ -4055,11 +5511,11 @@
         }
       },
       "foreignKeys": {
-        "subject_identities_space_id_spaces_id_fk": {
-          "name": "subject_identities_space_id_spaces_id_fk",
+        "subject_identities_circle_id_circles_id_fk": {
+          "name": "subject_identities_circle_id_circles_id_fk",
           "tableFrom": "subject_identities",
-          "tableTo": "spaces",
-          "columnsFrom": ["space_id"],
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
           "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
@@ -4068,8 +5524,8 @@
           "name": "subject_identities_subject_fk",
           "tableFrom": "subject_identities",
           "tableTo": "subjects",
-          "columnsFrom": ["space_id", "subject_id", "kind"],
-          "columnsTo": ["space_id", "id", "kind"],
+          "columnsFrom": ["circle_id", "subject_id", "kind"],
+          "columnsTo": ["circle_id", "id", "kind"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -4091,8 +5547,8 @@
           "notNull": true,
           "default": "gen_random_uuid()"
         },
-        "space_id": {
-          "name": "space_id",
+        "circle_id": {
+          "name": "circle_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
@@ -4139,11 +5595,11 @@
         }
       },
       "indexes": {
-        "subjects_space_id_created_at_id_index": {
-          "name": "subjects_space_id_created_at_id_index",
+        "subjects_circle_created_idx": {
+          "name": "subjects_circle_created_idx",
           "columns": [
             {
-              "expression": "space_id",
+              "expression": "circle_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -4168,11 +5624,11 @@
         }
       },
       "foreignKeys": {
-        "subjects_space_id_spaces_id_fk": {
-          "name": "subjects_space_id_spaces_id_fk",
+        "subjects_circle_id_circles_id_fk": {
+          "name": "subjects_circle_id_circles_id_fk",
           "tableFrom": "subjects",
-          "tableTo": "spaces",
-          "columnsFrom": ["space_id"],
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
           "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
@@ -4189,52 +5645,344 @@
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
-        "subjects_spaceId_id_unique": {
-          "name": "subjects_spaceId_id_unique",
+        "subjects_circle_id_unique": {
+          "name": "subjects_circle_id_unique",
           "nullsNotDistinct": false,
-          "columns": ["space_id", "id"]
+          "columns": ["circle_id", "id"]
         },
-        "subjects_spaceId_id_kind_unique": {
-          "name": "subjects_spaceId_id_kind_unique",
+        "subjects_circle_id_kind_unique": {
+          "name": "subjects_circle_id_kind_unique",
           "nullsNotDistinct": false,
-          "columns": ["space_id", "id", "kind"]
+          "columns": ["circle_id", "id", "kind"]
         }
       },
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
+    },
+    "public.vault_connections": {
+      "name": "vault_connections",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "circle_id": {
+          "name": "circle_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "owner_account_id": {
+          "name": "owner_account_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "server_url": {
+          "name": "server_url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "email": {
+          "name": "email",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "vault_user_id": {
+          "name": "vault_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "device_id": {
+          "name": "device_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ciphertext": {
+          "name": "ciphertext",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "wrapped_key": {
+          "name": "wrapped_key",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "key_id": {
+          "name": "key_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "status": {
+          "name": "status",
+          "type": "vault_connection_status",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'ok'"
+        },
+        "disabled_reason": {
+          "name": "disabled_reason",
+          "type": "vault_disabled_reason",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_error_kind": {
+          "name": "last_error_kind",
+          "type": "vault_error_kind",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_error_at": {
+          "name": "last_error_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_checked_at": {
+          "name": "last_checked_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "default_collection_id": {
+          "name": "default_collection_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "default_organization_id": {
+          "name": "default_organization_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "default_collection_name": {
+          "name": "default_collection_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "disconnected_at": {
+          "name": "disconnected_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "vault_connections_circle_owner_idx": {
+          "name": "vault_connections_circle_owner_idx",
+          "columns": [
+            {
+              "expression": "circle_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "owner_account_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "vault_connections_account_idx": {
+          "name": "vault_connections_account_idx",
+          "columns": [
+            {
+              "expression": "circle_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "owner_account_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "server_url",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "vault_user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "vault_connections_key_id_idx": {
+          "name": "vault_connections_key_id_idx",
+          "columns": [
+            {
+              "expression": "circle_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "key_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"vault_connections\".\"wrapped_key\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "vault_connections_destination_idx": {
+          "name": "vault_connections_destination_idx",
+          "columns": [
+            {
+              "expression": "circle_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "owner_account_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"vault_connections\".\"default_collection_id\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "vault_connections_circle_id_circles_id_fk": {
+          "name": "vault_connections_circle_id_circles_id_fk",
+          "tableFrom": "vault_connections",
+          "tableTo": "circles",
+          "columnsFrom": ["circle_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "vault_connections_owner_account_id_accounts_id_fk": {
+          "name": "vault_connections_owner_account_id_accounts_id_fk",
+          "tableFrom": "vault_connections",
+          "tableTo": "accounts",
+          "columnsFrom": ["owner_account_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "vault_connections_circle_owner_id_unique": {
+          "name": "vault_connections_circle_owner_id_unique",
+          "nullsNotDistinct": false,
+          "columns": ["circle_id", "owner_account_id", "id"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "vault_connections_secrets_shape": {
+          "name": "vault_connections_secrets_shape",
+          "value": "(\"vault_connections\".\"ciphertext\" is null) = (\"vault_connections\".\"wrapped_key\" is null)\n        and (\"vault_connections\".\"ciphertext\" is null) = (\"vault_connections\".\"status\" = 'disconnected')\n        and (\"vault_connections\".\"disconnected_at\" is null) = (\"vault_connections\".\"status\" <> 'disconnected')"
+        },
+        "vault_connections_disabled_reason": {
+          "name": "vault_connections_disabled_reason",
+          "value": "(\"vault_connections\".\"disabled_reason\" is null) = (\"vault_connections\".\"status\" <> 'disabled')"
+        },
+        "vault_connections_last_error": {
+          "name": "vault_connections_last_error",
+          "value": "(\"vault_connections\".\"last_error_kind\" is null) = (\"vault_connections\".\"last_error_at\" is null)"
+        },
+        "vault_connections_destination_shape": {
+          "name": "vault_connections_destination_shape",
+          "value": "(\"vault_connections\".\"default_collection_id\" is null) = (\"vault_connections\".\"default_organization_id\" is null)\n        and (\"vault_connections\".\"default_collection_id\" is null) = (\"vault_connections\".\"default_collection_name\" is null)"
+        }
+      },
+      "isRLSEnabled": false
     }
   },
   "enums": {
+    "public.account_link_purpose": {
+      "name": "account_link_purpose",
+      "schema": "public",
+      "values": ["setup", "reset"]
+    },
+    "public.circle_kind": {
+      "name": "circle_kind",
+      "schema": "public",
+      "values": ["personal", "shared"]
+    },
     "public.conversation_kind": {
       "name": "conversation_kind",
       "schema": "public",
-      "values": ["group", "direct", "none"]
-    },
-    "public.credential_provider_kind": {
-      "name": "credential_provider_kind",
-      "schema": "public",
-      "values": ["bitwarden", "1password", "env", "other"]
+      "values": ["group", "direct", "channel", "none"]
     },
     "public.credential_source": {
       "name": "credential_source",
       "schema": "public",
-      "values": ["hosted", "external"]
+      "values": ["hosted", "vault"]
+    },
+    "public.entry_kind": {
+      "name": "entry_kind",
+      "schema": "public",
+      "values": ["entry", "fact", "episode"]
+    },
+    "public.facet_match_mode": {
+      "name": "facet_match_mode",
+      "schema": "public",
+      "values": ["exclusive", "additive"]
     },
     "public.member_role": {
       "name": "member_role",
       "schema": "public",
       "values": ["owner", "editor", "viewer"]
-    },
-    "public.memory_form": {
-      "name": "memory_form",
-      "schema": "public",
-      "values": ["curated", "extracted"]
-    },
-    "public.memory_layer": {
-      "name": "memory_layer",
-      "schema": "public",
-      "values": ["core", "persona", "app", "user", "subject", "episode"]
     },
     "public.provenance": {
       "name": "provenance",
@@ -4250,6 +5998,34 @@
       "name": "subject_kind",
       "schema": "public",
       "values": ["person", "group"]
+    },
+    "public.vault_connection_status": {
+      "name": "vault_connection_status",
+      "schema": "public",
+      "values": ["ok", "reauth_required", "disabled", "disconnected"]
+    },
+    "public.vault_disabled_reason": {
+      "name": "vault_disabled_reason",
+      "schema": "public",
+      "values": ["personal_items", "organization_role"]
+    },
+    "public.vault_error_kind": {
+      "name": "vault_error_kind",
+      "schema": "public",
+      "values": [
+        "invalid_credentials",
+        "two_factor_invalid",
+        "unsupported_two_factor",
+        "reauth_required",
+        "item_unavailable",
+        "read_only",
+        "item_conflict",
+        "value_too_long",
+        "unsupported_format",
+        "integrity",
+        "unreachable",
+        "server_error"
+      ]
     }
   },
   "schemas": {},
