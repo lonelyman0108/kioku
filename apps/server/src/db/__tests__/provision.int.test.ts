@@ -260,6 +260,7 @@ describe.skipIf(!superuserUrl)('数据库检查与超级用户代建', { timeout
         database: () => ({ state: 'missing', source: null, url: null, check: null }),
         exclusive: (fn) => fn(),
         activate,
+        upgradeLegacy: () => Promise.reject(new Error('不是待迁移的状态')),
       }
       return setupDatabaseRoutes(host, 0, () => Promise.resolve(true))
     }

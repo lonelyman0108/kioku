@@ -29,6 +29,7 @@ import {
   entryRecallStats,
   entryVariants,
   extractionRuns,
+  legacyApiKeys,
   legacyUris,
   settings,
   subjectBindings,
@@ -527,6 +528,12 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
     ] as const) {
       expect((await send('PUT', path, body, cookie)).status).toBe(200)
     }
+    await database.db.insert(legacyApiKeys).values({
+      prefix: 'kioku_leg1234',
+      secretHash: 'legacy-secret-hash',
+      name: '旧版测试密钥',
+      ownerAccountId: ws.accountId,
+    })
     await backfillJob(database.db, staticEmbedderSource(fakeEmbedder('m')), async () => [])
     return { credentialId, nasShortId: nas.shortId, base, child, bob }
   }
@@ -856,7 +863,7 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
         { hash: 'before-2', at: String(old) },
       ])
       await expect(runMigrations(database, migrationsFolder)).rejects.toThrow(
-        /^数据库是记忆圈重构之前的结构.*清空或新建空库.*迁入工具导入数据/,
+        /^数据库是记忆圈重构之前的结构.*一键迁移.*migrate-legacy --in-place/,
       )
       // 库里有这个版本没有、却不早于基线的迁移（更新的版本，或者合并之后改过的迁移文件）：同样不迁移
       await rewrite([...saved, { hash: 'newer', at: String(latest.folderMillis + 1000) }])

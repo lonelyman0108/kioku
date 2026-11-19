@@ -1,4 +1,4 @@
-import { DATABASE_UNAVAILABLE_CODE } from '@kioku/contracts'
+import { DATABASE_UNAVAILABLE_CODE, LEGACY_DATABASE_CODE } from '@kioku/contracts'
 import type { z } from 'zod'
 
 // 后端返回的业务错误统一是 { error }；这里把状态码和提示一起带出来，页面按状态码决定怎么处理。
@@ -67,6 +67,12 @@ export function setDatabaseUnavailableHandler(handler: () => void): void {
   onDatabaseUnavailable = handler
 }
 
+// 库是重构之前的结构（503，带 LEGACY_DATABASE_CODE）时的处理，由入口注册：回到升级页
+let onLegacyDatabase: (() => void) | null = null
+export function setLegacyDatabaseHandler(handler: () => void): void {
+  onLegacyDatabase = handler
+}
+
 // 管理界面与后端同源，用浏览器的会话 Cookie 鉴权；浏览器会自动带上 Sec-Fetch-Site，后端据此做同源检查。
 // body 是 FormData 时按表单上传（分隔行由浏览器写进 content-type），其余的按 JSON 发
 async function send(method: string, path: string, options: RequestOptions<unknown>) {
@@ -102,6 +108,7 @@ async function send(method: string, path: string, options: RequestOptions<unknow
     if (res.status === 401 && !SESSION_PATHS.includes(path)) onUnauthorized?.()
     const payload = (await res.json().catch(() => null)) as { error?: string; code?: string } | null
     if (res.status === 503 && payload?.code === DATABASE_UNAVAILABLE_CODE) onDatabaseUnavailable?.()
+    if (res.status === 503 && payload?.code === LEGACY_DATABASE_CODE) onLegacyDatabase?.()
     throw new ApiError(res.status, payload?.error ?? `请求失败：HTTP ${res.status}`, payload)
   }
   return res

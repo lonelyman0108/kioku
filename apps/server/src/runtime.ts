@@ -15,9 +15,10 @@ import type { Config } from './config'
 import { createVaultClient } from './credential/bitwarden/client'
 import type { VaultClient } from './credential/bitwarden/types'
 import { assertWritable, DATA_FILE, writeDataFile } from './dataDir'
-import { logInternalError } from './db/client'
+import { connect, logInternalError } from './db/client'
 import { failedCheck, isFatal, probeDatabase, transientFailure } from './db/probe'
 import type { SetupHost } from './http/env'
+import { LegacyUpgradeError, migrateLegacyInPlace } from './importer/legacyInPlace'
 import { settleRecallEvents } from './recall/events'
 import { startService, startupText, StartupError, type Service } from './service'
 import { ActivationError, SetupBusyError } from './setupErrors'
@@ -26,6 +27,8 @@ import { ActivationError, SetupBusyError } from './setupErrors'
 // - missing：没有配置数据库，只提供初始化（createSetupApp），在初始化页填库、当场接上之后换成完整的服务；
 // - unavailable：配了却暂时连不上（连不上、超时、认证失败、库不存在这类可能自己好的问题），同样只挂
 //   createSetupApp，但不当作要初始化、不开初始化码，健康检查回 503；按退避重试，接上之后换成完整的服务；
+// - legacy：库是记忆圈重构之前的结构，只有这一个问题。同样只挂 createSetupApp，不开初始化码、不重试，
+//   等管理员在升级页就地迁移（upgradeLegacy），迁移成功后换成完整的服务；
 // - ready：完整的服务（startService），冷启动、重试接上与初始化页接入走的是同一个函数。
 // 角色绕过行级安全、缺扩展、库的结构用不了、主密钥对不上这类不会自己好的问题，照旧拒绝启动（FatalStartupError）。
 // 初始化码只在 missing、或者接上之后确认没有任何账号时打开并打印，有了账号就作废
@@ -117,6 +120,7 @@ export async function startRuntime(config: Config, options: RuntimeOptions = {})
       }
     },
     activate: (url) => activate(url),
+    upgradeLegacy: (request) => track(upgradeNow(request)),
   }
   const setupApp = createSetupApp({
     host,
@@ -223,6 +227,13 @@ export async function startRuntime(config: Config, options: RuntimeOptions = {})
   async function attempt(url: string, source: DatabaseSource): Promise<boolean> {
     const check = await probeDatabase(url, config.migrationsFolder)
     if (!check.ready) {
+      // 只差「重构之前的结构」：不拒绝启动，等管理员在升级页迁移。还有别的问题（角色、扩展）照旧拒绝启动，
+      // 那些不先解决迁移也做不成
+      if (check.problems.length > 0 && check.problems.every((p) => p.code === 'pre_baseline')) {
+        if (status.state !== 'legacy') announceLegacy()
+        status = { state: 'legacy', source, url, check }
+        return false
+      }
       if (isFatal(check)) {
         throw new FatalStartupError(
           `数据库来自${DATABASE_SOURCE_NAMES[source]}，无法使用：${checkProblem(check)}`,
@@ -277,13 +288,58 @@ export async function startRuntime(config: Config, options: RuntimeOptions = {})
       if (err instanceof FatalStartupError) return onFatal(err.message)
       throw err
     }
-    scheduleRetry()
+    if (status.state === 'unavailable') scheduleRetry()
+  }
+
+  const announceLegacy = () => {
+    log('')
+    log('==================== 检测到记忆圈重构之前的数据 ====================')
+    log('打开管理界面，按升级页的引导用旧实例的管理员账号一键迁移；旧数据移进 kioku_legacy 保留')
+    log('无界面时执行：kioku-ctl migrate-legacy --in-place --apply（之后重启服务）')
+    log('')
+  }
+
+  // 就地升级。和初始化页接入一样经 track，stop() 会等它结束；执行成功后照冷启动的办法起完整服务
+  async function upgradeNow(request: {
+    apply: boolean
+    authorize: Parameters<SetupHost['upgradeLegacy']>[0]['authorize']
+  }) {
+    if (stopped) throw new LegacyUpgradeError('服务正在停止')
+    const { state, url, source } = status
+    if (state !== 'legacy' || !url || !source) {
+      throw new LegacyUpgradeError('数据库不是待迁移的状态')
+    }
+    const database = connect(url, { max: 1 })
+    let result
+    try {
+      result = await migrateLegacyInPlace(database.db, {
+        migrationsFolder: config.migrationsFolder,
+        masterKey: config.masterKey,
+        apply: request.apply,
+        authorize: request.authorize,
+      })
+    } finally {
+      await database.close()
+    }
+    if (!request.apply) return result
+    log('旧版数据已就地迁移，旧对象保留在 kioku_legacy')
+    try {
+      if (await attempt(url, source)) log('已切换到新版服务')
+      else if (status.state === 'unavailable') scheduleRetry()
+    } catch (err) {
+      if (err instanceof FatalStartupError) onFatal(err.message)
+      else throw err
+    }
+    return result
   }
 
   if (!config.database) {
     log(`没有配置数据库（DATABASE_URL 或 ${join(config.dataDir, DATA_FILE)}），只提供初始化页`)
     announce()
-  } else if (!(await attempt(config.database.url, config.database.source))) {
+  } else if (
+    !(await attempt(config.database.url, config.database.source)) &&
+    status.state === 'unavailable'
+  ) {
     // 暂时连不上：不开初始化码（不知道有没有账号），等重试接上之后再看
     scheduleRetry()
   }

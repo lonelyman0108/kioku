@@ -21,8 +21,8 @@ const allSchemaTables = (Object.values(schema) as unknown[]).filter((v): v is Pg
 )
 
 describe('backup tables DAG 与基线覆盖', () => {
-  it('涵盖全部 41 张表：除明确排除外全部进入 BACKUP_TABLES，且 perCircle 与 RLS_TABLES 一致', () => {
-    expect(allSchemaTables).toHaveLength(41)
+  it('涵盖全部 42 张表：除明确排除外全部进入 BACKUP_TABLES，且 perCircle 与 RLS_TABLES 一致', () => {
+    expect(allSchemaTables).toHaveLength(42)
 
     const backupByName = new Map(BACKUP_TABLES.map((t) => [t.name, t]))
     const schemaNames = new Set(allSchemaTables.map((t) => getTableConfig(t).name))

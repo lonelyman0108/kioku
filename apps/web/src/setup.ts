@@ -69,7 +69,8 @@ const PROBLEM_HINTS: Record<
     `需要超级用户在这个库里执行 CREATE EXTENSION ${p.extension ?? ''}，或者改用「用超级用户创建」。`,
   extension_missing: () =>
     '需要 Kioku 的 PostgreSQL 镜像，或者在服务器上自行安装 pgvector 与 zhparser。',
-  pre_baseline: () => '这个版本不兼容旧数据：清空数据库重建后再接入，然后从 Lore 重新导入。',
+  pre_baseline: () =>
+    '库里是记忆圈重构之前的结构：通过环境变量 DATABASE_URL 指定此库并重启服务，即可在升级页一键就地迁移；也可先执行 kioku-ctl migrate-legacy --in-place --apply 升级后再接入。',
   newer: () => '用做这个库的版本启动。',
   insufficient_privilege: () =>
     '库里已有别的角色建的表，当前角色无权读取。改用这些表的所有者连接，或者换一个专用的库。',

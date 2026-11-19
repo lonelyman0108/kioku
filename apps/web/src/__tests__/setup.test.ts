@@ -79,6 +79,7 @@ describe('初始化的数据库检查', () => {
     expect(byKey['extension-vector']!.detail).toContain('CREATE EXTENSION vector')
     expect(byKey['extension-zhparser']!.detail).toContain('pgvector 与 zhparser')
     expect(byKey.existing).toMatchObject({ verdict: 'blocked' })
+    expect(byKey.existing!.detail).toContain('migrate-legacy --in-place')
     expect(byKey.unrelated).toMatchObject({ value: '2 张', verdict: 'notice' })
 
     const existing = checkRows({ ...ok, existing: 'kioku', accounts: 3 }).find(

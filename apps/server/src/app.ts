@@ -1,4 +1,4 @@
-import { DATABASE_UNAVAILABLE_CODE } from '@kioku/contracts'
+import { API_GENERATION, DATABASE_UNAVAILABLE_CODE, LEGACY_DATABASE_CODE } from '@kioku/contracts'
 import type { Context } from 'hono'
 import { HTTPException } from 'hono/http-exception'
 import { secureHeaders } from 'hono/secure-headers'
@@ -19,6 +19,7 @@ import { credentialRoutes } from './routes/credentials'
 import { deviceRoutes } from './routes/device'
 import { dreamRoutes } from './routes/dream'
 import { health } from './routes/health'
+import { legacyUpgradeRoutes } from './routes/legacyUpgrade'
 import { loreImportRoutes } from './routes/loreImport'
 import { mcpRoutes } from './routes/mcp'
 import { memoryRoutes } from './routes/memories'
@@ -177,23 +178,48 @@ export function createSetupApp(options: {
   const app = shell()
   // 没接上数据库：等人填库（missing）时要初始化；暂时连不上（unavailable）时不知道，按不要算
   const needsSetup = () => Promise.resolve(host.database().state === 'missing')
-  // 等人初始化时服务是好的，健康检查照常 200；配了的库暂时连不上时回 503，容器的健康检查与编排看得到
-  app.get('/v1/health', (c) =>
-    host.database().state === 'unavailable'
-      ? c.json({ status: 'unavailable', version: VERSION, database: 'unavailable' }, 503)
-      : c.json({ status: 'ok', version: VERSION }, 200),
-  )
+  // 等人初始化时服务是好的，健康检查照常 200；配了的库暂时连不上、或者是重构之前的结构等人迁移时回 503，
+  // 容器的健康检查与编排看得到。客户端按 code 与 api 区分「等迁移」与「连不上」
+  app.get('/v1/health', (c) => {
+    const { state } = host.database()
+    if (state === 'legacy') {
+      return c.json(
+        {
+          status: 'unavailable',
+          version: VERSION,
+          api: API_GENERATION,
+          database: 'legacy',
+          code: LEGACY_DATABASE_CODE,
+        },
+        503,
+      )
+    }
+    return state === 'unavailable'
+      ? c.json(
+          { status: 'unavailable', version: VERSION, api: API_GENERATION, database: 'unavailable' },
+          503,
+        )
+      : c.json({ status: 'ok', version: VERSION, api: API_GENERATION }, 200)
+  })
   app.route('/v1', setupStatusRoutes(host, needsSetup))
   app.route('/v1', setupDatabaseRoutes(host, trustedProxies, needsSetup))
-  app.all('/v1/*', (c) =>
-    c.json(
+  app.route('/v1', legacyUpgradeRoutes(host, trustedProxies))
+  app.all('/v1/*', (c) => {
+    const { state } = host.database()
+    if (state === 'legacy') {
+      return c.json(
+        { error: '数据库是升级前的结构，等待管理员迁移', code: LEGACY_DATABASE_CODE },
+        503,
+      )
+    }
+    return c.json(
       {
-        error: host.database().state === 'missing' ? '数据库尚未配置' : '数据库暂时无法连接',
+        error: state === 'missing' ? '数据库尚未配置' : '数据库暂时无法连接',
         code: DATABASE_UNAVAILABLE_CODE,
       },
       503,
-    ),
-  )
+    )
+  })
   finish(app, options.webDir)
   return app
 }

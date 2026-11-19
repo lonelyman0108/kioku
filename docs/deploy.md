@@ -139,12 +139,20 @@ docker compose run --rm -T -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_
 
 ## 从旧版 Kioku 迁移（`migrate-legacy`）
 
-从旧版空间结构升级时，数据库结构已重来为记忆圈与切面模型，不直接对旧库做就地 alter 升级，而是通过 `kioku-ctl migrate-legacy` 确定性迁入空白新库或已有新实例：
+从旧版（v0.5.0 及更早）空间结构升级时，数据库结构已重来为记忆圈与切面模型。直接替换新版本镜像并保留原有数据库连接与 `KIOKU_MASTER_KEY` 即可完成就地升级，无需新建数据库：
 
-- **全实例迁入（推荐用于整站升级）**：新建一个空白数据库并先用当前版本启动一次以完成空白建表（**不要**在界面注册或初始化任何账号），然后停止服务并二选一执行：
+- **界面一键就地迁移（推荐用于直接升级）**：直接用新版本镜像启动，服务端检测到库仍是重构之前的结构时，会进入待迁移状态并给出升级引导页（`/legacy-upgrade`）：
+  1. 打开管理界面，使用**原旧实例的管理员账号与密码**验证身份，先执行一次模拟迁移并预览各表转换统计（全过程在同一数据库事务中完成，预览后自动回滚，不改原库）。
+  2. 确认预览统计无误后点击「执行就地迁移」：旧表、类型、触发器与旧迁移记录整体移入 `kioku_legacy` schema 留存（`pgboss` 移入 `kioku_legacy_pgboss`；同库里其他应用的无关表留在 `public` 不动），原地建好新版基线并写入数据，同时记下旧访问密钥的哈希以供识别，完成后自动切换到新版服务。
+  3. 迁移完成后，使用原账号登录管理界面；旧版访问密钥已失效，携带旧密钥的客户端请求会收到明确的升级提示，运行 `npx @kioku-memory/cli migrate` 即可完成旧插件清理、更新与批量重新授权。
+  4. **回滚与清理**：若迁移后需回退到旧版本，停掉服务并在同一数据库内删掉 `public` 下新建的对象，将 `kioku_legacy` 中的表与 `__drizzle_migrations` 移回 `public` / `drizzle`（或恢复升级前整库快照），再换回旧镜像即可。确认新版本运行正常后，可执行 `DROP SCHEMA kioku_legacy CASCADE;` 清理留存旧表。
+- **命令行就地迁移（无界面 / 自动化场景）**：先停掉服务，再执行预览与写入：
+  - 预览：`docker compose run --rm kioku kioku-ctl migrate-legacy --in-place`
+  - 执行：`docker compose run --rm kioku kioku-ctl migrate-legacy --in-place --apply`，完成后启动新版服务。
+- **迁入新建空白库（换库、换主密钥或只从全实例备份恢复）**：新建一个空白数据库并先用当前版本启动一次以完成空白建表（**不要**在界面注册或初始化任何账号），然后停止服务并二选一执行：
   - **直连旧库**：`docker compose run --rm kioku kioku-ctl migrate-legacy --from-db postgres://... --apply`（也可配在 `LEGACY_DATABASE_URL`）。
   - **从旧版全实例备份迁入**：`docker compose run --rm -T kioku kioku-ctl migrate-legacy --backup - --apply < ~/old-kioku.backup`。
-  - 若目标新实例换了新主密钥，设置 `LEGACY_KIOKU_MASTER_KEY` 放旧主密钥、`KIOKU_MASTER_KEY` 放新主密钥，工具会自动解密旧版机密（原 UUID 绑定）、托管凭据、密码库连接与模型 API Key 并按新版信封规则重新封装。迁移会跳过旧版访问密钥与原 `backup` 对象存储设置；迁移完成后重启服务，在管理界面重新签发透镜访问密钥并重新配置对象存储备份即可。
+  - 若目标新实例换了新主密钥，设置 `LEGACY_KIOKU_MASTER_KEY` 放旧主密钥、`KIOKU_MASTER_KEY` 放新主密钥，工具会自动解密旧版机密（原 UUID 绑定）、托管凭据、密码库连接与模型 API Key 并按新版信封规则重新封装。迁移会保留旧版未吊销访问密钥的哈希用于 401 识别并跳过原 `backup` 对象存储设置；迁移完成后重启服务，在管理界面重新配置对象存储备份并运行 `npx @kioku-memory/cli migrate` 重新接入客户端即可。
 - **单份旧版空间导出文件迁入已有实例**：对已有新实例中的某个账号，可用 `--space-export <文件> --account <用户名>` 将旧版导出包迁入：自动在目标账号下新建共享圈承载原 `core` / `app` / `persona` / 联系人内容，并将原 `user://`、托管凭据与密码库连接路由进该账号的唯一个人圈（遇到凭据标识碰撞会自动重命名并重写正文占位符）。口令经 `KIOKU_EXPORT_PASSPHRASE`（或交互式隐藏输入）传入：
 
 ```bash

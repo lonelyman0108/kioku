@@ -1,4 +1,4 @@
-import { HealthResponse } from '@kioku/contracts'
+import { API_GENERATION, HealthResponse } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
 import { createApp } from '../app'
@@ -15,10 +15,12 @@ const app = createApp({
 })
 
 describe('GET /v1/health', () => {
-  it('返回 ok 与版本号', async () => {
+  it('返回 ok、版本号与接口代际', async () => {
     const res = await app.request('/v1/health')
     expect(res.status).toBe(200)
-    expect(HealthResponse.parse(await res.json()).status).toBe('ok')
+    const parsed = HealthResponse.parse(await res.json())
+    expect(parsed.status).toBe('ok')
+    expect(parsed.api).toBe(API_GENERATION)
   })
 
   it('OpenAPI 文档包含 health 路由', async () => {

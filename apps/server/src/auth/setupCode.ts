@@ -30,24 +30,18 @@ function digest(value: string): Buffer {
   return createHash('sha256').update(normalizeSetupCode(value)).digest()
 }
 
-interface Counter {
-  count: number
-  resetAt: number
-}
-
 export type SetupCodeResult = 'ok' | 'wrong' | 'limited' | 'closed'
 
 export class SetupGate {
   #code: string | null = null
   #digest: Buffer | null = null
   readonly #fixed: string | null
-  readonly #clients = new Map<string, Counter>()
-  readonly #now: () => number
+  readonly #attempts: ClientAttempts
 
   // fixed：KIOKU_SETUP_CODE；不设时 open() 随机生成
   constructor(fixed: string | null, now: () => number = Date.now) {
     this.#fixed = fixed
-    this.#now = now
+    this.#attempts = new ClientAttempts(now)
   }
 
   // 需要初始化时打开：返回这次的码，由调用方打印到日志。已经开着时返回同一个码
@@ -72,16 +66,40 @@ export class SetupGate {
   // 核对请求带的码。client 是客户端的分桶（clientIdentity 的 key；拿不到地址时为 null，共用一个计数）
   verify(input: string, client: string | null): SetupCodeResult {
     if (!this.#digest) return 'closed'
-    const now = this.#now()
-    const key = client ?? ''
-    const own = this.#counter(key, now)
-    if (own.count >= PER_CLIENT_LIMIT) return 'limited'
-    own.count++
+    if (!this.#attempts.take(client)) return 'limited'
     if (timingSafeEqual(digest(input), this.#digest)) {
-      this.#clients.delete(key)
+      this.#attempts.clear(client)
       return 'ok'
     }
     return 'wrong'
+  }
+}
+
+interface Counter {
+  count: number
+  resetAt: number
+}
+
+// 按客户端计数的尝试次数，同一客户端 15 分钟 5 次，计数在内存里。初始化码与升级页核对旧管理员共用
+export class ClientAttempts {
+  readonly #clients = new Map<string, Counter>()
+  readonly #now: () => number
+
+  constructor(now: () => number = Date.now) {
+    this.#now = now
+  }
+
+  // 先计数再比对：返回 false 表示这个客户端超限了，不要再比对
+  take(client: string | null): boolean {
+    const own = this.#counter(client ?? '', this.#now())
+    if (own.count >= PER_CLIENT_LIMIT) return false
+    own.count++
+    return true
+  }
+
+  // 比对成功：清掉这个客户端的计数
+  clear(client: string | null): void {
+    this.#clients.delete(client ?? '')
   }
 
   #counter(key: string, now: number): Counter {

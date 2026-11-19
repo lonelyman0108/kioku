@@ -101,6 +101,11 @@ async function loadStatus() {
     await router.replace({ name: 'database-unavailable' })
     return
   }
+  // 库是重构之前的结构：到旧版升级页就地迁移
+  if (status.value.database.state === 'legacy') {
+    await router.replace({ name: 'legacy-upgrade' })
+    return
+  }
   if (!status.value.needsSetup) {
     // 接入的是已有实例：用已有账号登录
     await router.replace({ name: 'login' })

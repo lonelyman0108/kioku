@@ -11,7 +11,7 @@ const MIGRATE_LOCK = 'kioku.migrate'
 
 // 记忆架构改版时迁移重来了一份基线（0000_baseline），不兼容旧数据：改版之前的库与备份里的迁移都早于基线
 const PRE_BASELINE_DATABASE =
-  '数据库是记忆圈重构之前的结构，这个版本不兼容旧数据，无法在上面迁移：请清空或新建空库启动后，使用旧版 Kioku / Lore 迁入工具导入数据'
+  '数据库是记忆圈重构之前的结构，需要先迁移：打开管理界面按升级页的引导一键迁移，或者执行 kioku-ctl migrate-legacy --in-place --apply'
 
 // 多个实例同时启动时用会话级咨询锁串行执行迁移。锁和迁移必须在同一条连接上，
 // 所以单独开一个只有一条连接的客户端，用完即关。
@@ -61,11 +61,32 @@ async function classifyMigrations(
   const [table] = await client<{ exists: boolean }[]>`
     select to_regclass('drizzle.__drizzle_migrations') is not null as exists`
   if (!table?.exists) return { state: 'none' }
-  const hashes = new Set(local.map((m) => m.hash))
-  const unknown = (
-    await client<{ hash: string; at: string }[]>`
+  const recorded = await client<{ hash: string; at: string }[]>`
       select hash, created_at::text as at from drizzle.__drizzle_migrations`
-  ).filter((m) => !hashes.has(m.hash))
+  return classify(recorded, local)
+}
+
+// 同一份判断，在调用方的事务里查（就地迁移在自己的事务里确认库还是重构之前的结构）
+export async function migrationStateIn(
+  tx: Tx,
+  local: readonly MigrationMeta[],
+): Promise<MigrationState['state']> {
+  const [table] = await tx.execute<{ exists: boolean }>(
+    sql`select to_regclass('drizzle.__drizzle_migrations') is not null as exists`,
+  )
+  if (!table?.exists) return 'none'
+  const recorded = await tx.execute<{ hash: string; at: string }>(
+    sql`select hash, created_at::text as at from drizzle.__drizzle_migrations`,
+  )
+  return classify([...recorded], local).state
+}
+
+function classify(
+  recorded: readonly { hash: string; at: string }[],
+  local: readonly MigrationMeta[],
+): MigrationState {
+  const hashes = new Set(local.map((m) => m.hash))
+  const unknown = recorded.filter((m) => !hashes.has(m.hash))
   if (!unknown.length) return { state: 'known' }
   const baseline = local[0]?.folderMillis ?? 0
   const state = unknown.some((m) => Number(m.at) < baseline) ? 'pre_baseline' : 'newer'

@@ -51,6 +51,7 @@ import overviewPage from '../pages/OverviewPage.vue?raw'
 import settingsPage from '../pages/SettingsPage.vue?raw'
 import setupPage from '../pages/SetupPage.vue?raw'
 import databaseUnavailablePage from '../pages/DatabaseUnavailablePage.vue?raw'
+import legacyUpgradePage from '../pages/LegacyUpgradePage.vue?raw'
 import unavailablePage from '../pages/UnavailablePage.vue?raw'
 import { routes } from '../routes'
 import useSessionSource from '../composables/useSession.ts?raw'
@@ -1674,6 +1675,23 @@ describe('初始化', () => {
     expect(setupPage).toContain("await router.replace({ name: 'database-unavailable' })")
     expect(databaseUnavailablePage).not.toContain('setupCode')
     expect(flat(databaseUnavailablePage)).toContain('正在自动重试')
+  })
+
+  it('重构之前的数据库进旧版升级页：守卫带到 /legacy-upgrade，先预览再执行就地迁移', () => {
+    expect(routesSource).toContain("if (status.database.state === 'legacy') {")
+    expect(routesSource).toContain("name: 'legacy-upgrade'")
+    expect(setupPage).toContain("await router.replace({ name: 'legacy-upgrade' })")
+    expect(legacyUpgradePage).not.toContain('setupCode')
+    expect(legacyUpgradePage).toContain('api.previewLegacyUpgrade')
+    expect(legacyUpgradePage).toContain('api.applyLegacyUpgrade')
+    expect(flat(legacyUpgradePage)).toContain('检查并预览迁移')
+    expect(flat(legacyUpgradePage)).toContain('执行就地迁移')
+    // 确认执行按钮不在 form 里，避免输入框回车误触发迁移
+    const applyBtn = elementsOf(template(legacyUpgradePage)).find(
+      (el) => el.tag === 'UButton' && textOf(el) === '执行就地迁移',
+    )!
+    expect(attr(applyBtn, 'type')).toBe('button')
+    expect(handler(applyBtn, 'click')).toBe('runApply')
   })
 
   it('校验的提示是中文：这是装好之后看到的第一屏', () => {

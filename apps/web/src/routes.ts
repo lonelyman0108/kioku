@@ -14,6 +14,12 @@ export const routes: RouteRecordRaw[] = [
     name: 'database-unavailable',
     component: () => import('./pages/DatabaseUnavailablePage.vue'),
   },
+  // 库是记忆圈重构之前的结构：引导用旧管理员账号就地升级
+  {
+    path: '/legacy-upgrade',
+    name: 'legacy-upgrade',
+    component: () => import('./pages/LegacyUpgradePage.vue'),
+  },
   { path: '/login', name: 'login', component: () => import('./pages/LoginPage.vue') },
   // 设置密码链接：不需要登录，已登录时也照样打开
   {
@@ -226,10 +232,20 @@ export function installGuards(router: Router): void {
             ? true
             : { name: 'database-unavailable', query: { next: to.fullPath } }
         }
+        // 库是重构之前的结构：只去升级页，完成后重新确认状态
+        if (status.database.state === 'legacy') {
+          return to.name === 'legacy-upgrade' ? true : { name: 'legacy-upgrade' }
+        }
         setupDone = !status.needsSetup
         if (!setupDone) return to.name === 'setup' ? true : { name: 'setup' }
       }
-      if (to.name === 'setup' || to.name === 'database-unavailable') return { name: 'home' }
+      if (
+        to.name === 'setup' ||
+        to.name === 'database-unavailable' ||
+        to.name === 'legacy-upgrade'
+      ) {
+        return { name: 'home' }
+      }
       if (to.name === 'password') return true
       const me = await loadMe()
       if (!me) return to.name === 'login' ? true : { name: 'login', query: { next: to.fullPath } }

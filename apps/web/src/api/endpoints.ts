@@ -79,6 +79,9 @@ import {
   IssuedKey,
   KeyAccessMatrix,
   KeyInfo,
+  LegacyUpgradeRequest,
+  LegacyUpgradeResult,
+  LegacyUpgradeStatus,
   LoginSessionList,
   LoreImportPlan,
   LoreImportResult,
@@ -201,6 +204,12 @@ export const api = {
     request('POST', '/setup/database', { body, schema: DatabaseConnected }),
   provisionDatabase: (body: DatabaseProvisionRequest) =>
     request('POST', '/setup/database/provision', { body, schema: DatabaseConnected }),
+  legacyUpgradeStatus: () =>
+    request('GET', '/legacy-upgrade/status', { schema: LegacyUpgradeStatus }),
+  previewLegacyUpgrade: (body: LegacyUpgradeRequest) =>
+    request('POST', '/legacy-upgrade/preview', { body, schema: LegacyUpgradeResult }),
+  applyLegacyUpgrade: (body: LegacyUpgradeRequest) =>
+    request('POST', '/legacy-upgrade/apply', { body, schema: LegacyUpgradeResult }),
   login: (username: string, password: string) =>
     request('POST', '/auth/login', { body: { username, password }, schema: Me }),
   logout: () => request('POST', '/auth/logout'),

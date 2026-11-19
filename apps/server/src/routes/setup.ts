@@ -2,6 +2,7 @@ import { createRoute } from '@hono/zod-openapi'
 import {
   DATABASE_FAILURE_NAMES,
   DATABASE_UNAVAILABLE_CODE,
+  LEGACY_DATABASE_CODE,
   DATABASE_SOURCE_NAMES,
   DatabaseCheck,
   DatabaseCheckRequest,
@@ -127,10 +128,18 @@ function guard(c: Context, host: SetupHost, trustedProxies: number, code: string
     case 'ok':
       return null
     case 'closed':
-      // 码只在等人初始化时开着：暂时连不上的库不知道有没有账号，不开
-      return host.database().state === 'unavailable'
-        ? c.json({ error: '数据库暂时无法连接', code: DATABASE_UNAVAILABLE_CODE }, 503)
-        : c.json({ error: DONE }, 409)
+      // 码只在等人初始化时开着：暂时连不上的库不知道有没有账号，不开；重构之前的库有账号，走升级页
+      switch (host.database().state) {
+        case 'unavailable':
+          return c.json({ error: '数据库暂时无法连接', code: DATABASE_UNAVAILABLE_CODE }, 503)
+        case 'legacy':
+          return c.json(
+            { error: '数据库是升级前的结构，等待管理员迁移', code: LEGACY_DATABASE_CODE },
+            503,
+          )
+        default:
+          return c.json({ error: DONE }, 409)
+      }
     case 'limited':
       return c.json({ error: '初始化码错误次数过多，请稍后重试', code: SETUP_CODE_LIMITED }, 429)
     case 'wrong':
