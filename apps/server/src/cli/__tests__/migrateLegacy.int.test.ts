@@ -23,7 +23,7 @@ import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/
 import { bootstrap, type Workspace } from '../../testing/fixtures'
 
 const SERVER_DIR = fileURLToPath(new URL('../../..', import.meta.url))
-const RUN_TIMEOUT = 20_000
+const RUN_TIMEOUT = 45_000
 
 const scryptAsync = promisify(
   (

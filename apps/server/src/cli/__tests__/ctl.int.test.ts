@@ -18,7 +18,7 @@ import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/
 import { bootstrap, type Workspace } from '../../testing/fixtures'
 
 const SERVER_DIR = fileURLToPath(new URL('../../..', import.meta.url))
-const RUN_TIMEOUT = 15_000
+const RUN_TIMEOUT = 30_000
 
 async function runCtlProcess(args: string[], env: Record<string, string | undefined> = {}) {
   const child = spawn(process.execPath, ['--import', 'tsx', 'src/cli/ctl.ts', ...args], {

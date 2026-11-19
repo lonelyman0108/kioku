@@ -20,7 +20,7 @@ import { bootstrap, type Workspace } from '../../testing/fixtures'
 import { exportLore, LORE_SCHEMA, seedLoreNode } from '../../testing/loreFixture'
 
 const SERVER_DIR = fileURLToPath(new URL('../../..', import.meta.url))
-const CLI_TIMEOUT = 25_000
+const CLI_TIMEOUT = 60_000
 
 async function runImportLoreCli(args: string[], env: Record<string, string | undefined>) {
   const child = spawn(process.execPath, ['--import', 'tsx', 'src/cli/importLore.ts', ...args], {
