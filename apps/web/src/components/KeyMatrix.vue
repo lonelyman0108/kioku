@@ -18,18 +18,22 @@ import AccessMatrix from './strata/AccessMatrix.vue'
 import NoteLine from './strata/NoteLine.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 import StrataCore from './strata/StrataCore.vue'
+import { matrixToBandRows } from './strata/strata'
 
-// 一个 Key 的权限范围：五种会话上下文各一根小岩芯，点哪根看哪根的矩阵。岩芯和矩阵的数据都来自接口，前端不算权限
-const props = defineProps<{ spaceId: string; appId: string; keyInfo: KeyInfo }>()
+// 一个访问密钥的权限范围：五种会话上下文各一根小岩芯，点哪根看哪根的圈内物种权限矩阵
+const props = defineProps<{ circleId: string; clientId: string; keyInfo: KeyInfo }>()
 const context = defineModel<AccessContext>('context', { required: true })
 
 const matrix = useQuery({
-  queryKey: computed(() => keyMatrixKey(props.spaceId, props.appId, props.keyInfo)),
-  queryFn: ({ queryKey: [, sid, aid, kid] }) => api.keyMatrix(sid, aid, kid),
+  queryKey: computed(() => keyMatrixKey(props.circleId, props.clientId, props.keyInfo)),
+  queryFn: ({ queryKey: [, cid, clid, kid] }) =>
+    api.keyMatrix(cid as string, clid as string, kid as string),
   staleTime: KEY_MATRIX_STALE_TIME,
 })
-const rowsOf = (c: AccessContext) =>
-  matrix.data.value?.contexts.find((entry) => entry.context === c)?.rows ?? null
+const rowsOf = (c: AccessContext) => {
+  const entry = matrix.data.value?.contexts.find((item) => item.context === c)
+  return entry ? matrixToBandRows(entry.circles) : null
+}
 const current = computed(() =>
   matrix.data.value?.contexts.find((entry) => entry.context === context.value),
 )
@@ -41,7 +45,8 @@ const groupName = useId()
     <SectionHeading title="权限范围">
       <template #hint>
         <Hint>
-          实际权限按当前有效上限与应用配置计算。会话上下文由应用上报，只能收紧权限，不能放宽。「按坐标读取」只能显式读取，不进入召回与启动加载。联系人与会话没有坐标，「写」指对话抽取写入。本人不设公开。
+          实际权限按当前有效上限与接入实例配置计算。会话上下文由客户端上报，只能收紧权限，不能放宽。「按短
+          ID 读取」只能显式读取，不进入召回与启动加载。联系人事实与会话摘要的写指对话抽取写入。
         </Hint>
       </template>
       <template #actions>
@@ -77,12 +82,12 @@ const groupName = useId()
           <span>{{ accessContextShortLabels[c] }}</span>
         </label>
       </div>
-      <AccessMatrix :rows="current.rows" />
+      <AccessMatrix :circles="current.circles" />
       <p class="origin">{{ originScopeLabels[current.originScope] }}</p>
       <p class="origin">
         凭据能力：<b class="capability">{{ credentialCapabilityLabels[current.credentials] }}</b>
         <Hint>
-          取用与管理需要可读本人的私密记忆，带会话上下文时一律不可用。不是空间所有者时一律不可用。
+          取用与管理需要可读正式词条且最高敏感级不低于私密；带会话上下文或客场记忆圈一律不可用，非记忆圈所有者一律不可用。
         </Hint>
       </p>
     </template>
@@ -148,6 +153,8 @@ const groupName = useId()
 }
 .origin {
   margin-top: 8px;
+  font-size: 13px;
+  color: var(--ui-text-muted);
 }
 .origin + .origin {
   margin-top: 2px;
@@ -155,10 +162,6 @@ const groupName = useId()
 .capability {
   font-weight: 500;
   color: var(--ui-text);
-}
-.origin {
-  font-size: 13px;
-  color: var(--ui-text-muted);
 }
 @media (max-width: 900px) {
   .ctx {

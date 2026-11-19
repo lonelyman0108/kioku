@@ -5,7 +5,9 @@ import { renderToString } from 'vue/server-renderer'
 
 import createMemoryModal from '../components/CreateMemoryModal.vue?raw'
 import deletedMemories from '../components/DeletedMemories.vue?raw'
+import entryLinksPanel from '../components/EntryLinksPanel.vue?raw'
 import expiredMemories from '../components/ExpiredMemories.vue?raw'
+import facetWhenPicker from '../components/FacetWhenPicker.vue?raw'
 import memoryEditor from '../components/MemoryEditor.vue?raw'
 import memoryHistory from '../components/MemoryHistory.vue?raw'
 import memoryListView from '../components/MemoryListView.vue?raw'
@@ -84,12 +86,14 @@ describe('记忆页', () => {
   })
 
   it('换记忆时编辑器重建，查看过的机密正文跟着丢', () => {
-    expect(memoriesPage).toContain(':key="`${spaceId}|${selectedUri}`"')
+    expect(memoriesPage).toContain(':key="`${circleId}|${selectedId}`"')
   })
 
-  it('目录没有文件夹图标，按归属筛选落在列表上', () => {
+  it('目录没有文件夹图标，按地层筛选落在列表上，且支持 7 轴动态分组', () => {
     expect(memoriesPage).not.toContain('icons.folder')
-    expect(memoriesPage).toMatch(/view: 'list',\s+layer: same \? null : layer/)
+    expect(memoriesPage).toMatch(/view: 'list',\s+band: same \? null : band/)
+    expect(memoriesPage).toContain('GROUP_BY_OPTIONS')
+    expect(memoriesPage).toContain('api.browseEntries(')
   })
 })
 
@@ -106,7 +110,7 @@ describe('目录的键盘和无障碍', () => {
         p.name === 'on' && p.arg?.content === 'keydown' && JSON.stringify(p).includes('capture'),
     )
     expect(capture?.exp?.content).toBe('onTreeLeftKey')
-    expect(memoriesPage).toMatch(/parentRow\(places\.value, expanded\.value, uri\)/)
+    expect(memoriesPage).toMatch(/parentRow\(places\.value, expanded\.value, key\)/)
   })
 
   it('打字跳转留给页面，组件库的那份给空文字关掉', () => {
@@ -133,9 +137,9 @@ describe('目录的键盘和无障碍', () => {
     expect(memoriesPage).toContain("el.dispatchEvent(new Event('scroll'))")
   })
 
-  it('刚删掉的 URI 用完就清：重建之后返回还回到那一行', () => {
+  it('刚删掉的短 ID 用完就清：重建之后返回还回到那一行', () => {
     expect(memoriesPage).toMatch(
-      /async function onDeleted[\s\S]*?deletedUri = uri[\s\S]*?deletedUri = null\n\}/,
+      /async function onDeleted[\s\S]*?deletedId = shortId[\s\S]*?deletedId = null\n\}/,
     )
   })
 
@@ -143,8 +147,8 @@ describe('目录的键盘和无障碍', () => {
     const title = elementsOf(template(memoryEditor)).find((el) => el.tag === 'h1')!
     expect(attr(title, 'tabindex')).toBe('-1')
     expect(memoryEditor).toContain('defineExpose({ focusTitle')
-    expect(memoriesPage).toContain('focusAfterSelect(narrow.value, uri, previous)')
-    expect(memoriesPage).toContain('focusIndexRow(target.uri)')
+    expect(memoriesPage).toContain('focusAfterSelect(narrow.value, id, previous)')
+    expect(memoriesPage).toContain('focusIndexRow(target.shortId)')
   })
 
   it('触屏上箭头的热区放大，行高和样式跟着粗指针走', () => {
@@ -152,15 +156,11 @@ describe('目录的键盘和无障碍', () => {
     expect(memoriesPage).toContain("matchMedia('(pointer: coarse)')")
   })
 
-  it('选中的行写在各类行的颜色后面：根、人格与应用的行选中后名字也看得见', () => {
+  it('选中的行写在各类行的颜色后面：分组与提示行选中后名字也看得见', () => {
     const style = memoriesPage.slice(memoriesPage.indexOf('<style'))
     const selected = style.indexOf('.tree-row.selected,\n.tree-row.selected:hover {')
     expect(selected).toBeGreaterThan(0)
-    for (const rule of [
-      '.tree-row.root,\n.tree-row.entity {',
-      '.tree-row.virtual {',
-      '.tree-row.note {',
-    ]) {
+    for (const rule of ['.tree-row.group {', '.tree-row.note {']) {
       expect(style.indexOf(rule)).toBeGreaterThan(0)
       expect(style.indexOf(rule)).toBeLessThan(selected)
     }
@@ -183,7 +183,7 @@ describe('记忆页取统计', () => {
   it('窄柱的统计不跟着每次写入重取：只标记过期，统计变了才取一次', () => {
     expect(memoriesPage).toContain('staleTime: 60_000')
     expect(memoriesPage).toContain("refetchType: 'none'")
-    expect(memoriesPage).toContain('statsChanged(before, memory)')
+    expect(memoriesPage).toContain('statsChanged(before, entry)')
   })
 
   it('invalidateLists 不再让概览跟着失效重取', () => {
@@ -197,7 +197,7 @@ describe('记忆页取统计', () => {
 // 回车的隐式提交会点默认按钮：单选在表单里时，方向键选完再按回车，提示还没看就提交了
 // 新建的 submit 带着放行标记的参数：点击事件不能传进去，所以写成 submit()
 describe.each([
-  ['移动或改层', moveMemoryModal, '确定', 'submit'],
+  ['迁移记忆', moveMemoryModal, '确定', 'submit'],
   ['新建记忆', createMemoryModal, '创建', 'submit()'],
 ])('%s的弹窗', (_name, source, label, call) => {
   const elements = elementsOf(template(source))
@@ -211,6 +211,20 @@ describe.each([
   it('只有点按钮才提交', () => {
     const button = elements.find((el) => el.tag === 'UButton' && textOf(el) === label)!
     expect(handler(button, 'click')).toBe(call)
+  })
+})
+
+describe('切面选择器与双链面板', () => {
+  it('切面选择器不用表单元素包装，避免在弹窗内按回车误提交', () => {
+    const elements = elementsOf(template(facetWhenPicker))
+    expect(elements.filter((el) => el.tag === 'form')).toEqual([])
+    expect(elements.filter((el) => attr(el, 'type') === 'submit')).toEqual([])
+    expect(facetWhenPicker).not.toContain('@submit')
+  })
+
+  it('双链面板使用 MemoryRow 渲染短 ID 邻居并可点击跳转', () => {
+    expect(entryLinksPanel).toContain(':short-id="item.shortId"')
+    expect(entryLinksPanel).toContain("emit('open', item.shortId, item.circleId)")
   })
 })
 
@@ -276,15 +290,21 @@ describe('记忆详情', () => {
     expect(memoryEditor).toContain('v-else-if="historyOpen"')
   })
 
-  it('保存带着载入时的 id 和版本，冲突时重新读取', () => {
-    expect(memoryEditor).toContain('expectedId: m.id')
+  it('保存带着载入时的版本，冲突时重新读取', () => {
     expect(memoryEditor).toContain('expectedVersion: m.version')
-    expect(memoryEditor).toMatch(/err\.status === 409\) void memory\.refetch\(\)/)
+    expect(memoryEditor).toMatch(/err\.status === 409\) void entry\.refetch\(\)/)
   })
 
   it('离开前确认，换视图和筛选不算离开', () => {
     expect(memoryEditor).toContain('useUnsavedChangesGuard(dirty')
-    expect(memoryEditor).toMatch(/to\.query\.uri !== from\.query\.uri/)
+    expect(memoryEditor).toMatch(/to\.query\.id !== from\.query\.id/)
+  })
+
+  it('支持多切面并排对比、双链关联面板与底部短 ID 复制行', () => {
+    expect(memoryEditor).toContain('icons.splitView')
+    expect(memoryEditor).toContain('<EntryLinksPanel')
+    expect(memoryEditor).toContain('<ShortIdLine')
+    expect(memoryEditor).toContain('<FacetWhenPicker')
   })
 
   it('机密的正文只放在组件里，不写进查询缓存', () => {
@@ -307,7 +327,7 @@ describe('概览', () => {
   })
 
   it('点地层柱去哪里由 strataTarget 定：一行去根或对话的分页，一格去列表', () => {
-    expect(overviewPage).toContain('void router.push(strataTarget(spaceId.value, selection))')
+    expect(overviewPage).toContain('void router.push(strataTarget(circleId.value, selection))')
   })
 })
 
@@ -316,11 +336,13 @@ describe('保存前逐处处理疑似明文', () => {
   it('标题、有效期这类本地就能判断的先查，再开弹窗', () => {
     const request = /function requestSave\(\) \{[\s\S]*?\n\}/.exec(editor)![0]
     expect(request.indexOf('formProblem(form, m)')).toBeGreaterThan(-1)
-    expect(request.indexOf('formProblem(form, m)')).toBeLessThan(request.indexOf('addedSpots('))
+    expect(request.indexOf('formProblem(form, m)')).toBeLessThan(
+      request.indexOf('addedVariantSpots('),
+    )
     const submit = /async function submit\(flags\?: SaveFlags\) \{[\s\S]*?\n\}/.exec(
       createMemoryModal,
     )![0]
-    expect(submit.indexOf('validToTooSoon')).toBeLessThan(submit.indexOf('addedSpots('))
+    expect(submit.indexOf('validToTooSoon')).toBeLessThan(submit.indexOf('addedVariantSpots('))
   })
 
   it('转存只看 canManageCredentials，照样保存给能改的成员，两个属性分开', () => {

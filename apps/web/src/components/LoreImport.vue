@@ -13,6 +13,7 @@ import {
   type LorePlanNode,
   type LorePlanTarget,
   type LoreTargetState,
+  type StrataBand,
 } from '@kioku/contracts'
 import { useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, shallowRef, watch } from 'vue'
@@ -63,7 +64,7 @@ import SettingsBlock from './strata/SettingsBlock.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
 import UriPath from './strata/UriPath.vue'
 
-const props = defineProps<{ spaceId: string; editable: boolean; isAdmin: boolean }>()
+const props = defineProps<{ circleId: string; editable: boolean; isAdmin: boolean }>()
 
 const queryClient = useQueryClient()
 
@@ -88,7 +89,7 @@ function onPlanTabKeydown(event: KeyboardEvent, current: PlanTab) {
 }
 const sourceKind = ref<SourceKind>('file')
 const file = ref<File | null>(null)
-// 裁剪过的导出：执行时要重新发一次。只在内存里，换了文件、换了空间或导入成功就丢掉
+// 裁剪过的导出：执行时要重新发一次。只在内存里，换了文件、换了记忆圈或导入成功就丢掉
 const backup = shallowRef<LoreBackupUpload | null>(null)
 const url = ref('')
 const token = ref('')
@@ -130,7 +131,7 @@ watch(open, (opened) => {
   }
 })
 watch(
-  () => props.spaceId,
+  () => props.circleId,
   () => {
     open.value = false
     planTab.value = 'nodes'
@@ -188,20 +189,20 @@ async function showPlan(): Promise<boolean> {
   }
   busy.value = true
   error.value = null
-  const forSpace = props.spaceId
+  const forCircle = props.circleId
   try {
-    const next = await api.lorePlan(forSpace, {
+    const next = await api.lorePlan(forCircle, {
       source: await currentSource(),
       persona: persona.value,
     })
-    if (forSpace !== props.spaceId) return false
+    if (forCircle !== props.circleId) return false
     plan.value = next
     // 重出的计划里序号可能指到另一处上：特征对不上的选择丢掉
     unconvertedIds.value = pruneUnconverted(next, unconvertedIds.value)
     confirmStale.value = false
     return true
   } catch (err) {
-    if (forSpace !== props.spaceId) return false
+    if (forCircle !== props.circleId) return false
     plan.value = null
     error.value = messageOf(err, '生成计划失败')
     return false
@@ -239,17 +240,17 @@ async function applyPlan() {
   busy.value = true
   error.value = null
   notice.value = null
-  const forSpace = props.spaceId
+  const forCircle = props.circleId
   let failure: ApplyFailure | null = null
   try {
-    const done = await api.loreApply(forSpace, {
+    const done = await api.loreApply(forCircle, {
       source: await currentSource(),
       persona: persona.value,
       fingerprint: seen.fingerprint,
       ...selectionOf(seen, secretIds.value, excludedIds.value, unconvertedIds.value),
       confirmStale: confirmStale.value,
     })
-    if (forSpace === props.spaceId) {
+    if (forCircle === props.circleId) {
       result.value = done
       plan.value = null
       // 全部做成就不再留着文件、Token 与勾选。有没做成的要重看计划，先留着：
@@ -267,7 +268,7 @@ async function applyPlan() {
       void queryClient.invalidateQueries()
     }
   } catch (err) {
-    if (forSpace === props.spaceId) failure = applyFailureOf(err)
+    if (forCircle === props.circleId) failure = applyFailureOf(err)
   } finally {
     busy.value = false
   }
@@ -279,7 +280,7 @@ async function applyPlan() {
   // 不用旧指纹重试：可能已经写了一部分，或者计划确实变了。直接重看计划，勾选还在
   plan.value = null
   await replanAfterFailure(failure, showPlan, (text) => {
-    if (forSpace === props.spaceId) notice.value = text
+    if (forCircle === props.circleId) notice.value = text
   })
 }
 
@@ -315,7 +316,9 @@ const keptCount = (node: LorePlanNode) =>
 // 这次同步的已导入记忆还在 Kioku 里：才能指向记忆详情
 const syncedStillThere = (node: LorePlanNode) =>
   !!plan.value &&
-  keptTargets(plan.value, node, secretIds.value).some((t) => t.current.some((c) => c.uri !== null))
+  keptTargets(plan.value, node, secretIds.value).some((t) =>
+    t.current.some((c) => c.shortId !== null),
+  )
 
 const nodes = computed(() => plan.value?.nodes ?? [])
 const plannedBoot = computed(() =>
@@ -358,12 +361,16 @@ const secretNow = (node: LorePlanNode, target: LorePlanTarget) =>
   isSecret(node, target) || target.current.some((c) => c.secret)
 const sensitivityOf = (node: LorePlanNode, target: LorePlanTarget) =>
   secretNow(node, target) ? 'secret' : target.sensitivity
-// 之前导入的那条现在的样子：移动过、删除了都说一声
+const isSoulUri = (uri: string) => uri === 'core://soul' || uri.startsWith('core://soul/')
+const targetBand = (node: LorePlanNode, target: LorePlanTarget): StrataBand => {
+  if (isSoulUri(node.uri) || isSoulUri(target.legacyUri)) return 'persona'
+  return target.targetCircleKind === 'personal' ? 'personal' : 'primary'
+}
+// 之前导入的那条现在的样子：删除了或给出短 ID
 function currentNote(target: LorePlanTarget): string | null {
-  const notes = target.current.flatMap((c) => {
-    if (c.uri === null) return ['已在 Kioku 中删除']
-    return c.uri === target.uri ? [] : [`当前位于 ${c.uri}`]
-  })
+  const notes = target.current.flatMap((c) =>
+    c.shortId === null ? ['已在 Kioku 中删除'] : [`当前词条 ${c.shortId}`],
+  )
   return notes.length ? notes.join('；') : null
 }
 // 路径或正文像有凭据的提醒：已经全是 secret 的不用再说；导入过的这里标不了，要到记忆详情里改
@@ -397,7 +404,9 @@ function secretHint(node: LorePlanNode): string | undefined {
 const disclosureCut = computed(
   () =>
     new Set(
-      plan.value?.warnings.filter((w) => w.kind === 'disclosureTruncated').map((w) => w.uri) ?? [],
+      plan.value?.warnings
+        .filter((w) => w.kind === 'disclosureTruncated')
+        .map((w) => w.legacyUri) ?? [],
     ),
 )
 const syncIssuesCount = computed(() => {
@@ -430,19 +439,19 @@ const entryStatus = computed(() => {
       导入 Lore 的节点，确认计划后才写入。查看计划与确认在独立弹窗中完成。
       <Hint>
         映射规则与命令行相同：core://agent 进入通用，core://soul
-        进入人格，core://agent/&lt;运行时&gt; 进入当前账号的对应应用，preferences://
-        进入当前账号的本人记忆（内部），其余进入当前账号的本人记忆（私密）。可重复执行：已导入的不重复写入，Lore
+        进入人格，core://agent/&lt;运行时&gt; 进入当前账号的对应接入实例，preferences://
+        进入个人圈（内部），其余进入个人圈（私密）。可重复执行：已导入的不重复写入，Lore
         中修改过的按 Lore 同步；在 Kioku 中修改、移动或删除过的不变。
       </Hint>
     </template>
 
-    <p v-if="!editable" class="text-muted">仅空间所有者可导入</p>
+    <p v-if="!editable" class="text-muted">仅记忆圈所有者可导入</p>
 
     <TransferEntryRow
       v-else
       :icon="icons.lore"
       title="Lore 知识库"
-      description="支持上传导出的 JSON 文件，或从 Lore 服务地址拉取，核对节点、映射与凭据后写入当前空间。"
+      description="支持上传导出的 JSON 文件，或从 Lore 服务地址拉取，核对节点、映射与凭据后写入当前记忆圈。"
       :status="entryStatus"
       :status-tone="plan ? 'warning' : 'neutral'"
     >
@@ -510,7 +519,6 @@ const entryStatus = computed(() => {
               <dt>跳过与未完成</dt>
               <dd>
                 {{
-                  result.occupied.length +
                   result.movedInLore.length +
                   result.secretAlreadyImported.length +
                   result.failed.length +
@@ -527,19 +535,19 @@ const entryStatus = computed(() => {
             </li>
             <li v-else>
               人格 {{ persona.slug }} 不存在，本次也没有要写入的
-              core://soul：未新建人格，新建应用的默认人格为空
+              core://soul：未新建人格，新建接入实例的默认人格为空
             </li>
-            <li v-if="result.appsCreated.length">
-              新建应用：{{
-                result.appsCreated.join('、')
-              }}。暂无访问密钥，请在「应用」中为要接入的应用签发
+            <li v-if="result.clientsCreated.length">
+              新建接入实例：{{
+                result.clientsCreated.join('、')
+              }}。暂无访问密钥，请在「接入实例」中为要接入的实例签发
             </li>
-            <li v-if="result.appsGivenPersona.length">
-              设为默认人格 {{ persona.slug }}：{{ result.appsGivenPersona.join('、') }}
+            <li v-if="result.clientsGivenPersona.length">
+              设为默认人格 {{ persona.slug }}：{{ result.clientsGivenPersona.join('、') }}
             </li>
-            <li v-if="result.appsOtherPersona.length">
-              以下应用使用其他人格，core://soul 不会进入其启动加载：{{
-                result.appsOtherPersona.join('、')
+            <li v-if="result.clientsOtherPersona.length">
+              以下接入实例使用其他人格，core://soul 不会进入其启动加载：{{
+                result.clientsOtherPersona.join('、')
               }}
             </li>
             <li>
@@ -551,7 +559,6 @@ const entryStatus = computed(() => {
 
           <ul
             v-if="
-              result.occupied.length ||
               result.movedInLore.length ||
               result.secretAlreadyImported.length ||
               result.failed.length ||
@@ -560,36 +567,32 @@ const entryStatus = computed(() => {
             "
             class="space-y-1 break-all border-t border-[var(--ui-border)] pt-3"
           >
-            <li v-for="uri in result.occupied" :key="`occupied-${uri}`">
-              跳过 <code class="uri">{{ uri }}</code
-              >：坐标已被其他记忆占用
-            </li>
-            <li v-for="m in result.movedInLore" :key="`moved-${m.uri}-${m.current}`">
-              跳过 <code class="uri">{{ m.uri }}</code
-              >：Lore 中路径已变更，<template v-if="m.current">
-                此前导入的记忆仍在 <code class="uri">{{ m.current }}</code
-                >，如需跟随请手动移动</template
+            <li v-for="m in result.movedInLore" :key="`moved-${m.legacyUri}-${m.shortId}`">
+              跳过 <code class="uri">{{ m.legacyUri }}</code
+              >：Lore 中路径已变更，<template v-if="m.shortId">
+                此前导入的记忆仍保留在
+                <code class="uri">{{ m.shortId }}</code> ，如需跟随请手动调整</template
               ><template v-else>此前导入的记忆已在 Kioku 中删除</template>，未在新位置新建
             </li>
             <li
               v-for="s in result.secretAlreadyImported"
-              :key="`secret-${s.uri}-${s.current}`"
+              :key="`secret-${s.legacyUri}-${s.shortId}`"
               class="text-warning"
             >
-              <code class="uri">{{ s.uri }}</code>
+              <code class="uri">{{ s.legacyUri }}</code>
               此前已导入，当前仍为明文，本次标记的机密未生效。请到记忆详情将
-              <code class="uri">{{ s.current }}</code> 改为机密（同时清除历史中的明文）
+              <code class="uri">{{ s.shortId }}</code> 改为机密（同时清除历史中的明文）
             </li>
-            <li v-for="f in result.failed" :key="`failed-${f.uri}`" class="text-error">
-              失败 <code class="uri">{{ f.uri }}</code
+            <li v-for="f in result.failed" :key="`failed-${f.source}`" class="text-error">
+              失败 <code class="uri">{{ f.source }}</code
               >：{{ f.reason }}
             </li>
-            <li v-for="f in result.sync.failed" :key="`sync-${f.uri}`" class="text-error">
-              同步失败 <code class="uri">{{ f.uri }}</code
+            <li v-for="f in result.sync.failed" :key="`sync-${f.source}`" class="text-error">
+              同步失败 <code class="uri">{{ f.source }}</code
               >：{{ f.reason }}
             </li>
-            <li v-for="f in result.plaintextKept" :key="`kept-${f.uri}`" class="text-warning">
-              保留明文 <code class="uri">{{ f.uri }}</code
+            <li v-for="f in result.plaintextKept" :key="`kept-${f.source}`" class="text-warning">
+              保留明文 <code class="uri">{{ f.source }}</code
               >：<span>{{ f.reason }}</span>
               <Hint>勾选了写成占位符，但照原样写入。可在待处理中转存为凭据。</Hint>
             </li>
@@ -737,8 +740,8 @@ const entryStatus = computed(() => {
                 <dd>{{ effects.bootNodes }}</dd>
               </div>
               <div class="kpi-cell">
-                <dt>涉及应用</dt>
-                <dd>{{ effects.apps.reduce((n, m) => n + m.apps.length, 0) }}</dd>
+                <dt>涉及接入实例</dt>
+                <dd>{{ effects.clients.reduce((n, m) => n + m.clients.length, 0) }}</dd>
               </div>
             </dl>
 
@@ -806,7 +809,7 @@ const entryStatus = computed(() => {
                 @click="planTab = 'mapping'"
                 @keydown="onPlanTabKeydown($event, 'mapping')"
               >
-                人格与应用（{{ effects.apps.length + 1 }}）
+                人格与接入实例（{{ effects.clients.length + 1 }}）
               </button>
               <button
                 id="lore-tab-sync"
@@ -875,16 +878,20 @@ const entryStatus = computed(() => {
                       />
                     </div>
                   </div>
-                  <div v-for="target in node.targets" :key="target.uri" class="node-target">
+                  <div
+                    v-for="target in node.targets"
+                    :key="`${target.legacyUri}-${target.targetCircleId}`"
+                    class="node-target"
+                  >
                     <UIcon :name="icons.inherits" class="target-arrow" aria-hidden="true" />
                     <!-- prettier-ignore -->
                     <span class="target-title">{{ targetTitle(target, secretNow(node, target)) }}</span>
-                    <UriPath :uri="target.uri" wrap />
+                    <UriPath :uri="target.legacyUri" wrap />
                     <span :class="STATE_CLASSES[target.state]">
                       {{ targetStateLabels[target.state] }}
                     </span>
                     <StrataSwatch
-                      :layer="target.layer"
+                      :band="targetBand(node, target)"
                       :sensitivity="sensitivityOf(node, target)"
                       label="both"
                     />
@@ -919,7 +926,7 @@ const entryStatus = computed(() => {
                         />
                         <span v-if="plaintextState(node, spot) === 'blocked'" class="text-warning">
                           无法写成占位符<Hint>
-                            凭据占位符只能放在本人、敏感级不低于私密的记忆中。
+                            凭据占位符只能放在个人圈、正式词条且敏感级不低于私密的记忆中。
                           </Hint>
                         </span>
                         <span
@@ -958,7 +965,13 @@ const entryStatus = computed(() => {
                   <p v-if="node.credentialHints.extras" class="text-warning">
                     触发场景或关键词疑似包含明文凭据：机密只加密正文，这两项仍为明文
                   </p>
-                  <p v-if="disclosureCut.has(node.uri)" class="text-muted">
+                  <p
+                    v-if="
+                      disclosureCut.has(node.uri) ||
+                      node.targets.some((t) => disclosureCut.has(t.legacyUri))
+                    "
+                    class="text-muted"
+                  >
                     触发场景过长，写入时截断
                   </p>
                 </li>
@@ -982,12 +995,12 @@ const entryStatus = computed(() => {
                 <p v-else-if="plan.persona.exists">
                   本次没有要新写入的 core://soul，不新建人格。已有人格
                   <code class="uri">{{ plan.persona.slug }}</code>
-                  照常使用：新建应用和暂无默认人格的应用将设为此人格。
+                  照常使用：新建接入实例和暂无默认人格的接入实例将设为此人格。
                 </p>
                 <p v-else>
                   本次没有要新写入的 core://soul，人格
                   <code class="uri">{{ plan.persona.slug }}</code>
-                  也不存在：不新建，新建应用的默认人格为空。
+                  也不存在：不新建，新建接入实例的默认人格为空。
                 </p>
                 <p v-if="effects.writesPersona && otherPersonas.length" class="text-warning">
                   此前的导入写入了人格 {{ otherPersonas.join('、') }}：本次将另写一份
@@ -995,29 +1008,32 @@ const entryStatus = computed(() => {
                 </p>
               </div>
 
-              <SectionHeading title="应用映射" :level="4" />
-              <div v-if="effects.apps.length" class="plan-body space-y-2">
-                <p v-for="mapping in effects.apps" :key="mapping.runtime" class="break-all">
+              <SectionHeading title="接入实例映射" :level="4" />
+              <div v-if="effects.clients.length" class="plan-body space-y-2">
+                <p v-for="mapping in effects.clients" :key="mapping.runtime" class="break-all">
                   core://agent/{{ mapping.runtime }} →
-                  <template v-for="(app, i) in mapping.apps" :key="app.slug"
-                    ><template v-if="i">、</template><code class="uri">{{ app.slug }}</code
-                    ><template v-if="app.create"
-                      >（新建，<RuntimeLabel :family="app.runtimeFamily" :size="14" />）</template
+                  <template v-for="(client, i) in mapping.clients" :key="client.slug"
+                    ><template v-if="i">、</template><code class="uri">{{ client.slug }}</code
+                    ><template v-if="client.create"
+                      >（新建，<RuntimeLabel
+                        :family="client.runtimeFamily"
+                        :size="14"
+                      />）</template
                     ><template v-else>（已有）</template></template
                   >
                 </p>
-                <p v-if="effects.appsGivenPersona.length">
-                  以下应用暂无默认人格，将设为 {{ plan.persona.slug }}：{{
-                    effects.appsGivenPersona.join('、')
+                <p v-if="effects.clientsGivenPersona.length">
+                  以下接入实例暂无默认人格，将设为 {{ plan.persona.slug }}：{{
+                    effects.clientsGivenPersona.join('、')
                   }}
                 </p>
-                <p v-if="effects.appsOtherPersona.length" class="text-warning">
-                  以下应用使用其他人格，core://soul 不会进入其启动加载：{{
-                    effects.appsOtherPersona.join('、')
+                <p v-if="effects.clientsOtherPersona.length" class="text-warning">
+                  以下接入实例使用其他人格，core://soul 不会进入其启动加载：{{
+                    effects.clientsOtherPersona.join('、')
                   }}
                 </p>
               </div>
-              <p v-else class="text-muted">本次节点未涉及应用坐标映射。</p>
+              <p v-else class="text-muted">本次节点未涉及接入实例映射。</p>
             </section>
 
             <section
@@ -1042,10 +1058,11 @@ const entryStatus = computed(() => {
                   >
                     <summary>{{ group.heading }}（{{ group.lines.length }}）</summary>
                     <ul class="detail-list">
-                      <!-- 和上面的写入目标一样先写标题，坐标跟在后面 -->
+                      <!-- 和上面的写入目标一样先写标题，来源路径跟在后面 -->
                       <li v-for="(line, i) in group.lines" :key="i" class="sync-line">
                         <span v-if="line.title" class="target-title">{{ line.title }}</span>
-                        <UriPath :uri="line.uri" wrap />
+                        <UriPath :uri="line.legacyUri" wrap />
+                        <code v-if="line.shortId" class="uri">{{ line.shortId }}</code>
                         <template v-if="line.target">
                           <span>→</span>
                           <UriPath :uri="line.target" wrap />

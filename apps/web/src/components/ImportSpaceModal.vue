@@ -3,7 +3,7 @@ import { ref } from 'vue'
 
 import SpaceImport from './SpaceImport.vue'
 
-// 导入空间的弹窗：外壳里一份，空间切换器与首页打开它。检查、导入期间不能关
+// 导入记忆圈的弹窗：外壳里一份，切换器与首页打开它。检查、导入期间不能关
 defineProps<{ open: boolean }>()
 const emit = defineEmits<{ close: [] }>()
 const busy = ref(false)
@@ -12,7 +12,7 @@ const busy = ref(false)
 <template>
   <UModal
     :open="open"
-    title="导入空间"
+    title="导入记忆圈"
     :dismissible="!busy"
     :close="!busy"
     @update:open="(v) => !v && !busy && emit('close')"

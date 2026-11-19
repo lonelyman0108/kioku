@@ -3,15 +3,17 @@ import type { ActivityItem } from '@kioku/contracts'
 import { computed } from 'vue'
 
 import { changeSummary } from '../activity'
+import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
 import { activityActor, activityActorIcons, changeLabels, eventLabel } from '../labels'
 import { formatClock, formatTime } from '../time'
 import ActivityFlags from './ActivityFlags.vue'
 import MemoryName from './strata/MemoryName.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
+import { entryBand } from './strata/strata'
 
 // 变更记录表格的一行：时间、操作者、操作、记忆、改动、状态。按天分组，所以时间只写时和分；
-// 记忆写标题，坐标在悬停里。详情打开时表格变窄（compact），状态并进记忆那一列；窄屏（narrow）只有
+// 记忆写标题，短 ID 在悬停里。详情打开时表格变窄（compact），状态并进记忆那一列；窄屏（narrow）只有
 // 时间与记忆两列，谁、做了什么、改了什么写在标题下面一行。
 // 同一个操作者接着改同一条记忆的几次折叠在第一行，folded 是折起来的次数，sub 是展开后的那几行
 export type EntryLayout = 'full' | 'compact' | 'narrow'
@@ -30,6 +32,8 @@ const props = withDefaults(
 )
 const emit = defineEmits<{ select: []; toggle: [] }>()
 
+const { circle } = useSession()
+const band = computed(() => entryBand({ kind: props.item.kind }, circle.value))
 const actor = computed(() => activityActor(props.item))
 const op = computed(() => eventLabel(props.item.type))
 const secret = computed(() => props.item.sensitivity === 'secret')
@@ -75,13 +79,8 @@ const changeText = computed(() =>
     </template>
     <td>
       <span class="cell-flex">
-        <StrataSwatch
-          :layer="item.layer"
-          :sensitivity="item.sensitivity"
-          :width="14"
-          :height="10"
-        />
-        <MemoryName class="memory-title" :uri="item.uri" :title="item.title" />
+        <StrataSwatch :band="band" :sensitivity="item.sensitivity" :width="14" :height="10" />
+        <MemoryName class="memory-title" :short-id="item.shortId" :title="item.title" />
         <UIcon v-if="secret" :name="icons.secret" class="cell-icon" aria-label="机密" />
         <button
           v-if="folded"

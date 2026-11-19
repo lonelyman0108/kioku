@@ -1,54 +1,86 @@
 import {
-  LAYERS,
   SENSITIVITIES,
+  STRATA_BANDS,
   sensitivityAllowed,
   type AccessCell,
-  type CuratedLayer,
-  type KeyAccessMatrix,
-  type KeyScopes,
-  type Layer,
-  type LayerCount,
+  type CircleAccessMatrix,
+  type CircleKind,
+  type EntryKind,
+  type KindCount,
+  type LensKeyScopes,
   type Sensitivity,
+  type StrataBand,
 } from '@kioku/contracts'
 
-import { layerLabels, scopesSummary, sensitivityLabels } from '../../labels'
+import { bandLabels, scopesSummary, sensitivityLabels } from '../../labels'
 
-// 地层编码的全部计算：颜色表示归属，纹理表示敏感级，纵向顺序固定。地层柱、窄柱、色块、岩芯、矩阵都从这里取
+// 地层编码的全部计算：色带表示形态与来源范围，纹理表示敏感级，纵向顺序固定。地层柱、窄柱、色块、岩芯与权限范围表格共用
 
 export type TextureScale = 'lg' | 'sm'
-export type StrataCounts = Record<Layer, Record<Sensitivity, number>>
-export type AccessRow = KeyAccessMatrix['contexts'][number]['rows'][number]
+export type StrataCounts = Record<StrataBand, Record<Sensitivity, number>>
+export type KindAccessRow = CircleAccessMatrix['rows'][number]
 
-// 地层柱上选中或悬停的位置：一类归属、一个敏感级，或者一类归属里的一段
+export interface BandAccessRow {
+  band: StrataBand
+  cells: CircleAccessMatrix['rows'][number]['cells']
+}
+
 export interface StrataSelection {
-  layer: Layer | null
+  band: StrataBand | null
   sensitivity: Sensitivity | null
 }
 
-// 纵向顺序：自上而下从具体到通用，会话在上，通用在下
-export const STACK: readonly Layer[] = ['episode', 'subject', 'user', 'app', 'persona', 'core']
+// 纵向顺序：自上而下为会话摘要、联系人事实、个人圈词条、共享客场圈词条、独立人格、主场圈正式词条
+export const STACK: readonly StrataBand[] = STRATA_BANDS
 
-// 会话和联系人两类来自对话，和下面四类隔开，边框用虚线
-export const isConversationLayer = (layer: Layer) => layer === 'subject' || layer === 'episode'
+// 来自对话的两类在最上方，以虚线与下面四类隔开
+export const isConversationBand = (band: StrataBand) => band === 'episode' || band === 'fact'
+export const isConversationKind = (kind: EntryKind) => kind === 'episode' || kind === 'fact'
 
-// 记下的四类，也是目录的四个根，顺序和地层柱一致
-export const CURATED_STACK: readonly CuratedLayer[] = ['user', 'app', 'persona', 'core']
+export const bandHints: Record<StrataBand, string> = {
+  episode: '所在的群或私聊，无会话上下文时仅限本接入实例的所属成员',
+  fact: '记下它的群或私聊；启用拟人跨群识人时可在非隔离群间按需召回',
+  personal: '个人记忆圈中的词条；关联客场时仅最高优先级且未限定场域的词条可穿透启动加载',
+  'shared-away': '所关联共享客场记忆圈中的词条',
+  persona: '独立人格设定条目，按设定键沿继承链覆盖',
+  primary: '当前主场记忆圈中的正式词条',
+}
 
-// 每类归属的适用范围。全站只在这里写一次，只放在提示层（地层柱的说明、记忆页根节点的提示）
-export const layerHints: Record<Layer, string> = {
-  episode: '所在的群或私聊；不带会话上下文的会话仅限本人的 Agent',
-  subject: '记下它的群或私聊',
-  user: '本人的 Agent；开启后也用于本人私聊（内部及以下）',
-  app: '该应用',
-  persona: '使用该人格的应用，含子人格',
-  core: '空间内所有应用',
+export const entryKindHints: Record<EntryKind, string> = {
+  entry: '主动整理保存的正式词条，支持多切面变体与双链',
+  fact: '从群聊或私聊中抽取的联系人与群事实',
+  episode: '按会话保留的近期讨论摘要，到期后自动清理',
 }
 
 export const sensitivityHints: Record<Sensitivity, string> = {
-  public: '任何上下文可见',
-  internal: '仅受信应用与上下文',
-  private: '仅本人的私密上下文',
-  secret: '加密存储，不进召回，仅可按坐标读取',
+  public: '任何会话上下文可见',
+  internal: '仅受信客户端与本人私聊提权上下文可见',
+  private: '仅本机私密上下文可见',
+  secret: '密文存储，不进召回，仅主场圈且通过场域锁可按短 ID 读取',
+}
+
+export function kindBandForCircle(
+  kind: EntryKind,
+  circle: { circleKind: CircleKind; isPrimary: boolean },
+): StrataBand {
+  if (kind === 'episode') return 'episode'
+  if (kind === 'fact') return 'fact'
+  if (circle.isPrimary) return 'primary'
+  return circle.circleKind === 'personal' ? 'personal' : 'shared-away'
+}
+
+export function entryBand(
+  entry: { kind: EntryKind; circleId?: string; circleKind?: CircleKind },
+  currentCircle?: { id: string; kind: CircleKind } | null,
+): StrataBand {
+  if (entry.kind === 'episode') return 'episode'
+  if (entry.kind === 'fact') return 'fact'
+  if (currentCircle && entry.circleId && entry.circleId !== currentCircle.id) {
+    return entry.circleKind === 'personal' ? 'personal' : 'shared-away'
+  }
+  return currentCircle?.kind === 'personal' || entry.circleKind === 'personal'
+    ? 'personal'
+    : 'primary'
 }
 
 const sum = (values: readonly number[]) => values.reduce((a, b) => a + b, 0)
@@ -62,45 +94,80 @@ const emptyRow = (): Record<Sensitivity, number> => ({
   secret: 0,
 })
 
-export function tallyCounts(rows: readonly LayerCount[]): StrataCounts {
-  const counts = Object.fromEntries(LAYERS.map((l) => [l, emptyRow()])) as StrataCounts
-  for (const row of rows) counts[row.layer][row.sensitivity] += row.count
+export interface TallySlice {
+  band: StrataBand
+  sensitivity: Sensitivity
+  count: number
+}
+
+export interface OverviewTallyInput {
+  circleKind: CircleKind
+  counts: readonly KindCount[]
+  extractedCounts?: readonly KindCount[]
+  personalCounts?: readonly KindCount[]
+  awaySharedCounts?: readonly KindCount[]
+  personaCount?: number
+}
+
+export function tallyCounts(input: readonly TallySlice[] | OverviewTallyInput): StrataCounts {
+  const counts = Object.fromEntries(STRATA_BANDS.map((b) => [b, emptyRow()])) as StrataCounts
+  if (Array.isArray(input)) {
+    for (const row of input as readonly TallySlice[]) {
+      counts[row.band][row.sensitivity] += row.count
+    }
+    return counts
+  }
+  const overview = input as OverviewTallyInput
+  const entryBandKey: StrataBand = overview.circleKind === 'personal' ? 'personal' : 'primary'
+  for (const row of overview.counts) {
+    const target: StrataBand =
+      row.kind === 'episode' ? 'episode' : row.kind === 'fact' ? 'fact' : entryBandKey
+    counts[target][row.sensitivity] += row.count
+  }
+  for (const row of overview.extractedCounts ?? []) {
+    if (row.kind === 'episode' || row.kind === 'fact') {
+      counts[row.kind][row.sensitivity] += row.count
+    }
+  }
+  for (const row of overview.personalCounts ?? []) {
+    if (row.kind === 'entry') counts.personal[row.sensitivity] += row.count
+  }
+  for (const row of overview.awaySharedCounts ?? []) {
+    if (row.kind === 'entry') counts['shared-away'][row.sensitivity] += row.count
+  }
+  if (overview.personaCount) {
+    counts.persona.public += overview.personaCount
+  }
   return counts
 }
 
-export const layerTotal = (counts: StrataCounts, layer: Layer) =>
-  sum(SENSITIVITIES.map((s) => counts[layer][s]))
+export const bandTotal = (counts: StrataCounts, band: StrataBand) =>
+  sum(SENSITIVITIES.map((s) => counts[band][s]))
 
-// 记忆的条数不含来自对话的两类，后者单独说
 export const curatedTotal = (counts: StrataCounts) =>
-  sum(STACK.filter((l) => !isConversationLayer(l)).map((l) => layerTotal(counts, l)))
+  sum(STACK.filter((b) => !isConversationBand(b)).map((b) => bandTotal(counts, b)))
 
 export const conversationTotal = (counts: StrataCounts) =>
-  sum(STACK.filter(isConversationLayer).map((l) => layerTotal(counts, l)))
+  sum(STACK.filter(isConversationBand).map((b) => bandTotal(counts, b)))
 
 export const sensitivityTotal = (counts: StrataCounts, sensitivity: Sensitivity) =>
-  sum(STACK.filter((l) => !isConversationLayer(l)).map((l) => counts[l][sensitivity]))
+  sum(STACK.filter((b) => !isConversationBand(b)).map((b) => counts[b][sensitivity]))
 
-// 按归属、敏感级筛选之后一共多少条，两个都可以不限。counts 里有什么归属就数什么归属
 export const filteredTotal = (
   counts: StrataCounts,
-  layer: Layer | null,
+  band: StrataBand | null,
   sensitivity: Sensitivity | null,
 ) =>
   sum(
-    (layer ? [layer] : STACK).flatMap((l) =>
-      (sensitivity ? [sensitivity] : SENSITIVITIES).map((s) => counts[l][s]),
+    (band ? [band] : STACK).flatMap((b) =>
+      (sensitivity ? [sensitivity] : SENSITIVITIES).map((s) => counts[b][s]),
     ),
   )
 
 /* ———— 几何 ———— */
 
-// 概览里地层柱的尺寸：一屏放下，高度跟着视口。放不下数字的窄屏换紧凑版。
-// 288 是导航、状态句、区块标题和表头表尾占掉的高度
-// 完整版的柱子连同右边的数字至少要这么宽；容器比它窄就换紧凑版
 export const FULL_COLUMN_MIN_WIDTH = 520
 
-// available 是放地层柱的容器宽度。只看视口不够：手机上页面一旦溢出，innerWidth 跟着变宽，就一直换不回紧凑版
 export function columnSize(
   viewport: { width: number; height: number },
   available = viewport.width,
@@ -113,13 +180,11 @@ export function columnSize(
 }
 
 export interface Band {
-  layer: Layer
+  band: StrataBand
   y: number
   h: number
 }
 
-// 按权重把 total 分成整数份，合起来正好是 total。每份至少 min，放不下时 min 退到平分的大小。
-// 按比例算不够 min 的先固定，剩下的由其他份按权重分；固定一份可能让别的也不够，循环到稳定
 function allot(weights: readonly number[], total: number, min: number): number[] {
   const floor = Math.min(min, Math.floor(total / weights.length))
   const indexes = weights.map((_, i) => i)
@@ -133,7 +198,6 @@ function allot(weights: readonly number[], total: number, min: number): number[]
     tooSmall.forEach((i) => fixed.add(i))
   }
   const exact = weights.map((weight, i) => (fixed.has(i) ? floor : weight * unit))
-  // 先取整，余下的给小数部分最大的那几份
   const whole = exact.map(Math.floor)
   const order = exact
     .map((v, i) => ({ i, rest: v - Math.floor(v) }))
@@ -145,17 +209,14 @@ function allot(weights: readonly number[], total: number, min: number): number[]
   return whole
 }
 
-// 带高按条数的平方根分配，小的归属也读得清。没有条数时等高（岩芯脱离数据时用）。
-// 每条带至少 min 高，否则一类很大时小的取整成 0 就消失了，要放文字的带也会挤在一起。
-// 来自对话的两类在上，和下面四类之间留 gap
 export function stackBands(counts: StrataCounts | null, height: number, gap = 0, min = 1): Band[] {
-  const weights = STACK.map((l) => (counts ? Math.sqrt(Math.max(layerTotal(counts, l), 1)) : 1))
+  const weights = STACK.map((b) => (counts ? Math.sqrt(Math.max(bandTotal(counts, b), 1)) : 1))
   const heights = allot(weights, Math.max(0, Math.floor(height - gap)), min)
   let start = 0
-  return STACK.map((layer, i) => {
-    const band = { layer, y: start + (isConversationLayer(layer) ? 0 : gap), h: heights[i]! }
-    start += band.h
-    return band
+  return STACK.map((band, i) => {
+    const item = { band, y: start + (isConversationBand(band) ? 0 : gap), h: heights[i]! }
+    start += item.h
+    return item
   })
 }
 
@@ -166,7 +227,6 @@ export interface Segment {
   w: number
 }
 
-// 带内按条数分段，0 条的不画。很小的段也留 min 的宽度，从别的段里匀出来；结果都是整数像素，合起来正好是 width
 export function segments(row: Record<Sensitivity, number>, width: number, min = 1): Segment[] {
   const present = SENSITIVITIES.filter((s) => row[s] > 0)
   if (!present.length || width <= 0) return []
@@ -207,63 +267,57 @@ export const TEXTURES = {
   lines: { lg: 'strata-lines-lg', sm: 'strata-lines-sm' },
 } as const
 
-// 权限格子下沿的虚线条：每类归属一种颜色，缺口真的留空，底下是什么就透出什么。两种大小的实虚比例一样
 export const DASHES: Record<TextureScale, { on: number; off: number }> = {
   lg: { on: 6, off: 4 },
   sm: { on: 3, off: 2 },
 }
-export const dashId = (layer: Layer, scale: TextureScale) => `strata-dash-${layer}-${scale}`
+export const dashId = (band: StrataBand, scale: TextureScale) => `strata-dash-${band}-${scale}`
 
-// 公开无纹理，内部圆点，私密斜线；机密是实心，也没有纹理
 export function textureId(sensitivity: Sensitivity, scale: TextureScale): string | null {
   if (sensitivity === 'internal') return TEXTURES.dots[scale]
   if (sensitivity === 'private') return TEXTURES.lines[scale]
   return null
 }
 
-const layerFill = (layer: Layer | null) =>
-  layer ? `var(--layer-${layer})` : 'var(--strata-neutral)'
+const bandFill = (band: StrataBand | null) =>
+  band ? `var(--layer-${band})` : 'var(--strata-neutral)'
 
-// 一块区域的画法：归属色打底，上面叠敏感级的纹理；没有归属时（图例）用中性底色
 export function paintCell(
-  layer: Layer | null,
+  band: StrataBand | null,
   sensitivity: Sensitivity,
   box: Box,
   scale: TextureScale = 'lg',
 ): PaintRect[] {
   if (sensitivity === 'secret') return [{ ...box, fill: 'var(--strata-solid)' }]
-  const rects: PaintRect[] = [{ ...box, fill: layerFill(layer) }]
+  const rects: PaintRect[] = [{ ...box, fill: bandFill(band) }]
   const texture = textureId(sensitivity, scale)
   if (texture) rects.push({ ...box, fill: `url(#${texture})` })
   return rects
 }
 
-// 小色块：机密是实心深色，左边留一条归属色，不然看不出是哪一类。没有敏感级时只画归属色
 export function paintSwatch(
-  layer: Layer | null,
+  band: StrataBand | null,
   sensitivity: Sensitivity | null,
   width: number,
   height: number,
 ): PaintRect[] {
   const box = { x: 0, y: 0, width, height }
-  if (!sensitivity) return [{ ...box, fill: layerFill(layer) }]
-  const rects = paintCell(layer, sensitivity, box, 'sm')
-  if (sensitivity === 'secret' && layer) {
-    rects.push({ ...box, width: Math.max(4, Math.round(width / 4)), fill: layerFill(layer) })
+  if (!sensitivity) return [{ ...box, fill: bandFill(band) }]
+  const rects = paintCell(band, sensitivity, box, 'sm')
+  if (sensitivity === 'secret' && band) {
+    rects.push({ ...box, width: Math.max(4, Math.round(width / 4)), fill: bandFill(band) })
   }
   return rects
 }
 
-export function swatchText(layer: Layer | null, sensitivity: Sensitivity | null): string {
-  return [layer && layerLabels[layer], sensitivity && sensitivityLabels[sensitivity]]
+export function swatchText(band: StrataBand | null, sensitivity: Sensitivity | null): string {
+  return [band && bandLabels[band], sensitivity && sensitivityLabels[sensitivity]]
     .filter(Boolean)
     .join(' ')
 }
 
 /* ———— 权限范围 ———— */
 
-// 一格的权限：怎么读（召回、按坐标、读不到）和怎么写的组合。
-// 联系人与会话的写指对话抽取能写进去，它们没有坐标、不能直接写，和普通的写是两回事，每种读法都单独一种
 export type AccessKind =
   | 'read-write'
   | 'read-extract'
@@ -279,33 +333,53 @@ export const accessKindLabels: Record<AccessKind, string> = {
   'read-write': '读写',
   'read-extract': '读取且抽取写入',
   read: '只读',
-  'explicit-write': '按坐标读取且可写',
-  'explicit-extract': '按坐标读取且抽取写入',
-  explicit: '仅按坐标读取',
+  'explicit-write': '按短 ID 读取且可写',
+  'explicit-extract': '按短 ID 读取且抽取写入',
+  explicit: '仅按短 ID 读取',
   write: '仅写入',
   extract: '仅抽取写入',
   none: '无权限',
 }
 
-// 签发弹窗的表格里格子窄，写短的；完整的说法（accessKindLabels、accessCellText）放在悬停与读屏里
 export const accessKindShortLabels: Record<AccessKind, string> = {
   'read-write': '读写',
   'read-extract': '读 · 抽取',
   read: '只读',
-  'explicit-write': '按坐标读写',
-  'explicit-extract': '按坐标读 · 抽取',
-  explicit: '按坐标读',
+  'explicit-write': '按短 ID 读写',
+  'explicit-extract': '按短 ID 读 · 抽取',
+  explicit: '按短 ID 读',
   write: '只写',
   extract: '仅抽取',
   none: '—',
 }
 
-// 一格的说明：岩芯与权限范围共用。这一类归属没有这一级（本人不设公开）时写明不适用，不说成无权限
-export function accessCellText(layer: Layer, sensitivity: Sensitivity, kind: AccessKind): string {
-  const place = `${layerLabels[layer]} ${sensitivityLabels[sensitivity]}`
-  return sensitivityAllowed(layer, sensitivity)
+export function bandSensitivityAllowed(band: StrataBand, sensitivity: Sensitivity): boolean {
+  if (band === 'episode' && sensitivity === 'secret') return false
+  return true
+}
+
+export function accessCellText(
+  band: StrataBand,
+  sensitivity: Sensitivity,
+  kind: AccessKind,
+): string {
+  const place = `${bandLabels[band]} ${sensitivityLabels[sensitivity]}`
+  return bandSensitivityAllowed(band, sensitivity)
     ? `${place}：${accessKindLabels[kind]}`
-    : `${place}：不适用，${layerLabels[layer]}不设${sensitivityLabels[sensitivity]}`
+    : `${place}：不适用，${bandLabels[band]}不设${sensitivityLabels[sensitivity]}`
+}
+
+export function kindAccessCellText(
+  entryKind: EntryKind,
+  circleKind: CircleKind,
+  sensitivity: Sensitivity,
+  kind: AccessKind,
+  label: string,
+): string {
+  const place = `${label} ${sensitivityLabels[sensitivity]}`
+  return sensitivityAllowed(circleKind, entryKind, sensitivity)
+    ? `${place}：${accessKindLabels[kind]}`
+    : `${place}：不适用，${label}不设${sensitivityLabels[sensitivity]}`
 }
 
 const ACCESS_KINDS: Record<AccessCell['read'], Record<'write' | 'extract' | 'none', AccessKind>> = {
@@ -314,15 +388,18 @@ const ACCESS_KINDS: Record<AccessCell['read'], Record<'write' | 'extract' | 'non
   none: { write: 'write', extract: 'extract', none: 'none' },
 }
 
-export function accessKind(layer: Layer, cell: AccessCell): AccessKind {
-  const writing = !cell.write ? 'none' : isConversationLayer(layer) ? 'extract' : 'write'
+export function accessKind(band: StrataBand, cell: AccessCell): AccessKind {
+  const writing = !cell.write ? 'none' : isConversationBand(band) ? 'extract' : 'write'
   return ACCESS_KINDS[cell.read][writing]
 }
 
-// 这一格的满色。归属色本身明度差得多，权限格子用单独的一组（见 main.css 的 --access-*），淡的归属也拉得开
-export const accessFill = (layer: Layer) => `var(--access-${layer})`
+export function kindAccessKind(entryKind: EntryKind, cell: AccessCell): AccessKind {
+  const writing = !cell.write ? 'none' : isConversationKind(entryKind) ? 'extract' : 'write'
+  return ACCESS_KINDS[cell.read][writing]
+}
 
-// 下沿的条占格子多高。矩阵、图例、岩芯都按这个比例，小格子至少 2px，也不能比格子高，否则画到相邻的带上
+export const accessFill = (band: StrataBand) => `var(--access-${band})`
+
 const ACCESS_BAR_RATIO = 0.2
 export const ACCESS_BAR_PERCENT = { y: '80%', height: '20%' }
 export function accessBar(y: number, height: number): { y: number; height: number } {
@@ -330,28 +407,23 @@ export function accessBar(y: number, height: number): { y: number; height: numbe
   return { y: y + height - bar, height: bar }
 }
 
-// 格子里下沿的条上面那一段。矩阵按百分比画，从格子顶上量；岩芯按像素画
 function aboveBar(box: Box, bar: { y: number | string }): Box {
   const height = typeof bar.y === 'number' && typeof box.y === 'number' ? bar.y - box.y : bar.y
   return { ...box, height }
 }
 
-// 同一套编码表示权限，岩芯上没有文字，每种都要一眼能分开。
-// 底色说怎么读：满色能读能写，淡色读得到但不能直接写，实心只能按坐标读取，空白读不到。
-// 下沿的条说怎么写：满色的条能写，虚线的条只能靠抽取写入。读写已经是满色，不再加条
 export function paintAccess(
-  layer: Layer,
+  band: StrataBand,
   sensitivity: Sensitivity,
   kind: AccessKind,
   box: Box,
   bar: { y: number | string; height: number | string },
   scale: TextureScale = 'lg',
 ): PaintRect[] {
-  const full = accessFill(layer)
+  const full = accessFill(band)
   const solid = { ...box, fill: 'var(--strata-explicit)' }
   const writeBar = { ...box, ...bar, fill: full }
-  const extractBar = { ...box, ...bar, fill: `url(#${dashId(layer, scale)})` }
-  // 下沿有条时，纹理只铺到条上面，虚线的缺口里露出的是底色，不是一半的圆点
+  const extractBar = { ...box, ...bar, fill: `url(#${dashId(band, scale)})` }
   const recall = (strong: boolean, textureBox: Box = box) => {
     const tint = `color-mix(in srgb, ${full} var(--strata-tint), var(--ui-bg))`
     const rects: PaintRect[] = [{ ...box, fill: strong ? full : tint }]
@@ -382,16 +454,53 @@ export function paintAccess(
   }
 }
 
-// Key 的签发范围换算成格子，只看归属和敏感级；机密只能按坐标读取，要上限到机密，本人不设公开（sensitivityAllowed）。
-// 这不是实际权限：人格、应用和会话上下文的规则都没算（没有人格的应用写不了人格的记忆，这里仍画成可写），
-// 实际碰得到哪些格子看权限范围矩阵，由服务端的 accessMatrix 给
-export function issuedScopeRows(scopes: KeyScopes): AccessRow[] {
+const READ_RANK: Record<AccessCell['read'], number> = { none: 0, explicit: 1, recall: 2 }
+
+function mergeCells(
+  a: CircleAccessMatrix['rows'][number]['cells'],
+  b: CircleAccessMatrix['rows'][number]['cells'],
+): CircleAccessMatrix['rows'][number]['cells'] {
+  return SENSITIVITIES.map((sensitivity) => {
+    const ca = a.find((c) => c.sensitivity === sensitivity)
+    const cb = b.find((c) => c.sensitivity === sensitivity)
+    if (!ca) return cb ?? { sensitivity, read: 'none' as const, write: false }
+    if (!cb) return ca
+    return {
+      sensitivity,
+      read: READ_RANK[ca.read] >= READ_RANK[cb.read] ? ca.read : cb.read,
+      write: ca.write || cb.write,
+    }
+  })
+}
+
+const emptyBandCells = (): CircleAccessMatrix['rows'][number]['cells'] =>
+  SENSITIVITIES.map((sensitivity) => ({ sensitivity, read: 'none' as const, write: false }))
+
+export function matrixToBandRows(circles: readonly CircleAccessMatrix[]): BandAccessRow[] {
+  const buckets = new Map<StrataBand, CircleAccessMatrix['rows'][number]['cells']>()
+  const put = (band: StrataBand, cells: CircleAccessMatrix['rows'][number]['cells']) => {
+    const prev = buckets.get(band)
+    buckets.set(band, prev ? mergeCells(prev, cells) : cells)
+  }
+  for (const circle of circles) {
+    for (const row of circle.rows) {
+      put(kindBandForCircle(row.kind, circle), row.cells)
+    }
+  }
+  return STACK.map((band) => ({ band, cells: buckets.get(band) ?? emptyBandCells() }))
+}
+
+export function issuedScopeRows(
+  scopes: LensKeyScopes,
+  circleKind: CircleKind = 'shared',
+): KindAccessRow[] {
   const limit = SENSITIVITIES.indexOf(scopes.maxSensitivity)
-  return LAYERS.map((layer) => ({
-    layer,
+  const order: readonly EntryKind[] = ['episode', 'fact', 'entry']
+  return order.map((kind) => ({
+    kind,
     cells: SENSITIVITIES.map((sensitivity, rank) => {
-      const reachable = rank <= limit && sensitivityAllowed(layer, sensitivity)
-      const readable = reachable && scopes.readLayers.includes(layer)
+      const reachable = rank <= limit && sensitivityAllowed(circleKind, kind, sensitivity)
+      const readable = reachable && scopes.readKinds.includes(kind)
       return {
         sensitivity,
         read: !readable
@@ -399,14 +508,78 @@ export function issuedScopeRows(scopes: KeyScopes): AccessRow[] {
           : sensitivity === 'secret'
             ? ('explicit' as const)
             : ('recall' as const),
-        write: reachable && scopes.writeLayers.includes(layer),
+        write: reachable && scopes.writeKinds.includes(kind),
       }
     }),
   }))
 }
 
-// 这份权限碰得到的最高敏感级（下标），一格都碰不到时是 -1。矩阵在这里画一条边界线
-export function deepestColumn(rows: readonly AccessRow[]): number {
+export function issuedBandRows(
+  scopes: LensKeyScopes,
+  options: {
+    primaryKind?: CircleKind
+    linkedKinds?: readonly CircleKind[]
+    hasPersona?: boolean
+  } = {},
+): BandAccessRow[] {
+  const primaryKind = options.primaryKind ?? 'shared'
+  const limit = SENSITIVITIES.indexOf(scopes.maxSensitivity)
+  const cellsFor = (kind: EntryKind, circleKind: CircleKind, writeAllowed: boolean) =>
+    SENSITIVITIES.map((sensitivity, rank) => {
+      const reachable = rank <= limit && sensitivityAllowed(circleKind, kind, sensitivity)
+      const readable = reachable && scopes.readKinds.includes(kind)
+      return {
+        sensitivity,
+        read: !readable
+          ? ('none' as const)
+          : sensitivity === 'secret'
+            ? ('explicit' as const)
+            : ('recall' as const),
+        write: writeAllowed && reachable && scopes.writeKinds.includes(kind),
+      }
+    })
+  const hasPersonalAway = (options.linkedKinds ?? []).includes('personal')
+  const hasSharedAway = (options.linkedKinds ?? []).includes('shared')
+  return STACK.map((band) => {
+    switch (band) {
+      case 'episode':
+        return { band, cells: cellsFor('episode', primaryKind, true) }
+      case 'fact':
+        return { band, cells: cellsFor('fact', primaryKind, true) }
+      case 'personal':
+        return {
+          band,
+          cells: hasPersonalAway ? cellsFor('entry', 'personal', false) : emptyBandCells(),
+        }
+      case 'shared-away':
+        return {
+          band,
+          cells: hasSharedAway ? cellsFor('entry', 'shared', false) : emptyBandCells(),
+        }
+      case 'persona':
+        return {
+          band,
+          cells:
+            options.hasPersona || scopes.admin
+              ? SENSITIVITIES.map((sensitivity, rank) => ({
+                  sensitivity,
+                  read:
+                    rank <= limit && sensitivity !== 'secret'
+                      ? ('recall' as const)
+                      : ('none' as const),
+                  write: scopes.admin && rank <= limit && sensitivity !== 'secret',
+                }))
+              : emptyBandCells(),
+        }
+      case 'primary':
+        return { band, cells: cellsFor('entry', primaryKind, true) }
+    }
+  })
+}
+
+export function deepestColumn(
+  rows: readonly { cells: readonly { read: AccessCell['read']; write: boolean }[] }[],
+): number {
   let deepest = -1
   for (const row of rows) {
     row.cells.forEach((cell, i) => {
@@ -416,7 +589,6 @@ export function deepestColumn(rows: readonly AccessRow[]): number {
   return deepest
 }
 
-// 这份权限里出现了哪几种，图例只列这些。读写、只读、无权限一直列着：看的人要知道还有别的情况
 const LEGEND_ORDER: AccessKind[] = [
   'read-write',
   'read-extract',
@@ -428,20 +600,37 @@ const LEGEND_ORDER: AccessKind[] = [
   'extract',
   'none',
 ]
-export function presentKinds(rows: readonly AccessRow[]): AccessKind[] {
+
+export function presentKinds(
+  circles: readonly CircleAccessMatrix[] | readonly BandAccessRow[],
+): AccessKind[] {
   const present = new Set<AccessKind>(['read-write', 'read', 'none'])
-  for (const row of rows) for (const cell of row.cells) present.add(accessKind(row.layer, cell))
+  if (!circles.length) return LEGEND_ORDER.filter((k) => present.has(k))
+  if ('rows' in circles[0]!) {
+    for (const circle of circles as readonly CircleAccessMatrix[]) {
+      for (const row of circle.rows) {
+        for (const cell of row.cells) present.add(kindAccessKind(row.kind, cell))
+      }
+    }
+  } else {
+    for (const row of circles as readonly BandAccessRow[]) {
+      for (const cell of row.cells) present.add(accessKind(row.band, cell))
+    }
+  }
   return LEGEND_ORDER.filter((kind) => present.has(kind))
 }
 
-// 接口不保证顺序，统一成地层柱的顺序
-export function orderRows(rows: readonly AccessRow[]): AccessRow[] {
-  return STACK.flatMap((layer) => rows.filter((row) => row.layer === layer))
+export function orderRows(rows: readonly BandAccessRow[]): BandAccessRow[] {
+  return STACK.flatMap((band) => rows.filter((row) => row.band === band))
 }
 
-// 岩芯每一格的位置：纵向和地层柱同一套带，横向四列是四个敏感级
+const KIND_ORDER: readonly EntryKind[] = ['episode', 'fact', 'entry']
+export function orderKindRows(rows: readonly KindAccessRow[]): KindAccessRow[] {
+  return KIND_ORDER.flatMap((kind) => rows.filter((row) => row.kind === kind))
+}
+
 export interface CoreCell extends Box {
-  layer: Layer
+  band: StrataBand
   sensitivity: Sensitivity
   kind: AccessKind
   barY: number
@@ -449,28 +638,27 @@ export interface CoreCell extends Box {
 }
 
 export function coreCells(
-  rows: readonly AccessRow[],
+  rows: readonly BandAccessRow[],
   width: number,
   height: number,
   counts: StrataCounts | null = null,
   gap = 3,
-  // 带之间的分隔线占 1px，下沿的条至少 2px，再留出看得见底色的地方
   minBand = 6,
 ): { bands: Band[]; columns: number[]; cells: CoreCell[] } {
   const bands = stackBands(counts, height, gap, minBand)
   const columns = [0, 1, 2, 3, 4].map((i) => Math.round((i / 4) * width))
   const cells: CoreCell[] = []
   for (const band of bands) {
-    const row = rows.find((r) => r.layer === band.layer)
+    const row = rows.find((r) => r.band === band.band)
     if (!row) continue
     SENSITIVITIES.forEach((sensitivity, i) => {
       const cell = row.cells.find((c) => c.sensitivity === sensitivity)
       if (!cell) return
       const bar = accessBar(band.y, band.h)
       cells.push({
-        layer: band.layer,
+        band: band.band,
         sensitivity,
-        kind: accessKind(band.layer, cell),
+        kind: accessKind(band.band, cell),
         x: columns[i]!,
         y: band.y,
         width: columns[i + 1]! - columns[i]!,
@@ -483,8 +671,6 @@ export function coreCells(
   return { bands, columns, cells }
 }
 
-// 岩芯读出来是什么：传了服务端算的 rows 才是权限范围，只传签发范围时说清是签发范围（不是实际权限，
-// 见 issuedScopeRows），什么都没有时不能读成没有权限。label 说这是谁的
 export function coreName({
   label,
   rows,
@@ -492,8 +678,8 @@ export function coreName({
   revoked,
 }: {
   label?: string | undefined
-  rows?: readonly AccessRow[] | null
-  scopes?: KeyScopes | null
+  rows?: readonly BandAccessRow[] | null
+  scopes?: LensKeyScopes | null
   revoked?: boolean
 }): string {
   if (revoked) return label ? `${label}，已吊销，没有权限` : '已吊销，没有权限'
@@ -502,13 +688,12 @@ export function coreName({
   return label ? `${label}，暂无权限数据` : '暂无权限数据'
 }
 
-// 岩芯上标出一条记忆的位置：落在空白处就是这个 Key 碰不到。不知道敏感级时标整条带
 export function coreMark(
   model: { bands: readonly Band[]; columns: readonly number[] },
-  layer: Layer,
+  bandKey: StrataBand,
   sensitivity: Sensitivity | null,
 ): Box | null {
-  const band = model.bands.find((b) => b.layer === layer)
+  const band = model.bands.find((b) => b.band === bandKey)
   if (!band) return null
   const column = sensitivity ? SENSITIVITIES.indexOf(sensitivity) : 0
   const left = model.columns[column]!

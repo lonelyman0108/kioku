@@ -20,7 +20,6 @@ import BenchNotice from './BenchNotice.vue'
 import BenchRawText from './BenchRawText.vue'
 import BenchStatus from './BenchStatus.vue'
 import BenchTag from './BenchTag.vue'
-import UriPath from './strata/UriPath.vue'
 
 // 一步的结果：调用台、场景、模型对话共用。原文一律经 BenchRawText 原样显示。
 // number 是一串步骤里的第几步，和明文提示、重放分叉说的第几步对得上
@@ -97,10 +96,12 @@ const emptyText = computed(() =>
 
       <BenchRawText v-if="responded" title="收到的原文" :text="step.text || emptyText" open />
 
-      <section v-if="step.uris?.length">
-        <h4>结果中的 URI（{{ step.uris.length }}）</h4>
+      <section v-if="step.shortIds?.length">
+        <h4>结果中的短 ID（{{ step.shortIds.length }}）</h4>
         <ul class="uris">
-          <li v-for="uri in step.uris" :key="uri"><UriPath :uri="uri" wrap /></li>
+          <li v-for="shortId in step.shortIds" :key="shortId">
+            <code>{{ shortId }}</code>
+          </li>
         </ul>
       </section>
 

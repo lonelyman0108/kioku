@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import { SPACE_EXPORT_PASSPHRASE_MIN } from '@kioku/contracts'
+import { CIRCLE_EXPORT_PASSPHRASE_MIN } from '@kioku/contracts'
 import { computed, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
@@ -12,7 +12,7 @@ import TransferEntryRow from './TransferEntryRow.vue'
 import NoteLine from './strata/NoteLine.vue'
 import SettingsBlock from './strata/SettingsBlock.vue'
 
-const props = defineProps<{ spaceId: string; spaceName: string; editable: boolean }>()
+const props = defineProps<{ circleId: string; circleName: string; editable: boolean }>()
 
 const toast = useToast()
 const open = ref(false)
@@ -20,9 +20,9 @@ const passphrase = ref('')
 const confirm = ref('')
 const exporting = ref(false)
 
-// 换了空间或关掉弹窗时清掉口令：口令只属于这一次导出
+// 换了记忆圈或关掉弹窗时清掉口令：口令只属于这一次导出
 watch(
-  () => props.spaceId,
+  () => props.circleId,
   () => {
     open.value = false
     passphrase.value = ''
@@ -38,8 +38,8 @@ watch(open, (opened) => {
 
 const problem = computed(() => {
   if (!passphrase.value) return null
-  if (passphrase.value.length < SPACE_EXPORT_PASSPHRASE_MIN) {
-    return `口令至少 ${SPACE_EXPORT_PASSPHRASE_MIN} 位`
+  if (passphrase.value.length < CIRCLE_EXPORT_PASSPHRASE_MIN) {
+    return `口令至少 ${CIRCLE_EXPORT_PASSPHRASE_MIN} 位`
   }
   if (confirm.value && confirm.value !== passphrase.value) return '两次输入的口令不一致'
   return null
@@ -48,19 +48,19 @@ const ready = computed(
   () =>
     props.editable &&
     !exporting.value &&
-    passphrase.value.length >= SPACE_EXPORT_PASSPHRASE_MIN &&
+    passphrase.value.length >= CIRCLE_EXPORT_PASSPHRASE_MIN &&
     confirm.value === passphrase.value,
 )
 
-async function exportSpace() {
+async function exportCircle() {
   if (!ready.value) return
   exporting.value = true
-  const forSpace = props.spaceId
-  const fallback = `${props.spaceName || 'space'}.kioku-space`
+  const target = props.circleId
+  const fallback = `${props.circleName || 'circle'}.kioku-circle`
   try {
-    const { blob, filename } = await api.exportSpace(forSpace, passphrase.value)
+    const { blob, filename } = await api.exportCircle(target, passphrase.value)
     saveFile(blob, filename ?? fallback)
-    if (forSpace === props.spaceId) {
+    if (target === props.circleId) {
       passphrase.value = ''
       confirm.value = ''
       open.value = false
@@ -81,39 +81,44 @@ async function exportSpace() {
 <template>
   <SettingsBlock title="导出">
     <template #note>
-      将当前空间导出为口令加密的文件，含机密记忆与托管的凭据值。可在下方「导入空间」将它导入为新空间，其他实例或当前实例均可。
+      将当前记忆圈导出为口令加密的文件，含机密词条与托管的凭据值。可在下方「导入记忆圈」导入。
       <Hint>
         <p>
-          包含共享的记忆、人格、应用配置与联系人，以及当前账号的本人记忆（含是否允许整理的设置）、凭据与密码库连接。机密记忆与托管的凭据值一并加密导出；密码库连接不含令牌与密钥，导入后需重新登录。
+          包含记忆圈内的词条与变体切片、切面词表、独立人格、接入实例配置、联系人，以及当前账号在本圈的凭据与密码库连接。机密词条与托管凭据值一并加密导出；密码库连接不含令牌与密钥，导入后需重新登录。
         </p>
         <p class="mt-1">
-          已过期的记忆与已被取代的事实也会导出，有效期不变，导入后可恢复生效（已被取代的事实不再保留取代它的记录）。已删除的内容不导出。
+          已过期的词条与已被取代的事实也会导出，有效期不变，导入后可恢复生效。已删除的内容不导出。
         </p>
         <p class="mt-1">
-          不包含其他成员的本人记忆、会话、召回记录、对话缓冲、抽取记录、历史、向量与访问密钥。导入后需为应用重新签发访问密钥，向量按目标实例的设置重新生成。
+          不包含会话、召回记录、对话缓冲、抽取记录、历史、向量与访问密钥。导入后需为接入实例重新签发访问密钥，向量按目标实例设置重新生成。
         </p>
       </Hint>
     </template>
-    <p v-if="!editable" class="text-muted">仅空间所有者可导出</p>
+    <p v-if="!editable" class="text-muted">仅记忆圈所有者可导出</p>
     <TransferEntryRow
       v-else
-      :icon="icons.exportSpace"
-      title="加密导出文件（.kioku-space）"
-      description="打包共享记忆、人格、应用、联系人与本人记忆及凭据；在弹窗中设置文件口令后下载。"
+      :icon="icons.exportCircle"
+      title="加密导出文件（.kioku-circle）"
+      description="打包词条、切面词表、人格、接入实例、联系人及当前账号的凭据；在弹窗中设置文件口令后下载。"
     >
       <template #action>
-        <UButton color="neutral" variant="outline" :icon="icons.exportSpace" @click="open = true">
-          导出空间
+        <UButton color="neutral" variant="outline" :icon="icons.exportCircle" @click="open = true">
+          导出记忆圈
         </UButton>
       </template>
     </TransferEntryRow>
 
-    <UModal v-model:open="open" title="导出当前空间" :dismissible="!exporting" :close="!exporting">
+    <UModal
+      v-model:open="open"
+      title="导出当前记忆圈"
+      :dismissible="!exporting"
+      :close="!exporting"
+    >
       <template #body>
-        <form class="space-y-4" @submit.prevent="exportSpace">
+        <form class="space-y-4" @submit.prevent="exportCircle">
           <UFormField
             label="口令"
-            :help="`至少 ${SPACE_EXPORT_PASSPHRASE_MIN} 位，导入时需要输入；Kioku 不保存口令，丢失后无法打开文件。`"
+            :help="`至少 ${CIRCLE_EXPORT_PASSPHRASE_MIN} 位，导入时需要输入；Kioku 不保存口令，丢失后无法打开文件。`"
           >
             <UInput
               v-model="passphrase"

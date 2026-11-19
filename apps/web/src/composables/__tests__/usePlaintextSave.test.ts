@@ -48,9 +48,10 @@ function requestOf(over: Partial<PlaintextSaveRequest> = {}): PlaintextSaveReque
   const content = over.content ?? CONTENT
   return {
     content,
-    uri: 'user://infra/nas',
+    shortId: 'm-234567',
     title: '家里的 NAS',
-    layer: 'user',
+    circleKind: 'personal',
+    kind: 'entry',
     sensitivity: 'private',
     spots: addedSpots(null, content),
     rejected: false,
@@ -76,17 +77,16 @@ async function start(
   const request = ref<PlaintextSaveRequest | null>(requestOf(over))
   const save = vueApp.runWithContext(() =>
     scope.run(() =>
-      usePlaintextSave(ref('s1'), request, ref(canConvert), ref(canSaveAnyway), proceeded),
+      usePlaintextSave(ref('c1'), request, ref(canConvert), ref(canSaveAnyway), proceeded),
     )!,
   )
   await settle()
   return { save, request }
 }
 
-// 按值给匹配结果：hunter22 对上已有凭据，别的看 others
 function matchBy(others: Record<string, unknown> = {}) {
   fakes.api.matchCredentialValues.mockImplementation(
-    async (_sid: string, body: { values: string[] }) => ({
+    async (_cid: string, body: { values: string[] }) => ({
       items: body.values.map((v) =>
         v === 'hunter22' ? { credentials: [credential], vaultItems: [] } : (others[v] ?? NONE),
       ),
@@ -100,17 +100,16 @@ const created = (over: Partial<ConsoleCredential>) =>
   ({ id: 'x', identifier: 'x', name: 'x', fields: [], ...over }) as unknown as ConsoleCredential
 
 beforeEach(() => {
-  // 新建凭据的去处：默认没设，由 Kioku 托管
   fakes.api.vaultConnections.mockReset().mockResolvedValue({ items: [] })
   fakes.api.vaultItems.mockReset()
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   fakes.api.credentials.mockReset().mockResolvedValue({
-    items: [{ identifier: 'infra-nas' }],
+    items: [{ identifier: 'nas' }],
     truncated: false,
   })
   fakes.api.createCredential
     .mockReset()
-    .mockImplementation(async (_sid: string, body: { identifier: string }) =>
+    .mockImplementation(async (_cid: string, body: { identifier: string }) =>
       created({ identifier: body.identifier, storedIn: { kind: 'hosted', bench: false } } as never),
     )
   matchBy()
@@ -128,21 +127,17 @@ describe('打开时', () => {
       ['hunter22', [1], 'convert'],
       ['abcd1234', [2], null],
     ])
-    expect(fakes.api.matchCredentialValues).toHaveBeenCalledWith('s1', {
+    expect(fakes.api.matchCredentialValues).toHaveBeenCalledWith('c1', {
       values: ['hunter22', 'abcd1234'],
     })
-    // 读不到值的托管凭据没比，和不可用的连接一样要说
     expect(save.unreadableCredentials.value).toBe(3)
     expect(save.problem.value).toBe('请选择转存为凭据或不是凭据')
     expect(save.ready.value).toBe(false)
   })
 
-  it('新建托管凭据的标识按坐标建议，避开已有的与这次别处建议过的', async () => {
+  it('新建托管凭据的标识按标题与短 ID 建议，避开已有的与这次别处建议过的', async () => {
     const { save } = await start()
-    expect(save.rows.value.map((r) => r.fresh.identifier)).toEqual([
-      'infra-nas-password',
-      'infra-nas-token',
-    ])
+    expect(save.rows.value.map((r) => r.fresh.identifier)).toEqual(['nas-password', 'nas-token'])
     expect(save.rows.value[0]!.fresh.name).toBe('家里的 NAS')
   })
 
@@ -163,7 +158,7 @@ describe('打开时', () => {
     const { save } = await start({}, false, false)
     expect(fakes.api.matchCredentialValues).not.toHaveBeenCalled()
     for (const row of save.rows.value) {
-      expect(save.convertBlocker(row)).toBe('仅空间所有者可转存为凭据')
+      expect(save.convertBlocker(row)).toBe('仅记忆圈所有者可转存为凭据')
       expect(row.choice).toBeNull()
     }
     save.rows.value.forEach((r) => (r.choice = 'ignore'))
@@ -182,32 +177,32 @@ describe('打开时', () => {
   })
 
   it('占位符放不进保存之后的记忆时不能转存，也不查', async () => {
-    const { save } = await start({ layer: 'core', sensitivity: 'internal' })
+    const { save } = await start({ circleKind: 'shared', sensitivity: 'internal' })
     expect(fakes.api.matchCredentialValues).not.toHaveBeenCalled()
-    expect(save.convertBlocker(save.rows.value[0]!)).toContain('凭据占位符只能放在本人')
+    expect(save.convertBlocker(save.rows.value[0]!)).toContain('凭据占位符只能放在个人圈')
   })
 
   it('太短的值不能转存，也不拿去查', async () => {
     const { save } = await start({ content: '密码：abc\n密码：hunter22' })
-    expect(fakes.api.matchCredentialValues).toHaveBeenCalledWith('s1', { values: ['hunter22'] })
+    expect(fakes.api.matchCredentialValues).toHaveBeenCalledWith('c1', { values: ['hunter22'] })
     expect(save.convertBlocker(save.rows.value[0]!)).toContain('至少 4 个字符')
   })
 })
 
 describe('保存', () => {
   it('全部转存：先建好凭据，再换掉正文里的值（占位符里的不换），不带标记', async () => {
-    fakes.api.createCredential.mockImplementation(async (_sid, body) =>
+    fakes.api.createCredential.mockImplementation(async (_cid, body) =>
       created({ identifier: body.identifier }),
     )
     const { save } = await start()
     const token = save.rows.value[1]!
     token.choice = 'convert'
     await nextTick()
-    expect(save.placeholderFor(token)).toBe('{{cred:infra-nas-token#token}}')
+    expect(save.placeholderFor(token)).toBe('{{cred:nas-token#token}}')
     await save.proceed()
     expect(fakes.api.createCredential).toHaveBeenCalledTimes(1)
-    expect(fakes.api.createCredential).toHaveBeenCalledWith('s1', {
-      identifier: 'infra-nas-token',
+    expect(fakes.api.createCredential).toHaveBeenCalledWith('c1', {
+      identifier: 'nas-token',
       name: '家里的 NAS',
       source: { kind: 'new', values: { token: 'abcd1234' } },
     })
@@ -215,7 +210,7 @@ describe('保存', () => {
       expect.objectContaining({
         source: CONTENT,
         content:
-          '密码：{{cred:router#password}}\ntoken={{cred:infra-nas-token#token}}\n备用 {{cred:router#password}}，{{cred:hunter22#password}}',
+          '密码：{{cred:router#password}}\ntoken={{cred:nas-token#token}}\n备用 {{cred:router#password}}，{{cred:hunter22#password}}',
         flags: {},
       }),
     )
@@ -237,7 +232,7 @@ describe('保存', () => {
   })
 
   it('新建的凭据带上网址与到期时间，记下写到了哪里，待处理的条数失效', async () => {
-    fakes.api.createCredential.mockImplementation(async (_sid, body) =>
+    fakes.api.createCredential.mockImplementation(async (_cid, body) =>
       created({
         identifier: body.identifier,
         storedIn: { kind: 'vault', collectionName: 'Agent' },
@@ -255,16 +250,16 @@ describe('保存', () => {
     await nextTick()
     expect(save.rowProblem(token)).toBeNull()
     await save.proceed()
-    expect(fakes.api.createCredential).toHaveBeenCalledWith('s1', {
-      identifier: 'infra-nas-token',
+    expect(fakes.api.createCredential).toHaveBeenCalledWith('c1', {
+      identifier: 'nas-token',
       name: '家里的 NAS',
       source: { kind: 'new', values: { token: 'abcd1234' }, url: 'https://nas.example.com' },
       expiresAt: new Date('2026-12-01T08:00').toISOString(),
     })
     expect(save.stored.value).toEqual([
-      { identifier: 'infra-nas-token', storedIn: { kind: 'vault', collectionName: 'Agent' } },
+      { identifier: 'nas-token', storedIn: { kind: 'vault', collectionName: 'Agent' } },
     ])
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['inbox-counts', 's1'] })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['inbox-counts', 'c1'] })
   })
 
   it('去处读取失败时新建的那一处不能保存；转存成已有凭据的不受影响', async () => {
@@ -331,7 +326,7 @@ describe('保存', () => {
     matchBy({ abcd1234: { credentials: [], vaultItems: [item] } })
     fakes.api.createCredential.mockResolvedValue(
       created({
-        identifier: 'nas',
+        identifier: 'nas-vault',
         fields: [
           { name: 'username', itemField: 'login.username' },
           { name: 'password', itemField: 'login.password' },
@@ -343,22 +338,22 @@ describe('保存', () => {
     token.choice = 'convert'
     await nextTick()
     expect(save.selectedOf(token).kind).toBe('vault')
-    expect(save.vaultIdentifiers[itemKey(item)]).toBe('nas')
-    expect(save.placeholderFor(token)).toBe('{{cred:nas#password}}')
+    expect(save.vaultIdentifiers[itemKey(item)]).toBe('nas-2')
+    expect(save.placeholderFor(token)).toBe('{{cred:nas-2#password}}')
     await save.proceed()
-    expect(fakes.api.createCredential).toHaveBeenCalledWith('s1', {
-      identifier: 'nas',
+    expect(fakes.api.createCredential).toHaveBeenCalledWith('c1', {
+      identifier: 'nas-2',
       name: 'NAS',
       source: { kind: 'vault', connectionId: item.connectionId, itemId: 'item-1' },
     })
-    expect(proceeded.mock.calls[0]![0].content).toContain('token={{cred:nas#password}}')
+    expect(proceeded.mock.calls[0]![0].content).toContain('token={{cred:nas-vault#password}}')
   })
 
   it('中途失败：建好的留着，再点不重建；错误照服务端的文字', async () => {
     const { save } = await start({ content: 'token=abcd1234\n密码：qwerty99' })
     save.rows.value.forEach((r) => (r.choice = 'convert'))
     fakes.api.createCredential
-      .mockResolvedValueOnce(created({ identifier: 'infra-nas-token' }))
+      .mockResolvedValueOnce(created({ identifier: 'nas-token' }))
       .mockRejectedValueOnce(new ApiError(409, '标识已被占用或不可用'))
     await save.proceed()
     expect(save.failure.value).toBe('标识已被占用或不可用')
@@ -369,7 +364,7 @@ describe('保存', () => {
     await save.proceed()
     expect(fakes.api.createCredential).toHaveBeenCalledTimes(3)
     expect(proceeded.mock.calls[0]![0].content).toBe(
-      'token={{cred:infra-nas-token#token}}\n密码：{{cred:other#password}}',
+      'token={{cred:nas-token#token}}\n密码：{{cred:other#password}}',
     )
   })
 
@@ -378,7 +373,7 @@ describe('保存', () => {
     const [a, b] = save.rows.value
     a!.choice = 'convert'
     b!.choice = 'convert'
-    a!.fresh.identifier = 'infra-nas'
+    a!.fresh.identifier = 'nas'
     await nextTick()
     expect(save.problem.value).toBe('标识已被占用')
     a!.fresh.identifier = 'same'
@@ -414,7 +409,7 @@ describe('给条目起标识', () => {
     const { save } = await start()
     const token = save.rows.value[1]!
     token.choice = 'convert'
-    save.vaultIdentifiers[itemKey(item)] = 'nas'
+    save.vaultIdentifiers[itemKey(item)] = 'nas-2'
     await save.proceed()
     const name = fakes.api.createCredential.mock.calls[0]![1].name as string
     expect(name).toBe('名'.repeat(99))
@@ -443,7 +438,7 @@ describe('再开一次的弹窗', () => {
     save.rows.value[0]!.choice = 'convert'
     await save.proceed()
     expect(proceeded.mock.calls[0]![0]).toMatchObject({
-      content: '密码：{{cred:infra-nas-password#password}}',
+      content: '密码：{{cred:nas-password#password}}',
       flags: { ignorePlaintext: true },
       ignored: ['abcd1234'],
     })

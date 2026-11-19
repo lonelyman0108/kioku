@@ -1,12 +1,20 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import { ACCESS_CONTEXTS, type AccessContext, type AppConfig, type AppInfo } from '@kioku/contracts'
+import {
+  ACCESS_CONTEXTS,
+  PERSON_MEMORY_MODES,
+  type AccessContext,
+  type ClientConfig,
+  type ClientInfo,
+} from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import { forgetClient, refreshClientCaches } from '../appQueries'
+import { lastUsedAt, usableKeys } from '../apps'
 import AppAdvancedSettings from '../components/AppAdvancedSettings.vue'
 import AppGroupPersonas from '../components/AppGroupPersonas.vue'
 import AppKeys from '../components/AppKeys.vue'
@@ -15,71 +23,68 @@ import AppSimulator from '../components/AppSimulator.vue'
 import Hint from '../components/Hint.vue'
 import KeyMatrix from '../components/KeyMatrix.vue'
 import RuntimeLabel from '../components/RuntimeLabel.vue'
+import SegmentedChoice from '../components/SegmentedChoice.vue'
 import NoteLine from '../components/strata/NoteLine.vue'
 import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import SectionHeading from '../components/strata/SectionHeading.vue'
-import { forgetApp, refreshAppCaches } from '../appQueries'
-import { lastUsedAt } from '../apps'
-import { usableKeys } from '../benchSession'
 import { useSession } from '../composables/useSession'
+import { personMemoryModeLabels } from '../labels'
 import { failedReads } from '../query'
-import { memoryNodeRoute } from '../routes'
 import { formatRelative, formatTime } from '../time'
 
 const route = useRoute()
 const router = useRouter()
 const toast = useToast()
 const queryClient = useQueryClient()
-const { me, space } = useSession()
-const spaceId = computed(() => String(route.params.spaceId))
-const appId = computed(() => String(route.params.appId))
-const role = computed(() => space.value?.role ?? 'viewer')
-const isSpaceOwner = computed(() => role.value === 'owner')
+const { me, circle } = useSession()
+const circleId = computed(() => String(route.params.circleId))
+const clientId = computed(() => String(route.params.clientId))
+const role = computed(() => circle.value?.role ?? 'viewer')
+const isCircleOwner = computed(() => role.value === 'owner')
 
-const apps = useQuery({
-  queryKey: computed(() => ['apps', spaceId.value]),
-  queryFn: () => api.apps(spaceId.value),
+const clients = useQuery({
+  queryKey: computed(() => ['clients', circleId.value] as const),
+  queryFn: () => api.clients(circleId.value),
 })
 const personas = useQuery({
-  queryKey: computed(() => ['personas', spaceId.value]),
-  queryFn: () => api.personas(spaceId.value),
+  queryKey: computed(() => ['personas', circleId.value] as const),
+  queryFn: () => api.personas(circleId.value),
 })
 const members = useQuery({
-  queryKey: computed(() => ['members', spaceId.value]),
-  queryFn: () => api.members(spaceId.value),
+  queryKey: computed(() => ['members', circleId.value] as const),
+  queryFn: () => api.members(circleId.value),
 })
-const app = computed(() => apps.data.value?.find((a) => a.id === appId.value) ?? null)
-const isAppOwner = computed(() => app.value?.ownerAccountId === me.data.value?.id)
-// 应用的设置与 Key 只有应用主人能管，而且主人在空间里还得是 owner 或 editor（被降为 viewer 后就不能改了）
-const canManage = computed(() => isAppOwner.value && role.value !== 'viewer')
-const canDelete = computed(() => canManage.value || isSpaceOwner.value)
+const facets = useQuery({
+  queryKey: computed(() => ['facets', circleId.value] as const),
+  queryFn: () => api.facets(circleId.value),
+})
+
+const client = computed(() => clients.data.value?.find((a) => a.id === clientId.value) ?? null)
+const isClientOwner = computed(() => client.value?.ownerAccountId === me.data.value?.id)
+const canManage = computed(() => isClientOwner.value && role.value !== 'viewer')
+const canDelete = computed(() => canManage.value || isCircleOwner.value)
 const ownerName = computed(
-  () => members.data.value?.find((m) => m.accountId === app.value?.ownerAccountId)?.displayName,
+  () => members.data.value?.find((m) => m.accountId === client.value?.ownerAccountId)?.displayName,
 )
 const personaName = computed(
-  () => personas.data.value?.find((p) => p.id === app.value?.defaultPersonaId)?.name,
+  () => personas.data.value?.find((p) => p.id === client.value?.defaultPersonaId)?.name,
 )
 const personaItems = computed(() => [
   { label: '不使用人格', value: null },
   ...(personas.data.value ?? []).map((p) => ({ label: p.name, value: p.id })),
 ])
 
-// 只有应用所有者和空间所有者能看 Key。AppKeys 用同一份缓存
-const canSeeKeys = computed(() => isAppOwner.value || isSpaceOwner.value)
+const canSeeKeys = computed(() => isClientOwner.value || isCircleOwner.value)
 const keys = useQuery({
-  queryKey: computed(() => ['keys', spaceId.value, appId.value]),
-  queryFn: () => api.keys(spaceId.value, appId.value),
+  queryKey: computed(() => ['keys', circleId.value, clientId.value] as const),
+  queryFn: () => api.keys(circleId.value, clientId.value),
   enabled: canSeeKeys,
 })
-// 应用转给别人之后查询停了，缓存还在：看不到 Key 的人不能再用手里这一份
 const seenKeys = computed(() => (canSeeKeys.value ? keys.data.value : undefined))
 const usable = computed(() => usableKeys(seenKeys.value ?? []))
-// 默认人格和所有者只显示名字，人格的选项也靠它：读不到时要说出来，不然分不清是没有还是没读到
-// 同一句说法只提示一次，每条的重试只重读说这句话的那几样
-const failures = computed(() => failedReads([apps, personas, members]))
+const failures = computed(() => failedReads([clients, personas, members]))
 const lastUsed = computed(() => lastUsedAt(seenKeys.value ?? []))
 
-// 看的是哪个 Key、哪种会话上下文：记在地址里。地址里的 Key 失效了就看第一个有效的
 const selectedKey = computed(
   () => usable.value.find((key) => key.id === route.query.key) ?? usable.value[0] ?? null,
 )
@@ -98,17 +103,15 @@ function failed(err: unknown, fallback: string) {
   toast.add({ title: err instanceof ApiError ? err.message : fallback, color: 'error' })
 }
 
-// 发请求时的空间与应用记下来：请求期间换了页面，刷新的仍是被改的那个应用
-async function update(body: Parameters<typeof api.updateApp>[2], done = '已保存') {
-  const sid = spaceId.value
-  const id = appId.value
+async function update(body: Parameters<typeof api.updateClient>[2], done = '已保存') {
+  const cid = circleId.value
+  const id = clientId.value
   try {
-    const saved = await api.updateApp(sid, id, body)
-    // 先把返回的这一版写进缓存：接着改别的设置时，拼的是这一版，不会盖掉刚保存的
-    queryClient.setQueryData<AppInfo[]>(['apps', sid], (list) =>
+    const saved = await api.updateClient(cid, id, body)
+    queryClient.setQueryData<ClientInfo[]>(['clients', cid], (list) =>
       list?.map((a) => (a.id === id ? saved : a)),
     )
-    await refreshAppCaches(queryClient, sid, id)
+    await refreshClientCaches(queryClient, cid, id)
     toast.add({ title: done, color: 'success' })
     return true
   } catch (err) {
@@ -117,48 +120,50 @@ async function update(body: Parameters<typeof api.updateApp>[2], done = '已保�
   }
 }
 
-// 应用配置整个替换：改一项时带上其余几项，没设的不写（不设就是默认）。保存期间两个开关都不能动，
-// 否则第二次拼的还是改之前的配置，会把第一次的改动盖掉
 const savingConfig = ref<string | null>(null)
-async function updateConfig(patch: Partial<AppConfig>) {
-  const id = appId.value
+async function updateConfig(patch: Partial<ClientConfig>) {
+  const id = clientId.value
   if (savingConfig.value === id) return
-  const merged: Record<string, unknown> = { ...app.value?.config, ...patch }
+  const merged: Record<string, unknown> = { ...client.value?.config, ...patch }
   for (const key of Object.keys(merged)) if (merged[key] === undefined) delete merged[key]
   savingConfig.value = id
   try {
-    await update({ config: merged as AppConfig })
+    await update({ config: merged as ClientConfig })
   } finally {
     if (savingConfig.value === id) savingConfig.value = null
   }
 }
 
-// 还停在发请求时的那个应用的页面上吗：请求返回之后，换了页面就不再动这一页的弹窗与选择
-const stillOn = (sid: string, id: string) =>
-  route.name === 'app' && route.params.spaceId === sid && route.params.appId === id
+const personModeItems = computed(() =>
+  PERSON_MEMORY_MODES.map((value) => ({
+    value,
+    label: personMemoryModeLabels[value],
+    disabled: !canManage.value || savingConfig.value === client.value?.id,
+  })),
+)
 
-// 名称在输入框里改，点保存才提交；换了应用（或数据重新读出来）时回到服务端的值
+const stillOn = (cid: string, id: string) =>
+  route.name === 'client' && route.params.circleId === cid && route.params.clientId === id
+
 const name = ref('')
 watch(
-  () => app.value?.name,
+  () => client.value?.name,
   (value) => (name.value = value ?? ''),
   { immediate: true },
 )
 
-// 转移：只有空间 owner 能做，新主人要是 owner 或 editor；转移会吊销这个应用现有的全部 Key
 const transferTo = ref<string | undefined>()
 const transferItems = computed(() =>
   (members.data.value ?? [])
-    .filter((m) => m.role !== 'viewer' && m.accountId !== app.value?.ownerAccountId)
+    .filter((m) => m.role !== 'viewer' && m.accountId !== client.value?.ownerAccountId)
     .map((m) => ({ label: `${m.displayName}（${m.username}）`, value: m.accountId })),
 )
 const transferName = computed(
   () => members.data.value?.find((m) => m.accountId === transferTo.value)?.displayName,
 )
-// 转移与删除进行中记的是哪个应用：换到别的应用时，那边的按钮不跟着转圈
 const confirmingTransfer = ref(false)
 const transferringId = ref<string | null>(null)
-const transferring = computed(() => transferringId.value === appId.value)
+const transferring = computed(() => transferringId.value === clientId.value)
 function closeTransfer() {
   if (transferring.value) return
   confirmingTransfer.value = false
@@ -166,15 +171,15 @@ function closeTransfer() {
 }
 async function transfer() {
   if (!transferTo.value || transferring.value) return
-  const sid = spaceId.value
-  const id = appId.value
+  const cid = circleId.value
+  const id = clientId.value
   transferringId.value = id
   try {
     const done = await update(
       { ownerAccountId: transferTo.value },
       '已转移，原有访问密钥已全部吊销',
     )
-    if (done && stillOn(sid, id)) {
+    if (done && stillOn(cid, id)) {
       confirmingTransfer.value = false
       transferTo.value = undefined
     }
@@ -185,21 +190,19 @@ async function transfer() {
 
 const confirmingDelete = ref(false)
 const deletingId = ref<string | null>(null)
-const deleting = computed(() => deletingId.value === appId.value)
-async function remove(target: AppInfo) {
+const deleting = computed(() => deletingId.value === clientId.value)
+async function remove(target: ClientInfo) {
   if (deleting.value) return
-  const sid = spaceId.value
+  const cid = circleId.value
   deletingId.value = target.id
   try {
-    await api.deleteApp(sid, target.id)
-    // 还停在这个应用的页面上就先离开，再刷新列表：否则会先闪一下「应用不存在」。
-    // 请求期间已经离开的，不再动它的弹窗，也不跳转
-    if (stillOn(sid, target.id)) {
+    await api.deleteClient(cid, target.id)
+    if (stillOn(cid, target.id)) {
       confirmingDelete.value = false
-      await router.replace({ name: 'apps', params: { spaceId: sid } })
+      await router.replace({ name: 'clients', params: { circleId: cid } })
     }
-    toast.add({ title: `已删除应用「${target.name}」`, color: 'success' })
-    await forgetApp(queryClient, sid, target.id)
+    toast.add({ title: `已删除接入实例「${target.name}」`, color: 'success' })
+    await forgetClient(queryClient, cid, target.id)
   } catch (err) {
     failed(err, '删除失败')
   } finally {
@@ -207,8 +210,7 @@ async function remove(target: AppInfo) {
   }
 }
 
-// 换了空间或应用时关掉对话框：里面的内容属于上一个
-watch([spaceId, appId], () => {
+watch([circleId, clientId], () => {
   confirmingTransfer.value = false
   confirmingDelete.value = false
   transferTo.value = undefined
@@ -220,33 +222,33 @@ watch([spaceId, appId], () => {
     <div v-if="failures.length" class="app-failed">
       <ReadFailureNote v-for="failure in failures" :key="failure.key" :query="failure.read" />
     </div>
-    <div v-if="apps.isPending.value" class="app-state"><USkeleton class="h-40 w-full" /></div>
-    <div v-else-if="apps.data.value && !app" class="app-state">
-      <NoteLine>应用不存在或已删除</NoteLine>
+    <div v-if="clients.isPending.value" class="app-state"><USkeleton class="h-40 w-full" /></div>
+    <div v-else-if="clients.data.value && !client" class="app-state">
+      <NoteLine>接入实例不存在或已删除</NoteLine>
       <UButton
-        :to="{ name: 'apps', params: { spaceId } }"
+        :to="{ name: 'clients', params: { circleId } }"
         size="sm"
         color="primary"
         variant="outline"
       >
-        返回应用列表
+        返回接入实例列表
       </UButton>
     </div>
-    <template v-else-if="app">
+    <template v-else-if="client">
       <header class="app-head">
         <div class="app-title">
           <nav class="crumbs" aria-label="路径">
-            <RouterLink :to="{ name: 'apps', params: { spaceId } }">应用</RouterLink>
+            <RouterLink :to="{ name: 'clients', params: { circleId } }">接入实例</RouterLink>
             <i aria-hidden="true">›</i>
-            <span>{{ app.name }}</span>
+            <span>{{ client.name }}</span>
           </nav>
-          <h1>{{ app.name }}</h1>
-          <code>app://{{ app.slug }}</code>
+          <h1>{{ client.name }}</h1>
+          <code>{{ client.slug }}</code>
         </div>
         <dl class="app-meta">
           <div>
             <dt>运行时</dt>
-            <dd><RuntimeLabel :family="app.runtimeFamily" /></dd>
+            <dd><RuntimeLabel :family="client.runtimeFamily" /></dd>
           </div>
           <div>
             <dt>默认人格</dt>
@@ -267,7 +269,7 @@ watch([spaceId, appId], () => {
           </div>
           <div>
             <dt>所有者</dt>
-            <dd>{{ ownerName ?? '–' }}<span v-if="isAppOwner" class="app-mine">我的</span></dd>
+            <dd>{{ ownerName ?? '–' }}<span v-if="isClientOwner" class="app-mine">我的</span></dd>
           </div>
         </dl>
       </header>
@@ -275,12 +277,16 @@ watch([spaceId, appId], () => {
       <div class="app-grid" :class="{ solo: !selectedKey }">
         <AppKeys
           class="app-keys-area"
-          :space-id="spaceId"
-          :app-id="app.id"
-          :is-app-owner="isAppOwner"
+          :circle-id="circleId"
+          :circle-kind="circle?.kind ?? 'shared'"
+          :client-id="client.id"
+          :is-client-owner="isClientOwner"
           :can-issue="canManage"
-          :is-space-owner="isSpaceOwner"
+          :is-circle-owner="isCircleOwner"
           :selected="selectedKey?.id ?? null"
+          :personas="personas.data.value ?? []"
+          :linked-circle-options="me.data.value?.circles ?? []"
+          :vocabulary="facets.data.value ?? null"
           @select="selectKey"
         />
 
@@ -288,23 +294,23 @@ watch([spaceId, appId], () => {
           v-if="selectedKey"
           v-model:context="context"
           class="app-matrix-area"
-          :space-id="spaceId"
-          :app-id="app.id"
+          :circle-id="circleId"
+          :client-id="client.id"
           :key-info="selectedKey"
         />
 
         <section class="app-settings-area">
           <SectionHeading title="设置" />
-          <p v-if="!canManage" class="set-note">仅应用所有者可修改设置</p>
+          <p v-if="!canManage" class="set-note">仅接入实例所有者可修改设置</p>
           <div class="set">
-            <label :for="`app-name-${app.id}`">名称</label>
+            <label :for="`client-name-${client.id}`">名称</label>
             <div class="set-name">
-              <UInput :id="`app-name-${app.id}`" v-model="name" :disabled="!canManage" />
+              <UInput :id="`client-name-${client.id}`" v-model="name" :disabled="!canManage" />
               <UButton
                 v-if="canManage"
                 color="primary"
                 variant="outline"
-                :disabled="!name.trim() || name === app.name"
+                :disabled="!name.trim() || name === client.name"
                 @click="update({ name: name.trim() })"
                 >保存</UButton
               >
@@ -313,17 +319,22 @@ watch([spaceId, appId], () => {
           <div class="set">
             <span class="set-label">
               默认人格
-              <Hint>应用读写所选人格的设定。</Hint>
+              <Hint>未配置按群规则或密钥人格覆盖时使用的人格设定。</Hint>
               <RouterLink
-                v-if="app.defaultPersonaId"
-                :to="memoryNodeRoute(spaceId, `persona:${app.defaultPersonaId}`)"
+                v-if="client.defaultPersonaId"
+                :to="{
+                  name: 'vocabulary',
+                  params: { circleId },
+                  query: { tab: 'personas', persona: client.defaultPersonaId },
+                }"
                 class="set-link"
                 >查看人格</RouterLink
               >
             </span>
             <USelect
-              :model-value="app.defaultPersonaId"
+              :model-value="client.defaultPersonaId"
               :items="personaItems"
+              value-key="value"
               class="set-select"
               aria-label="默认人格"
               :disabled="!canManage"
@@ -332,43 +343,59 @@ watch([spaceId, appId], () => {
               "
             />
           </div>
+          <div class="set col">
+            <div class="set-mode-row">
+              <span class="set-label">
+                人物跨群识人模式
+                <Hint>
+                  严格单群隔离下各群事实互不流转；拟人跨群识人允许在未开单群隔离锁的群与私聊间按需召回同一发言人事实。
+                </Hint>
+              </span>
+              <SegmentedChoice
+                :model-value="client.config.personMemoryMode ?? 'strict'"
+                :items="personModeItems"
+                label="人物跨群识人模式"
+                @update:model-value="(v) => updateConfig({ personMemoryMode: v })"
+              />
+            </div>
+          </div>
           <div class="set">
             <USwitch
-              label="本人私聊时读取本人记忆"
-              :model-value="app.config.elevateOwnerDirect === 'internal'"
-              :disabled="!canManage || savingConfig === app.id"
+              label="本人私聊提权至内部敏感级"
+              :model-value="client.config.elevateOwnerDirect === 'internal'"
+              :disabled="!canManage || savingConfig === client.id"
               @update:model-value="
                 (v) => updateConfig({ elevateOwnerDirect: v ? 'internal' : undefined })
               "
             />
-            <Hint>识别为本人的私聊可读取本人记忆中内部及以下的。</Hint>
+            <Hint>识别为本人的私聊可读取内部及以下词条（受接入实例与密钥透镜上限约束）。</Hint>
           </div>
           <div class="set">
             <USwitch
               label="记录召回提示语"
-              :model-value="app.config.recordPrompt !== false"
-              :disabled="!canManage || savingConfig === app.id"
+              :model-value="client.config.recordPrompt !== false"
+              :disabled="!canManage || savingConfig === client.id"
               @update:model-value="(v) => updateConfig({ recordPrompt: v ? undefined : false })"
             />
             <Hint>保留提示语前 200 字，疑似凭据的片段自动打码，仅所有者可见。</Hint>
           </div>
           <div class="set col">
             <AppGroupPersonas
-              :space-id="spaceId"
-              :app-id="app.id"
+              :circle-id="circleId"
+              :client-id="client.id"
               :can-manage="canManage"
               :personas="personas.data.value ?? []"
               :personas-loaded="personas.isSuccess.value"
             />
           </div>
-          <div v-if="isSpaceOwner || canDelete" class="set-actions">
+          <div v-if="isCircleOwner || canDelete" class="set-actions">
             <UButton
-              v-if="isSpaceOwner"
+              v-if="isCircleOwner"
               color="primary"
               variant="outline"
               @click="confirmingTransfer = true"
             >
-              转移应用
+              转移接入实例
             </UButton>
             <UButton
               v-if="canDelete"
@@ -376,29 +403,29 @@ watch([spaceId, appId], () => {
               variant="outline"
               @click="confirmingDelete = true"
             >
-              删除应用
+              删除接入实例
             </UButton>
           </div>
         </section>
 
         <div class="app-side-area">
-          <!-- 模拟会读到应用所有者的本人记忆，只给应用所有者 -->
+          <!-- 模拟按接入实例所有者的视角执行，仅给接入实例所有者 -->
           <AppSimulator
-            v-if="isAppOwner"
+            v-if="isClientOwner"
             class="app-boot-area"
-            :space-id="spaceId"
-            :app-id="app.id"
+            :circle-id="circleId"
+            :client-id="client.id"
             :key-id="selectedKey?.id"
-            :settings="`${app.defaultPersonaId}:${app.config.elevateOwnerDirect ?? ''}`"
+            :settings="`${client.defaultPersonaId}:${client.config.elevateOwnerDirect ?? ''}:${client.config.personMemoryMode ?? ''}`"
+            :vocabulary="facets.data.value ?? null"
           />
-          <AppRecallEvents class="app-events-area" :space-id="spaceId" :app-id="app.id" />
+          <AppRecallEvents class="app-events-area" :circle-id="circleId" :client-id="client.id" />
         </div>
-        <!-- 高级设置的覆盖只给应用所有者与空间所有者看 -->
         <AppAdvancedSettings
           v-if="canSeeKeys"
           class="app-advanced-area"
-          :space-id="spaceId"
-          :app-id="app.id"
+          :circle-id="circleId"
+          :client-id="client.id"
         />
       </div>
     </template>
@@ -406,7 +433,7 @@ watch([spaceId, appId], () => {
 
   <UModal
     :open="confirmingTransfer"
-    title="转移这个应用？"
+    title="转移这个接入实例？"
     :dismissible="!transferring"
     @update:open="(v) => !v && closeTransfer()"
   >
@@ -415,19 +442,20 @@ watch([spaceId, appId], () => {
         <USelect
           v-model="transferTo"
           :items="transferItems"
-          placeholder="选择新所有者（空间所有者或编辑者）"
+          value-key="value"
+          placeholder="选择新所有者（记忆圈所有者或编辑者）"
           aria-label="新所有者"
           class="w-full"
         />
         <p v-if="transferTo">
           转移给 {{ transferName }} 后，「{{
-            app?.name
-          }}」现有的访问密钥全部吊销，新所有者需重新签发；应用读取的本人记忆改为
-          {{ transferName }} 的。
+            client?.name
+          }}」现有的访问密钥全部吊销，新所有者需重新签发；成员私有视角与凭据归属将切换为
+          {{ transferName }}。
         </p>
         <p v-else>
           转移后现有访问密钥全部吊销，新所有者需重新签发。
-          <Hint>应用读写的本人记忆属于应用所有者，转移后改为新所有者的。</Hint>
+          <Hint>接入实例无上下文请求与凭据授权属于其所有者，转移后改为新所有者。</Hint>
         </p>
       </div>
     </template>
@@ -445,18 +473,16 @@ watch([spaceId, appId], () => {
 
   <UModal
     :open="confirmingDelete"
-    title="删除这个应用？"
+    title="删除这个接入实例？"
     :dismissible="!deleting"
     @update:open="(v) => !v && !deleting && (confirmingDelete = false)"
   >
     <template #body>
       <div class="space-y-2 text-sm">
         <p>
-          删除「{{ app?.name }}」及其全部访问密钥后，使用这些访问密钥的客户端将立即失去访问权限。
-        </p>
-        <p class="text-muted">
-          仍有这个应用的记忆时无法删除。
-          <Hint>已删除但仍可恢复的也算在内，需先移到其他归属。</Hint>
+          删除「{{
+            client?.name
+          }}」后，其全部访问密钥与按群规则将一并删除，使用这些访问密钥的客户端将立即失去访问权限。
         </p>
       </div>
     </template>
@@ -469,7 +495,7 @@ watch([spaceId, appId], () => {
           @click="confirmingDelete = false"
           >取消</UButton
         >
-        <UButton color="error" :loading="deleting" @click="app && remove(app)">删除</UButton>
+        <UButton color="error" :loading="deleting" @click="client && remove(client)">删除</UButton>
       </div>
     </template>
   </UModal>
@@ -595,12 +621,10 @@ watch([spaceId, appId], () => {
   margin-top: 30px;
   min-width: 0;
 }
-/* 没有权限范围可看时（看不到 Key，或者暂无有效 Key）右栏从顶上开始 */
 .app-grid.solo .app-side-area {
   grid-row: 1 / span 2;
   margin-top: 0;
 }
-/* 高级设置的覆盖：设置行有三栏，左栏放不下，占满下面一整行 */
 .app-advanced-area {
   grid-column: 1 / -1;
   grid-row: 3;
@@ -620,6 +644,13 @@ watch([spaceId, appId], () => {
 .set.col {
   display: block;
   padding: 11px 0 13px;
+}
+.set-mode-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
 }
 .set-note {
   padding: 10px 0 6px;
@@ -663,7 +694,6 @@ watch([spaceId, appId], () => {
   margin-top: 14px;
 }
 
-/* 单栏时的顺序：Key、权限范围、启动加载、设置，召回记录可能很长，放最后 */
 @media (max-width: 1240px) {
   .app-grid,
   .app-grid.solo {

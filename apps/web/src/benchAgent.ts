@@ -44,7 +44,7 @@ export const AGENT_MAX_ROUNDS = 8
 // 系统提示的基础文字，界面上可以改，session.start 的结果接在后面
 export const DEFAULT_SYSTEM_PROMPT = '你是一个有长期记忆的助手，用简体中文回答。'
 
-// 宿主的会话标识：这里同时只有一段对话
+// 客户端的会话标识：这里同时只有一段对话
 const AGENT_SESSION_ID = 'bench-agent'
 // 生命周期事件的文字上限和契约相同。插件同样先截：超长的话整个事件被拒，这一轮什么都拿不到
 const LIFECYCLE_TEXT_MAX = 20_000
@@ -74,7 +74,7 @@ export function agentLoopDetail(loop: BenchAgentLoop, turnEnd: boolean): string 
     ? '回复后不发 turn.end。'
     : loop === 'chat'
       ? '回复后发 turn.end（需带私聊、群聊或频道的会话上下文，否则不发）。'
-      : '回复后发 turn.end；不带会话上下文时按应用与所属成员缓冲，只写会话摘要。'
+      : '回复后发 turn.end；不带会话上下文时按接入实例与所属成员缓冲，只写会话摘要。'
   return `${AGENT_LOOP_DETAILS[loop]}${after}`
 }
 
@@ -201,7 +201,7 @@ export const agentPhaseLabels: Record<AgentPhase, string> = {
 
 // 这条消息怎么结束的。done：模型给了最终回复；empty：模型没有文字也没有工具调用（包括拒绝回答）；stopped：用户停止；limit：到了轮数上限；
 // blocked：写入放不进重放日志；toolFailed：工具的运行请求失败；diverged：重放分叉；
-// modelFailed：请求模型失败；lifecycleFailed：生命周期事件的运行请求失败；abandoned：换了应用、Key 或模式
+// modelFailed：请求模型失败；lifecycleFailed：生命周期事件的运行请求失败；abandoned：换了接入实例、Key 或模式
 export type AgentEnd =
   | 'done'
   | 'empty'
@@ -242,9 +242,9 @@ export interface AgentConversation {
   messages: BenchAgentMessage[]
   // session.start 的结果，接在系统提示后面。还没拿到时是 null：失败了下一条消息再发
   sessionText: string | null
-  // 这个结果是按什么会话上下文拿到的：页面上换了上下文（换了群）就不算数了，真实的宿主那也是另一个会话
+  // 这个结果是按什么会话上下文拿到的：页面上换了上下文（换了群）就不算数了，真实客户端那也是另一个会话
   sessionContext: string | null
-  // 这次对话的重放日志，和调用台的会话分开：带上调用台的写入可能撞 URI，模型读到的也会依赖调用台的历史
+  // 这次对话的重放日志，和调用台的会话分开：带上调用台的写入可能撞标题，模型读到的也会依赖调用台的历史
   session: BenchSession
   exchanges: AgentExchange[]
   usage: AgentUsage
@@ -433,7 +433,7 @@ export function acceptAgentDivergence(conversation: AgentConversation): AgentCon
 }
 
 // turn.end 的请求体，带页面上的会话上下文：群聊机器人带私聊、群聊或频道的，群里要有发言人；
-// Claude Code 不带时按应用与所属成员缓冲
+// Claude Code 不带时按接入实例与所属成员缓冲
 export function turnEndBody(
   context: SessionContextInput | undefined,
   user: string,
@@ -607,7 +607,7 @@ export async function sendAgentMessage(
   }
 
   const sentUser = attached ? { role: 'user', content: `${text}\n\n${attached}` } : plainUser
-  // 聊天类的宿主把召回块当临时内容，只附在这一轮的请求上
+  // 聊天类的客户端把召回块当临时内容，只附在这一轮的请求上
   if (loop !== 'chat') keptUser = sentUser
   const head = systemMessage(system, state.sessionText)
   const before = [...(head ? [head] : []), ...state.messages, sentUser]

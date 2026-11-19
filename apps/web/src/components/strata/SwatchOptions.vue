@@ -1,20 +1,20 @@
 <script setup lang="ts" generic="T extends string | null">
-import type { Layer, Sensitivity } from '@kioku/contracts'
+import type { Sensitivity, StrataBand } from '@kioku/contracts'
 import { useId } from 'vue'
 
 import StrataSwatch from './StrataSwatch.vue'
 
-// 带色块的单选：改层、改敏感级时看得到选了之后长什么样。都有文字，色块只是配图
+// 带色块的单选：改条件或敏感级时看得到选了之后长什么样。都有文字，色块只是配图
 defineProps<{
   label: string
   options: readonly {
     value: T
     label: string
-    layer?: Layer | null
+    band?: StrataBand | null
     sensitivity?: Sensitivity | null
-    // 只标层，不画敏感级
+    // 只标色带，不画敏感级
     plain?: boolean
-    // 没有色块，例如「按层默认」
+    // 没有色块，例如默认项
     bare?: boolean
   }[]
   disabled?: boolean
@@ -40,7 +40,7 @@ const name = useId()
       />
       <StrataSwatch
         v-if="!option.bare"
-        :layer="option.layer ?? null"
+        :band="option.band ?? null"
         :sensitivity="option.sensitivity ?? null"
         :plain="option.plain"
         :width="16"

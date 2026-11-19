@@ -25,14 +25,14 @@ import {
 
 const route = useRoute()
 const queryClient = useQueryClient()
-const { space } = useSession()
-const spaceId = computed(() => String(route.params.spaceId))
-const canAct = computed(() => space.value?.role === 'owner' || space.value?.role === 'editor')
-const canManageCredential = computed(() => canManageCredentials(space.value?.role))
+const { circle } = useSession()
+const circleId = computed(() => String(route.params.circleId))
+const canAct = computed(() => circle.value?.role === 'owner' || circle.value?.role === 'editor')
+const canManageCredential = computed(() => canManageCredentials(circle.value?.role))
 
-const counts = useInboxCounts(spaceId)
+const counts = useInboxCounts(circleId)
 // 标题的大数字和导航角标、概览同一个口径：当前账号能处理的。角色读到之前不知道口径，先写「–」
-const role = computed(() => space.value?.role)
+const role = computed(() => circle.value?.role)
 const total = computed(() =>
   counts.data.value && role.value ? actionableInboxCount(counts.data.value, role.value) : null,
 )
@@ -63,7 +63,7 @@ watch(tab, () => {
             size="sm"
             aria-label="刷新"
             :loading="refreshing"
-            @click="refreshInbox(queryClient, spaceId)"
+            @click="refreshInbox(queryClient, circleId)"
           />
           <span class="inbox-total">{{ total ?? '–' }}</span>
         </div>
@@ -71,7 +71,7 @@ watch(tab, () => {
           <RouterLink
             v-for="t in INBOX_TABS"
             :key="t"
-            :to="{ name: 'inbox', params: { spaceId }, query: { tab: t } }"
+            :to="{ name: 'inbox', params: { circleId }, query: { tab: t } }"
             replace
             class="inbox-tab"
             :aria-current="tab === t ? 'page' : undefined"
@@ -86,13 +86,13 @@ watch(tab, () => {
       <section class="inbox-main" :aria-label="tab ? inboxTabLabels[tab] : '待处理'">
         <!-- 切到别的分类时不卸载：勾选的条目和改了一半的草稿都还在 -->
         <KeepAlive>
-          <InboxBindings v-if="tab === 'binding'" :space-id="spaceId" />
-          <InboxReview v-else-if="tab === 'review'" :space-id="spaceId" :can-act="canAct" />
-          <DreamSuggestions v-else-if="tab === 'dream'" :space-id="spaceId" :can-act="canAct" />
-          <InboxPlaintext v-else-if="tab === 'plaintext'" :space-id="spaceId" />
+          <InboxBindings v-if="tab === 'binding'" :circle-id="circleId" />
+          <InboxReview v-else-if="tab === 'review'" :circle-id="circleId" :can-act="canAct" />
+          <DreamSuggestions v-else-if="tab === 'dream'" :circle-id="circleId" :can-act="canAct" />
+          <InboxPlaintext v-else-if="tab === 'plaintext'" :circle-id="circleId" />
           <InboxCredentials
             v-else-if="tab === 'credential'"
-            :space-id="spaceId"
+            :circle-id="circleId"
             :can-act="canManageCredential"
           />
         </KeepAlive>

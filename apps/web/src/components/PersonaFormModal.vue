@@ -1,15 +1,17 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import type { PersonaInfo } from '@kioku/contracts'
+import { Slug, type PersonaInfo } from '@kioku/contracts'
 import { useQueryClient } from '@tanstack/vue-query'
 import { computed, reactive, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import { personaOptionItems } from '../personas'
+import NoteLine from './strata/NoteLine.vue'
 
-// 新建与修改人格共用一个表单；editing 为 null 时是新建。人格的记忆在目录里人格的根下面
+// 新建与修改独立人格共用一个表单；editing 为 null 时是新建。
 const props = defineProps<{
-  spaceId: string
+  circleId: string
   personas: readonly PersonaInfo[]
   editing: PersonaInfo | null
 }>()
@@ -19,6 +21,8 @@ const toast = useToast()
 const queryClient = useQueryClient()
 
 const form = reactive({ slug: '', name: '', extendsId: null as string | null, description: '' })
+const error = ref<string | null>(null)
+
 watch(open, (value) => {
   if (!value) return
   const p = props.editing
@@ -28,64 +32,54 @@ watch(open, (value) => {
     extendsId: p?.extendsId ?? null,
     description: p?.description ?? '',
   })
+  error.value = null
 })
 
-// 继承的候选：不能选自己和自己的后代（会成环，服务端也会拒绝）
-const descendants = (id: string): Set<string> => {
-  const found = new Set<string>([id])
-  for (let grew = true; grew;) {
-    grew = false
-    for (const p of props.personas) {
-      if (p.extendsId && found.has(p.extendsId) && !found.has(p.id)) {
-        found.add(p.id)
-        grew = true
-      }
-    }
+const parentItems = computed(() => personaOptionItems(props.personas, props.editing?.id ?? null))
+
+const problem = computed(() => {
+  if (!props.editing) {
+    const slugCheck = Slug.safeParse(form.slug)
+    if (!slugCheck.success) return slugCheck.error.issues[0]?.message ?? '标识格式有误'
   }
-  return found
-}
-const parentItems = computed(() => {
-  const excluded = props.editing ? descendants(props.editing.id) : new Set<string>()
-  return [
-    { label: '不继承', value: null },
-    ...props.personas
-      .filter((p) => !excluded.has(p.id))
-      .map((p) => ({ label: `${p.name}（${p.slug}）`, value: p.id })),
-  ]
+  if (!form.name.trim()) return '请填写名称'
+  return null
 })
 
 // 保存中不接受第二次提交：连点两次新建会先成功、再报标识已被占用
 const saving = ref(false)
 async function save() {
-  if (saving.value) return
+  if (saving.value || problem.value) return
   saving.value = true
-  // 请求期间关掉再打开了别的表单，结果不能落到换上来的那个
-  const sid = props.spaceId
+  error.value = null
+  const cid = props.circleId
   const target = props.editing
   try {
     const description = form.description.trim() || null
     const saved = target
-      ? // 继承没变时不带上：改继承要锁住空间里的继承关系，只改名称与说明用不着
-        await api.updatePersona(sid, target.id, {
-          name: form.name,
+      ? // 继承没变时不带上：仅改名称与说明时不需要重算继承关系
+        await api.updatePersona(cid, target.id, {
+          name: form.name.trim(),
           description,
           ...(form.extendsId !== target.extendsId ? { extendsId: form.extendsId } : {}),
         })
-      : await api.createPersona(sid, {
-          slug: form.slug,
-          name: form.name,
+      : await api.createPersona(cid, {
+          slug: form.slug.trim().toLowerCase(),
+          name: form.name.trim(),
           extendsId: form.extendsId,
           description,
         })
     if (props.editing === target) open.value = false
     await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ['personas', sid] }),
-      queryClient.invalidateQueries({ queryKey: ['persona', sid] }),
+      queryClient.invalidateQueries({ queryKey: ['personas', cid] }),
+      queryClient.invalidateQueries({ queryKey: ['persona', cid] }),
+      queryClient.invalidateQueries({ queryKey: ['overview', cid] }),
+      queryClient.invalidateQueries({ queryKey: ['clients', cid] }),
     ])
     toast.add({ title: target ? '已保存' : '已创建人格', color: 'success' })
     emit('saved', saved, !target)
   } catch (err) {
-    toast.add({ title: err instanceof ApiError ? err.message : '保存失败', color: 'error' })
+    error.value = err instanceof ApiError ? err.message : '保存失败'
   } finally {
     saving.value = false
   }
@@ -93,7 +87,6 @@ async function save() {
 </script>
 
 <template>
-  <!-- 保存期间不能关：关掉再打开别的表单，保存结果会落到换上来的那个 -->
   <UModal
     :open="open"
     :title="editing ? '修改人格' : '新建人格'"
@@ -102,39 +95,39 @@ async function save() {
     @update:open="(v) => (v ? (open = true) : !saving && (open = false))"
   >
     <template #body>
-      <form id="persona-form" class="space-y-4" @submit.prevent="save">
+      <!-- 不用 form：下拉选单选择与输入回车显式点击提交按钮 -->
+      <div class="space-y-4">
+        <p class="text-sm text-muted">
+          人格是独立的设定实体，供接入实例与访问密钥绑定，并支持沿父人格继承设定段。
+        </p>
         <UFormField
           label="标识"
           :help="
             editing
-              ? '标识是这个人格的记忆的坐标开头，不可修改'
-              : '小写字母、数字和连字符；用在坐标的开头，例如 persona://doubao/soul'
+              ? '标识用于命令与接口引用，创建后不可修改'
+              : '小写字母、数字和连字符，例如 assistant、doubao'
           "
         >
-          <UInput
-            v-model="form.slug"
-            class="w-full font-mono"
-            :disabled="editing !== null"
-            required
-          />
+          <UInput v-model="form.slug" class="w-full font-mono" :disabled="editing !== null" />
         </UFormField>
         <UFormField label="名称">
-          <UInput v-model="form.name" class="w-full" required />
+          <UInput v-model="form.name" class="w-full" />
         </UFormField>
-        <UFormField label="继承" help="例如群聊版继承通用版，仅覆盖需要收敛的部分">
-          <USelect v-model="form.extendsId" :items="parentItems" class="w-full" />
+        <UFormField label="继承" help="例如群聊版继承通用版，仅覆盖需要收敛的设定段">
+          <USelect v-model="form.extendsId" :items="parentItems" value-key="value" class="w-full" />
         </UFormField>
         <UFormField label="说明">
           <UInput v-model="form.description" class="w-full" />
         </UFormField>
-      </form>
+        <NoteLine v-if="error" tone="error" flush>{{ error }}</NoteLine>
+      </div>
     </template>
     <template #footer>
       <div class="flex w-full justify-end gap-2">
         <UButton color="neutral" variant="ghost" :disabled="saving" @click="open = false"
           >取消</UButton
         >
-        <UButton type="submit" form="persona-form" :loading="saving">{{
+        <UButton :disabled="Boolean(problem)" :loading="saving" @click="save">{{
           editing ? '保存' : '创建'
         }}</UButton>
       </div>

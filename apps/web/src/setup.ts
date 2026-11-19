@@ -62,9 +62,9 @@ const PROBLEM_HINTS: Record<
   (p: DatabaseProblem) => string
 > = {
   superuser: () =>
-    '会绕过行级安全，空间之间的隔离不生效。改用 NOSUPERUSER NOBYPASSRLS 的普通角色。',
+    '会绕过行级安全，记忆圈之间的隔离不生效。改用 NOSUPERUSER NOBYPASSRLS 的普通角色。',
   bypass_rls: () =>
-    '会绕过行级安全，空间之间的隔离不生效。改用 NOSUPERUSER NOBYPASSRLS 的普通角色。',
+    '会绕过行级安全，记忆圈之间的隔离不生效。改用 NOSUPERUSER NOBYPASSRLS 的普通角色。',
   extension_not_installed: (p) =>
     `需要超级用户在这个库里执行 CREATE EXTENSION ${p.extension ?? ''}，或者改用「用超级用户创建」。`,
   extension_missing: () =>
@@ -78,9 +78,9 @@ const PROBLEM_HINTS: Record<
 
 // 检查结果逐项列出。哪一项拦住接入只看服务端给的 problems（规则只在服务端的 assess 里），这里只决定怎么列：
 // 连不上时只有连接一项
-// 「已有数据」一行：有账号时接入已有实例；有空间、没有账号时这些空间没有成员，照样能继续，但要写明后果
+// 「已有数据」一行：有账号时接入已有实例；有记忆圈、没有账号时这些记忆圈没有成员，照样能继续，但要写明后果
 function existingRow(check: DatabaseCheck): Pick<CheckRow, 'value' | 'verdict' | 'detail'> {
-  const { accounts, spaces } = check
+  const { accounts, circles } = check
   if (check.existing === 'kioku' && accounts) {
     return {
       value: `${EXISTING_DATA_NAMES.kioku}（${accounts} 个账号）`,
@@ -88,11 +88,11 @@ function existingRow(check: DatabaseCheck): Pick<CheckRow, 'value' | 'verdict' |
       detail: '将接入已有实例，接入后用已有账号登录。',
     }
   }
-  if (check.existing === 'kioku' && spaces) {
+  if (check.existing === 'kioku' && circles) {
     return {
-      value: `${EXISTING_DATA_NAMES.kioku}（${spaces} 个空间，没有账号）`,
+      value: `${EXISTING_DATA_NAMES.kioku}（${circles} 个记忆圈，没有账号）`,
       verdict: 'notice',
-      detail: '这些空间没有成员，新建的管理员无法查看；之后也无法把备份恢复到这个实例。',
+      detail: '这些记忆圈没有成员，新建的管理员无法查看；之后也无法把备份恢复到这个实例。',
     }
   }
   return { value: EXISTING_DATA_NAMES[check.existing!], verdict: 'passed' }

@@ -31,12 +31,12 @@ import BenchTag from './BenchTag.vue'
 import Hint from './Hint.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 
-// 调用台：调一个工具或发一个生命周期事件，看宿主收到什么。工具目录来自真实的 tools/list。
+// 调用台：调一个工具或发一个生命周期事件，看客户端收到什么。工具目录来自真实的 tools/list。
 // 连续调用：回滚模式下这次会话的写入靠重放带到后面的调用，时间线列出这次会话的调用
 const {
-  spaceId,
-  appId,
-  app,
+  circleId,
+  clientId,
+  client,
   keyId,
   real,
   mode,
@@ -53,9 +53,9 @@ const {
 } = useBench()
 
 const tools = useQuery({
-  queryKey: computed(() => ['bench-tools', spaceId.value, appId.value, keyId.value]),
-  queryFn: () => api.benchTools(spaceId.value, appId.value!, keyId.value!),
-  enabled: computed(() => Boolean(appId.value && keyId.value)),
+  queryKey: computed(() => ['bench-tools', circleId.value, clientId.value, keyId.value]),
+  queryFn: () => api.benchTools(circleId.value, clientId.value!, keyId.value!),
+  enabled: computed(() => Boolean(clientId.value && keyId.value)),
 })
 const targets = computed(() => callTargets(tools.data.value?.tools ?? []))
 const groups = computed(() =>
@@ -149,7 +149,7 @@ const timeline = computed(() => [...session.value.timeline].reverse())
 const shown = computed(
   () => timeline.value.find((entry) => entry.id === shownId.value) ?? timeline.value[0] ?? null,
 )
-// 换了应用、Key 或模式时会话已经换了一份新的，这里清掉报错：它们属于别的 Key 或别的模式
+// 换了接入实例、Key 或模式时会话已经换了一份新的，这里清掉报错：它们属于别的 Key 或别的模式
 watch(generation, () => {
   failure.value = null
   shownId.value = null
@@ -258,7 +258,7 @@ function onRunClick() {
               <p class="text-muted">
                 工具调用不带会话上下文，与真实 MCP 一致，按当前访问密钥的全部权限读写。
               </p>
-              <p v-if="app?.runtimeFamily === 'astrbot'" class="text-warning">
+              <p v-if="client?.runtimeFamily === 'astrbot'" class="text-warning">
                 请勿为群聊机器人接入
                 MCP：群成员可借工具读取当前访问密钥能读取的全部内容。此处仅测试工具本身。
               </p>

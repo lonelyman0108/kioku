@@ -34,15 +34,20 @@ import { useSavedField, useSavedText } from '../composables/useSavedField'
 import { useTuningFields } from '../composables/useTuningFields'
 
 const candidate = (title: string, rawScore: number, priority = 2): DebugCandidate => ({
-  uri: `core://${title}`,
+  entryId: '00000000-0000-4000-8000-000000000001',
+  shortId: 'abcd12',
   title,
-  layer: 'core',
+  circleId: '00000000-0000-4000-8000-000000000002',
+  circleSlug: 'main',
+  kind: 'entry',
+  matchedWhen: {},
+  otherVariantsCount: 0,
   priority,
   disclosure: null,
   score: Math.round(rawScore * 100) / 100,
   via: ['glossary'],
   cues: [],
-  breakdown: { semantic: 0, fulltext: 0, glossary: rawScore, priority: 0 },
+  breakdown: { semantic: 0, fulltext: 0, glossary: rawScore, priority: 0, facet: 0, link: 0 },
   rawScore,
 })
 
@@ -74,8 +79,8 @@ describe('试算的本地重算', () => {
     ])
   })
 
-  it('所选访问密钥的应用自己覆盖了最低分或条数：按应用的值试算，写明空间的设置对它不起作用', () => {
-    const app = { id: 'a1', name: 'Codex' }
+  it('所选访问密钥的接入实例自己覆盖了最低分或条数：按接入实例的值试算，写明记忆圈的设置对它不起作用', () => {
+    const client = { id: 'a1', name: 'Codex' }
     const overrides = [
       {
         id: 'a1',
@@ -84,23 +89,23 @@ describe('试算的本地重算', () => {
         hasGuidance: false,
       },
     ]
-    const used = trialSettings({ minScore: 0.2, limit: 8 }, app, overrides)
+    const used = trialSettings({ minScore: 0.2, limit: 8 }, client, overrides)
     expect(used).toEqual({
       minScore: 0.5,
       limit: 3,
-      note: '应用「Codex」另有覆盖（最低分 0.50、条数 3），按它的值试算，空间的设置对它不起作用。',
+      note: '接入实例「Codex」另有覆盖（最低分 0.50、条数 3），按它的值试算，记忆圈的设置对它不起作用。',
     })
     const cands = Array.from({ length: 10 }, (_, i) => candidate(`c${i}`, 0.9 - i * 0.01))
     expect(trialSummary(trialRows(cands, used.minScore, used.limit))).toBe(
       '注入 3 条 · 不注入 7 条',
     )
-    // 只覆盖了一项：另一项用空间表单的
+    // 只覆盖了一项：另一项用记忆圈表单的
     expect(
-      trialSettings({ minScore: 0.2, limit: 8 }, app, [
+      trialSettings({ minScore: 0.2, limit: 8 }, client, [
         { id: 'a1', name: 'Codex', overrides: { 'recall.limit': 3 }, hasGuidance: true },
       ]),
     ).toMatchObject({ minScore: 0.2, limit: 3 })
-    // 没有覆盖的应用：用空间表单的，不写说明
+    // 没有覆盖的接入实例：用记忆圈表单的，不写说明
     expect(
       trialSettings({ minScore: 0.2, limit: 8 }, { id: 'a2', name: '别的' }, overrides),
     ).toEqual({
@@ -164,13 +169,13 @@ describe('来源与恢复', () => {
     const sources = Object.fromEntries(
       Object.keys(TUNING_DEFAULTS).map((k) => [k, 'instance']),
     ) as TuningSources
-    sources['recall.limit'] = 'space'
-    sources['recall.minScore'] = 'app'
-    expect([...overriddenAt(sources, 'space')!]).toEqual(['recall.limit'])
+    sources['recall.limit'] = 'circle'
+    sources['recall.minScore'] = 'client'
+    expect([...overriddenAt(sources, 'circle')!]).toEqual(['recall.limit'])
     expect([...overriddenIn({ 'recall.limit': 3, 'prompts.agentGuidance': '补充' })!]).toEqual([
       'recall.limit',
     ])
-    expect(overriddenAt(undefined, 'space')).toBeUndefined()
+    expect(overriddenAt(undefined, 'circle')).toBeUndefined()
   })
 
   it('覆盖的值碰巧等于上一级：照样是已覆盖，恢复时显式写 null，之后上一级改了跟着走', async () => {
@@ -344,9 +349,9 @@ describe('来源与恢复', () => {
 describe('只读', () => {
   it('不能改时控件禁用、不显示保存条，写明谁能改', () => {
     for (const [source, who] of [
-      [spaceRecall, '仅空间所有者可修改。'],
-      [spaceAdvancedExtraction, '仅空间所有者可修改。'],
-      [appAdvanced, '仅应用所有者可修改。'],
+      [spaceRecall, '仅记忆圈所有者可修改。'],
+      [spaceAdvancedExtraction, '仅记忆圈所有者可修改。'],
+      [appAdvanced, '仅接入实例所有者可修改。'],
     ] as const) {
       const tpl = parse(source).descriptor.template!.content
       expect(tpl).toMatch(/<SaveBar\s+v-if="editable"/)

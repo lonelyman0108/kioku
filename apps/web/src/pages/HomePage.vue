@@ -3,44 +3,44 @@ import { watchEffect } from 'vue'
 import { useRouter } from 'vue-router'
 
 import EmptyState from '../components/strata/EmptyState.vue'
-import { useNewSpaceEntry } from '../composables/useCreateSpace'
+import { useNewCircleEntry } from '../composables/useCreateSpace'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
 
-// 根路径跳到最近访问（或第一个）空间的概览。没有任何空间时给「新建空间」「导入空间」：这时一个空间都没拥有，名额一定够，超限由服务端兜底
+// 根路径跳到最近访问（或个人）记忆圈的概览。没有任何记忆圈时给「新建共享圈」「导入记忆圈」
 const router = useRouter()
-const { me, space } = useSession()
+const { me, circle } = useSession()
 watchEffect(() => {
-  if (space.value) void router.replace({ name: 'overview', params: { spaceId: space.value.id } })
+  if (circle.value) void router.replace({ name: 'overview', params: { circleId: circle.value.id } })
 })
 // 外壳里的那一份入口与弹窗
-const newSpace = useNewSpaceEntry()
+const newCircle = useNewCircleEntry()
 </script>
 
 <template>
   <div class="home">
-    <template v-if="me.data.value && !space">
+    <template v-if="me.data.value && !circle">
       <EmptyState
-        title="暂无空间"
+        title="暂无记忆圈"
         :description="
-          newSpace
-            ? '新建或导入一个空间，或请空间所有者将当前账号加为成员。'
-            : '请空间所有者将当前账号加为成员，加入后刷新页面。'
+          newCircle
+            ? '新建或导入一个记忆圈，或请记忆圈所有者将当前账号加为成员。'
+            : '请记忆圈所有者将当前账号加为成员，加入后刷新页面。'
         "
       >
-        <template v-if="newSpace" #actions>
-          <UButton :icon="icons.add" @click="newSpace.open.value = true">新建空间</UButton>
+        <template v-if="newCircle" #actions>
+          <UButton :icon="icons.add" @click="newCircle.open.value = true">新建共享圈</UButton>
           <UButton
-            :icon="icons.importSpace"
+            :icon="icons.importCircle"
             color="neutral"
             variant="outline"
-            @click="newSpace.importing.value = true"
-            >导入空间</UButton
+            @click="newCircle.importing.value = true"
+            >导入记忆圈</UButton
           >
         </template>
       </EmptyState>
     </template>
-    <p v-else>正在打开空间……</p>
+    <p v-else>正在打开记忆圈……</p>
   </div>
 </template>
 

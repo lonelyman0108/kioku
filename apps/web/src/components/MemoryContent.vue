@@ -2,28 +2,30 @@
 import { computed, ref } from 'vue'
 
 import type { KeywordIndex } from '../keywords'
-import { renderMarkdown, type CredentialLinks } from '../markdown'
+import { renderMarkdown, type CredentialLinks, type WikiLinkTargets } from '../markdown'
 
 const props = defineProps<{
   content: string
   keywords?: KeywordIndex | null
   self?: string
   credentials?: CredentialLinks | null
+  wikiLinks?: WikiLinkTargets | null
   // 疑似明文的值：在正文里标出来
   plaintext?: readonly string[] | null
 }>()
-const emit = defineEmits<{ open: [uri: string]; credential: [id: string] }>()
+const emit = defineEmits<{ open: [shortId: string, circleId?: string]; credential: [id: string] }>()
 
 const html = computed(() =>
   renderMarkdown(props.content, {
     keywords: props.keywords && props.self ? { index: props.keywords, self: props.self } : null,
     credentials: props.credentials ?? null,
+    wikiLinks: props.wikiLinks ?? null,
     plaintext: props.plaintext ?? null,
   }),
 )
 
 // 点了关键词：只有一条记忆有它就直接打开，有好几条就列出来选
-const choices = ref<{ keyword: string; uris: string[] } | null>(null)
+const choices = ref<{ keyword: string; shortIds: string[] } | null>(null)
 function onClick(event: MouseEvent) {
   const target = event.target as HTMLElement | null
   const credential = target?.closest<HTMLAnchorElement>('a.kioku-cred')
@@ -32,16 +34,22 @@ function onClick(event: MouseEvent) {
     emit('credential', credential.dataset.credential)
     return
   }
+  const wikilink = target?.closest<HTMLAnchorElement>('a.kioku-wikilink')
+  if (wikilink?.dataset.shortId) {
+    event.preventDefault()
+    emit('open', wikilink.dataset.shortId, wikilink.dataset.circleId || undefined)
+    return
+  }
   const link = target?.closest<HTMLAnchorElement>('a.kioku-keyword')
-  if (!link?.dataset.uris) return
+  if (!link?.dataset.shortIds) return
   event.preventDefault()
-  const uris = link.dataset.uris.split(' ').filter(Boolean)
-  if (uris.length === 1) emit('open', uris[0]!)
-  else choices.value = { keyword: link.textContent ?? '', uris }
+  const shortIds = link.dataset.shortIds.split(' ').filter(Boolean)
+  if (shortIds.length === 1) emit('open', shortIds[0]!)
+  else choices.value = { keyword: link.textContent ?? '', shortIds }
 }
-function choose(uri: string) {
+function choose(shortId: string) {
   choices.value = null
-  emit('open', uri)
+  emit('open', shortId)
 }
 </script>
 
@@ -55,13 +63,13 @@ function choose(uri: string) {
   >
     <template #body>
       <ul class="space-y-1">
-        <li v-for="uri in choices?.uris ?? []" :key="uri">
+        <li v-for="shortId in choices?.shortIds ?? []" :key="shortId">
           <UButton
             variant="link"
             color="neutral"
             class="font-mono"
-            :label="uri"
-            @click="choose(uri)"
+            :label="shortId"
+            @click="choose(shortId)"
           />
         </li>
       </ul>
@@ -230,6 +238,20 @@ function choose(uri: string) {
 }
 .kioku-markdown :deep(a.kioku-keyword:hover) {
   text-decoration-color: currentColor;
+}
+/* [[m-xxxxxx]] 双链 */
+.kioku-markdown :deep(a.kioku-wikilink) {
+  color: inherit;
+  text-decoration: underline solid var(--strata-rule);
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.kioku-markdown :deep(a.kioku-wikilink:hover) {
+  text-decoration-color: currentColor;
+}
+.kioku-markdown :deep(a.kioku-wikilink-missing) {
+  color: var(--ui-text-muted);
+  text-decoration-style: dotted;
 }
 /* 这条记忆自己的关键词：只标出来，一条赭色的线，不铺灰底 */
 .kioku-markdown :deep(mark.kioku-own-keyword) {

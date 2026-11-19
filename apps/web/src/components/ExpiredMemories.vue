@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import type { ExpiredMemory } from '@kioku/contracts'
+import type { ExpiredEntry } from '@kioku/contracts'
 import { useInfiniteQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref } from 'vue'
 
@@ -9,77 +9,60 @@ import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
 import { useNow } from '../composables/useNow'
-import { purgeAt, purgeNote, releasedNotice } from '../retention'
 import { formatRelative, formatTime } from '../time'
 import Hint from './Hint.vue'
 import MemoryHistory from './MemoryHistory.vue'
 import MemoryRow from './strata/MemoryRow.vue'
 import NoteLine from './strata/NoteLine.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
+import { entryBand } from './strata/strata'
 
-const props = defineProps<{ spaceId: string }>()
-const emit = defineEmits<{ reactivated: [uri: string] }>()
+const props = defineProps<{ circleId: string }>()
+const emit = defineEmits<{ reactivated: [shortId: string] }>()
 const toast = useToast()
 const queryClient = useQueryClient()
-// 和别处一样按条判断：editor 改不了别人的应用的记忆
-const { canWriteUri } = useMemoryPermissions(computed(() => props.spaceId))
+// 和别处一样按条判断：editor 改不了机密记忆
+const { circleKind, canWriteEntry } = useMemoryPermissions(computed(() => props.circleId))
+const canWriteItem = (item: ExpiredEntry) =>
+  canWriteEntry({ sensitivity: item.sensitivity, circleId: props.circleId })
 
-const queryKey = computed(() => ['memory-expired', props.spaceId] as const)
+const queryKey = computed(() => ['entry-expired', props.circleId] as const)
 const expired = useInfiniteQuery({
   queryKey,
-  // 参数从键里取：换了空间之后，旧键剩下的页还在重新拉取时，不会去请求新的空间
-  queryFn: ({ pageParam, queryKey: [, spaceId] }) => api.expiredMemories(spaceId, pageParam),
+  // 参数从键里取：换了记忆圈之后，旧键剩下的页还在重新拉取时，不会去请求新的记忆圈
+  queryFn: ({ pageParam, queryKey: [, cid] }) => api.expiredEntries(cid, pageParam),
   initialPageParam: undefined as string | undefined,
   getNextPageParam: (last) => last.nextCursor ?? undefined,
   enabled: useActivated(),
 })
 const items = computed(() => expired.data.value?.pages.flatMap((page) => page.items) ?? [])
-// 让出了 URI 的和已删除的一样按保留期永久清除：保留期每一页都带着，用第一页的
-const retention = computed(() => expired.data.value?.pages[0]?.retention ?? null)
-const anyReleased = computed(() => items.value.some((item) => item.deletedAt !== null))
-// 还剩几天按它算：页面一直开着也每分钟跟着变，切到别的视图时停下
 const now = useNow()
-// 让出的那几条后面的说法与要不要标警示色；没让出的不清除，没有
-const notes = computed(() => {
-  const r = retention.value
-  return new Map(
-    r
-      ? items.value.flatMap((item) =>
-          item.deletedAt ? [[item.id, purgeNote(item.deletedAt, r, now.value)] as const] : [],
-        )
-      : [],
-  )
-})
 
 // 正在看历史的那一条
-const viewing = ref<ExpiredMemory | null>(null)
+const viewing = ref<ExpiredEntry | null>(null)
 
 const reactivating = ref<string | null>(null)
 // version 是看到的版本：在历史里恢复过旧版本之后，用历史里的版本
-async function reactivate(item: ExpiredMemory, version = item.version) {
+async function reactivate(item: ExpiredEntry, version = item.version) {
   if (reactivating.value) return
-  // 请求期间可能换了空间（页面会被复用）：缓存按发出请求时的空间写，换了空间就不通知页面
-  const spaceId = props.spaceId
+  const cid = props.circleId
   const key = queryKey.value
   reactivating.value = item.id
   try {
-    const memory = await api.reactivateMemory(spaceId, {
-      memoryId: item.id,
+    const entry = await api.reactivateEntry(cid, {
+      entryId: item.id,
       expectedVersion: version,
     })
-    // 写进这条记忆的缓存：这个 URI 上之前缓存的可能是别的记录、或者过期之前的版本
-    queryClient.setQueryData(['memory', spaceId, memory.uri], memory)
-    void queryClient.invalidateQueries({ queryKey: ['memory-history', spaceId, memory.id] })
+    queryClient.setQueryData(['entry', cid, entry.shortId], entry)
+    void queryClient.invalidateQueries({ queryKey: ['entry-history', cid, entry.id] })
     // 变更记录详情里的前后快照也可能带着刚抹掉的正文
-    void queryClient.invalidateQueries({ queryKey: ['activity-event', spaceId] })
-    toast.add({ title: `已恢复生效 ${memory.uri}`, color: 'success' })
+    void queryClient.invalidateQueries({ queryKey: ['activity-event', cid] })
+    toast.add({ title: `已恢复生效「${entry.title || entry.shortId}」`, color: 'success' })
     if (viewing.value?.id === item.id) viewing.value = null
-    if (props.spaceId === spaceId) emit('reactivated', memory.uri)
-    // 等列表重新拉取完、这一行消失之后按钮才恢复，免得再点一次。页面收到通知时已经发出了重新拉取，接着等它
+    if (props.circleId === cid) emit('reactivated', entry.shortId)
     await queryClient.invalidateQueries({ queryKey: key }, { cancelRefetch: false })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '恢复生效失败', color: 'error' })
-    // 版本对不上、已经被别人重新生效了：刷新列表
     if (err instanceof ApiError && err.status === 409) void expired.refetch()
   } finally {
     reactivating.value = null
@@ -91,11 +74,8 @@ async function reactivate(item: ExpiredMemory, version = item.version) {
   <div>
     <div class="list-head">
       <p>
-        已过期的记忆不再召回，也不进启动加载。<Hint>
-          恢复生效后长期有效，可再设置新的有效期。标记为「坐标已释放」的，过期后同一坐标上已写入新记忆；那条记忆仍在时，需先移走或删除。
-        </Hint>
+        已过期的记忆不再召回，也不进启动加载。<Hint>恢复生效后长期有效，可再设置新的有效期。</Hint>
       </p>
-      <p v-if="retention && anyReleased" class="text-warning">{{ releasedNotice(retention) }}</p>
     </div>
     <!-- 读取失败时已经读到的行留着：翻页失败的错误放在「加载更多」上面，其余放在最上面 -->
     <div v-if="expired.isError.value && !expired.isFetchNextPageError.value" class="list-note">
@@ -108,9 +88,10 @@ async function reactivate(item: ExpiredMemory, version = item.version) {
       <ul>
         <li v-for="item in items" :key="item.id">
           <MemoryRow
-            :uri="item.uri"
+            :short-id="item.shortId"
             :title="item.title"
-            :layer="item.layer"
+            :band="entryBand({ kind: item.kind }, { id: circleId, kind: circleKind })"
+            :kind="item.kind"
             :sensitivity="item.sensitivity"
             :priority="item.priority"
           >
@@ -119,35 +100,19 @@ async function reactivate(item: ExpiredMemory, version = item.version) {
               <time :datetime="item.expiredAt" :title="formatTime(item.expiredAt)">
                 {{ formatRelative(item.expiredAt, now) }}
               </time>
-              <template v-if="retention && item.deletedAt && notes.get(item.id)">
-                ·
-                <span
-                  :class="{ 'text-warning': notes.get(item.id)!.soon }"
-                  :title="`坐标释放于 ${formatTime(item.deletedAt)}，最早于 ${formatTime(purgeAt(item.deletedAt, retention).toISOString())} 后清除`"
-                >
-                  {{ notes.get(item.id)!.text }}
-                </span>
-              </template>
-            </span>
-            <span
-              v-if="item.released"
-              class="block text-warning"
-              title="过期后同一坐标上已写入新记忆，坐标已释放"
-            >
-              坐标已释放
             </span>
             <template #actions>
               <UButton
                 size="xs"
                 color="neutral"
                 variant="outline"
-                :aria-label="`${item.uri} 的历史`"
+                :aria-label="`${item.title || item.shortId} 的历史`"
                 @click="viewing = item"
               >
                 历史
               </UButton>
               <UButton
-                v-if="canWriteUri(item.uri)"
+                v-if="canWriteItem(item)"
                 size="xs"
                 color="neutral"
                 variant="outline"
@@ -179,17 +144,17 @@ async function reactivate(item: ExpiredMemory, version = item.version) {
 
     <USlideover
       :open="viewing !== null"
-      :title="viewing ? `历史：${viewing.uri}` : '历史'"
+      :title="viewing ? `历史：${viewing.title || viewing.shortId}` : '历史'"
       :ui="{ content: 'max-w-2xl' }"
       @update:open="(v) => !v && (viewing = null)"
     >
       <template #body>
         <MemoryHistory
           v-if="viewing"
-          :space-id="spaceId"
-          :memory-id="viewing.id"
-          :can-restore="canWriteUri(viewing.uri)"
-          :can-reactivate="canWriteUri(viewing.uri)"
+          :circle-id="circleId"
+          :entry-id="viewing.id"
+          :can-restore="canWriteItem(viewing)"
+          :can-reactivate="canWriteItem(viewing)"
           :reactivating="reactivating === viewing.id"
           @reactivate="(version) => viewing && reactivate(viewing, version)"
         />

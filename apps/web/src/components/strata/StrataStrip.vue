@@ -1,13 +1,13 @@
 <script setup lang="ts">
-import type { Layer, Sensitivity } from '@kioku/contracts'
+import type { Sensitivity, StrataBand } from '@kioku/contracts'
 import { computed } from 'vue'
 
 import { paintCell } from './strata'
 
-// 详情顶上的一条地层：一眼看出这条记忆在哪一层、什么敏感级。文字在下面的标签里，这里不读屏
-const props = defineProps<{ layer: Layer; sensitivity: Sensitivity }>()
+// 详情顶上的一条地层：一眼看出这条词条在哪一条色带、什么敏感级。文字在下面的标签里，这里不读屏
+const props = defineProps<{ band: StrataBand; sensitivity: Sensitivity }>()
 const rects = computed(() =>
-  paintCell(props.layer, props.sensitivity, { x: 0, y: 0, width: '100%', height: '100%' }),
+  paintCell(props.band, props.sensitivity, { x: 0, y: 0, width: '100%', height: '100%' }),
 )
 </script>
 

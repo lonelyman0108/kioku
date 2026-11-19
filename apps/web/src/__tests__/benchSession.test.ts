@@ -2,12 +2,12 @@ import {
   BENCH_MAX_REPLAY_BYTES,
   BENCH_MAX_REPLAY_STEPS,
   BenchRunRequest,
-  type AppInfo,
   type BenchReplayStep,
   type BenchRunResult,
   type BenchStepResult,
+  type ClientInfo,
   type KeyInfo,
-  type KeyScopes,
+  type LensKeyScopes,
   type WhoAmI,
 } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
@@ -16,14 +16,14 @@ import { ApiError } from '../api/client'
 import {
   abandonedRun,
   acceptDivergence,
-  APP_REPLACED_NOTICE,
   BENCH_TIMELINE_MAX,
   catalogFailure,
+  CLIENT_REPLACED_NOTICE,
   divergenceNotice,
   emptySession,
   KEY_REPLACED_NOTICE,
   modeSwitchLoss,
-  ownedApps,
+  ownedClients,
   REAL_MODE_CONSEQUENCES,
   recordRun,
   replayEntryOf,
@@ -38,14 +38,15 @@ import {
   type BenchSession,
 } from '../benchSession'
 
-const scopes: KeyScopes = {
-  readLayers: ['user'],
-  writeLayers: ['user'],
+const scopes: LensKeyScopes = {
+  readKinds: ['entry'],
+  writeKinds: ['entry'],
   maxSensitivity: 'private',
+  allowedRealms: null,
   admin: false,
   credentials: 'none' as const,
 }
-const whoami = { scopes } as WhoAmI
+const whoami = {} as WhoAmI
 
 const write = (uri: string, content = '正文'): BenchReplayStep => ({
   kind: 'tool',
@@ -76,7 +77,7 @@ const step = (over: Partial<BenchStepResult> = {}): BenchStepResult => ({
   text: '',
   raw: {},
   ms: 1,
-  uris: [],
+  shortIds: [],
   session: null,
   vectorSkipped: false,
   assertions: [],
@@ -91,6 +92,7 @@ const result = (steps: BenchStepResult[], over: Partial<BenchRunResult> = {}): B
   mode: 'rollback',
   ok: true,
   whoami,
+  scopes,
   counts: { passed: steps.length, failed: 0, skipped: 0, notRun: 0 },
   steps,
   replayDiverged: null,
@@ -101,16 +103,16 @@ const recorded = (session: BenchSession, ...replays: BenchReplayStep[]) =>
   replays.reduce((s, replay) => recordRun(s, result([step({ replay })])), session)
 
 describe('谁能用测试台', () => {
-  const app = (id: string, ownerAccountId: string) => ({ id, ownerAccountId }) as AppInfo
+  const client = (id: string, ownerAccountId: string) => ({ id, ownerAccountId }) as ClientInfo
 
-  it('只列自己是主人的应用：空间 owner 也看不到别人的应用', () => {
-    const apps = [app('a', 'me'), app('b', 'other'), app('c', 'me')]
-    expect(ownedApps(apps, 'me').map((a) => a.id)).toEqual(['a', 'c'])
-    expect(ownedApps(apps, undefined)).toEqual([])
+  it('只列自己是所有者的接入实例：记忆圈管理员也看不了别人的接入实例', () => {
+    const clients = [client('a', 'me'), client('b', 'other'), client('c', 'me')]
+    expect(ownedClients(clients, 'me').map((c) => c.id)).toEqual(['a', 'c'])
+    expect(ownedClients(clients, undefined)).toEqual([])
   })
 
   it('只列还有效的 Key：吊销的与作废的 effectiveScopes 是 null', () => {
-    const key = (id: string, effectiveScopes: KeyScopes | null) =>
+    const key = (id: string, effectiveScopes: LensKeyScopes | null) =>
       ({ id, effectiveScopes }) as KeyInfo
     const keys = [key('live', scopes), key('revoked', null), key('live2', scopes)]
     expect(usableKeys(keys).map((k) => k.id)).toEqual(['live', 'live2'])
@@ -118,52 +120,58 @@ describe('谁能用测试台', () => {
 })
 
 describe('选择写回地址', () => {
-  const APPS = ['a1', 'a2']
+  const CLIENTS = ['a1', 'a2']
   const KEYS = ['k1', 'k2']
 
   it('没读到时不判断', () => {
-    expect(selectionFix({ app: 'gone', key: 'gone' }, null, null)).toBeNull()
-    expect(selectionFix({ app: 'a1', key: 'gone' }, APPS, null)).toBeNull()
+    expect(selectionFix({ client: 'gone', key: 'gone' }, null, null)).toBeNull()
+    expect(selectionFix({ client: 'a1', key: 'gone' }, CLIENTS, null)).toBeNull()
     expect(selectionFix({}, null, KEYS)).toBeNull()
   })
 
   it('地址里没有的：写上默认的，不提示', () => {
-    expect(selectionFix({}, APPS, null)).toEqual({ query: { app: 'a1' }, notice: null })
-    expect(selectionFix({ app: 'a2' }, APPS, KEYS)).toEqual({ query: { key: 'k1' }, notice: null })
+    expect(selectionFix({}, CLIENTS, null)).toEqual({ query: { client: 'a1' }, notice: null })
+    expect(selectionFix({ client: 'a2' }, CLIENTS, KEYS)).toEqual({
+      query: { key: 'k1' },
+      notice: null,
+    })
   })
 
-  it('地址里只有 Key：先写应用，Key 留着等读到那个应用的列表再判断', () => {
-    expect(selectionFix({ key: 'k2' }, APPS, null)).toEqual({ query: { app: 'a1' }, notice: null })
+  it('地址里只有 Key：先写接入实例，Key 留着等读到那个接入实例的列表再判断', () => {
+    expect(selectionFix({ key: 'k2' }, CLIENTS, null)).toEqual({
+      query: { client: 'a1' },
+      notice: null,
+    })
   })
 
   it('都用得上：不动', () => {
-    expect(selectionFix({ app: 'a2', key: 'k2' }, APPS, KEYS)).toBeNull()
+    expect(selectionFix({ client: 'a2', key: 'k2' }, CLIENTS, KEYS)).toBeNull()
   })
 
-  it('应用用不了、有别的可换：换了，Key 一起去掉，提示', () => {
-    expect(selectionFix({ app: 'gone', key: 'k-gone' }, APPS, null)).toEqual({
-      query: { app: 'a1', key: undefined },
-      notice: APP_REPLACED_NOTICE,
+  it('接入实例用不了、有别的可换：换了，Key 一起去掉，提示', () => {
+    expect(selectionFix({ client: 'gone', key: 'k-gone' }, CLIENTS, null)).toEqual({
+      query: { client: 'a1', key: undefined },
+      notice: CLIENT_REPLACED_NOTICE,
     })
   })
 
   it('Key 用不了、有别的可换：换了，提示', () => {
-    expect(selectionFix({ app: 'a1', key: 'gone' }, APPS, KEYS)).toEqual({
+    expect(selectionFix({ client: 'a1', key: 'gone' }, CLIENTS, KEYS)).toEqual({
       query: { key: 'k1' },
       notice: KEY_REPLACED_NOTICE,
     })
   })
 
   it('没有可换的：不动，不说换了', () => {
-    expect(selectionFix({ app: 'gone', key: 'gone' }, [], null)).toBeNull()
-    expect(selectionFix({ app: 'a1', key: 'gone' }, APPS, [])).toBeNull()
-    expect(selectionFix({ app: 'a1' }, APPS, [])).toBeNull()
+    expect(selectionFix({ client: 'gone', key: 'gone' }, [], null)).toBeNull()
+    expect(selectionFix({ client: 'a1', key: 'gone' }, CLIENTS, [])).toBeNull()
+    expect(selectionFix({ client: 'a1' }, CLIENTS, [])).toBeNull()
   })
 
   it('说的是换了之后的情况', () => {
     expect(KEY_REPLACED_NOTICE).toContain('已切换到')
     expect(KEY_REPLACED_NOTICE).toContain('权限可能不同')
-    expect(APP_REPLACED_NOTICE).toContain('已切换到')
+    expect(CLIENT_REPLACED_NOTICE).toContain('已切换到')
   })
 })
 
@@ -223,7 +231,13 @@ describe('工具目录读取失败的原因', () => {
 })
 
 describe('真实模式的运行中途作废', () => {
-  const RUN = { id: 7, label: '存凭据', view: 'judged' as const, app: '应用', key: '主 Key' }
+  const RUN = {
+    id: 7,
+    label: '存凭据',
+    view: 'judged' as const,
+    client: '接入实例',
+    key: '主 Key',
+  }
 
   it('有结果：说可能已经写入、到活动里确认，结果留着', () => {
     const made = result([step()], { run: 'abcd1234', mode: 'real' })
@@ -232,7 +246,7 @@ describe('真实模式的运行中途作废', () => {
     expect(notice.title).toContain('中途作废')
     expect(notice.title).toContain('可能已写入')
     expect(notice.title).toContain('请到变更记录确认')
-    expect(notice.description).toContain('「存凭据」按「应用」的访问密钥「主 Key」真实执行')
+    expect(notice.description).toContain('「存凭据」按「接入实例」的访问密钥「主 Key」真实执行')
     expect(notice.result).toBe(made)
     expect(notice.view).toBe('judged')
   })
@@ -635,10 +649,10 @@ describe('这次会话的说明', () => {
     expect(
       replayStepLabel({
         kind: 'tool',
-        tool: 'kioku_move',
-        arguments: { from: 'a://1', to: 'a://2' },
+        tool: 'kioku_transfer',
+        arguments: { id: 'm-abc123', to_circle: 'work' },
       }),
-    ).toBe('kioku_move a://1')
+    ).toBe('kioku_transfer m-abc123')
     expect(
       replayStepLabel({
         kind: 'tool',

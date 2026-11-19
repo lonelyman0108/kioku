@@ -4,7 +4,12 @@ import { parse } from 'vue/compiler-sfc'
 import { QueryClient } from '@tanstack/vue-query'
 
 import apps from '../apps?raw'
-import { KEY_MATRIX_STALE_TIME, forgetApp, keyMatrixKey, refreshAppCaches } from '../appQueries'
+import {
+  KEY_MATRIX_STALE_TIME,
+  forgetClient,
+  keyMatrixKey,
+  refreshClientCaches,
+} from '../appQueries'
 import appGroupPersonas from '../components/AppGroupPersonas.vue?raw'
 import appKeys from '../components/AppKeys.vue?raw'
 import appRecallEvents from '../components/AppRecallEvents.vue?raw'
@@ -101,16 +106,16 @@ describe('路由和入口', () => {
   const children = routes.find((r) => r.path === '/')!.children!
 
   it('待处理有自己的路由', () => {
-    expect(children.find((r) => r.name === 'inbox')?.path).toBe('spaces/:spaceId/inbox')
+    expect(children.find((r) => r.name === 'inbox')?.path).toBe('circles/:circleId/inbox')
   })
 
   it('旧的 review 地址带着分类跳过来', () => {
     const redirect = children.find((r) => r.name === 'review')!.redirect as (to: unknown) => unknown
-    const go = (query: Record<string, string>) => redirect({ params: { spaceId: 's1' }, query })
-    expect(go({})).toEqual({ name: 'inbox', params: { spaceId: 's1' }, query: { tab: 'review' } })
+    const go = (query: Record<string, string>) => redirect({ params: { circleId: 's1' }, query })
+    expect(go({})).toEqual({ name: 'inbox', params: { circleId: 's1' }, query: { tab: 'review' } })
     expect(go({ tab: 'dream' })).toEqual({
       name: 'inbox',
-      params: { spaceId: 's1' },
+      params: { circleId: 's1' },
       query: { tab: 'dream' },
     })
   })
@@ -118,14 +123,14 @@ describe('路由和入口', () => {
   it('导航指向待处理，角标用共享的条数', () => {
     expect(consoleLayout).toContain("link('inbox', icons.review), count: inboxBadge.value")
     expect(consoleLayout).toContain(
-      'actionableInboxCount(inboxCounts.data.value, space.value.role)',
+      'actionableInboxCount(inboxCounts.data.value, circle.value.role)',
     )
     expect(consoleLayout).toContain('useInboxCounts(')
   })
 
-  it('条数不跟着每个页面重取：有 staleTime，空间未知时不查', () => {
+  it('条数不跟着每个页面重取：有 staleTime，记忆圈未知时不查', () => {
     expect(useInboxCounts).toContain('staleTime: 60_000')
-    expect(useInboxCounts).toContain('enabled: computed(() => Boolean(spaceId.value))')
+    expect(useInboxCounts).toContain('enabled: computed(() => Boolean(circleId.value))')
   })
 
   it('概览的四类都链到待处理', () => {
@@ -140,7 +145,9 @@ describe('路由和入口', () => {
 
 describe('处理完待办之后条数失效', () => {
   it('绑定（确认、拒绝走 refreshSubjectCaches）', () => {
-    expect(subjectBindings).toContain('refreshSubjectCaches(queryClient, spaceId)')
+    expect(subjectBindings).toContain(
+      'refreshSubjectCaches(queryClient, circleId, props.subjectId)',
+    )
     expect(subjectQueries).toContain("'inbox-counts'")
   })
 
@@ -150,13 +157,13 @@ describe('处理完待办之后条数失效', () => {
   })
 
   it('整理建议：执行、拒绝、作废，整理完有新建议', () => {
-    const refresh = /function refresh\(spaceId: string\) \{[\s\S]*?\n\}/.exec(dreamSuggestions)![0]
+    const refresh = /function refresh\(circleId: string\) \{[\s\S]*?\n\}/.exec(dreamSuggestions)![0]
     expect(refresh).toContain("'inbox-counts'")
     const reject = /async function reject\([\s\S]*?\n\}/.exec(dreamSuggestions)![0]
-    expect(reject).toContain('invalidateInboxCounts(queryClient, spaceId)')
+    expect(reject).toContain('invalidateInboxCounts(queryClient, circleId)')
     const apply = /async function apply\([\s\S]*?\n\}/.exec(dreamSuggestions)![0]
-    expect(apply).toContain('invalidateInboxCounts(queryClient, spaceId)')
-    expect(dreamSuggestions).toContain('invalidateInboxCounts(queryClient, props.spaceId)')
+    expect(apply).toContain('invalidateInboxCounts(queryClient, circleId)')
+    expect(dreamSuggestions).toContain('invalidateInboxCounts(queryClient, props.circleId)')
   })
 
   it('忽略、撤销忽略和转存', () => {
@@ -164,8 +171,8 @@ describe('处理完待办之后条数失效', () => {
       usePlaintextActions,
     )![0]
     expect(refresh).toContain("'inbox-counts'")
-    expect(usePlaintextActions).toContain('refreshAfterPlaintext(queryClient, sid, memory)')
-    expect(useConvertCredential).toContain('refreshAfterPlaintext(queryClient, sid, done.memory)')
+    expect(usePlaintextActions).toContain('refreshAfterPlaintext(queryClient, cid, entry)')
+    expect(useConvertCredential).toContain('refreshAfterPlaintext(queryClient, cid, done.entry)')
   })
 })
 
@@ -219,7 +226,7 @@ describe('待处理', () => {
     expect(dreamSuggestions).toContain('suggestionKinds[item.kind].effect')
     expect(dreamSuggestions).toContain('suggestionKinds[confirming.kind].effect')
     expect(dreamSuggestions).toContain(
-      '包含当前账号无权写入的记忆（如其他成员的应用的记忆），需由有权限的成员处理。',
+      '包含当前账号无权写入的记忆（如其他成员的接入实例的记忆），需由有权限的成员处理。',
     )
     expect(dreamSuggestions).toContain('正文疑似包含明文凭据')
     expect(dream).toContain('其余几条删除')
@@ -252,7 +259,9 @@ describe('疑似明文', () => {
     expect(handler(buttonOf(memoryEditor, '转存为凭据'), 'click')).toBe('convertOpen = true')
     expect(handler(buttonOf(memoryEditor, '忽略'), 'click')).toBe('setPlaintextIgnored(true)')
     expect(handler(buttonOf(memoryEditor, '撤销忽略'), 'click')).toBe('setPlaintextIgnored(false)')
-    expect(memoryEditor).toContain('v-else-if="base.plaintextIgnored"')
+    expect(memoryEditor).toContain(
+      'v-else-if="base.plaintextIgnored && base.sensitivity !== \'secret\'"',
+    )
     expect(memoryEditor.match(/<template v-if="!readOnly" #actions>/g)).toHaveLength(3)
     expect(memoryEditor).toContain('v-else-if="unprotectedPii"')
     expect(memoryEditor).toContain('v-else-if="protectedPii"')
@@ -293,7 +302,7 @@ describe('转存对话框', () => {
   it('占位符放不进这条记忆时：不渲染值，没有提交按钮，有查看记忆的入口', () => {
     const elementsOfBlock = elementsOf(convertModal)
     const block = elementsOfBlock.find(
-      (el) => el.props?.find((p) => p.name === 'else-if')?.exp?.content === 'memory && blocked',
+      (el) => el.props?.find((p) => p.name === 'else-if')?.exp?.content === 'entry && blocked',
     )!
     const inside = (node: TemplateNode): TemplateNode[] => [
       node,
@@ -302,7 +311,7 @@ describe('转存对话框', () => {
     const tags = inside(block)
     expect(tags.some((el) => el.tag === 'UInput')).toBe(false)
     const link = tags.find((el) => el.tag === 'UButton')!
-    expect(bound(link, 'to')).toBe('memoryRoute(spaceId, memory.uri)')
+    expect(bound(link, 'to')).toBe('entryRoute(circleId, entry.shortId)')
     expect(textOf(link)).toBe('查看记忆')
     expect(
       buttonOf(convertModal, '转存为凭据').props?.find((p) => p.name === 'if')?.exp?.content,
@@ -339,20 +348,22 @@ describe('转存对话框', () => {
   })
 })
 
-describe('应用', () => {
-  it('只有应用所有者和空间所有者能看 Key', () => {
-    expect(appKeys).toContain('enabled: computed(() => props.isAppOwner || props.isSpaceOwner)')
-    expect(appKeys).toContain('仅应用所有者可查看和签发访问密钥')
+describe('接入实例', () => {
+  it('只有接入实例所有者和记忆圈所有者能看 Key', () => {
+    expect(appKeys).toContain('enabled: computed(() => props.isClientOwner || props.isCircleOwner)')
+    expect(appKeys).toContain('仅接入实例所有者或记忆圈所有者可查看访问密钥')
     expect(appDetailPage).toContain(
-      'const canSeeKeys = computed(() => isAppOwner.value || isSpaceOwner.value)',
+      'const canSeeKeys = computed(() => isClientOwner.value || isCircleOwner.value)',
     )
     expect(appDetailPage).toContain('enabled: canSeeKeys')
-    expect(appsPage).toContain('isSpaceOwner.value || app.ownerAccountId === me.data.value?.id')
-    expect(appsPage).toContain('仅应用所有者可查看访问密钥')
+    expect(appsPage).toContain('isCircleOwner.value || c.ownerAccountId === me.data.value?.id')
+    expect(appsPage).toContain('仅接入实例所有者可查看访问密钥')
   })
 
   it('明文 Key 显示期间不能点遮罩、按 Esc 或右上角关掉', () => {
-    const modal = elementsOf(appKeys).find((el) => attr(el, 'title') === '签发访问密钥')!
+    const modal = elementsOf(appKeys).find(
+      (el) => el.tag === 'UModal' && bound(el, 'title')?.includes('签发访问密钥'),
+    )!
     expect(bound(modal, 'dismissible')).toBe('!issued')
     expect(bound(modal, 'close')).toBe('!issued')
     expect(handler(buttonOf(appKeys, '我已保存'), 'click')).toBe('closeIssue')
@@ -374,7 +385,7 @@ describe('应用', () => {
     expect(appKeys).toContain('<template v-if="canIssue" #actions>')
     expect(appDetailPage).toContain(':can-issue="canManage"')
     expect(appDetailPage).toContain(
-      "canManage = computed(() => isAppOwner.value && role.value !== 'viewer')",
+      "canManage = computed(() => isClientOwner.value && role.value !== 'viewer')",
     )
   })
 
@@ -382,26 +393,28 @@ describe('应用', () => {
     expect(appKeys).toContain('后，使用它的客户端将立即失去访问权限。')
   })
 
-  it('转移会吊销 Key、删除有限制：后果都还在，只有有权限的人看得到按钮', () => {
+  it('转移会吊销 Key、删除要写清后果，只有有权限的人看得到按钮', () => {
     expect(appDetailPage).toContain('全部吊销，新所有者需重新签发')
-    expect(appDetailPage).toContain('应用读取的本人记忆改为')
+    expect(appDetailPage).toContain(
+      '接入实例无上下文请求与凭据授权属于其所有者，转移后改为新所有者',
+    )
     expect(appDetailPage).toContain("'已转移，原有访问密钥已全部吊销'")
-    expect(appDetailPage).toContain('仍有这个应用的记忆时无法删除。')
-    expect(appDetailPage).toContain('已删除但仍可恢复的也算在内，需先移到其他归属。')
-    expect(appDetailPage).toContain('使用这些访问密钥的客户端将立即失去访问权限。')
+    expect(appDetailPage).toContain(
+      '其全部访问密钥与按群规则将一并删除，使用这些访问密钥的客户端将立即失去访问权限。',
+    )
     const elements = elementsOf(appDetailPage)
     const directive = (el: TemplateNode) => el.props?.find((p) => p.name === 'if')?.exp?.content
-    expect(directive(buttonOf(appDetailPage, '转移应用'))).toBe('isSpaceOwner')
-    expect(directive(buttonOf(appDetailPage, '删除应用'))).toBe('canDelete')
-    expect(elements.some((el) => el.tag === 'AppSimulator' && directive(el) === 'isAppOwner')).toBe(
-      true,
-    )
+    expect(directive(buttonOf(appDetailPage, '转移接入实例'))).toBe('isCircleOwner')
+    expect(directive(buttonOf(appDetailPage, '删除接入实例'))).toBe('canDelete')
+    expect(
+      elements.some((el) => el.tag === 'AppSimulator' && directive(el) === 'isClientOwner'),
+    ).toBe(true)
   })
 
   it('权限范围的数据都来自接口：矩阵和五根小岩芯用同一个查询的结果', () => {
-    expect(keyMatrix).toContain('keyMatrixKey(props.spaceId, props.appId, props.keyInfo)')
-    expect(keyMatrix).toContain('api.keyMatrix(sid, aid, kid)')
-    expect(keyMatrix).toContain('<AccessMatrix :rows="current.rows" />')
+    expect(keyMatrix).toContain('keyMatrixKey(props.circleId, props.clientId, props.keyInfo)')
+    expect(keyMatrix).toContain('api.keyMatrix(cid as string, clid as string, kid as string)')
+    expect(keyMatrix).toContain('<AccessMatrix :circles="current.circles" />')
     expect(keyMatrix).toContain(':rows="rowsOf(c)"')
     expect(keyMatrix).not.toContain('issuedScopeRows')
     expect(appKeys).toContain(':rows="rowsOf(key.id)"')
@@ -431,30 +444,30 @@ describe('应用', () => {
     expect(appDetailPage).toContain('usableKeys(seenKeys.value ?? [])')
   })
 
-  it('启动加载预览留在应用详情，链到召回调试和测试台，都带上 Key', () => {
+  it('启动加载预览留在接入实例详情，链到召回调试和测试台，都带上 Key', () => {
     expect(bound(buttonOf(appSimulator, '召回调试'), 'to')).toBe(
-      "{ name: 'recall', params: { spaceId }, query: { key: keyId } }",
+      "{ name: 'recall', params: { circleId }, query: { key: keyId } }",
     )
     expect(appSimulator).toContain('api.bootPreview(')
     expect(appSimulator).not.toContain('api.recallDebug')
   })
 
-  it('换了应用、Key 或应用设置时清掉上一次的结果，旧的请求作废', () => {
+  it('换了接入实例、Key 或记忆圈设置时清掉上一次的结果，旧的请求作废', () => {
     expect(appSimulator).toMatch(
-      /\[\(\) => props\.spaceId, \(\) => props\.appId, \(\) => props\.keyId, \(\) => props\.settings\],\s+\(\) => \{\s+current\.value = null\s+preview\.value = null/,
+      /\[\(\) => props\.circleId, \(\) => props\.clientId, \(\) => props\.keyId, \(\) => props\.settings\],\s+\(\) => \{\s+current\.value = null\s+preview\.value = null/,
     )
     expect(appSimulator).toContain('if (id === current.value) apply(result)')
   })
 })
 
 describe('召回调试', () => {
-  it('只列当前账号是所有者的应用的有效 Key，和服务端一个规则', () => {
-    expect(recallDebugPanel).toContain('ownedApps(apps.data.value ?? [], me.data.value?.id)')
+  it('只列当前账号是所有者的接入实例的有效 Key，和服务端一个规则', () => {
+    expect(recallDebugPanel).toContain('ownedClients(clients.data.value ?? [], me.data.value?.id)')
     expect(recallDebugPanel).toContain('debugKeyChoices(owned.value, keyResults.value)')
   })
 
-  it('没有自己的应用、没有有效 Key 时给出说明', () => {
-    expect(recallDebugPanel).toContain('当前账号暂无应用，无法调试')
+  it('没有自己的接入实例、没有有效 Key 时给出说明', () => {
+    expect(recallDebugPanel).toContain('当前账号暂无接入实例，无法调试')
     expect(recallDebugPanel).toContain('暂无有效访问密钥。签发后可调试。')
   })
 
@@ -464,9 +477,9 @@ describe('召回调试', () => {
     )
   })
 
-  it('换了 Key 或应用设置时清掉结果，旧的请求作废', () => {
+  it('换了 Key 或记忆圈设置时清掉结果，旧的请求作废', () => {
     expect(recallDebugPanel).toMatch(
-      /watch\(\[\(\) => props\.spaceId, \(\) => selected\.value\?\.key\.id, settings\], \(\) => \{\s+current\.value = null\s+debug\.value = null/,
+      /watch\(\[\(\) => props\.circleId, \(\) => selected\.value\?\.key\.id, settings\], \(\) => \{\s+current\.value = null\s+debug\.value = null/,
     )
     expect(recallDebugPanel).toContain('if (id === current.value) debug.value = result')
   })
@@ -483,17 +496,25 @@ describe('召回调试', () => {
   it('召回页挂着调试，统计的说明还在', () => {
     expect(recallPage).toContain('<RecallDebugPanel')
     expect(recallPage).toContain('更早的事件只保留每条记忆的累计次数')
-    expect(recallPage).toContain('不含机密内容（不参与召回）和启动加载的节点')
+    expect(recallPage).toContain('不含机密内容（不参与召回）和启动加载的词条')
     expect(recallPage).toContain('仅显示最早的 {{ data.never.length }} 条')
   })
 })
 
 describe('占位符的规则只有一份', () => {
   it('转存、列表、详情都用 contracts 的 placeholderAllowed', () => {
-    expect(memoryEditor).toContain('placeholderAllowed(base.value.layer, form.sensitivity)')
-    expect(memoryEditor).toContain('placeholderAllowed(base.value.layer, base.value.sensitivity)')
-    expect(inboxPlaintext).toContain('placeholderAllowed(item.layer, item.sensitivity)')
-    expect(useConvertCredential).toContain('placeholderAllowed(view.layer, view.sensitivity)')
+    expect(memoryEditor).toContain(
+      'placeholderAllowed(entryCircleKind.value, base.value.kind, form.sensitivity)',
+    )
+    expect(memoryEditor).toContain(
+      'placeholderAllowed(entryCircleKind.value, base.value.kind, base.value.sensitivity)',
+    )
+    expect(inboxPlaintext).toContain(
+      'placeholderAllowed(permissions.circleKind.value, item.kind, item.sensitivity)',
+    )
+    expect(useConvertCredential).toContain(
+      'placeholderAllowed(resolveCircleKind(view), view.kind, view.sensitivity)',
+    )
     expect(memoryEditor).not.toContain("form.sensitivity === 'private'")
   })
 
@@ -503,7 +524,7 @@ describe('占位符的规则只有一份', () => {
     expect(convert.props?.find((p) => p.name === 'if')?.exp?.content).toBe('convertible(item)')
     const view = buttonOf(inboxPlaintext, '查看记忆')
     expect(view.props?.some((p) => p.name === 'else')).toBe(true)
-    expect(bound(view, 'to')).toBe('memoryRoute(spaceId, item.uri)')
+    expect(bound(view, 'to')).toBe('entryRoute(circleId, item.shortId)')
     expect(elements.some((el) => attr(el, 'class') === 'plain-blocked')).toBe(true)
   })
 
@@ -517,13 +538,15 @@ describe('占位符的规则只有一份', () => {
 })
 
 describe('查询', () => {
-  it('参数从键里取：切换筛选或空间时，旧键下的后续页不会用新参数去取', () => {
-    expect(inboxReview).toMatch(/queryFn: \(\{ pageParam, queryKey: \[, sid, filter\] \}\)/)
-    expect(inboxReview).toContain('api.reviewQueue(sid, {')
-    expect(inboxReview).toContain("layer: filter === 'all' ? undefined : filter")
-    expect(inboxReview).not.toContain('api.reviewQueue(props.spaceId')
-    expect(inboxBindings).toContain('queryFn: ({ queryKey: [, spaceId] }) => api.overview(spaceId)')
-    expect(inboxPlaintext).toContain('queryKey: [, sid, f]')
+  it('参数从键里取：切换筛选或记忆圈时，旧键下的后续页不会用新参数去取', () => {
+    expect(inboxReview).toMatch(/queryFn: \(\{ pageParam, queryKey: \[, cid, filter\] \}\)/)
+    expect(inboxReview).toContain('api.reviewQueue(cid, {')
+    expect(inboxReview).toContain("kind: filter === 'all' ? undefined : filter")
+    expect(inboxReview).not.toContain('api.reviewQueue(props.circleId')
+    expect(inboxBindings).toContain(
+      'queryFn: ({ queryKey: [, circleId] }) => api.overview(circleId)',
+    )
+    expect(inboxPlaintext).toContain('queryKey: [, cid, f]')
   })
 
   it('权限范围的查询 60 秒内不重发', () => {
@@ -534,9 +557,10 @@ describe('查询', () => {
 
   describe('权限范围什么时候失效', () => {
     const scopes = {
-      readLayers: ['core' as const],
-      writeLayers: [],
+      readKinds: ['entry' as const],
+      writeKinds: [],
       maxSensitivity: 'internal' as const,
+      allowedRealms: null,
       admin: false,
       credentials: 'none' as const,
     }
@@ -550,16 +574,16 @@ describe('查询', () => {
     const stale = (client: QueryClient, queryKey: readonly unknown[]) =>
       client.getQueryState(queryKey)?.isInvalidated
 
-    it('应用的配置、默认人格、所有者改了：这个应用的 Key 都失效，别的应用不动', async () => {
+    it('接入实例的配置、默认人格、所有者改了：这个接入实例的 Key 都失效，别的接入实例不动', async () => {
       const client = seeded()
-      await refreshAppCaches(client, 's1', 'a1')
+      await refreshClientCaches(client, 's1', 'a1')
       expect(stale(client, keyMatrixKey('s1', 'a1', key))).toBe(true)
       expect(stale(client, keyMatrixKey('s1', 'a2', { ...key, id: 'k2' }))).toBe(false)
     })
 
-    it('删掉的应用：缓存去掉', async () => {
+    it('删掉的接入实例：缓存去掉', async () => {
       const client = seeded()
-      await forgetApp(client, 's1', 'a1')
+      await forgetClient(client, 's1', 'a1')
       expect(client.getQueryData(keyMatrixKey('s1', 'a1', key))).toBeUndefined()
     })
 
@@ -601,7 +625,7 @@ describe('读取失败', () => {
     ['Key 列表', appKeys, 'keys'],
     ['权限范围', keyMatrix, 'matrix'],
     ['召回统计', recallPage, 'stats'],
-    ['调试的应用', recallDebugPanel, 'apps'],
+    ['调试的接入实例', recallDebugPanel, 'clients'],
     ['最近整理', dreamSuggestions, 'runs'],
     ['按群切换人格', appGroupPersonas, 'rules'],
   ])('%s：后台刷新失败时有提示，读到的内容还在', (_name, source, query) => {
@@ -613,17 +637,17 @@ describe('读取失败', () => {
     expect(source).not.toContain(`v-else-if="${query}.isError.value"`)
   })
 
-  it('应用列表和详情：几个查询的错误都说出来，内容跟着 data 走', () => {
+  it('接入实例列表和详情：几个查询的错误都说出来，内容跟着 data 走', () => {
     for (const source of [appsPage, appDetailPage]) {
       // 同一句说法只提示一次，每条的重试只重读说这句话的查询，见 readFailures.test.ts
-      expect(source).toContain('failedReads([apps, personas, members])')
+      expect(source).toContain('failedReads([clients, personas, members])')
       expect(source).toContain(':query="failure.read"')
-      expect(source).not.toContain('apps.isError.value && !apps.data.value')
+      expect(source).not.toContain('clients.isError.value && !clients.data.value')
       expect(source).not.toContain('new Set(')
     }
-    expect(appsPage).toContain('<template v-else-if="apps.data.value">')
-    expect(appDetailPage).toContain('<template v-else-if="app">')
-    expect(appDetailPage).toContain('v-else-if="apps.data.value && !app"')
+    expect(appsPage).toContain('<template v-else-if="clients.data.value">')
+    expect(appDetailPage).toContain('<template v-else-if="client">')
+    expect(appDetailPage).toContain('v-else-if="clients.data.value && !client"')
   })
 
   it('概览：没读到才只有错误；读到过的留着，错误放在上面', () => {
@@ -634,13 +658,13 @@ describe('读取失败', () => {
     expect(overviewPage).not.toContain('v-else-if="!data')
   })
 
-  it('召回调试：所有应用的 Key 都有结果才显示表单，先到的不先显示', () => {
-    expect(recallDebugPanel).toContain('v-if="apps.isPending.value || keysPending"')
+  it('召回调试：所有接入实例的 Key 都有结果才显示表单，先到的不先显示', () => {
+    expect(recallDebugPanel).toContain('v-if="clients.isPending.value || keysPending"')
     expect(recallDebugPanel).toContain('keyResults.value.some((result) => result.isPending)')
     expect(recallDebugPanel).not.toContain('keysPending && !options.length')
   })
 
-  it('应用详情：转给别人之后不再用手里的 Key：查询停了，缓存还在', () => {
+  it('接入实例详情：转给别人之后不再用手里的 Key：查询停了，缓存还在', () => {
     expect(appDetailPage).toContain(
       'const seenKeys = computed(() => (canSeeKeys.value ? keys.data.value : undefined))',
     )
@@ -654,7 +678,7 @@ describe('读取失败', () => {
   it('「暂无」只在真的读到空时显示', () => {
     expect(appKeys).toContain('v-else-if="keys.data.value && !keys.data.value.length"')
     expect(inboxBindings).toContain('v-else-if="overview.data.value && !items.length"')
-    expect(appsPage).toContain('v-else-if="apps.data.value && !apps.data.value.length"')
+    expect(appsPage).toContain('v-else-if="clients.data.value && !clients.data.value.length"')
     expect(appRecallEvents).toContain('v-else-if="events.data.value && !items.length"')
   })
 
@@ -712,9 +736,13 @@ describe('启动加载', () => {
     expect(textOf(buttonOf(appSimulator, '预览'))).toBe('预览')
   })
 
-  it('超出预算的节点写标题，坐标放在悬停里：omitted 的每一项是对象，直接 join 会显示成 [object Object]', () => {
-    expect(appSimulator).toContain("preview.omitted.map((node) => memoryTitle(node)).join('、')")
-    expect(appSimulator).toContain(`:title="preview.omitted.map((node) => node.uri).join('\\n')"`)
+  it('超出预算的节点写标题，短 ID 放在悬停里：omitted 的每一项是对象，直接 join 会显示成 [object Object]', () => {
+    expect(appSimulator).toContain(
+      "preview.omitted.map((item) => `${item.title}（${item.shortId}）`).join('、')",
+    )
+    expect(appSimulator).toContain(
+      `:title="preview.omitted.map((item) => item.shortId).join('\\n')"`,
+    )
     expect(appSimulator).not.toContain('preview.omitted.join(')
   })
 

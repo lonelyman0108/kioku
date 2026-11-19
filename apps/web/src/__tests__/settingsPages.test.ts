@@ -56,10 +56,10 @@ import { routes } from '../routes'
 import useSessionSource from '../composables/useSession.ts?raw'
 import { fieldProblems, useSavedField } from '../composables/useSavedField'
 import {
-  forgetSpace,
+  forgetCircle,
   ME_KEY,
-  pickSpace,
-  rememberSpace,
+  pickCircle,
+  rememberCircle,
   useSession,
 } from '../composables/useSession'
 import { queryClient as sharedClient } from '../query'
@@ -71,14 +71,14 @@ import routesSource from '../routes.ts?raw'
 import settingsSectionsSource from '../settingsSections.ts?raw'
 import {
   accountSettingsRoute,
+  circleSettingsRoute,
   currentSection,
   instanceSettingsRoute,
   leavesSettingsPage,
+  legacyCircleSettingsRedirect,
   legacySettingsRedirect,
-  legacySpaceSettingsRedirect,
   SETTINGS_GROUPS,
   SETTINGS_SECTIONS,
-  spaceSettingsRoute,
   visibleGroups,
   visibleSections,
 } from '../settingsSections'
@@ -178,11 +178,11 @@ describe('小节的注册', () => {
   it('三组按分页的顺序，组内顺序和 demo 一致', () => {
     expect(SETTINGS_GROUPS.map((g) => [g.key, g.label])).toEqual([
       ['account', '个人'],
-      ['space', '空间'],
+      ['circle', '记忆圈'],
       ['instance', '实例'],
     ])
     expect(keysOf('account')).toEqual(['account', 'appearance'])
-    expect(keysOf('space')).toEqual([
+    expect(keysOf('circle')).toEqual([
       'general',
       'members',
       'recall',
@@ -192,7 +192,7 @@ describe('小节的注册', () => {
     ])
     expect(keysOf('instance')).toEqual([
       'accounts',
-      'spaces',
+      'circles',
       'models',
       'security',
       'data',
@@ -209,7 +209,7 @@ describe('小节的注册', () => {
       '隐私与脱敏',
       '导入与导出',
       '账号',
-      '空间',
+      '记忆圈',
       '模型',
       '安全',
       '数据与保留',
@@ -234,11 +234,11 @@ describe('小节的注册', () => {
     )
   })
 
-  it('个人组一直有；空间组要有空间；实例组只给实例管理员', () => {
-    expect(visibleGroups({ ...admin, hasSpace: true })).toEqual(['account', 'space', 'instance'])
-    expect(visibleGroups({ ...member, hasSpace: true })).toEqual(['account', 'space'])
-    expect(visibleGroups({ ...member, hasSpace: false })).toEqual(['account'])
-    expect(visibleSections('space', member).map((s) => s.key)).toEqual([
+  it('个人组一直有；记忆圈组要有记忆圈；实例组只给实例管理员', () => {
+    expect(visibleGroups({ ...admin, hasCircle: true })).toEqual(['account', 'circle', 'instance'])
+    expect(visibleGroups({ ...member, hasCircle: true })).toEqual(['account', 'circle'])
+    expect(visibleGroups({ ...member, hasCircle: false })).toEqual(['account'])
+    expect(visibleSections('circle', member).map((s) => s.key)).toEqual([
       'general',
       'members',
       'recall',
@@ -264,21 +264,19 @@ describe('设置的地址', () => {
 
   it('三组各一个地址，各是一个路由组件：换组时换掉整页，离开前的确认各组自己注册', () => {
     expect(record('account-settings').path).toBe('settings/account/:section?')
-    expect(record('space-settings').path).toBe('spaces/:spaceId/settings/:section?')
+    expect(record('circle-settings').path).toBe('circles/:circleId/settings/:section?')
     expect(record('instance-settings').path).toBe('settings/instance/:section?')
-    const components = ['account-settings', 'space-settings', 'instance-settings'].map(
+    const components = ['account-settings', 'circle-settings', 'instance-settings'].map(
       (name) => record(name).component,
     )
     expect(new Set(components).size).toBe(3)
-    for (const [name, page] of [
-      ['account', accountSettingsPage],
-      ['space', spaceSettingsPage],
-      ['instance', instanceSettingsPage],
+    for (const [group, page, file] of [
+      ['account', accountSettingsPage, 'AccountSettingsPage.vue'],
+      ['circle', spaceSettingsPage, 'SpaceSettingsPage.vue'],
+      ['instance', instanceSettingsPage, 'InstanceSettingsPage.vue'],
     ] as const) {
-      expect(page, name).toContain(`<SettingsPage group="${name}" />`)
-      expect(routesSource).toContain(
-        `import('./pages/${name[0]!.toUpperCase()}${name.slice(1)}SettingsPage.vue')`,
-      )
+      expect(page, group).toContain(`<SettingsPage group="${group}" />`)
+      expect(routesSource).toContain(`import('./pages/${file}')`)
     }
   })
 
@@ -301,20 +299,20 @@ describe('设置的地址', () => {
     for (const section of ['backup', 'retention', 'recall']) {
       expect(go({ section })).toEqual(to('data'))
     }
-    // 导入空间搬到了空间组，实例组里没有对应的小节了
+    // 导入记忆圈搬到了记忆圈组，实例组里没有对应的小节了
     expect(go({ section: 'import' })).toEqual(accountSettingsRoute())
     expect(go({})).toEqual({ name: 'account-settings', params: {}, query: {} })
     expect(go({ section: 'constructor' })).toEqual(accountSettingsRoute())
     expect(legacySettingsRedirect({ section: ['backup'] })).toEqual(accountSettingsRoute())
   })
 
-  it('旧的空间设置地址跳到合并后的小节', () => {
-    const enter = record('space-settings').beforeEnter as (to: unknown) => unknown
+  it('旧的记忆圈设置地址跳到合并后的小节', () => {
+    const enter = record('circle-settings').beforeEnter as (to: unknown) => unknown
     const go = (section: string | undefined, query: Record<string, string>) =>
-      enter({ params: { spaceId: 's1', ...(section ? { section } : {}) }, query })
+      enter({ params: { circleId: 's1', ...(section ? { section } : {}) }, query })
     const to = (section?: string) => ({
-      name: 'space-settings',
-      params: section ? { spaceId: 's1', section } : { spaceId: 's1' },
+      name: 'circle-settings',
+      params: section ? { circleId: 's1', section } : { circleId: 's1' },
       query: {},
     })
     expect(go(undefined, { section: 'budget' })).toEqual(to('extraction'))
@@ -325,13 +323,13 @@ describe('设置的地址', () => {
     expect(go(undefined, { section: 'layers' })).toEqual(to())
     expect(go(undefined, {})).toBe(true)
     expect(go('transfer', { section: 'budget' })).toBe(true)
-    expect(legacySpaceSettingsRedirect('s1', {})).toBeNull()
+    expect(legacyCircleSettingsRedirect('s1', {})).toBeNull()
   })
 
   it('别的页面链到合并后的小节', () => {
-    expect(spaceSettingsRoute('s1', 'extraction')).toEqual({
-      name: 'space-settings',
-      params: { spaceId: 's1', section: 'extraction' },
+    expect(circleSettingsRoute('s1', 'extraction')).toEqual({
+      name: 'circle-settings',
+      params: { circleId: 's1', section: 'extraction' },
       query: {},
     })
     expect(instanceSettingsRoute('data')).toEqual({
@@ -339,17 +337,17 @@ describe('设置的地址', () => {
       params: { section: 'data' },
       query: {},
     })
-    expect(overviewPage).toContain(`:to="spaceSettingsRoute(spaceId, 'extraction')"`)
+    expect(overviewPage).toContain(`:to="circleSettingsRoute(circleId, 'extraction')"`)
     expect(overviewPage).toContain(`:to="instanceSettingsRoute('data')"`)
     expect(overviewPage).toContain(`:to="instanceSettingsRoute('models')"`)
     expect(overviewPage).not.toContain("name: 'settings'")
-    expect(dreamSuggestions).toContain(`:to="spaceSettingsRoute(spaceId, 'extraction')"`)
+    expect(dreamSuggestions).toContain(`:to="circleSettingsRoute(circleId, 'extraction')"`)
     expect(benchAgent).toContain("to: instanceSettingsRoute('models')")
   })
 
-  it('同一组里换空间算离开，换小节不算；换组是换路由组件，由离开路由的确认处理', () => {
-    const at = (section: string, spaceId?: string) => ({
-      params: { section, ...(spaceId ? { spaceId } : {}) },
+  it('同一组里换记忆圈算离开，换小节不算；换组是换路由组件，由离开路由的确认处理', () => {
+    const at = (section: string, circleId?: string) => ({
+      params: { section, ...(circleId ? { circleId } : {}) },
     })
     expect(leavesSettingsPage(at('data'), at('models'))).toBe(false)
     expect(leavesSettingsPage(at('transfer', 's1'), at('extraction', 's1'))).toBe(false)
@@ -359,28 +357,28 @@ describe('设置的地址', () => {
     expect(consoleLayout).not.toContain('settingsPageKey')
   })
 
-  it('换空间之后小节按新空间重新挂上，旧空间的改动标记清掉', () => {
+  it('换记忆圈之后小节按新记忆圈重新挂上，旧记忆圈的改动标记清掉', () => {
     const component = elementsOf(template(settingsPage)).find((el) => el.tag === 'component')!
-    expect(bound(component, 'key')).toBe('`${section}:${spaceKey}`')
+    expect(bound(component, 'key')).toBe('`${section}:${circleKey}`')
     expect(scriptOf(settingsPage)).toMatch(
-      /watch\(spaceKey, \(\) => \{\s*for \(const key of Object\.keys\(dirty\)\) delete dirty\[key\]/,
+      /watch\(circleKey, \(\) => \{\s*for \(const key of Object\.keys\(dirty\)\) delete dirty\[key\]/,
     )
   })
 
-  it('个人与实例页面上的空间组是最近访问的空间，不是第一个', () => {
-    const a = { id: 'a', name: 'A', role: 'owner' as const }
-    const b = { id: 'b', name: 'B', role: 'editor' as const }
-    // 地址里有空间时只认它，不是成员就是 null
-    expect(pickSpace([a, b], 'b', 'a')).toBe(b)
-    expect(pickSpace([a, b], 'c', 'a')).toBeNull()
-    // 地址里没有时取最近访问的；它已不在成员的空间里时退回第一个
-    expect(pickSpace([a, b], undefined, 'b')).toBe(b)
-    expect(pickSpace([a, b], undefined, 'gone')).toBe(a)
-    expect(pickSpace([a, b], undefined, null)).toBe(a)
-    expect(pickSpace([], undefined, 'b')).toBeNull()
-    // 进入带空间的地址（导航成功）时记下，sessionStorage 读写出错时只在内存里记
+  it('个人与实例页面上的记忆圈组是最近访问的记忆圈，不是第一个', () => {
+    const a = { id: 'a', slug: 'a', name: 'A', kind: 'shared' as const, role: 'owner' as const }
+    const b = { id: 'b', slug: 'b', name: 'B', kind: 'shared' as const, role: 'editor' as const }
+    // 地址里有记忆圈时只认它，不是成员就是 null
+    expect(pickCircle([a, b], 'b', 'a')).toBe(b)
+    expect(pickCircle([a, b], 'c', 'a')).toBeNull()
+    // 地址里没有时取最近访问的；它已不在成员的记忆圈里时退回第一个
+    expect(pickCircle([a, b], undefined, 'b')).toBe(b)
+    expect(pickCircle([a, b], undefined, 'gone')).toBe(a)
+    expect(pickCircle([a, b], undefined, null)).toBe(a)
+    expect(pickCircle([], undefined, 'b')).toBeNull()
+    // 进入带记忆圈的地址（导航成功）时记下，sessionStorage 读写出错时只在内存里记
     expect(routesSource).toContain(
-      "if (!failure && typeof to.params.spaceId === 'string') rememberSpace(to.params.spaceId)",
+      "if (!failure && typeof to.params.circleId === 'string') rememberCircle(to.params.circleId)",
     )
     expect(useSessionSource).toMatch(/try \{\s*return sessionStorage\.getItem/)
     expect(useSessionSource).toMatch(/try \{\s*sessionStorage\.setItem/)
@@ -391,13 +389,14 @@ describe('设置的地址', () => {
     username: 'u',
     displayName: 'U',
     isAdmin: false,
-    spaces: [
-      { id: 'a', name: '空间甲', role: 'owner' as const },
-      { id: 'b', name: '空间乙', role: 'editor' as const },
+    personalCircleId: 'a',
+    circles: [
+      { id: 'a', slug: 'a', name: '记忆圈甲', kind: 'personal' as const, role: 'owner' as const },
+      { id: 'b', slug: 'b', name: '记忆圈乙', kind: 'shared' as const, role: 'editor' as const },
     ],
   }
-  // 不带空间的地址上 useSession 给的空间名
-  const spaceOnAccountPage = async () => {
+  // 不带记忆圈的地址上 useSession 给的记忆圈名
+  const circleOnAccountPage = async () => {
     const client = new QueryClient()
     client.setQueryData(ME_KEY, me)
     const router = createRouter({
@@ -406,8 +405,8 @@ describe('设置的地址', () => {
     })
     await router.push('/settings/account')
     const Probe = defineComponent(() => {
-      const { space } = useSession()
-      return () => space.value?.name ?? ''
+      const { circle } = useSession()
+      return () => circle.value?.name ?? ''
     })
     const app = createSSRApp(Probe)
     app.use(router)
@@ -415,51 +414,51 @@ describe('设置的地址', () => {
     return renderToString(app)
   }
 
-  it('只记当前账号是成员的空间；退出登录、会话失效时清掉', async () => {
+  it('只记当前账号是成员的记忆圈；退出登录、会话失效时清掉', async () => {
     sharedClient.setQueryData(ME_KEY, me)
-    forgetSpace()
-    rememberSpace('b')
-    expect(await spaceOnAccountPage()).toBe('空间乙')
-    // 不是成员的地址不顶掉上一次的空间
-    rememberSpace('not-a-member')
-    expect(await spaceOnAccountPage()).toBe('空间乙')
-    forgetSpace()
-    expect(await spaceOnAccountPage()).toBe('空间甲')
+    forgetCircle()
+    rememberCircle('b')
+    expect(await circleOnAccountPage()).toBe('记忆圈乙')
+    // 不是成员的地址不顶掉上一次的记忆圈
+    rememberCircle('not-a-member')
+    expect(await circleOnAccountPage()).toBe('记忆圈乙')
+    forgetCircle()
+    expect(await circleOnAccountPage()).toBe('记忆圈甲')
     // 没登录时不记
     sharedClient.setQueryData(ME_KEY, null)
-    rememberSpace('b')
+    rememberCircle('b')
     sharedClient.setQueryData(ME_KEY, me)
-    expect(await spaceOnAccountPage()).toBe('空间甲')
-    expect(consoleLayout).toContain('if (m === null) forgetSpace()')
+    expect(await circleOnAccountPage()).toBe('记忆圈甲')
+    expect(consoleLayout).toContain('if (m === null) forgetCircle()')
     const logout = consoleLayout.slice(consoleLayout.indexOf('async function logout'))
-    expect(logout.indexOf('forgetSpace()')).toBeLessThan(logout.indexOf('queryClient.clear()'))
+    expect(logout.indexOf('forgetCircle()')).toBeLessThan(logout.indexOf('queryClient.clear()'))
     sharedClient.clear()
   })
 
-  it('在空间 B 里打开过设置，到个人页面时空间组还是 B', async () => {
+  it('在记忆圈 B 里打开过设置，到个人页面时记忆圈组还是 B', async () => {
     const client = new QueryClient()
     client.setQueryData(ME_KEY, me)
     sharedClient.setQueryData(ME_KEY, me)
     const router = createRouter({
       history: createMemoryHistory(),
       routes: [
-        { path: '/spaces/:spaceId', component: { render: () => null } },
+        { path: '/circles/:circleId', component: { render: () => null } },
         { path: '/settings/account', component: { render: () => null } },
       ],
     })
     router.afterEach((to) => {
-      if (typeof to.params.spaceId === 'string') rememberSpace(to.params.spaceId)
+      if (typeof to.params.circleId === 'string') rememberCircle(to.params.circleId)
     })
-    await router.push('/spaces/b')
+    await router.push('/circles/b')
     await router.push('/settings/account')
     const Probe = defineComponent(() => {
-      const { space } = useSession()
-      return () => space.value?.name ?? ''
+      const { circle } = useSession()
+      return () => circle.value?.name ?? ''
     })
     const app = createSSRApp(Probe)
     app.use(router)
     app.use(VueQueryPlugin, { queryClient: client })
-    expect(await renderToString(app)).toBe('空间乙')
+    expect(await renderToString(app)).toBe('记忆圈乙')
   })
 })
 
@@ -559,7 +558,7 @@ describe('设置页的骨架', () => {
     expect(tree).toContain('数据与保留')
     // 顶部已有全局空间切换器，设置目录不再重复放空间选择框；不同空间仍各自记滚动位置
     expect(html).not.toContain('<select')
-    expect(scriptOf(settingsFrame)).toContain("${group}:${spaceId ?? ''}:${section}")
+    expect(scriptOf(settingsFrame)).toContain("${group}:${circleId ?? ''}:${section}")
   })
 
   it('只有右边那一栏滚动：标题与左栏不跟着滚，也没有贴顶的行盖在内容上', () => {
@@ -628,10 +627,10 @@ describe('设置页的骨架', () => {
   it('切换时记下滚动位置，当前小节滚进左栏的可见范围', () => {
     const script = scriptOf(settingsFrame)
     expect(script).toContain(
-      'positions.set(posKey(props.group, prevSpace, previous), area.scrollTop)',
+      'positions.set(posKey(props.group, prevCircle, previous), area.scrollTop)',
     )
     expect(script).toContain(
-      'area.scrollTop = positions.get(posKey(props.group, nextSpace, next)) ?? 0',
+      'area.scrollTop = positions.get(posKey(props.group, nextCircle, next)) ?? 0',
     )
     expect(flat(script)).toContain("scrollIntoView({block:'nearest',inline:'nearest',})")
   })
@@ -1067,8 +1066,8 @@ describe('设置页', () => {
       ['EmbeddingSettings', embeddingSettings, 'askStart'],
       ['ExtractionSettings', extractionSettings, 'save'],
       ['BackupSettings', backupSettings, 'save'],
-      ['SpaceExport', spaceExport, 'exportSpace'],
-      ['SpaceImport', spaceImport, 'preview ? importSpace() : inspect()'],
+      ['SpaceExport', spaceExport, 'exportCircle'],
+      ['SpaceImport', spaceImport, 'preview ? importCircle() : inspect()'],
     ]
     for (const [name, source, submit] of forms) {
       const form = elementsOf(template(source)).find(
@@ -1379,7 +1378,7 @@ describe('标题和说明一直在', () => {
     ['保留期', retentionSettings, '超过保留期的内容将被永久删除，之后只能从备份恢复。'],
     ['抽取预算', extractionBudget, '抽取事实与整理共用此 token 预算。'],
     ['整理', myDreamSettings, '已发送的内容无法撤回。'],
-    ['导入', spaceTransferSettings, '将其他工具的记忆导入当前空间，目前仅支持 Lore。'],
+    ['导入', spaceTransferSettings, '将其他工具的数据导入当前记忆圈，目前仅支持 Lore。'],
     ['Lore', loreImport, '导入 Lore 的节点，确认计划后才写入。'],
   ]
 
@@ -1406,20 +1405,20 @@ describe('没有权限时', () => {
   it('小节都在，内容和改版前一样收起', () => {
     const ownerOnly = (source: string, text: string) =>
       elementsOf(template(source)).find((el) => textOf(el) === text)
-    expect(condition(ownerOnly(spaceExport, '仅空间所有者可导出')!)).toBe('!editable')
-    expect(condition(ownerOnly(loreImport, '仅空间所有者可导入')!)).toBe('!editable')
-    expect(flat(extractionBudget)).toContain('仅空间所有者可修改预算')
+    expect(condition(ownerOnly(spaceExport, '仅记忆圈所有者可导出')!)).toBe('!editable')
+    expect(condition(ownerOnly(loreImport, '仅记忆圈所有者可导入')!)).toBe('!editable')
+    expect(flat(extractionBudget)).toContain('仅记忆圈所有者可修改预算')
     const budgetForm = elementsOf(template(extractionBudget)).find((el) => el.tag === 'form')!
     expect(condition(budgetForm)).toBe('editable')
   })
 
-  it('空间组的小节把权限传给各块', () => {
+  it('记忆圈组的小节把权限传给各块', () => {
     const elements = [
       ...elementsOf(template(spaceExtractionSettings)),
       ...elementsOf(template(spaceTransferSettings)),
     ]
     for (const source of [spaceExtractionSettings, spaceTransferSettings]) {
-      expect(source).toContain("const isOwner = computed(() => space.value?.role === 'owner')")
+      expect(source).toContain("const isOwner = computed(() => circle.value?.role === 'owner')")
     }
     for (const tag of ['ExtractionBudget', 'SpaceExport', 'LoreImport']) {
       expect(
@@ -1469,27 +1468,27 @@ describe('带后果的文字整句留着', () => {
     [
       '整理',
       myDreamSettings,
-      '开启后，当前账号的本人记忆（机密除外）将发送给抽取模型整理，已发送的内容无法撤回。',
+      '开启后，当前账号的个人内容（机密除外）将发送给抽取模型整理，已发送的内容无法撤回。',
     ],
     ['导出口令', spaceExport, 'Kioku不保存口令，丢失后无法打开文件。'],
-    ['导出的文件去哪导入', spaceExport, '可在下方「导入空间」将它导入为新空间'],
+    ['导出的文件去哪导入', spaceExport, '可在下方「导入记忆圈」导入'],
     [
-      '空间文件在哪导入',
+      '记忆圈文件在哪导入',
       spaceTransferSettings,
-      'Kioku 导出的空间文件在下方「导入空间」导入为新空间。',
+      'Kioku导出的记忆圈文件在下方「导入记忆圈」导入。',
     ],
-    ['导入空间名额用完', spaceImport, '{{ blocked }}，删除或转让一个空间后再导入。'],
+    ['导入共享圈名额用完', spaceImport, '{{ blocked }}，删除或转让一个共享圈后再导入共享记忆圈。'],
     ['导出的口令提示', spaceExport, '请另行保存口令。Kioku不保存口令，丢失后无法打开此文件。'],
-    ['导入空间', spaceImport, '仅导入本人导出、或导出人同意移交的文件。'],
+    ['导入记忆圈', spaceImport, '仅导入本人导出、或导出人同意移交的文件。'],
     [
-      '导入空间的归属',
+      '导入记忆圈的归属',
       spaceImport,
-      '其中符合条件的本人记忆将进入当前账号Agent的启动加载。仅导入本人导出、或导出人同意移交的文件。',
+      '个人圈导出文件将合并进入当前账号的个人记忆圈；共享圈导出文件将新建为一个由当前账号所有的共享记忆圈。',
     ],
     [
-      '导入空间没有主密钥',
+      '导入记忆圈没有主密钥',
       spaceImport,
-      '当前实例未配置主密钥：文件包含机密记忆或托管的凭据时无法导入。请先配置KIOKU_MASTER_KEY。',
+      '当前实例未配置主密钥：文件包含机密词条或托管的凭据时无法导入。请先配置KIOKU_MASTER_KEY。',
     ],
     ['Lore 来源', loreImport, '只导入本人导出的文件或本人的Lore'],
     ['Lore 指令', loreImport, '来源不明的内容写入后，会成为当前账号Agent的指令。'],
@@ -1642,12 +1641,12 @@ describe('初始化', () => {
       elementsOf(form)
         .filter((el) => el.tag === 'UFormField')
         .map((el) => attr(el, 'name')),
-    ).toEqual(['setupCode', 'username', 'displayName', 'password', 'spaceName'])
+    ).toEqual(['setupCode', 'username', 'displayName', 'password', 'circleName'])
     expect(elements.filter((el) => attr(el, 'type') === 'submit').map(textOf)).toEqual([
       '检查',
       '创建并登录',
     ])
-    expect(flat(setupPage)).toContain('创建首个账号及其空间，该账号为实例管理员。')
+    expect(flat(setupPage)).toContain('创建首个账号及其个人记忆圈，该账号为实例管理员。')
   })
 
   it('数据库这一步：回车只做检查，保存、代建与下一步都要点按钮', () => {
@@ -1683,12 +1682,12 @@ describe('初始化', () => {
       username: 'lin',
       displayName: '',
       password: 'long-enough-password',
-      spaceName: '',
+      circleName: '',
     }).error!.issues
     expect(issues.map((issue) => issue.message)).toEqual([
       '请填写初始化码',
       '请填写显示名',
-      '请填写空间名',
+      '请填写共享记忆圈名称',
     ])
     const tooLong = 'x'.repeat(65)
     const long = SetupRequest.safeParse({
@@ -1696,11 +1695,11 @@ describe('初始化', () => {
       username: 'lin',
       displayName: tooLong,
       password: 'long-enough-password',
-      spaceName: tooLong,
+      circleName: tooLong,
     }).error!.issues
     expect(long.map((issue) => issue.message)).toEqual([
       '显示名不超过 64 个字符',
-      '空间名不超过 64 个字符',
+      '记忆圈名称不超过 64 个字符',
     ])
   })
 })
@@ -1837,7 +1836,7 @@ describe('登录页的地层', () => {
     const html = await render(EntryFrame, {}, { default: () => '表单' })
     expect(html).toContain('aria-label="記憶"')
     expect(html).toContain('表单')
-    expect(strataOf(html)).toContain('var(--layer-user)')
+    expect(strataOf(html)).toContain('var(--layer-personal)')
   })
 
   it('只铺归属色，不铺纹理：纹理表示敏感级，这里没有数据', async () => {
@@ -1856,12 +1855,12 @@ describe('登录页的地层', () => {
   it('纵向顺序和地层柱一样，六类铺满，来自对话的两类用虚线隔开', async () => {
     const strata = strataOf(await render(EntryFrame, {}, { default: () => '表单' }))
     const bands = [...strata.matchAll(/<i([^>]*)>/g)].map((m) => m[1]!)
-    expect(bands.map((band) => /--layer-(\w+)/.exec(band)![1])).toEqual([...STACK])
+    expect(bands.map((band) => /--layer-([\w-]+)/.exec(band)![1])).toEqual([...STACK])
     const heights = bands.map((band) => Number(/flex-grow:(\d+)/.exec(band)![1]))
     expect(heights.reduce((a, b) => a + b, 0)).toBe(100)
-    // 虚线只有一条，在联系人和本人之间
+    // 虚线只有一条，在联系人和个人圈之间
     expect(bands.map((band) => band.includes('dashed'))).toEqual(
-      STACK.map((layer) => layer === 'user'),
+      STACK.map((band) => band === 'personal'),
     )
   })
 

@@ -8,25 +8,25 @@ import SpaceExport from './SpaceExport.vue'
 import SpaceImport from './SpaceImport.vue'
 import SettingsBlock from './strata/SettingsBlock.vue'
 
-// 空间 › 导入与导出：导出当前空间，从别的工具导入到当前空间，把导出文件导入成新空间。空间组只挂在空间的地址下，空间取地址里的；不是成员时外壳不渲染这一页
+// 记忆圈 › 导入与导出：导出当前记忆圈，从别的工具导入到当前记忆圈，把导出文件导入进记忆圈。记忆圈组只挂在记忆圈地址下
 const route = useRoute()
-const { me, space } = useSession()
-const spaceId = computed(() => String(route.params.spaceId))
-const isOwner = computed(() => space.value?.role === 'owner')
+const { me, circle } = useSession()
+const circleId = computed(() => String(route.params.circleId))
+const isOwner = computed(() => circle.value?.role === 'owner')
 </script>
 
 <template>
   <div>
-    <SpaceExport :space-id="spaceId" :space-name="space?.name ?? ''" :editable="isOwner" />
+    <SpaceExport :circle-id="circleId" :circle-name="circle?.name ?? ''" :editable="isOwner" />
 
     <!-- 每个来源一块，标题是来源的名字 -->
     <SettingsBlock title="导入">
       <template #note>
-        将其他工具的记忆导入当前空间，目前仅支持 Lore。Kioku
-        导出的空间文件在下方「导入空间」导入为新空间。
+        将其他工具的数据导入当前记忆圈，目前仅支持 Lore。Kioku
+        导出的记忆圈文件在下方「导入记忆圈」导入。
       </template>
       <LoreImport
-        :space-id="spaceId"
+        :circle-id="circleId"
         :editable="isOwner"
         :is-admin="me.data.value?.isAdmin ?? false"
       />

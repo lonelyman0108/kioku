@@ -4,9 +4,11 @@ import { ApiError } from '../api/client'
 import plaintextSaveSource from '../plaintextSave.ts?raw'
 import {
   addedSpots,
+  addedVariantSpots,
   afterGate,
   linesText,
   plaintextRejection,
+  replaceVariantsValues,
   saveFlags,
   spotsAfterRejection,
   spotsFromFindings,
@@ -168,6 +170,28 @@ describe('弹窗处理完之后', () => {
       content: '改过了 token=zzzz9999',
       flags: { allowPlaintext: true },
     })
+  })
+})
+
+describe('多变体切片保存检测', () => {
+  it('多变体切片搬移已有明文不算新增，仅检出新加入的值并可批量替换', () => {
+    const before = [{ content: '密码：hunter22' }]
+    const moved = addedVariantSpots(before, [
+      { content: '说明文字' },
+      { content: 'token: hunter22' },
+    ])
+    expect(moved.spots).toEqual([])
+    const added = addedVariantSpots(before, [
+      { content: '密码：hunter22' },
+      { content: 'token=abcd1234' },
+    ])
+    expect(added.spots).toEqual([{ value: 'abcd1234', lines: [2], kind: 'label', field: 'token' }])
+    expect(
+      replaceVariantsValues(
+        [{ content: '密码：hunter22' }, { content: 'token=abcd1234' }],
+        [{ value: 'abcd1234', placeholder: '{{cred:nas#token}}' }],
+      ),
+    ).toEqual([{ content: '密码：hunter22' }, { content: 'token={{cred:nas#token}}' }])
   })
 })
 

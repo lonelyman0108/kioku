@@ -18,16 +18,16 @@ import { useSession } from '../composables/useSession'
 import { useViewport } from '../composables/useViewport'
 import { actionableInboxCount, inboxTabActionable, inboxTabLabels } from '../inbox'
 import { bindingNote, budgetWarning, splitNote, strataTarget } from '../overview'
-import { instanceSettingsRoute, spaceSettingsRoute } from '../settingsSections'
+import { circleSettingsRoute, instanceSettingsRoute } from '../settingsSections'
 import { formatRelative, formatTime } from '../time'
 
 const route = useRoute()
 const router = useRouter()
-const { me, space } = useSession()
-const spaceId = computed(() => String(route.params.spaceId))
+const { me, circle } = useSession()
+const circleId = computed(() => String(route.params.circleId))
 const overview = useQuery({
-  queryKey: computed(() => ['overview', spaceId.value]),
-  queryFn: () => api.overview(spaceId.value),
+  queryKey: computed(() => ['overview', circleId.value]),
+  queryFn: () => api.overview(circleId.value),
 })
 const data = computed(() => overview.data.value)
 
@@ -46,21 +46,27 @@ onMounted(() => {
 onBeforeUnmount(() => strataObserver?.disconnect())
 const size = computed(() => columnSize(viewport.value, strataWidth.value ?? viewport.value.width))
 
-// 归属 × 敏感级的条数：记忆加上来自对话的两类
+// 色带 × 敏感级的条数：记忆加上来自对话的两类
 const counts = computed(() =>
-  data.value ? tallyCounts([...data.value.counts, ...data.value.extractedCounts]) : null,
+  data.value
+    ? tallyCounts({
+        circleKind: circle.value?.kind ?? 'shared',
+        counts: data.value.counts,
+        extractedCounts: data.value.extractedCounts,
+      })
+    : null,
 )
 const extracted = computed(() =>
   (data.value?.extractedCounts ?? []).reduce((sum, c) => sum + c.count, 0),
 )
 
-// 点地层柱：一行去记忆页的根或对话页的分页，一格去记忆列表（见 strataTarget）
+// 点地层柱：按色带或敏感级跳转到对应页面（见 strataTarget）
 function openStrata(selection: StrataSelection) {
-  void router.push(strataTarget(spaceId.value, selection))
+  void router.push(strataTarget(circleId.value, selection))
 }
 
-// 查看者处理不了后三类，凭据只有空间所有者处理得了：数字不算进「待处理」，不标红，操作只是查看。记忆健康里的补全也一样
-const role = computed(() => space.value?.role ?? 'viewer')
+// 查看者处理不了后三类，凭据只有记忆圈所有者处理得了：数字不算进「待处理」，不标红，操作只是查看。记忆健康里的补全也一样
+const role = computed(() => circle.value?.role ?? 'viewer')
 const canAct = computed(() => role.value !== 'viewer')
 const pendingTotal = computed(() =>
   data.value ? actionableInboxCount(data.value.inbox, role.value) : 0,
@@ -70,7 +76,7 @@ const pendingTotal = computed(() =>
 const pending = computed(() => {
   const inbox = data.value?.inbox
   if (!inbox) return []
-  const params = { spaceId: spaceId.value }
+  const params = { circleId: circleId.value }
   return [
     {
       title: '待确认内容',
@@ -126,7 +132,7 @@ const backup = computed(() => {
   const notice = backupNotice(data.value?.backup ?? null)
   return notice && { ...notice, note: splitNote(notice.description) }
 })
-const canAdjustBudget = computed(() => space.value?.role === 'owner')
+const canAdjustBudget = computed(() => circle.value?.role === 'owner')
 </script>
 
 <template>
@@ -155,7 +161,7 @@ const canAdjustBudget = computed(() => space.value?.role === 'owner')
           <SectionHeading title="记忆分布">
             <template #hint>
               <Hint>
-                带的高度表示条数的多少，数字是确切的条数。点归属的名字打开记忆页的那一类或对话页的分页，点一格按归属与敏感级查看记忆列表。
+                带的高度表示条数的多少，数字是确切的条数。点色带名打开对应列表或分页，点一格按色带与敏感级查看记忆列表。
               </Hint>
             </template>
           </SectionHeading>
@@ -179,7 +185,7 @@ const canAdjustBudget = computed(() => space.value?.role === 'owner')
               :value="data.inbox.bindings"
               :note="bindingNote(data.pendingBindings, data.inbox.bindings) ?? '暂无'"
               :action="data.inbox.bindings ? '查看' : null"
-              :to="{ name: 'inbox', params: { spaceId }, query: { tab: 'binding' } }"
+              :to="{ name: 'inbox', params: { circleId }, query: { tab: 'binding' } }"
               :hot="data.inbox.bindings > 0"
               :zero="!data.inbox.bindings"
             />
@@ -206,7 +212,7 @@ const canAdjustBudget = computed(() => space.value?.role === 'owner')
             :action="data.missingDisclosure ? (canAct ? '去补全' : '查看') : null"
             :to="{
               name: 'memories',
-              params: { spaceId },
+              params: { circleId },
               query: { view: 'list', missingDisclosure: 'true' },
             }"
             :zero="!data.missingDisclosure"
@@ -215,12 +221,12 @@ const canAdjustBudget = computed(() => space.value?.role === 'owner')
             title="从未召回"
             :value="data.neverRecalled"
             :action="data.neverRecalled ? '查看' : null"
-            :to="{ name: 'recall', params: { spaceId } }"
+            :to="{ name: 'recall', params: { circleId } }"
             :zero="!data.neverRecalled"
           >
             <template #note>
-              创建已久，未被任何应用召回<Hint>
-                创建与开始记录召回均已满明细保留天数才计入，不含机密内容与启动加载的节点。可能缺少关键词、内容过于笼统，或已不再需要。
+              创建已久，未被任何接入实例召回<Hint>
+                创建与开始记录召回均已满明细保留天数才计入，不含机密内容与启动加载的词条。可能缺少关键词、内容过于笼统，或已不再需要。
               </Hint>
             </template>
           </OverviewRow>
@@ -267,7 +273,7 @@ const canAdjustBudget = computed(() => space.value?.role === 'owner')
               <span>{{ budget.note.first }}</span>
               <RouterLink
                 v-if="canAdjustBudget"
-                :to="spaceSettingsRoute(spaceId, 'extraction')"
+                :to="circleSettingsRoute(circleId, 'extraction')"
                 class="notice-link"
               >
                 调整预算
@@ -313,7 +319,7 @@ const canAdjustBudget = computed(() => space.value?.role === 'owner')
         <section>
           <SectionHeading title="最近变更">
             <template #actions>
-              <RouterLink :to="{ name: 'activity', params: { spaceId } }" class="heading-link">
+              <RouterLink :to="{ name: 'activity', params: { circleId } }" class="heading-link">
                 全部变更
               </RouterLink>
             </template>
@@ -323,48 +329,48 @@ const canAdjustBudget = computed(() => space.value?.role === 'owner')
               v-for="item in data.recent"
               :key="item.id"
               :item="item"
-              :space-id="spaceId"
+              :circle-id="circleId"
             />
           </ul>
           <p v-else class="empty">暂无变更记录</p>
         </section>
 
         <section>
-          <SectionHeading title="应用">
+          <SectionHeading title="接入实例">
             <template #actions>
-              <RouterLink :to="{ name: 'apps', params: { spaceId } }" class="heading-link">
-                管理应用
+              <RouterLink :to="{ name: 'clients', params: { circleId } }" class="heading-link">
+                管理接入实例
               </RouterLink>
             </template>
           </SectionHeading>
-          <ul v-if="data.apps.length">
-            <li v-for="app in data.apps" :key="app.id" class="app-row">
+          <ul v-if="data.clients.length">
+            <li v-for="client in data.clients" :key="client.id" class="app-row">
               <RouterLink
-                :to="{ name: 'app', params: { spaceId, appId: app.id } }"
+                :to="{ name: 'client', params: { circleId, clientId: client.id } }"
                 class="app-name"
               >
-                <b>{{ app.name }}</b>
-                <RuntimeLabel class="app-runtime" :family="app.runtimeFamily" :size="14" />
+                <b>{{ client.name }}</b>
+                <RuntimeLabel class="app-runtime" :family="client.runtimeFamily" :size="14" />
               </RouterLink>
-              <template v-if="app.keys">
+              <template v-if="client.keys">
                 <span class="app-meta">
-                  有效访问密钥 <span class="font-mono">{{ app.keys.active }}</span>
+                  有效访问密钥 <span class="font-mono">{{ client.keys.active }}</span>
                 </span>
                 <time
-                  v-if="app.keys.lastUsedAt"
+                  v-if="client.keys.lastUsedAt"
                   class="app-meta"
-                  :datetime="app.keys.lastUsedAt"
-                  :title="`最近使用 ${formatTime(app.keys.lastUsedAt)}`"
+                  :datetime="client.keys.lastUsedAt"
+                  :title="`最近使用 ${formatTime(client.keys.lastUsedAt)}`"
                 >
-                  {{ formatRelative(app.keys.lastUsedAt) }}
+                  {{ formatRelative(client.keys.lastUsedAt) }}
                 </time>
-                <span v-else-if="app.keys.active" class="app-meta">尚未使用</span>
+                <span v-else-if="client.keys.active" class="app-meta">尚未使用</span>
                 <span v-else class="app-meta" />
               </template>
-              <span v-else class="app-meta app-hidden">仅应用所有者可查看访问密钥</span>
+              <span v-else class="app-meta app-hidden">仅接入实例所有者可查看访问密钥</span>
             </li>
           </ul>
-          <p v-else class="empty">暂无应用</p>
+          <p v-else class="empty">暂无接入实例</p>
         </section>
       </div>
     </div>

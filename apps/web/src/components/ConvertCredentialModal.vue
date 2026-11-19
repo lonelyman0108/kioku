@@ -2,30 +2,31 @@
 import {
   CONVERT_SCOPE_TEXT,
   CONVERT_VALUE_MIN_LENGTH,
-  type ConsoleMemoryView,
+  type ConsoleEntryView,
   type ConvertedToCredential,
 } from '@kioku/contracts'
 import { computed, toRef, useId, watch } from 'vue'
 
 import { useConvertCredential } from '../composables/useConvertCredential'
 import { convertSummary, UNMATCHED_HINT, unmatchedNote } from '../plaintext'
-import { memoryRoute } from '../routes'
+import { entryRoute } from '../routes'
 import { orphanNotice } from '../vault'
 import ConvertDestinationPicker from './ConvertDestinationPicker.vue'
 import Hint from './Hint.vue'
+import MemoryName from './strata/MemoryName.vue'
 import NoteLine from './strata/NoteLine.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
-import MemoryName from './strata/MemoryName.vue'
+import { entryBand } from './strata/strata'
 
 // 转存为凭据的对话框，状态和规则在 useConvertCredential。没有表单：回车的隐式提交会跳过核对
-const props = defineProps<{ spaceId: string; uri: string | null }>()
+const props = defineProps<{ circleId: string; shortId: string | null }>()
 const open = defineModel<boolean>('open', { required: true })
 const emit = defineEmits<{
-  converted: [memory: ConsoleMemoryView, result: ConvertedToCredential]
+  converted: [entry: ConsoleEntryView, result: ConvertedToCredential]
 }>()
 
 const {
-  memory,
+  entry,
   loading,
   loadFailure,
   form,
@@ -60,7 +61,7 @@ const {
   load,
   reset,
   submit,
-} = useConvertCredential(toRef(props, 'spaceId'), toRef(props, 'uri'), (changed, done) =>
+} = useConvertCredential(toRef(props, 'circleId'), toRef(props, 'shortId'), (changed, done) =>
   emit('converted', changed, done),
 )
 
@@ -68,9 +69,9 @@ watch(open, (isOpen) => {
   reset()
   if (isOpen) void load()
 })
-// 换了空间：对话框里的内容属于上一个
+// 换了记忆圈：对话框里的内容属于上一个
 watch(
-  () => props.spaceId,
+  () => props.circleId,
   () => {
     open.value = false
   },
@@ -118,14 +119,23 @@ const candidateGroup = useId()
           <UButton size="sm" color="primary" variant="outline" @click="load">重新读取</UButton>
         </template>
       </NoteLine>
-      <NoteLine v-else-if="memory && memory.content === null">
+      <NoteLine v-else-if="entry && entry.contentHidden">
         机密记忆的正文已加密，无需转存为凭据
       </NoteLine>
       <!-- 占位符放不进这条记忆：提交一定失败，值不显示，先去调整 -->
-      <div v-else-if="memory && blocked" class="convert-form">
+      <div v-else-if="entry && blocked" class="convert-form">
         <p class="convert-target">
-          <StrataSwatch :layer="memory.layer" :sensitivity="memory.sensitivity" />
-          <MemoryName :uri="memory.uri" :title="memory.title" />
+          <StrataSwatch
+            :band="
+              entryBand({
+                kind: entry.kind,
+                circleId: entry.circleId,
+                circleKind: entry.circleSlug === 'personal' ? 'personal' : 'shared',
+              })
+            "
+            :sensitivity="entry.sensitivity"
+          />
+          <MemoryName :short-id="entry.shortId" :title="entry.title" />
         </p>
         <NoteLine tone="warning">
           这条记忆暂不能转存为凭据
@@ -135,7 +145,7 @@ const candidateGroup = useId()
               size="sm"
               color="primary"
               variant="outline"
-              :to="memoryRoute(spaceId, memory.uri)"
+              :to="entryRoute(circleId, entry.shortId)"
               @click="close"
             >
               查看记忆
@@ -143,10 +153,19 @@ const candidateGroup = useId()
           </template>
         </NoteLine>
       </div>
-      <div v-else-if="memory" class="convert-form">
+      <div v-else-if="entry" class="convert-form">
         <p class="convert-target">
-          <StrataSwatch :layer="memory.layer" :sensitivity="memory.sensitivity" />
-          <MemoryName :uri="memory.uri" :title="memory.title" />
+          <StrataSwatch
+            :band="
+              entryBand({
+                kind: entry.kind,
+                circleId: entry.circleId,
+                circleKind: entry.circleSlug === 'personal' ? 'personal' : 'shared',
+              })
+            "
+            :sensitivity="entry.sensitivity"
+          />
+          <MemoryName :short-id="entry.shortId" :title="entry.title" />
         </p>
 
         <div
@@ -255,7 +274,7 @@ const candidateGroup = useId()
           variant="outline"
           :to="{
             name: 'credentials',
-            params: { spaceId },
+            params: { circleId },
             query: { id: result.credential.id },
           }"
           @click="close"

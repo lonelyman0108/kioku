@@ -20,7 +20,7 @@ import PageHead from '../components/strata/PageHead.vue'
 import { useNow } from '../composables/useNow'
 import { useSession } from '../composables/useSession'
 import { invalidateInboxCounts } from '../inbox'
-import { credentialSourceLabels, restrictedAppsLabel } from '../labels'
+import { allowedRealmsLabel, credentialSourceLabels, restrictedClientsLabel } from '../labels'
 import { deletionNotice, purgeAt, purgeNote } from '../retention'
 import { formatRelative, formatTime } from '../time'
 import { canManageCredentials } from '../vault'
@@ -29,10 +29,10 @@ const route = useRoute()
 const router = useRouter()
 const toast = useToast()
 const queryClient = useQueryClient()
-const { me, space } = useSession()
-const spaceId = computed(() => String(route.params.spaceId))
-// 凭据与密码库连接的操作都只给空间所有者，别的成员只看列表
-const canManage = computed(() => canManageCredentials(space.value?.role))
+const { me, circle } = useSession()
+const circleId = computed(() => String(route.params.circleId))
+// 凭据与密码库连接的操作都只给记忆圈所有者，别的成员只看列表
+const canManage = computed(() => canManageCredentials(circle.value?.role))
 
 // 凭据、密码库与已删除的凭据三个分页。选的是哪一页记在地址里（tab），刷新之后还在这一页
 type Tab = 'credentials' | 'vault' | 'deleted'
@@ -58,12 +58,12 @@ const tabItems = [
 ]
 
 const credentials = useQuery({
-  queryKey: computed(() => ['credentials', spaceId.value] as const),
+  queryKey: computed(() => ['credentials', circleId.value] as const),
   queryFn: ({ queryKey: [, id] }) => api.credentials(id),
 })
 const showingDeleted = computed(() => tab.value === 'deleted')
 const deleted = useQuery({
-  queryKey: computed(() => ['credentials-deleted', spaceId.value] as const),
+  queryKey: computed(() => ['credentials-deleted', circleId.value] as const),
   queryFn: ({ queryKey: [, id] }) => api.deletedCredentials(id),
   enabled: showingDeleted,
 })
@@ -77,12 +77,12 @@ const credentialNotes = computed(() => {
   return new Map(r ? items.map((c) => [c.id, purgeNote(c.deletedAt!, r, now.value)]) : [])
 })
 const connections = useQuery({
-  queryKey: computed(() => ['vault-connections', spaceId.value] as const),
+  queryKey: computed(() => ['vault-connections', circleId.value] as const),
   queryFn: ({ queryKey: [, id] }) => api.vaultConnections(id),
 })
-const apps = useQuery({
-  queryKey: computed(() => ['apps', spaceId.value] as const),
-  queryFn: ({ queryKey: [, id] }) => api.apps(id),
+const clients = useQuery({
+  queryKey: computed(() => ['clients', circleId.value] as const),
+  queryFn: ({ queryKey: [, id] }) => api.clients(id),
 })
 
 // 列表上的来源：托管，或密码库（哪个连接）
@@ -91,8 +91,10 @@ function sourceOf(c: ConsoleCredential): string {
   const conn = connections.data.value?.items.find((x) => x.id === c.vault!.connectionId)
   return conn ? `${credentialSourceLabels.vault} ${conn.email}` : credentialSourceLabels.vault
 }
-const appsOf = (c: ConsoleCredential) =>
-  restrictedAppsLabel(c.appIds, apps.data.value, me.data.value?.id)
+const clientsOf = (c: ConsoleCredential) =>
+  restrictedClientsLabel(c.clientIds, clients.data.value, me.data.value?.id)
+const realmsTitle = (c: ConsoleCredential) =>
+  c.allowedRealms !== null ? `限定场域：${allowedRealmsLabel(c.allowedRealms)}` : undefined
 const identifiers = computed(() => (credentials.data.value?.items ?? []).map((c) => c.identifier))
 
 // 详情：每次打开都按 id 重新读，删除、修改之后拿到的是最新的一版。打开的是哪一条记在地址里，
@@ -107,8 +109,8 @@ const selectedId = computed<string | null>({
   },
 })
 const selected = useQuery({
-  queryKey: computed(() => ['credential', spaceId.value, selectedId.value] as const),
-  queryFn: ({ queryKey: [, sid, id] }) => api.credential(sid, id!),
+  queryKey: computed(() => ['credential', circleId.value, selectedId.value] as const),
+  queryFn: ({ queryKey: [, cid, id] }) => api.credential(cid, id!),
   enabled: computed(() => selectedId.value !== null),
 })
 const detail = computed(() =>
@@ -120,22 +122,22 @@ const editing = ref<ConsoleCredential | null>(null)
 const naming = ref<{ connectionId: string; item: VaultItemSummary } | null>(null)
 const loginOpen = ref(false)
 const reconnecting = ref<VaultConnection | null>(null)
-// 切换空间时关掉打开着的窗口：里面的内容属于上一个空间。详情不关，它记在地址里、跟着地址走：
-// 按浏览历史在两个空间的凭据之间前进后退时，地址里的 id 本来就是那个空间的
-watch(spaceId, () => {
+// 切换记忆圈时关掉打开着的窗口：里面的内容属于上一个记忆圈。详情不关，它记在地址里、跟着地址走：
+// 按浏览历史在两个记忆圈的凭据之间前进后退时，地址里的 id 本来就是那个记忆圈的
+watch(circleId, () => {
   formOpen.value = false
   loginOpen.value = false
   removing.value = null
 })
 
-async function refreshLists(sid: string) {
+async function refreshLists(cid: string) {
   await Promise.all([
-    queryClient.invalidateQueries({ queryKey: ['credentials', sid] }),
-    queryClient.invalidateQueries({ queryKey: ['credentials-deleted', sid] }),
-    queryClient.invalidateQueries({ queryKey: ['vault-connections', sid] }),
-    queryClient.invalidateQueries({ queryKey: ['vault-items', sid] }),
+    queryClient.invalidateQueries({ queryKey: ['credentials', cid] }),
+    queryClient.invalidateQueries({ queryKey: ['credentials-deleted', cid] }),
+    queryClient.invalidateQueries({ queryKey: ['vault-connections', cid] }),
+    queryClient.invalidateQueries({ queryKey: ['vault-items', cid] }),
     // 到期时间、需要轮换与删除都会改变待处理的「凭据」一类
-    invalidateInboxCounts(queryClient, sid),
+    invalidateInboxCounts(queryClient, cid),
   ])
 }
 
@@ -163,11 +165,11 @@ function openLogin(connection: VaultConnection | null) {
   reconnecting.value = connection
   loginOpen.value = true
 }
-// 按保存到的空间写缓存；保存期间换了空间，就不在新空间里打开它
-function onSaved(credential: ConsoleCredential, sid: string) {
-  queryClient.setQueryData(['credential', sid, credential.id], credential)
-  void refreshLists(sid)
-  if (sid === spaceId.value) selectedId.value = credential.id
+// 按保存到的记忆圈写缓存；保存期间换了记忆圈，就不在新记忆圈里打开它
+function onSaved(credential: ConsoleCredential, cid: string) {
+  queryClient.setQueryData(['credential', cid, credential.id], credential)
+  void refreshLists(cid)
+  if (cid === circleId.value) selectedId.value = credential.id
 }
 function onConflict() {
   void selected.refetch()
@@ -179,16 +181,16 @@ const busy = ref(false)
 async function remove() {
   const target = removing.value
   if (!target || busy.value) return
-  const sid = spaceId.value
+  const cid = circleId.value
   busy.value = true
   try {
-    await api.deleteCredential(sid, target.id, target.version)
+    await api.deleteCredential(cid, target.id, target.version)
     removing.value = null
     toast.add({ title: `已删除凭据 ${target.identifier}`, color: 'success' })
     if (selectedId.value === target.id) selectedId.value = null
     // 缓存里的详情还是删除前的样子，从「已删除」里再打开时要重新读
-    queryClient.removeQueries({ queryKey: ['credential', sid, target.id], exact: true })
-    await refreshLists(sid)
+    queryClient.removeQueries({ queryKey: ['credential', cid, target.id], exact: true })
+    await refreshLists(cid)
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '删除失败', color: 'error' })
     removing.value = null
@@ -200,13 +202,13 @@ async function remove() {
 
 async function undelete(c: ConsoleCredential) {
   if (busy.value) return
-  const sid = spaceId.value
+  const cid = circleId.value
   busy.value = true
   try {
-    const restored = await api.undeleteCredential(sid, c.id)
-    queryClient.setQueryData(['credential', sid, restored.id], restored)
+    const restored = await api.undeleteCredential(cid, c.id)
+    queryClient.setQueryData(['credential', cid, restored.id], restored)
     toast.add({ title: `已恢复 ${restored.identifier}`, color: 'success' })
-    await refreshLists(sid)
+    await refreshLists(cid)
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '恢复失败', color: 'error' })
   } finally {
@@ -225,7 +227,7 @@ async function undelete(c: ConsoleCredential) {
           Agent 用到时向 Kioku 取值。值由 Kioku
           加密保存，或保留在连接的密码库中、取用时获取；设了去处时，新建的凭据写进密码库。凭据与密码库连接仅所有者可见。<template
             v-if="!canManage"
-            >管理凭据、连接密码库与查看值需要空间所有者权限。</template
+            >管理凭据、连接密码库与查看值需要记忆圈所有者权限。</template
           >
         </Hint>
       </template>
@@ -279,7 +281,7 @@ async function undelete(c: ConsoleCredential) {
               <span>来源</span>
               <span>字段</span>
               <span class="num">引用</span>
-              <span>限定应用</span>
+              <span>限定接入实例</span>
               <span class="num">更新</span>
             </div>
             <ul>
@@ -306,7 +308,13 @@ async function undelete(c: ConsoleCredential) {
                   >
                     {{ c.referenceCount }}
                   </span>
-                  <span class="row-muted row-apps" data-label="限定应用">{{ appsOf(c) }}</span>
+                  <span
+                    class="row-muted row-apps"
+                    data-label="限定接入实例"
+                    :title="realmsTitle(c)"
+                  >
+                    {{ clientsOf(c) }}
+                  </span>
                   <time
                     class="num row-muted row-time"
                     :datetime="c.updatedAt"
@@ -353,7 +361,7 @@ async function undelete(c: ConsoleCredential) {
             <VaultConnectionPanel
               v-for="conn in connections.data.value.items"
               :key="conn.id"
-              :space-id="spaceId"
+              :circle-id="circleId"
               :connection="conn"
               :can-manage="canManage"
               @reconnect="openLogin(conn)"
@@ -450,9 +458,9 @@ async function undelete(c: ConsoleCredential) {
       <template v-else-if="detail">
         <ReadFailureNote v-if="selected.isError.value" :query="selected" />
         <CredentialDetail
-          :space-id="spaceId"
+          :circle-id="circleId"
           :credential="detail"
-          :apps="apps.data.value"
+          :clients="clients.data.value"
           :can-manage="canManage"
           @edit="openEdit"
           @remove="removing = detail"
@@ -465,10 +473,10 @@ async function undelete(c: ConsoleCredential) {
 
   <CredentialFormModal
     v-model:open="formOpen"
-    :space-id="spaceId"
+    :circle-id="circleId"
     :credential="editing"
     :vault-item="naming"
-    :apps="apps.data.value ?? []"
+    :clients="clients.data.value ?? []"
     :identifiers="identifiers"
     @saved="onSaved"
     @conflict="onConflict"
@@ -476,9 +484,9 @@ async function undelete(c: ConsoleCredential) {
   />
   <VaultLoginModal
     v-model:open="loginOpen"
-    :space-id="spaceId"
+    :circle-id="circleId"
     :connection="reconnecting"
-    @connected="(_, sid) => refreshLists(sid)"
+    @connected="(_, cid) => refreshLists(cid)"
   />
 
   <UModal
@@ -637,7 +645,7 @@ button.row-name::after {
   clip-path: inset(50%);
   white-space: nowrap;
 }
-/* 窄屏：一行拆成几行，字段和限定应用带上名字 */
+/* 窄屏：一行拆成几行，字段和限定接入实例带上名字 */
 @media (max-width: 1023.98px) {
   .column-head {
     padding: 0 16px 0 7px;

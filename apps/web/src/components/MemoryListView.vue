@@ -1,10 +1,14 @@
 <script setup lang="ts">
 import {
-  LAYERS,
-  MEMORY_LIST_SORTS,
+  ENTRY_KINDS,
+  ENTRY_LIST_SORTS,
   SENSITIVITIES,
-  type MemoryListSort,
-  type SpaceOverview,
+  STRATA_BANDS,
+  type CircleKind,
+  type CircleOverview,
+  type EntryKind,
+  type EntryListSort,
+  type StrataBand,
 } from '@kioku/contracts'
 import { useInfiniteQuery, useQuery } from '@tanstack/vue-query'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
@@ -13,9 +17,8 @@ import { useRoute, useRouter } from 'vue-router'
 import { readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
-import { identifierOf } from '../coordinates'
 import { icons } from '../icons'
-import { layerLabels, sensitivityLabels } from '../labels'
+import { builtinFacetLabels, sensitivityLabels } from '../labels'
 import { missingDisclosure } from '../memoryDetail'
 import { formatRelative, formatShort, formatTime, isExpired } from '../time'
 import Hint from './Hint.vue'
@@ -24,20 +27,22 @@ import NoteLine from './strata/NoteLine.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
 import {
+  entryBand,
   filteredTotal,
-  isConversationLayer,
+  isConversationBand,
   sensitivityHints,
   swatchText,
   tallyCounts,
 } from './strata/strata'
 
 const props = defineProps<{
-  spaceId: string
-  selectedUri: string | null
+  circleId: string
+  circleKind: CircleKind
+  selectedId: string | null
   // 概览的统计：能算出总数时写在列表上方
-  overview?: SpaceOverview | undefined
+  overview?: CircleOverview | undefined
 }>()
-const emit = defineEmits<{ select: [uri: string] }>()
+const emit = defineEmits<{ select: [shortId: string] }>()
 const route = useRoute()
 const router = useRouter()
 
@@ -50,34 +55,53 @@ function oneOf<T extends string>(key: string, values: readonly T[]): T | null {
   const value = text(key)
   return value && (values as readonly string[]).includes(value) ? (value as T) : null
 }
-const sortLabels: Record<MemoryListSort, string> = {
+const sortLabels: Record<EntryListSort, string> = {
   updated: '按最近更新',
   priority: '按优先级',
-  uri: '按坐标',
+  shortId: '按短 ID',
 }
 const filters = computed(() => ({
-  // 位置：坐标前缀，它本身与下面各级（例如 user://projects、persona://default）
-  under: text('under'),
-  layer: oneOf('layer', LAYERS),
+  band: oneOf('band', STRATA_BANDS),
+  kind: oneOf('kind', ENTRY_KINDS),
   sensitivity: oneOf('sensitivity', SENSITIVITIES),
+  topic: text('topic'),
+  dimensionKey: text('dimensionKey'),
+  termSlug: text('termSlug'),
   missingDisclosure: text('missingDisclosure') === 'true',
   plaintext: text('plaintext') === 'true',
   q: text('q'),
-  sort: oneOf('sort', MEMORY_LIST_SORTS) ?? 'updated',
+  sort: oneOf('sort', ENTRY_LIST_SORTS) ?? 'updated',
 }))
+
 function setFilter(key: string, value: string | null) {
   const query = { ...route.query }
   if (value) query[key] = value
   else delete query[key]
   void router.replace({ query })
 }
+function setFacetFilter(encoded: string | null) {
+  const query = { ...route.query }
+  if (!encoded) {
+    delete query.dimensionKey
+    delete query.termSlug
+  } else {
+    const [dim, slug] = encoded.split(':')
+    if (dim && slug) {
+      query.dimensionKey = dim
+      query.termSlug = slug
+    }
+  }
+  void router.replace({ query })
+}
 
-// 关键字输入停下来之后再写进地址
+// 关键字与主题输入停下来之后再写进地址
 const keyword = ref(filters.value.q ?? '')
-let timer: ReturnType<typeof setTimeout> | undefined
+const topicText = ref(filters.value.topic ?? '')
+let qTimer: ReturnType<typeof setTimeout> | undefined
+let topicTimer: ReturnType<typeof setTimeout> | undefined
 watch(keyword, (value) => {
-  clearTimeout(timer)
-  timer = setTimeout(() => setFilter('q', value.trim() || null), 300)
+  clearTimeout(qTimer)
+  qTimer = setTimeout(() => setFilter('q', value.trim() || null), 300)
 })
 watch(
   () => filters.value.q,
@@ -85,67 +109,80 @@ watch(
     if ((q ?? '') !== keyword.value.trim()) keyword.value = q ?? ''
   },
 )
-onBeforeUnmount(() => clearTimeout(timer))
+watch(topicText, (value) => {
+  clearTimeout(topicTimer)
+  topicTimer = setTimeout(() => setFilter('topic', value.trim().toLowerCase() || null), 300)
+})
+watch(
+  () => filters.value.topic,
+  (t) => {
+    if ((t ?? '') !== topicText.value.trim().toLowerCase()) topicText.value = t ?? ''
+  },
+)
+onBeforeUnmount(() => {
+  clearTimeout(qTimer)
+  clearTimeout(topicTimer)
+})
 
-// 切到树或已删除时这个视图留在 KeepAlive 里，查询跟着停用
 const active = useActivated()
+const facets = useQuery({
+  queryKey: computed(() => ['facets', props.circleId] as const),
+  queryFn: ({ queryKey: [, cid] }) => api.facets(cid),
+  enabled: active,
+})
 
-// 位置的选项：各个人格、各个应用，以及本人与通用下面有下一级的第一级。更深的位置从地址里来
-// （例如从目录点过来），也列出来。整个本人、通用用窄柱按归属筛
-const levelsOf = (of: 'user' | 'core') =>
-  useQuery({
-    queryKey: computed(() => ['memory-children', props.spaceId, of] as const),
-    queryFn: ({ queryKey: [, sid, o] }) => api.memoryChildren(sid, o),
-    enabled: active,
-  })
-const userLevels = levelsOf('user')
-const coreLevels = levelsOf('core')
-const personas = useQuery({
-  queryKey: computed(() => ['personas', props.spaceId]),
-  queryFn: () => api.personas(props.spaceId),
-  enabled: active,
-})
-const apps = useQuery({
-  queryKey: computed(() => ['apps', props.spaceId]),
-  queryFn: () => api.apps(props.spaceId),
-  enabled: active,
-})
-const positionItems = computed(() => {
-  const items: { label: string; value: string | null }[] = [{ label: '全部位置', value: null }]
-  for (const [layer, levels] of [
-    ['user', userLevels],
-    ['core', coreLevels],
-  ] as const) {
-    for (const child of levels.data.value?.children ?? []) {
-      if (child.childCount > 0) {
-        items.push({
-          label: `${layerLabels[layer]} › ${identifierOf(child.uri)}`,
-          value: child.uri,
-        })
-      }
-    }
+const facetItems = computed(() => {
+  const data = facets.data.value
+  const items: { label: string; value: string | null }[] = [{ label: '全部切面', value: null }]
+  const dimMap = new Map<string, string>()
+  for (const d of data?.dimensions ?? []) dimMap.set(d.key, d.name)
+  for (const t of data?.terms ?? []) {
+    const dimName =
+      dimMap.get(t.dimensionKey) ??
+      builtinFacetLabels[t.dimensionKey as keyof typeof builtinFacetLabels] ??
+      t.dimensionKey
+    items.push({ label: `${dimName} › ${t.label}`, value: `${t.dimensionKey}:${t.slug}` })
   }
-  for (const p of personas.data.value ?? []) {
-    items.push({ label: `${layerLabels.persona} › ${p.name}`, value: `persona://${p.slug}` })
+  const dk = filters.value.dimensionKey
+  const ts = filters.value.termSlug
+  if (dk && ts) {
+    const value = `${dk}:${ts}`
+    if (!items.some((item) => item.value === value)) items.push({ label: `${dk}:${ts}`, value })
   }
-  for (const a of apps.data.value ?? []) {
-    items.push({ label: `${layerLabels.app} › ${a.name}`, value: `app://${a.slug}` })
-  }
-  const under = filters.value.under
-  if (under && !items.some((item) => item.value === under))
-    items.push({ label: under, value: under })
   return items
 })
-const sortItems = MEMORY_LIST_SORTS.map((s) => ({ label: sortLabels[s], value: s }))
+
+const selectedFacet = computed(() =>
+  filters.value.dimensionKey && filters.value.termSlug
+    ? `${filters.value.dimensionKey}:${filters.value.termSlug}`
+    : null,
+)
+const sortItems = ENTRY_LIST_SORTS.map((s) => ({ label: sortLabels[s], value: s }))
+
+const conversationBand = computed(
+  () => !!filters.value.band && isConversationBand(filters.value.band),
+)
+const personaBand = computed(() => filters.value.band === 'persona')
+const specialBand = computed(() => conversationBand.value || personaBand.value)
+
+function effectiveKind(band: StrataBand | null, explicit: EntryKind | null): EntryKind | undefined {
+  if (explicit) return explicit
+  if (band === 'episode') return 'episode'
+  if (band === 'fact') return 'fact'
+  if (band === 'primary' || band === 'personal' || band === 'shared-away') return 'entry'
+  return undefined
+}
 
 const list = useInfiniteQuery({
-  queryKey: computed(() => ['memory-list', props.spaceId, filters.value] as const),
-  // 参数从键里取：换了筛选之后，旧键剩下的页还在重新拉取时，不会用上新的筛选条件
-  queryFn: ({ pageParam, queryKey: [, spaceId, f] }) => {
-    return api.memoryList(spaceId, {
-      ...(f.under ? { under: f.under } : {}),
-      ...(f.layer ? { layer: f.layer } : {}),
+  queryKey: computed(() => ['entry-list', props.circleId, filters.value] as const),
+  queryFn: ({ pageParam, queryKey: [, cid, f] }) => {
+    const kind = effectiveKind(f.band, f.kind)
+    return api.entryList(cid, {
+      ...(kind ? { kind } : {}),
       ...(f.sensitivity ? { sensitivity: f.sensitivity } : {}),
+      ...(f.topic ? { topic: f.topic } : {}),
+      ...(f.dimensionKey ? { dimensionKey: f.dimensionKey } : {}),
+      ...(f.termSlug ? { termSlug: f.termSlug } : {}),
       ...(f.missingDisclosure ? { missingDisclosure: 'true' } : {}),
       ...(f.plaintext ? { plaintext: 'true' } : {}),
       ...(f.q ? { q: f.q } : {}),
@@ -155,44 +192,46 @@ const list = useInfiniteQuery({
   },
   initialPageParam: undefined as string | undefined,
   getNextPageParam: (last) => last.nextCursor ?? undefined,
-  enabled: active,
+  enabled: computed(() => active.value && !specialBand.value),
 })
-const items = computed(() => list.data.value?.pages.flatMap((page) => page.items) ?? [])
+
+const items = computed(() =>
+  specialBand.value ? [] : (list.data.value?.pages.flatMap((page) => page.items) ?? []),
+)
 // 每一行没写触发场景时怎么提示：随列表算一次，渲染时不再每行重复判断
 const rows = computed(() => items.value.map((item) => ({ item, missing: missingDisclosure(item) })))
 
-// 再点一次取消这个敏感级
 function toggleSensitivity(value: string) {
   setFilter('sensitivity', filters.value.sensitivity === value ? null : value)
 }
-// 窄柱上的归属和这里的敏感级一起清掉
 function clearStrata() {
   const query = { ...route.query }
-  delete query.layer
+  delete query.band
   delete query.sensitivity
   void router.replace({ query })
 }
-// 列表只列目录里的记忆，来自对话的两类筛出来是空的：说清楚去哪里看
-const conversationLayer = computed(
-  () => !!filters.value.layer && isConversationLayer(filters.value.layer),
-)
 const strataTag = computed(() =>
-  filters.value.layer || filters.value.sensitivity
-    ? swatchText(filters.value.layer, filters.value.sensitivity)
+  filters.value.band || filters.value.sensitivity
+    ? swatchText(filters.value.band, filters.value.sensitivity)
     : null,
 )
 
-// 列表上方的总数：统计里有的才说。列表只列记忆，来自对话的两类不算，所以不用合并的条数。
-// 关键字、位置或两个开关合用时算不出来，说已经载入了多少
+// 列表上方的总数：统计里有的才说。带关键字、主题、切面筛选或两个开关合用时算不出来，说已经载入了多少
 const total = computed(() => {
   const data = props.overview
   const f = filters.value
-  if (!data || f.q || f.under) return null
-  const strata = f.layer || f.sensitivity
+  if (!data || specialBand.value || f.q || f.topic || f.dimensionKey || f.termSlug || f.kind) {
+    return null
+  }
+  const strata = f.band || f.sensitivity
   if (f.missingDisclosure && f.plaintext) return null
   if (f.missingDisclosure) return strata ? null : data.missingDisclosure
   if (f.plaintext) return strata ? null : data.plaintextCredentials
-  return filteredTotal(tallyCounts(data.counts), f.layer, f.sensitivity)
+  return filteredTotal(
+    tallyCounts({ circleKind: props.circleKind, counts: data.counts }),
+    f.band,
+    f.sensitivity,
+  )
 })
 </script>
 
@@ -202,16 +241,16 @@ const total = computed(() => {
       <UInput
         v-model="keyword"
         name="q"
-        placeholder="搜索标题、坐标与触发场景"
+        placeholder="搜索标题、短 ID 与触发场景"
         aria-label="关键字"
         class="w-full"
       />
       <div class="grid grid-cols-2 gap-2">
         <USelect
-          :model-value="filters.under"
-          :items="positionItems"
-          aria-label="位置"
-          @update:model-value="(v) => setFilter('under', (v as string | null) ?? null)"
+          :model-value="selectedFacet"
+          :items="facetItems"
+          aria-label="切面"
+          @update:model-value="(v) => setFacetFilter((v as string | null) ?? null)"
         />
         <USelect
           :model-value="filters.sort"
@@ -220,6 +259,14 @@ const total = computed(() => {
           @update:model-value="(v) => setFilter('sort', v === 'updated' ? null : (v as string))"
         />
       </div>
+      <UInput
+        v-model="topicText"
+        name="topic"
+        size="sm"
+        placeholder="按主题标签筛选（例如 deploy）"
+        aria-label="主题筛选"
+        class="w-full"
+      />
       <div class="sensitivity-filter" role="group" aria-label="敏感级">
         <button
           v-for="s in SENSITIVITIES"
@@ -230,13 +277,7 @@ const total = computed(() => {
           :title="sensitivityHints[s]"
           @click="toggleSensitivity(s)"
         >
-          <StrataSwatch
-            :layer="filters.layer"
-            :sensitivity="s"
-            :width="16"
-            :height="11"
-            decorative
-          />
+          <StrataSwatch :band="filters.band" :sensitivity="s" :width="16" :height="11" decorative />
           <span>{{ sensitivityLabels[s] }}</span>
         </button>
       </div>
@@ -258,7 +299,7 @@ const total = computed(() => {
 
     <p class="list-count">
       <span v-if="strataTag" class="list-tag">
-        <StrataSwatch :layer="filters.layer" :sensitivity="filters.sensitivity" decorative />
+        <StrataSwatch :band="filters.band" :sensitivity="filters.sensitivity" decorative />
         {{ strataTag }}
         <button type="button" aria-label="清除筛选" @click="clearStrata">
           <UIcon :name="icons.cancel" class="size-3.5" />
@@ -272,7 +313,7 @@ const total = computed(() => {
       </span>
     </p>
 
-    <div v-if="conversationLayer" class="list-note">
+    <div v-if="conversationBand" class="list-note">
       <NoteLine>
         来自对话的内容不在记忆列表中<Hint> 联系人的事实与会话摘要在「对话」中查看。 </Hint>
         <template #actions>
@@ -280,83 +321,109 @@ const total = computed(() => {
             size="sm"
             color="primary"
             variant="outline"
-            :to="{ name: 'conversations', params: { spaceId } }"
+            :to="{ name: 'conversations', params: { circleId } }"
           >
             查看对话
           </UButton>
         </template>
       </NoteLine>
     </div>
-
-    <!-- 读取失败时已经读到的行留着：翻页失败的错误放在「加载更多」上面，其余放在最上面 -->
-    <div v-if="list.isError.value && !list.isFetchNextPageError.value" class="list-note">
-      <ReadFailureNote :query="list" />
-    </div>
-    <div v-if="list.isPending.value" class="space-y-2 p-3.5">
-      <USkeleton v-for="n in 5" :key="n" class="h-12 w-full" />
-    </div>
-    <template v-else-if="list.data.value">
-      <ul>
-        <li v-for="{ item, missing } in rows" :key="item.id">
-          <MemoryRow
-            as="button"
-            type="button"
-            :uri="item.uri"
-            :title="item.title"
-            :layer="item.layer"
-            :sensitivity="item.sensitivity"
-            :priority="item.priority"
-            :selected="item.uri === selectedUri"
-            :aria-current="item.uri === selectedUri ? 'true' : undefined"
-            @click="emit('select', item.uri)"
+    <div v-else-if="personaBand" class="list-note">
+      <NoteLine>
+        独立人格设定不在记忆列表中<Hint> 人格与特质覆盖规则在「人格与特质」页面查看和编辑。 </Hint>
+        <template #actions>
+          <UButton
+            size="sm"
+            color="primary"
+            variant="outline"
+            :to="{ name: 'personas', params: { circleId } }"
           >
-            <span class="flex items-baseline gap-2">
-              <span class="min-w-0 flex-1 truncate">
-                <span
-                  v-if="missing"
-                  :class="{
-                    'text-warning': missing.tone === 'warning' && item.uri !== selectedUri,
-                  }"
-                >
-                  {{ missing.short }}
+            查看人格
+          </UButton>
+        </template>
+      </NoteLine>
+    </div>
+
+    <template v-else>
+      <!-- 读取失败时已经读到的行留着：翻页失败的错误放在「加载更多」上面，其余放在最上面 -->
+      <div v-if="list.isError.value && !list.isFetchNextPageError.value" class="list-note">
+        <ReadFailureNote :query="list" />
+      </div>
+      <div v-if="list.isPending.value" class="space-y-2 p-3.5">
+        <USkeleton v-for="n in 5" :key="n" class="h-12 w-full" />
+      </div>
+      <template v-else-if="list.data.value">
+        <ul>
+          <li v-for="{ item, missing } in rows" :key="item.id">
+            <MemoryRow
+              as="button"
+              type="button"
+              :short-id="item.shortId"
+              :title="item.title"
+              :band="
+                entryBand(
+                  { kind: item.kind, circleId: item.circleId, circleKind },
+                  { id: circleId, kind: circleKind },
+                )
+              "
+              :kind="item.kind"
+              :sensitivity="item.sensitivity"
+              :priority="item.priority"
+              :variant-count="item.variantCount"
+              :selected="item.shortId === selectedId"
+              :aria-current="item.shortId === selectedId ? 'true' : undefined"
+              @click="emit('select', item.shortId)"
+            >
+              <span class="flex items-baseline gap-2">
+                <span class="min-w-0 flex-1 truncate">
+                  <span
+                    v-if="missing"
+                    :class="{
+                      'text-warning': missing.tone === 'warning' && item.shortId !== selectedId,
+                    }"
+                  >
+                    {{ missing.short }}
+                  </span>
+                  <template v-else>{{ item.disclosure }}</template>
                 </span>
-                <template v-else>{{ item.disclosure }}</template>
+                <!-- 列表只列有效的；载入之后才到期的在这里显示已过期 -->
+                <span
+                  v-if="item.validTo"
+                  class="shrink-0 text-xs"
+                  :class="{
+                    'text-warning': isExpired(item.validTo) && item.shortId !== selectedId,
+                  }"
+                  :title="`有效期至 ${formatTime(item.validTo)}`"
+                >
+                  {{ isExpired(item.validTo) ? '已过期' : `${formatShort(item.validTo)} 到期` }}
+                </span>
+                <time
+                  :datetime="item.updatedAt"
+                  :title="formatTime(item.updatedAt)"
+                  class="shrink-0 text-xs"
+                >
+                  {{ formatRelative(item.updatedAt) }}
+                </time>
               </span>
-              <!-- 列表只列有效的；载入之后才到期的在这里显示已过期 -->
-              <span
-                v-if="item.validTo"
-                class="shrink-0 text-xs"
-                :class="{ 'text-warning': isExpired(item.validTo) && item.uri !== selectedUri }"
-                :title="`有效期至 ${formatTime(item.validTo)}`"
-              >
-                {{ isExpired(item.validTo) ? '已过期' : `${formatShort(item.validTo)} 到期` }}
-              </span>
-              <time
-                :datetime="item.updatedAt"
-                :title="formatTime(item.updatedAt)"
-                class="shrink-0 text-xs"
-              >
-                {{ formatRelative(item.updatedAt) }}
-              </time>
-            </span>
-          </MemoryRow>
-        </li>
-      </ul>
-      <p v-if="!items.length && !conversationLayer" class="list-empty">没有符合条件的记忆</p>
-      <div v-if="list.isFetchNextPageError.value" class="list-note">
-        <NoteLine tone="error">{{ readFailure(list.error.value) }}</NoteLine>
-      </div>
-      <div v-if="list.hasNextPage.value" class="flex justify-center py-3">
-        <UButton
-          color="neutral"
-          variant="outline"
-          size="sm"
-          :loading="list.isFetchingNextPage.value"
-          @click="list.fetchNextPage()"
-        >
-          加载更多
-        </UButton>
-      </div>
+            </MemoryRow>
+          </li>
+        </ul>
+        <p v-if="!items.length" class="list-empty">没有符合条件的记忆</p>
+        <div v-if="list.isFetchNextPageError.value" class="list-note">
+          <NoteLine tone="error">{{ readFailure(list.error.value) }}</NoteLine>
+        </div>
+        <div v-if="list.hasNextPage.value" class="flex justify-center py-3">
+          <UButton
+            color="neutral"
+            variant="outline"
+            size="sm"
+            :loading="list.isFetchingNextPage.value"
+            @click="list.fetchNextPage()"
+          >
+            加载更多
+          </UButton>
+        </div>
+      </template>
     </template>
   </div>
 </template>

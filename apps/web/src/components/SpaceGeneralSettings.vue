@@ -6,18 +6,19 @@ import { useRoute } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
-import { useAfterSpaceGone, useLeaveSpace } from '../composables/useLeaveSpace'
+import { useAfterCircleGone, useLeaveCircle } from '../composables/useLeaveSpace'
 import { fieldProblems } from '../composables/useSavedField'
 import { useSession } from '../composables/useSession'
+import { circleKindLabels } from '../labels'
 import { roleName } from '../settingsSections'
 import {
+  CIRCLE_NAME_RANGE,
+  circleNameIssue,
   isLastOwner,
   LAST_OWNER_NOTE,
   LEAVE_CONSEQUENCES,
   LEAVE_NOTE,
-  refreshSpaces,
-  SPACE_NAME_RANGE,
-  spaceNameIssue,
+  refreshCircles,
   TRANSFER_CONSEQUENCES,
   transferTargets,
 } from '../spaces'
@@ -30,25 +31,26 @@ import SaveBar from './strata/SaveBar.vue'
 import SettingsBlock from './strata/SettingsBlock.vue'
 import SettingsRow from './strata/SettingsRow.vue'
 
-// 空间 › 概况：名称（空间所有者可改）、当前账号的角色、成员数与建立时间；下面是危险操作：转让所有者、离开空间、删除空间。
-// 空间组只挂在空间的地址下，空间取地址里的；不是成员时外壳不渲染这一页
+// 记忆圈 › 概况：名称（所有者可改）、类型、当前账号的角色、成员数与建立时间；共享圈下方有危险操作：转让所有者、离开、删除。
+// 个人记忆圈不可转让、离开或删除
 const dirtyModel = defineModel<boolean>('dirty', { default: false })
 const route = useRoute()
 const toast = useToast()
 const queryClient = useQueryClient()
-const { me, space } = useSession()
-const spaceId = computed(() => String(route.params.spaceId))
+const { me, circle } = useSession()
+const circleId = computed(() => String(route.params.circleId))
 const myId = computed(() => me.data.value?.id)
-const isOwner = computed(() => space.value?.role === 'owner')
+const isOwner = computed(() => circle.value?.role === 'owner')
 const isAdmin = computed(() => me.data.value?.isAdmin ?? false)
 
 const detail = useQuery({
-  queryKey: computed(() => ['space', spaceId.value]),
-  queryFn: () => api.space(spaceId.value),
+  queryKey: computed(() => ['circle', circleId.value]),
+  queryFn: () => api.circle(circleId.value),
 })
 const members = useQuery({
-  queryKey: computed(() => ['members', spaceId.value]),
-  queryFn: () => api.members(spaceId.value),
+  queryKey: computed(() => ['members', circleId.value]),
+  queryFn: () => api.members(circleId.value),
+  enabled: computed(() => detail.data.value?.kind === 'shared'),
 })
 
 // 名称：基准是服务端最新的名字，没改过时跟着它
@@ -62,7 +64,7 @@ watch(savedName, (next) => {
   baseline.value = next
 })
 const changed = computed(() => baseline.value !== undefined && name.value.trim() !== baseline.value)
-const nameIssue = computed(() => (changed.value ? spaceNameIssue(name.value) : null))
+const nameIssue = computed(() => (changed.value ? circleNameIssue(name.value) : null))
 const problem = computed(() => fieldProblems([{ label: '名称', issue: nameIssue.value }]))
 watch(changed, (d) => (dirtyModel.value = d), { immediate: true })
 const saving = ref(false)
@@ -71,10 +73,10 @@ async function save() {
   const submitted = name.value.trim()
   saving.value = true
   try {
-    const saved = await api.renameSpace(spaceId.value, submitted)
+    const saved = await api.renameCircle(circleId.value, submitted)
     if (name.value.trim() === submitted) name.value = saved.name
     baseline.value = saved.name
-    await refreshSpaces(queryClient, spaceId.value)
+    await refreshCircles(queryClient, circleId.value)
     toast.add({ title: '已保存', color: 'success' })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '保存失败', color: 'error' })
@@ -108,9 +110,9 @@ async function transfer() {
   transferBusy.value = true
   transferError.value = null
   try {
-    await api.transferOwnership(spaceId.value, transferTo.value)
+    await api.transferOwnership(circleId.value, transferTo.value)
     transferOpen.value = false
-    await refreshSpaces(queryClient, spaceId.value, { accounts: true })
+    await refreshCircles(queryClient, circleId.value, { accounts: true })
     toast.add({ title: '已转让所有者', color: 'success' })
   } catch (err) {
     transferError.value = err instanceof ApiError ? err.message : '转让失败'
@@ -120,27 +122,27 @@ async function transfer() {
 }
 
 const lastOwner = computed(() => Boolean(myId.value && isLastOwner(list.value, myId.value)))
-const leave = useLeaveSpace(spaceId, myId)
+const leave = useLeaveCircle(circleId, myId)
 
 const deleteOpen = ref(false)
-const afterGone = useAfterSpaceGone()
+const afterGone = useAfterCircleGone()
 async function deleted() {
   deleteOpen.value = false
-  toast.add({ title: '已删除空间', color: 'success' })
-  await afterGone(spaceId.value)
+  toast.add({ title: '已删除共享圈', color: 'success' })
+  await afterGone(circleId.value)
 }
 </script>
 
 <template>
   <div>
-    <SettingsBlock title="空间">
+    <SettingsBlock title="记忆圈">
       <ReadFailureNote v-if="detail.isError.value" :query="detail" />
       <USkeleton v-if="detail.isPending.value" class="h-40 w-full" />
       <template v-else-if="detail.data.value">
         <form v-if="isOwner" @submit.prevent="save">
-          <SettingsRow label="名称" description="空间切换器与成员看到的名字" for="space-name">
-            <UInput id="space-name" v-model="name" class="w-full max-w-xs" autocomplete="off" />
-            <p v-if="nameIssue" class="w-full text-xs text-error">{{ SPACE_NAME_RANGE }}</p>
+          <SettingsRow label="名称" description="记忆圈切换器与成员看到的名字" for="circle-name">
+            <UInput id="circle-name" v-model="name" class="w-full max-w-xs" autocomplete="off" />
+            <p v-if="nameIssue" class="w-full text-xs text-error">{{ CIRCLE_NAME_RANGE }}</p>
           </SettingsRow>
           <SaveBar
             :count="changed ? 1 : 0"
@@ -150,8 +152,9 @@ async function deleted() {
           />
         </form>
         <SettingsRow v-else label="名称">{{ detail.data.value.name }}</SettingsRow>
+        <SettingsRow label="类型">{{ circleKindLabels[detail.data.value.kind] }}</SettingsRow>
         <SettingsRow label="当前账号的角色">{{ roleName(detail.data.value.role) }}</SettingsRow>
-        <SettingsRow label="成员">
+        <SettingsRow v-if="detail.data.value.kind === 'shared'" label="成员">
           <span class="tabular-nums">{{ detail.data.value.memberCount }}</span> 个
         </SettingsRow>
         <SettingsRow label="建立时间">{{
@@ -160,7 +163,7 @@ async function deleted() {
       </template>
     </SettingsBlock>
 
-    <DangerZone v-if="detail.data.value">
+    <DangerZone v-if="detail.data.value && detail.data.value.kind === 'shared'">
       <div v-if="isOwner" class="danger-row">
         <div class="danger-text">
           <p class="danger-name">转让所有者</p>
@@ -177,21 +180,23 @@ async function deleted() {
       </div>
       <div class="danger-row">
         <div class="danger-text">
-          <p class="danger-name">离开空间</p>
+          <p class="danger-name">离开记忆圈</p>
           <p class="danger-note">
             {{ lastOwner ? LAST_OWNER_NOTE : LEAVE_NOTE }}
           </p>
         </div>
         <UButton color="error" variant="outline" :disabled="lastOwner" @click="leave.start"
-          >离开空间</UButton
+          >离开记忆圈</UButton
         >
       </div>
       <div v-if="isOwner || isAdmin" class="danger-row">
         <div class="danger-text">
-          <p class="danger-name">删除空间</p>
-          <p class="danger-note">空间内的记忆、凭据与访问密钥全部删除，接入的应用立即失去访问。</p>
+          <p class="danger-name">删除共享圈</p>
+          <p class="danger-note">
+            记忆圈内的词条、会话、凭据与访问密钥全部删除，关联的接入实例立即失去访问。
+          </p>
         </div>
-        <UButton color="error" @click="deleteOpen = true">删除空间</UButton>
+        <UButton color="error" @click="deleteOpen = true">删除共享圈</UButton>
       </div>
     </DangerZone>
 
@@ -212,9 +217,9 @@ async function deleted() {
     </ConsequenceModal>
     <ConsequenceModal
       :open="leave.open.value"
-      :title="`离开空间「${detail.data.value?.name ?? ''}」`"
+      :title="`离开记忆圈「${detail.data.value?.name ?? ''}」`"
       :consequences="LEAVE_CONSEQUENCES"
-      action="离开空间"
+      action="离开记忆圈"
       :busy="leave.busy.value"
       :error="leave.error.value"
       @confirm="leave.confirm"
@@ -222,8 +227,8 @@ async function deleted() {
     />
     <DeleteSpaceModal
       :open="deleteOpen"
-      :space-id="spaceId"
-      :space-name="detail.data.value?.name ?? ''"
+      :circle-id="circleId"
+      :circle-name="detail.data.value?.name ?? ''"
       :can-export="isOwner"
       @close="deleteOpen = false"
       @deleted="deleted"

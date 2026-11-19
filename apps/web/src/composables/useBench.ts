@@ -1,12 +1,12 @@
 import {
   mayWrite,
-  type AppInfo,
   type BenchAgentLoop,
   type BenchAgentTurnRequest,
   type BenchMode,
   type BenchReplayStep,
   type BenchRunResult,
   type BenchStep,
+  type ClientInfo,
   type KeyInfo,
 } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
@@ -42,7 +42,7 @@ import {
   acceptDivergence,
   emptySession,
   modeSwitchLoss,
-  ownedApps,
+  ownedClients,
   recordRun,
   replayFor,
   runBlocker,
@@ -60,15 +60,15 @@ const param = (value: unknown) => (typeof value === 'string' && value ? value : 
 
 // 地址里的选择。只在测试台页面上读：离开时路由先变、组件后卸载，这段时间不跟着路由走
 const selectionOf = (route: RouteLocationNormalizedLoaded) => ({
-  spaceId: String(route.params.spaceId),
-  app: param(route.query.app),
+  circleId: String(route.params.circleId),
+  client: param(route.query.client),
   key: param(route.query.key),
 })
 
 // 一次运行对着谁。发请求之前就定下来：一条消息的循环中途不能换成别的 Key
 interface RunTarget {
-  space: string
-  app: AppInfo
+  circle: string
+  client: ClientInfo
   key: KeyInfo
   mode: BenchMode
 }
@@ -82,7 +82,7 @@ const settledIds = (
   list: readonly { id: string }[],
 ) => (query.isSuccess.value && !query.isFetching.value ? list.map((item) => item.id) : null)
 
-// 测试台各分页共享的状态：应用、Key、模式、会话上下文、这次会话、模型对话。页面建一份，分页组件用 useBench 取同一份。
+// 测试台各分页共享的状态：接入实例、Key、模式、会话上下文、这次会话、模型对话。页面建一份，分页组件用 useBench 取同一份。
 // 都只在内存里：调用内容可能有明文，不进浏览器存储
 export function createBench() {
   const route = useRoute()
@@ -91,7 +91,7 @@ export function createBench() {
   const { me } = useSession()
 
   // 选择记在地址里：刷新、分享都还在。模式不记：真实模式每次都要确认
-  const select = (query: { app?: string; key?: string }) =>
+  const select = (query: { client?: string; key?: string }) =>
     void router.replace({ query: { ...route.query, ...query } })
 
   const selection = reactive(selectionOf(route))
@@ -101,30 +101,30 @@ export function createBench() {
       if (route.name !== 'bench') return
       const next = selectionOf(route)
       // 侧栏的入口不带参数，点它不算换选择：不然默认的那把变过的话，这里就悄悄换了
-      if (next.spaceId === selection.spaceId && !next.app && !next.key && selection.app) {
-        select({ app: selection.app, key: selection.key })
+      if (next.circleId === selection.circleId && !next.client && !next.key && selection.client) {
+        select({ client: selection.client, key: selection.key })
         return
       }
       Object.assign(selection, next)
     },
   )
-  const spaceId = computed(() => selection.spaceId)
+  const circleId = computed(() => selection.circleId)
 
-  const apps = useQuery({
-    queryKey: computed(() => ['apps', selection.spaceId]),
-    queryFn: () => api.apps(selection.spaceId),
+  const clients = useQuery({
+    queryKey: computed(() => ['clients', selection.circleId]),
+    queryFn: () => api.clients(selection.circleId),
   })
-  const owned = computed(() => ownedApps(apps.data.value ?? [], me.data.value?.id))
-  const appId = computed(() => {
+  const owned = computed(() => ownedClients(clients.data.value ?? [], me.data.value?.id))
+  const clientId = computed(() => {
     const list = owned.value
-    return list.find((a) => a.id === selection.app)?.id ?? list[0]?.id
+    return list.find((c) => c.id === selection.client)?.id ?? list[0]?.id
   })
-  const app = computed(() => owned.value.find((a) => a.id === appId.value) ?? null)
+  const client = computed(() => owned.value.find((c) => c.id === clientId.value) ?? null)
 
   const keys = useQuery({
-    queryKey: computed(() => ['keys', selection.spaceId, appId.value]),
-    queryFn: () => api.keys(selection.spaceId, appId.value!),
-    enabled: computed(() => Boolean(appId.value)),
+    queryKey: computed(() => ['keys', selection.circleId, clientId.value]),
+    queryFn: () => api.keys(selection.circleId, clientId.value!),
+    enabled: computed(() => Boolean(clientId.value)),
   })
   const usable = computed(() => usableKeys(keys.data.value ?? []))
   const keyId = computed(() => {
@@ -132,29 +132,29 @@ export function createBench() {
     return list.find((k) => k.id === selection.key)?.id ?? list[0]?.id
   })
   const key = computed(() => usable.value.find((k) => k.id === keyId.value) ?? null)
-  const ready = computed(() => Boolean(app.value && key.value))
+  const ready = computed(() => Boolean(client.value && key.value))
 
-  // 地址里的应用或 Key 用不了（链接是别人的、Key 刚被吊销）时说一声，不悄悄换。
+  // 地址里的接入实例或 Key 用不了（链接是别人的、Key 刚被吊销）时说一声，不悄悄换。
   // 地址同时改成实际的选择，所以只说一次：用户关掉或者重新选过之后不再提示，刷新之后也不会
   const selectionNotice = ref<string | null>(null)
-  watch(spaceId, () => (selectionNotice.value = null))
+  watch(circleId, () => (selectionNotice.value = null))
 
-  const selectApp = (id: string) => {
+  const selectClient = (id: string) => {
     selectionNotice.value = null
-    select({ app: id, key: undefined })
+    select({ client: id, key: undefined })
   }
   const selectKey = (id: string) => {
     selectionNotice.value = null
     select({ key: id })
   }
 
-  // 等 useQuery 跟上新的应用之后再判断（post）：它的选项在 pre 阶段才更新，那之前 keys.data 还是上一个应用的
+  // 等 useQuery 跟上新的接入实例之后再判断（post）：它的选项在 pre 阶段才更新，那之前 keys.data 还是上一个接入实例的
   watchPostEffect(() => {
     // 离开时路由先变、组件后卸载，这段时间不能写到别的页面的地址上
     if (route.name !== 'bench') return
     const fix = selectionFix(
       selection,
-      settledIds(apps, owned.value),
+      settledIds(clients, owned.value),
       settledIds(keys, usable.value),
     )
     if (!fix) return
@@ -166,8 +166,8 @@ export function createBench() {
   const real = computed(() => mode.value === 'real')
   const confirmingReal = ref(false)
   const confirmingRollback = ref(false)
-  // 换了应用或 Key 就回到回滚：真实模式是对着这把 Key 确认的
-  watch([spaceId, appId, keyId], () => {
+  // 换了接入实例或 Key 就回到回滚：真实模式是对着这把 Key 确认的
+  watch([circleId, clientId, keyId], () => {
     mode.value = 'rollback'
     confirmingReal.value = false
     confirmingRollback.value = false
@@ -177,7 +177,7 @@ export function createBench() {
   const sessionContext = computed(() => contextOf(contextForm))
 
   // 每次运行一个序号，current 是进行中的那次：结果、报错与 loading 都只认它。
-  // 换了应用、Key 或模式时清掉，进行中的那次就作废了，会话换一份新的；generation 让各分页清掉自己的结果
+  // 换了接入实例、Key 或模式时清掉，进行中的那次就作废了，会话换一份新的；generation 让各分页清掉自己的结果
   let counter = 0
   const current = ref<number | null>(null)
   const running = computed(() => current.value !== null)
@@ -199,7 +199,7 @@ export function createBench() {
   const agentController = shallowRef<AbortController | null>(null)
   const agentSending = computed(() => agentController.value !== null)
   const agentStopping = ref(false)
-  watch([spaceId, appId, keyId, mode], () => {
+  watch([circleId, clientId, keyId, mode], () => {
     current.value = null
     session.value = emptySession()
     generation.value++
@@ -248,7 +248,7 @@ export function createBench() {
   const realInFlight = ref<number[]>([])
   // 中途作废、还没回来的：现在可能正在写入。按属于谁算，不能按个数减：模型对话等模型时占着运行，却没有请求在途
   const abandonedInFlight = computed(() => realInFlight.value.some((id) => id !== current.value))
-  // 中途作废的真实运行。不随换应用、Key 或模式清掉：作废就是因为这些变了，用户看过之后自己关
+  // 中途作废的真实运行。不随换接入实例、Key 或模式清掉：作废就是因为这些变了，用户看过之后自己关
   const abandoned = shallowRef<AbandonedRun[]>([])
   function dismissAbandoned(id: number) {
     abandoned.value = abandoned.value.filter((run) => run.id !== id)
@@ -258,7 +258,7 @@ export function createBench() {
   // 两种模式都算：回滚模式下也是花了 token 聊出来的）、还没回来的真实运行（离开就看不到它写了什么）、
   // 真实模式留下的记录（时间线、场景结果、失败的说明、作废的运行：写入可能已经落库，结果里的运行标记是
   // 活动里对应它们的线索）。回滚模式的结果不算：什么都没留下。
-  // 换应用、Key、分页只改查询参数，页面还在，不算离开
+  // 换接入实例、Key、分页只改查询参数，页面还在，不算离开
   const unsaved = reactive({ scenario: false, drafts: false })
   useUnsavedChangesGuard(
     computed(
@@ -270,19 +270,19 @@ export function createBench() {
         (real.value && modeLoss.value !== null) ||
         abandoned.value.length > 0,
     ),
-    { leavesOn: (to, from) => to.params.spaceId !== from.params.spaceId },
+    { leavesOn: (to, from) => to.params.circleId !== from.params.circleId },
   )
 
   const runTarget = (): RunTarget | null =>
-    app.value && key.value
-      ? { space: spaceId.value, app: app.value, key: key.value, mode: mode.value }
+    client.value && key.value
+      ? { circle: circleId.value, client: client.value, key: key.value, mode: mode.value }
       : null
 
-  // 应用转给了别人、Key 刚被吊销：重新读一遍，选择跟着变
-  function refetchIfDenied(err: unknown, { space, app: forApp }: RunTarget) {
+  // 接入实例转给了别人、Key 刚被吊销：重新读一遍，选择跟着变
+  function refetchIfDenied(err: unknown, { circle, client: forClient }: RunTarget) {
     if (err instanceof ApiError && (err.status === 403 || err.status === 404)) {
-      void queryClient.invalidateQueries({ queryKey: ['apps', space] })
-      void queryClient.invalidateQueries({ queryKey: ['keys', space, forApp.id] })
+      void queryClient.invalidateQueries({ queryKey: ['clients', circle] })
+      void queryClient.invalidateQueries({ queryKey: ['keys', circle, forClient.id] })
     }
   }
 
@@ -294,19 +294,19 @@ export function createBench() {
     what: { label: string; view: StepView },
     replay: BenchReplayStep[],
   ): Promise<RunOutcome> {
-    const { space: forSpace, app: forApp, key: forKey, mode: forMode } = target
+    const { circle: forCircle, client: forClient, key: forKey, mode: forMode } = target
     if (forMode === 'real') realInFlight.value = [...realInFlight.value, id]
     // 回滚模式作废了就丢掉：什么都没留下。真实模式下写入可能已经落库，要说出来，有结果就显示
     const staleOutcome = (settled: { result: BenchRunResult } | { error: unknown }): RunOutcome => {
       const run =
         forMode === 'real'
-          ? abandonedRun({ id, ...what, app: forApp.name, key: forKey.name }, settled)
+          ? abandonedRun({ id, ...what, client: forClient.name, key: forKey.name }, settled)
           : null
       if (run) abandoned.value = [...abandoned.value, run]
       return { kind: 'stale' }
     }
     try {
-      const result = await api.benchRun(forSpace, forApp.id, forKey.id, {
+      const result = await api.benchRun(forCircle, forClient.id, forKey.id, {
         mode: forMode,
         steps,
         replay,
@@ -368,11 +368,11 @@ export function createBench() {
   // 请求一次模型。Key 被吊销时和运行一样让选择跟上；模型的设置变了（400）时重新读模型代理的情况
   async function agentTurn(target: RunTarget, body: BenchAgentTurnRequest, signal: AbortSignal) {
     try {
-      return await api.benchAgentTurn(target.space, target.app.id, target.key.id, body, signal)
+      return await api.benchAgentTurn(target.circle, target.client.id, target.key.id, body, signal)
     } catch (err) {
       refetchIfDenied(err, target)
       if (err instanceof ApiError && err.status < 500) {
-        void queryClient.invalidateQueries({ queryKey: ['bench-agent', target.space] })
+        void queryClient.invalidateQueries({ queryKey: ['bench-agent', target.circle] })
       }
       throw err
     }
@@ -380,7 +380,7 @@ export function createBench() {
 
   // 发一条消息给模型，走完它的循环。整个循环算一次运行，current 一直占着：模型请求之间没有运行在跑，
   // 但这段时间同样不能切换、不能跑别的调用（历史与重放日志都是按这把 Key 算的）。
-  // 换了应用、Key 或模式时 current 被清掉，之后的结果都不算数，新的对话不会被旧的循环写回来。
+  // 换了接入实例、Key 或模式时 current 被清掉，之后的结果都不算数，新的对话不会被旧的循环写回来。
   // 返回这条消息的经过；中途作废时是 null
   async function sendToAgent(
     text: string,
@@ -422,9 +422,9 @@ export function createBench() {
         },
       })
       if (current.value === id) return finished.exchanges.at(-1) ?? null
-      const { app: forApp, key: forKey } = target
+      const { client: forClient, key: forKey } = target
       for (const { label, result } of written) {
-        const run = { id: ++counter, ...what(label), app: forApp.name, key: forKey.name }
+        const run = { id: ++counter, ...what(label), client: forClient.name, key: forKey.name }
         const record = abandonedRun(run, { result })
         if (record) abandoned.value = [...abandoned.value, record]
       }
@@ -459,17 +459,17 @@ export function createBench() {
   }
 
   return {
-    spaceId,
-    apps,
+    circleId,
+    clients,
     owned,
-    appId,
-    app,
+    clientId,
+    client,
     keys,
     usable,
     keyId,
     key,
     ready,
-    selectApp,
+    selectClient,
     selectKey,
     selectionNotice,
     mode,

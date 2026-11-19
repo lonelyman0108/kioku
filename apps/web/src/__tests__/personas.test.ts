@@ -1,45 +1,47 @@
-import type { PersonaInfo, PersonaNode } from '@kioku/contracts'
+import { ENTRY_KINDS, type PersonaInfo, type ResolvedPersonaTrait } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
 import { sameScopes } from '../components/keyPresets'
 import { guideLines } from '../components/memoryTree'
-import { inheritedGroups, lostFromBoot, personaRows } from '../personas'
+import personaDetailSource from '../components/PersonaDetail.vue?raw'
+import vocabularyPageSource from '../pages/VocabularyPage.vue?raw'
+import {
+  canBeParent,
+  hasCycle,
+  inheritedGroups,
+  personaChildren,
+  personaOptionItems,
+  personaRows,
+  personaTree,
+} from '../personas'
 
-const node = (uri: string, priority: number, overriddenBy: string | null = null): PersonaNode => ({
-  uri,
-  title: uri.split('/').pop()!,
-  personaId: '00000000-0000-4000-8000-000000000000',
-  priority,
-  sensitivity: 'public',
-  disclosure: null,
-  overriddenBy,
-})
-
-describe('被覆盖之后会不会从启动上下文里消失', () => {
-  it('祖先那条会进启动上下文、覆盖它的那条进不了时给出那条的 priority', () => {
-    const child = node('persona://child/soul', 2)
-    const parent = node('persona://parent/soul', 0, child.uri)
-    expect(lostFromBoot(parent, [child, parent])).toBe(2)
-  })
-
-  it('覆盖它的那条也进启动上下文、祖先那条本来就进不了、或没被覆盖时不提示', () => {
-    const child = node('persona://child/soul', 1)
-    expect(lostFromBoot(node('persona://parent/soul', 0, child.uri), [child])).toBeNull()
-    const low = node('persona://child/tone', 3)
-    expect(lostFromBoot(node('persona://parent/tone', 2, low.uri), [low])).toBeNull()
-    expect(lostFromBoot(node('persona://parent/habit', 0), [])).toBeNull()
-  })
-})
+const CIRCLE = '00000000-0000-4000-8000-0000000000s1'
+const at = '2026-11-10T00:00:00.000Z'
 
 const persona = (id: string, extendsId: string | null = null): PersonaInfo => ({
   id,
+  circleId: CIRCLE,
   slug: id,
   name: id,
   extendsId,
   description: null,
 })
 
-describe('人格列表的继承树', () => {
+const trait = (
+  traitKey: string,
+  personaId: string,
+  overriddenBy: string | null = null,
+): ResolvedPersonaTrait => ({
+  traitKey,
+  title: traitKey,
+  content: `content-${traitKey}`,
+  sortOrder: 0,
+  updatedAt: at,
+  personaId,
+  overriddenBy,
+})
+
+describe('人格列表的继承树与继承校验', () => {
   const ids = (personas: PersonaInfo[]) => personaRows(personas).map((r) => r.persona.id)
 
   it('继承的人格不在列表里时，排在前面的子人格也不会被拆出去', () => {
@@ -56,7 +58,6 @@ describe('人格列表的继承树', () => {
   })
 
   it('子人格排在被继承的人格下面，同一级保持接口的顺序', () => {
-    // 接口按创建时间排，子人格可能比后来才设的父人格更早
     const personas = [
       persona('child', 'root'),
       persona('root'),
@@ -79,84 +80,95 @@ describe('人格列表的继承树', () => {
     const lines = (id: string) => guideLines(rows.find((r) => r.persona.id === id)!)
     expect(lines('root')).toEqual([])
     expect(lines('a')).toEqual([{ left: 14, end: false, tick: true }])
-    // a 后面还有 b：a1 这一行要有 a 那一级穿过去的竖线
     expect(lines('a1')).toEqual([
       { left: 14, end: false, tick: false },
       { left: 30, end: true, tick: true },
     ])
     expect(lines('b')).toEqual([{ left: 14, end: true, tick: true }])
-    // b 是最后一个：b1 这一行没有穿过去的竖线
     expect(lines('b1')).toEqual([{ left: 30, end: true, tick: true }])
   })
 
-  it('继承的人格不在列表里时算作一棵新树，不丢', () => {
-    expect(personaRows([persona('orphan', 'gone')]).map((r) => [r.persona.id, r.depth])).toEqual([
-      ['orphan', 0],
-    ])
-  })
-
-  it('万一成环也不丢、不重复、不死循环', () => {
-    const rows = personaRows([persona('a', 'b'), persona('b', 'a'), persona('root')])
-    expect(rows.map((r) => r.persona.id).sort()).toEqual(['a', 'b', 'root'])
+  it('personaTree、personaChildren 与成环检测', () => {
+    const list = [persona('root'), persona('child', 'root'), persona('leaf', 'child')]
+    const tree = personaTree(list)
+    expect(tree).toHaveLength(1)
+    expect(tree[0]!.children[0]!.children[0]!.persona.id).toBe('leaf')
+    expect(personaChildren(list, 'root').map((p) => p.id)).toEqual(['child'])
+    expect(hasCycle(list, 'root', 'leaf')).toBe(true)
+    expect(hasCycle(list, 'child', 'root')).toBe(false)
+    expect(canBeParent(list, 'root', 'leaf')).toBe(false)
+    expect(personaOptionItems(list, 'root').map((i) => i.value)).toEqual([null])
   })
 
   it('没有人格时为空', () => {
     expect(personaRows([])).toEqual([])
+    expect(personaTree([])).toEqual([])
   })
 })
 
-describe('继承来的节点按祖先分组', () => {
-  const at = (uri: string, personaId: string): PersonaNode => ({
-    ...node(uri, 2),
-    personaId,
-  })
-
-  it('由近到远，和节点的先后无关；没有节点的祖先不列', () => {
+describe('继承来的设定段按祖先分组', () => {
+  it('由近到远排序，保留覆盖状态且不丢失未匹配祖先', () => {
     const groups = inheritedGroups({
       ancestors: [persona('near'), persona('empty'), persona('far')],
-      inherited: [
-        at('persona://far/a', 'far'),
-        at('persona://near/b', 'near'),
-        at('persona://far/c', 'far'),
+      inheritedTraits: [
+        trait('tone', 'far', 'near'),
+        trait('tone', 'near', 'child'),
+        trait('extra', 'unknown', null),
+        trait('rules', 'far', null),
       ],
     })
-    expect(groups.map((g) => g.name)).toEqual(['near', 'far'])
-    expect(groups[1]!.nodes.map((n) => n.uri)).toEqual(['persona://far/a', 'persona://far/c'])
-  })
-
-  it('节点对不上祖先时也不丢', () => {
-    const groups = inheritedGroups({
-      ancestors: [persona('near')],
-      inherited: [at('persona://x/a', 'unknown'), at('persona://near/b', 'near')],
-    })
-    expect(groups.map((g) => g.name)).toEqual(['near', '祖先人格'])
+    expect(groups.map((g) => g.persona.name)).toEqual(['near', 'far', '祖先人格'])
+    expect(groups[0]!.traits[0]!.overriddenBy).toBe('child')
+    expect(groups[1]!.traits.map((t) => t.traitKey)).toEqual(['tone', 'rules'])
   })
 })
 
-describe('两组 Key 权限是否相同', () => {
+describe('两组透镜访问密钥权限是否相同', () => {
   const scopes = {
-    readLayers: ['core', 'user'] as const,
-    writeLayers: ['user'] as const,
+    readKinds: [...ENTRY_KINDS],
+    writeKinds: ['entry'] as ('entry' | 'fact' | 'episode')[],
     maxSensitivity: 'private' as const,
+    allowedRealms: null,
     admin: false,
     credentials: 'none' as const,
   }
-  it('归属的先后不算', () => {
+  it('物种与场域的先后不算，null 与空数组不同', () => {
     expect(
       sameScopes(
-        { ...scopes, readLayers: ['core', 'user'], writeLayers: ['user'] },
-        { ...scopes, readLayers: ['user', 'core'], writeLayers: ['user'] },
+        { ...scopes, readKinds: ['entry', 'fact', 'episode'] },
+        { ...scopes, readKinds: ['episode', 'entry', 'fact'] },
       ),
     ).toBe(true)
+    expect(
+      sameScopes(
+        { ...scopes, allowedRealms: ['work', 'personal'] },
+        { ...scopes, allowedRealms: ['personal', 'work'] },
+      ),
+    ).toBe(true)
+    expect(sameScopes({ ...scopes, allowedRealms: null }, { ...scopes, allowedRealms: [] })).toBe(
+      false,
+    )
   })
-  it('敏感级、admin 或归属不同就不同', () => {
+  it('敏感级、admin 或写入物种不同就不同', () => {
     const base = {
       ...scopes,
-      readLayers: [...scopes.readLayers],
-      writeLayers: [...scopes.writeLayers],
+      readKinds: [...scopes.readKinds],
+      writeKinds: [...scopes.writeKinds],
     }
     expect(sameScopes(base, { ...base, maxSensitivity: 'secret' })).toBe(false)
     expect(sameScopes(base, { ...base, admin: true })).toBe(false)
-    expect(sameScopes(base, { ...base, writeLayers: [] })).toBe(false)
+    expect(sameScopes(base, { ...base, writeKinds: [] })).toBe(false)
+  })
+})
+
+describe('词表与独立人格页面源码结构', () => {
+  it('VocabularyPage 覆盖切面词表 CRUD 与独立人格分页且不含 persona://', () => {
+    expect(vocabularyPageSource).toContain('切面词表')
+    expect(vocabularyPageSource).toContain('独立人格')
+    expect(vocabularyPageSource).toContain('createFacetDimension')
+    expect(vocabularyPageSource).toContain('createFacetTerm')
+    expect(vocabularyPageSource).toContain('implies')
+    expect(vocabularyPageSource).not.toContain('persona://')
+    expect(personaDetailSource).not.toContain('persona://')
   })
 })

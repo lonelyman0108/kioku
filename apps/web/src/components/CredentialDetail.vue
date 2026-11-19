@@ -2,7 +2,7 @@
 import { useToast } from '@nuxt/ui/composables'
 import {
   CREDENTIAL_ROTATION_NAME,
-  type AppInfo,
+  type ClientInfo,
   type ConsoleCredential,
   type CredentialEvent,
 } from '@kioku/contracts'
@@ -15,13 +15,14 @@ import { useCopy } from '../composables/useCopy'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
 import {
+  allowedRealmsLabel,
   benchAccountLabel,
   credentialEventLabels,
   credentialSourceLabels,
-  restrictedAppsLabel,
+  restrictedClientsLabel,
   sensitivityLabels,
 } from '../labels'
-import { memoryRoute } from '../routes'
+import { entryRoute } from '../routes'
 import { formatRelative, formatTime } from '../time'
 import {
   connectionStatusText,
@@ -36,15 +37,15 @@ import FlagTag from './strata/FlagTag.vue'
 import { credentialFlagStatuses, expiryStatus } from './strata/flags'
 import MemoryRow from './strata/MemoryRow.vue'
 import NoteLine from './strata/NoteLine.vue'
-import ReadFailureNote from './strata/ReadFailureNote.vue'
 import PropertyList from './strata/PropertyList.vue'
+import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 
 const props = defineProps<{
-  spaceId: string
+  circleId: string
   credential: ConsoleCredential
   // 还没读出来时为 undefined
-  apps: AppInfo[] | undefined
+  clients: ClientInfo[] | undefined
   canManage: boolean
 }>()
 const emit = defineEmits<{ edit: []; remove: []; undelete: [] }>()
@@ -54,15 +55,18 @@ const queryClient = useQueryClient()
 const c = computed(() => props.credential)
 const placeholder = (field?: string) => `{{cred:${c.value.identifier}${field ? `#${field}` : ''}}}`
 const { me } = useSession()
-const appNames = computed(() => restrictedAppsLabel(c.value.appIds, props.apps, me.data.value?.id))
+const clientNames = computed(() =>
+  restrictedClientsLabel(c.value.clientIds, props.clients, me.data.value?.id),
+)
+const realmNames = computed(() => allowedRealmsLabel(c.value.allowedRealms))
 
 const copy = useCopy()
 
 const references = useQuery({
-  queryKey: computed(() => ['credential-references', props.spaceId, c.value.id] as const),
-  queryFn: ({ queryKey: [, spaceId, id] }) => api.credentialReferences(spaceId, id),
+  queryKey: computed(() => ['credential-references', props.circleId, c.value.id] as const),
+  queryFn: ({ queryKey: [, cid, id] }) => api.credentialReferences(cid, id),
 })
-// 记录可以只看上次改值以来的取用：值可能泄露时，据此看影响到哪些应用。换了凭据回到全部
+// 记录可以只看上次改值以来的取用：值可能泄露时，据此看影响到哪些接入实例。换了凭据回到全部
 const sinceChange = ref(false)
 watch(
   () => c.value.id,
@@ -78,22 +82,20 @@ const eventFilter = computed({
 })
 const events = useInfiniteQuery({
   queryKey: computed(
-    () => ['credential-events', props.spaceId, c.value.id, { since: sinceChange.value }] as const,
+    () => ['credential-events', props.circleId, c.value.id, { since: sinceChange.value }] as const,
   ),
-  queryFn: ({ pageParam, queryKey: [, spaceId, id, f] }) =>
-    api.credentialEvents(spaceId, id, pageParam, f.since),
+  queryFn: ({ pageParam, queryKey: [, cid, id, f] }) =>
+    api.credentialEvents(cid, id, pageParam, f.since),
   initialPageParam: undefined as string | undefined,
   getNextPageParam: (last) => last.nextCursor ?? undefined,
 })
 const eventItems = computed(() => events.data.value?.pages.flatMap((p) => p.items) ?? [])
 
-// 事件的细节：结果与原因、经由、会话上下文、用途、改了哪些部分、涉及哪些字段
 const describe = (e: CredentialEvent) => credentialEventParts(e).join('；')
 
-// 密码库来源：连接与条目。条目名称从连接的条目列表里取，和凭据页同一个查询；只有可用的连接列得出条目
 const connections = useQuery({
-  queryKey: computed(() => ['vault-connections', props.spaceId] as const),
-  queryFn: ({ queryKey: [, sid] }) => api.vaultConnections(sid),
+  queryKey: computed(() => ['vault-connections', props.circleId] as const),
+  queryFn: ({ queryKey: [, cid] }) => api.vaultConnections(cid),
   enabled: computed(() => c.value.vault !== null),
 })
 const connection = computed(() =>
@@ -103,14 +105,13 @@ const connection = computed(() =>
 )
 const items = useQuery({
   queryKey: computed(
-    () => ['vault-items', props.spaceId, c.value.vault?.connectionId ?? null] as const,
+    () => ['vault-items', props.circleId, c.value.vault?.connectionId ?? null] as const,
   ),
-  queryFn: ({ queryKey: [, sid, id] }) => fetchVaultItems(queryClient, sid, id!),
+  queryFn: ({ queryKey: [, cid, id] }) => fetchVaultItems(queryClient, cid, id!),
   enabled: computed(
     () => props.canManage && !!connection.value && itemsAvailable(connection.value),
   ),
 })
-// 条目：读到了列表却没有它，就是不可用（被删、移出集合）；列表没读到时不下结论
 const item = computed(() => {
   if (!c.value.vault || !items.data.value) return undefined
   return items.data.value.items.find((i) => i.id === c.value.vault!.itemId) ?? null
@@ -120,7 +121,6 @@ const item = computed(() => {
 const revealed = ref<Record<string, string> | null>(null)
 const confirmingReveal = ref(false)
 const revealing = ref(false)
-// 换了凭据、或这条被改过（版本变了）：之前查看的值可能已经不对，清掉；记录重新拉一次
 watch(
   () => [c.value.id, c.value.version] as const,
   ([id], [oldId]) => {
@@ -133,9 +133,8 @@ async function reveal() {
   const { id, version } = c.value
   revealing.value = true
   try {
-    const { values } = await api.revealCredential(props.spaceId, id)
+    const { values } = await api.revealCredential(props.circleId, id)
     confirmingReveal.value = false
-    // 请求期间换成了别的凭据、或这条被改过：值可能已经不对，不显示
     if (c.value.id === id && c.value.version === version) revealed.value = values
     void events.refetch()
   } catch (err) {
@@ -333,14 +332,23 @@ async function reveal() {
     </section>
 
     <section>
-      <SectionHeading title="限定应用" :level="3" />
-      <p class="section-text">{{ appNames }}</p>
+      <SectionHeading title="限定接入实例" :level="3" />
+      <p class="section-text">{{ clientNames }}</p>
+    </section>
+
+    <section>
+      <SectionHeading title="允许场域" :level="3">
+        <template #hint>
+          <Hint>静态场域锁：配置后，不在所选场域内的会话无法取用此凭据。</Hint>
+        </template>
+      </SectionHeading>
+      <p class="section-text">{{ realmNames }}</p>
     </section>
 
     <section>
       <SectionHeading title="引用此凭据的记忆" :level="3">
         <template #hint>
-          <Hint>仅统计当前账号的本人记忆中未删除、非机密、仍有效的记忆。</Hint>
+          <Hint>仅统计当前账号个人圈内未删除、非机密、仍有效的正式词条。</Hint>
         </template>
       </SectionHeading>
       <p class="section-note">仍有引用时无法删除凭据。</p>
@@ -350,11 +358,11 @@ async function reveal() {
         <li v-for="m in references.data.value.items" :key="m.id">
           <MemoryRow
             flush
-            :uri="m.uri"
+            :short-id="m.shortId"
             :title="m.title"
-            layer="user"
+            band="personal"
             :sensitivity="m.sensitivity"
-            :to="memoryRoute(spaceId, m.uri)"
+            :to="entryRoute(circleId, m.shortId)"
           >
             <template #flags>
               <span class="reference-flags">
@@ -375,7 +383,7 @@ async function reveal() {
       <SectionHeading title="记录" :level="3">
         <template #hint>
           <Hint>
-            仅凭据所有者可见，不进入空间的变更记录。取用被拒或向密码库取值失败也会记录。
+            仅凭据所有者可见，不进入记忆圈的变更记录。取用被拒或向密码库取值失败也会记录。
           </Hint>
         </template>
       </SectionHeading>

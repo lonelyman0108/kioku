@@ -11,7 +11,7 @@ import {
   latestRequest,
   SELF_LOCKED_REASON,
   SOLE_OWNER_TEXT,
-  soleOwnerSpaces,
+  soleOwnerCircles,
 } from '../accounts'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
@@ -27,7 +27,7 @@ import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SettingsBlock from './strata/SettingsBlock.vue'
 import SettingsTable from './strata/SettingsTable.vue'
 
-// 实例 › 账号：新建账号（自动建个人空间，给设置密码链接）、重新生成链接、停用与启用、设为管理员。
+// 实例 › 账号：新建账号（自动建个人记忆圈，给设置密码链接）、重新生成链接、停用与启用、设为管理员。
 // 链接只显示这一次，管理员不经手密码
 const toast = useToast()
 const queryClient = useQueryClient()
@@ -40,10 +40,10 @@ const selfId = computed(() => me.data.value?.id)
 const initial = (account: AdminAccount) => Array.from(account.displayName)[0] ?? '?'
 
 async function refresh(account?: AdminAccount) {
-  // 新建账号会自动建个人空间：实例 › 空间那一节的列表一起刷新
+  // 新建账号会自动建个人记忆圈：实例 › 记忆圈那一节的列表一起刷新
   await Promise.all([
     queryClient.invalidateQueries({ queryKey: QUERY_KEY }),
-    queryClient.invalidateQueries({ queryKey: ['instance-spaces'] }),
+    queryClient.invalidateQueries({ queryKey: ['instance-circles'] }),
   ])
   // 改的是当前账号（显示名）时，顶栏与个人设置里的也跟着变
   if (account?.id === selfId.value) await queryClient.invalidateQueries({ queryKey: ME_KEY })
@@ -168,7 +168,7 @@ interface Confirmation {
   danger: boolean
   change: { disabled?: boolean; isAdmin?: boolean }
   done: string
-  // 停用时：他是唯一可用所有者的空间
+  // 停用时：他是唯一可用所有者的记忆圈
   soleOwnerOf?: string[]
 }
 const confirming = ref<Confirmation | null>(null)
@@ -177,19 +177,19 @@ function askDisable(account: AdminAccount) {
   confirming.value = {
     account,
     title: `停用 ${account.displayName}？`,
-    body: '停用后：无法登录，会话立即失效，其应用的访问密钥停止工作；重新启用后恢复。',
+    body: '停用后：无法登录，会话立即失效，其接入实例的访问密钥停止工作；重新启用后恢复。',
     action: '停用',
     danger: true,
     change: { disabled: true },
     done: '已停用',
-    soleOwnerOf: soleOwnerSpaces(account),
+    soleOwnerOf: soleOwnerCircles(account),
   }
 }
 function askEnable(account: AdminAccount) {
   confirming.value = {
     account,
     title: `启用 ${account.displayName}？`,
-    body: '启用后：可以重新登录，其应用的访问密钥恢复工作。',
+    body: '启用后：可以重新登录，其接入实例的访问密钥恢复工作。',
     action: '启用',
     danger: false,
     change: { disabled: false },
@@ -248,7 +248,7 @@ async function apply() {
         <tr>
           <th>账号</th>
           <th>管理员</th>
-          <th>空间</th>
+          <th>记忆圈</th>
           <th>最近活动</th>
           <th>状态</th>
           <th><span class="sr-only">操作</span></th>
@@ -271,9 +271,9 @@ async function apply() {
             <span v-else class="dim">—</span>
           </td>
           <td>
-            <span v-if="!account.spaces.length" class="dim">—</span>
-            <span v-for="(s, i) in account.spaces" :key="s.id" class="space-item"
-              >{{ i ? '、' : '' }}{{ s.name }} <span class="dim">{{ roleName(s.role) }}</span></span
+            <span v-if="!account.circles.length" class="dim">—</span>
+            <span v-for="(c, i) in account.circles" :key="c.id" class="space-item"
+              >{{ i ? '、' : '' }}{{ c.name }} <span class="dim">{{ roleName(c.role) }}</span></span
             >
           </td>
           <td>
@@ -361,7 +361,9 @@ async function apply() {
             description="可以管理全部账号与实例设置"
           />
           <p class="dim text-sm">
-            同时建立个人空间「{{ form.displayName.trim() || '显示名' }}的空间」，本人是所有者。
+            同时建立个人记忆圈「{{
+              form.displayName.trim() || '显示名'
+            }}的个人记忆圈」，本人是所有者。
           </p>
           <p v-if="createError" class="text-error text-sm" role="alert">{{ createError }}</p>
         </div>
@@ -468,7 +470,7 @@ async function apply() {
   gap: 4px;
   white-space: nowrap;
 }
-/* 窄屏时一个空间名不拆开，表格横向滚动 */
+/* 窄屏时一个记忆圈名不拆开，表格横向滚动 */
 .space-item {
   white-space: nowrap;
 }

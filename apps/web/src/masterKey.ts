@@ -4,7 +4,7 @@ type Remaining = MasterKeyStatus['remaining']
 
 // 要加起来的各类加密数据，以及轮换进度表里每一行的名字，按这个顺序列。契约里多出一类而这里没列时编译不过
 export const REMAINING_LABELS: Record<keyof Remaining, string> = {
-  memories: '机密记忆',
+  entries: '机密记忆',
   credentials: '托管的凭据',
   vaultConnections: '密码库连接',
   settings: '实例设置中的密钥',

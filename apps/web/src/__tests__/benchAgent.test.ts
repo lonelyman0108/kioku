@@ -16,6 +16,7 @@ import {
   type BenchStep,
   type BenchStepResult,
   type SessionContextInput,
+  type LensKeyScopes,
   type WhoAmI,
 } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
@@ -157,7 +158,7 @@ const baseStep = (over: Partial<BenchStepResult> = {}): BenchStepResult => ({
   text: '结果',
   raw: {},
   ms: 3,
-  uris: [],
+  shortIds: [],
   session: null,
   vectorSkipped: false,
   assertions: [],
@@ -199,6 +200,7 @@ const runResult = (
   mode,
   ok: true,
   whoami: {} as WhoAmI,
+  scopes: {} as LensKeyScopes,
   counts: { passed: steps.length, failed: 0, skipped: 0, notRun: 0 },
   steps,
   replayDiverged: null,
@@ -300,7 +302,7 @@ describe('hook 循环', () => {
   it('session.start 的结果进系统提示；召回块附在这条消息上、留在历史；给工具；codex 不发 turn.end', async () => {
     const h = harness({
       turnEnd: false,
-      turns: [reply(null, [toolCall('c1', 'kioku_list')]), reply('好了'), reply('第二句')],
+      turns: [reply(null, [toolCall('c1', 'kioku_browse')]), reply('好了'), reply('第二句')],
     })
     const first = await h.send(USER_TEXT)
 
@@ -366,13 +368,13 @@ describe('hook 循环', () => {
   it('页面上的会话上下文带给生命周期事件，工具步骤不带', async () => {
     const h = harness({
       context: GROUP,
-      turns: [reply(null, [toolCall('c1', 'kioku_list')]), reply('好')],
+      turns: [reply(null, [toolCall('c1', 'kioku_browse')]), reply('好')],
     })
     await h.send(USER_TEXT)
     const [start, submit] = h.runs[0]!.steps as { body: { context: unknown } }[]
     expect(start!.body.context).toEqual(GROUP)
     expect(submit!.body.context).toEqual(GROUP)
-    expect(h.runs[1]!.steps[0]).toEqual({ kind: 'tool', tool: 'kioku_list', arguments: {} })
+    expect(h.runs[1]!.steps[0]).toEqual({ kind: 'tool', tool: 'kioku_browse', arguments: {} })
   })
 
   it.each(['hook', 'approximate', 'tools', 'chat'] as const)(
@@ -679,7 +681,7 @@ describe('chat 循环', () => {
         mode,
         loop: 'chat',
         context: GROUP,
-        turns: [reply(null, [toolCall('c1', 'kioku_list')]), reply(null)],
+        turns: [reply(null, [toolCall('c1', 'kioku_browse')]), reply(null)],
       })
       const done = await h.send(USER_TEXT)
       expect(h.runs.flatMap((r) => events(r.steps))).not.toContain('turn.end')
@@ -711,13 +713,13 @@ describe('Claude Code：hook 循环回复后发 turn.end', () => {
   it('不带会话上下文，和插件一样：用户的原话与最后的回复，不带召回块；回滚模式下进重放，下一条带着它', async () => {
     const h = harness({
       turnEnd: true,
-      turns: [reply(null, [toolCall('c1', 'kioku_list')]), reply('好了'), reply('第二句')],
+      turns: [reply(null, [toolCall('c1', 'kioku_browse')]), reply('好了'), reply('第二句')],
     })
     const first = await h.send(USER_TEXT)
 
     // 工具照给，召回块照旧留在历史；turn.end 在工具之后、最后的回复回来之后
     expect(events(h.runs[0]!.steps)).toEqual(['session.start', 'prompt.submit'])
-    expect(h.runs[1]!.steps).toEqual([{ kind: 'tool', tool: 'kioku_list', arguments: {} }])
+    expect(h.runs[1]!.steps).toEqual([{ kind: 'tool', tool: 'kioku_browse', arguments: {} }])
     expect(events(h.runs[2]!.steps)).toEqual(['turn.end'])
     expect((h.runs[2]!.steps[0] as { body: unknown }).body).toEqual({
       event: 'turn.end',
@@ -818,7 +820,7 @@ describe('Claude Code：hook 循环回复后发 turn.end', () => {
       expect(agentLoopDetail(loop, false)).toBe(`${AGENT_LOOP_DETAILS[loop]}回复后不发 turn.end。`)
     }
     expect(agentLoopDetail('hook', true)).toContain('回复后发 turn.end')
-    expect(agentLoopDetail('hook', true)).toContain('不带会话上下文时按应用与所属成员缓冲')
+    expect(agentLoopDetail('hook', true)).toContain('不带会话上下文时按接入实例与所属成员缓冲')
     expect(agentLoopDetail('chat', true)).toContain('需带私聊、群聊或频道的会话上下文')
   })
 })
@@ -857,7 +859,7 @@ describe('工具调用', () => {
     const calls = [
       toolCall('call_a', 'kioku_create', { uri: 'core://a', content: '甲' }),
       toolCall('call_b', 'kioku_get', { uri: 'core://a' }),
-      toolCall('call_c', 'kioku_list', { uri: 'core://' }),
+      toolCall('call_c', 'kioku_browse', { uri: 'core://' }),
     ]
     const h = harness({ loop: 'tools', turns: [reply(null, calls), reply('好')] })
     const done = await h.send(USER_TEXT)
@@ -865,26 +867,26 @@ describe('工具调用', () => {
     expect(h.runs[0]!.steps.map((s) => (s as { tool: string }).tool)).toEqual([
       'kioku_create',
       'kioku_get',
-      'kioku_list',
+      'kioku_browse',
     ])
-    expect(h.runs[0]!.label).toContain('kioku_create、kioku_get、kioku_list')
+    expect(h.runs[0]!.label).toContain('kioku_create、kioku_get、kioku_browse')
     const tools = toolMessages(done.messages)
     expect(tools.map((m) => m.tool_call_id)).toEqual(['call_a', 'call_b', 'call_c'])
     expect(tools.map((m) => m.content)).toEqual([
       'kioku_create 的结果',
       'kioku_get 的结果',
-      'kioku_list 的结果',
+      'kioku_browse 的结果',
     ])
     expect(last(done).rounds[0]!.calls.map((c) => c.trace?.step.label)).toEqual([
       'kioku_create',
       'kioku_get',
-      'kioku_list',
+      'kioku_browse',
     ])
     expect(roundRun(last(done).rounds[0]!)).toBe('run12345')
   })
 
   it('助手消息原样放回历史：reasoning_content 这些字段都不丢', async () => {
-    const first = reply(null, [toolCall('c1', 'kioku_list')], {
+    const first = reply(null, [toolCall('c1', 'kioku_browse')], {
       reasoning_content: '想一想',
       vendor_field: { a: 1 },
     })
@@ -899,21 +901,21 @@ describe('工具调用', () => {
     const calls = [
       toolCall('c1', 'kioku_get', { uri: 'core://a' }),
       toolCall('c2', 'kioku_create', null, '工具参数不是合法的 JSON'),
-      toolCall('c3', 'kioku_list'),
+      toolCall('c3', 'kioku_browse'),
       toolCall('c4', '', null, '工具调用没有名字'),
     ]
     const h = harness({ loop: 'tools', turns: [reply(null, calls), reply('好')] })
     const done = await h.send(USER_TEXT)
     expect(h.runs[0]!.steps.map((s) => (s as { tool: string }).tool)).toEqual([
       'kioku_get',
-      'kioku_list',
+      'kioku_browse',
     ])
     const tools = toolMessages(done.messages)
     expect(tools.map((m) => m.tool_call_id)).toEqual(['c1', 'c2', 'c3', 'c4'])
     expect(tools.map((m) => m.content)).toEqual([
       'kioku_get 的结果',
       '没有执行：工具参数不是合法的 JSON',
-      'kioku_list 的结果',
+      'kioku_browse 的结果',
       '没有执行：工具调用没有名字',
     ])
     const traced = last(done).rounds[0]!.calls
@@ -942,13 +944,13 @@ describe('工具调用', () => {
   })
 
   it('工具名不合契约（太长）：只这一个不发，不让整个运行被拒', async () => {
-    const calls = [toolCall('c1', 'x'.repeat(65)), toolCall('c2', 'kioku_list')]
+    const calls = [toolCall('c1', 'x'.repeat(65)), toolCall('c2', 'kioku_browse')]
     const h = harness({ loop: 'tools', turns: [reply(null, calls), reply('好')] })
     const done = await h.send(USER_TEXT)
     expect(h.runs[0]!.steps).toHaveLength(1)
     const tools = toolMessages(done.messages)
     expect(tools[0]!.content).toContain('没有执行：工具调用不合法')
-    expect(tools[1]!.content).toBe('kioku_list 的结果')
+    expect(tools[1]!.content).toBe('kioku_browse 的结果')
   })
 
   it('工具报错：原文回给模型，它接着处理；循环不停', async () => {
@@ -970,7 +972,7 @@ describe('工具调用', () => {
     let seen: AgentConversation | null = null
     const h = harness({
       loop: 'tools',
-      turns: [reply(null, [toolCall('c1', 'kioku_list')]), reply('好')],
+      turns: [reply(null, [toolCall('c1', 'kioku_browse')]), reply('好')],
       run: (steps) => {
         seen = h.changes.at(-1)!
         return { kind: 'done', result: runResult('rollback', steps.map(defaultStep)) }
@@ -986,7 +988,7 @@ describe('工具调用', () => {
 
 describe('一轮的工具调用放不进一次运行', () => {
   const OVER_STEPS = `没有执行：一轮最多执行 ${BENCH_MAX_STEPS} 个工具调用，这个超出了，可以下一轮再调`
-  const list = (id: string) => toolCall(id, 'kioku_list')
+  const list = (id: string) => toolCall(id, 'kioku_browse')
   const create = (id: string, content: string) =>
     toolCall(id, 'kioku_create', { uri: `core://${id}`, content })
   const stepTools = (steps: readonly BenchStep[]) => steps.map((s) => (s as { tool: string }).tool)
@@ -1002,7 +1004,7 @@ describe('一轮的工具调用放不进一次运行', () => {
     expect(last(done).end).toBe('done')
     const tools = toolMessages(done.messages)
     expect(tools.map((m) => m.tool_call_id)).toEqual(calls.map((c) => c.id))
-    expect(tools.slice(0, 50).every((m) => m.content === 'kioku_list 的结果')).toBe(true)
+    expect(tools.slice(0, 50).every((m) => m.content === 'kioku_browse 的结果')).toBe(true)
     expect(tools.slice(50).every((m) => m.content === OVER_STEPS)).toBe(true)
     const traced = last(done).rounds[0]!.calls
     expect(traced.slice(0, 50).every((c) => c.trace !== null)).toBe(true)
@@ -1015,7 +1017,7 @@ describe('一轮的工具调用放不进一次运行', () => {
     const h = harness({ loop: 'tools', turns: [reply(null, calls), reply('好')] })
     const done = await h.send(USER_TEXT)
     expect(h.runs[0]!.steps).toHaveLength(50)
-    expect(toolMessages(done.messages).every((m) => m.content === 'kioku_list 的结果')).toBe(true)
+    expect(toolMessages(done.messages).every((m) => m.content === 'kioku_browse 的结果')).toBe(true)
   })
 
   it('解析失败的不占名额：放得下的还是 50 个', async () => {
@@ -1029,7 +1031,7 @@ describe('一轮的工具调用放不进一次运行', () => {
     const tools = toolMessages(done.messages)
     expect(tools[0]!.content).toBe('没有执行：工具参数不是合法的 JSON')
     expect(tools.at(-1)!.content).toBe(OVER_STEPS)
-    expect(tools.filter((m) => m.content === 'kioku_list 的结果')).toHaveLength(50)
+    expect(tools.filter((m) => m.content === 'kioku_browse 的结果')).toHaveLength(50)
   })
 
   it('单个参数把请求体撑过上限：只这一个不发，前后的照样执行，说明上限', async () => {
@@ -1037,14 +1039,14 @@ describe('一轮的工具调用放不进一次运行', () => {
     const calls = [list('a'), create('huge', huge), list('b')]
     const h = harness({ loop: 'tools', turns: [reply(null, calls), reply('好')] })
     const done = await h.send(USER_TEXT)
-    expect(stepTools(h.runs[0]!.steps)).toEqual(['kioku_list', 'kioku_list'])
+    expect(stepTools(h.runs[0]!.steps)).toEqual(['kioku_browse', 'kioku_browse'])
     expect(last(done).end).toBe('done')
     const tools = toolMessages(done.messages)
     expect(tools.map((m) => m.tool_call_id)).toEqual(['a', 'huge', 'b'])
-    expect(tools[0]!.content).toBe('kioku_list 的结果')
+    expect(tools[0]!.content).toBe('kioku_browse 的结果')
     expect(tools[1]!.content).toContain('没有执行')
     expect(tools[1]!.content).toContain('请求体上限 2.0 MB')
-    expect(tools[2]!.content).toBe('kioku_list 的结果')
+    expect(tools[2]!.content).toBe('kioku_browse 的结果')
     expect(last(done).rounds[0]!.calls.map((c) => c.trace !== null)).toEqual([true, false, true])
   })
 
@@ -1159,7 +1161,7 @@ describe('一轮里有调用没有执行之后，后面的写操作不接着做'
   const broken = toolCall('new', 'kioku_create', null, '工具参数不是合法的 JSON')
   const remove = toolCall('del', 'kioku_delete', { uri: 'core://old' })
   const get = toolCall('get', 'kioku_get', { uri: 'core://old' })
-  const list = toolCall('list', 'kioku_list')
+  const list = toolCall('list', 'kioku_browse')
   const sentTools = (h: ReturnType<typeof harness>) =>
     h.runs.flatMap((r) => r.steps.map((s) => (s as { tool: string }).tool))
 
@@ -1200,14 +1202,14 @@ describe('一轮里有调用没有执行之后，后面的写操作不接着做'
   })
 
   it('超过一轮的步数：第 51 个被拒，再后面的写操作说的是不接着做', async () => {
-    const lists = Array.from({ length: 51 }, (_, i) => toolCall(`c${i}`, 'kioku_list'))
+    const lists = Array.from({ length: 51 }, (_, i) => toolCall(`c${i}`, 'kioku_browse'))
     const h = harness({
       mode: 'real',
       loop: 'tools',
       turns: [reply(null, [...lists, remove]), reply('好')],
     })
     const done = await h.send(USER_TEXT)
-    expect(sentTools(h)).toEqual(Array.from({ length: 50 }, () => 'kioku_list'))
+    expect(sentTools(h)).toEqual(Array.from({ length: 50 }, () => 'kioku_browse'))
     const tools = toolMessages(done.messages)
     expect(tools.at(-2)!.content).toContain('一轮最多执行 50 个')
     expect(tools.at(-1)!.content).toBe(NOT_CONTINUED)
@@ -1220,12 +1222,12 @@ describe('一轮里有调用没有执行之后，后面的写操作不接着做'
       turns: [reply(null, [broken, get, remove, list]), reply('好')],
     })
     const done = await h.send(USER_TEXT)
-    expect(sentTools(h)).toEqual(['kioku_get', 'kioku_list'])
+    expect(sentTools(h)).toEqual(['kioku_get', 'kioku_browse'])
     expect(toolMessages(done.messages).map((m) => [m.tool_call_id, m.content])).toEqual([
       ['new', BROKEN],
       ['get', 'kioku_get 的结果'],
       ['del', NOT_CONTINUED],
-      ['list', 'kioku_list 的结果'],
+      ['list', 'kioku_browse 的结果'],
     ])
     expect(done.mayHaveWritten).toBe(false)
   })
@@ -1251,7 +1253,7 @@ describe('一轮里有调用没有执行之后，后面的写操作不接着做'
     ['kioku_create', { uri: 'core://a', content: '甲' }],
     ['kioku_update', { uri: 'core://a', content: '乙' }],
     ['kioku_delete', { uri: 'core://a' }],
-    ['kioku_move', { from: 'core://a', to: 'core://b' }],
+    ['kioku_transfer', { id: 'm-abc123', to_circle: 'work' }],
     ['kioku_credential_save', { identifier: 'x' }],
     ['kioku_credential_delete', { identifier: 'x' }],
     // 取值记访问事件，契约算写
@@ -1272,7 +1274,7 @@ describe('一轮里有调用没有执行之后，后面的写操作不接着做'
     ['kioku_boot', {}],
     ['kioku_search', { query: '茶' }],
     ['kioku_get', { uri: 'core://a' }],
-    ['kioku_list', {}],
+    ['kioku_browse', {}],
     // 不带 identifier 只是列出，契约不算写
     ['kioku_credential', {}],
   ] as [string, Record<string, unknown>][])('%s 算读操作：照常执行', async (name, args) => {
@@ -1363,7 +1365,7 @@ describe('toolReply：回给模型的文字不能是空的', () => {
 describe('8 轮上限', () => {
   const always = () =>
     Array.from({ length: AGENT_MAX_ROUNDS }, (_, i) =>
-      reply(null, [toolCall(`c${i}`, 'kioku_list'), toolCall(`d${i}`, 'kioku_boot')]),
+      reply(null, [toolCall(`c${i}`, 'kioku_browse'), toolCall(`d${i}`, 'kioku_boot')]),
     )
 
   it('最多请求 8 次模型，第 8 次要的工具不执行：结果没有下一次请求能告诉模型了', async () => {
@@ -1458,7 +1460,7 @@ describe('停止', () => {
       turns: [
         () => {
           h.controller.abort()
-          return reply('要调工具', [toolCall('c1', 'kioku_list'), toolCall('c2', 'kioku_boot')])
+          return reply('要调工具', [toolCall('c1', 'kioku_browse'), toolCall('c2', 'kioku_boot')])
         },
       ],
     })
@@ -1480,7 +1482,7 @@ describe('停止', () => {
     const h = harness({
       loop: 'tools',
       turns: [
-        reply(null, [toolCall('c1', 'kioku_list')]),
+        reply(null, [toolCall('c1', 'kioku_browse')]),
         (signal) => {
           setTimeout(() => h.controller.abort())
           return hangUntilAborted(signal)
@@ -1543,7 +1545,7 @@ describe('工具的运行请求失败', () => {
       reply(null, [
         toolCall('c1', 'kioku_create', { uri: 'core://a', content: '甲' }),
         toolCall('c2', 'kioku_get', null, '工具参数不是合法的 JSON'),
-        toolCall('c3', 'kioku_list'),
+        toolCall('c3', 'kioku_browse'),
       ]),
     ],
     run: (): RunOutcome => ({ kind: 'failed', message, retryable: true }),
@@ -1669,7 +1671,7 @@ describe('请求模型失败', () => {
     it('调过工具之后才 4xx：做过的留着，同样只有服务端的文字', async () => {
       const h = harness({
         loop: 'tools',
-        turns: [reply(null, [toolCall('c1', 'kioku_list')]), new ApiError(400, TOO_LONG)],
+        turns: [reply(null, [toolCall('c1', 'kioku_browse')]), new ApiError(400, TOO_LONG)],
       })
       const done = await h.send(USER_TEXT)
       expect(last(done).notice).toBe(TOO_LONG)
@@ -1727,7 +1729,7 @@ describe('回滚模式的重放', () => {
     ]
     const h = harness({
       loop: 'tools',
-      turns: [reply(null, calls), reply(null, [toolCall('c9', 'kioku_list')]), reply('好')],
+      turns: [reply(null, calls), reply(null, [toolCall('c9', 'kioku_browse')]), reply('好')],
       run: (steps) => ({
         kind: 'done',
         result: runResult(
@@ -1766,7 +1768,7 @@ describe('回滚模式的重放', () => {
       loop: 'tools',
       turns: [
         reply(null, [toolCall('c1', 'kioku_create', { uri: 'core://${run}', content: '正文' })]),
-        reply(null, [toolCall('c2', 'kioku_list')]),
+        reply(null, [toolCall('c2', 'kioku_browse')]),
         reply('好'),
       ],
       run: (steps) => ({
@@ -1802,7 +1804,7 @@ describe('回滚模式的重放', () => {
       loop: 'tools',
       turns: [
         reply(null, [create('core://a')]),
-        reply(null, [toolCall('c2', 'kioku_list')]),
+        reply(null, [toolCall('c2', 'kioku_browse')]),
         reply('好'),
       ],
     })
@@ -1828,7 +1830,7 @@ describe('回滚模式的重放', () => {
       loop: 'tools',
       turns: [
         reply(null, [toolCall('c1', 'kioku_create', { uri: 'core://a', content: big })]),
-        reply(null, [toolCall('c2', 'kioku_list')]),
+        reply(null, [toolCall('c2', 'kioku_browse')]),
       ],
     })
     const done = await h.send(USER_TEXT)
@@ -1885,7 +1887,7 @@ describe('重放分叉', () => {
     const conversation = await withWrite()
     const h = harness({
       loop: 'tools',
-      turns: [reply(null, [toolCall('c2', 'kioku_list')]), reply('不该到这里')],
+      turns: [reply(null, [toolCall('c2', 'kioku_browse')]), reply('不该到这里')],
       run: diverged(),
     })
     const done = await h.send('第二条', conversation)
@@ -1907,7 +1909,7 @@ describe('重放分叉', () => {
   const afterDivergence = async (internalError = false) => {
     const h = harness({
       loop: 'tools',
-      turns: [reply(null, [toolCall('c2', 'kioku_list')])],
+      turns: [reply(null, [toolCall('c2', 'kioku_browse')])],
       run: diverged(internalError),
     })
     return h.send('第二条', await withWrite())
@@ -1923,7 +1925,7 @@ describe('重放分叉', () => {
 
     const h = harness({
       loop: 'tools',
-      turns: [reply(null, [toolCall('c3', 'kioku_list')]), reply('好')],
+      turns: [reply(null, [toolCall('c3', 'kioku_browse')]), reply('好')],
     })
     const done = await h.send('再试一次', conversation)
     expect(h.turnRequests).toHaveLength(2)
@@ -1959,7 +1961,7 @@ describe('重放分叉', () => {
 
       const failing = harness({
         loop: 'tools',
-        turns: [reply(null, [toolCall('c3', 'kioku_list')])],
+        turns: [reply(null, [toolCall('c3', 'kioku_browse')])],
         run: (steps) => ({
           kind: 'done',
           result: {
@@ -1986,7 +1988,7 @@ describe('重放分叉', () => {
 
       const next = harness({
         loop: 'tools',
-        turns: [reply(null, [toolCall('c4', 'kioku_list')]), reply('好')],
+        turns: [reply(null, [toolCall('c4', 'kioku_browse')]), reply('好')],
       })
       const done = await next.send('第三条', accepted)
       expect(next.runs[0]!.replay).toEqual(accepted.session.replay)
@@ -2003,7 +2005,7 @@ describe('重放分叉', () => {
       const conversation = await first.send(USER_TEXT)
       const failing = harness({
         loop: 'tools',
-        turns: [reply(null, [toolCall('c3', 'kioku_list')])],
+        turns: [reply(null, [toolCall('c3', 'kioku_browse')])],
         run: diverged(),
       })
       const stuck = await failing.send('第二条', conversation)
@@ -2030,7 +2032,7 @@ describe('重放分叉', () => {
       const conversation = await first.send(USER_TEXT)
       const failing = harness({
         loop: 'tools',
-        turns: [reply(null, [toolCall('c3', 'kioku_list')])],
+        turns: [reply(null, [toolCall('c3', 'kioku_browse')])],
         run: diverged(),
       })
       const stuck = await failing.send('第二条', conversation)
@@ -2051,7 +2053,7 @@ describe('重放分叉', () => {
       const single = await only.send(USER_TEXT)
       const stuckAgain = await harness({
         loop: 'tools',
-        turns: [reply(null, [toolCall('c3', 'kioku_list')])],
+        turns: [reply(null, [toolCall('c3', 'kioku_browse')])],
         run: diverged(),
       }).send('第二条', single)
       expect(agentScenario(acceptAgentDivergence(stuckAgain), new Date())).toBeNull()
@@ -2143,11 +2145,11 @@ describe('重放分叉', () => {
   })
 })
 
-describe('中途作废（换了应用、Key 或模式）', () => {
+describe('中途作废（换了接入实例、Key 或模式）', () => {
   it('工具那一轮作废：不再发任何请求，历史照样合法', async () => {
     const h = harness({
       loop: 'tools',
-      turns: [reply(null, [toolCall('c1', 'kioku_list')]), reply('不该到这里')],
+      turns: [reply(null, [toolCall('c1', 'kioku_browse')]), reply('不该到这里')],
       run: () => ({ kind: 'stale' }),
     })
     const done = await h.send(USER_TEXT)
@@ -2328,7 +2330,7 @@ describe('模型没有文字也没有工具调用', () => {
   it('带工具调用的助手消息没有文字是正常的：照旧进历史', async () => {
     const h = harness({
       loop: 'tools',
-      turns: [reply(null, [toolCall('c1', 'kioku_list')]), reply('好')],
+      turns: [reply(null, [toolCall('c1', 'kioku_browse')]), reply('好')],
     })
     const done = await h.send(USER_TEXT)
     expect(done.messages.map((m) => m.role)).toEqual(['user', 'assistant', 'tool', 'assistant'])
@@ -2384,7 +2386,7 @@ describe('模型拒绝回答：content 是空的，refusal 有文字', () => {
   it('已经调过工具才拒绝：做过的留着，说可以接着说下一句，拒绝的那条不在历史里', async () => {
     const h = harness({
       loop: 'tools',
-      turns: [reply(null, [toolCall('c1', 'kioku_list')]), refused()],
+      turns: [reply(null, [toolCall('c1', 'kioku_browse')]), refused()],
     })
     const done = await h.send(USER_TEXT)
     expect(last(done).notice).toBe(
@@ -2415,7 +2417,7 @@ describe('模型拒绝回答：content 是空的，refusal 有文字', () => {
   it('带工具调用时也不算拒绝：工具照常执行', async () => {
     const h = harness({
       loop: 'tools',
-      turns: [reply(null, [toolCall('c1', 'kioku_list')], { refusal: '不该看它' }), reply('好')],
+      turns: [reply(null, [toolCall('c1', 'kioku_browse')], { refusal: '不该看它' }), reply('好')],
     })
     const done = await h.send(USER_TEXT)
     expect(h.runs).toHaveLength(1)
@@ -2441,7 +2443,7 @@ describe('用量', () => {
   it('累计 prompt、completion token 与耗时，跨轮跨消息', async () => {
     const h = harness({
       loop: 'tools',
-      turns: [reply(null, [toolCall('c1', 'kioku_list')]), reply('好'), reply('第二句')],
+      turns: [reply(null, [toolCall('c1', 'kioku_browse')]), reply('好'), reply('第二句')],
     })
     const first = await h.send(USER_TEXT)
     expect(first.usage).toEqual({ promptTokens: 200, completionTokens: 40, ms: 1000, rounds: 2 })
@@ -2476,7 +2478,7 @@ describe('用量', () => {
 
 describe('状态的更新', () => {
   it('每走一步给一份新的状态，看得到走到哪里，不改旧的', async () => {
-    const h = harness({ turns: [reply(null, [toolCall('c1', 'kioku_list')]), reply('好')] })
+    const h = harness({ turns: [reply(null, [toolCall('c1', 'kioku_browse')]), reply('好')] })
     const start = emptyConversation()
     const done = await h.send(USER_TEXT, start)
     expect(start.exchanges).toEqual([])
@@ -2639,7 +2641,7 @@ describe('存成场景', () => {
       turns: [
         () => {
           h.controller.abort()
-          return reply(null, [toolCall('c1', 'kioku_list')])
+          return reply(null, [toolCall('c1', 'kioku_browse')])
         },
       ],
     })
@@ -2653,7 +2655,7 @@ describe('存成场景', () => {
         reply(null, [
           toolCall('c1', 'kioku_create', { uri: 'core://a', content: '甲' }),
           toolCall('c2', 'kioku_get', { uri: 'core://a' }),
-          toolCall('c3', 'kioku_list'),
+          toolCall('c3', 'kioku_browse'),
           toolCall('c4', 'kioku_boot'),
         ]),
         reply('好'),
@@ -2694,7 +2696,7 @@ describe('存成场景', () => {
   it('都没有执行：存不成', async () => {
     const h = harness({
       loop: 'tools',
-      turns: [reply(null, [toolCall('c1', 'kioku_list')]), reply('好')],
+      turns: [reply(null, [toolCall('c1', 'kioku_browse')]), reply('好')],
       run: (steps) => ({
         kind: 'done',
         result: runResult('rollback', [
@@ -2722,7 +2724,7 @@ describe('存成场景', () => {
       turns: [
         reply(null, many),
         reply('好'),
-        reply(null, [toolCall('d1', 'kioku_list'), toolCall('d2', 'kioku_boot')]),
+        reply(null, [toolCall('d1', 'kioku_browse'), toolCall('d2', 'kioku_boot')]),
         reply('好'),
       ],
     })
@@ -2765,7 +2767,7 @@ describe('存成场景', () => {
   it('没有明文时没有提示', async () => {
     const h = harness({
       loop: 'tools',
-      turns: [reply(null, [toolCall('c1', 'kioku_list')]), reply('好')],
+      turns: [reply(null, [toolCall('c1', 'kioku_browse')]), reply('好')],
     })
     const made = agentScenario(await h.send(USER_TEXT), NOW)!
     if (!made.parsed.ok) throw new Error(made.parsed.errors.join())

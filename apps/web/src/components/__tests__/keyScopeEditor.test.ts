@@ -1,9 +1,15 @@
-import { LAYERS, SENSITIVITIES, sensitivityAllowed, type KeyScopes } from '@kioku/contracts'
+import {
+  ENTRY_KINDS,
+  SENSITIVITIES,
+  sensitivityAllowed,
+  type CircleKind,
+  type LensKeyScopes,
+} from '@kioku/contracts'
 import { describe, expect, it, vi } from 'vitest'
 import { createSSRApp, defineComponent, h } from 'vue'
 import { renderToString } from 'vue/server-renderer'
 
-import { layerLabels } from '../../labels'
+import { entryKindLabels } from '../../labels'
 import {
   CUSTOM_PRESET,
   issuedCredentialCapability,
@@ -14,25 +20,36 @@ import {
 import KeyScopeEditor from '../KeyScopeEditor.vue'
 import keyScopeEditorSource from '../KeyScopeEditor.vue?raw'
 import {
-  accessKind,
   accessKindShortLabels,
   issuedScopeRows,
-  orderRows,
-  STACK,
+  kindAccessKind,
+  orderKindRows,
 } from '../strata/strata'
 
-// 提示层与开关依赖组件库的 provider，这里只看卡片与表格本身
 vi.mock('../Hint.vue', () => ({ default: defineComponent({ render: () => h('i') }) }))
 
-// 组件库的开关与图标换成空的函数组件
 const blank = () => h('i')
 
-async function render(scopes: KeyScopes, preset: string, isSpaceOwner = true) {
+async function render(
+  scopes: LensKeyScopes,
+  preset: string,
+  isCircleOwner = true,
+  circleKind: CircleKind = 'shared',
+) {
   const app = createSSRApp({
-    render: () => h(KeyScopeEditor, { scopes, preset, isSpaceOwner }),
+    render: () =>
+      h(KeyScopeEditor, {
+        scopes,
+        preset,
+        isCircleOwner,
+        circleKind,
+        realmTerms: [{ slug: 'work', label: '工作' }],
+      }),
   })
   app.component('USwitch', blank)
   app.component('UIcon', blank)
+  app.component('UInput', blank)
+  app.component('UButton', blank)
   return renderToString(app)
 }
 
@@ -40,11 +57,11 @@ const of = (id: string) => keyPresets.find((p) => p.id === id)!
 const scopesOf = (id: string, owner = true) => presetScopes(of(id), owner)
 
 describe('模板匹配', () => {
-  it('和模板完全一样时选中它，归属的先后不算', () => {
+  it('和模板完全一样时选中它，物种与场域元素的先后不算', () => {
     for (const preset of keyPresets) {
       expect(matchPreset(scopesOf(preset.id), true)).toBe(preset.id)
       const reversed = { ...scopesOf(preset.id) }
-      reversed.readLayers = [...reversed.readLayers].reverse()
+      reversed.readKinds = [...reversed.readKinds].reverse()
       expect(matchPreset(reversed, true)).toBe(preset.id)
     }
   })
@@ -54,32 +71,31 @@ describe('模板匹配', () => {
     expect(matchPreset({ ...agent, maxSensitivity: 'internal' }, true)).toBe(CUSTOM_PRESET)
     expect(matchPreset({ ...agent, credentials: 'manage' }, true)).toBe(CUSTOM_PRESET)
     expect(matchPreset({ ...agent, admin: true }, true)).toBe(CUSTOM_PRESET)
-    expect(matchPreset({ ...agent, writeLayers: ['core'] }, true)).toBe(CUSTOM_PRESET)
+    expect(matchPreset({ ...agent, allowedRealms: ['work'] }, true)).toBe(CUSTOM_PRESET)
+    expect(matchPreset({ ...agent, writeKinds: ['entry'] }, true)).toBe(CUSTOM_PRESET)
   })
 
-  it('改回去又对上模板：只读加上全部写入就是本机编码 Agent 的归属', () => {
+  it('改回去又对上模板：只读加上全部写入就是本机编码 Agent 的权限', () => {
     const ro = scopesOf('readonly')
-    const back = { ...ro, writeLayers: [...LAYERS], credentials: 'use' as const }
+    const back = { ...ro, writeKinds: [...ENTRY_KINDS], credentials: 'use' as const }
     expect(matchPreset(back, true)).toBe('agent')
   })
 
-  it('不是空间所有者时模板先按签发人收紧再比：凭据能力只能是不可用', () => {
+  it('不是记忆圈所有者时模板先按签发人收紧再比：凭据能力只能是不可用', () => {
     expect(scopesOf('agent', false).credentials).toBe('none')
     expect(scopesOf('agent', true).credentials).toBe('use')
     expect(matchPreset(scopesOf('agent', false), false)).toBe('agent')
-    // 所有者眼里收紧过的那份已经不是本机编码 Agent 了
     expect(matchPreset(scopesOf('agent', false), true)).toBe(CUSTOM_PRESET)
   })
 
   it('模板的权限是新数组，改表格不会改到模板本身', () => {
     const copy = scopesOf('agent')
-    copy.readLayers.pop()
-    expect(of('agent').scopes.readLayers).toEqual([...LAYERS])
+    copy.readKinds.pop()
+    expect(of('agent').scopes.readKinds).toEqual([...ENTRY_KINDS])
   })
 })
 
 describe('签发弹窗的权限表', () => {
-  // 按渲染出来的顺序取每一格的种类与短文字：表格自上而下按 STACK，每行四个敏感级
   const classes = (attr: string) => attr.split(/\s+/)
   const cellTexts = (html: string) =>
     [...html.matchAll(/<td class="([^"]*)"[^>]*>([\s\S]*?)<\/td>/g)]
@@ -95,13 +111,15 @@ describe('签发弹窗的权限表', () => {
     async (_label, id) => {
       const scopes = scopesOf(id)
       const html = await render(scopes, id)
-      const expected = orderRows(issuedScopeRows(scopes)).flatMap((row) =>
+      const expected = orderKindRows(issuedScopeRows(scopes, 'shared')).flatMap((row) =>
         SENSITIVITIES.map((s) => {
           const cell = row.cells.find((c) => c.sensitivity === s)!
-          const kind = accessKind(row.layer, cell)
+          const kind = kindAccessKind(row.kind, cell)
           return {
             kind,
-            text: sensitivityAllowed(row.layer, s) ? accessKindShortLabels[kind] : '不适用',
+            text: sensitivityAllowed('shared', row.kind, s)
+              ? accessKindShortLabels[kind]
+              : '不适用',
           }
         }),
       )
@@ -109,19 +127,20 @@ describe('签发弹窗的权限表', () => {
     },
   )
 
-  it('行按 STACK，读写勾选框有读屏名称', async () => {
+  it('行按物种顺序排列，读写勾选框有读屏名称', async () => {
     const html = await render(scopesOf('bot'), 'bot')
     const names = [
       ...html.matchAll(/<th scope="row"[\s\S]*?<span(?: data-v-\w+)?>([^<]+)<\/span>/g),
     ].map((m) => m[1])
-    expect(names).toEqual(STACK.map((l) => layerLabels[l]))
-    for (const l of LAYERS) {
-      expect(html).toContain(`aria-label="读 ${layerLabels[l]}"`)
-      expect(html).toContain(`aria-label="写 ${layerLabels[l]}"`)
+    expect(names).toEqual(
+      ['episode', 'fact', 'entry'].map((k) => entryKindLabels[k as keyof typeof entryKindLabels]),
+    )
+    for (const k of ENTRY_KINDS) {
+      expect(html).toContain(`aria-label="读 ${entryKindLabels[k]}"`)
+      expect(html).toContain(`aria-label="写 ${entryKindLabels[k]}"`)
     }
-    // 群聊机器人不读本人
-    expect(html).not.toMatch(/aria-label="读 本人" checked/)
-    expect(html).toMatch(/aria-label="读 通用" checked/)
+    expect(html).not.toMatch(/aria-label="写 词条" checked/)
+    expect(html).toMatch(/aria-label="读 词条" checked/)
   })
 
   it('边界线画在最高敏感级那一列', async () => {
@@ -139,19 +158,25 @@ describe('签发弹窗的权限表', () => {
     expect(html.match(/class="scope-tags tpl-tags"/g)).toHaveLength(keyPresets.length)
   })
 
-  it('不是空间所有者：机密、取用、管理与跨人格写入禁用，并写出原因', async () => {
+  it('不是记忆圈所有者：机密、取用、管理与管理词表及人格权限禁用，并写出原因', async () => {
     const html = await render(scopesOf('agent', false), 'agent', false)
-    expect(html).toContain('仅空间所有者可签发机密级')
-    expect(html).toContain('仅空间所有者的应用可以取用或管理凭据。')
-    expect(html).toContain('仅空间所有者可开启')
+    expect(html).toContain('仅记忆圈所有者可签发机密级')
+    expect(html).toContain('仅记忆圈所有者的接入实例可以取用或管理凭据。')
+    expect(html).toContain('仅记忆圈所有者可开启')
     expect(html).toMatch(/value="secret" disabled/)
     expect(html).toMatch(/value="use" disabled/)
     expect(html).toMatch(/value="manage" disabled/)
     expect(html).not.toMatch(/value="none" disabled/)
   })
 
+  it('静态场域白名单可限定到具体场域词条', async () => {
+    const html = await render({ ...scopesOf('agent'), allowedRealms: ['work'] }, CUSTOM_PRESET)
+    expect(html).toContain('允许的场域')
+    expect(html).toContain('工作')
+  })
+
   it('实际凭据能力不足时提示实际值', async () => {
-    const scopes = { ...scopesOf('agent'), credentials: 'manage' as const, writeLayers: [] }
+    const scopes = { ...scopesOf('agent'), credentials: 'manage' as const, writeKinds: [] }
     expect(issuedCredentialCapability(scopes)).toBe('use')
     const html = await render(scopes, CUSTOM_PRESET)
     expect(html).toContain('按当前签发范围，凭据能力实际为「取用」')
@@ -160,25 +185,23 @@ describe('签发弹窗的权限表', () => {
     expect(await render(scopesOf('agent'), 'agent')).not.toContain('凭据能力实际为')
   })
 
-  // 在勾选框、单选上按回车，只有它们属于某个表单时才会隐式提交。编辑器自己不带表单，
-  // 每个输入也不借 form 属性挂到别处的表单上；签发弹窗不用表单见 accessPages.test.ts
-  it('在勾选框与单选上按回车不签发：输入不属于任何表单，也不接回车', async () => {
+  it('在勾选框与单选上按回车不签发：输入不属于任何表单', async () => {
     const html = await render(scopesOf('agent'), 'agent')
     const inputs = [...html.matchAll(/<input\b[^>]*>/g)].map((m) => m[0])
-    expect(inputs.filter((i) => /type="checkbox"/.test(i))).toHaveLength(LAYERS.length * 2)
+    expect(inputs.filter((i) => /type="checkbox"/.test(i))).toHaveLength(ENTRY_KINDS.length * 2)
     expect(inputs.filter((i) => /type="radio"/.test(i)).length).toBeGreaterThan(0)
     for (const input of inputs) expect(input).not.toMatch(/\sform=/)
     expect(html).not.toContain('<form')
-    expect(keyScopeEditorSource).not.toMatch(/<form|@submit|@key(down|up|press)\.enter/)
+    expect(keyScopeEditorSource).not.toMatch(/<form|@submit/)
   })
 
   it('格子的判断只用共享的规则，不另写一份', () => {
-    expect(keyScopeEditorSource).toContain('issuedScopeRows(scopes.value)')
-    expect(keyScopeEditorSource).toContain('accessKind(row.layer, cell)')
+    expect(keyScopeEditorSource).toContain('issuedScopeRows(scopes.value, props.circleKind)')
+    expect(keyScopeEditorSource).toContain('kindAccessKind(row.kind, cell)')
     expect(keyScopeEditorSource).toContain('paintAccess(')
-    expect(keyScopeEditorSource).toContain('matchPreset(next, props.isSpaceOwner)')
+    expect(keyScopeEditorSource).toContain('matchPreset(next, props.isCircleOwner)')
     expect(keyScopeEditorSource).toContain(
-      'disabled: allowedCredentialCapability(c, props.isSpaceOwner) !== c',
+      'disabled: allowedCredentialCapability(c, props.isCircleOwner) !== c',
     )
   })
 })

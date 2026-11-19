@@ -23,9 +23,7 @@ defineProps<{ item: Pick<ActivityItem, 'deleted' | 'expired' | 'bench' | 'left'>
     </span>
     <span v-if="item.left" class="left-flag">
       <FlagTag status="left" />
-      <Hint>
-        此次改动后，这条记忆超出当前账号的可见范围（例如移入其他成员的本人记忆，或改为机密）。
-      </Hint>
+      <Hint> 此次改动后，这条记忆超出当前账号的可见范围（例如移入其他记忆圈，或改为机密）。 </Hint>
     </span>
   </span>
 </template>

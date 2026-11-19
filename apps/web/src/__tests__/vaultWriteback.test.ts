@@ -127,9 +127,9 @@ describe('新凭据的去处', () => {
 
   it('连接上的去处：显示、设与清除，设好之后按返回的连接列表整个换掉', () => {
     expect(vaultPanel).toContain('集合「{{ c.destination.collectionName }}」')
-    expect(vaultPanel).toContain("queryClient.setQueryData(['vault-connections', sid], list)")
-    expect(vaultPanel).toContain('api.setVaultDestination(sid, c.value.id, { collectionId })')
-    expect(vaultPanel).toContain('api.clearVaultDestination(sid, c.value.id)')
+    expect(vaultPanel).toContain("queryClient.setQueryData(['vault-connections', cid], list)")
+    expect(vaultPanel).toContain('api.setVaultDestination(cid, c.value.id, { collectionId })')
+    expect(vaultPanel).toContain('api.clearVaultDestination(cid, c.value.id)')
     // 连接不可用时去处照样显示：显示的条件不看连接的状态
     expect(vaultPanel).toContain('v-if="c.destination || canChooseDestination"')
     expect(vaultPanel).toContain(':disabled="x.disabled"')
@@ -199,12 +199,12 @@ describe('去处的几处共用一份', () => {
   it('设去处失败时条目列表里的集合一起重读，不然同一个集合还能选', () => {
     const save = vaultPanel.slice(vaultPanel.indexOf('async function saveDestination'))
     const failed = save.slice(save.indexOf('} catch'), save.indexOf('} finally'))
-    expect(failed).toContain("queryKey: ['vault-items', sid, c.value.id]")
+    expect(failed).toContain("queryKey: ['vault-items', cid, c.value.id]")
   })
 
   it('条目列表都经 fetchVaultItems 读：读到之后凭据与待处理的条数跟着失效', () => {
     for (const source of [vaultPanel, credentialDetail, credentialForm]) {
-      expect(source).toContain('fetchVaultItems(queryClient, sid, id')
+      expect(source).toContain('fetchVaultItems(queryClient, cid, id')
       expect(source).not.toContain('api.vaultItems(')
     }
   })
@@ -370,23 +370,23 @@ describe('到期与轮换', () => {
     expect(credentialDetail).toContain("{ key: 'changed', label: '上次改值' }")
     expect(credentialDetail).toContain(':status="expiryStatus(c.expiry)"')
     expect(credentialDetail).toContain(
-      "['credential-events', props.spaceId, c.value.id, { since: sinceChange.value }]",
+      "['credential-events', props.circleId, c.value.id, { since: sinceChange.value }]",
     )
-    expect(credentialDetail).toContain('api.credentialEvents(spaceId, id, pageParam, f.since)')
+    expect(credentialDetail).toContain('api.credentialEvents(cid, id, pageParam, f.since)')
   })
 
   it('改了到期时间、需要轮换、值或删除之后，待处理的条数失效', () => {
     const refresh = credentialsPage.slice(credentialsPage.indexOf('async function refreshLists'))
     expect(refresh.slice(0, refresh.indexOf('\n}\n'))).toContain(
-      'invalidateInboxCounts(queryClient, sid)',
+      'invalidateInboxCounts(queryClient, cid)',
     )
     expect(credentialsPage).toContain('@saved="onSaved"')
-    expect(credentialsPage).toMatch(/function onSaved[\s\S]*?void refreshLists\(sid\)/)
+    expect(credentialsPage).toMatch(/function onSaved[\s\S]*?void refreshLists\(cid\)/)
   })
 
   it('待处理的凭据列表用 attention 筛选，和凭据列表同一个前缀', () => {
-    expect(inboxCredentials).toContain("api.credentials(sid, { attention: 'true' })")
-    expect(inboxCredentials).toContain('attentionCredentialsKey(props.spaceId)')
+    expect(inboxCredentials).toContain("api.credentials(cid, { attention: 'true' })")
+    expect(inboxCredentials).toContain('attentionCredentialsKey(props.circleId)')
   })
 })
 
@@ -405,7 +405,7 @@ describe('写回密码库', () => {
 
   it('409 时留在表单里，可以一键重新读取；重新读取和表单里的改动合起来，不重建表单', () => {
     expect(credentialForm).toContain('conflict.value = true')
-    expect(credentialForm).toContain('const fresh = await api.credential(spaceId, before.id)')
+    expect(credentialForm).toContain('const fresh = await api.credential(cid, before.id)')
     expect(credentialForm).toContain('mergeReloaded(input(), before, fresh')
     expect(credentialForm).not.toMatch(/function reload[\s\S]*?fill\(fresh/)
     expect(credentialForm).toContain('@click="reload"')
@@ -485,9 +485,9 @@ describe('密码库凭据的基准版本', () => {
     )
     // 重新读取：条目列表在前，凭据在后
     const reload = credentialForm.slice(credentialForm.indexOf('async function reload'))
-    expect(reload.indexOf('fetchVaultItems(queryClient, spaceId, conn.id)')).toBeGreaterThan(0)
-    expect(reload.indexOf('fetchVaultItems(queryClient, spaceId, conn.id)')).toBeLessThan(
-      reload.indexOf('api.credential(spaceId, before.id)'),
+    expect(reload.indexOf('fetchVaultItems(queryClient, cid, conn.id)')).toBeGreaterThan(0)
+    expect(reload.indexOf('fetchVaultItems(queryClient, cid, conn.id)')).toBeLessThan(
+      reload.indexOf('api.credential(cid, before.id)'),
     )
   })
 })

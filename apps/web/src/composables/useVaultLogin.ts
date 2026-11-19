@@ -14,10 +14,10 @@ import { api } from '../api/endpoints'
 // 主密码只在这里的局部状态里，不进查询缓存、地址或本地存储：连上、失败、返回上一步或关掉都立即清空；
 // 只有等验证码的那一步留着它，第二次提交还要用
 export function useVaultLogin(
-  spaceId: Ref<string>,
+  circleId: Ref<string>,
   // 重新登录的连接；null 是新建连接
   target: Ref<VaultConnection | null>,
-  onConnected: (connection: VaultConnection, spaceId: string) => void,
+  onConnected: (connection: VaultConnection, circleId: string) => void,
 ) {
   const form = reactive({ serverUrl: '', email: '', masterPassword: '', code: '' })
   const step = ref<'login' | 'two_factor'>('login')
@@ -117,7 +117,7 @@ export function useVaultLogin(
   async function submit() {
     if (submitting.value || problem.value) return
     const id = ++submitId
-    const sid = spaceId.value
+    const cid = circleId.value
     const c = target.value
     const request = body()
     submitting.value = true
@@ -126,8 +126,8 @@ export function useVaultLogin(
     touched.value = false
     try {
       const result = c
-        ? await api.reconnectVault(sid, c.id, request as ReconnectVaultRequest)
-        : await api.connectVault(sid, request as ConnectVaultRequest)
+        ? await api.reconnectVault(cid, c.id, request as ReconnectVaultRequest)
+        : await api.connectVault(cid, request as ConnectVaultRequest)
       if (id !== submitId) return
       if (result.kind === 'two_factor_required') {
         // 主密码留到第二次提交
@@ -141,7 +141,7 @@ export function useVaultLogin(
         return
       }
       quietly(() => Object.assign(form, { masterPassword: '', code: '' }))
-      onConnected(result.connection, sid)
+      onConnected(result.connection, cid)
     } catch (err) {
       if (id !== submitId) return
       quietly(() => Object.assign(form, { masterPassword: '', code: '' }))

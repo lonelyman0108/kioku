@@ -26,7 +26,7 @@ export const inboxTabCount = (counts: InboxCounts, tab: InboxTab): number =>
   })[tab]
 
 // 当前账号动得了手的分类：查看者只能拒绝等本人确认的账号绑定，别的几类动不了；
-// 凭据只有空间所有者改得了（vault.ts 的 canManageCredentials），条数也只算当前账号自己的
+// 凭据只有记忆圈所有者改得了（vault.ts 的 canManageCredentials），条数也只算当前账号自己的
 export const inboxTabActionable = (tab: InboxTab, role: MemberRole): boolean => {
   if (tab === 'credential') return canManageCredentials(role)
   return role !== 'viewer' || tab === 'binding'
@@ -59,17 +59,17 @@ export const legacyReviewTab = (tab: unknown): InboxTab => (tab === 'dream' ? 'd
 
 // 条数的缓存键。这个接口每次跑正则（两万条约 110 毫秒），所以有 staleTime，不跟着每个页面重取，
 // 处理完待办之后才让它失效
-export const inboxCountsKey = (spaceId: string) => ['inbox-counts', spaceId] as const
+export const inboxCountsKey = (circleId: string) => ['inbox-counts', circleId] as const
 
-export const invalidateInboxCounts = (queryClient: QueryClient, spaceId: string) =>
-  queryClient.invalidateQueries({ queryKey: inboxCountsKey(spaceId) })
+export const invalidateInboxCounts = (queryClient: QueryClient, circleId: string) =>
+  queryClient.invalidateQueries({ queryKey: inboxCountsKey(circleId) })
 
-// 待处理里「凭据」一类的列表：和凭据列表同一个前缀，凭据页的刷新清单让 ['credentials', spaceId] 失效时一起重取
-export const attentionCredentialsKey = (spaceId: string) =>
-  ['credentials', spaceId, { attention: true }] as const
+// 待处理里「凭据」一类的列表：和凭据列表同一个前缀，凭据页的刷新清单让 ['credentials', circleId] 失效时一起重取
+export const attentionCredentialsKey = (circleId: string) =>
+  ['credentials', circleId, { attention: true }] as const
 
 // 手动刷新：各类的列表和条数一起重取
-export function refreshInbox(queryClient: QueryClient, spaceId: string) {
+export function refreshInbox(queryClient: QueryClient, circleId: string) {
   return Promise.all(
     [
       'inbox-counts',
@@ -77,8 +77,9 @@ export function refreshInbox(queryClient: QueryClient, spaceId: string) {
       'review',
       'dream-suggestions',
       'dream-runs',
-      'memory-list',
+      'entry-list',
+      'entry-browse',
       'credentials',
-    ].map((key) => queryClient.invalidateQueries({ queryKey: [key, spaceId] })),
+    ].map((key) => queryClient.invalidateQueries({ queryKey: [key, circleId] })),
   )
 }

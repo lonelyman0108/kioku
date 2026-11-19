@@ -1,28 +1,24 @@
 <script setup lang="ts">
-import type { Layer, Sensitivity } from '@kioku/contracts'
+import type { Sensitivity, StrataBand } from '@kioku/contracts'
 import { computed } from 'vue'
 
-import { layerLabels, sensitivityLabels } from '../../labels'
-import { layerHints, paintCell, sensitivityHints } from './strata'
+import { bandLabels, sensitivityLabels } from '../../labels'
+import { bandHints, paintCell, sensitivityHints } from './strata'
 
-// 记忆的标签：层是实色块加全名，后面接一块敏感级的纹理和它的名字
-const props = defineProps<{ layer: Layer; sensitivity: Sensitivity }>()
+// 记忆的标签：色带是实色块加全名，后面接一块敏感级的纹理和它的名字
+const props = defineProps<{ band: StrataBand; sensitivity: Sensitivity }>()
 
 const WIDTH = 38
 const HEIGHT = 24
 const rects = computed(() =>
-  paintCell(props.layer, props.sensitivity, { x: 0, y: 0, width: WIDTH, height: HEIGHT }),
+  paintCell(props.band, props.sensitivity, { x: 0, y: 0, width: WIDTH, height: HEIGHT }),
 )
 </script>
 
 <template>
   <span class="strata-tag">
-    <span
-      class="tag-layer"
-      :style="{ background: `var(--layer-${layer})` }"
-      :title="layerHints[layer]"
-    >
-      {{ layerLabels[layer] }}
+    <span class="tag-band" :style="{ background: `var(--layer-${band})` }" :title="bandHints[band]">
+      {{ bandLabels[band] }}
     </span>
     <svg :width="WIDTH" :height="HEIGHT" :viewBox="`0 0 ${WIDTH} ${HEIGHT}`" aria-hidden="true">
       <rect
@@ -60,7 +56,7 @@ const rects = computed(() =>
   font-size: 13px;
   line-height: 1.5;
 }
-.tag-layer {
+.tag-band {
   display: inline-flex;
   align-items: center;
   height: 24px;

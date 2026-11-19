@@ -18,6 +18,7 @@ import {
   replaceValues,
   vaultFieldName,
   plaintextCandidates,
+  suggestEntryIdentifier,
   suggestIdentifier,
   suggestName,
   valueContext,
@@ -43,35 +44,41 @@ describe('猜出来的值', () => {
 })
 
 describe('建议的标识', () => {
-  it('路径的各段连起来', () => {
-    expect(suggestIdentifier('infra://nas/admin', 'password', [])).toBe('nas-admin')
+  it('抽取字母数字并连起来', () => {
+    expect(suggestIdentifier('Home NAS / Admin', 'password', [])).toBe('home-nas-admin')
+    expect(
+      suggestEntryIdentifier({ title: '家里的 NAS', shortId: 'm-234567' }, 'password', []),
+    ).toBe('nas')
+    expect(
+      suggestEntryIdentifier({ title: '家里的密码', shortId: 'm-234567' }, 'password', []),
+    ).toBe('m-234567')
   })
 
   it('开头和结尾的分隔符去掉，保证合规', () => {
-    expect(suggestIdentifier('infra://_nas', 'password', [])).toBe('nas')
-    expect(suggestIdentifier('infra://--', 'password', [])).toBe('password')
+    expect(suggestIdentifier('_nas', 'password', [])).toBe('nas')
+    expect(suggestIdentifier('--', 'password', [])).toBe('password')
   })
 
   it('最长 64 个字符', () => {
     const long = 'a'.repeat(70)
-    expect(suggestIdentifier(`infra://${long}`, 'password', [])).toHaveLength(64)
+    expect(suggestIdentifier(long, 'password', [])).toHaveLength(64)
   })
 
   it('已有这个标识时加字段名，再不行加序号，也不超长', () => {
-    expect(suggestIdentifier('infra://nas', 'password', ['nas'])).toBe('nas-password')
-    expect(suggestIdentifier('infra://nas', 'password', ['nas', 'nas-password'])).toBe('nas-2')
-    expect(
-      suggestIdentifier('infra://nas', 'password', ['nas', 'nas-password', 'nas-2', 'nas-3']),
-    ).toBe('nas-4')
+    expect(suggestIdentifier('nas', 'password', ['nas'])).toBe('nas-password')
+    expect(suggestIdentifier('nas', 'password', ['nas', 'nas-password'])).toBe('nas-2')
+    expect(suggestIdentifier('nas', 'password', ['nas', 'nas-password', 'nas-2', 'nas-3'])).toBe(
+      'nas-4',
+    )
     const long = 'b'.repeat(64)
-    const next = suggestIdentifier(`infra://${long}`, 'password', [long])
+    const next = suggestIdentifier(long, 'password', [long])
     expect(next).toHaveLength(64)
     expect(next).not.toBe(long)
   })
 
-  it('名称用标题，没有标题时用开头之后的那一段', () => {
-    expect(suggestName({ uri: 'user://infra/nas', title: '家里的 NAS' })).toBe('家里的 NAS')
-    expect(suggestName({ uri: 'user://infra/nas', title: ' ' })).toBe('infra/nas')
+  it('名称用标题，没有标题时退回短 ID', () => {
+    expect(suggestName({ shortId: 'm-234567', title: '家里的 NAS' })).toBe('家里的 NAS')
+    expect(suggestName({ shortId: 'm-234567', title: ' ' })).toBe('m-234567')
   })
 })
 
@@ -247,8 +254,8 @@ describe('把值换成占位符', () => {
 })
 
 describe('转存之后还要告诉人的', () => {
-  const result = (plaintextVersions: number, otherMemories: number) =>
-    ({ plaintextVersions, otherMemories }) as ConvertedToCredential
+  const result = (plaintextVersions: number, otherEntries: number) =>
+    ({ plaintextVersions, otherEntries }) as ConvertedToCredential
 
   it('都处理完了就不提', () => {
     expect(convertLeftovers(result(0, 0))).toEqual([])

@@ -1,58 +1,72 @@
 import { useToast } from '@nuxt/ui/composables'
-import type { ConsoleMemoryView, ProtectTarget, RedactMode } from '@kioku/contracts'
+import type { ConsoleEntryView, ProtectTarget, RedactMode } from '@kioku/contracts'
 import { useQueryClient, type QueryClient } from '@tanstack/vue-query'
 import { ref, type Ref } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import { invalidateInboxCounts } from '../inbox'
 
-// 疑似明文的提示处理之后要刷新的：条数、列表、概览、变更记录，这条记忆的历史和详情
+// 疑似明文的提示处理之后要刷新的：条数、列表、浏览目录、概览、变更记录，这条记忆的历史和详情
 export function refreshAfterPlaintext(
   queryClient: QueryClient,
-  spaceId: string,
-  memory?: ConsoleMemoryView,
+  circleId: string,
+  entry?: ConsoleEntryView,
 ) {
-  // activity-event：变更记录详情里的前后快照可能带着刚转存走的值
-  for (const key of ['inbox-counts', 'memory-list', 'overview', 'activity', 'activity-event']) {
-    void queryClient.invalidateQueries({ queryKey: [key, spaceId] })
+  for (const key of [
+    'inbox-counts',
+    'entry-list',
+    'entry-browse',
+    'overview',
+    'activity',
+    'activity-event',
+  ]) {
+    void queryClient.invalidateQueries({ queryKey: [key, circleId] })
   }
-  if (!memory) return
-  queryClient.setQueryData(['memory', spaceId, memory.uri], memory)
-  void queryClient.invalidateQueries({ queryKey: ['memory-history', spaceId, memory.id] })
+  if (!entry) return
+  if (entry.circleId !== circleId) {
+    for (const key of ['inbox-counts', 'entry-list', 'entry-browse', 'overview', 'activity']) {
+      void queryClient.invalidateQueries({ queryKey: [key, entry.circleId] })
+    }
+  }
+  if (!entry.contentHidden) {
+    queryClient.setQueryData(['entry', entry.circleId, entry.shortId], entry)
+  } else {
+    void queryClient.invalidateQueries({ queryKey: ['entry', entry.circleId, entry.shortId] })
+  }
+  void queryClient.invalidateQueries({ queryKey: ['entry-history', entry.circleId, entry.id] })
+  void queryClient.invalidateQueries({ queryKey: ['entry-history', circleId, entry.id] })
+  void invalidateInboxCounts(queryClient, circleId)
 }
 
-// 忽略、撤销忽略、保护（移入本人私密 / 设为机密）与抹除敏感段：带着看到提示时的版本，由服务端核对并发
-export function usePlaintextActions(spaceId: Ref<string>) {
+// 忽略、撤销忽略、保护（移入个人圈私密 / 设为机密）与抹除敏感段：带着看到提示时的版本，由服务端核对并发
+export function usePlaintextActions(circleId: Ref<string>) {
   const toast = useToast()
   const queryClient = useQueryClient()
   const busy = ref<string | null>(null)
 
   async function run(
     call: (
-      sid: string,
-      body: { memoryId: string; expectedVersion: number },
-    ) => Promise<ConsoleMemoryView>,
+      cid: string,
+      body: { entryId: string; expectedVersion: number },
+    ) => Promise<ConsoleEntryView>,
     done: string,
     target: { id: string; version: number },
-    refreshTree = false,
-  ): Promise<ConsoleMemoryView | null> {
+  ): Promise<ConsoleEntryView | null> {
     if (busy.value) return null
-    const sid = spaceId.value
+    const cid = circleId.value
     busy.value = target.id
     try {
-      const memory = await call(sid, { memoryId: target.id, expectedVersion: target.version })
+      const entry = await call(cid, { entryId: target.id, expectedVersion: target.version })
       toast.add({ title: done, color: 'success' })
-      refreshAfterPlaintext(queryClient, sid, memory)
-      if (refreshTree) {
-        void queryClient.invalidateQueries({ queryKey: ['memory-children', sid] })
-      }
-      return memory
+      refreshAfterPlaintext(queryClient, cid, entry)
+      return entry
     } catch (err) {
       toast.add({ title: err instanceof ApiError ? err.message : '操作失败', color: 'error' })
       // 列表或详情里的版本已经旧了：重新读取，看过新的正文再决定
       if (err instanceof ApiError && (err.status === 404 || err.status === 409)) {
-        refreshAfterPlaintext(queryClient, sid)
-        void queryClient.invalidateQueries({ queryKey: ['memory', sid] })
+        refreshAfterPlaintext(queryClient, cid)
+        void queryClient.invalidateQueries({ queryKey: ['entry', cid] })
       }
       return null
     } finally {
@@ -62,25 +76,40 @@ export function usePlaintextActions(spaceId: Ref<string>) {
 
   return {
     busy,
-    ignore: (target: { id: string; version: number }) =>
-      run(api.ignorePlaintext, '已忽略，正文修改后会重新提示', target),
-    unignore: (target: { id: string; version: number }) =>
-      run(api.unignorePlaintext, '已撤销忽略', target),
+    ignore: (target: { id: string; version: number }, variantId?: string) =>
+      run(
+        (cid, body) => api.ignorePlaintext(cid, variantId ? { ...body, variantId } : body),
+        '已忽略，正文修改后会重新提示',
+        target,
+      ),
+    unignore: (target: { id: string; version: number }, variantId?: string) =>
+      run(
+        (cid, body) => api.unignorePlaintext(cid, variantId ? { ...body, variantId } : body),
+        '已撤销忽略',
+        target,
+      ),
     protect: (
-      target: { id: string; version: number; layer?: string },
+      target: { id: string; version: number; inPersonal?: boolean },
       protectTarget: ProtectTarget,
     ) =>
       run(
-        (sid, body) => api.protectMemory(sid, { ...body, target: protectTarget }),
+        (cid, body) => api.protectEntry(cid, { ...body, target: protectTarget }),
         protectTarget === 'secret'
           ? '已设为机密，正文已加密存储'
-          : target.layer && target.layer !== 'user'
-            ? '已移入本人私密，原文已保留'
-            : '已设为本人私密，原文已保留',
+          : target.inPersonal
+            ? '已设为私密，原文已保留'
+            : '已移入个人圈私密，原文已保留',
         target,
-        protectTarget === 'user_private' && target.layer !== 'user',
       ),
-    redact: (target: { id: string; version: number }, mode: RedactMode = 'stars') =>
-      run((sid, body) => api.redactMemory(sid, { ...body, mode }), '已抹除敏感段', target),
+    redact: (
+      target: { id: string; version: number },
+      mode: RedactMode = 'stars',
+      variantId?: string,
+    ) =>
+      run(
+        (cid, body) => api.redactEntry(cid, { ...body, mode, ...(variantId ? { variantId } : {}) }),
+        '已抹除敏感段',
+        target,
+      ),
   }
 }

@@ -1,3 +1,5 @@
+import { whenSignature, type VariantSnapshot, type WhenCondition } from '@kioku/contracts'
+
 // 历史里两版正文的按行对比
 export type DiffLine = { kind: 'same' | 'add' | 'remove'; text: string }
 export type DiffRow = DiffLine | { kind: 'skip'; count: number }
@@ -98,4 +100,75 @@ export function collapseUnchanged(lines: DiffLine[], context = 3): DiffRow[] {
   })
   if (skipped) rows.push({ kind: 'skip', count: skipped })
   return rows
+}
+
+export type VariantDiffStatus = 'added' | 'removed' | 'modified' | 'unchanged' | 'secret'
+
+export interface VariantDiffItem {
+  sig: string
+  when: WhenCondition
+  status: VariantDiffStatus
+  rows: DiffRow[]
+}
+
+// 历史中前后两次词条快照的多变体切片按 when 签名配对比较
+export function diffVariantSnapshots(
+  before: readonly VariantSnapshot[] | null,
+  after: readonly VariantSnapshot[],
+): VariantDiffItem[] {
+  const beforeMap = new Map<string, VariantSnapshot>()
+  for (const variant of before ?? []) {
+    beforeMap.set(whenSignature(variant.when), variant)
+  }
+  const afterMap = new Map<string, VariantSnapshot>()
+  for (const variant of after) {
+    afterMap.set(whenSignature(variant.when), variant)
+  }
+
+  const ordered: { sig: string; prev?: VariantSnapshot; next?: VariantSnapshot }[] = []
+  const seen = new Set<string>()
+  for (const variant of after) {
+    const sig = whenSignature(variant.when)
+    seen.add(sig)
+    ordered.push({ sig, prev: beforeMap.get(sig), next: variant })
+  }
+  for (const variant of before ?? []) {
+    const sig = whenSignature(variant.when)
+    if (seen.has(sig)) continue
+    ordered.push({ sig, prev: variant })
+  }
+
+  return ordered.map(({ sig, prev, next }) => {
+    const when = next?.when ?? prev!.when
+    if (!next) {
+      if (prev!.content === null) return { sig, when, status: 'secret', rows: [] }
+      return {
+        sig,
+        when,
+        status: 'removed',
+        rows: prev!.content.split('\n').map((text) => ({ kind: 'remove' as const, text })),
+      }
+    }
+    if (!prev) {
+      if (next.content === null) return { sig, when, status: 'secret', rows: [] }
+      return {
+        sig,
+        when,
+        status: 'added',
+        rows: next.content.split('\n').map((text) => ({ kind: 'add' as const, text })),
+      }
+    }
+    if (prev.content === null || next.content === null) {
+      return { sig, when, status: 'secret', rows: [] }
+    }
+    if (prev.content === next.content) {
+      return { sig, when, status: 'unchanged', rows: [] }
+    }
+    return {
+      sig,
+      when,
+      status: 'modified',
+      rows: collapseUnchanged(diffLines(prev.content, next.content)),
+    }
+  })
 }

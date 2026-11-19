@@ -24,7 +24,7 @@ describe('抽取预算的提醒', () => {
     expect(over.over).toBe(true)
     expect(over.title).toBe('本月抽取预算已用完')
     expect(over.description).toContain('下月恢复')
-    expect(over.description).toContain('空间所有者可在空间设置中调高预算')
+    expect(over.description).toContain('记忆圈所有者可在记忆圈设置中调高预算')
   })
 })
 
@@ -62,31 +62,41 @@ describe('账号绑定那一行', () => {
 })
 
 describe('点地层柱去哪里', () => {
-  it('点一行：记下的四类去记忆页对应的根，来自对话的两类去对话页对应的分页', () => {
-    expect(strataTarget('s1', { layer: 'user', sensitivity: null })).toEqual({
-      name: 'memories',
-      params: { spaceId: 's1' },
-      query: { node: 'user' },
-    })
-    expect(strataTarget('s1', { layer: 'episode', sensitivity: null })).toEqual({
+  it('来自对话的两类去对话页对应的分页，独立人格去词表页的人格分页', () => {
+    expect(strataTarget('c1', { band: 'episode', sensitivity: null })).toEqual({
       name: 'conversations',
-      params: { spaceId: 's1' },
+      params: { circleId: 'c1' },
       query: {},
     })
-    expect(strataTarget('s1', { layer: 'subject', sensitivity: 'public' })).toEqual({
+    expect(strataTarget('c1', { band: 'fact', sensitivity: 'public' })).toEqual({
       name: 'conversations',
-      params: { spaceId: 's1' },
+      params: { circleId: 'c1' },
       query: { tab: 'contacts' },
+    })
+    expect(strataTarget('c1', { band: 'persona', sensitivity: null })).toEqual({
+      name: 'vocabulary',
+      params: { circleId: 'c1' },
+      query: { tab: 'personas' },
     })
   })
 
-  it('点一格或一个敏感级：记忆列表按归属与敏感级筛选', () => {
-    expect(strataTarget('s1', { layer: 'core', sensitivity: 'internal' })).toEqual({
+  it('点其他色带或一个敏感级：记忆列表按色带与敏感级筛选', () => {
+    expect(strataTarget('c1', { band: 'personal', sensitivity: null })).toEqual({
       name: 'memories',
-      params: { spaceId: 's1' },
-      query: { view: 'list', layer: 'core', sensitivity: 'internal' },
+      params: { circleId: 'c1' },
+      query: { view: 'list', band: 'personal' },
     })
-    expect(strataTarget('s1', { layer: null, sensitivity: 'secret' }).query).toEqual({
+    expect(strataTarget('c1', { band: 'primary', sensitivity: 'internal' })).toEqual({
+      name: 'memories',
+      params: { circleId: 'c1' },
+      query: { view: 'list', band: 'primary', sensitivity: 'internal' },
+    })
+    expect(strataTarget('c1', { band: 'shared-away', sensitivity: 'public' })).toEqual({
+      name: 'memories',
+      params: { circleId: 'c1' },
+      query: { view: 'list', band: 'shared-away', sensitivity: 'public' },
+    })
+    expect(strataTarget('c1', { band: null, sensitivity: 'secret' }).query).toEqual({
       view: 'list',
       sensitivity: 'secret',
     })
@@ -94,20 +104,20 @@ describe('点地层柱去哪里', () => {
 })
 
 describe('点地层柱的一格', () => {
-  it('跳到列表，带上归属和敏感级', () => {
-    expect(strataFilterQuery({ layer: 'user', sensitivity: 'secret' })).toEqual({
+  it('跳到列表，带上色带和敏感级', () => {
+    expect(strataFilterQuery({ band: 'personal', sensitivity: 'secret' })).toEqual({
       view: 'list',
-      layer: 'user',
+      band: 'personal',
       sensitivity: 'secret',
     })
   })
 
-  it('只点一类归属或只点一个敏感级时，另一个不写进地址', () => {
-    expect(strataFilterQuery({ layer: 'core', sensitivity: null })).toEqual({
+  it('只点一个色带或只点一个敏感级时，另一个不写进地址', () => {
+    expect(strataFilterQuery({ band: 'primary', sensitivity: null })).toEqual({
       view: 'list',
-      layer: 'core',
+      band: 'primary',
     })
-    expect(strataFilterQuery({ layer: null, sensitivity: 'internal' })).toEqual({
+    expect(strataFilterQuery({ band: null, sensitivity: 'internal' })).toEqual({
       view: 'list',
       sensitivity: 'internal',
     })

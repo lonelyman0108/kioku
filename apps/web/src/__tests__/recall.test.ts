@@ -1,55 +1,55 @@
-import type { AppInfo, AppRecallVolume, DebugCandidate, KeyInfo } from '@kioku/contracts'
+import type { ClientInfo, ClientRecallVolume, DebugCandidate, KeyInfo } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
 import { ApiError } from '../api/client'
 import { debugKeyChoices, recallTotal, scoreAxis, scoreParts, volumeBars } from '../recall'
 
-const volume = (total: number, sources: [string, number][] = []): AppRecallVolume =>
+const volume = (total: number, sources: [string, number][] = []): ClientRecallVolume =>
   ({
-    appId: '00000000-0000-4000-8000-000000000001',
+    clientId: '00000000-0000-4000-8000-000000000001',
     name: 'a',
     total,
     sources: sources.map(([source, count]) => ({ source, count })),
-  }) as AppRecallVolume
+  }) as ClientRecallVolume
 
 describe('调试能选的 Key', () => {
-  const app = (id: string) => ({ id, name: id }) as AppInfo
+  const client = (id: string) => ({ id, name: id }) as ClientInfo
   const key = (id: string, effective = true) =>
-    ({ id, effectiveScopes: effective ? { readLayers: [] } : null }) as KeyInfo
+    ({ id, effectiveScopes: effective ? { readKinds: [] } : null }) as KeyInfo
   const loaded = (...keys: KeyInfo[]) => ({ data: keys, isError: false, error: null })
   const failed = (data?: KeyInfo[]) => ({
     data,
     isError: true,
-    error: new ApiError(404, '应用不存在'),
+    error: new ApiError(404, '接入实例不存在'),
   })
 
   it('只要有效的 Key', () => {
     const { options, failures } = debugKeyChoices(
-      [app('a')],
+      [client('a')],
       [loaded(key('live'), key('voided', false))],
     )
     expect(options.map((o) => o.key.id)).toEqual(['live'])
     expect(failures).toEqual([])
   })
 
-  it('一个应用读取失败不挡别的应用，失败的单独说', () => {
+  it('一个接入实例读取失败不挡别的接入实例，失败的单独说', () => {
     const { options, failures } = debugKeyChoices(
-      [app('gone'), app('ok')],
+      [client('gone'), client('ok')],
       [failed(), loaded(key('k1'))],
     )
-    expect(options.map((o) => [o.app.id, o.key.id])).toEqual([['ok', 'k1']])
-    expect(failures.map((f) => [f.app.id, f.text])).toEqual([['gone', '应用不存在']])
+    expect(options.map((o) => [o.client.id, o.key.id])).toEqual([['ok', 'k1']])
+    expect(failures.map((f) => [f.client.id, f.text])).toEqual([['gone', '接入实例不存在']])
   })
 
   it('读到过又刷新失败：手里的 Key 照样能选，错误也要说', () => {
-    const { options, failures } = debugKeyChoices([app('a')], [failed([key('k1')])])
+    const { options, failures } = debugKeyChoices([client('a')], [failed([key('k1')])])
     expect(options.map((o) => o.key.id)).toEqual(['k1'])
     expect(failures).toHaveLength(1)
   })
 
   it('还在读的不算失败，也没有选项', () => {
     const { options, failures } = debugKeyChoices(
-      [app('a')],
+      [client('a')],
       [{ data: undefined, isError: false, error: null }],
     )
     expect(options).toEqual([])
@@ -57,13 +57,13 @@ describe('调试能选的 Key', () => {
   })
 })
 
-describe('各应用的调用量', () => {
-  it('最长的一条占满，别的按平方根：小应用也看得清', () => {
+describe('各接入实例的调用量', () => {
+  it('最长的一条占满，别的按平方根：小接入实例也看得清', () => {
     const bars = volumeBars([volume(900), volume(100), volume(0)])
     expect(bars.map((b) => Math.round(b.width))).toEqual([100, 33, 0])
   })
 
-  it('一个应用都没有调用时不除以零', () => {
+  it('一个接入实例都没有调用时不除以零', () => {
     expect(volumeBars([volume(0)])[0]!.width).toBe(0)
     expect(volumeBars([])).toEqual([])
   })
@@ -82,7 +82,7 @@ describe('各应用的调用量', () => {
     expect(bar!.segments.map((s) => s.label)).toEqual(['每轮输入', '会话开始'])
   })
 
-  it('总次数是各应用加起来', () => {
+  it('总次数是各接入实例加起来', () => {
     expect(recallTotal([volume(3), volume(4)])).toBe(7)
     expect(recallTotal([])).toBe(0)
   })
@@ -114,17 +114,36 @@ describe('分数轴', () => {
 describe('分数的分项', () => {
   const candidate = (breakdown: DebugCandidate['breakdown']) => ({ breakdown }) as DebugCandidate
 
-  it('四路都列出来，比例加起来是整条', () => {
+  it('六路都列出来，正值比例加起来是整条，负切面调制在条上占 0%', () => {
     const parts = scoreParts(
-      candidate({ semantic: 0.4, fulltext: 0.3, glossary: 0.2, priority: 0.1 }),
+      candidate({
+        semantic: 0.4,
+        fulltext: 0.25,
+        glossary: 0.15,
+        priority: 0.1,
+        facet: 0.05,
+        link: 0.05,
+      }),
     )
-    expect(parts.map((p) => p.label)).toEqual(['向量', '全文', '关键词', '优先级'])
-    expect(parts.map((p) => p.value)).toEqual([0.4, 0.3, 0.2, 0.1])
+    expect(parts.map((p) => p.label)).toEqual(['向量', '全文', '关键词', '优先级', '切面', '关联'])
+    expect(parts.map((p) => p.value)).toEqual([0.4, 0.25, 0.15, 0.1, 0.05, 0.05])
     expect(parts.reduce((a, p) => a + p.share, 0)).toBeCloseTo(100)
+
+    const penalized = scoreParts(
+      candidate({ semantic: 0.5, fulltext: 0.5, glossary: 0, priority: 0, facet: -0.06, link: 0 }),
+    )
+    expect(penalized.find((p) => p.label === '切面')).toEqual({
+      label: '切面',
+      value: -0.06,
+      share: 0,
+    })
+    expect(penalized.reduce((a, p) => a + p.share, 0)).toBeCloseTo(100)
   })
 
   it('没走到的一路是 0；全是 0 时不除以零', () => {
-    const parts = scoreParts(candidate({ semantic: 0, fulltext: 0, glossary: 0, priority: 0 }))
+    const parts = scoreParts(
+      candidate({ semantic: 0, fulltext: 0, glossary: 0, priority: 0, facet: 0, link: 0 }),
+    )
     expect(parts.every((p) => p.value === 0 && p.share === 0)).toBe(true)
   })
 })

@@ -32,14 +32,14 @@ export function plaintextCandidates(content: string): PlaintextCandidate[] {
 
 const IDENTIFIER_MAX = 64
 
-// 按坐标建议一个标识：开头之后的各段连起来，比如 user://nas/admin 是 nas-admin。坐标的段已经只有小写字母、
-// 数字、_ 和 -，开头是 _ 或 - 时去掉。已经有这个标识的凭据时加上字段名，再不行加序号
-export function suggestIdentifier(uri: string, field: string, taken: readonly string[]): string {
-  const path = uri.split('://')[1] ?? ''
+// 按词条名称或短 ID 建议一个凭据标识：抽取 ASCII 字母数字与 _/- 连起来，碰撞时加上字段名或序号
+export function suggestIdentifier(seed: string, field: string, taken: readonly string[]): string {
+  const body = seed.includes('://') ? (seed.split('://')[1] ?? '') : seed
   const base =
-    path
-      .replaceAll('/', '-')
-      .replace(/^[-_]+/, '')
+    body
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, '-')
+      .replace(/^[-_]+|[-_]+$/g, '')
       .slice(0, IDENTIFIER_MAX)
       .replace(/[-_]+$/, '') || field
   const used = new Set(taken)
@@ -51,9 +51,22 @@ export function suggestIdentifier(uri: string, field: string, taken: readonly st
   }
 }
 
-// 建议的名称：记忆的标题，给人看的名字本来就是它；没有标题时用开头之后的那一段
-export const suggestName = (memory: { uri: string; title: string }) =>
-  memory.title.trim() || (memory.uri.split('://')[1] ?? memory.uri)
+export function suggestEntryIdentifier(
+  entry: { title: string; shortId?: string },
+  field: string,
+  taken: readonly string[],
+): string {
+  const fromTitle = entry.title
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^[-_]+|[-_]+$/g, '')
+  const seed = fromTitle || entry.shortId?.trim() || field
+  return suggestIdentifier(seed, field, taken)
+}
+
+// 建议的名称：记忆的标题，给人看的名字本来就是它；没有标题时用短 ID
+export const suggestName = (entry: { title: string; shortId: string }) =>
+  entry.title.trim() || entry.shortId
 
 // 正文里跳过占位符之后的几段：值恰好是占位符里的标识时不算，和服务端替换时一个规则
 function outsidePlaceholders(content: string): { text: string; start: number }[] {
@@ -136,9 +149,9 @@ export function convertLeftovers(result: ConvertedToCredential): ConvertLeftover
         '例如更换前的旧密码，这次只处理了选定的值。如需全部抹除，可将这条记忆改为机密；仍在使用的值建议更换。',
     })
   }
-  if (result.otherMemories > 0) {
+  if (result.otherEntries > 0) {
     leftovers.push({
-      title: `其他记忆中还有 ${result.otherMemories} 条含这个值`,
+      title: `其他记忆中还有 ${result.otherEntries} 条含这个值`,
       detail: '这些记忆未改动（已删除、已过期的也计算在内），可逐条转存或修改。',
     })
   }

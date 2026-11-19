@@ -16,9 +16,9 @@ import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 
 // 对话页的联系人分页：机器人面对的人和群，人和群各一栏。点进去是联系人详情
-const props = defineProps<{ spaceId: string }>()
+const props = defineProps<{ circleId: string }>()
 const { me } = useSession()
-const spaceId = computed(() => props.spaceId)
+const circleId = computed(() => props.circleId)
 
 const search = ref('')
 const q = useDebounced(search)
@@ -26,9 +26,9 @@ const q = useDebounced(search)
 // 人和群各翻各的页：混在一起翻的话，加载更多会把人插到群上面
 function listOf(kind: SubjectKind) {
   const query = useInfiniteQuery({
-    queryKey: computed(() => ['subjects', spaceId.value, kind, q.value]),
+    queryKey: computed(() => ['subjects', circleId.value, kind, q.value]),
     queryFn: ({ pageParam }) =>
-      api.subjects(spaceId.value, {
+      api.subjects(circleId.value, {
         kind,
         q: q.value || undefined,
         cursor: pageParam,
@@ -71,7 +71,7 @@ function accounts(subject: SubjectInfo) {
     <div class="contacts-bar">
       <p class="contacts-note">
         对话中遇到的人和群，以及记下的事实。<Hint>
-          新遇到的排在前面。将本人在各平台的账号标记为「这是我」后，当前账号的应用会将这些私聊视为本人对话。
+          新遇到的排在前面。将本人在各平台的账号标记为「这是我」后，当前账号的接入实例会将这些私聊视为本人对话。
         </Hint>
       </p>
       <div class="contacts-actions">
@@ -142,7 +142,7 @@ function accounts(subject: SubjectInfo) {
             <ul v-if="section.items.value.length">
               <li v-for="subject in section.items.value" :key="subject.id">
                 <RouterLink
-                  :to="{ name: 'contact', params: { spaceId, subjectId: subject.id } }"
+                  :to="{ name: 'contact', params: { circleId, subjectId: subject.id } }"
                   class="subject-row"
                 >
                   <span class="subject-title">

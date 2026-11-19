@@ -99,13 +99,13 @@
   --color-lake-950: #0e191f;
 }
 
-/* 地层的编码也做成工具类：bg-layer-user、border-rule 这样写，主题切换时跟着变 */
+/* 地层的编码也做成工具类：bg-layer-personal、border-rule 这样写，主题切换时跟着变 */
 @theme inline {
-  --color-layer-core: var(--layer-core);
+  --color-layer-primary: var(--layer-primary);
   --color-layer-persona: var(--layer-persona);
-  --color-layer-app: var(--layer-app);
-  --color-layer-user: var(--layer-user);
-  --color-layer-subject: var(--layer-subject);
+  --color-layer-shared-away: var(--layer-shared-away);
+  --color-layer-personal: var(--layer-personal);
+  --color-layer-fact: var(--layer-fact);
   --color-layer-episode: var(--layer-episode);
   --color-rule: var(--strata-rule);
   --color-solid: var(--strata-solid);
@@ -119,37 +119,37 @@
 
 :root,
 .light {
-  /* 6 个归属色：颜色表示归属 */
-  --layer-core: #94aebb;
+  /* 6 个色带色：自下而上为主场、人格、共享客场、个人圈、联系人事实、会话摘要 */
+  --layer-primary: #94aebb;
   --layer-persona: #8fb29a;
-  --layer-app: #b3c183;
-  --layer-user: #e0c37f;
-  --layer-subject: #afa3bd;
+  --layer-shared-away: #b3c183;
+  --layer-personal: #e0c37f;
+  --layer-fact: #afa3bd;
   --layer-episode: #c8bfd0;
 
-  /* 结构线用墨；压在归属色上的线和文字；机密的实心深色 */
+  /* 结构线用墨；压在色带上的线和文字；机密的实心深色 */
   --strata-rule: #2a2b26;
   --strata-band-line: #2a2b26;
   --strata-frame: #2a2b26;
   --strata-on-layer: #2a2b26;
   --strata-solid: #2e2a26;
   --strata-on-solid: #f1efe4;
-  /* 权限格子里只能按坐标读取的实心块，和机密的实心块不是一回事 */
+  /* 权限格子里只能按短 ID 读取的实心块，和机密的实心块不是一回事 */
   --strata-explicit: #2e2a26;
   /* 纹理：内部圆点、私密斜线的颜色。公开无纹理，机密是实心 */
   --strata-texture: rgba(42, 43, 38, 0.5);
-  /* 不带归属的图例底色；只读格子是归属色和纸按这个比例混出来的淡色 */
+  /* 不带色带的图例底色；只读格子是色带色和纸按这个比例混出来的淡色 */
   --strata-neutral: #dedbca;
   --strata-tint: 52%;
   /*
    * 权限格子的满色。岩芯上没有文字，满色、淡色、空白三档只靠明度分开：
-   * 应用、本人、会话三类本来就淡，压暗到和别的归属差不多的明度，三档才拉得开
+   * 客场共享、个人圈、会话三类本来就淡，压暗到和别的色带差不多的明度，三档才拉得开
    */
-  --access-core: #94aebb;
+  --access-primary: #94aebb;
   --access-persona: #8fb29a;
-  --access-app: #a4b179;
-  --access-user: #c1a970;
-  --access-subject: #afa3bd;
+  --access-shared-away: #a4b179;
+  --access-personal: #c1a970;
+  --access-fact: #afa3bd;
   --access-episode: #b0a8b6;
   /* 选中行反白 */
   --strata-selected: #2a2b26;
@@ -179,13 +179,13 @@
   --ui-border-inverted: #2a2b26;
 }
 
-/* 夜间地图：归属色整体提亮并降饱和，墨线变浅灰。选中不用反白，晚上太刺眼 */
+/* 夜间地图：色带整体提亮并降饱和，墨线变浅灰。选中不用反白，晚上太刺眼 */
 .dark {
-  --layer-core: #9fb5c1;
+  --layer-primary: #9fb5c1;
   --layer-persona: #9cbba8;
-  --layer-app: #bac794;
-  --layer-user: #d8c48f;
-  --layer-subject: #b4a9c5;
+  --layer-shared-away: #bac794;
+  --layer-personal: #d8c48f;
+  --layer-fact: #b4a9c5;
   --layer-episode: #cac3d5;
 
   --strata-rule: #7e8483;
@@ -200,12 +200,12 @@
   --strata-texture: rgba(20, 24, 27, 0.55);
   --strata-neutral: #aeb3b0;
   --strata-tint: 46%;
-  /* 深色底上三档本来就拉得开，用归属色本身 */
-  --access-core: #9fb5c1;
+  /* 深色底上三档本来就拉得开，用色带色本身 */
+  --access-primary: #9fb5c1;
   --access-persona: #9cbba8;
-  --access-app: #bac794;
-  --access-user: #d8c48f;
-  --access-subject: #b4a9c5;
+  --access-shared-away: #bac794;
+  --access-personal: #d8c48f;
+  --access-fact: #b4a9c5;
   --access-episode: #cac3d5;
   --strata-selected: #333b40;
   --strata-on-selected: #f0f1eb;
@@ -269,7 +269,7 @@
   }
 
   ::selection {
-    background: var(--layer-user);
+    background: var(--layer-personal);
     color: #2a2b26;
   }
 

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { EntryKind } from '@kioku/contracts'
 import { useQuery } from '@tanstack/vue-query'
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
@@ -11,22 +12,26 @@ import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import SectionHeading from '../components/strata/SectionHeading.vue'
 import StrataSwatch from '../components/strata/StrataSwatch.vue'
 import MemoryName from '../components/strata/MemoryName.vue'
+import { entryBand } from '../components/strata/strata'
+import { useSession } from '../composables/useSession'
 import { recallTotal, volumeBars } from '../recall'
-import { memoryRoute } from '../routes'
+import { entryRoute } from '../routes'
 import { formatRelative, formatShort, formatTime } from '../time'
 
 const route = useRoute()
-const spaceId = computed(() => String(route.params.spaceId))
+const { circle } = useSession()
+const circleId = computed(() => String(route.params.circleId))
 
 const stats = useQuery({
-  queryKey: computed(() => ['recall-stats', spaceId.value]),
-  queryFn: () => api.recallStats(spaceId.value),
+  queryKey: computed(() => ['recall-stats', circleId.value]),
+  queryFn: () => api.recallStats(circleId.value),
 })
 const data = computed(() => stats.data.value)
-const bars = computed(() => volumeBars(data.value?.apps ?? []))
-const total = computed(() => recallTotal(data.value?.apps ?? []))
+const bars = computed(() => volumeBars(data.value?.clients ?? []))
+const total = computed(() => recallTotal(data.value?.clients ?? []))
 
-const memoryLink = (uri: string) => memoryRoute(spaceId.value, uri)
+const entryLink = (shortId: string) => entryRoute(circleId.value, shortId)
+const bandOf = (kind: EntryKind) => entryBand({ kind }, circle.value)
 </script>
 
 <template>
@@ -44,26 +49,26 @@ const memoryLink = (uri: string) => memoryRoute(spaceId.value, uri)
           <span>{{ formatShort(data.recordingSince) }} 开始记录，</span>
           <span class="me-1.5">明细保留 {{ data.retentionDays }} 天</span>
           <Hint>
-            更早的事件只保留每条记忆的累计次数。次数仅统计当前账号有权查看的记忆；各应用的调用量仅列出当前账号可管理访问密钥的应用。
+            更早的事件只保留每条记忆的累计次数。次数仅统计当前账号有权查看的记忆；各接入实例的调用量仅列出当前账号可管理访问密钥的接入实例。
           </Hint>
         </p>
       </div>
 
       <div class="stat-apps">
-        <SectionHeading title="应用">
+        <SectionHeading title="接入实例">
           <template #hint>
             <Hint>条长按调用量的平方根，确切的次数写在旁边；条内按来路分段。</Hint>
           </template>
         </SectionHeading>
         <ul v-if="bars.length">
-          <li v-for="bar in bars" :key="bar.volume.appId" class="volume">
+          <li v-for="bar in bars" :key="bar.volume.clientId" class="volume">
             <p class="volume-head">
               <RouterLink
                 v-if="bar.volume.name"
-                :to="{ name: 'app', params: { spaceId, appId: bar.volume.appId } }"
+                :to="{ name: 'client', params: { circleId, clientId: bar.volume.clientId } }"
                 >{{ bar.volume.name }}</RouterLink
               >
-              <span v-else class="volume-gone">已删除的应用</span>
+              <span v-else class="volume-gone">已删除的接入实例</span>
               <span class="font-mono">{{ bar.volume.total.toLocaleString() }}</span>
             </p>
             <div class="volume-bar" :style="{ width: `${bar.width}%` }">
@@ -89,22 +94,22 @@ const memoryLink = (uri: string) => memoryRoute(spaceId.value, uri)
       <div class="stat-top">
         <SectionHeading title="常被召回" />
         <ul v-if="data.top.length">
-          <li v-for="memory in data.top" :key="memory.id" class="top-row">
-            <StrataSwatch :layer="memory.layer" :sensitivity="memory.sensitivity" />
+          <li v-for="entry in data.top" :key="entry.id" class="top-row">
+            <StrataSwatch :band="bandOf(entry.kind)" :sensitivity="entry.sensitivity" />
             <span class="row-uri">
-              <RouterLink :to="memoryLink(memory.uri)" class="min-w-0"
-                ><MemoryName :uri="memory.uri" :title="memory.title"
+              <RouterLink :to="entryLink(entry.shortId)" class="min-w-0"
+                ><MemoryName :short-id="entry.shortId" :title="entry.title"
               /></RouterLink>
-              <MemoryFlags :layer="memory.layer" :sensitivity="memory.sensitivity" />
+              <MemoryFlags :band="bandOf(entry.kind)" :sensitivity="entry.sensitivity" />
             </span>
-            <span class="font-mono top-count">{{ memory.total }}</span>
+            <span class="font-mono top-count">{{ entry.total }}</span>
             <time
-              v-if="memory.lastRecalledAt"
+              v-if="entry.lastRecalledAt"
               class="top-when"
-              :datetime="memory.lastRecalledAt"
-              :title="`最近一次 ${formatTime(memory.lastRecalledAt)}`"
+              :datetime="entry.lastRecalledAt"
+              :title="`最近一次 ${formatTime(entry.lastRecalledAt)}`"
             >
-              {{ formatRelative(memory.lastRecalledAt) }}
+              {{ formatRelative(entry.lastRecalledAt) }}
             </time>
             <span v-else class="top-when">–</span>
           </li>
@@ -120,27 +125,27 @@ const memoryLink = (uri: string) => memoryRoute(spaceId.value, uri)
             <Hint>
               创建已满
               {{ data.retentionDays }}
-              天，未被任何应用召回。最早创建的排在前面。记忆创建和开始记录召回事件都满
+              天，未被任何接入实例召回。最早创建的排在前面。记忆创建和开始记录召回事件都满
               {{ data.retentionDays }}
-              天才计入。不含机密内容（不参与召回）和启动加载的节点（每次会话开始时注入）。长期未被召回时，可检查是否缺少关键词与触发场景、内容过于笼统或已无用处。
+              天才计入。不含机密内容（不参与召回）和启动加载的词条（每次会话开始时注入）。长期未被召回时，可检查是否缺少关键词与触发场景、内容过于笼统或已无用处。
             </Hint>
           </template>
         </SectionHeading>
         <ul v-if="data.never.length">
-          <li v-for="memory in data.never" :key="memory.id" class="never-row">
-            <StrataSwatch :layer="memory.layer" :sensitivity="memory.sensitivity" />
+          <li v-for="entry in data.never" :key="entry.id" class="never-row">
+            <StrataSwatch :band="bandOf(entry.kind)" :sensitivity="entry.sensitivity" />
             <span class="row-uri">
-              <RouterLink :to="memoryLink(memory.uri)" class="min-w-0"
-                ><MemoryName :uri="memory.uri" :title="memory.title"
+              <RouterLink :to="entryLink(entry.shortId)" class="min-w-0"
+                ><MemoryName :short-id="entry.shortId" :title="entry.title"
               /></RouterLink>
-              <MemoryFlags :layer="memory.layer" :sensitivity="memory.sensitivity" />
+              <MemoryFlags :band="bandOf(entry.kind)" :sensitivity="entry.sensitivity" />
             </span>
             <time
               class="never-when"
-              :datetime="memory.createdAt"
-              :title="formatTime(memory.createdAt)"
+              :datetime="entry.createdAt"
+              :title="formatTime(entry.createdAt)"
             >
-              创建于 {{ formatShort(memory.createdAt) }}
+              创建于 {{ formatShort(entry.createdAt) }}
             </time>
           </li>
         </ul>
@@ -151,7 +156,7 @@ const memoryLink = (uri: string) => memoryRoute(spaceId.value, uri)
       </div>
     </section>
 
-    <RecallDebugPanel class="debug" :space-id="spaceId" />
+    <RecallDebugPanel class="debug" :circle-id="circleId" />
   </div>
 </template>
 

@@ -1,10 +1,8 @@
-import { DATABASE_UNAVAILABLE_CODE, URI_FORMAT_MESSAGE } from '@kioku/contracts'
+import { DATABASE_UNAVAILABLE_CODE } from '@kioku/contracts'
 import type { z } from 'zod'
 
-import { URI_FORMAT_HINT } from '../labels'
-
 // 后端返回的业务错误统一是 { error }；这里把状态码和提示一起带出来，页面按状态码决定怎么处理。
-// payload 是原样的错误体，有的错误另带字段（记忆写入的 MemoryWriteError 带疑似明文的位置），由调用方按契约解析
+// payload 是原样的错误体，有的错误另带字段（词条写入的 EntryWriteError 带疑似敏感位置），由调用方按契约解析
 export class ApiError extends Error {
   constructor(
     readonly status: number,
@@ -43,11 +41,6 @@ export function retryable(error: unknown): boolean {
     return error.status >= 500 || TRANSIENT_STATUSES.includes(error.status)
   if (error instanceof NetworkError) return true
   return error instanceof Error && ABORTED.includes(error.name)
-}
-
-// 有的报错是写给接口与 MCP 的：URI 格式那句中英并列，前面还带着字段路径（uri：、to：）。界面上换成只说中文的那句
-function consoleMessage(message: string): string {
-  return message.endsWith(URI_FORMAT_MESSAGE) ? URI_FORMAT_HINT : message
 }
 
 type Query = Record<string, string | number | undefined>
@@ -109,11 +102,7 @@ async function send(method: string, path: string, options: RequestOptions<unknow
     if (res.status === 401 && !SESSION_PATHS.includes(path)) onUnauthorized?.()
     const payload = (await res.json().catch(() => null)) as { error?: string; code?: string } | null
     if (res.status === 503 && payload?.code === DATABASE_UNAVAILABLE_CODE) onDatabaseUnavailable?.()
-    throw new ApiError(
-      res.status,
-      consoleMessage(payload?.error ?? `请求失败：HTTP ${res.status}`),
-      payload,
-    )
+    throw new ApiError(res.status, payload?.error ?? `请求失败：HTTP ${res.status}`, payload)
   }
   return res
 }

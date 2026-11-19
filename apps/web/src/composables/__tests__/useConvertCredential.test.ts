@@ -1,4 +1,4 @@
-import type { ConsoleMemoryView, ConvertedToCredential } from '@kioku/contracts'
+import type { ConsoleEntryView, ConvertedToCredential } from '@kioku/contracts'
 import { QueryClient, VueQueryPlugin } from '@tanstack/vue-query'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, effectScope, nextTick, ref, type EffectScope } from 'vue'
@@ -10,7 +10,7 @@ import { useConvertCredential } from '../useConvertCredential'
 // 接口换成假的，别的都是真的：vue 的响应式、vue-query 的缓存。对话框只管长相，能不能提交都在这里定
 const fakes = vi.hoisted(() => ({
   api: {
-    memory: vi.fn(),
+    entry: vi.fn(),
     credentials: vi.fn(),
     convertToCredential: vi.fn(),
     matchCredentialValues: vi.fn(),
@@ -20,18 +20,51 @@ const fakes = vi.hoisted(() => ({
 }))
 vi.mock('../../api/endpoints', () => ({ api: fakes.api }))
 
-const URI = 'user://nas'
-const memory = (over: Partial<ConsoleMemoryView> = {}): ConsoleMemoryView =>
-  ({
+const SHORT_ID = 'm-234567'
+const entry = (
+  over: Partial<ConsoleEntryView> & { content?: string | null } = {},
+): ConsoleEntryView => {
+  const { content, ...rest } = over
+  const text = content === undefined ? '密码：hunter2-not-real，平时不用。' : content
+  return {
     id: '00000000-0000-4000-8000-000000000001',
-    uri: URI,
+    shortId: SHORT_ID,
+    circleId: '00000000-0000-4000-8000-0000000000c1',
+    circleSlug: 'personal',
+    kind: 'entry',
     title: 'NAS',
-    layer: 'user',
     sensitivity: 'private',
+    provenance: 'owner',
+    originScope: 'global',
+    topics: [],
+    realms: [],
+    priority: 2,
+    disclosure: null,
+    glossary: [],
+    validFrom: '2026-10-31T00:00:00Z',
+    validTo: null,
     version: 1,
-    content: '密码：hunter2-not-real，平时不用。',
-    ...over,
-  }) as ConsoleMemoryView
+    variants: [
+      {
+        id: '00000000-0000-4000-8000-0000000000v1',
+        when: {},
+        whenSignature: '{}',
+        sortOrder: 0,
+        content: text,
+        updatedAt: '2026-10-31T00:00:00Z',
+        contentHidden: text === null,
+        plaintextIgnored: false,
+      },
+    ],
+    otherVariants: [],
+    links: [],
+    createdAt: '2026-10-31T00:00:00Z',
+    updatedAt: '2026-10-31T00:00:00Z',
+    contentHidden: text === null,
+    plaintextIgnored: false,
+    ...rest,
+  }
+}
 
 let client: QueryClient
 let scope: EffectScope
@@ -42,7 +75,7 @@ function start() {
   vueApp.use(VueQueryPlugin, { queryClient: client })
   scope = effectScope()
   return vueApp.runWithContext(() =>
-    scope.run(() => useConvertCredential(ref('s1'), ref(URI), onConverted))!,
+    scope.run(() => useConvertCredential(ref('c1'), ref(SHORT_ID), onConverted))!,
   )
 }
 
@@ -53,15 +86,14 @@ async function settle() {
   }
 }
 
-// 读到这条记忆，显示并核对过值
-async function ready(over: Partial<ConsoleMemoryView> = {}) {
-  fakes.api.memory.mockResolvedValue(memory(over))
+async function ready(over: Partial<ConsoleEntryView> & { content?: string | null } = {}) {
+  fakes.api.entry.mockResolvedValue(entry(over))
   const convert = start()
   await convert.load()
   await nextTick()
   return convert
 }
-async function shown(over: Partial<ConsoleMemoryView> = {}) {
+async function shown(over: Partial<ConsoleEntryView> & { content?: string | null } = {}) {
   const convert = await ready(over)
   convert.shown.value = true
   await nextTick()
@@ -79,18 +111,18 @@ function deferred<T>() {
 }
 
 beforeEach(() => {
-  // 新建凭据的去处：默认没设，由 Kioku 托管
   fakes.api.vaultConnections.mockReset().mockResolvedValue({ items: [] })
   fakes.api.vaultItems.mockReset()
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  fakes.api.memory.mockReset()
+  fakes.api.entry.mockReset()
   fakes.api.credentials.mockReset().mockResolvedValue({ items: [], truncated: false })
   fakes.api.convertToCredential.mockReset()
   fakes.api.matchCredentialValues
     .mockReset()
-    .mockImplementation(async (_sid: string, body: { values: string[] }) => ({
+    .mockImplementation(async (_cid: string, body: { values: string[] }) => ({
       items: body.values.map(() => ({ credentials: [], vaultItems: [] })),
       unavailableConnections: 0,
+      unreadableCredentials: 0,
     }))
   onConverted.mockReset()
 })
@@ -124,7 +156,6 @@ describe('读到记忆之后', () => {
     expect(convert.canSubmit.value).toBe(false)
     convert.shown.value = true
     await nextTick()
-    // 改过的值要等按值查找回来
     expect(convert.problem.value).toBe('正在查找同值的凭据')
     await new Promise((resolve) => setTimeout(resolve, 450))
     await settle()
@@ -142,9 +173,9 @@ describe('读到记忆之后', () => {
 
 describe('占位符放不进这条记忆', () => {
   it.each([
-    ['通用', { layer: 'core', sensitivity: 'internal' }],
-    ['本人但敏感级不够', { layer: 'user', sensitivity: 'internal' }],
-    ['应用、私密', { layer: 'app', sensitivity: 'private' }],
+    ['共享圈', { circleSlug: 'team', sensitivity: 'internal' }],
+    ['个人圈但敏感级不够', { circleSlug: 'personal', sensitivity: 'internal' }],
+    ['事实词条', { circleSlug: 'personal', kind: 'fact', sensitivity: 'private' }],
   ] as const)('%s：值不拿出来，提交不了', async (_name, over) => {
     const convert = await ready(over)
     expect(convert.blocked.value).toBe(true)
@@ -159,11 +190,11 @@ describe('占位符放不进这条记忆', () => {
 
   it('列表读旧了才走到这里：顺带让列表重读，那一行也换成去调整', async () => {
     const invalidate = vi.spyOn(client, 'invalidateQueries')
-    await ready({ layer: 'core', sensitivity: 'internal' })
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['memory-list', 's1'] })
+    await ready({ circleSlug: 'team', sensitivity: 'internal' })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['entry-list', 'c1'] })
   })
 
-  it('本人、私密的不受影响', async () => {
+  it('个人圈、私密的不受影响', async () => {
     const invalidate = vi.spyOn(client, 'invalidateQueries')
     expect((await shown()).canSubmit.value).toBe(true)
     expect(invalidate).not.toHaveBeenCalled()
@@ -182,28 +213,28 @@ describe('重新读取', () => {
   it('进行中不能提交：手里的是旧版本，表单藏着', async () => {
     const convert = await shown()
     expect(convert.canSubmit.value).toBe(true)
-    const pending = deferred<ConsoleMemoryView>()
-    fakes.api.memory.mockReturnValue(pending.promise)
+    const pending = deferred<ConsoleEntryView>()
+    fakes.api.entry.mockReturnValue(pending.promise)
     const loading = convert.load()
     await nextTick()
     expect(convert.loading.value).toBe(true)
     expect(convert.canSubmit.value).toBe(false)
     await convert.submit()
     expect(fakes.api.convertToCredential).not.toHaveBeenCalled()
-    pending.resolve(memory({ version: 2 }))
+    pending.resolve(entry({ version: 2 }))
     await loading
   })
 
   it('失败之后不能提交，能再试；再试成功后也要重新核对', async () => {
     const convert = await shown()
-    fakes.api.memory.mockRejectedValue(new ApiError(500, '服务端的文字'))
+    fakes.api.entry.mockRejectedValue(new ApiError(500, '服务端的文字'))
     await convert.load()
     expect(convert.loadFailure.value).toBe('服务端的文字')
     expect(convert.canSubmit.value).toBe(false)
     await convert.submit()
     expect(fakes.api.convertToCredential).not.toHaveBeenCalled()
 
-    fakes.api.memory.mockResolvedValue(memory({ version: 2 }))
+    fakes.api.entry.mockResolvedValue(entry({ version: 2 }))
     await convert.load()
     await nextTick()
     expect(convert.loadFailure.value).toBeNull()
@@ -220,8 +251,8 @@ describe('重新读取', () => {
     convert.form.field = 'mysql'
     convert.form.identifier = 'my-id'
     await nextTick()
-    fakes.api.memory.mockResolvedValue(
-      memory({ version: 2, content: 'token: abcd1234\n密码: hunter22' }),
+    fakes.api.entry.mockResolvedValue(
+      entry({ version: 2, content: 'token: abcd1234\n密码: hunter22' }),
     )
     await convert.load()
     await nextTick()
@@ -233,7 +264,7 @@ describe('重新读取', () => {
     const convert = await shown({ content: 'token: abcd1234\n密码: hunter22' })
     expect(convert.form).toMatchObject({ value: 'abcd1234', field: 'token' })
     convert.form.identifier = 'my-id'
-    fakes.api.memory.mockResolvedValue(memory({ version: 2, content: '密码: hunter22' }))
+    fakes.api.entry.mockResolvedValue(entry({ version: 2, content: '密码: hunter22' }))
     await convert.load()
     await nextTick()
     expect(convert.form).toMatchObject({
@@ -245,7 +276,7 @@ describe('重新读取', () => {
 
   it('重读之后变成放不进了：不留值', async () => {
     const convert = await shown()
-    fakes.api.memory.mockResolvedValue(memory({ version: 2, layer: 'core' }))
+    fakes.api.entry.mockResolvedValue(entry({ version: 2, circleSlug: 'team' }))
     await convert.load()
     await nextTick()
     expect(convert.blocked.value).toBe(true)
@@ -255,14 +286,14 @@ describe('重新读取', () => {
 
   it('关上之后晚到的结果不算', async () => {
     const convert = await shown()
-    const pending = deferred<ConsoleMemoryView>()
-    fakes.api.memory.mockReturnValue(pending.promise)
+    const pending = deferred<ConsoleEntryView>()
+    fakes.api.entry.mockReturnValue(pending.promise)
     const loading = convert.load()
     await nextTick()
     convert.reset()
-    pending.resolve(memory({ version: 2 }))
+    pending.resolve(entry({ version: 2 }))
     await loading
-    expect(convert.memory.value).toBeNull()
+    expect(convert.entry.value).toBeNull()
     expect(convert.form.value).toBe('')
     expect(convert.loading.value).toBe(false)
   })
@@ -270,20 +301,20 @@ describe('重新读取', () => {
 
 describe('提交', () => {
   const done = {
-    memory: memory({ version: 2, content: '密码：{{cred:nas#password}}' }),
+    entry: entry({ version: 2, content: '密码：{{cred:nas#password}}' }),
     credential: { id: 'c1', name: 'nas' },
     replaced: 1,
     scrubbedEvents: 1,
     plaintextVersions: 2,
-    otherMemories: 1,
+    otherEntries: 1,
   } as unknown as ConvertedToCredential
 
   it('带着读到的版本和当前的值；成功后值不留，结果和遗留都有', async () => {
     const convert = await shown()
     fakes.api.convertToCredential.mockResolvedValue(done)
     await convert.submit()
-    expect(fakes.api.convertToCredential).toHaveBeenCalledWith('s1', {
-      memoryId: memory().id,
+    expect(fakes.api.convertToCredential).toHaveBeenCalledWith('c1', {
+      entryId: entry().id,
       expectedVersion: 1,
       value: 'hunter2-not-real',
       target: { kind: 'new', identifier: 'nas', name: 'NAS', field: 'password' },
@@ -291,7 +322,7 @@ describe('提交', () => {
     expect(convert.form.value).toBe('')
     expect(convert.result.value).toEqual(done)
     expect(convert.leftovers.value).toHaveLength(2)
-    expect(onConverted).toHaveBeenCalledWith(done.memory, done)
+    expect(onConverted).toHaveBeenCalledWith(done.entry, done)
   })
 
   it('错误按服务端的文字显示', async () => {
@@ -372,7 +403,7 @@ describe('提交', () => {
     await convert.submit()
     expect(convert.failure.value).toBe('标识已被占用')
     expect(convert.orphan.value).toEqual(vaultItem)
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['vault-items', 's1'] })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['vault-items', 'c1'] })
     convert.reset()
     expect(convert.orphan.value).toBeNull()
   })
@@ -380,16 +411,16 @@ describe('提交', () => {
   it('400 不给重新读取：重读解决不了，哪怕这时版本也变了', async () => {
     const convert = await shown()
     fakes.api.convertToCredential.mockRejectedValue(new ApiError(400, '放不进'))
-    fakes.api.memory.mockClear().mockResolvedValue(memory({ version: 2 }))
+    fakes.api.entry.mockClear().mockResolvedValue(entry({ version: 2 }))
     await convert.submit()
     expect(convert.canReload.value).toBe(false)
-    expect(fakes.api.memory).not.toHaveBeenCalled()
+    expect(fakes.api.entry).not.toHaveBeenCalled()
   })
 
   it('版本变了给重新读取', async () => {
     const convert = await shown()
     fakes.api.convertToCredential.mockRejectedValue(new ApiError(409, '版本已变化'))
-    fakes.api.memory.mockResolvedValue(memory({ version: 2 }))
+    fakes.api.entry.mockResolvedValue(entry({ version: 2 }))
     await convert.submit()
     expect(convert.failure.value).toBe('版本已变化')
     expect(convert.canReload.value).toBe(true)
@@ -406,7 +437,7 @@ describe('提交', () => {
   it('比版本时读取失败要留着入口：提示让人重新读取，再提交一直 409', async () => {
     const convert = await shown()
     fakes.api.convertToCredential.mockRejectedValue(new ApiError(409, '版本已变化'))
-    fakes.api.memory.mockRejectedValue(new ApiError(500, '读不到'))
+    fakes.api.entry.mockRejectedValue(new ApiError(500, '读不到'))
     await convert.submit()
     await settle()
     expect(convert.canReload.value).toBe(true)
@@ -416,21 +447,19 @@ describe('提交', () => {
   it('比版本时发现换成了同版本的另一条：给', async () => {
     const convert = await shown()
     fakes.api.convertToCredential.mockRejectedValue(new ApiError(409, '版本已变化'))
-    fakes.api.memory.mockResolvedValue(memory({ id: '00000000-0000-4000-8000-000000000002' }))
+    fakes.api.entry.mockResolvedValue(entry({ id: '00000000-0000-4000-8000-000000000002' }))
     await convert.submit()
     expect(convert.canReload.value).toBe(true)
   })
 })
 
-// 切空间时对话框被重置，这时提交可能还没回来；重置之后可能已经打开了另一条记忆
 describe('提交没回来就被重置', () => {
   const done = () =>
     ({
-      memory: memory({ version: 2 }),
-      credential: { id: 'c1' },
-      memories: [],
+      entry: entry({ version: 2 }),
+      credential: { id: 'cred-1' },
       plaintextVersions: 0,
-      plaintextElsewhere: 0,
+      otherEntries: 0,
     }) as unknown as ConvertedToCredential
 
   async function pending() {
@@ -460,14 +489,14 @@ describe('提交没回来就被重置', () => {
     await submitted
     expect(convert.result.value).toBeNull()
     expect(onConverted).not.toHaveBeenCalled()
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['memory-list', 's1'] })
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['credentials', 's1'] })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['entry-list', 'c1'] })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['credentials', 'c1'] })
   })
 
   it('新打开的另一条记忆不受迟到的响应影响', async () => {
     const { convert, response, submitted } = await pending()
     convert.reset()
-    fakes.api.memory.mockResolvedValue(memory({ content: '密码：another-value-1，别的记忆。' }))
+    fakes.api.entry.mockResolvedValue(entry({ content: '密码：another-value-1，别的记忆。' }))
     await convert.load()
     await nextTick()
     expect(convert.form.value).toBe('another-value-1')
@@ -481,24 +510,24 @@ describe('提交没回来就被重置', () => {
   it('迟到的失败不写错误，也不去重读', async () => {
     const { convert, response, submitted } = await pending()
     convert.reset()
-    fakes.api.memory.mockClear()
+    fakes.api.entry.mockClear()
     response.reject(new ApiError(409, '版本已变化'))
     await submitted
     expect(convert.failure.value).toBeNull()
     expect(convert.canReload.value).toBe(false)
-    expect(fakes.api.memory).not.toHaveBeenCalled()
+    expect(fakes.api.entry).not.toHaveBeenCalled()
   })
 
   it('比版本的途中被重置：结果丢掉', async () => {
     const { convert, response, submitted } = await pending()
-    const reread = deferred<ConsoleMemoryView>()
-    fakes.api.memory.mockClear().mockReturnValue(reread.promise)
+    const reread = deferred<ConsoleEntryView>()
+    fakes.api.entry.mockClear().mockReturnValue(reread.promise)
     response.reject(new ApiError(409, '版本已变化'))
     await settle()
-    expect(fakes.api.memory).toHaveBeenCalled()
+    expect(fakes.api.entry).toHaveBeenCalled()
     expect(convert.failure.value).toBe('版本已变化')
     convert.reset()
-    reread.resolve(memory({ version: 9 }))
+    reread.resolve(entry({ version: 9 }))
     await submitted
     expect(convert.canReload.value).toBe(false)
   })
@@ -506,10 +535,9 @@ describe('提交没回来就被重置', () => {
   it('旧的提交回来时不放开新提交的 submitting，也不写它的错误', async () => {
     const { convert, response, submitted } = await pending()
     convert.reset()
-    fakes.api.memory.mockResolvedValue(memory())
+    fakes.api.entry.mockResolvedValue(entry())
     await convert.load()
     convert.shown.value = true
-    // 等按值查找回来才能提交
     await settle()
     fakes.api.convertToCredential.mockReturnValue(new Promise(() => {}))
     void convert.submit()
@@ -538,7 +566,7 @@ describe('转存的去处', () => {
   }
   const matchWith = (match: { credentials: unknown[]; vaultItems: unknown[] }) =>
     fakes.api.matchCredentialValues.mockImplementation(
-      async (_sid: string, body: { values: string[] }) => ({
+      async (_cid: string, body: { values: string[] }) => ({
         items: body.values.map(() => match),
         unavailableConnections: 1,
         unreadableCredentials: 2,
@@ -548,7 +576,7 @@ describe('转存的去处', () => {
   it('打开时按值查找，只发合规的值；结果不进查询的缓存', async () => {
     const convert = await shown({ content: '密码：hunter2-not-real\ntoken=abc' })
     await settle()
-    expect(fakes.api.matchCredentialValues).toHaveBeenCalledWith('s1', {
+    expect(fakes.api.matchCredentialValues).toHaveBeenCalledWith('c1', {
       values: ['hunter2-not-real'],
     })
     expect(
@@ -573,7 +601,7 @@ describe('转存的去处', () => {
     expect(convert.placeholder.value).toBe('{{cred:nas-admin#password}}')
     expect(convert.unavailableConnections.value).toBe(1)
     expect(convert.unreadableCredentials.value).toBe(2)
-    fakes.api.convertToCredential.mockResolvedValue({ memory: memory({ version: 2 }) })
+    fakes.api.convertToCredential.mockResolvedValue({ entry: entry({ version: 2 }) })
     await convert.submit()
     expect(fakes.api.convertToCredential.mock.calls[0]![1].target).toEqual({
       kind: 'credential',
@@ -593,7 +621,7 @@ describe('转存的去处', () => {
     convert.vaultIdentifiers[key] = 'nas-box'
     await nextTick()
     expect(convert.placeholder.value).toBe('{{cred:nas-box#password}}')
-    fakes.api.convertToCredential.mockResolvedValue({ memory: memory({ version: 2 }) })
+    fakes.api.convertToCredential.mockResolvedValue({ entry: entry({ version: 2 }) })
     await convert.submit()
     expect(fakes.api.convertToCredential.mock.calls[0]![1].target).toEqual({
       kind: 'vault',
@@ -611,7 +639,7 @@ describe('转存的去处', () => {
     convert.choose('new')
     await nextTick()
     expect(convert.selected.value.kind).toBe('new')
-    fakes.api.convertToCredential.mockResolvedValue({ memory: memory({ version: 2 }) })
+    fakes.api.convertToCredential.mockResolvedValue({ entry: entry({ version: 2 }) })
     await convert.submit()
     expect(fakes.api.convertToCredential.mock.calls[0]![1].target.kind).toBe('new')
   })
@@ -659,7 +687,7 @@ describe('转存的去处', () => {
       await nextTick()
       expect(fakes.api.matchCredentialValues).not.toHaveBeenCalled()
       await vi.advanceTimersByTimeAsync(500)
-      expect(fakes.api.matchCredentialValues).toHaveBeenCalledWith('s1', {
+      expect(fakes.api.matchCredentialValues).toHaveBeenCalledWith('c1', {
         values: ['hunter2-not'],
       })
     } finally {
@@ -686,21 +714,19 @@ describe('转存的去处', () => {
   it('重新读取时进行中的查找作废：恢复回来的手输值重新查一次，不会一直等着', async () => {
     const convert = await shown({ content: '密码：hunter2-not-real-x' })
     await settle()
-    // 手输一个新值，查找发出去还没回来
     const stale = deferred<unknown>()
     fakes.api.matchCredentialValues.mockReturnValueOnce(stale.promise)
     convert.form.value = 'hunter2-not-real'
     await new Promise((resolve) => setTimeout(resolve, 450))
     expect(convert.matchingValue.value).toBe(true)
-    // 重新读取：值还在正文里，留下
-    fakes.api.memory.mockResolvedValue(memory({ version: 2, content: '密码：hunter2-not-real-x' }))
+    fakes.api.entry.mockResolvedValue(entry({ version: 2, content: '密码：hunter2-not-real-x' }))
     await convert.load()
     await settle()
     expect(convert.form.value).toBe('hunter2-not-real')
     stale.resolve({ items: [{ credentials: [], vaultItems: [] }], unavailableConnections: 0 })
     await settle()
     expect(convert.matchingValue.value).toBe(false)
-    expect(fakes.api.matchCredentialValues).toHaveBeenLastCalledWith('s1', {
+    expect(fakes.api.matchCredentialValues).toHaveBeenLastCalledWith('c1', {
       values: ['hunter2-not-real'],
     })
   })
@@ -710,7 +736,6 @@ describe('转存的去处', () => {
     const convert = await shown()
     await settle()
     expect(convert.matchFailure.value).toBe('密码库无法连接')
-    // 改成通不过转存规则的值：不发请求
     fakes.api.matchCredentialValues.mockClear()
     convert.form.value = 'abc'
     await new Promise((resolve) => setTimeout(resolve, 450))
@@ -724,9 +749,8 @@ describe('转存的去处', () => {
     const convert = await shown()
     await settle()
     expect(convert.selected.value.kind).toBe('vault')
-    // 提交 409：条目已经有凭据；重新读取后再查，这次对上的是那条凭据
     matchWith({ credentials: [credential], vaultItems: [] })
-    fakes.api.memory.mockResolvedValue(memory({ version: 2 }))
+    fakes.api.entry.mockResolvedValue(entry({ version: 2 }))
     await convert.load()
     await settle()
     expect(convert.selected.value.kind).toBe('credential')

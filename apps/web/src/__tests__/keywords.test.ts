@@ -4,11 +4,11 @@ import { buildKeywordIndex, splitByKeywords } from '../keywords'
 
 describe('正文里的关键词', () => {
   const index = buildKeywordIndex([
-    { keyword: 'AI', uris: ['notes://ai'] },
-    { keyword: '阿尔法', uris: ['projects://alpha'] },
-    { keyword: '阿尔法项目', uris: ['projects://alpha-plan'] },
-    { keyword: 'c++', uris: ['notes://cpp'] },
-    { keyword: '单', uris: ['notes://single'] },
+    { keyword: 'AI', shortIds: ['m-234567'] },
+    { keyword: '阿尔法', shortIds: ['m-345678'] },
+    { keyword: '阿尔法项目', shortIds: ['m-456789'] },
+    { keyword: 'c++', shortIds: ['m-56789a'] },
+    { keyword: '单', shortIds: ['m-6789ab'] },
   ])!
 
   it('英文按单词边界、不区分大小写，中文按子串，长的优先', () => {
@@ -36,10 +36,10 @@ describe('正文里的关键词', () => {
 
   it('同一个关键词合并多条记忆；没有可用的关键词时返回 null', () => {
     const merged = buildKeywordIndex([
-      { keyword: 'Kioku', uris: ['a://1'] },
-      { keyword: 'kioku', uris: ['a://2', 'a://1'] },
+      { keyword: 'Kioku', shortIds: ['m-234567'] },
+      { keyword: 'kioku', shortIds: ['m-345678', 'm-234567'] },
     ])!
-    expect(merged.targets.get('kioku')).toEqual(['a://1', 'a://2'])
-    expect(buildKeywordIndex([{ keyword: '一', uris: ['a://x'] }])).toBeNull()
+    expect(merged.targets.get('kioku')).toEqual(['m-234567', 'm-345678'])
+    expect(buildKeywordIndex([{ keyword: '一', shortIds: ['m-234567'] }])).toBeNull()
   })
 })

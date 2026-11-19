@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { KeyScopes, Layer, Sensitivity } from '@kioku/contracts'
+import type { CircleKind, LensKeyScopes, Sensitivity, StrataBand } from '@kioku/contracts'
 import { computed } from 'vue'
 
 import {
@@ -7,20 +7,20 @@ import {
   coreCells,
   coreMark,
   coreName,
-  isConversationLayer,
-  issuedScopeRows,
+  isConversationBand,
+  issuedBandRows,
   paintAccess,
-  type AccessRow,
+  type BandAccessRow,
   type StrataCounts,
 } from './strata'
 
-// 岩芯：一个 Key 碰得到多深。纵向是层，顺序和地层柱一样；横向是敏感级，越往右越敏感。
-// 能碰到的格子上色，一眼看出范围。传 rows 看服务端算出的实际范围，只传 scopes 看签发范围
-// （不是实际权限，见 issuedScopeRows）。两个都没有时只留虚线框，不能当成没有权限
+// 岩芯：一个访问密钥碰得到多深。纵向是色带，顺序和地层柱一样；横向是敏感级，越往右越敏感。
+// 传 rows 看服务端算出的实际范围，只传 scopes 看签发范围。两个都没有时只留虚线框
 const props = withDefaults(
   defineProps<{
-    scopes?: KeyScopes | null
-    rows?: readonly AccessRow[] | null
+    scopes?: LensKeyScopes | null
+    rows?: readonly BandAccessRow[] | null
+    primaryKind?: CircleKind
     // 带高跟随地层柱时传条数，不传就等高
     counts?: StrataCounts | null
     width?: number
@@ -29,14 +29,15 @@ const props = withDefaults(
     revoked?: boolean
     // 这根岩芯是谁的，读屏和悬停时读出来
     label?: string
-    // 标出一条记忆的位置；不知道敏感级时标整层
-    mark?: { layer: Layer; sensitivity: Sensitivity | null } | null
+    // 标出一条词条的位置；不知道敏感级时标整条色带
+    mark?: { band: StrataBand; sensitivity: Sensitivity | null } | null
     // 每一格能悬停：放上去时发出这一格的说明，离开时发出 null，由外面决定显示在哪
     interactive?: boolean
   }>(),
   {
     scopes: null,
     rows: null,
+    primaryKind: 'shared',
     counts: null,
     width: 44,
     height: 72,
@@ -51,7 +52,8 @@ const emit = defineEmits<{ hover: [text: string | null] }>()
 const GAP = 3
 const model = computed(() =>
   coreCells(
-    props.rows ?? (props.scopes ? issuedScopeRows(props.scopes) : []),
+    props.rows ??
+      (props.scopes ? issuedBandRows(props.scopes, { primaryKind: props.primaryKind }) : []),
     props.width,
     props.height,
     props.counts,
@@ -60,7 +62,7 @@ const model = computed(() =>
 )
 const groups = computed(() =>
   [true, false].map((conversation) => {
-    const bands = model.value.bands.filter((b) => isConversationLayer(b.layer) === conversation)
+    const bands = model.value.bands.filter((b) => isConversationBand(b.band) === conversation)
     const first = bands[0]
     const last = bands[bands.length - 1]
     const top = first?.y ?? 0
@@ -73,7 +75,7 @@ const name = computed(() =>
 )
 const noData = computed(() => !props.rows && !props.scopes)
 const markBox = computed(() =>
-  props.mark ? coreMark(model.value, props.mark.layer, props.mark.sensitivity) : null,
+  props.mark ? coreMark(model.value, props.mark.band, props.mark.sensitivity) : null,
 )
 </script>
 
@@ -110,10 +112,10 @@ const markBox = computed(() =>
       style="stroke: var(--ui-border)"
     />
     <template v-if="!revoked">
-      <template v-for="cell in model.cells" :key="`${cell.layer}-${cell.sensitivity}`">
+      <template v-for="cell in model.cells" :key="`${cell.band}-${cell.sensitivity}`">
         <rect
           v-for="(r, i) in paintAccess(
-            cell.layer,
+            cell.band,
             cell.sensitivity,
             cell.kind,
             { x: cell.x, y: cell.y, width: cell.width, height: cell.height },
@@ -158,7 +160,7 @@ const markBox = computed(() =>
       <!-- 透明的命中区：盖住整格（含格子之间的缝），悬停与键盘聚焦都给出这一格的说明 -->
       <rect
         v-for="cell in model.cells"
-        :key="`hit-${cell.layer}-${cell.sensitivity}`"
+        :key="`hit-${cell.band}-${cell.sensitivity}`"
         class="core-hit"
         :x="cell.x"
         :y="cell.y"
@@ -166,13 +168,13 @@ const markBox = computed(() =>
         :height="cell.height"
         fill="transparent"
         tabindex="0"
-        :aria-label="accessCellText(cell.layer, cell.sensitivity, cell.kind)"
-        @mouseenter="emit('hover', accessCellText(cell.layer, cell.sensitivity, cell.kind))"
-        @focus="emit('hover', accessCellText(cell.layer, cell.sensitivity, cell.kind))"
+        :aria-label="accessCellText(cell.band, cell.sensitivity, cell.kind)"
+        @mouseenter="emit('hover', accessCellText(cell.band, cell.sensitivity, cell.kind))"
+        @focus="emit('hover', accessCellText(cell.band, cell.sensitivity, cell.kind))"
         @mouseleave="emit('hover', null)"
         @blur="emit('hover', null)"
       >
-        <title>{{ accessCellText(cell.layer, cell.sensitivity, cell.kind) }}</title>
+        <title>{{ accessCellText(cell.band, cell.sensitivity, cell.kind) }}</title>
       </rect>
     </template>
     <rect

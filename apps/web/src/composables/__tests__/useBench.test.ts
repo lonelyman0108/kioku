@@ -1,10 +1,10 @@
 import type {
-  AppInfo,
   BenchAgentToolCall,
   BenchAgentTurnResult,
   BenchRunResult,
+  ClientInfo,
   KeyInfo,
-  KeyScopes,
+  LensKeyScopes,
   WhoAmI,
 } from '@kioku/contracts'
 import { QueryClient, VueQueryPlugin } from '@tanstack/vue-query'
@@ -12,7 +12,7 @@ import { createApp, effectScope, nextTick, reactive, ref, type EffectScope } fro
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ApiError } from '../../api/client'
-import { APP_REPLACED_NOTICE, KEY_REPLACED_NOTICE } from '../../benchSession'
+import { CLIENT_REPLACED_NOTICE, KEY_REPLACED_NOTICE } from '../../benchSession'
 import { createBench } from '../useBench'
 
 // 路由与接口换成假的，别的都是真的：vue 的响应式、vue-query 的缓存与刷新。
@@ -21,7 +21,7 @@ const fakes = vi.hoisted(() => ({
   route: null as unknown,
   router: null as unknown,
   api: {
-    apps: vi.fn(),
+    clients: vi.fn(),
     keys: vi.fn(),
     benchRun: vi.fn(),
     benchAgentTurn: vi.fn(),
@@ -37,15 +37,16 @@ vi.mock('../../api/endpoints', () => ({ api: fakes.api }))
 vi.mock('../useSession', () => ({ useSession: () => ({ me: { data: ref({ id: 'me' }) } }) }))
 vi.mock('../unsavedChanges', () => ({ useUnsavedChangesGuard: fakes.guard }))
 
-const SCOPES: KeyScopes = {
-  readLayers: ['user'],
-  writeLayers: ['user'],
+const SCOPES: LensKeyScopes = {
+  readKinds: ['entry'],
+  writeKinds: ['entry'],
   maxSensitivity: 'private',
+  allowedRealms: null,
   admin: false,
   credentials: 'none' as const,
 }
-const app = (id: string, ownerAccountId = 'me') =>
-  ({ id, name: `应用${id}`, ownerAccountId, runtimeFamily: 'claudecode' }) as AppInfo
+const makeClient = (id: string, ownerAccountId = 'me') =>
+  ({ id, name: `接入实例${id}`, ownerAccountId, runtimeFamily: 'claudecode' }) as ClientInfo
 const liveKey = (id: string) =>
   ({ id, name: `Key${id}`, prefix: id, effectiveScopes: SCOPES }) as KeyInfo
 const revokedKey = (id: string) =>
@@ -57,6 +58,7 @@ const RESULT = {
   mode: 'real',
   ok: true,
   whoami: {} as WhoAmI,
+  scopes: SCOPES,
   counts: { passed: 1, failed: 0, skipped: 0, notRun: 0 },
   steps: [
     {
@@ -72,7 +74,7 @@ const RESULT = {
       text: '',
       raw: {},
       ms: 1,
-      uris: [],
+      shortIds: [],
       session: null,
       vectorSkipped: false,
       assertions: [],
@@ -86,10 +88,10 @@ const RESULT = {
 
 // 地址：query 里 undefined 的项和真的 vue-router 一样去掉。导航和真的一样是异步的
 function fakeRouter(query: Record<string, string>) {
-  const fullPath = (q: Record<string, string>) => `/spaces/s1/bench?${new URLSearchParams(q)}`
+  const fullPath = (q: Record<string, string>) => `/circles/s1/bench?${new URLSearchParams(q)}`
   const route = reactive({
     name: 'bench',
-    params: { spaceId: 's1' },
+    params: { circleId: 's1' },
     query,
     fullPath: fullPath(query),
   })
@@ -177,7 +179,7 @@ async function abandonRun(mode: 'real' | 'rollback') {
 
 beforeEach(() => {
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  fakes.api.apps.mockReset().mockResolvedValue([app('a1'), app('a2')])
+  fakes.api.clients.mockReset().mockResolvedValue([makeClient('a1'), makeClient('a2')])
   fakes.api.keys.mockReset().mockResolvedValue([liveKey('k1'), liveKey('k2')])
   fakes.api.benchRun.mockReset()
   fakes.api.benchAgentTurn.mockReset()
@@ -190,10 +192,10 @@ afterEach(() => {
 })
 
 describe('选择写回地址', () => {
-  it('地址里没有应用与 Key：把解析出的写回去，用 replace，不进历史', async () => {
+  it('地址里没有接入实例与 Key：把解析出的写回去，用 replace，不进历史', async () => {
     const bench = start()
     await settle()
-    expect(fake.route.query).toEqual({ app: 'a1', key: 'k1' })
+    expect(fake.route.query).toEqual({ client: 'a1', key: 'k1' })
     expect(fake.router.push).not.toHaveBeenCalled()
     expect(bench.selectionNotice.value).toBeNull()
   })
@@ -201,30 +203,30 @@ describe('选择写回地址', () => {
   it('别的查询参数留着', async () => {
     start({ tab: 'scenarios' })
     await settle()
-    expect(fake.route.query).toEqual({ tab: 'scenarios', app: 'a1', key: 'k1' })
+    expect(fake.route.query).toEqual({ tab: 'scenarios', client: 'a1', key: 'k1' })
   })
 
-  it('带应用与 Key 的链接（模拟器的「在测试台打开」）：不动地址，选中的就是它们', async () => {
-    const bench = start({ app: 'a2', key: 'k2' })
+  it('带接入实例与 Key 的链接（模拟器的「在测试台打开」）：不动地址，选中的就是它们', async () => {
+    const bench = start({ client: 'a2', key: 'k2' })
     await settle()
     expect(fake.router.replace).not.toHaveBeenCalled()
-    expect(bench.appId.value).toBe('a2')
+    expect(bench.clientId.value).toBe('a2')
     expect(bench.keyId.value).toBe('k2')
     expect(bench.selectionNotice.value).toBeNull()
   })
 
-  it('只带应用的链接：那个应用的默认 Key 写回去，应用不变', async () => {
-    fakes.api.keys.mockImplementation(async (_space: string, id: string) =>
+  it('只带接入实例的链接：那个接入实例的默认 Key 写回去，接入实例不变', async () => {
+    fakes.api.keys.mockImplementation(async (_circle: string, id: string) =>
       id === 'a2' ? [liveKey('k8')] : [liveKey('k1')],
     )
-    start({ app: 'a2' })
+    start({ client: 'a2' })
     await settle()
-    expect(fake.route.query).toEqual({ app: 'a2', key: 'k8' })
+    expect(fake.route.query).toEqual({ client: 'a2', key: 'k8' })
   })
 
   it('还没读到的时候不动地址、不提示', async () => {
     fakes.api.keys.mockReturnValue(new Promise(() => {}))
-    const bench = start({ app: 'a1', key: 'k-link' })
+    const bench = start({ client: 'a1', key: 'k-link' })
     await settle()
     expect(fake.router.replace).not.toHaveBeenCalled()
     expect(bench.selectionNotice.value).toBeNull()
@@ -232,7 +234,7 @@ describe('选择写回地址', () => {
 
   it('读 Key 失败时不动地址、不提示', async () => {
     fakes.api.keys.mockRejectedValue(new Error('读不到'))
-    const bench = start({ app: 'a1', key: 'k-link' })
+    const bench = start({ client: 'a1', key: 'k-link' })
     await settle()
     expect(fake.router.replace).not.toHaveBeenCalled()
     expect(bench.selectionNotice.value).toBeNull()
@@ -241,7 +243,7 @@ describe('选择写回地址', () => {
   it('缓存里的旧列表没有地址里的 Key：等刷新完再判断，不冤枉它', async () => {
     client.setQueryData(['keys', 's1', 'a1'], [liveKey('k1')])
     fakes.api.keys.mockResolvedValue([liveKey('k1'), liveKey('k-new')])
-    const bench = start({ app: 'a1', key: 'k-new' })
+    const bench = start({ client: 'a1', key: 'k-new' })
     await settle()
     expect(fake.router.replace).not.toHaveBeenCalled()
     expect(bench.keyId.value).toBe('k-new')
@@ -251,25 +253,25 @@ describe('选择写回地址', () => {
   it('刷新失败时手上只有旧列表：不判断', async () => {
     client.setQueryData(['keys', 's1', 'a1'], [liveKey('k1')])
     fakes.api.keys.mockRejectedValue(new Error('读不到'))
-    const bench = start({ app: 'a1', key: 'k-new' })
+    const bench = start({ client: 'a1', key: 'k-new' })
     await settle()
     expect(fake.router.replace).not.toHaveBeenCalled()
     expect(bench.selectionNotice.value).toBeNull()
   })
 
-  it('换应用的时候不把上一个应用的 Key 写进地址', async () => {
-    fakes.api.keys.mockImplementation(async (_space: string, id: string) =>
+  it('换接入实例的时候不把上一个接入实例的 Key 写进地址', async () => {
+    fakes.api.keys.mockImplementation(async (_circle: string, id: string) =>
       id === 'a2' ? [liveKey('k8')] : [liveKey('k1')],
     )
     const bench = start()
     await settle()
-    expect(fake.route.query).toEqual({ app: 'a1', key: 'k1' })
+    expect(fake.route.query).toEqual({ client: 'a1', key: 'k1' })
     fake.router.replace.mockClear()
-    bench.selectApp('a2')
+    bench.selectClient('a2')
     await settle()
     const writes = fake.router.replace.mock.calls.map(([to]) => to.query.key)
     expect(writes).not.toContain('k1')
-    expect(fake.route.query).toEqual({ app: 'a2', key: 'k8' })
+    expect(fake.route.query).toEqual({ client: 'a2', key: 'k8' })
     expect(bench.selectionNotice.value).toBeNull()
   })
 
@@ -279,7 +281,7 @@ describe('选择写回地址', () => {
     fake.router.replace.mockClear()
     fake.route.name = 'memories'
     fake.route.query = {}
-    fake.route.fullPath = '/spaces/s1/memories'
+    fake.route.fullPath = '/circles/s1/memories'
     fakes.api.keys.mockResolvedValue([liveKey('k2')])
     await refetchKeys()
     expect(fake.router.replace).not.toHaveBeenCalled()
@@ -307,10 +309,10 @@ describe('默认选中的一变', () => {
     fakes.api.keys.mockResolvedValue([liveKey('k-new'), liveKey('k1'), liveKey('k2')])
     await refetchKeys()
     fake.route.query = {}
-    fake.route.fullPath = '/spaces/s1/bench'
+    fake.route.fullPath = '/circles/s1/bench'
     await settle()
     expect(bench.keyId.value).toBe('k1')
-    expect(fake.route.query).toEqual({ app: 'a1', key: 'k1' })
+    expect(fake.route.query).toEqual({ client: 'a1', key: 'k1' })
     expect(bench.generation.value).toBe(generation)
     expect(bench.selectionNotice.value).toBeNull()
   })
@@ -325,59 +327,59 @@ describe('默认选中的一变', () => {
     expect(bench.selectionNotice.value).toBe(KEY_REPLACED_NOTICE)
   })
 
-  it('应用转走了：换成自己的另一个应用，提示一次，Key 不留原来应用的', async () => {
-    fakes.api.keys.mockImplementation(async (_space: string, id: string) =>
+  it('接入实例转走了：换成自己的另一个接入实例，提示一次，Key 不留原来接入实例的', async () => {
+    fakes.api.keys.mockImplementation(async (_circle: string, id: string) =>
       id === 'a2' ? [liveKey('k8')] : [liveKey('k1')],
     )
     const bench = start()
     await settle()
-    fakes.api.apps.mockResolvedValue([app('a1', 'other'), app('a2')])
-    await client.invalidateQueries({ queryKey: ['apps'] })
+    fakes.api.clients.mockResolvedValue([makeClient('a1', 'other'), makeClient('a2')])
+    await client.invalidateQueries({ queryKey: ['clients'] })
     await settle()
-    expect(bench.appId.value).toBe('a2')
-    expect(fake.route.query).toEqual({ app: 'a2', key: 'k8' })
-    expect(bench.selectionNotice.value).toBe(APP_REPLACED_NOTICE)
+    expect(bench.clientId.value).toBe('a2')
+    expect(fake.route.query).toEqual({ client: 'a2', key: 'k8' })
+    expect(bench.selectionNotice.value).toBe(CLIENT_REPLACED_NOTICE)
   })
 })
 
 describe('选择失效的提示', () => {
   it('链接里的 Key 失效、有别的可换：换了，地址改成实际选择，提示', async () => {
-    const bench = start({ app: 'a1', key: 'k-gone' })
+    const bench = start({ client: 'a1', key: 'k-gone' })
     await settle()
     expect(bench.keyId.value).toBe('k1')
-    expect(fake.route.query).toEqual({ app: 'a1', key: 'k1' })
+    expect(fake.route.query).toEqual({ client: 'a1', key: 'k1' })
     expect(bench.selectionNotice.value).toBe(KEY_REPLACED_NOTICE)
   })
 
-  it('链接里的应用不是自己的：换了，地址里的 Key 也去掉，只提示应用', async () => {
-    const bench = start({ app: 'a-other', key: 'k-other' })
+  it('链接里的接入实例不是自己的：换了，地址里的 Key 也去掉，只提示接入实例', async () => {
+    const bench = start({ client: 'a-other', key: 'k-other' })
     await settle()
-    expect(bench.appId.value).toBe('a1')
-    expect(fake.route.query).toEqual({ app: 'a1', key: 'k1' })
-    expect(bench.selectionNotice.value).toBe(APP_REPLACED_NOTICE)
+    expect(bench.clientId.value).toBe('a1')
+    expect(fake.route.query).toEqual({ client: 'a1', key: 'k1' })
+    expect(bench.selectionNotice.value).toBe(CLIENT_REPLACED_NOTICE)
   })
 
   it('没有别的有效 Key：不说换了，地址不动', async () => {
     fakes.api.keys.mockResolvedValue([revokedKey('k1')])
-    const bench = start({ app: 'a1', key: 'k1' })
+    const bench = start({ client: 'a1', key: 'k1' })
     await settle()
     expect(bench.keyId.value).toBeUndefined()
     expect(bench.selectionNotice.value).toBeNull()
     expect(fake.router.replace).not.toHaveBeenCalled()
   })
 
-  it('没有自己的应用：不说换了，地址不动', async () => {
-    fakes.api.apps.mockResolvedValue([app('a1', 'other')])
-    const bench = start({ app: 'a1' })
+  it('没有自己的接入实例：不说换了，地址不动', async () => {
+    fakes.api.clients.mockResolvedValue([makeClient('a1', 'other')])
+    const bench = start({ client: 'a1' })
     await settle()
-    expect(bench.appId.value).toBeUndefined()
+    expect(bench.clientId.value).toBeUndefined()
     expect(bench.selectionNotice.value).toBeNull()
     expect(fake.router.replace).not.toHaveBeenCalled()
   })
 
   it('用得上的 Key 回来了才算换：之前选中的失效，现在有了新的', async () => {
     fakes.api.keys.mockResolvedValue([revokedKey('k1')])
-    const bench = start({ app: 'a1', key: 'k1' })
+    const bench = start({ client: 'a1', key: 'k1' })
     await settle()
     fakes.api.keys.mockResolvedValue([revokedKey('k1'), liveKey('k-new')])
     await refetchKeys()
@@ -387,7 +389,7 @@ describe('选择失效的提示', () => {
   })
 
   it('关掉之后不再提示：地址已经是实际的选择，再刷新也不会', async () => {
-    const bench = start({ app: 'a1', key: 'k-gone' })
+    const bench = start({ client: 'a1', key: 'k-gone' })
     await settle()
     bench.selectionNotice.value = null
     await refetchKeys()
@@ -396,7 +398,7 @@ describe('选择失效的提示', () => {
   })
 
   it('刷新页面：地址已经改过，不再提示', async () => {
-    start({ app: 'a1', key: 'k-gone' })
+    start({ client: 'a1', key: 'k-gone' })
     await settle()
     const { query } = fake.route
     scope.stop()
@@ -407,7 +409,7 @@ describe('选择失效的提示', () => {
   })
 
   it('自己选了别的：提示清掉', async () => {
-    const bench = start({ app: 'a1', key: 'k-gone' })
+    const bench = start({ client: 'a1', key: 'k-gone' })
     await settle()
     expect(bench.selectionNotice.value).toBe(KEY_REPLACED_NOTICE)
     bench.selectKey('k2')
@@ -436,7 +438,7 @@ describe('运行中途作废', () => {
     expect(record?.title).toContain('可能已写入')
     expect(record?.title).toContain('请到变更记录确认')
     expect(record?.description).toContain('「我的场景」')
-    expect(record?.description).toContain('「应用a1」的访问密钥「Keyk1」')
+    expect(record?.description).toContain('「接入实例a1」的访问密钥「Keyk1」')
     expect(record?.result).toBe(RESULT)
     expect(record?.view).toBe('judged')
   })
@@ -814,12 +816,12 @@ describe('离开页面前提醒', () => {
     expect(dirty()).toBe(false)
   })
 
-  it('换应用、Key、分页只改查询参数，不算离开；写回地址也是；换空间才算', () => {
+  it('换接入实例、Key、分页只改查询参数，不算离开；写回地址也是；换记忆圈才算', () => {
     start()
-    const from = { params: { spaceId: 's1' }, query: {} }
-    expect(leavesOn({ params: { spaceId: 's1' }, query: { key: 'k2' } }, from)).toBe(false)
-    expect(leavesOn({ params: { spaceId: 's1' }, query: { tab: 'scenarios' } }, from)).toBe(false)
-    expect(leavesOn({ params: { spaceId: 's2' }, query: {} }, from)).toBe(true)
+    const from = { params: { circleId: 's1' }, query: {} }
+    expect(leavesOn({ params: { circleId: 's1' }, query: { key: 'k2' } }, from)).toBe(false)
+    expect(leavesOn({ params: { circleId: 's1' }, query: { tab: 'scenarios' } }, from)).toBe(false)
+    expect(leavesOn({ params: { circleId: 's2' }, query: {} }, from)).toBe(true)
   })
 })
 
@@ -1014,7 +1016,7 @@ describe('模型对话', () => {
     await settle()
     const calling = deferred<BenchRunResult>()
     fakes.api.benchRun.mockReturnValueOnce(calling.promise)
-    const called = bench.call(STEPS, 'kioku_list')
+    const called = bench.call(STEPS, 'kioku_browse')
     await settle()
     expect(bench.callRunning.value).toBe(true)
     expect(bench.scenarioRunning.value).toBe(false)
@@ -1039,7 +1041,7 @@ describe('模型对话', () => {
     const bench = start()
     await settle()
     fakes.api.benchRun.mockResolvedValueOnce({ ...RESULT, mode: 'rollback' })
-    await bench.call(STEPS, 'kioku_list')
+    await bench.call(STEPS, 'kioku_browse')
     const model = hangingModel()
     fakes.api.benchAgentTurn.mockImplementationOnce(model.turn)
     const sent = bench.sendToAgent('你好', TOOLS_LOOP)
@@ -1050,7 +1052,7 @@ describe('模型对话', () => {
 
     const run = deferred<BenchRunResult>()
     fakes.api.benchRun.mockReturnValueOnce(run.promise)
-    const called = bench.call(STEPS, 'kioku_list')
+    const called = bench.call(STEPS, 'kioku_browse')
     await settle()
     expect(bench.callRunning.value).toBe(true)
     fakes.api.keys.mockResolvedValue([liveKey('k2')])
@@ -1179,11 +1181,11 @@ describe('模型对话', () => {
     expect(body.messages.filter((m: { role: string }) => m.role === 'user')).toHaveLength(1)
   })
 
-  it('换应用、换模式都清掉对话', async () => {
+  it('换接入实例、换模式都清掉对话', async () => {
     const bench = start()
     await settle()
     await withConversation(bench)
-    bench.selectApp('a2')
+    bench.selectClient('a2')
     await settle()
     expect(bench.agent.value.exchanges).toEqual([])
     await withConversation(bench)
@@ -1216,7 +1218,7 @@ describe('模型对话', () => {
       })
     fakes.api.benchAgentTurn
       .mockResolvedValueOnce(modelReply('', [WRITE_CALL]))
-      .mockResolvedValueOnce(modelReply('', [{ ...WRITE_CALL, id: 'c2', name: 'kioku_list' }]))
+      .mockResolvedValueOnce(modelReply('', [{ ...WRITE_CALL, id: 'c2', name: 'kioku_browse' }]))
     await bench.sendToAgent('你好', TOOLS_LOOP)
     expect(bench.agent.value.session.diverged?.index).toBe(0)
     expect(bench.agent.value.session.replay).toHaveLength(1)
@@ -1280,7 +1282,7 @@ describe('模型对话', () => {
     const [record] = bench.abandoned.value
     expect(record?.title).toContain('可能已写入')
     expect(record?.description).toContain('kioku_create')
-    expect(record?.description).toContain('「应用a1」的访问密钥「Keyk1」')
+    expect(record?.description).toContain('「接入实例a1」的访问密钥「Keyk1」')
     expect(record?.view).toBe('call')
     expect(record?.result).toBe(RESULT)
     // 不再请求模型：对话已经作废
@@ -1349,7 +1351,7 @@ describe('模型对话', () => {
     expect(bench.abandoned.value).toHaveLength(1)
     expect(record?.title).toContain('可能已写入')
     expect(record?.description).toContain('kioku_create')
-    expect(record?.description).toContain('「应用a1」的访问密钥「Keyk1」')
+    expect(record?.description).toContain('「接入实例a1」的访问密钥「Keyk1」')
     expect(record?.view).toBe('call')
     expect(record?.result?.run).toBe(RESULT.run)
     // 能一条一条关
@@ -1362,7 +1364,7 @@ describe('模型对话', () => {
     await settle()
     bench.confirmReal()
     await settle()
-    const read = { ...WRITE_CALL, name: 'kioku_list', arguments: {} }
+    const read = { ...WRITE_CALL, name: 'kioku_browse', arguments: {} }
     const model = hangingModel()
     fakes.api.benchAgentTurn
       .mockResolvedValueOnce(modelReply('', [read]))

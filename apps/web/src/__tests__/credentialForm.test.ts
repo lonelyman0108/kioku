@@ -19,8 +19,10 @@ const form = (over: Partial<CredentialFormState> = {}): CredentialFormState => (
   identifier: 'nas',
   name: 'NAS',
   description: '',
-  restrict: false,
-  appIds: [],
+  restrictClients: false,
+  clientIds: [],
+  restrictRealms: false,
+  allowedRealms: [],
   url: '',
   expires: expiresField(null),
   needsRotation: false,
@@ -40,7 +42,8 @@ const credential = (over: Partial<ConsoleCredential> = {}): ConsoleCredential =>
   updatedAt: '2026-11-01T00:00:00Z',
   fields: [{ name: 'password', itemField: null }],
   vault: null,
-  appIds: null,
+  clientIds: null,
+  allowedRealms: null,
   deletedAt: null,
   referenceCount: 0,
   rotationRequestedAt: null,
@@ -92,34 +95,48 @@ const edit = (origin: ConsoleCredential, over: Partial<CredentialFormInput> = {}
   })
 
 describe('新建', () => {
-  it('来源是 new：值写到去处或由 Kioku 托管，请求里不选；网址与到期时间填了才发', () => {
+  it('来源是 new：值写到去处或由 Kioku 托管；网址、到期时间与允许场域按输入发出', () => {
     expect(createBody(input())).toEqual({
       identifier: 'nas',
       name: 'NAS',
       description: null,
-      appIds: null,
+      clientIds: null,
+      allowedRealms: null,
       source: { kind: 'new', values: { password: 'hunter22' } },
     })
     const body = createBody(
-      input({ form: form({ url: ' https://nas.example.com ', expires: at('2026-12-01T08:00') }) }),
+      input({
+        form: form({
+          url: ' https://nas.example.com ',
+          expires: at('2026-12-01T08:00'),
+          restrictRealms: true,
+          allowedRealms: [' Home ', 'home', 'work'],
+        }),
+      }),
     )
     expect(body.source).toEqual({
       kind: 'new',
       values: { password: 'hunter22' },
       url: 'https://nas.example.com',
     })
+    expect(body.allowedRealms).toEqual(['home', 'work'])
     expect(body.expiresAt).toBe(new Date('2026-12-01T08:00').toISOString())
     expect(formProblem(input())).toBeNull()
   })
 
-  it('网址按接口的规则检查，不完整的到期时间拦下', () => {
+  it('开启限定接入实例或限定场域但列表为空时拦下；网址与到期时间照规则检查', () => {
+    expect(formProblem(input({ form: form({ restrictClients: true, clientIds: [] }) }))).toBe(
+      '限定接入实例时至少选择一个',
+    )
+    expect(formProblem(input({ form: form({ restrictRealms: true, allowedRealms: [] }) }))).toBe(
+      '限定场域时至少选择一个',
+    )
     expect(formProblem(input({ form: form({ url: 'nas.example.com' }) }))).toBe(
       '网址要以 http:// 或 https:// 开头',
     )
     expect(formProblem(input({ form: form({ expires: at('2026-12-01') }) }))).toBe(
       '请填写完整的到期时间',
     )
-    // 填了一半：值是空的，badInput 为真
     expect(formProblem(input({ form: form({ expires: at('', true) }) }))).toBe(
       '请填写完整的到期时间',
     )
@@ -158,12 +175,13 @@ describe('新建', () => {
 })
 
 describe('修改', () => {
-  it('什么都没改时只带名称、说明与限定应用', () => {
+  it('什么都没改时只带名称、说明、限定接入实例与允许场域', () => {
     expect(updateBody(edit(credential()))).toEqual({
       expectedVersion: 3,
       name: 'NAS',
       description: null,
-      appIds: null,
+      clientIds: null,
+      allowedRealms: null,
     })
   })
 
@@ -257,7 +275,6 @@ describe('409 之后重新读取', () => {
     })
     mine.form.description = '改过的说明'
     mine.form.expires = { noExpiry: false, input: '2027-01-01T00:00', bad: false }
-    // 别处改了名称与到期时间，版本加一
     const fresh = {
       ...before,
       version: 4,
@@ -269,7 +286,6 @@ describe('409 之后重新读取', () => {
     expect(merged.mode).toEqual({ kind: 'edit', origin: fresh })
     expect(merged.valueRows.find((r) => r.name === 'username')!.removed).toBe(true)
     expect(merged.valueRows.find((r) => r.name === 'token')!.value).toBe('abcd1234')
-    // 没动过的取新的，动过的留着表单里的
     expect(merged.form.name).toBe('别处改的名称')
     expect(merged.form.description).toBe('改过的说明')
     expect(merged.form.expires.input).toBe('2027-01-01T00:00')
@@ -361,19 +377,29 @@ describe('409 之后重新读取', () => {
     expect(mergeReloaded(same, before, fresh, key).conflicts).toEqual([])
   })
 
-  it('限定应用是一个整体：一边改了列表、另一边取消了限定，报冲突，不悄悄变成不限定', () => {
-    const before = credential({ appIds: ['00000000-0000-4000-8000-0000000000a1'] })
+  it('限定接入实例与允许场域各自按整体合并：双边冲突时报提示，单边改动直接采纳', () => {
+    const before = credential({
+      clientIds: ['00000000-0000-4000-8000-0000000000a1'],
+      allowedRealms: ['home'],
+    })
     const mine = edit(before)
-    mine.form.appIds = ['00000000-0000-4000-8000-0000000000a2']
-    const fresh = { ...before, version: 4, appIds: null }
+    mine.form.clientIds = ['00000000-0000-4000-8000-0000000000a2']
+    mine.form.allowedRealms = ['work']
+    const fresh = { ...before, version: 4, clientIds: null, allowedRealms: null }
     const { input: merged, conflicts } = mergeReloaded(mine, before, fresh, key)
-    expect(conflicts).toEqual(['限定应用在别处也修改过，保存时以表单中的为准，请核对'])
-    expect(merged.form.restrict).toBe(true)
-    expect(merged.form.appIds).toEqual(['00000000-0000-4000-8000-0000000000a2'])
-    // 只有一边动了：取动了的那边
+    expect(conflicts).toEqual([
+      '限定接入实例在别处也修改过，保存时以表单中的为准，请核对',
+      '允许场域在别处也修改过，保存时以表单中的为准，请核对',
+    ])
+    expect(merged.form.restrictClients).toBe(true)
+    expect(merged.form.clientIds).toEqual(['00000000-0000-4000-8000-0000000000a2'])
+    expect(merged.form.restrictRealms).toBe(true)
+    expect(merged.form.allowedRealms).toEqual(['work'])
+
     const untouched = mergeReloaded(edit(before), before, fresh, key)
     expect(untouched.conflicts).toEqual([])
-    expect(untouched.input.form.restrict).toBe(false)
+    expect(untouched.input.form.restrictClients).toBe(false)
+    expect(untouched.input.form.restrictRealms).toBe(false)
   })
 
   it('托管的：空的新行和别处新加的字段同名，不报「将改为填写的值」，名字照样能改', () => {

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { CONVERSATION_KINDS, type ConversationKind } from '@kioku/contracts'
 import type { TabsItem } from '@nuxt/ui'
 import { useInfiniteQuery, useQuery } from '@tanstack/vue-query'
 import { computed, nextTick, ref, watch } from 'vue'
@@ -14,15 +15,14 @@ import EmptyState from '../components/strata/EmptyState.vue'
 import NoteLine from '../components/strata/NoteLine.vue'
 import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import { useViewport } from '../composables/useViewport'
-import { conversationSubline, conversationTitle } from '../conversations'
+import { conversationKindLabels, conversationSubline, conversationTitle } from '../conversations'
 import { icons } from '../icons'
 import { formatShort, formatTime } from '../time'
 
 // 对话：会话与联系人两个分页。联系人回答「关于谁」，会话回答「在哪聊的、聊了什么」。
-// 会话像聊天列表：左边按最近活动排，右边是选中的会话；联系人是原来的联系人页，点进去是联系人详情
 const route = useRoute()
 const router = useRouter()
-const spaceId = computed(() => String(route.params.spaceId))
+const circleId = computed(() => String(route.params.circleId))
 
 type Tab = 'sessions' | 'contacts'
 const tab = computed<Tab>(() => (route.query.tab === 'contacts' ? 'contacts' : 'sessions'))
@@ -35,13 +35,20 @@ function setTab(value: string | number) {
   void router.replace({ query: value === 'contacts' ? { tab: 'contacts' } : {} })
 }
 
-// 选中的会话和按应用的筛选记在地址里：从应用、联系人详情点过来时直接打开
+// 选中的会话、按接入实例与类型的筛选记在地址里：从接入实例或联系人详情点过来时直接打开
 const text = (key: string) => {
   const value = route.query[key]
   return typeof value === 'string' && value ? value : null
 }
 const selectedId = computed(() => (tab.value === 'sessions' ? text('id') : null))
-const appId = computed(() => text('app'))
+const clientId = computed(() => text('client'))
+const selectedKind = computed<ConversationKind | 'all'>(() => {
+  const raw = text('kind')
+  return raw && (CONVERSATION_KINDS as readonly string[]).includes(raw)
+    ? (raw as ConversationKind)
+    : 'all'
+})
+
 function withQuery(changes: Record<string, string | null>) {
   const query = { ...route.query }
   for (const [key, value] of Object.entries(changes)) {
@@ -51,31 +58,42 @@ function withQuery(changes: Record<string, string | null>) {
   return { query }
 }
 const select = (id: string | null) => router.replace(withQuery({ id }))
-const clearApp = () => router.replace(withQuery({ app: null }))
+const clearClient = () => router.replace(withQuery({ client: null }))
+const setKind = (kind: string) =>
+  router.replace(withQuery({ kind: kind === 'all' ? null : kind, id: null }))
 
-// 重新读取（刷新、失效）从第一页读起，后面几页的游标按新读到的算：服务端按最近活动翻页，
-// 翻页期间变活跃的会话这时回到最前面（见服务端 routes/conversations.ts）
+const kindItems = [
+  { label: '全部类型', value: 'all' },
+  ...CONVERSATION_KINDS.map((kind) => ({ label: conversationKindLabels[kind], value: kind })),
+]
+
+// 重新读取（刷新、失效）从第一页读起，后面几页的游标按新读到的算：服务端按最近活动翻页
 const list = useInfiniteQuery({
-  queryKey: computed(() => ['conversations', spaceId.value, appId.value] as const),
-  // 参数从键里取：换了筛选之后，旧键剩下的页还在重新拉取时，不会用上新的筛选条件
-  queryFn: ({ pageParam, queryKey: [, sid, app] }) =>
-    api.conversations(sid, { appId: app ?? undefined, cursor: pageParam }),
+  queryKey: computed(
+    () => ['conversations', circleId.value, clientId.value, selectedKind.value] as const,
+  ),
+  queryFn: ({ pageParam, queryKey: [, cid, client, kind] }) =>
+    api.conversations(cid, {
+      clientId: client ?? undefined,
+      kind: kind === 'all' ? undefined : kind,
+      cursor: pageParam,
+    }),
   initialPageParam: undefined as string | undefined,
   getNextPageParam: (last) => last.nextCursor ?? undefined,
   enabled: computed(() => tab.value === 'sessions'),
 })
 const items = computed(() => list.data.value?.pages.flatMap((page) => page.items) ?? [])
 
-// 筛选条上写应用的名字：列表里有就用列表里的，没有（这个应用还没有会话）再去应用列表里找
-const apps = useQuery({
-  queryKey: computed(() => ['apps', spaceId.value]),
-  queryFn: () => api.apps(spaceId.value),
-  enabled: computed(() => appId.value !== null),
+// 筛选条上写接入实例的名字：列表里有就用列表里的，没有再去列表里找
+const clients = useQuery({
+  queryKey: computed(() => ['clients', circleId.value] as const),
+  queryFn: () => api.clients(circleId.value),
+  enabled: computed(() => clientId.value !== null),
 })
-const appName = computed(
+const clientName = computed(
   () =>
-    items.value.find((c) => c.app.id === appId.value)?.app.name ??
-    apps.data.value?.find((a) => a.id === appId.value)?.name ??
+    items.value.find((c) => c.client.id === clientId.value)?.client.name ??
+    clients.data.value?.find((a) => a.id === clientId.value)?.name ??
     '…',
 )
 
@@ -96,7 +114,7 @@ watch(selectedId, async (id, previous) => {
   if (!target) return
   await nextTick()
   if (target.to === 'title') return detailRef.value?.focusTitle()
-  ;(rowOf(target.uri) ?? listColumn.value)?.focus()
+  ;(rowOf(target.shortId) ?? listColumn.value)?.focus()
 })
 </script>
 
@@ -113,19 +131,30 @@ watch(selectedId, async (id, previous) => {
           :ui="{ root: 'min-w-0', list: 'border-0', trigger: 'px-2 py-0 h-11 text-sm/5' }"
           @update:model-value="setTab"
         />
-        <UButton
-          :icon="icons.refresh"
-          size="sm"
-          color="neutral"
-          variant="ghost"
-          aria-label="刷新"
-          :loading="list.isRefetching.value"
-          @click="refresh"
-        />
+        <div class="list-actions">
+          <USelect
+            :model-value="selectedKind"
+            :items="kindItems"
+            value-key="value"
+            size="xs"
+            aria-label="筛选会话类型"
+            class="w-28"
+            @update:model-value="setKind"
+          />
+          <UButton
+            :icon="icons.refresh"
+            size="sm"
+            color="neutral"
+            variant="ghost"
+            aria-label="刷新"
+            :loading="list.isRefetching.value"
+            @click="refresh"
+          />
+        </div>
       </div>
-      <p v-if="appId" class="list-filter">
-        <span class="min-w-0 truncate">应用「{{ appName }}」的会话</span>
-        <button type="button" aria-label="清除筛选" @click="clearApp">
+      <p v-if="clientId" class="list-filter">
+        <span class="min-w-0 truncate">接入实例「{{ clientName }}」的会话</span>
+        <button type="button" aria-label="清除筛选" @click="clearClient">
           <UIcon :name="icons.cancel" class="size-3.5" />
         </button>
       </p>
@@ -155,6 +184,11 @@ watch(selectedId, async (id, previous) => {
                   </time>
                 </span>
                 <span class="conv-sub">{{ conversationSubline(c) }}</span>
+                <span v-if="c.projectSlug || c.deviceKey" class="conv-env">
+                  <template v-if="c.projectSlug">项目 {{ c.projectSlug }}</template>
+                  <template v-if="c.projectSlug && c.deviceKey"> · </template>
+                  <template v-if="c.deviceKey">设备 {{ c.deviceKey }}</template>
+                </span>
                 <span v-if="c.latestSummary" class="conv-snippet">
                   {{ c.latestSummary.excerpt }}
                 </span>
@@ -164,7 +198,8 @@ watch(selectedId, async (id, previous) => {
           <EmptyState v-else title="暂无会话">
             <template #hint>
               <Hint>
-                群聊机器人与本机 Agent 的对话按群、私聊或本人分成会话，抽取后在这里列出会话摘要。
+                群聊机器人与本机 Agent
+                的对话按群、频道、私聊或本地会话分隔，抽取后在这里列出会话摘要。
               </Hint>
             </template>
           </EmptyState>
@@ -190,9 +225,9 @@ watch(selectedId, async (id, previous) => {
       <ConversationDetail
         v-if="selectedId"
         :id="selectedId"
-        :key="`${spaceId}|${selectedId}`"
+        :key="`${circleId}|${selectedId}`"
         ref="detailRef"
-        :space-id="spaceId"
+        :circle-id="circleId"
       >
         <template #nav>
           <button type="button" class="back" @click="select(null)">
@@ -217,7 +252,7 @@ watch(selectedId, async (id, previous) => {
         @update:model-value="setTab"
       />
     </div>
-    <ContactList :space-id="spaceId" />
+    <ContactList :circle-id="circleId" />
   </div>
 </template>
 
@@ -250,8 +285,10 @@ watch(selectedId, async (id, previous) => {
   padding: 0 10px 0 6px;
   border-bottom: 1px solid var(--strata-rule);
 }
-.list-head > :last-child {
-  align-self: center;
+.list-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 .list-filter {
   flex: none;
@@ -281,7 +318,7 @@ watch(selectedId, async (id, previous) => {
 .list-failed {
   padding: 14px 14px 0;
 }
-/* 会话的颜色压在行首一条细带上：和地层柱的会话同一种颜色，文字靠第二行说明是哪一类 */
+/* 会话的颜色压在行首一条细带上：和地层柱的会话摘要同一种颜色 */
 .conv-row {
   position: relative;
   display: flex;
@@ -332,6 +369,7 @@ watch(selectedId, async (id, previous) => {
   color: var(--ui-text-muted);
 }
 .conv-sub,
+.conv-env,
 .conv-snippet {
   overflow: hidden;
   font-size: 13px;
@@ -340,12 +378,17 @@ watch(selectedId, async (id, previous) => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.conv-env {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
 .conv-snippet {
   font-size: 14px;
   color: var(--ui-text-toned);
 }
 .selected .conv-top time,
 .selected .conv-sub,
+.selected .conv-env,
 .selected .conv-snippet {
   color: var(--strata-on-selected-muted);
 }

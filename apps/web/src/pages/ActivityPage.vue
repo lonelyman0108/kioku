@@ -25,7 +25,7 @@ import {
   type FilterGroup,
   type QuickRange,
 } from '../activity'
-import { ACTIVITY_UNKNOWN_TIME_ZONE } from '@kioku/contracts'
+import { ACTIVITY_UNKNOWN_TIME_ZONE, type EntryKind } from '@kioku/contracts'
 import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import ActivityCalendar from '../components/ActivityCalendar.vue'
@@ -43,12 +43,12 @@ import {
   activityActorKind,
   activityActorName,
   changeLabels,
+  entryKindLabels,
   eventLabel,
-  layerLabels,
 } from '../labels'
 const route = useRoute()
 const router = useRouter()
-const spaceId = computed(() => String(route.params.spaceId))
+const circleId = computed(() => String(route.params.circleId))
 // 浏览器的时区：按天计数按它分天，和表格里按本地日期分组一致。服务端按数据库的时区库认名字，
 // 不认识（库比浏览器旧）时回 400 并带上 code，只在这种错误时退回 UTC：日历、柱条、表格的分组与范围的边界
 // 一律按 UTC 分天，筛选那里写明
@@ -89,16 +89,16 @@ const filter = computed(() => filterQuery(state.value, today.value, utcFallback.
 
 // 筛选计数：每组的条数，以及合计
 const facets = useQuery({
-  queryKey: computed(() => ['activity-facets', spaceId.value, filter.value]),
-  queryFn: () => api.activityFacets(spaceId.value, filter.value),
+  queryKey: computed(() => ['activity-facets', circleId.value, filter.value]),
+  queryFn: () => api.activityFacets(circleId.value, filter.value),
   placeholderData: keepPreviousData,
 })
 const options = computed(() => facetOptions(facets.data.value, state.value.off))
 
 // 列表：一页一页往后加载；看不到的记忆的改动服务端已经滤掉
 const activity = useInfiniteQuery({
-  queryKey: computed(() => ['activity', spaceId.value, filter.value]),
-  queryFn: ({ pageParam }) => api.activity(spaceId.value, filter.value, pageParam),
+  queryKey: computed(() => ['activity', circleId.value, filter.value]),
+  queryFn: ({ pageParam }) => api.activity(circleId.value, filter.value, pageParam),
   initialPageParam: undefined as string | undefined,
   getNextPageParam: (last) => last.nextCursor ?? undefined,
 })
@@ -107,8 +107,8 @@ const groups = computed(() => groupByDay(items.value, today.value, utcFallback.v
 
 // 每天的条数：选中范围内的给柱条与每天的小标题，日历上那个月的给格子
 const rangeDays = useQuery({
-  queryKey: computed(() => ['activity-days', spaceId.value, filter.value, tz.value]),
-  queryFn: () => api.activityDays(spaceId.value, filter.value, tz.value),
+  queryKey: computed(() => ['activity-days', circleId.value, filter.value, tz.value]),
+  queryFn: () => api.activityDays(circleId.value, filter.value, tz.value),
   placeholderData: keepPreviousData,
 })
 const month = ref(monthOf(days.value?.to ?? today.value))
@@ -117,8 +117,8 @@ const calendarFilter = computed(() => ({
   ...dayBounds(gridDays(month.value), utcFallback.value),
 }))
 const calendarDays = useQuery({
-  queryKey: computed(() => ['activity-days', spaceId.value, calendarFilter.value, tz.value]),
-  queryFn: () => api.activityDays(spaceId.value, calendarFilter.value, tz.value),
+  queryKey: computed(() => ['activity-days', circleId.value, calendarFilter.value, tz.value]),
+  queryFn: () => api.activityDays(circleId.value, calendarFilter.value, tz.value),
   placeholderData: keepPreviousData,
 })
 watch([() => rangeDays.error.value, () => calendarDays.error.value], (errors) => {
@@ -172,7 +172,7 @@ function onReset(group: FilterGroup) {
 const groupTitles: Record<FilterGroup, string> = {
   actor: '操作者',
   type: '操作',
-  layer: '归属',
+  kind: '类型',
   field: '字段',
 }
 const actorNames = computed(
@@ -183,7 +183,7 @@ function valueName(group: FilterGroup, key: string): string {
     return activityActorName(activityActorKind(key), actorNames.value.get(key) ?? null)
   }
   if (group === 'type') return eventLabel(key).label
-  if (group === 'layer') return layerLabels[key as keyof typeof layerLabels] ?? key
+  if (group === 'kind') return entryKindLabels[key as EntryKind] ?? key
   return changeLabels[key] ?? key
 }
 const dateChip = computed(() => {
@@ -289,14 +289,14 @@ const columns = computed(() => ({ narrow: 2, compact: 5, full: 6 })[layout.value
     <div class="main">
       <div class="toolbar">
         <h1>变更记录</h1>
-        <Hint>通过访问密钥写入的改动，操作者显示为应用。</Hint>
+        <Hint>通过访问密钥写入的改动，操作者显示为接入实例。</Hint>
         <UInput
           v-model="qInput"
           class="search"
           size="sm"
           :icon="icons.search"
-          placeholder="标题或坐标"
-          aria-label="搜索标题或坐标"
+          placeholder="标题或短 ID"
+          aria-label="搜索标题或短 ID"
           :maxlength="100"
         />
         <span class="grow" />
@@ -478,7 +478,7 @@ const columns = computed(() => ({ narrow: 2, compact: 5, full: 6 })[layout.value
         :key="state.event!"
         :event-id="state.event!"
         :initial="selected"
-        :space-id="spaceId"
+        :circle-id="circleId"
         @close="closeDetail"
       />
     </aside>
@@ -527,7 +527,7 @@ const columns = computed(() => ({ narrow: 2, compact: 5, full: 6 })[layout.value
           class="overflow-y-auto"
           :event-id="state.event"
           :initial="selected"
-          :space-id="spaceId"
+          :circle-id="circleId"
           @close="closeDetail"
         />
       </template>

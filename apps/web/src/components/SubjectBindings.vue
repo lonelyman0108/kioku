@@ -19,7 +19,7 @@ import { formatRelative, formatTime } from '../time'
 
 // 绑定记录与确认、拒绝：待处理页列出等当前账号确认的，联系人页列出这个联系人的。
 // subjectId 是所在的联系人页；不在联系人页（待处理）时每条都链到绑到的那个联系人
-const props = defineProps<{ spaceId: string; items: SubjectBinding[]; subjectId?: string }>()
+const props = defineProps<{ circleId: string; items: SubjectBinding[]; subjectId?: string }>()
 const toast = useToast()
 const queryClient = useQueryClient()
 const router = useRouter()
@@ -30,18 +30,18 @@ const busy = ref<string | null>(null)
 
 async function decide(binding: SubjectBinding, action: 'confirm' | 'reject') {
   if (busy.value) return
-  const spaceId = props.spaceId
+  const circleId = props.circleId
   busy.value = binding.id
   try {
     if (action === 'confirm') {
-      const kept = await api.confirmBinding(spaceId, binding.id)
+      const kept = await api.confirmBinding(circleId, binding.id)
       toast.add({ title: `已合并到「${kept.displayName}」`, color: 'success' })
-      // 在收码那个对象的页面上确认的：它已经并进别的对象、不在了，换到保留的那个对象
-      if (props.subjectId && props.subjectId !== kept.id && props.spaceId === spaceId) {
-        await router.replace({ name: 'contact', params: { spaceId, subjectId: kept.id } })
+      // 在收码那个联系人的页面上确认的：它已经并进别的联系人、不在了，换到保留的那个联系人
+      if (props.subjectId && props.subjectId !== kept.id && props.circleId === circleId) {
+        await router.replace({ name: 'contact', params: { circleId, subjectId: kept.id } })
       }
     } else {
-      await api.rejectBinding(spaceId, binding.id)
+      await api.rejectBinding(circleId, binding.id)
       toast.add({ title: '已拒绝，未合并', color: 'success' })
     }
   } catch (err) {
@@ -50,7 +50,7 @@ async function decide(binding: SubjectBinding, action: 'confirm' | 'reject') {
   } finally {
     busy.value = null
     confirming.value = null
-    void refreshSubjectCaches(queryClient, spaceId)
+    void refreshSubjectCaches(queryClient, circleId, props.subjectId)
   }
 }
 
@@ -74,7 +74,7 @@ const incomingText = (binding: SubjectBinding) =>
             <template v-if="binding.subject.id !== subjectId">
               <span class="text-muted">绑定到</span>
               <RouterLink
-                :to="{ name: 'contact', params: { spaceId, subjectId: binding.subject.id } }"
+                :to="{ name: 'contact', params: { circleId, subjectId: binding.subject.id } }"
                 class="text-primary"
                 >{{ binding.subject.displayName }}</RouterLink
               >

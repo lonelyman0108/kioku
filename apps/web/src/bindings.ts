@@ -2,7 +2,7 @@ import type { BindingStatus, SubjectBinding } from '@kioku/contracts'
 
 import { formatShort } from './time'
 
-// 绑定记录在界面上的说法：对象页的「账号绑定」与概览里等确认的绑定共用
+// 绑定记录在界面上的说法：联系人页的「账号绑定」与待处理页等确认的绑定共用
 
 export const bindingStatusLabels: Record<BindingStatus, string> = {
   pending: '待确认',
@@ -52,7 +52,7 @@ export function bindingOutcome(binding: SubjectBinding, now: Date = new Date()):
   }
 }
 
-// 绑定码是哪个平台账号、什么时候申请的，经由哪个应用
+// 绑定码是哪个平台账号、什么时候申请的，经由哪个接入实例
 export function bindingSource(binding: SubjectBinding, now: Date = new Date()): string {
-  return `${accountText(binding.issuedBy)} 于 ${formatShort(binding.issuedAt, now)} 申请绑定码，经由「${binding.app.name}」`
+  return `${accountText(binding.issuedBy)} 于 ${formatShort(binding.issuedAt, now)} 申请绑定码，经由「${binding.client.name}」`
 }

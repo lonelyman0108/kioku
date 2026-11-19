@@ -18,7 +18,6 @@ import {
 
 // 凭据表单（新建、给条目起标识、修改）的请求怎么拼、哪里不对、409 之后怎么和新读到的合起来。对话框只管长相
 
-// 带值的一行（新建，或者修改托管的）：existing 表示修改时已有的字段，值留空就是不改，removed 表示删掉它
 export interface ValueRow {
   key: number
   name: string
@@ -26,13 +25,13 @@ export interface ValueRow {
   existing: boolean
   removed: boolean
 }
-// 密码库的一行：凭据里的字段名对应条目里的哪个字段
+
 export interface VaultRow {
   key: number
   name: string
   itemField: string
 }
-// 修改密码库凭据的值：按修改前的字段名，值写回对应的条目字段；留空不改
+
 export interface VaultValueRow {
   name: string
   itemField: string
@@ -43,15 +42,16 @@ export interface CredentialFormState {
   identifier: string
   name: string
   description: string
-  restrict: boolean
-  appIds: string[]
+  restrictClients: boolean
+  clientIds: string[]
+  restrictRealms: boolean
+  allowedRealms: string[]
   // 新建时写进密码库条目的网址，托管时服务端不保存
   url: string
   expires: ExpiresField
   needsRotation: boolean
 }
 
-// 表单在哪种情况下：新建（值写到去处或托管）、给条目起标识、修改
 export type CredentialFormMode =
   | { kind: 'new' }
   | { kind: 'name-item'; connectionId: string; item: VaultItemSummary }
@@ -77,14 +77,15 @@ export function editableState(
   return {
     name: c.name,
     description: c.description ?? '',
-    restrict: c.appIds !== null,
-    appIds: [...(c.appIds ?? [])],
+    restrictClients: c.clientIds !== null,
+    clientIds: [...(c.clientIds ?? [])],
+    restrictRealms: c.allowedRealms !== null,
+    allowedRealms: [...(c.allowedRealms ?? [])],
     expires: expiresField(c.expiresAt),
     needsRotation: c.rotationRequestedAt !== null,
   }
 }
 
-// 修改托管的值：只发改了的字段，删掉的为 null
 export function hostedChanges(
   rows: readonly ValueRow[],
 ): Record<string, string | null> | undefined {
@@ -102,13 +103,11 @@ const originFields = (origin: ConsoleCredential) =>
   origin.fields.flatMap((f) => (f.itemField ? [{ name: f.name, itemField: f.itemField }] : []))
 const sameFields = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 
-// 修改密码库的字段对应：整个替换，没改就不发
 export function vaultFieldChanges(origin: ConsoleCredential, rows: readonly VaultRow[]) {
   const fields = vaultFields(rows)
   return sameFields(originFields(origin), fields) ? undefined : fields
 }
 
-// 写回密码库条目的值：只发填了的、能改的字段；不能删字段，所以没有 null
 export function vaultValueChanges(
   rows: readonly VaultValueRow[],
 ): Record<string, string> | undefined {
@@ -122,6 +121,10 @@ export function vaultValueChanges(
 const expiresAtOf = (field: ExpiresField) =>
   field.noExpiry || field.bad ? undefined : (fromLocalInput(field.input) ?? undefined)
 
+const normalizedRealms = (realms: readonly string[]) => [
+  ...new Set(realms.map((r) => r.trim().toLowerCase()).filter(Boolean)),
+]
+
 export function createBody({ mode, form, valueRows, vaultRows }: CredentialFormInput) {
   const url = form.url.trim()
   const expiresAt = expiresAtOf(form.expires)
@@ -129,7 +132,8 @@ export function createBody({ mode, form, valueRows, vaultRows }: CredentialFormI
     identifier: form.identifier,
     name: form.name.trim(),
     description: form.description.trim() || null,
-    appIds: form.restrict ? [...form.appIds] : null,
+    clientIds: form.restrictClients ? [...form.clientIds] : null,
+    allowedRealms: form.restrictRealms ? normalizedRealms(form.allowedRealms) : null,
     source:
       mode.kind === 'name-item'
         ? {
@@ -165,7 +169,8 @@ export function updateBody({
     expectedVersion: origin?.version ?? 0,
     name: form.name.trim(),
     description: form.description.trim() || null,
-    appIds: form.restrict ? [...form.appIds] : null,
+    clientIds: form.restrictClients ? [...form.clientIds] : null,
+    allowedRealms: form.restrictRealms ? normalizedRealms(form.allowedRealms) : null,
     ...(values ? { values } : {}),
     ...(fields ? { fields } : {}),
     ...(expiresAt !== undefined ? { expiresAt } : {}),
@@ -175,7 +180,6 @@ export function updateBody({
 
 const validName = (name: string) => CREDENTIAL_NAME_PATTERN.test(name)
 
-// 提交前在界面上能看出来的问题；服务端照样会检查。其余规则（长度、网址的写法等）直接用接口的定义检查，提示与服务端一致
 export function formProblem(input: CredentialFormInput): string | null {
   const { mode, form } = input
   const editing = mode.kind === 'edit'
@@ -186,16 +190,15 @@ export function formProblem(input: CredentialFormInput): string | null {
   if (!form.name.trim()) return '名称不能为空'
   const rows = vault ? input.vaultRows : liveRows(input.valueRows)
   if (!rows.length) return '至少需要一个字段'
-  // 修改托管的只发改了的字段，合并之后的总数要在这里看
   if (rows.length > MAX_CREDENTIAL_FIELDS) return `一条凭据最多 ${MAX_CREDENTIAL_FIELDS} 个字段`
   const names = rows.map((r) => r.name)
-  if (names.some((n) => !validName(n)))
+  if (names.some((n) => !validName(n))) {
     return '字段名只能包含小写字母、数字、_ 和 -，且以字母或数字开头'
+  }
   if (new Set(names).size !== names.length) return '字段名不能重复'
   if (!vault && liveRows(input.valueRows).some((r) => !r.existing && !r.value)) {
     return '请填写新字段的值'
   }
-  // 写回的值按修改前的字段名对到条目字段：同时改名会对不上，分两次改
   if (
     mode.kind === 'edit' &&
     vault &&
@@ -206,24 +209,21 @@ export function formProblem(input: CredentialFormInput): string | null {
   }
   const expires = expiresProblem(form.expires)
   if (expires) return expires
-  if (form.restrict && !form.appIds.length) return '限定应用时至少选择一个'
+  if (form.restrictClients && !form.clientIds.length) return '限定接入实例时至少选择一个'
+  if (form.restrictRealms && !normalizedRealms(form.allowedRealms).length) {
+    return '限定场域时至少选择一个'
+  }
   const result = editing
     ? UpdateCredentialRequest.safeParse(updateBody(input))
     : CreateCredentialRequest.safeParse(createBody(input))
   return result.success ? null : (result.error.issues[0]?.message ?? '填写内容有误')
 }
 
-// ---- 409 之后重新读取 ----
-
 export interface ReloadedForm {
   input: CredentialFormInput
-  // 合不起来的地方，逐条告诉人；为空时表示新读到的一版和表单里的改动没有冲突
   conflicts: string[]
 }
 
-// 重新读取之后：只换掉服务端的那一份（版本、字段与字段对应、到期与轮换的现状），表单里做过的改动都留着，再和新的一版合起来。
-// 按三方合并：表单里某一项和打开时（before）一样，说明没动过，取新读到的（fresh）；动过的留着表单里的。
-// 要改的字段在新版本里没了、两边都改了字段对应这类合不起来的，写进 conflicts。key 给新加的行编号
 export function mergeReloaded(
   current: CredentialFormInput,
   before: ConsoleCredential,
@@ -236,23 +236,48 @@ export function mergeReloaded(
   const mine = current.form
   const pick = <K extends keyof typeof base>(k: K): (typeof base)[K] =>
     sameFields(mine[k], base[k]) ? theirs[k] : mine[k]
-  // 限定应用的开关与列表是一个整体：分开合并时，一边改了列表、另一边取消了限定，合起来就成了不限定
-  const scope = (s: { restrict: boolean; appIds: string[] }) => ({
-    restrict: s.restrict,
-    appIds: s.restrict ? [...s.appIds].sort() : [],
+
+  // 限定接入实例的开关与列表是一个整体：分别合并会把列表改坏
+  const clientScope = (s: { restrictClients: boolean; clientIds: string[] }) => ({
+    restrict: s.restrictClients,
+    ids: s.restrictClients ? [...s.clientIds].sort() : [],
   })
-  const [mineScope, baseScope, theirScope] = [scope(mine), scope(base), scope(theirs)]
-  let restriction = mineScope
-  if (sameFields(mineScope, baseScope)) restriction = theirScope
-  else if (!sameFields(theirScope, baseScope) && !sameFields(theirScope, mineScope)) {
-    conflicts.push('限定应用在别处也修改过，保存时以表单中的为准，请核对')
+  const [mineClients, baseClients, theirClients] = [
+    clientScope(mine),
+    clientScope(base),
+    clientScope(theirs),
+  ]
+  let resolvedClients = mineClients
+  if (sameFields(mineClients, baseClients)) resolvedClients = theirClients
+  else if (!sameFields(theirClients, baseClients) && !sameFields(theirClients, mineClients)) {
+    conflicts.push('限定接入实例在别处也修改过，保存时以表单中的为准，请核对')
   }
+
+  // 允许场域（静态场域锁）开关与列表同样按整体合并
+  const realmScope = (s: { restrictRealms: boolean; allowedRealms: string[] }) => ({
+    restrict: s.restrictRealms,
+    realms: s.restrictRealms ? normalizedRealms(s.allowedRealms).sort() : [],
+  })
+  const [mineRealms, baseRealms, theirRealms] = [
+    realmScope(mine),
+    realmScope(base),
+    realmScope(theirs),
+  ]
+  let resolvedRealms = mineRealms
+  if (sameFields(mineRealms, baseRealms)) resolvedRealms = theirRealms
+  else if (!sameFields(theirRealms, baseRealms) && !sameFields(theirRealms, mineRealms)) {
+    conflicts.push('允许场域在别处也修改过，保存时以表单中的为准，请核对')
+  }
+
   const form: CredentialFormState = {
     ...mine,
     name: pick('name'),
     description: pick('description'),
-    restrict: restriction.restrict,
-    appIds: restriction === mineScope ? [...mine.appIds] : [...theirs.appIds],
+    restrictClients: resolvedClients.restrict,
+    clientIds: resolvedClients === mineClients ? [...mine.clientIds] : [...theirs.clientIds],
+    restrictRealms: resolvedRealms.restrict,
+    allowedRealms:
+      resolvedRealms === mineRealms ? [...mine.allowedRealms] : [...theirs.allowedRealms],
     expires: pick('expires'),
     needsRotation: pick('needsRotation'),
   }
@@ -266,8 +291,6 @@ export function mergeReloaded(
         if (row.value || row.removed) conflicts.push(`字段 ${row.name} 已在别处删除`)
         continue
       }
-      // 新加的行和别处新加的字段同名：填了值就改成修改那个字段；值是空的什么都不会发，原样留着（名字还能改），
-      // 别处加的字段照常列出来，同名由「字段名不能重复」提示
       if (!row.existing && freshNames.has(row.name) && row.name && row.value) {
         conflicts.push(`字段 ${row.name} 已在别处添加，保存时将改为填写的值`)
         valueRows.push({ ...row, existing: true })
@@ -293,8 +316,6 @@ export function mergeReloaded(
     } else if (!sameFields(freshFields, baseFields) && !sameFields(freshFields, mineFields)) {
       conflicts.push('字段对应在别处也修改过，保存时以表单中的为准，请核对')
     }
-    // 填的值写回的是条目字段：按条目字段对到新的一版。同一个条目字段在别处改了名，按改名带过去；
-    // 这个条目字段在新的一版里不再对应任何字段（例如 password 改成对应别的条目字段），不带过去，报冲突
     vaultValues = freshFields.map((f) => ({ ...f, value: '' }))
     for (const row of current.vaultValues) {
       if (!row.value) continue

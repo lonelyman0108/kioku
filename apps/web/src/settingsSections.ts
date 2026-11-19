@@ -1,24 +1,25 @@
-import type { MemberRole } from '@kioku/contracts'
+import type { CircleKind, MemberRole } from '@kioku/contracts'
 import { defineAsyncComponent, type Component } from 'vue'
 import type { RouteLocationNormalized } from 'vue-router'
 
 import { icons } from './icons'
 
-// 设置分三组：个人（当前账号）、空间（地址里的空间，个人与实例页面上是会话里当前的空间）、实例（只给实例管理员）。
-// 三组共用一个骨架，标题下面的分页列出看得到的组，左栏是当前组的小节，右边是当前小节。加小节只在 SETTINGS_SECTIONS 里加一项、写一个组件
+// 设置分三组：个人（当前账号）、记忆圈（地址里的记忆圈，个人与实例页面上是会话里当前的记忆圈）、实例（只给实例管理员）。
+// 三组共用一个骨架，标题下面的分页列看得到的组，左栏是当前组的小节，右边是当前小节。加小节只在 SETTINGS_SECTIONS 里加一项、写一个组件
 
 export const SETTINGS_GROUPS = [
   { key: 'account', label: '个人', icon: icons.account, route: 'account-settings' },
-  { key: 'space', label: '空间', icon: icons.space, route: 'space-settings' },
+  { key: 'circle', label: '记忆圈', icon: icons.circle, route: 'circle-settings' },
   { key: 'instance', label: '实例', icon: icons.instance, route: 'instance-settings' },
 ] as const
 
 export type SettingsGroupKey = (typeof SETTINGS_GROUPS)[number]['key']
 
-// 判断小节给不给看用到的：实例管理员、当前账号在这一组的空间里的角色（个人与实例组里是会话里当前的空间）
+// 判断小节是否可见：实例管理员、当前账号在这一组记忆圈里的角色与记忆圈类型（个人圈隐藏成员页）
 export interface SettingsViewer {
   isAdmin: boolean
   role: MemberRole | null
+  circleKind?: CircleKind | null
 }
 
 export interface SettingsSection {
@@ -51,42 +52,43 @@ export const SETTINGS_SECTIONS = [
     component: lazy(() => import('./components/AppearanceSettings.vue')),
   },
   {
-    group: 'space',
+    group: 'circle',
     key: 'general',
     label: '概况',
     icon: icons.general,
     component: lazy(() => import('./components/SpaceGeneralSettings.vue')),
   },
   {
-    group: 'space',
+    group: 'circle',
     key: 'members',
     label: '成员',
     icon: icons.members,
     component: lazy(() => import('./components/SpaceMembers.vue')),
+    visible: (viewer: SettingsViewer) => viewer.circleKind !== 'personal',
   },
   {
-    group: 'space',
+    group: 'circle',
     key: 'recall',
     label: '召回与启动加载',
     icon: icons.tuning,
     component: lazy(() => import('./components/SpaceRecallSettings.vue')),
   },
   {
-    group: 'space',
+    group: 'circle',
     key: 'extraction',
     label: '抽取与整理',
     icon: icons.extraction,
     component: lazy(() => import('./components/SpaceExtractionSettings.vue')),
   },
   {
-    group: 'space',
+    group: 'circle',
     key: 'privacy',
     label: '隐私与脱敏',
     icon: icons.privacy,
     component: lazy(() => import('./components/SpacePrivacySettings.vue')),
   },
   {
-    group: 'space',
+    group: 'circle',
     key: 'transfer',
     label: '导入与导出',
     icon: icons.transfer,
@@ -101,9 +103,9 @@ export const SETTINGS_SECTIONS = [
   },
   {
     group: 'instance',
-    key: 'spaces',
-    label: '空间',
-    icon: icons.spaces,
+    key: 'circles',
+    label: '记忆圈',
+    icon: icons.circles,
     component: lazy(() => import('./components/InstanceSpaces.vue')),
   },
   {
@@ -148,7 +150,7 @@ type SectionOf<G extends SettingsGroupKey> = Extract<
   { group: G }
 >['key']
 export type AccountSectionKey = SectionOf<'account'>
-export type SpaceSectionKey = SectionOf<'space'>
+export type CircleSectionKey = SectionOf<'circle'>
 export type InstanceSectionKey = SectionOf<'instance'>
 
 // 这一组里给当前账号看的小节
@@ -161,20 +163,20 @@ export function visibleSections(
   )
 }
 
-// 分页列哪几组：个人一直有；空间组要有空间；实例组只给实例管理员
-export function visibleGroups(viewer: SettingsViewer & { hasSpace: boolean }): SettingsGroupKey[] {
+// 分页列哪几组：个人一直有；记忆圈组要有记忆圈；实例组只给实例管理员
+export function visibleGroups(viewer: SettingsViewer & { hasCircle: boolean }): SettingsGroupKey[] {
   return SETTINGS_GROUPS.filter(
     (group) =>
-      (group.key !== 'space' || viewer.hasSpace) && (group.key !== 'instance' || viewer.isAdmin),
+      (group.key !== 'circle' || viewer.hasCircle) && (group.key !== 'instance' || viewer.isAdmin),
   ).map((group) => group.key)
 }
 
-// 设置页里的导航算不算离开：同一组里换空间算，换小节不算（各小节都还挂着）。
+// 设置页里的导航算不算离开：同一组里换记忆圈算，换小节不算（各小节都还挂着）。
 // 换组是换路由组件，由离开路由的确认处理，不经过这里
 export const leavesSettingsPage = (
   to: Pick<RouteLocationNormalized, 'params'>,
   from: Pick<RouteLocationNormalized, 'params'>,
-): boolean => to.params.spaceId !== from.params.spaceId
+): boolean => to.params.circleId !== from.params.circleId
 
 // 当前看哪一节：地址里的小节不存在、看不到（链接过期、手写、权限变了）时看第一个看得到的
 export function currentSection(
@@ -196,9 +198,9 @@ export const instanceSettingsRoute = (section?: InstanceSectionKey) => ({
   params: section ? { section } : {},
   query: {},
 })
-export const spaceSettingsRoute = (spaceId: string, section?: SpaceSectionKey) => ({
-  name: 'space-settings',
-  params: section ? { spaceId, section } : { spaceId },
+export const circleSettingsRoute = (circleId: string, section?: CircleSectionKey) => ({
+  name: 'circle-settings',
+  params: section ? { circleId, section } : { circleId },
   query: {},
 })
 
@@ -210,8 +212,9 @@ const LEGACY_INSTANCE: Record<string, InstanceSectionKey> = {
   backup: 'data',
   retention: 'data',
   recall: 'data',
+  spaces: 'circles',
 }
-const LEGACY_SPACE: Record<string, SpaceSectionKey> = {
+const LEGACY_CIRCLE: Record<string, CircleSectionKey> = {
   budget: 'extraction',
   dream: 'extraction',
   export: 'transfer',
@@ -227,10 +230,10 @@ export function legacySettingsRedirect(query: Record<string, unknown>) {
   return section ? instanceSettingsRoute(section) : accountSettingsRoute()
 }
 
-// /spaces/:spaceId/settings?section=：认得的小节换成合并后的；不认得的去掉参数。没有这个参数时为 null，不用跳
-export function legacySpaceSettingsRedirect(spaceId: string, query: Record<string, unknown>) {
+// /circles/:circleId/settings?section=：认得的小节换成合并后的；不认得的去掉参数。没有这个参数时为 null，不用跳
+export function legacyCircleSettingsRedirect(circleId: string, query: Record<string, unknown>) {
   if (query.section === undefined) return null
-  return spaceSettingsRoute(spaceId, legacyKey(LEGACY_SPACE, query.section))
+  return circleSettingsRoute(circleId, legacyKey(LEGACY_CIRCLE, query.section))
 }
 
 const ROLE_NAMES: Record<MemberRole, string> = {

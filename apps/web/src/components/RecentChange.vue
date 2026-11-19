@@ -2,6 +2,7 @@
 import type { ActivityItem } from '@kioku/contracts'
 import { computed } from 'vue'
 
+import { useSession } from '../composables/useSession'
 import {
   activityActor,
   activityActorIcons,
@@ -9,16 +10,19 @@ import {
   changeLabels,
   eventLabel,
 } from '../labels'
-import { memoryRoute } from '../routes'
+import { entryRoute } from '../routes'
 import { formatRelative, formatTime } from '../time'
 import ActivityFlags from './ActivityFlags.vue'
 import MemoryName from './strata/MemoryName.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
+import { entryBand } from './strata/strata'
 
 // 概览里最近变更的一行：记忆一行，谁做了什么一行，操作者与操作带和变更记录同样的图标。
 // 完整的版本是变更记录页的表格（ActivityEntry）
-const props = defineProps<{ item: ActivityItem; spaceId: string }>()
+const props = defineProps<{ item: ActivityItem; circleId: string }>()
 
+const { circle } = useSession()
+const band = computed(() => entryBand({ kind: props.item.kind }, circle.value))
 const actor = computed(() => activityActor(props.item))
 const op = computed(() => eventLabel(props.item.type))
 const fields = computed(() => props.item.changes.map((c) => changeLabels[c] ?? c).join('、'))
@@ -27,15 +31,15 @@ const fields = computed(() => props.item.changes.map((c) => changeLabels[c] ?? c
 <template>
   <li class="recent-change">
     <span class="change-uri">
-      <StrataSwatch :layer="item.layer" :sensitivity="item.sensitivity" :width="14" :height="10" />
+      <StrataSwatch :band="band" :sensitivity="item.sensitivity" :width="14" :height="10" />
       <RouterLink
         v-if="activityLinkable(item)"
-        :to="memoryRoute(spaceId, item.uri)"
+        :to="entryRoute(circleId, item.shortId)"
         class="change-link"
       >
-        <MemoryName :uri="item.uri" :title="item.title" />
+        <MemoryName :short-id="item.shortId" :title="item.title" />
       </RouterLink>
-      <MemoryName v-else :uri="item.uri" :title="item.title" />
+      <MemoryName v-else :short-id="item.shortId" :title="item.title" />
     </span>
     <span class="change-meta" :title="`${actor.hint} ${op.label} ${fields}`">
       <span class="meta-part truncate">

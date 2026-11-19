@@ -2,18 +2,27 @@
 import { useToast } from '@nuxt/ui/composables'
 import {
   CONVERT_SCOPE_TEXT,
-  MEMORY_TITLE_MAX,
-  MemoryTitle,
+  ENTRY_TITLE_MAX,
+  EntryTitle,
   PLAINTEXT_CREDENTIAL,
-  isProtectedPersonalMemory,
+  TOPICS_MAX,
+  TopicTag,
+  VARIANTS_MAX,
+  hasHomogeneousRealms,
+  isProtectedPersonalEntry,
   needsSensitiveInboxAlert,
+  normalizeWhen,
   placeholderAllowed,
   sensitivityAllowed,
-  type ConsoleMemoryView,
-  type Layer,
+  whenSignature,
+  type CircleKind,
+  type ConsoleEntryView,
+  type EntryListItem,
+  type EntryMatch,
   type ProtectTarget,
   type RedactMode,
   type Sensitivity,
+  type StrataBand,
 } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, nextTick, reactive, ref, watch } from 'vue'
@@ -21,39 +30,44 @@ import { useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
-import { useMemoryPermissions } from '../composables/useMemoryPermissions'
-import { usePlaintextActions } from '../composables/usePlaintextActions'
-import { useNow } from '../composables/useNow'
 import { hasUnsavedChanges, useUnsavedChangesGuard } from '../composables/unsavedChanges'
-import { identifierOf, parseCoordinate } from '../coordinates'
+import { useMemoryPermissions } from '../composables/useMemoryPermissions'
+import { useNow } from '../composables/useNow'
+import { usePlaintextActions } from '../composables/usePlaintextActions'
+import type { PlaintextSaveRequest, PlaintextSaveResult } from '../composables/usePlaintextSave'
+import { icons } from '../icons'
 import { buildKeywordIndex } from '../keywords'
-import { provenanceLabels, sensitivityLabels } from '../labels'
-import type { CredentialLinks } from '../markdown'
+import { entryKindLabels, provenanceLabels, sensitivityLabels } from '../labels'
+import type { CredentialLinks, WikiLinkTargets } from '../markdown'
 import {
   BOOT_HINT,
+  entryText,
   expiryState,
   isBootNode,
   looksPlaintext,
   missingDisclosure,
   originScopeLabel,
-  overriddenNode,
   plaintextValues,
   recallText,
+  variantPlaintextValues,
+  whenLabel,
 } from '../memoryDetail'
 import { placeholderOf } from '../placeholders'
 import {
-  addedSpots,
+  addedVariantSpots,
   afterGate,
+  joinVariantContents,
   plaintextRejection,
+  replaceVariantsValues,
   spotsAfterRejection,
   type PlaintextSpot,
   type SaveFlags,
 } from '../plaintextSave'
-import { canManageCredentials } from '../vault'
-import type { PlaintextSaveRequest, PlaintextSaveResult } from '../composables/usePlaintextSave'
+import { entryRoute } from '../routes'
 import {
   hiddenAgain,
   revealedAfterWrite,
+  revealedFromEntry,
   stillRevealed,
   withRevealed,
   type RevealedContent,
@@ -68,48 +82,74 @@ import {
   toLocalInput,
   validToTooSoon,
 } from '../time'
+import { canManageCredentials } from '../vault'
 import ConvertCredentialModal from './ConvertCredentialModal.vue'
+import EntryLinksPanel from './EntryLinksPanel.vue'
+import FacetWhenPicker from './FacetWhenPicker.vue'
 import Hint from './Hint.vue'
 import MemoryContent from './MemoryContent.vue'
 import MemoryHistory from './MemoryHistory.vue'
 import MoveMemoryModal from './MoveMemoryModal.vue'
-import RedactConfirmModal from './RedactConfirmModal.vue'
 import PlaintextSaveModal from './PlaintextSaveModal.vue'
+import RedactConfirmModal from './RedactConfirmModal.vue'
+import FlagTag from './strata/FlagTag.vue'
 import NoteLine from './strata/NoteLine.vue'
-import CoordinateLine from './strata/CoordinateLine.vue'
-import ReadFailureNote from './strata/ReadFailureNote.vue'
 import PropertyList, { type Property } from './strata/PropertyList.vue'
+import ReadFailureNote from './strata/ReadFailureNote.vue'
+import ShortIdLine from './strata/ShortIdLine.vue'
+import StrataBandTag from './strata/StrataTag.vue'
 import StrataStrip from './strata/StrataStrip.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
-import StrataTag from './strata/StrataTag.vue'
-import FlagTag from './strata/FlagTag.vue'
 import SwatchOptions from './strata/SwatchOptions.vue'
-import MemoryName from './strata/MemoryName.vue'
+import { entryBand } from './strata/strata'
 
-const props = defineProps<{ spaceId: string; uri: string }>()
+interface EditVariant {
+  key: number
+  when: Record<string, string[]>
+  content: string
+  contentHidden: boolean
+}
+
+const props = withDefaults(
+  defineProps<{
+    circleId: string
+    shortId: string
+    circleSlug?: string | null
+  }>(),
+  { circleSlug: null },
+)
+
 const emit = defineEmits<{
-  deleted: [uri: string]
-  createChild: [parentUri: string]
-  moved: [memory: ConsoleMemoryView, from: string]
-  // 保存或恢复了旧版本：层、敏感级、priority、disclosure 可能变了。before 是改之前的那一版
-  changed: [memory: ConsoleMemoryView, before: ConsoleMemoryView]
-  open: [uri: string]
-  // 读到了这条记忆在哪一层：页面在窄柱上标出来
-  layer: [layer: Layer]
+  deleted: [shortId: string]
+  moved: [entry: ConsoleEntryView, toCircleId: string]
+  changed: [entry: ConsoleEntryView, before: ConsoleEntryView]
+  open: [shortId: string, targetCircleId?: string]
+  band: [band: StrataBand]
 }>()
+
 const toast = useToast()
 const queryClient = useQueryClient()
 const router = useRouter()
 
-const queryKey = computed(() => ['memory', props.spaceId, props.uri])
-const memory = useQuery({
+const queryKey = computed(() => ['entry', props.circleId, props.shortId] as const)
+const entry = useQuery({
   queryKey,
-  queryFn: () => api.memory(props.spaceId, props.uri),
+  queryFn: ({ queryKey: [, cid, id] }) =>
+    api.entry(cid, id, {
+      allVariants: true,
+      ...(props.circleSlug ? { circle: props.circleSlug } : {}),
+    }),
+})
+
+const permissions = useMemoryPermissions(computed(() => props.circleId))
+const facets = useQuery({
+  queryKey: computed(() => ['facets', props.circleId] as const),
+  queryFn: ({ queryKey: [, cid] }) => api.facets(cid),
 })
 
 const form = reactive({
   title: '',
-  content: '',
+  topics: [] as string[],
   disclosure: '',
   priority: 2,
   sensitivity: 'private' as Sensitivity,
@@ -118,37 +158,77 @@ const form = reactive({
   validTo: '',
 })
 
-// 表单是从哪一版载入的：改动与保存时的版本号都以它为准，而不是缓存里最新的那份。
-// 否则后台重新拉取到别人改过的新版本，会悄悄覆盖还没保存的修改，或者让保存绕过冲突检查
-const base = ref<ConsoleMemoryView | null>(null)
+let nextVarKey = 0
+const editVariants = ref<EditVariant[]>([])
+const editSliceIdx = ref(0)
+const readSliceIdx = ref(0)
+const compareMode = ref(false)
 
-// 显式查看拿到的机密正文，只放在这里，不写进查询的缓存（见 secretContent.ts）。这个组件按 URI 重建，切走就丢
+// 表单是从哪一版载入的：改动与保存时的版本号都以它为准，而不是缓存里最新的那份
+const base = ref<ConsoleEntryView | null>(null)
+
+// 显式查看拿到的机密正文，只放在这里，不写进查询的缓存（见 secretContent.ts）。这个组件按短 ID 重建，切走就丢
 const revealed = ref<RevealedContent | null>(null)
 const revealing = ref(false)
 
-// 有效到在输入框里的样子：只到分钟，没改过时和载入的那一版比较也按分钟
-const validToInput = (m: ConsoleMemoryView) => (m.validTo ? toLocalInput(m.validTo) : '')
+const validToInput = (m: ConsoleEntryView) => (m.validTo ? toLocalInput(m.validTo) : '')
 
-function load(next: ConsoleMemoryView) {
+function setEditVariantsFromEntry(m: ConsoleEntryView) {
+  editVariants.value = m.variants.map((v) => ({
+    key: nextVarKey++,
+    when: normalizeWhen(v.when),
+    content: v.content ?? '',
+    contentHidden: v.contentHidden,
+  }))
+  if (editSliceIdx.value >= editVariants.value.length) editSliceIdx.value = 0
+}
+
+function load(next: ConsoleEntryView) {
   // 换了一条或有了新版本，查看过的就不算了，要再查看一次
   if (!stillRevealed(next, revealed.value)) revealed.value = null
   const m = withRevealed(next, revealed.value)
   base.value = m
   form.title = m.title
-  form.content = m.content ?? ''
+  form.topics = [...m.topics]
   form.disclosure = m.disclosure ?? ''
   form.priority = m.priority
   form.sensitivity = m.sensitivity
   form.glossary = [...m.glossary]
   form.validTo = validToInput(m)
+  setEditVariantsFromEntry(m)
+  if (readSliceIdx.value >= m.variants.length) readSliceIdx.value = 0
 }
+
+const normalizedTopics = (items: readonly string[]) => {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const raw of items) {
+    const clean = raw.trim().toLowerCase()
+    if (!clean || seen.has(clean)) continue
+    seen.add(clean)
+    out.push(clean)
+  }
+  return out
+}
+
+const variantsChanged = computed(() => {
+  const m = base.value
+  if (!m) return false
+  if (editVariants.value.length !== m.variants.length) return true
+  return editVariants.value.some((v, i) => {
+    const orig = m.variants[i]
+    if (!orig) return true
+    return whenSignature(v.when) !== orig.whenSignature || v.content !== (orig.content ?? '')
+  })
+})
 
 const dirty = computed(() => {
   const m = base.value
   if (!m) return false
   return (
     form.title !== m.title ||
-    form.content !== (m.content ?? '') ||
+    normalizedTopics(form.topics).join('\n') !== m.topics.join('\n') ||
+    variantsChanged.value ||
     form.disclosure !== (m.disclosure ?? '') ||
     form.priority !== m.priority ||
     form.sensitivity !== m.sensitivity ||
@@ -157,15 +237,11 @@ const dirty = computed(() => {
   )
 })
 
-// 现在的时间，每半分钟更新一次：开着的这条到了有效到时显示已过期
 const now = useNow(30_000)
 const expiredNow = computed(() => !!base.value && isExpired(base.value.validTo, now.value))
 
-// 有未保存的改动时保留它们，提示在别处被改过，保存时由 id 与版本号检查冲突。
-// 没有改动时跟上服务器：换成了另一条（删除后在同一个 URI 重建），或者有了更新的版本；
-// 同一条但比表单那一版还旧的数据不理会，例如保存之前发出的重新拉取晚到了
 watch(
-  () => memory.data.value,
+  () => entry.data.value,
   (m) => {
     if (!m) return
     if (!base.value) return load(m)
@@ -175,47 +251,72 @@ watch(
   { immediate: true },
 )
 
-// 载入服务器上的一版；比表单那一版新时通知页面，树上的标记与列表跟着变（别处改过、或从历史里恢复了）
-function adopt(m: ConsoleMemoryView) {
+function adopt(m: ConsoleEntryView) {
   const b = base.value
   const newer = !!b && (m.id !== b.id || m.version > b.version)
   load(m)
   if (newer) emit('changed', m, b)
 }
 
-// 服务器上最新的那一版。表单有改动时上面的监听会跳过新版本，开始或取消编辑时要从它载入
-function latest(): ConsoleMemoryView | null {
-  const [m, b] = [memory.data.value, base.value]
+function latest(): ConsoleEntryView | null {
+  const [m, b] = [entry.data.value, base.value]
   if (!m || !b) return m ?? b
   return m.id !== b.id || m.version >= b.version ? m : b
 }
 
-// 有未保存的修改时，切到别的记忆、别的页面、退出登录或关掉标签页之前先确认（见 unsavedChanges.ts）。
-// 换视图或筛选条件时编辑器还在，不用确认
+// 有未保存的修改时，切到别的记忆、别的页面、退出登录或关掉标签页之前先确认。换视图或筛选条件时编辑器还在，不用确认
 const { leaving } = useUnsavedChangesGuard(dirty, {
   leavesOn: (to, from) =>
-    to.query.uri !== from.query.uri || to.params.spaceId !== from.params.spaceId,
+    to.query.id !== from.query.id || to.params.circleId !== from.params.circleId,
 })
 const changedElsewhere = computed(() => {
-  const [m, b] = [memory.data.value, base.value]
+  const [m, b] = [entry.data.value, base.value]
   return !!m && !!b && (m.id !== b.id || m.version !== b.version)
 })
 
-const permissions = useMemoryPermissions(computed(() => props.spaceId))
+const readVariants = computed(() => base.value?.variants ?? [])
+const activeReadVariant = computed(
+  () => readVariants.value[readSliceIdx.value] ?? readVariants.value[0] ?? null,
+)
+const activeEditVariant = computed(
+  () => editVariants.value[editSliceIdx.value] ?? editVariants.value[0] ?? null,
+)
 
-// 被召回的次数：保留期内的明细加上清理时并入的累计；secret 不进召回，不用查
+const entryCircleKind = computed<CircleKind>(() => {
+  const m = base.value
+  if (!m) return permissions.circleKind.value
+  const known = permissions.circle.value
+  if (known && known.id === m.circleId) return known.kind
+  return m.circleSlug === 'personal' ? 'personal' : 'shared'
+})
+
+const entryStrataBand = computed<StrataBand | null>(() => {
+  const m = base.value
+  if (!m) return null
+  return entryBand(
+    { kind: m.kind, circleId: m.circleId, circleKind: entryCircleKind.value },
+    { id: props.circleId, kind: permissions.circleKind.value },
+  )
+})
+
+watch(
+  entryStrataBand,
+  (band) => {
+    if (band) emit('band', band)
+  },
+  { immediate: true },
+)
+
 const recallable = computed(() => !!base.value && base.value.sensitivity !== 'secret')
 const recallStat = useQuery({
-  queryKey: computed(() => ['memory-recall', props.spaceId, base.value?.id] as const),
-  queryFn: ({ queryKey: [, spaceId, id] }) => api.memoryRecallStat(spaceId, id!),
+  queryKey: computed(() => ['entry-recall', props.circleId, base.value?.id] as const),
+  queryFn: ({ queryKey: [, cid, id] }) => api.entryRecallStat(cid, id!),
   enabled: recallable,
 })
 const readOnly = computed(() => (base.value ? permissions.readOnlyReason(base.value) : null))
 
-// 默认是阅读状态，点「编辑」才改原文
 const mode = ref<'read' | 'edit'>('read')
 const preview = ref(false)
-// 编辑时载入了新版本，查看过的正文不算了：回到阅读状态，再查看一次才能编辑
 watch(
   () => base.value?.contentHidden,
   (hidden) => {
@@ -223,17 +324,16 @@ watch(
   },
 )
 
-// 查看机密的正文：服务端记一次访问。结果只放在这个组件里
+// 查看机密的正文：服务端记一次访问。结果只放在这个组件里，不写进查询缓存
 async function revealContent() {
   const m = base.value
   if (!m || revealing.value) return
   revealing.value = true
   try {
-    const view = await api.revealMemory(props.spaceId, m.id)
-    // 等结果的时候这条又有了更新的版本，这份已经旧了：再点一次
-    const now = base.value
-    if (!now || view.id !== now.id || view.version < now.version) return
-    revealed.value = { id: view.id, version: view.version, content: view.content ?? '' }
+    const view = await api.revealEntry(props.circleId, m.id)
+    const current = base.value
+    if (!current || view.id !== current.id || view.version < current.version) return
+    revealed.value = revealedFromEntry(view)
     adopt(view)
   } catch (err) {
     failed(err, '查看失败')
@@ -241,25 +341,25 @@ async function revealContent() {
     revealing.value = false
   }
 }
-// 收起查看过的正文：再看要再查看一次。这一版不变，版本号和表单都还对得上
+
 function hideContent() {
   const m = base.value
   if (!m) return
   revealed.value = null
   load(hiddenAgain(m))
 }
-// 有效到最早能选的时间（见 earliestValidTo）：开始编辑、聚焦选择器与保存之前重新算
+
 const minValidTo = ref('')
 function startEditing() {
   const m = latest()
   if (m) adopt(m)
-  // 表单靠读到的正文来编辑：机密要先查看（可能刚发现有了新版本，查看过的不算了）
   if (base.value?.contentHidden) return
   minValidTo.value = earliestValidTo()
   historyOpen.value = false
+  editSliceIdx.value = Math.min(readSliceIdx.value, Math.max(editVariants.value.length - 1, 0))
   mode.value = 'edit'
 }
-// 点「去补全」：进入编辑，光标放到触发场景
+
 const disclosureInput = ref<{ inputRef: HTMLInputElement | null } | null>(null)
 function fillDisclosure() {
   startEditing()
@@ -272,22 +372,81 @@ function cancelEditing() {
   mode.value = 'read'
 }
 
-// 正文里出现别的记忆的关键词时标出来，点了过去
+// 机密词条的所有切片须保持相同场域
+const primaryRealms = computed(() => normalizeWhen(editVariants.value[0]?.when).realm ?? [])
+function syncSecretRealms() {
+  if (form.sensitivity !== 'secret' || editVariants.value.length <= 1) return
+  const baseRealms = primaryRealms.value
+  for (let i = 1; i < editVariants.value.length; i++) {
+    const slice = editVariants.value[i]!
+    const nextWhen = { ...normalizeWhen(slice.when) }
+    if (baseRealms.length) nextWhen.realm = [...baseRealms]
+    else delete nextWhen.realm
+    slice.when = normalizeWhen(nextWhen)
+  }
+}
+watch(
+  () => form.sensitivity,
+  (s) => s === 'secret' && syncSecretRealms(),
+)
+watch(primaryRealms, () => syncSecretRealms())
+
+function addEditVariant() {
+  if (editVariants.value.length >= VARIANTS_MAX) return
+  const when: Record<string, string[]> =
+    form.sensitivity === 'secret' && primaryRealms.value.length
+      ? { realm: primaryRealms.value }
+      : {}
+  editVariants.value.push({
+    key: nextVarKey++,
+    when: normalizeWhen(when),
+    content: '',
+    contentHidden: false,
+  })
+  editSliceIdx.value = editVariants.value.length - 1
+}
+
+function removeEditVariant(idx: number) {
+  if (editVariants.value.length <= 1) return
+  editVariants.value.splice(idx, 1)
+  if (editSliceIdx.value >= editVariants.value.length) {
+    editSliceIdx.value = editVariants.value.length - 1
+  }
+}
+
+function updateActiveEditWhen(next: Record<string, string[]>) {
+  const slice = activeEditVariant.value
+  if (!slice) return
+  slice.when = normalizeWhen(next)
+  if (editVariants.value[0]?.key === slice.key) syncSecretRealms()
+}
+
+// 正文里出现别的记忆的关键词时标出来
 const glossary = useQuery({
-  queryKey: computed(() => ['memory-glossary', props.spaceId]),
-  queryFn: () => api.glossaryIndex(props.spaceId),
+  queryKey: computed(() => ['entry-glossary', props.circleId] as const),
+  queryFn: ({ queryKey: [, cid] }) => api.glossaryIndex(cid),
   staleTime: 60_000,
 })
 const keywordIndex = computed(() =>
   glossary.data.value ? buildKeywordIndex(glossary.data.value.entries) : null,
 )
 
-// 凭据占位符按记忆的所有者解析，而只有本人的记忆能引用凭据：读得到的本人记忆就是自己的，
-// 拿自己的凭据来画徽章；别的归属不解析
-const ownsCredentials = computed(() => base.value?.layer === 'user')
+// 双链跳转解析
+const wikiLinks = computed<WikiLinkTargets | null>(() => {
+  const m = base.value
+  if (!m) return null
+  return {
+    byShortId: new Map(m.links.map((l) => [l.shortId, { circleId: l.circleId, title: l.title }])),
+    href: (sid, targetCircleId) =>
+      router.resolve(entryRoute(targetCircleId ?? props.circleId, sid)).href,
+  }
+})
+
+// 凭据占位符按记忆圈与所有者解析
+const ownsCredentials = computed(() => entryCircleKind.value === 'personal')
 const credentials = useQuery({
-  queryKey: computed(() => ['credentials', props.spaceId] as const),
-  queryFn: ({ queryKey: [, spaceId] }) => api.credentials(spaceId),
+  queryKey: computed(() => ['credentials', props.circleId] as const),
+  queryFn: ({ queryKey: [, cid] }) => api.credentials(cid),
   enabled: ownsCredentials,
   staleTime: 60_000,
 })
@@ -295,9 +454,8 @@ const credentialLinks = computed<CredentialLinks | null>(() => {
   const items = credentials.data.value?.items
   if (!ownsCredentials.value || !items) return null
   return {
-    // 徽章是真的链接：中键、在新标签页打开也能到凭据页
     href: (id) =>
-      router.resolve({ name: 'credentials', params: { spaceId: props.spaceId }, query: { id } })
+      router.resolve({ name: 'credentials', params: { circleId: props.circleId }, query: { id } })
         .href,
     byIdentifier: new Map(
       items.map((c) => [
@@ -308,19 +466,18 @@ const credentialLinks = computed<CredentialLinks | null>(() => {
   }
 })
 function openCredential(id: string) {
-  void router.push({ name: 'credentials', params: { spaceId: props.spaceId }, query: { id } })
+  void router.push({ name: 'credentials', params: { circleId: props.circleId }, query: { id } })
 }
 
-// 插入凭据引用：服务端只收本人、敏感级至少 private 的记忆里的占位符
 const canReference = computed(
-  () => !!base.value && placeholderAllowed(base.value.layer, form.sensitivity),
+  () =>
+    !!base.value && placeholderAllowed(entryCircleKind.value, base.value.kind, form.sensitivity),
 )
 const contentInput = ref<{ textareaRef: HTMLTextAreaElement | null } | null>(null)
 const picking = ref(false)
-// 打开选择框时记下光标的位置与当时的正文：焦点移到选择框之后，正文框的选区就读不准了；
-// 选择框开着时正文被换掉（例如跟上了别处保存的新版本），原来的位置就不对了，改为插在末尾
-const caret = ref<{ start: number; end: number; content: string } | null>(null)
-// 字段选「整条」时用 WHOLE：下拉框的选项不能用空字符串当值
+const linkPicking = ref(false)
+const linkQuery = ref('')
+const caret = ref<{ start: number; end: number; content: string; key: number } | null>(null)
 const WHOLE = '*'
 const pick = reactive({ credentialId: undefined as string | undefined, field: WHOLE })
 const pickItems = computed(() =>
@@ -339,16 +496,56 @@ const pickedPlaceholder = computed(() =>
     ? placeholderOf(picked.value.identifier, pick.field === WHOLE ? null : pick.field)
     : '',
 )
-// 换了凭据，原来选的字段可能没有了
 watch(
   () => pick.credentialId,
   () => (pick.field = WHOLE),
 )
-function startPicking() {
+
+const linkSearch = useQuery({
+  queryKey: computed(() => ['entry-link-search', props.circleId, linkQuery.value.trim()] as const),
+  queryFn: async ({ queryKey: [, cid, q] }): Promise<(EntryMatch | EntryListItem)[]> => {
+    if (!q) {
+      const res = await api.entryList(cid, { limit: 12 })
+      return res.items
+    }
+    const res = await api.searchEntries(cid, q, 12)
+    return res.matches
+  },
+  enabled: linkPicking,
+})
+const linkCandidates = computed(() =>
+  (linkSearch.data.value ?? []).filter((item) => item.shortId !== props.shortId),
+)
+
+function captureCaret() {
+  const slice = activeEditVariant.value
   const el = contentInput.value?.textareaRef
-  caret.value = el
-    ? { start: el.selectionStart, end: el.selectionEnd, content: form.content }
-    : null
+  caret.value =
+    slice && el
+      ? { start: el.selectionStart, end: el.selectionEnd, content: slice.content, key: slice.key }
+      : slice
+        ? {
+            start: slice.content.length,
+            end: slice.content.length,
+            content: slice.content,
+            key: slice.key,
+          }
+        : null
+}
+function insertAtCaret(text: string) {
+  const slice = activeEditVariant.value
+  if (!slice || !text) return
+  const at = caret.value
+  const [start, end] =
+    at && at.key === slice.key && at.content === slice.content
+      ? [at.start, at.end]
+      : [slice.content.length, slice.content.length]
+  slice.content = slice.content.slice(0, start) + text + slice.content.slice(end)
+  afterPick = start + text.length
+}
+
+function startPicking() {
+  captureCaret()
   pick.credentialId = undefined
   pick.field = WHOLE
   picking.value = true
@@ -356,22 +553,28 @@ function startPicking() {
 function insertPlaceholder() {
   const text = pickedPlaceholder.value
   if (!text) return
-  const at = caret.value
-  const [start, end] =
-    at && at.content === form.content
-      ? [at.start, at.end]
-      : [form.content.length, form.content.length]
-  form.content = form.content.slice(0, start) + text + form.content.slice(end)
+  insertAtCaret(text)
   picking.value = false
-  // 选择框关掉、焦点回到按钮之后，再把光标放回正文里插入的位置后面
-  afterPick = start + text.length
 }
+
+function startLinkPicking() {
+  captureCaret()
+  linkQuery.value = ''
+  linkPicking.value = true
+}
+function insertWikiLink(shortId: string, title: string) {
+  const safeTitle = title.replace(/[|\]]/g, ' ').trim()
+  const syntax =
+    safeTitle && safeTitle !== shortId ? `[[${shortId}|${safeTitle}]]` : `[[${shortId}]]`
+  insertAtCaret(syntax)
+  linkPicking.value = false
+}
+
 let afterPick: number | null = null
 function restoreCaret() {
   const at = afterPick
   afterPick = null
   if (at === null) return
-  // 组件库在下一个宏任务才把焦点还给按钮，要排在它后面
   setTimeout(() => {
     const el = contentInput.value?.textareaRef
     el?.focus()
@@ -381,82 +584,109 @@ function restoreCaret() {
 
 const historyOpen = ref(false)
 const moveOpen = ref(false)
-// 移动或改层之后把结果写进缓存：只改层时编辑器跟上新的层，移动后打开新 URI 时不用再读一次
-async function onMoved(next: ConsoleMemoryView, from: string) {
-  const key = ['memory', props.spaceId, next.uri]
-  // 移动不改正文，查看过的接着算
+
+async function onMoved(next: ConsoleEntryView, targetCircleId: string) {
+  const key = ['entry', props.circleId, next.shortId]
   if (revealed.value?.id === next.id) revealed.value = { ...revealed.value, version: next.version }
-  // 先取消进行中的重新拉取，免得晚到的旧数据盖掉移动的结果
-  await queryClient.cancelQueries({ queryKey: key, exact: true })
-  queryClient.setQueryData(key, next)
-  // 只改了层时还停在这一条上：先载入结果，否则监听会把它当成别处的新版本，再通知页面一次
-  if (next.uri === props.uri) load(next)
-  void queryClient.invalidateQueries({ queryKey: ['memory-history', props.spaceId, next.id] })
-  // 变更记录详情里的前后快照也可能带着刚抹掉的正文
-  void queryClient.invalidateQueries({ queryKey: ['activity-event', props.spaceId] })
-  emit('moved', next, from)
+  if (next.circleId === props.circleId) {
+    await queryClient.cancelQueries({ queryKey: key, exact: true })
+    queryClient.setQueryData(key, next)
+    load(next)
+  } else {
+    void queryClient.invalidateQueries({ queryKey: ['entry', next.circleId, next.shortId] })
+  }
+  void queryClient.invalidateQueries({ queryKey: ['entry-history', props.circleId, next.id] })
+  void queryClient.invalidateQueries({ queryKey: ['activity-event', props.circleId] })
+  emit('moved', next, targetCircleId)
 }
 
-const canCreateChild = computed(() => permissions.canWriteUri(props.uri))
-// 本人不设公开：选项里也不给
+// 个人圈不设公开：选项里也不给
 const sensitivityOptions = computed(() =>
   permissions.sensitivities.value
-    .filter((value) => !base.value || sensitivityAllowed(base.value.layer, value))
+    .filter(
+      (value) => !base.value || sensitivityAllowed(entryCircleKind.value, base.value.kind, value),
+    )
     .map((value) => ({
       value,
       label: sensitivityLabels[value],
-      layer: base.value?.layer ?? null,
+      band: entryStrataBand.value ?? ('primary' as const),
       sensitivity: value,
     })),
 )
 const saving = ref(false)
-// 要删除的那一版，在打开确认框时记下：确认期间编辑器可能载入了删除后重建的另一条，不能把它一起删掉
-const deleting = ref<ConsoleMemoryView | null>(null)
+const deleting = ref<ConsoleEntryView | null>(null)
 
 function failed(err: unknown, fallback: string) {
   toast.add({ title: err instanceof ApiError ? err.message : fallback, color: 'error' })
 }
 
-// 从 secret 降级时看整段正文像不像有明文凭据：降级之后正文会进历史、全文检索和向量。
-// 服务端会拒绝带着明文降级，确认之后才带上 allowPlaintext 强制。强制降级只给空间 owner（只有他能改 secret，
-// 也就只有他会走到这里）；同一个标记用在照样保存上时，能改这条记忆的成员都能带
 const downgradeWarning = ref(false)
-// 写成一整句：模板里中文换行会多出一个空格
 const PLAINTEXT_DOWNGRADE_TEXT =
   '降级后，正文将写入历史、全文索引和向量，无法撤回。请先将凭据转存，并确认正文不含密码或令牌。'
-// 别的保存：正文里有这次新增的疑似明文时，先逐处选转存为凭据或不是凭据（PlaintextSaveModal），
-// 判断和服务端拒绝写入是同一个（addedPlaintextCredentials）。结果是 secret 时正文加密，不用处理
 const plaintextGate = ref<PlaintextSaveRequest | null>(null)
-// 转存为凭据只看 canManageCredentials；照样保存给能改这条记忆的成员
 const canConvert = computed(() => canManageCredentials(permissions.role.value))
 const canSaveAnyway = computed(() => !readOnly.value)
 
-// 本地就能判断的问题：标题、有效期。开逐处处理的弹窗之前先查，免得转存建了凭据、改了正文才停下
-function formProblem(values: { title: string; validTo: string }, m: ConsoleMemoryView) {
-  const title = MemoryTitle.safeParse(values.title)
+const hasDuplicateWhen = computed(() => {
+  const seen = new Set<string>()
+  for (const v of editVariants.value) {
+    const sig = whenSignature(v.when)
+    if (seen.has(sig)) return true
+    seen.add(sig)
+  }
+  return false
+})
+const hasEmptySlice = computed(() => editVariants.value.some((v) => !v.content.trim()))
+
+function formProblem(
+  values: { title: string; validTo: string; topics?: readonly string[] },
+  m: ConsoleEntryView,
+) {
+  const title = EntryTitle.safeParse(values.title)
   if (values.title !== m.title && !title.success) {
     return title.error.issues[0]?.message ?? '标题格式错误'
   }
+  if (values.topics) {
+    for (const raw of values.topics) {
+      const parsed = TopicTag.safeParse(raw)
+      if (!parsed.success) return parsed.error.issues[0]?.message ?? '主题标签格式错误'
+    }
+    if (normalizedTopics(values.topics).length > TOPICS_MAX) {
+      return `主题标签最多 ${TOPICS_MAX} 个`
+    }
+  }
+  if (hasEmptySlice.value) return '每个变体切片的正文不能为空'
+  if (hasDuplicateWhen.value) return '同一条记忆下不能存在适用切面相同的变体切片'
+  if (form.sensitivity === 'secret' && !hasHomogeneousRealms(editVariants.value)) {
+    return '机密记忆的所有变体切片须保持相同的场域'
+  }
   if (values.validTo === validToInput(m) || !values.validTo) return null
   if (!fromLocalInput(values.validTo)) return '有效期的日期和时间不完整'
-  // 编辑得久了，开始编辑时能选的最早时间现在可能已经太近；没改的有效到原样不发，不用查
   if (validToTooSoon(values.validTo)) {
     minValidTo.value = earliestValidTo()
     return '有效期须晚于当前时间至少一分钟'
   }
   return null
 }
-function gateFor(m: ConsoleMemoryView, content: string, spots: PlaintextSpot[], rejected: boolean) {
+
+function gateFor(
+  m: ConsoleEntryView,
+  content: string,
+  spots: PlaintextSpot[],
+  rejected: boolean,
+): PlaintextSaveRequest {
   return {
     content,
-    uri: m.uri,
+    shortId: m.shortId,
     title: form.title,
-    layer: m.layer,
+    circleKind: entryCircleKind.value,
+    kind: m.kind,
     sensitivity: form.sensitivity,
     spots,
     rejected,
   }
 }
+
 function requestSave() {
   const m = base.value
   if (!m || saving.value) return
@@ -467,64 +697,80 @@ function requestSave() {
   }
   const downgrade = m.sensitivity === 'secret' && form.sensitivity !== 'secret'
   if (downgrade) {
-    if (PLAINTEXT_CREDENTIAL.test(form.content)) {
+    const joined = joinVariantContents(editVariants.value) ?? ''
+    if (PLAINTEXT_CREDENTIAL.test(joined)) {
       downgradeWarning.value = true
       return
     }
-  } else if (form.sensitivity !== 'secret' && form.content !== (m.content ?? '')) {
-    const spots = addedSpots(m.content, form.content)
+  } else if (form.sensitivity !== 'secret' && variantsChanged.value) {
+    const { content, spots } = addedVariantSpots(m.variants, editVariants.value)
     if (spots.length) {
-      plaintextGate.value = gateFor(m, form.content, spots, false)
+      plaintextGate.value = gateFor(m, content, spots, false)
       return
     }
   }
   void save()
 }
+
 function confirmDowngrade() {
-  // 确认框关闭的动画期间再点一次：已经在保存了，不再发第二个请求
   if (!downgradeWarning.value || saving.value) return
   downgradeWarning.value = false
   void save({ allowPlaintext: true })
 }
-// 逐处处理完：转存的已经建好凭据、正文里的值换成了占位符，换过的正文放回表单再保存。
-// 结果只能用在算出它的那份正文上，这期间正文变了就按现在的正文接着算（afterGate）
+
 function onGateProceed(result: PlaintextSaveResult) {
   const m = base.value
   if (!m) return
-  const next = afterGate(m.content, form.content, result)
+  const beforeJoined = joinVariantContents(m.variants)
+  const currentJoined = joinVariantContents(editVariants.value) ?? ''
+  const next = afterGate(beforeJoined, currentJoined, result)
+  if (result.replacements.length) {
+    editVariants.value = replaceVariantsValues(editVariants.value, result.replacements)
+  }
   if (next.kind === 'reopen') {
-    // 转存了的值已经换进现在的正文：放回表单，只把新出现的几处再给人看
-    form.content = next.content
     plaintextGate.value = { ...gateFor(m, next.content, next.spots, false), ignored: next.ignored }
     return
   }
-  form.content = next.content
   void save(next.flags)
 }
 
 async function save(flags: SaveFlags = {}) {
   const m = base.value
   if (!m || saving.value) return
-  // 记下这次提交的值：请求期间又改过的字段，保存之后保留新改的内容
-  const sent = { ...form, glossary: [...form.glossary] }
+  const sent = {
+    title: form.title,
+    topics: normalizedTopics(form.topics),
+    disclosure: form.disclosure,
+    priority: form.priority,
+    sensitivity: form.sensitivity,
+    glossary: [...form.glossary],
+    validTo: form.validTo,
+    variants: editVariants.value.map((v, sortOrder) => ({
+      when: normalizeWhen(v.when),
+      content: v.content,
+      sortOrder,
+    })),
+    variantsDirty: variantsChanged.value,
+  }
   const problem = formProblem(sent, m)
   if (problem) {
     toast.add({ title: problem, color: 'error' })
     return
   }
-  const title = MemoryTitle.safeParse(sent.title)
+  const title = EntryTitle.safeParse(sent.title)
+  const topicsChanged = sent.topics.join('\n') !== m.topics.join('\n')
   const validToChanged = sent.validTo !== validToInput(m)
   const validTo = sent.validTo ? fromLocalInput(sent.validTo) : null
+  const beforeJoined = joinVariantContents(m.variants)
+  const sentJoined = joinVariantContents(sent.variants) ?? ''
   saving.value = true
   try {
-    const next = await api.updateMemory(props.spaceId, {
-      uri: m.uri,
-      // 带上表单载入时的 id 与版本号：别人改过、或删除后重建了之后返回 409，不会悄悄覆盖
-      expectedId: m.id,
+    const next = await api.updateEntry(props.circleId, {
+      id: m.shortId,
       expectedVersion: m.version,
       ...(title.success && title.data !== m.title ? { title: title.data } : {}),
-      ...(sent.content !== (m.content ?? '') ? { content: sent.content } : {}),
-      // 只在改了的时候发：服务端会检查写进去的 disclosure，规则之前写着的不该挡住改别的
+      ...(sent.variantsDirty ? { variants: sent.variants } : {}),
+      ...(topicsChanged ? { topics: sent.topics } : {}),
       ...((sent.disclosure.trim() || null) !== (m.disclosure ?? null)
         ? { disclosure: sent.disclosure.trim() || null }
         : {}),
@@ -532,42 +778,41 @@ async function save(flags: SaveFlags = {}) {
       sensitivity: sent.sensitivity,
       glossaryAdd: sent.glossary.filter((k) => !m.glossary.includes(k)),
       glossaryRemove: m.glossary.filter((k) => !sent.glossary.includes(k)),
-      // 只在改了的时候发：输入框只到分钟，原样发回去会抹掉原来的秒
       ...(validToChanged ? { validTo } : {}),
       ...flags,
     })
-    // 正在进行的重新拉取可能带回保存之前的版本，先取消，再把保存结果写进缓存
     await queryClient.cancelQueries({ queryKey: queryKey.value })
     queryClient.setQueryData(queryKey.value, next)
-    revealed.value = revealedAfterWrite(next, sent.content)
+    revealed.value = revealedAfterWrite(next, sent.variants, revealed.value)
     const saved = withRevealed(next, revealed.value)
     base.value = saved
     if (form.title === sent.title) form.title = saved.title
-    if (form.content === sent.content) form.content = saved.content ?? ''
+    if (normalizedTopics(form.topics).join('\n') === sent.topics.join('\n')) {
+      form.topics = [...saved.topics]
+    }
+    if (!editVariants.value.some((v, i) => v.content !== sent.variants[i]?.content)) {
+      setEditVariantsFromEntry(saved)
+    }
     if (form.disclosure === sent.disclosure) form.disclosure = next.disclosure ?? ''
     if (form.priority === sent.priority) form.priority = next.priority
     if (form.sensitivity === sent.sensitivity) form.sensitivity = next.sensitivity
     if (form.glossary.join('\n') === sent.glossary.join('\n')) form.glossary = [...next.glossary]
     if (form.validTo === sent.validTo) form.validTo = validToInput(next)
     toast.add({ title: '已保存', color: 'success' })
-    // 保存期间没有再改，就回到阅读状态
     if (!dirty.value) mode.value = 'read'
-    void queryClient.invalidateQueries({ queryKey: ['memory-history', props.spaceId, next.id] })
-    // 变更记录详情里的前后快照也可能带着刚抹掉的正文
-    void queryClient.invalidateQueries({ queryKey: ['activity-event', props.spaceId] })
+    void queryClient.invalidateQueries({ queryKey: ['entry-history', props.circleId, next.id] })
+    void queryClient.invalidateQueries({ queryKey: ['activity-event', props.circleId] })
     emit('changed', next, m)
   } catch (err) {
-    // 服务端检出了新增的疑似明文（两边判断有出入时）：照样逐处处理
-    // 请求期间又改过正文时按现在的正文重算，没有新增的就照常报错
     const findings = plaintextRejection(err)
-    const gate = findings && spotsAfterRejection(m.content, sent.content, form.content, findings)
+    const currentJoined = joinVariantContents(editVariants.value) ?? ''
+    const gate = findings && spotsAfterRejection(beforeJoined, sentJoined, currentJoined, findings)
     if (gate) {
       plaintextGate.value = gateFor(m, gate.content, gate.spots, true)
       return
     }
     failed(err, '保存失败')
-    // 版本冲突时立刻重新拉取，好显示「载入新版本」
-    if (err instanceof ApiError && err.status === 409) void memory.refetch()
+    if (err instanceof ApiError && err.status === 409) void entry.refetch()
   } finally {
     saving.value = false
   }
@@ -577,29 +822,24 @@ async function remove() {
   const m = deleting.value
   if (!m) return
   try {
-    // 带上确认的那一版的 id 与版本号：期间被改过、或删除后重建了的记忆不会被一起删掉
-    await api.deleteMemory(props.spaceId, props.uri, m)
+    await api.deleteEntry(props.circleId, m.shortId, m.version)
     deleting.value = null
     toast.add({ title: '已删除', color: 'success' })
-    // 已经删除了，离开时不再提示未保存的修改
     leaving.value = true
     hasUnsavedChanges.value = false
-    emit('deleted', props.uri)
+    emit('deleted', m.shortId)
   } catch (err) {
     failed(err, '删除失败')
-    // 版本冲突：关掉确认框并重新读取，看过新的那一版再决定删不删
     if (err instanceof ApiError && err.status === 409) {
       deleting.value = null
-      void memory.refetch()
+      void entry.refetch()
     }
   }
 }
 
-// 窄屏上打开一条之后，页面把焦点放到这里
 const titleEl = ref<HTMLElement | null>(null)
 defineExpose({ focusTitle: () => titleEl.value?.focus() })
 
-// 标签和条带跟着表单走：改敏感级时就能看到改了之后的样子
 const shownSensitivity = computed(() =>
   mode.value === 'edit' ? form.sensitivity : (base.value?.sensitivity ?? 'private'),
 )
@@ -609,15 +849,14 @@ const shownPriority = computed(() =>
 
 const expiry = computed(() => expiryState(base.value?.validTo ?? null, now.value))
 const bootNode = computed(() => !!base.value && isBootNode(base.value, now.value))
-// 没写触发场景时的提示：颜色、文字和说明一次判断给全，列表也用同一个函数
 const missingNote = computed(() => (base.value ? missingDisclosure(base.value, now.value) : null))
 const plaintext = computed(() => {
   const m = base.value
   return m && looksPlaintext(m) ? plaintextValues(m) : null
 })
-const hasPiiFinding = (m: ConsoleMemoryView | null | undefined) =>
-  !!m?.sensitiveFindings?.some((f) => f.category === 'pii')
-// 未进入本人私密边界的个人信息：需要提醒成员移入本人私密或设为机密
+const hasPiiFinding = (m: ConsoleEntryView | null | undefined) =>
+  !!m?.variants.some((v) => v.sensitiveFindings?.some((f) => f.category === 'pii'))
+
 const unprotectedPii = computed(() => {
   const m = base.value
   const hasPii = hasPiiFinding(m)
@@ -627,7 +866,7 @@ const unprotectedPii = computed(() => {
     !m.plaintextIgnored &&
     hasPii &&
     needsSensitiveInboxAlert({
-      layer: m.layer,
+      circleKind: entryCircleKind.value,
       sensitivity: m.sensitivity,
       provenance: m.provenance,
       sensitiveCredential: false,
@@ -636,7 +875,6 @@ const unprotectedPii = computed(() => {
     })
   )
 })
-// 已处于本人私密（受信任来源）且含个人信息：静默提示已受外发脱敏与权限边界保护
 const protectedPii = computed(() => {
   const m = base.value
   return (
@@ -645,19 +883,18 @@ const protectedPii = computed(() => {
     !m.plaintextIgnored &&
     m.sensitivity !== 'secret' &&
     hasPiiFinding(m) &&
-    isProtectedPersonalMemory(m.layer, m.sensitivity, m.provenance)
+    isProtectedPersonalEntry(entryCircleKind.value, m.sensitivity, m.provenance)
   )
 })
 
-// 疑似明文的提示：转存为凭据、保护隔离、抹除敏感段、忽略与撤销忽略。结果写进缓存并载入，不用再读一次；
-// 版本变了的（转存 / 保护 / 抹除）由 adopt 或 onMoved 通知页面，版本没变的（忽略）条数和列表在 usePlaintextActions 里刷新
 const convertOpen = ref(false)
 const redactOpen = ref(false)
-// 占位符放不进这条记忆时转存一定失败，先调整
 const convertible = computed(
-  () => !!base.value && placeholderAllowed(base.value.layer, base.value.sensitivity),
+  () =>
+    !!base.value &&
+    placeholderAllowed(entryCircleKind.value, base.value.kind, base.value.sensitivity),
 )
-const plaintextActions = usePlaintextActions(computed(() => props.spaceId))
+const plaintextActions = usePlaintextActions(computed(() => props.circleId))
 async function setPlaintextIgnored(ignored: boolean) {
   const m = base.value
   if (!m) return
@@ -667,84 +904,54 @@ async function setPlaintextIgnored(ignored: boolean) {
 async function protectCurrent(target: ProtectTarget) {
   const m = base.value
   if (!m) return
-  const view = await plaintextActions.protect(m, target)
+  const view = await plaintextActions.protect(
+    { id: m.id, version: m.version, inPersonal: entryCircleKind.value === 'personal' },
+    target,
+  )
   if (!view || view.id !== base.value?.id) return
-  if (view.uri !== m.uri) await onMoved(view, m.uri)
+  if (view.circleId !== m.circleId) await onMoved(view, view.circleId)
   else adopt(view)
 }
-async function redactCurrent(mode: RedactMode) {
+async function redactCurrent(redactMode: RedactMode) {
   const m = base.value
   if (!m) return
   try {
-    const view = await plaintextActions.redact(m, mode)
+    const view = await plaintextActions.redact(m, redactMode)
     if (view && view.id === base.value?.id) adopt(view)
   } finally {
     redactOpen.value = false
   }
 }
-function onConverted(memory: ConsoleMemoryView) {
-  if (memory.id === base.value?.id) adopt(memory)
+function onConverted(changed: ConsoleEntryView) {
+  if (changed.id === base.value?.id) adopt(changed)
 }
 
-watch(
-  () => base.value?.layer,
-  (layer) => {
-    if (layer) emit('layer', layer)
-  },
-  { immediate: true },
-)
-
-// 人格层的节点要说清覆盖了祖先的哪个节点：按 URI 里的标识找到人格，再读它的继承关系
-const personaSlug = computed(() => /^persona:\/\/([^/]+)\//.exec(props.uri)?.[1] ?? null)
-const personas = useQuery({
-  queryKey: computed(() => ['personas', props.spaceId]),
-  queryFn: () => api.personas(props.spaceId),
-  enabled: computed(() => personaSlug.value !== null),
-})
-const personaId = computed(
-  () => personas.data.value?.find((p) => p.slug === personaSlug.value)?.id ?? null,
-)
-const persona = useQuery({
-  queryKey: computed(() => ['persona', props.spaceId, personaId.value] as const),
-  queryFn: ({ queryKey: [, spaceId, id] }) => api.persona(spaceId, id!),
-  enabled: computed(() => personaId.value !== null),
-})
-const overrides = computed(() => overriddenNode(persona.data.value, props.uri))
-
-const appName = (id: string) => permissions.apps.data.value?.find((a) => a.id === id)?.name
-// 归属后面接上是哪个人格、哪个应用：坐标里写的是标识，这里换成名字
-const ownerName = computed(() => {
-  const c = base.value ? parseCoordinate(base.value.uri) : null
-  if (!c?.entity) return null
-  if (c.layer === 'persona') {
-    return personas.data.value?.find((p) => p.slug === c.entity)?.name ?? c.entity
-  }
-  return permissions.apps.data.value?.find((a) => a.slug === c.entity)?.name ?? c.entity
-})
+const clientName = (id: string) => permissions.clients.data.value?.find((a) => a.id === id)?.name
 const properties = computed<Property[][]>(() => {
   const m = base.value
   if (!m) return []
   return [
     [
-      { key: 'layer', label: '归属' },
+      { key: 'band', label: '地层' },
+      { key: 'kind', label: '类型', value: entryKindLabels[m.kind] },
       { key: 'sensitivity', label: '敏感级' },
       { key: 'priority', label: '优先级' },
     ],
     [
+      { key: 'topics', label: '主题', stacked: true },
       { key: 'disclosure', label: '触发场景', stacked: true },
       { key: 'glossary', label: '关键词', stacked: true },
       { key: 'validity', label: '有效期' },
     ],
     [
       { key: 'provenance', label: '来源', value: provenanceLabels[m.provenance] },
-      { key: 'origin', label: '范围', value: originScopeLabel(m.originScope, appName) },
+      { key: 'origin', label: '作用域', value: originScopeLabel(m.originScope, clientName) },
       { key: 'version', label: '版本', value: m.version },
       { key: 'created', label: '创建' },
       { key: 'updated', label: '更新' },
       {
         key: 'recall',
         label: '召回',
-        // 改成机密之后不再显示次数：查询停了，缓存里还留着之前的
         value: recallText(
           recallable.value ? recallStat.data.value : undefined,
           { secret: !recallable.value, boot: bootNode.value },
@@ -754,20 +961,38 @@ const properties = computed<Property[][]>(() => {
     ],
   ]
 })
+
+function variantPlaintext(content: string | null, ignored: boolean): string[] | null {
+  if (!base.value) return null
+  const values = variantPlaintextValues(content, base.value.sensitivity, ignored)
+  return values.length ? values : null
+}
+
+function previewVariantContent(): string {
+  return activeEditVariant.value?.content ?? entryText(base.value ?? {})
+}
 </script>
 
 <template>
   <article class="memory-detail">
-    <StrataStrip v-if="base" :layer="base.layer" :sensitivity="shownSensitivity" />
+    <StrataStrip
+      v-if="base && entryStrataBand"
+      :band="entryStrataBand"
+      :sensitivity="shownSensitivity"
+    />
     <header class="detail-head">
       <div class="detail-nav"><slot name="nav" /></div>
       <div class="detail-title">
-        <h1 ref="titleEl" tabindex="-1">{{ base?.title ?? identifierOf(uri) }}</h1>
+        <h1 ref="titleEl" tabindex="-1">{{ base?.title ?? shortId }}</h1>
       </div>
-      <template v-if="base">
+      <template v-if="base && entryStrataBand">
         <div class="detail-tag">
-          <StrataTag :layer="base.layer" :sensitivity="shownSensitivity" />
+          <StrataBandTag :band="entryStrataBand" :sensitivity="shownSensitivity" />
           <span class="tag-priority">P{{ shownPriority }}</span>
+          <span v-if="readVariants.length > 1" class="tag-variants">
+            <UIcon :name="icons.variants" class="size-3.5" />
+            <span>{{ readVariants.length }} 切片</span>
+          </span>
           <span v-if="bootNode" class="inline-flex items-center gap-1.5">
             <span class="boot-flag">启动加载</span>
             <Hint>{{ BOOT_HINT }}</Hint>
@@ -806,16 +1031,7 @@ const properties = computed<Property[][]>(() => {
               variant="outline"
               @click="moveOpen = true"
             >
-              移动
-            </UButton>
-            <UButton
-              v-if="canCreateChild"
-              size="sm"
-              color="primary"
-              variant="outline"
-              @click="emit('createChild', uri)"
-            >
-              新建子节点
+              迁移
             </UButton>
             <UButton
               v-if="!readOnly"
@@ -832,7 +1048,7 @@ const properties = computed<Property[][]>(() => {
             <UButton
               size="sm"
               :loading="saving"
-              :disabled="!dirty || !form.content.trim()"
+              :disabled="!dirty || hasEmptySlice || hasDuplicateWhen"
               @click="requestSave"
             >
               保存
@@ -845,17 +1061,16 @@ const properties = computed<Property[][]>(() => {
       </template>
     </header>
 
-    <div v-if="memory.isPending.value" class="detail-read space-y-3">
+    <div v-if="entry.isPending.value" class="detail-read space-y-3">
       <USkeleton class="h-6 w-1/2" />
       <USkeleton class="h-40 w-full" />
     </div>
     <div v-else-if="!base" class="detail-read">
-      <ReadFailureNote :query="memory" />
+      <ReadFailureNote :query="entry" />
     </div>
     <div v-else class="detail-main">
       <div class="detail-read">
-        <!-- 已经载入过时，重新拉取失败（例如别处删除了它）也保留表单，免得丢掉正在编辑的内容 -->
-        <ReadFailureNote v-if="memory.isError.value" :query="memory" />
+        <ReadFailureNote v-if="entry.isError.value" :query="entry" />
         <NoteLine v-else-if="changedElsewhere && dirty" tone="warning">
           这条记忆已在别处修改，或已删除并重新创建。保存将提示冲突，可先复制当前改动，再载入新版本。
           <template #actions>
@@ -863,7 +1078,7 @@ const properties = computed<Property[][]>(() => {
               size="sm"
               color="primary"
               variant="outline"
-              @click="memory.data.value && adopt(memory.data.value)"
+              @click="entry.data.value && adopt(entry.data.value)"
             >
               载入新版本
             </UButton>
@@ -877,22 +1092,72 @@ const properties = computed<Property[][]>(() => {
           这条记忆将于 {{ formatTime(base.validTo!) }} 到期，到期后不再召回，也不进启动加载。
         </NoteLine>
 
-        <!-- 编辑：就地改原文，可以并排预览 -->
+        <!-- 编辑：就地改多切面原文，可以并排预览与插双链 -->
         <template v-if="mode === 'edit'">
-          <UFormField label="标题" class="edit-title">
-            <template #hint><Hint>目录、列表与搜索显示标题；改标题不改坐标</Hint></template>
-            <UInput v-model="form.title" :maxlength="MEMORY_TITLE_MAX" class="w-full" />
-          </UFormField>
+          <div class="grid gap-3 pb-3 sm:grid-cols-2">
+            <UFormField label="标题" class="edit-title">
+              <template #hint><Hint>目录、列表与搜索显示标题；改标题不影响短 ID</Hint></template>
+              <UInput v-model="form.title" :maxlength="ENTRY_TITLE_MAX" class="w-full" />
+            </UFormField>
+            <UFormField label="主题">
+              <template #hint><Hint>用于分组归类与筛选</Hint></template>
+              <UInputTags v-model="form.topics" class="w-full" placeholder="输入后回车添加" />
+            </UFormField>
+          </div>
+
           <div class="edit-head">
-            <p class="edit-help">
-              Markdown。密码与令牌存为凭据，正文只放占位符。<Hint>写清背景、原因和适用条件。</Hint>
-            </p>
+            <div class="slice-bar" role="tablist" aria-label="内容切片">
+              <button
+                v-for="(slice, idx) in editVariants"
+                :key="slice.key"
+                type="button"
+                role="tab"
+                :aria-selected="idx === editSliceIdx"
+                class="slice-tab"
+                :class="{ active: idx === editSliceIdx }"
+                @click="editSliceIdx = idx"
+              >
+                <span>{{ whenLabel(slice.when, facets.data.value) }}</span>
+                <UButton
+                  v-if="editVariants.length > 1"
+                  type="button"
+                  size="xs"
+                  color="neutral"
+                  variant="ghost"
+                  :icon="icons.cancel"
+                  aria-label="删除此切片"
+                  @click.stop="removeEditVariant(idx)"
+                />
+              </button>
+              <UButton
+                v-if="editVariants.length < VARIANTS_MAX"
+                type="button"
+                size="xs"
+                color="neutral"
+                variant="outline"
+                :icon="icons.add"
+                @click="addEditVariant"
+              >
+                添加切片
+              </UButton>
+            </div>
             <div class="edit-tools">
+              <UButton
+                type="button"
+                size="sm"
+                color="neutral"
+                variant="outline"
+                :icon="icons.links"
+                @click="startLinkPicking"
+              >
+                插入双链
+              </UButton>
               <UTooltip
-                :text="canReference ? undefined : '仅本人中敏感级不低于私密的记忆可引用凭据'"
+                :text="canReference ? undefined : '仅个人圈中敏感级不低于私密的正式词条可引用凭据'"
                 :disabled="canReference"
               >
                 <UButton
+                  type="button"
                   size="sm"
                   color="neutral"
                   variant="outline"
@@ -902,34 +1167,50 @@ const properties = computed<Property[][]>(() => {
                   插入凭据引用
                 </UButton>
               </UTooltip>
-              <!-- 不放进表单字段里：表单字段会把自己的标签给里面的第一个控件 -->
               <USwitch v-model="preview" size="sm" label="预览" />
             </div>
           </div>
-          <div class="grid gap-3" :class="preview ? 'xl:grid-cols-2' : ''">
-            <UTextarea
-              ref="contentInput"
-              v-model="form.content"
-              :rows="18"
-              autoresize
-              :maxrows="40"
-              class="w-full font-mono"
-              aria-label="正文"
+
+          <div v-if="activeEditVariant" class="space-y-3">
+            <FacetWhenPicker
+              :model-value="activeEditVariant.when"
+              :circle-id="circleId"
+              :vocabulary="facets.data.value"
+              :locked-realms="
+                form.sensitivity === 'secret' && editSliceIdx > 0 ? primaryRealms : undefined
+              "
+              @update:model-value="updateActiveEditWhen"
             />
-            <div v-if="preview" class="edit-preview">
-              <MemoryContent
-                :content="form.content"
-                :credentials="credentialLinks"
-                @credential="openCredential"
+            <NoteLine v-if="hasDuplicateWhen" tone="warning">
+              存在适用切面相同的变体切片，请调整条件后再保存。
+            </NoteLine>
+            <div class="grid gap-3" :class="preview ? 'xl:grid-cols-2' : ''">
+              <UTextarea
+                ref="contentInput"
+                v-model="activeEditVariant.content"
+                :rows="18"
+                autoresize
+                :maxrows="40"
+                class="w-full font-mono"
+                aria-label="正文"
               />
+              <div v-if="preview" class="edit-preview">
+                <MemoryContent
+                  :content="previewVariantContent()"
+                  :wiki-links="wikiLinks"
+                  :credentials="credentialLinks"
+                  @credential="openCredential"
+                  @open="(sid, cid) => emit('open', sid, cid)"
+                />
+              </div>
             </div>
           </div>
         </template>
 
         <MemoryHistory
           v-else-if="historyOpen"
-          :space-id="spaceId"
-          :memory-id="base.id"
+          :circle-id="circleId"
+          :entry-id="base.id"
           :can-restore="!readOnly && mode === 'read'"
         />
 
@@ -961,16 +1242,16 @@ const properties = computed<Property[][]>(() => {
                 size="sm"
                 color="primary"
                 variant="outline"
-                :to="{ name: 'credentials', params: { spaceId } }"
+                :to="{ name: 'credentials', params: { circleId } }"
               >
                 查看凭据
               </UButton>
             </template>
           </NoteLine>
           <NoteLine v-else-if="unprotectedPii" tone="warning">
-            正文疑似包含个人信息，当前归属或可见范围较宽
+            正文疑似包含个人信息，当前记忆圈或可见范围较宽
             <Hint>
-              建议保留原值并移入本人私密或设为机密，外发至模型与嵌入前会自动脱敏；误粘贴的冗余文本可抹除敏感段。
+              建议保留原值并移入个人圈私密或设为机密，外发至模型与嵌入前会自动脱敏；误粘贴的冗余文本可抹除敏感段。
             </Hint>
             <template v-if="!readOnly" #actions>
               <UButton
@@ -978,9 +1259,9 @@ const properties = computed<Property[][]>(() => {
                 color="primary"
                 variant="outline"
                 :loading="plaintextActions.busy.value === base.id"
-                @click="protectCurrent('user_private')"
+                @click="protectCurrent('personal_private')"
               >
-                {{ base.layer === 'user' ? '设为私密' : '移入本人私密' }}
+                {{ entryCircleKind === 'personal' ? '设为私密' : '移入个人圈私密' }}
               </UButton>
               <UButton
                 v-if="permissions.sensitivities.value.includes('secret')"
@@ -1013,11 +1294,10 @@ const properties = computed<Property[][]>(() => {
             </template>
           </NoteLine>
           <NoteLine v-else-if="protectedPii">
-            包含个人信息 · 仅本人与私有应用可见，外发模型前自动脱敏
-            <Hint>当前已受本人私密边界保护，原文完整保留，无需打码或抹除。</Hint>
+            已处于个人圈私密边界，外发脱敏与权限控制已生效。
           </NoteLine>
-          <NoteLine v-else-if="base.plaintextIgnored">
-            疑似明文的提示已忽略<Hint>正文修改后会重新提示。</Hint>
+          <NoteLine v-else-if="base.plaintextIgnored && base.sensitivity !== 'secret'">
+            已忽略明文提醒
             <template v-if="!readOnly" #actions>
               <UButton
                 size="sm"
@@ -1041,14 +1321,12 @@ const properties = computed<Property[][]>(() => {
               </UButton>
             </template>
           </NoteLine>
-          <NoteLine v-if="overrides">
-            覆盖「{{ overrides.persona }}」的同名记忆
-            <template #actions>
-              <button type="button" class="override-link" @click="emit('open', overrides!.uri)">
-                <MemoryName :uri="overrides.uri" :title="overrides.title" />
-              </button>
-            </template>
+          <NoteLine v-if="base.otherVariants.length">
+            另有 {{ base.otherVariants.length }} 个未展开的切面切片：{{
+              base.otherVariants.map((o) => whenLabel(o.when, facets.data.value)).join('、')
+            }}
           </NoteLine>
+
           <template v-if="base.contentHidden">
             <div class="secret-mask" role="img" aria-label="机密内容已加密存储">
               <i style="width: 94%" />
@@ -1081,25 +1359,90 @@ const properties = computed<Property[][]>(() => {
                 </UButton>
               </template>
             </NoteLine>
+
+            <div v-if="readVariants.length >= 2" class="read-variant-bar">
+              <div class="slice-bar" role="tablist" aria-label="切面切片">
+                <button
+                  v-for="(v, idx) in readVariants"
+                  :key="v.id"
+                  type="button"
+                  role="tab"
+                  :aria-selected="!compareMode && idx === readSliceIdx"
+                  class="slice-tab"
+                  :class="{ active: !compareMode && idx === readSliceIdx }"
+                  @click="((compareMode = false), (readSliceIdx = idx))"
+                >
+                  {{ whenLabel(v.when, facets.data.value) }}
+                </button>
+              </div>
+              <UButton
+                size="xs"
+                color="neutral"
+                variant="outline"
+                :icon="icons.splitView"
+                :aria-pressed="compareMode"
+                @click="compareMode = !compareMode"
+              >
+                并排对比
+              </UButton>
+            </div>
+            <p
+              v-else-if="readVariants.length === 1 && Object.keys(readVariants[0]!.when).length > 0"
+              class="single-when-note"
+            >
+              <UIcon :name="icons.facets" class="size-3.5" />
+              <span>适用切面：{{ whenLabel(readVariants[0]!.when, facets.data.value) }}</span>
+            </p>
+
+            <div v-if="compareMode && readVariants.length >= 2" class="compare-grid">
+              <section v-for="v in readVariants" :key="v.id" class="compare-card">
+                <header class="compare-head">
+                  {{ whenLabel(v.when, facets.data.value) }}
+                </header>
+                <div class="compare-body">
+                  <MemoryContent
+                    :content="v.content ?? ''"
+                    :keywords="keywordIndex"
+                    :self="base.shortId"
+                    :wiki-links="wikiLinks"
+                    :credentials="credentialLinks"
+                    :plaintext="variantPlaintext(v.content, v.plaintextIgnored)"
+                    @open="(sid, cid) => emit('open', sid, cid)"
+                    @credential="openCredential"
+                  />
+                </div>
+              </section>
+            </div>
             <MemoryContent
-              :content="base.content ?? ''"
+              v-else-if="activeReadVariant"
+              :content="activeReadVariant.content ?? ''"
               :keywords="keywordIndex"
-              :self="base.uri"
+              :self="base.shortId"
+              :wiki-links="wikiLinks"
               :credentials="credentialLinks"
-              :plaintext="plaintext"
-              @open="(uri) => emit('open', uri)"
+              :plaintext="
+                variantPlaintext(activeReadVariant.content, activeReadVariant.plaintextIgnored)
+              "
+              @open="(sid, cid) => emit('open', sid, cid)"
               @credential="openCredential"
             />
           </template>
+
+          <EntryLinksPanel
+            v-if="base.links.length"
+            :circle-id="circleId"
+            :circle-kind="entryCircleKind"
+            :links="base.links"
+            @open="(sid, cid) => emit('open', sid, cid)"
+          />
         </template>
       </div>
 
       <aside class="detail-side">
-        <!-- 编辑时属性栏也可以改 -->
         <div v-if="mode === 'edit'" class="edit-fields">
           <div class="edit-layer">
-            <span>归属</span>
-            <StrataSwatch :layer="base.layer" plain label="layer" />
+            <span>地层</span>
+            <StrataSwatch v-if="entryStrataBand" :band="entryStrataBand" plain label="band" />
           </div>
           <UFormField label="优先级" help="0 最重要">
             <UInputNumber v-model="form.priority" :min="0" :max="99" class="w-full" />
@@ -1164,16 +1507,26 @@ const properties = computed<Property[][]>(() => {
           </PropertyList>
         </div>
         <PropertyList v-else :groups="properties">
-          <template #layer>
-            <StrataSwatch :layer="base.layer" plain label="layer" />
-            <span v-if="ownerName"> · {{ ownerName }}</span>
+          <template #band>
+            <StrataSwatch v-if="entryStrataBand" :band="entryStrataBand" plain label="band" />
           </template>
           <template #sensitivity>
-            <StrataSwatch :layer="base.layer" :sensitivity="base.sensitivity" label="sensitivity" />
+            <StrataSwatch
+              v-if="entryStrataBand"
+              :band="entryStrataBand"
+              :sensitivity="base.sensitivity"
+              label="sensitivity"
+            />
           </template>
           <template #priority>
             <span class="me-1.5 font-mono">P{{ base.priority }}</span>
             <span v-if="bootNode" class="boot-flag" :title="BOOT_HINT"> 启动加载 </span>
+          </template>
+          <template #topics>
+            <span v-if="base.topics.length" class="keywords">
+              <span v-for="topic in base.topics" :key="topic">{{ topic }}</span>
+            </span>
+            <span v-else class="text-muted">–</span>
           </template>
           <template #disclosure>
             <template v-if="!missingNote">{{ base.disclosure }}</template>
@@ -1212,17 +1565,56 @@ const properties = computed<Property[][]>(() => {
       </aside>
     </div>
 
-    <CoordinateLine v-if="base" :value="base.uri" />
+    <ShortIdLine
+      v-if="base"
+      :value="base.shortId"
+      :circle-slug="base.circleId !== circleId ? base.circleSlug : null"
+    />
 
     <template v-if="base">
-      <MoveMemoryModal v-model:open="moveOpen" :space-id="spaceId" :memory="base" @done="onMoved" />
+      <MoveMemoryModal
+        v-model:open="moveOpen"
+        :circle-id="circleId"
+        :entry="base"
+        @done="onMoved"
+      />
 
       <ConvertCredentialModal
         v-model:open="convertOpen"
-        :space-id="spaceId"
-        :uri="base.uri"
+        :circle-id="circleId"
+        :short-id="base.shortId"
         @converted="onConverted"
       />
+
+      <UModal v-model:open="linkPicking" title="插入双链" @after:leave="restoreCaret">
+        <template #body>
+          <div class="space-y-3">
+            <UInput
+              v-model="linkQuery"
+              placeholder="搜索标题或短 ID"
+              aria-label="搜索要关联的记忆"
+              class="w-full"
+              autofocus
+            />
+            <div v-if="linkSearch.isPending.value" class="space-y-2">
+              <USkeleton v-for="n in 3" :key="n" class="h-9 w-full" />
+            </div>
+            <ul v-else-if="linkCandidates.length" class="link-pick-list">
+              <li v-for="item in linkCandidates" :key="item.shortId">
+                <button
+                  type="button"
+                  class="link-pick-item"
+                  @click="insertWikiLink(item.shortId, item.title)"
+                >
+                  <span class="truncate">{{ item.title }}</span>
+                  <code class="link-pick-id">{{ item.shortId }}</code>
+                </button>
+              </li>
+            </ul>
+            <p v-else class="text-sm text-muted">没有匹配的记忆</p>
+          </div>
+        </template>
+      </UModal>
 
       <UModal v-model:open="picking" title="插入凭据引用" @after:leave="restoreCaret">
         <template #body>
@@ -1264,9 +1656,9 @@ const properties = computed<Property[][]>(() => {
         </template>
         <template #footer>
           <div class="flex w-full justify-end gap-2">
-            <UButton color="neutral" variant="ghost" @click="downgradeWarning = false">
-              返回修改
-            </UButton>
+            <UButton color="neutral" variant="ghost" @click="downgradeWarning = false"
+              >取消</UButton
+            >
             <UButton color="error" @click="confirmDowngrade">确认不含明文并降级</UButton>
           </div>
         </template>
@@ -1274,7 +1666,7 @@ const properties = computed<Property[][]>(() => {
 
       <PlaintextSaveModal
         v-model:request="plaintextGate"
-        :space-id="spaceId"
+        :circle-id="circleId"
         :can-convert="canConvert"
         :can-save-anyway="canSaveAnyway"
         @proceed="onGateProceed"
@@ -1282,8 +1674,8 @@ const properties = computed<Property[][]>(() => {
 
       <RedactConfirmModal
         :open="redactOpen"
-        :title="base?.title"
-        :busy="plaintextActions.busy.value === base?.id"
+        :title="base.title"
+        :busy="plaintextActions.busy.value === base.id"
         @close="redactOpen = false"
         @confirm="redactCurrent"
       />
@@ -1295,9 +1687,7 @@ const properties = computed<Property[][]>(() => {
       >
         <template #body>
           <p class="text-sm">
-            删除「{{
-              deleting?.title
-            }}」。历史事件将保留，可在「已删除」中恢复；下一级的记忆不受影响。
+            删除「{{ deleting?.title }}」。历史事件将保留，可在「已删除」中恢复。
           </p>
         </template>
         <template #footer>
@@ -1348,9 +1738,6 @@ const properties = computed<Property[][]>(() => {
   line-height: 1.4;
   overflow-wrap: anywhere;
 }
-.edit-title {
-  margin-bottom: 14px;
-}
 .detail-tag {
   grid-column: 1;
   display: flex;
@@ -1364,6 +1751,12 @@ const properties = computed<Property[][]>(() => {
 .tag-priority {
   font-family: var(--font-mono);
   font-weight: 500;
+}
+.tag-variants {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--ui-text-muted);
 }
 .boot-flag {
   display: inline-flex;
@@ -1413,15 +1806,6 @@ const properties = computed<Property[][]>(() => {
   font-size: 13px;
   line-height: 1.55;
 }
-.override-link {
-  display: block;
-  max-width: 20em;
-  font-size: 14px;
-}
-.override-link:hover {
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
 .secret-mask {
   display: flex;
   flex-direction: column;
@@ -1438,18 +1822,77 @@ const properties = computed<Property[][]>(() => {
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 6px 16px;
-  margin-bottom: 7px;
-}
-/* 和表单字段下的说明一样大：这是一句完整的说明，不是标签 */
-.edit-help {
-  font-size: 14px;
-  color: var(--ui-text-muted);
+  gap: 8px 16px;
+  margin-bottom: 10px;
 }
 .edit-tools {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
+  gap: 8px 12px;
+}
+.slice-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.slice-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border: 1px solid var(--ui-border-accented);
+  font-size: 12px;
+  background: var(--ui-bg);
+  color: var(--ui-text-muted);
+  cursor: pointer;
+}
+.slice-tab:hover {
+  background: var(--ui-bg-elevated);
+  color: var(--ui-text);
+}
+.slice-tab.active {
+  background: var(--strata-selected);
+  border-color: var(--strata-selected-frame);
+  color: var(--strata-on-selected);
+}
+.read-variant-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.single-when-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: var(--ui-text-muted);
+}
+.compare-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.compare-card {
+  min-width: 0;
+  border: 1px solid var(--ui-border);
+}
+.compare-head {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--ui-border);
+  font-size: 12px;
+  font-weight: 500;
+  background: var(--ui-bg-elevated);
+}
+.compare-body {
+  padding: 12px;
 }
 .edit-preview {
   min-width: 0;
@@ -1480,8 +1923,31 @@ const properties = computed<Property[][]>(() => {
   font-weight: 500;
   line-height: 1.25rem;
 }
+.link-pick-list {
+  border-top: 1px solid var(--ui-border);
+}
+.link-pick-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 4px;
+  border-bottom: 1px solid var(--ui-border);
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+.link-pick-item:hover {
+  background: var(--ui-bg-elevated);
+}
+.link-pick-id {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
 
-/* 详情放不下两栏时，属性栏放到正文下面，操作放到标题下面 */
 @media (max-width: 1240px) {
   .detail-head {
     grid-template-columns: minmax(0, 1fr);
@@ -1492,7 +1958,6 @@ const properties = computed<Property[][]>(() => {
     flex-wrap: wrap;
     margin-top: 11px;
   }
-  /* 多出的高度留给属性栏，正文和属性栏之间不空出来 */
   .memory-detail > .detail-main {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto 1fr;
@@ -1501,6 +1966,9 @@ const properties = computed<Property[][]>(() => {
     padding: 6px 32px 40px;
     border-left: 0;
     border-top: 1px solid var(--ui-border-accented);
+  }
+  .compare-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 @media (max-width: 1023.98px) {

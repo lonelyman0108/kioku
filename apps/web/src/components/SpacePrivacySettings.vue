@@ -7,12 +7,13 @@ import {
   OPTIONAL_PII_KINDS,
   PII_KIND_NAMES,
   normalizeRuleKind,
+  type CirclePrivacySettings as CirclePrivacyView,
   type CustomSensitiveRule,
-  type SpacePrivacySettings as SpacePrivacyView,
   type ToggleablePiiKind,
 } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, reactive, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
@@ -23,20 +24,23 @@ import SaveBar from './strata/SaveBar.vue'
 import SettingsBlock from './strata/SettingsBlock.vue'
 import SettingsSummaryStrip from './strata/SettingsSummaryStrip.vue'
 
-// 空间 › 隐私与脱敏：控制空间内的明文凭据拦截、个人信息识别、自定义规则与白名单。只有空间所有者能改
+// 记忆圈 › 隐私与脱敏：控制记忆圈内的明文凭据拦截、个人信息识别、自定义规则与白名单。只有记忆圈所有者能改
 const dirtyModel = defineModel<boolean>('dirty', { default: false })
-const props = defineProps<{ spaceId: string }>()
+const route = useRoute()
 
 const toast = useToast()
 const queryClient = useQueryClient()
-const { space } = useSession()
-const editable = computed(() => space.value?.role === 'owner')
+const { circle } = useSession()
+const circleId = computed(() =>
+  typeof route.params.circleId === 'string' ? route.params.circleId : '',
+)
+const editable = computed(() => circle.value?.role === 'owner')
 
-const queryKey = computed(() => ['space-privacy', props.spaceId] as const)
+const queryKey = computed(() => ['circle-privacy', circleId.value] as const)
 const query = useQuery({
   queryKey,
-  enabled: computed(() => Boolean(props.spaceId)),
-  queryFn: ({ queryKey: [, sid] }) => api.spacePrivacy(sid),
+  enabled: computed(() => Boolean(circleId.value)),
+  queryFn: ({ queryKey: [, cid] }) => api.circlePrivacy(cid),
 })
 
 const form = reactive<{
@@ -65,7 +69,7 @@ const form = reactive<{
   usePrivacyModel: false,
 })
 
-function syncFromSaved(saved: SpacePrivacyView) {
+function syncFromSaved(saved: CirclePrivacyView) {
   form.credentials = saved.credentials
   form.pii = saved.pii
   form.piiKinds = { ...saved.piiKinds }
@@ -190,7 +194,7 @@ async function save() {
   if (!editable.value || !dirty.value) return
   saving.value = true
   try {
-    const saved = await api.saveSpacePrivacy(props.spaceId, {
+    const saved = await api.saveCirclePrivacy(circleId.value, {
       credentials: form.credentials,
       pii: form.pii,
       piiKinds: { ...form.piiKinds },
@@ -217,15 +221,16 @@ function reset() {
 const rescanning = ref(false)
 async function rescan() {
   if (!editable.value || dirty.value || rescanning.value) return
+  const cid = circleId.value
   rescanning.value = true
   try {
-    const res = await api.rescanSpacePrivacy(props.spaceId)
+    const res = await api.rescanCirclePrivacy(cid)
     toast.add({
       title: res.queued ? '已提交后台重扫存量记忆' : `已完成重扫，更新 ${res.updated ?? 0} 条记忆`,
       color: 'success',
     })
-    for (const key of ['memory-list', 'inbox-counts', 'overview']) {
-      void queryClient.invalidateQueries({ queryKey: [key, props.spaceId] })
+    for (const key of ['entry-list', 'inbox-counts', 'overview']) {
+      void queryClient.invalidateQueries({ queryKey: [key, cid] })
     }
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '重扫失败', color: 'error' })
@@ -241,8 +246,8 @@ const enabledPiiCount = computed(() =>
 const summaryItems = computed(() => [
   {
     label: '当前权限',
-    value: editable.value ? '空间所有者' : '空间成员',
-    sub: editable.value ? '可配置识别开关、自定义规则与重扫' : '仅所有者可修改空间隐私规则',
+    value: editable.value ? '记忆圈所有者' : '记忆圈成员',
+    sub: editable.value ? '可配置识别开关、自定义规则与重扫' : '仅所有者可修改记忆圈隐私规则',
     tone: editable.value ? ('ok' as const) : ('warn' as const),
   },
   {
@@ -415,8 +420,8 @@ const summaryItems = computed(() => [
           <span class="rescan-note">
             {{
               dirty
-                ? '保存更改后可执行全空间重扫。'
-                : '使用当前规则重新扫描空间内既有记忆的敏感内容标记。'
+                ? '保存更改后可执行全圈重扫。'
+                : '使用当前规则重新扫描记忆圈内既有记忆的敏感内容标记。'
             }}
           </span>
         </div>

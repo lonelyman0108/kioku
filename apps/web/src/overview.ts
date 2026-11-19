@@ -1,14 +1,13 @@
 import type { ExtractionUsage, SubjectBinding } from '@kioku/contracts'
 
 import { accountText } from './bindings'
-import { isConversationLayer, type StrataSelection } from './components/strata/strata'
-import { memoryNodeRoute } from './routes'
+import { isConversationBand, type StrataSelection } from './components/strata/strata'
 
-// 来自对话的两类在对话页：会话在会话分页，联系人的事实在联系人分页
-export const conversationTabRoute = (spaceId: string, layer: 'subject' | 'episode') => ({
+// 来自对话的两类在对话页：会话摘要在会话分页，联系人的事实在联系人分页
+export const conversationTabRoute = (circleId: string, band: 'fact' | 'episode') => ({
   name: 'conversations',
-  params: { spaceId },
-  query: layer === 'subject' ? { tab: 'contacts' } : {},
+  params: { circleId },
+  query: band === 'fact' ? { tab: 'contacts' } : {},
 })
 
 // 概览页的说法和计算
@@ -24,7 +23,7 @@ export function budgetWarning(e: ExtractionUsage) {
       ? '本月抽取预算已用完'
       : `本月抽取预算已用 ${Math.floor((e.usedTokens / e.monthlyTokens) * 100)}%`,
     description: over
-      ? `${used}本月仅写会话摘要，不再抽取事实，整理暂停，下月恢复。空间所有者可在空间设置中调高预算。`
+      ? `${used}本月仅写会话摘要，不再抽取事实，整理暂停，下月恢复。记忆圈所有者可在记忆圈设置中调高预算。`
       : `${used}用完后本月仅写会话摘要，不再抽取事实，整理暂停。`,
   }
 }
@@ -44,23 +43,25 @@ export function bindingNote(items: readonly SubjectBinding[], total: number): st
   return total > 1 ? `${note}，共 ${total} 个` : note
 }
 
-// 点地层柱的一格：记忆列表按归属和敏感级筛选。
-// 来自对话的两类不在记忆列表里（列表只列目录里的记忆），调用方带去对话页（conversationTabRoute）
-export function strataFilterQuery({ layer, sensitivity }: StrataSelection) {
+// 点地层柱的一格：记忆列表按色带和敏感级筛选。
+// 来自对话的两类在对话页，独立人格在词表页的人格分页
+export function strataFilterQuery({ band, sensitivity }: StrataSelection) {
   return {
     view: 'list',
-    ...(layer ? { layer } : {}),
+    ...(band ? { band } : {}),
     ...(sensitivity ? { sensitivity } : {}),
   }
 }
 
-// 点地层柱去哪里：点一行（只有归属）去记忆页对应的根，来自对话的两类去对话页对应的分页；
-// 点一格或表头的一个敏感级，去记忆列表按归属与敏感级筛选
-export function strataTarget(spaceId: string, selection: StrataSelection) {
-  const { layer, sensitivity } = selection
-  if (layer && isConversationLayer(layer)) {
-    return conversationTabRoute(spaceId, layer as 'subject' | 'episode')
+// 点地层柱去哪里：来自对话的两类去对话页对应的分页；独立人格去词表页的独立人格分页；
+// 其余按色带与敏感级去记忆列表
+export function strataTarget(circleId: string, selection: StrataSelection) {
+  const { band } = selection
+  if (band && isConversationBand(band)) {
+    return conversationTabRoute(circleId, band as 'fact' | 'episode')
   }
-  if (layer && !sensitivity) return memoryNodeRoute(spaceId, layer)
-  return { name: 'memories', params: { spaceId }, query: strataFilterQuery(selection) }
+  if (band === 'persona') {
+    return { name: 'vocabulary', params: { circleId }, query: { tab: 'personas' } }
+  }
+  return { name: 'memories', params: { circleId }, query: strataFilterQuery(selection) }
 }

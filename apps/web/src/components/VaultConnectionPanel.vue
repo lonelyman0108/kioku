@@ -29,7 +29,7 @@ import Hint from './Hint.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
 
 // 一个密码库连接：状态与操作，以及它读得到的条目（名称、类型、字段与所在集合，不含值）
-const props = defineProps<{ spaceId: string; connection: VaultConnection; canManage: boolean }>()
+const props = defineProps<{ circleId: string; connection: VaultConnection; canManage: boolean }>()
 const emit = defineEmits<{
   reconnect: []
   'open-credential': [id: string]
@@ -40,8 +40,8 @@ const queryClient = useQueryClient()
 
 const c = computed(() => props.connection)
 const items = useQuery({
-  queryKey: computed(() => ['vault-items', props.spaceId, c.value.id] as const),
-  queryFn: ({ queryKey: [, sid, id] }) => fetchVaultItems(queryClient, sid, id),
+  queryKey: computed(() => ['vault-items', props.circleId, c.value.id] as const),
+  queryFn: ({ queryKey: [, cid, id] }) => fetchVaultItems(queryClient, cid, id),
   enabled: computed(() => props.canManage && itemsAvailable(c.value)),
 })
 // 列条目时服务端会同步一次：连不上记进最近的错误，出现个人条目这类情况连接停用。读取失败时重读连接，状态跟上
@@ -49,34 +49,34 @@ watch(
   () => items.isError.value,
   (failed) => {
     if (failed)
-      void queryClient.invalidateQueries({ queryKey: ['vault-connections', props.spaceId] })
+      void queryClient.invalidateQueries({ queryKey: ['vault-connections', props.circleId] })
   },
 )
 
 // 状态变了，条目与指向它的凭据也跟着变
-async function refresh(sid: string) {
+async function refresh(cid: string) {
   await Promise.all([
-    queryClient.invalidateQueries({ queryKey: ['vault-connections', sid] }),
-    queryClient.invalidateQueries({ queryKey: ['vault-items', sid] }),
-    queryClient.invalidateQueries({ queryKey: ['credentials', sid] }),
+    queryClient.invalidateQueries({ queryKey: ['vault-connections', cid] }),
+    queryClient.invalidateQueries({ queryKey: ['vault-items', cid] }),
+    queryClient.invalidateQueries({ queryKey: ['credentials', cid] }),
   ])
 }
 
 const busy = ref(false)
 async function check() {
   if (busy.value) return
-  const sid = props.spaceId
+  const cid = props.circleId
   busy.value = true
   let succeeded = false
   try {
-    toast.add(checkNotice(await api.checkVault(sid, c.value.id)))
+    toast.add(checkNotice(await api.checkVault(cid, c.value.id)))
     succeeded = true
   } catch (err) {
     toast.add(checkNotice({ error: err }))
   } finally {
     busy.value = false
     await Promise.all(
-      checkRefreshKeys(sid, succeeded).map((queryKey) =>
+      checkRefreshKeys(cid, succeeded).map((queryKey) =>
         queryClient.invalidateQueries({ queryKey }),
       ),
     )
@@ -86,17 +86,17 @@ async function check() {
 const confirmingDisconnect = ref(false)
 async function disconnect() {
   if (busy.value) return
-  const sid = props.spaceId
+  const cid = props.circleId
   busy.value = true
   try {
-    await api.disconnectVault(sid, c.value.id)
+    await api.disconnectVault(cid, c.value.id)
     confirmingDisconnect.value = false
     toast.add({ title: '已断开密码库', color: 'success' })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '断开失败', color: 'error' })
   } finally {
     busy.value = false
-    await refresh(sid)
+    await refresh(cid)
   }
 }
 
@@ -114,20 +114,20 @@ function openDestination() {
 }
 async function saveDestination(collectionId: string | null) {
   if (busy.value) return
-  const sid = props.spaceId
+  const cid = props.circleId
   busy.value = true
   try {
     const list = collectionId
-      ? await api.setVaultDestination(sid, c.value.id, { collectionId })
-      : await api.clearVaultDestination(sid, c.value.id)
-    queryClient.setQueryData(['vault-connections', sid], list)
+      ? await api.setVaultDestination(cid, c.value.id, { collectionId })
+      : await api.clearVaultDestination(cid, c.value.id)
+    queryClient.setQueryData(['vault-connections', cid], list)
     choosingDestination.value = false
     toast.add({ title: collectionId ? '已设为去处' : '已清除去处', color: 'success' })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '保存失败', color: 'error' })
     // 「集合只读」「集合不存在或不可用」：选择框读的是条目列表里的集合，一起重读，不然同一个集合还能选
-    void queryClient.invalidateQueries({ queryKey: ['vault-connections', sid] })
-    void queryClient.invalidateQueries({ queryKey: ['vault-items', sid, c.value.id] })
+    void queryClient.invalidateQueries({ queryKey: ['vault-connections', cid] })
+    void queryClient.invalidateQueries({ queryKey: ['vault-items', cid, c.value.id] })
   } finally {
     busy.value = false
   }

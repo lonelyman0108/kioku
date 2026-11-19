@@ -3,7 +3,7 @@ import { useToast } from '@nuxt/ui/composables'
 import {
   CREDENTIAL_EXPIRING_DAYS,
   CREDENTIAL_ROTATION_NAME,
-  type AppInfo,
+  type ClientInfo,
   type ConsoleCredential,
   type OrphanVaultItem,
   type VaultItemSummary,
@@ -53,20 +53,19 @@ import NoteLine from './strata/NoteLine.vue'
 // 提交用它的版本号，期间别处改过就返回冲突。来源不能改：托管的改值；密码库的改字段对应，值写回原条目。
 // 新建的值写到哪里由去处决定（设了去处写进那个集合，没有时由 Kioku 托管），表单里只说明，不让选
 const props = defineProps<{
-  spaceId: string
+  circleId: string
   credential: ConsoleCredential | null
   // 起标识时的条目与它所在的连接；新建与修改时为 null
   vaultItem: { connectionId: string; item: VaultItemSummary } | null
-  apps: AppInfo[]
+  clients: ClientInfo[]
   // 已有的标识，起标识时建议的标识避开它们
   identifiers: readonly string[]
 }>()
 const open = defineModel<boolean>('open', { required: true })
-// 事件带上提交时的空间：保存期间切换了空间，页面不能把结果写进新空间
+// 事件带上提交时的记忆圈：保存期间切换了记忆圈，页面不能把结果写进新记忆圈
 const emit = defineEmits<{
-  saved: [credential: ConsoleCredential, spaceId: string]
+  saved: [credential: ConsoleCredential, circleId: string]
   conflict: []
-  // 写进了密码库、凭据却没建成：页面切到「密码库」分页给条目起标识
   'open-vault': []
 }>()
 const toast = useToast()
@@ -78,8 +77,10 @@ const form = reactive<CredentialFormState>({
   identifier: '',
   name: '',
   description: '',
-  restrict: false,
-  appIds: [],
+  restrictClients: false,
+  clientIds: [],
+  restrictRealms: false,
+  allowedRealms: [],
   url: '',
   expires: expiresField(null),
   needsRotation: false,
@@ -87,14 +88,10 @@ const form = reactive<CredentialFormState>({
 const valueRows = ref<ValueRow[]>([])
 const vaultRows = ref<VaultRow[]>([])
 const vaultValues = ref<VaultValueRow[]>([])
-// 提交失败的说明；409 时可以重新读取；写进了密码库却没建成凭据时留下的条目；
-// 重新读取之后和新的一版合不起来的地方
 const failure = ref<string | null>(null)
 const conflict = ref(false)
-// 失败之后的下一步（集合只读、值太长时说明该改什么），见 vault.ts 的 writeFailureNext
 const failureDetail = ref<string | null>(null)
 const orphan = ref<OrphanVaultItem | null>(null)
-// 按新读到的一版合进表单之后的提示：title 说发生了什么，conflicts 是合不起来的地方
 const mergeNote = ref<{ title: string; conflicts: string[] } | null>(null)
 
 const valueRow = (name = '', existing = false): ValueRow => ({
@@ -123,7 +120,6 @@ function clearValues() {
   for (const row of vaultValues.value) row.value = ''
 }
 
-// 按凭据或条目填好表单
 function fill(c: ConsoleCredential | null) {
   const item = c ? null : props.vaultItem
   const draft = item ? vaultCredentialDraft(item.item, props.identifiers) : null
@@ -140,8 +136,10 @@ function fill(c: ConsoleCredential | null) {
       : {
           name: draft?.name ?? '',
           description: '',
-          restrict: false,
-          appIds: [],
+          restrictClients: false,
+          clientIds: [],
+          restrictRealms: false,
+          allowedRealms: [],
           expires: expiresField(null),
           needsRotation: false,
         }),
@@ -150,7 +148,6 @@ function fill(c: ConsoleCredential | null) {
     c?.source === 'hosted'
       ? c.fields.map((f) => valueRow(f.name, true))
       : [valueRow('username'), valueRow('password')]
-  // 起标识时按条目里的字段预填，和服务端没给字段对应时推出的一样
   vaultRows.value = c
     ? c.fields.flatMap((f) => (f.itemField ? [vaultRow(f.name, f.itemField)] : []))
     : (draft?.fields ?? []).map((f) => vaultRow(f.name, f.itemField!))
@@ -168,30 +165,41 @@ function fill(c: ConsoleCredential | null) {
 }
 
 watch(open, (isOpen) => {
-  // 关掉时清掉填过的值
   if (!isOpen) clearValues()
   else fill(props.credential)
 })
 
-// 去处与可选的条目字段都从连接取：和凭据页、详情同一个查询，只有可用的连接列得出条目
 const editingConnection = computed(() => origin.value?.vault?.connectionId ?? null)
 const connections = useQuery({
-  queryKey: computed(() => ['vault-connections', props.spaceId] as const),
-  queryFn: ({ queryKey: [, sid] }) => api.vaultConnections(sid),
+  queryKey: computed(() => ['vault-connections', props.circleId] as const),
+  queryFn: ({ queryKey: [, cid] }) => api.vaultConnections(cid),
   enabled: computed(() => open.value && (editingConnection.value !== null || isNew.value)),
 })
 const connection = computed(
   () => connections.data.value?.items.find((x) => x.id === editingConnection.value) ?? null,
 )
 const items = useQuery({
-  queryKey: computed(() => ['vault-items', props.spaceId, editingConnection.value] as const),
-  queryFn: ({ queryKey: [, sid, id] }) => fetchVaultItems(queryClient, sid, id!),
+  queryKey: computed(() => ['vault-items', props.circleId, editingConnection.value] as const),
+  queryFn: ({ queryKey: [, cid, id] }) => fetchVaultItems(queryClient, cid, id!),
   enabled: computed(() => open.value && !!connection.value && itemsAvailable(connection.value)),
 })
 
-// 密码库凭据的基准版本：列条目时服务端可能看到条目改过、把版本号加一，打开时手里的那一版就旧了，第一次保存必然 409。
-// 所以先等条目列表读完，再读一次凭据作为基准；之后条目列表再刷新（别处让它失效、重新检查），也再读一次，
-// 版本变了就按 mergeReloaded 合进表单，表单里的改动留着并提示
+const facets = useQuery({
+  queryKey: computed(() => ['facets', props.circleId] as const),
+  queryFn: ({ queryKey: [, cid] }) => api.facets(cid),
+  enabled: open,
+})
+const realmChoices = computed(() =>
+  (facets.data.value?.terms ?? []).filter((t) => t.dimensionKey === 'realm'),
+)
+function toggleRealm(slug: string) {
+  const list = [...form.allowedRealms]
+  const at = list.indexOf(slug)
+  if (at >= 0) list.splice(at, 1)
+  else list.push(slug)
+  form.allowedRealms = list
+}
+
 const syncsWithItems = computed(
   () =>
     origin.value?.source === 'vault' &&
@@ -200,7 +208,6 @@ const syncsWithItems = computed(
     !items.isError.value,
 )
 const baselineDone = ref(false)
-// 基准还没定下来时不能保存：连接列表在读，或者要等条目列表与凭据
 const baselinePending = computed(
   () =>
     origin.value?.source === 'vault' &&
@@ -211,12 +218,12 @@ async function rebase(title: string) {
   const before = origin.value
   if (!before || !open.value) return
   const id = ++syncId
-  const spaceId = props.spaceId
-  const fresh = await api.credential(spaceId, before.id).catch(() => null)
+  const cid = props.circleId
+  const fresh = await api.credential(cid, before.id).catch(() => null)
   if (id !== syncId || !open.value || origin.value?.id !== before.id) return
   baselineDone.value = true
   if (!fresh) return
-  queryClient.setQueryData(['credential', spaceId, fresh.id], fresh)
+  queryClient.setQueryData(['credential', cid, fresh.id], fresh)
   if (fresh.version !== origin.value.version) applyFresh(origin.value, fresh, title)
 }
 watch(
@@ -243,7 +250,7 @@ const {
   issue: storeIssue,
   failed: storeFailed,
 } = useNewCredentialStore(
-  toRef(props, 'spaceId'),
+  toRef(props, 'circleId'),
   computed(() => open.value && isNew.value),
 )
 
@@ -251,7 +258,6 @@ const itemFields = computed<string[]>(() => {
   if (target.value) return target.value.item.fields
   const itemId = origin.value?.vault?.itemId
   const found = items.data.value?.items.find((i) => i.id === itemId)
-  // 条目读不到时（连接不可用、条目不可用、列表读取失败）只能在已有的对应里改
   const known = found?.fields ?? []
   const current = vaultRows.value.map((r) => r.itemField)
   return [...new Set([...known, ...current])]
@@ -262,15 +268,17 @@ const itemFieldItems = computed(() =>
 const unusedItemField = () =>
   itemFields.value.find((f) => !vaultRows.value.some((r) => r.itemField === f))
 
-// 只列出自己是所有者的应用：访问密钥按应用所有者取凭据，别人的应用的访问密钥取不到这些凭据。
+// 只列出自己是所有者的接入实例：访问密钥按接入实例所有者取凭据，别人的接入实例取不到这些凭据。
 // 已经限定了的照样列出来，免得改别的地方时被悄悄去掉
 const { me } = useSession()
-const appItems = computed(() =>
-  props.apps
-    .filter((a) => a.ownerAccountId === me.data.value?.id || form.appIds.includes(a.id))
+const clientItems = computed(() =>
+  props.clients
+    .filter((a) => a.ownerAccountId === me.data.value?.id || form.clientIds.includes(a.id))
     .map((a) => ({
       label:
-        a.ownerAccountId === me.data.value?.id ? a.name : `${a.name}（非当前账号的应用，不可用）`,
+        a.ownerAccountId === me.data.value?.id
+          ? a.name
+          : `${a.name}（非当前账号的接入实例，不可用）`,
       value: a.id,
     })),
 )
@@ -289,7 +297,6 @@ const problem = computed(
     formProblem(input()),
 )
 
-// 已有的字段标记删除（再点一次取消），新加的直接去掉
 function removeValueRow(row: ValueRow) {
   if (row.existing) row.removed = !row.removed
   else valueRows.value.splice(valueRows.value.indexOf(row), 1)
@@ -307,20 +314,19 @@ async function submit() {
   failureDetail.value = null
   conflict.value = false
   orphan.value = null
-  const spaceId = props.spaceId
+  const cid = props.circleId
   const before = origin.value
   const creating = isNew.value
   try {
     let saved: ConsoleCredential
     let stored: string | null = null
     if (before) {
-      saved = await api.updateCredential(spaceId, before.id, updateBody(input()))
+      saved = await api.updateCredential(cid, before.id, updateBody(input()))
     } else {
-      const { storedIn, ...created } = await api.createCredential(spaceId, createBody(input()))
+      const { storedIn, ...created } = await api.createCredential(cid, createBody(input()))
       saved = created
       if (creating) stored = storeName(storedIn)
     }
-    // 填过的值不留在页面里
     clearValues()
     open.value = false
     toast.add({
@@ -328,16 +334,13 @@ async function submit() {
       description: stored ? `写到：${stored}` : undefined,
       color: 'success',
     })
-    emit('saved', saved, spaceId)
+    emit('saved', saved, cid)
   } catch (err) {
     failure.value = err instanceof ApiError ? err.message : '保存失败'
     orphan.value = orphanVaultItem(err)
     const next = writeFailureNext(err, before ? 'update' : 'create')
     failureDetail.value = next.detail
-    // 留下的条目出现在条目列表里，可以起标识
-    if (orphan.value) void queryClient.invalidateQueries({ queryKey: ['vault-items', spaceId] })
-    // 版本冲突、条目在别处改过（reason 为 version、item_conflict）：重新读取，看过新的那一版再改。
-    // 集合只读、值太长重新读取没有用，只说明该改什么
+    if (orphan.value) void queryClient.invalidateQueries({ queryKey: ['vault-items', cid] })
     if (before && next.reload) {
       conflict.value = true
       emit('conflict')
@@ -347,27 +350,25 @@ async function submit() {
   }
 }
 
-// 重新读取：只换掉服务端的那一份，表单里的改动都留着，和新的一版合起来；合不起来的逐条提示。
-// 密码库的先重读条目列表（列条目时服务端可能再把版本号加一），读完再读凭据，免得读到的那一版马上又旧了
 const reloading = ref(false)
 async function reload() {
   const before = origin.value
   if (!before || reloading.value) return
-  const spaceId = props.spaceId
+  const cid = props.circleId
   const conn = connection.value
   reloading.value = true
   syncId++
   try {
     if (syncsWithItems.value && conn) {
       await queryClient.fetchQuery({
-        queryKey: ['vault-items', spaceId, conn.id],
-        queryFn: () => fetchVaultItems(queryClient, spaceId, conn.id),
+        queryKey: ['vault-items', cid, conn.id],
+        queryFn: () => fetchVaultItems(queryClient, cid, conn.id),
         staleTime: 0,
       })
     }
-    const fresh = await api.credential(spaceId, before.id)
-    queryClient.setQueryData(['credential', spaceId, fresh.id], fresh)
-    void invalidateInboxCounts(queryClient, spaceId)
+    const fresh = await api.credential(cid, before.id)
+    queryClient.setQueryData(['credential', cid, fresh.id], fresh)
+    void invalidateInboxCounts(queryClient, cid)
     if (!open.value || origin.value?.id !== before.id) return
     applyFresh(origin.value, fresh, '已重新读取')
     failure.value = null
@@ -600,23 +601,51 @@ const orphanText = computed(() => (orphan.value ? orphanNotice(orphan.value) : n
           <USwitch v-model="form.needsRotation" :label="`标记为${CREDENTIAL_ROTATION_NAME}`" />
         </UFormField>
 
-        <UFormField label="限定应用">
+        <UFormField label="限定接入实例">
           <template #help>
-            仅选中应用的访问密钥可以取用。
+            仅选中接入实例的访问密钥可以取用。
             <Hint>
-              列表仅含当前账号所有的应用。通过访问密钥新建的凭据默认限定给该应用，只能在此处修改。
+              列表仅含当前账号所有的接入实例。通过访问密钥新建的凭据默认限定给该接入实例，只能在此处修改。
             </Hint>
           </template>
           <div class="space-y-2">
-            <USwitch v-model="form.restrict" label="仅限部分应用" />
+            <USwitch v-model="form.restrictClients" label="仅限部分接入实例" />
             <USelect
-              v-if="form.restrict"
-              v-model="form.appIds"
-              :items="appItems"
+              v-if="form.restrictClients"
+              v-model="form.clientIds"
+              :items="clientItems"
               multiple
               class="w-full"
-              placeholder="选择应用"
+              placeholder="选择接入实例"
             />
+          </div>
+        </UFormField>
+
+        <UFormField label="允许场域">
+          <template #help>
+            静态场域锁：开启后，不在所选场域内的访问密钥与会话上下文一律无法取用此凭据。
+          </template>
+          <div class="space-y-2">
+            <USwitch v-model="form.restrictRealms" label="限定特定场域" />
+            <template v-if="form.restrictRealms">
+              <div v-if="realmChoices.length" class="flex flex-wrap gap-1.5">
+                <UButton
+                  v-for="t in realmChoices"
+                  :key="t.slug"
+                  size="xs"
+                  :color="form.allowedRealms.includes(t.slug) ? 'primary' : 'neutral'"
+                  :variant="form.allowedRealms.includes(t.slug) ? 'solid' : 'outline'"
+                  @click="toggleRealm(t.slug)"
+                >
+                  {{ t.label }}（{{ t.slug }}）
+                </UButton>
+              </div>
+              <UInputTags
+                v-model="form.allowedRealms"
+                class="w-full font-mono"
+                placeholder="输入场域词条标识（如 work、home）"
+              />
+            </template>
           </div>
         </UFormField>
 

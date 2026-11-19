@@ -32,10 +32,10 @@ import BenchNotice from './BenchNotice.vue'
 import Hint from './Hint.vue'
 
 // 模型对话：用实例设置里抽取模型的接口与 Key，让模型自己决定调哪个工具。循环由浏览器驱动（benchAgent.ts），
-// 对话不存服务端、不进浏览器存储，状态在 useBench 里，换应用、Key、模式时清掉
+// 对话不存服务端、不进浏览器存储，状态在 useBench 里，换接入实例、Key、模式时清掉
 const {
-  spaceId,
-  appId,
+  circleId,
+  clientId,
   keyId,
   real,
   mode,
@@ -53,9 +53,9 @@ const {
 
 // 用不用得了、默认模型、接口的地址、这个运行时走哪种循环、回复后发不发 turn.end
 const info = useQuery({
-  queryKey: computed(() => ['bench-agent', spaceId.value, appId.value, keyId.value]),
-  queryFn: () => api.benchAgent(spaceId.value, appId.value!, keyId.value!),
-  enabled: computed(() => Boolean(appId.value && keyId.value)),
+  queryKey: computed(() => ['bench-agent', circleId.value, clientId.value, keyId.value]),
+  queryFn: () => api.benchAgent(circleId.value, clientId.value!, keyId.value!),
+  enabled: computed(() => Boolean(clientId.value && keyId.value)),
   // 实例设置可能刚改过：从那边配好模型回来时不能还显示没配
   staleTime: 0,
 })
@@ -232,7 +232,7 @@ function requestClear() {
   if (agent.value.mayHaveWritten) confirmingClear.value = true
   else clear()
 }
-// 换了应用、Key 或模式时对话已经清掉了（useBench），这里的提示也不算数了。输入框里没发的留着
+// 换了接入实例、Key 或模式时对话已经清掉了（useBench），这里的提示也不算数了。输入框里没发的留着
 watch(generation, () => {
   exporting.value = null
   exportNote.value = null
@@ -338,7 +338,7 @@ watch(generation, () => {
             </UButton>
             <UButton
               class="ml-auto"
-              :icon="icons.exportSpace"
+              :icon="icons.exportCircle"
               color="neutral"
               variant="outline"
               :disabled="running || !hasCalls"

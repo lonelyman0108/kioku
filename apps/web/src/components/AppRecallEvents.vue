@@ -5,24 +5,27 @@ import { computed } from 'vue'
 import { readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { recallSourceLabels } from '../labels'
-import { memoryRoute } from '../routes'
 import { formatRelative, formatTime } from '../time'
 import Hint from './Hint.vue'
 import NoteLine from './strata/NoteLine.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 
-// 这个应用的召回记录：服务端只给事件发生时的应用所有者，所以列的是当前账号作为所有者期间的那些
-const props = defineProps<{ spaceId: string; appId: string }>()
+// 这个接入实例的召回记录：服务端只给事件发生时的接入实例所有者，所以列的是当前账号作为所有者期间的那些
+const props = defineProps<{ circleId: string; clientId: string }>()
 
 const events = useInfiniteQuery({
-  queryKey: computed(() => ['recall-events', props.spaceId, props.appId] as const),
-  queryFn: ({ pageParam, queryKey: [, spaceId, appId] }) =>
-    api.recallEvents(spaceId, { appId, ...(pageParam ? { cursor: pageParam } : {}) }),
+  queryKey: computed(() => ['recall-events', props.circleId, props.clientId] as const),
+  queryFn: ({ pageParam, queryKey: [, circleId, clientId] }) =>
+    api.recallEvents(circleId, { clientId, ...(pageParam ? { cursor: pageParam } : {}) }),
   initialPageParam: undefined as string | undefined,
   getNextPageParam: (last) => last.nextCursor ?? undefined,
 })
 const items = computed(() => events.data.value?.pages.flatMap((p) => p.items) ?? [])
-const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
+const entryLink = (targetCircleId: string, shortId: string) => ({
+  name: 'memories',
+  params: { circleId: targetCircleId },
+  query: { id: shortId },
+})
 </script>
 
 <template>
@@ -30,7 +33,7 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
     <SectionHeading title="召回记录">
       <template #hint>
         <Hint>
-          此应用每次召回的命中结果。仅列出当前账号作为应用所有者期间的记录。明细按实例设置的天数保留。应用转移后，新所有者无法查看此前的记录。
+          此接入实例每次召回的命中结果。仅列出当前账号作为接入实例所有者期间的记录。明细按实例设置的天数保留。接入实例转移后，新所有者无法查看此前的记录。
         </Hint>
       </template>
     </SectionHeading>
@@ -57,8 +60,14 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
         <ul v-else class="event-hits">
           <li v-for="hit in event.hits" :key="hit.rank">
             <span class="hit-score">{{ hit.score.toFixed(2) }}</span>
-            <RouterLink v-if="hit.uri" :to="memoryLink(hit.uri)" class="hit-uri" :title="hit.uri">
-              {{ hit.title ?? hit.uri }}
+            <RouterLink
+              v-if="hit.shortId"
+              :to="entryLink(hit.targetCircleId, hit.shortId)"
+              class="hit-uri"
+              :title="hit.shortId"
+            >
+              {{ hit.title ?? hit.shortId }}
+              <span v-if="hit.targetCircleSlug" class="hit-circle">{{ hit.targetCircleSlug }}</span>
             </RouterLink>
             <span v-else class="event-miss">（当前不可见）</span>
           </li>
@@ -135,11 +144,16 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
   color: var(--ui-text-muted);
 }
 .hit-uri {
-  font-family: var(--font-mono);
   overflow-wrap: anywhere;
 }
 .hit-uri:hover {
   text-decoration: underline;
   text-underline-offset: 3px;
+}
+.hit-circle {
+  margin-left: 4px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ui-text-muted);
 }
 </style>

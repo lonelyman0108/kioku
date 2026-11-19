@@ -3,14 +3,14 @@ import {
   ACTIVITY_FIELDS,
   ACTIVITY_MAX_SPAN_DAYS,
   ACTIVITY_TYPES,
-  CURATED_LAYERS,
+  ENTRY_KINDS,
   type ActivityFacets,
   type ActivityFieldChange,
   type ActivityItem,
 } from '@kioku/contracts'
 import type { LocationQuery, LocationQueryRaw } from 'vue-router'
 
-import { layerLabels, sensitivityLabels } from './labels'
+import { sensitivityLabels } from './labels'
 import { localDate } from './time'
 
 const WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六']
@@ -53,19 +53,19 @@ export const quickRangeLabels: Record<QuickRange, string> = {
 // 没写范围时看近 30 天
 export const DEFAULT_RANGE: QuickRange = '30'
 
-export const FILTER_GROUPS = ['actor', 'type', 'layer', 'field'] as const
+export const FILTER_GROUPS = ['actor', 'type', 'kind', 'field'] as const
 export type FilterGroup = (typeof FILTER_GROUPS)[number]
 // 地址里每一组取消勾选的值写在哪个参数里
 const OFF_PARAMS: Record<FilterGroup, string> = {
   actor: 'noActor',
   type: 'noType',
-  layer: 'noLayer',
+  kind: 'noKind',
   field: 'noField',
 }
 // 每一组可选的值：操作者随数据变（从筛选计数来），其余三组是固定的
 export const FIXED_OPTIONS = {
   type: ACTIVITY_TYPES as readonly string[],
-  layer: CURATED_LAYERS as readonly string[],
+  kind: ENTRY_KINDS as readonly string[],
   field: ACTIVITY_FIELDS as readonly string[],
 }
 
@@ -187,7 +187,7 @@ export function filterQuery(state: ActivityState, today: string, utc = false): F
   const query: FilterQuery = {}
   const days = selectedDays(state, today)
   if (days) Object.assign(query, dayBounds(days, utc))
-  for (const g of ['type', 'layer', 'field'] as const) {
+  for (const g of ['type', 'kind', 'field'] as const) {
     if (!state.off[g].length) continue
     const kept = FIXED_OPTIONS[g].filter((v) => !state.off[g].includes(v))
     if (g === 'field') query.field = [...kept, 'none'].join(',')
@@ -215,10 +215,7 @@ export interface ActivityDay {
 
 // 能并在一起的两次改动：都是修改，同一个操作者，同一条记忆
 const foldable = (a: ActivityItem, b: ActivityItem) =>
-  a.type === 'update' &&
-  b.type === 'update' &&
-  a.actorKey === b.actorKey &&
-  a.memoryId === b.memoryId
+  a.type === 'update' && b.type === 'update' && a.actorKey === b.actorKey && a.entryId === b.entryId
 
 // 按本地日期分组，同一天里同一个操作者接着修改同一条记忆折叠成一行。接口按时间倒序给，
 // 翻页时后面的页接在同一天后面，组的先后和里面的先后都不动
@@ -353,7 +350,7 @@ export function facetOptions(
 ): Record<FilterGroup, FacetOption[]> {
   const counts = (pairs: [string, number][]) => new Map(pairs)
   const type = counts(facets?.types.map((t) => [t.type, t.count]) ?? [])
-  const layer = counts(facets?.layers.map((l) => [l.layer, l.count]) ?? [])
+  const kind = counts(facets?.kinds.map((k) => [k.kind, k.count]) ?? [])
   const field = counts(facets?.fields.map((f) => [f.field, f.count]) ?? [])
   const actors: FacetOption[] = facets?.actors.map((a) => ({ key: a.key, count: a.count })) ?? []
   for (const key of off.actor)
@@ -365,7 +362,7 @@ export function facetOptions(
       key,
       count: type.get(key) ?? 0,
     })),
-    layer: CURATED_LAYERS.map((key) => ({ key, count: layer.get(key) ?? 0 })),
+    kind: ENTRY_KINDS.map((key) => ({ key, count: kind.get(key) ?? 0 })),
     field: ACTIVITY_FIELDS.map((key) => ({ key, count: field.get(key) ?? 0 })),
   }
 }
@@ -392,16 +389,6 @@ export function toggleOff(
 
 // ---- 改动的标签 ----
 
-// 坐标改了哪里：去掉前后共同的开头几级，写成 …/a → …/b；开头（归属）就不同时写全
-function uriChange(before: string, after: string): string {
-  const a = before.split('/')
-  const b = after.split('/')
-  let same = 0
-  while (same < a.length - 1 && same < b.length - 1 && a[same] === b[same]) same++
-  // 前两段是「core:」和空串，再往后才是共同的位置
-  if (same <= 2) return `${before} → ${after}`
-  return `…/${a.slice(same).join('/')} → …/${b.slice(same).join('/')}`
-}
 const shortDate = (iso: string) => {
   const d = new Date(iso)
   return `${d.getMonth() + 1}-${String(d.getDate()).padStart(2, '0')}`
@@ -415,19 +402,24 @@ export function changeSummary(change: ActivityFieldChange): string {
       return [change.added && `+${change.added}`, change.removed && `−${change.removed}`]
         .filter(Boolean)
         .join(' ')
-    case 'glossary': {
+    case 'glossary':
+    case 'topics': {
       const words = (sign: string, list: string[]) =>
         list.length === 1 ? `${sign}${list[0]}` : list.length ? `${sign}${list.length}` : ''
       return [words('+', change.added), words('−', change.removed)].filter(Boolean).join(' ')
     }
+    case 'variants':
+      return [
+        change.added && `+${change.added}`,
+        change.modified && `~${change.modified}`,
+        change.removed && `−${change.removed}`,
+      ]
+        .filter(Boolean)
+        .join(' ')
     case 'priority':
       return `${change.before} → ${change.after}`
-    case 'layer':
-      return `${layerLabels[change.before]} → ${layerLabels[change.after]}`
     case 'sensitivity':
       return `${sensitivityLabels[change.before]} → ${sensitivityLabels[change.after]}`
-    case 'uri':
-      return change.before && change.after ? uriChange(change.before, change.after) : ''
     case 'validTo':
       if (!change.after) return '长期有效'
       return change.before ? `改为 ${shortDate(change.after)}` : `至 ${shortDate(change.after)}`

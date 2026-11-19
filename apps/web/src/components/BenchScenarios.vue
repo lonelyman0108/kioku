@@ -32,8 +32,8 @@ import SectionHeading from './strata/SectionHeading.vue'
 // 场景：一串步骤。选预设或导入 JSON，在文本框里编辑，运行，看断言结果。不存库，只在内存里：
 // 里面可能有明文，不进浏览器存储
 const {
-  spaceId,
-  app,
+  circleId,
+  client,
   real,
   mode,
   running,
@@ -46,10 +46,10 @@ const {
 } = useBench()
 
 const presets = useQuery({
-  queryKey: computed(() => ['bench-scenarios', spaceId.value]),
-  queryFn: () => api.benchScenarios(spaceId.value),
+  queryKey: computed(() => ['bench-scenarios', circleId.value]),
+  queryFn: () => api.benchScenarios(circleId.value),
 })
-const runtime = computed(() => app.value?.runtimeFamily ?? '')
+const runtime = computed(() => client.value?.runtimeFamily ?? '')
 const choices = computed(() =>
   (presets.data.value?.scenarios ?? []).map((scenario) => ({
     scenario,
@@ -120,7 +120,7 @@ async function onFile(event: Event) {
   if (!parsed.ok) errors.value = parsed.errors
 }
 
-// 文本框里的场景不适用于这个应用时只提醒，不拦：它是用户自己选的，也不会比别的调用多拿到权限
+// 文本框里的场景不适用于这个接入实例时只提醒，不拦：它是用户自己选的，也不会比别的调用多拿到权限
 const mismatch = computed(() => {
   const parsed = parseScenario(text.value)
   return parsed.ok ? runtimeMismatch(parsed.scenario, runtime.value) : null
@@ -158,13 +158,13 @@ const summary = computed(() =>
 // 真实模式下运行同样要确认：切模式时确认的是这把 Key，这里确认的是这一串步骤
 const confirming = shallowRef<BenchScenario | null>(null)
 
-// 换了应用、Key 或模式时清掉结果：它们属于别的 Key 或别的模式。文本框里的场景留着，换把 Key 再跑是常见的用法
+// 换了接入实例、Key 或模式时清掉结果：它们属于别的 Key 或别的模式。文本框里的场景留着，换把 Key 再跑是常见的用法
 watch(generation, () => {
   outcome.value = null
   failure.value = null
   confirming.value = null
 })
-// 选中的预设不适用于新的应用时不再显示成选中
+// 选中的预设不适用于新的接入实例时不再显示成选中
 watch(runtime, () => {
   if (!preset.value) presetId.value = undefined
 })
@@ -236,7 +236,7 @@ function startRun() {
           @change="onFile"
         />
         <UButton
-          :icon="icons.importSpace"
+          :icon="icons.importCircle"
           color="neutral"
           variant="outline"
           @click="fileInput?.click()"
@@ -244,7 +244,7 @@ function startRun() {
           导入 JSON
         </UButton>
         <UButton
-          :icon="icons.exportSpace"
+          :icon="icons.exportCircle"
           color="neutral"
           variant="outline"
           :disabled="!text.trim()"
@@ -255,7 +255,7 @@ function startRun() {
       </div>
       <p v-if="preset?.description" class="scenario-note">{{ preset.description }}</p>
       <details v-if="unusable.length" class="unusable">
-        <summary>不适用于当前应用的预设（{{ unusable.length }}）</summary>
+        <summary>不适用于当前接入实例的预设（{{ unusable.length }}）</summary>
         <ul>
           <li v-for="c in unusable" :key="c.scenario.id">{{ c.scenario.title }}：{{ c.reason }}</li>
         </ul>

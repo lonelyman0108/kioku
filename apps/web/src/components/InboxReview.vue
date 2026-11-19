@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import type { ReviewLayer } from '@kioku/contracts'
+import type { ReviewKind } from '@kioku/contracts'
 import { useInfiniteQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 
@@ -17,25 +17,25 @@ import SectionHeading from './strata/SectionHeading.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
 
 // 待确认内容：未确认来源写下的内容，确认后记为本人来源，有误的可以删除
-const props = defineProps<{ spaceId: string; canAct: boolean }>()
+const props = defineProps<{ circleId: string; canAct: boolean }>()
 const toast = useToast()
 const queryClient = useQueryClient()
 
-const layer = ref<'all' | ReviewLayer>('all')
+const kind = ref<'all' | ReviewKind>('all')
 const tabs = [
   { label: '全部', value: 'all' },
-  { label: '联系人事实', value: 'subject' },
+  { label: '联系人事实', value: 'fact' },
   { label: '会话摘要', value: 'episode' },
 ]
-const kindLabels: Record<ReviewLayer, string> = { subject: '事实', episode: '会话摘要' }
+const kindLabels: Record<ReviewKind, string> = { fact: '事实', episode: '会话摘要' }
 
 const active = useActivated()
 const queue = useInfiniteQuery({
-  queryKey: computed(() => ['review', props.spaceId, layer.value] as const),
-  // 参数从键里取：换了筛选或空间之后，旧键剩下的页还在重新拉取时，不会用上新的参数
-  queryFn: ({ pageParam, queryKey: [, sid, filter] }) =>
-    api.reviewQueue(sid, {
-      layer: filter === 'all' ? undefined : filter,
+  queryKey: computed(() => ['review', props.circleId, kind.value] as const),
+  // 参数从键里取：换了筛选或记忆圈之后，旧键剩下的页还在重新拉取时，不会用上新的参数
+  queryFn: ({ pageParam, queryKey: [, cid, filter] }) =>
+    api.reviewQueue(cid, {
+      kind: filter === 'all' ? undefined : filter,
       cursor: pageParam,
     }),
   initialPageParam: undefined as string | undefined,
@@ -45,11 +45,11 @@ const queue = useInfiniteQuery({
 const items = computed(() => queue.data.value?.pages.flatMap((page) => page.items) ?? [])
 const total = computed(() => queue.data.value?.pages[0]?.total ?? 0)
 
-// 选中的条目与勾选时看到的版本：换了空间或筛选就清空。版本在勾选时记下，
+// 选中的条目与勾选时看到的版本：换了记忆圈或筛选就清空。版本在勾选时记下，
 // 之后刷新拿到的新版本不算，服务端按它跳过看过之后被改过的
 type Seen = { id: string; version: number }
 const selected = ref(new Map<string, number>())
-watch([() => props.spaceId, layer], () => (selected.value = new Map()))
+watch([() => props.circleId, kind], () => (selected.value = new Map()))
 const allSelected = computed(
   () => items.value.length > 0 && items.value.every((i) => selected.value.has(i.id)),
 )
@@ -70,7 +70,7 @@ const deleting = ref<Seen[] | null>(null)
 const BATCH = 100
 
 async function act(action: 'confirm' | 'delete', items: Seen[]) {
-  const sid = props.spaceId
+  const cid = props.circleId
   const verb = action === 'confirm' ? '确认' : '删除'
   busy.value = true
   let done = 0
@@ -79,7 +79,7 @@ async function act(action: 'confirm' | 'delete', items: Seen[]) {
   try {
     for (let i = 0; i < items.length; i += BATCH) {
       const batch = items.slice(i, i + BATCH)
-      const result = await api.review(sid, { action, items: batch })
+      const result = await api.review(cid, { action, items: batch })
       done += result.done
       skipped += result.skipped
       submitted.push(...batch.map((b) => b.id))
@@ -99,19 +99,20 @@ async function act(action: 'confirm' | 'delete', items: Seen[]) {
     const next = new Map(selected.value)
     for (const id of submitted) next.delete(id)
     selected.value = next
-    // 处理过的会出现在联系人页、记忆列表、已删除、变更记录与概览里；涉及它们的 Dream 建议随之作废；条数跟着变
+    // 处理过的会出现在联系人页、记忆列表、已删除、变更记录与概览里；涉及它们的整理建议随之作废；条数跟着变
     for (const key of [
       'review',
       'dream-suggestions',
       'subjects',
       'subject',
-      'memory-list',
-      'memory-deleted',
+      'entry-list',
+      'entry-browse',
+      'entry-deleted',
       'activity',
       'overview',
       'inbox-counts',
     ]) {
-      void queryClient.invalidateQueries({ queryKey: [key, sid] })
+      void queryClient.invalidateQueries({ queryKey: [key, cid] })
     }
     busy.value = false
     deleting.value = null
@@ -137,7 +138,7 @@ async function act(action: 'confirm' | 'delete', items: Seen[]) {
       />
       <span v-if="canAct && selected.size" class="review-count">已选 {{ selected.size }} 条</span>
       <span v-else-if="queue.data.value" class="review-count">{{ total }} 条待确认</span>
-      <UTabs v-model="layer" :items="tabs" :content="false" size="sm" class="w-auto" />
+      <UTabs v-model="kind" :items="tabs" :content="false" size="sm" class="w-auto" />
       <div v-if="canAct && items.length" class="review-bulk">
         <UButton
           color="neutral"
@@ -183,13 +184,13 @@ async function act(action: 'confirm' | 'delete', items: Seen[]) {
             @update:model-value="(v) => toggle(item, v === true)"
           />
           <span class="row-kind">
-            <StrataSwatch :layer="item.layer" plain decorative />
-            {{ kindLabels[item.layer] }}
+            <StrataSwatch :band="item.kind" plain decorative />
+            {{ kindLabels[item.kind] }}
           </span>
           <span class="row-about">
             <RouterLink
               v-if="item.subject"
-              :to="{ name: 'contact', params: { spaceId, subjectId: item.subject.id } }"
+              :to="{ name: 'contact', params: { circleId, subjectId: item.subject.id } }"
               >{{ item.subject.displayName }}</RouterLink
             >
           </span>

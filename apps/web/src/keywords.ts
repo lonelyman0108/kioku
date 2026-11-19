@@ -12,13 +12,13 @@ const ASCII = /^[\x20-\x7e]+$/
 const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 export function buildKeywordIndex(
-  entries: { keyword: string; uris: string[] }[],
+  entries: { keyword: string; shortIds: string[] }[],
 ): KeywordIndex | null {
   const targets = new Map<string, string[]>()
-  for (const { keyword, uris } of entries) {
+  for (const { keyword, shortIds } of entries) {
     const key = keyword.trim().toLowerCase()
-    if (key.length < 2 || !uris.length) continue
-    targets.set(key, [...new Set([...(targets.get(key) ?? []), ...uris])])
+    if (key.length < 2 || !shortIds.length) continue
+    targets.set(key, [...new Set([...(targets.get(key) ?? []), ...shortIds])])
   }
   if (!targets.size) return null
   const alternatives = [...targets.keys()]

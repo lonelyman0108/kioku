@@ -1,35 +1,35 @@
 import type {
-  AppInfo,
-  AppRecallVolume,
+  ClientInfo,
+  ClientRecallVolume,
   DebugCandidate,
   KeyInfo,
   RecallSource,
 } from '@kioku/contracts'
 
 import { readFailure } from './api/client'
-import { usableKeys } from './benchSession'
+import { usableKeys } from './apps'
 import { recallSourceLabels } from './labels'
 
-// 召回页的计算：各应用的调用量、分数轴
+// 召回页的计算：各接入实例的调用量、分数轴
 
-// 调试能选的 Key：只来自传进来的应用（当前账号是所有者的），只要有效的。一个应用的 Key 读取失败不影响别的应用，
-// 失败的单独列出来；读到过又刷新失败的，手里的 Key 照样能选。results 和 apps 一一对应
+// 调试能选的访问密钥：只来自传进来的接入实例（当前账号是所有者的），只要有效的。一个接入实例读取失败不影响别的，
+// 失败的单独列出来；读到过又刷新失败的，手里的访问密钥照样能选。results 和 clients 一一对应
 export function debugKeyChoices(
-  apps: readonly AppInfo[],
+  clients: readonly ClientInfo[],
   results: readonly { data?: KeyInfo[] | undefined; isError: boolean; error: unknown }[],
 ) {
   return {
-    options: apps.flatMap((app, i) =>
-      usableKeys(results[i]?.data ?? []).map((key) => ({ app, key })),
+    options: clients.flatMap((client, i) =>
+      usableKeys(results[i]?.data ?? []).map((key) => ({ client, key })),
     ),
-    failures: apps.flatMap((app, i) => {
+    failures: clients.flatMap((client, i) => {
       const result = results[i]
-      return result?.isError ? [{ app, text: readFailure(result.error) }] : []
+      return result?.isError ? [{ client, text: readFailure(result.error) }] : []
     }),
   }
 }
 
-// 一个应用的调用量条里的一段：按来路分，占这个应用总量的比例
+// 一个接入实例的调用量条里的一段：按来路分，占这个接入实例总量的比例
 export interface VolumeSegment {
   source: RecallSource
   label: string
@@ -38,19 +38,19 @@ export interface VolumeSegment {
 }
 
 export interface VolumeBar {
-  volume: AppRecallVolume
+  volume: ClientRecallVolume
   // 条长，占最长一条的百分比
   width: number
   segments: VolumeSegment[]
 }
 
-// 段的先后固定：每轮输入最多，放最前面，各应用之间能对着看
+// 段的先后固定：每轮输入最多，放最前面，各接入实例之间能对着看
 const SOURCE_ORDER: RecallSource[] = ['prompt.submit', 'session.start', 'mcp.search', 'rest.recall']
 
-// 条长按调用量的平方根：几十倍的差距下小应用也看得清，确切的次数写在旁边
-export function volumeBars(apps: readonly AppRecallVolume[]): VolumeBar[] {
-  const longest = Math.sqrt(Math.max(0, ...apps.map((app) => app.total)))
-  return apps.map((volume) => ({
+// 条长按调用量的平方根：几十倍的差距下小接入实例也看得清，确切的次数写在旁边
+export function volumeBars(clients: readonly ClientRecallVolume[]): VolumeBar[] {
+  const longest = Math.sqrt(Math.max(0, ...clients.map((client) => client.total)))
+  return clients.map((volume) => ({
     volume,
     width: longest ? (Math.sqrt(volume.total) / longest) * 100 : 0,
     segments: SOURCE_ORDER.flatMap((source) => {
@@ -69,9 +69,9 @@ export function volumeBars(apps: readonly AppRecallVolume[]): VolumeBar[] {
   }))
 }
 
-// 调用次数加起来：只有当前账号能管 Key 的应用，服务端只给这些
-export const recallTotal = (apps: readonly AppRecallVolume[]) =>
-  apps.reduce((sum, app) => sum + app.total, 0)
+// 调用次数加起来：只有当前账号能管访问密钥的接入实例，服务端只给这些
+export const recallTotal = (clients: readonly ClientRecallVolume[]) =>
+  clients.reduce((sum, client) => sum + client.total, 0)
 
 export interface ScoreAxis {
   max: number
@@ -104,14 +104,20 @@ export interface ScorePart {
   share: number
 }
 
-// 四路的得分，四项相加就是总分。没走到的一路 value 是 0，文字写「–」，条上不画
+// 六路的得分（向量、全文、关键词、优先级、切面、关联）。没走到的一路 value 是 0，负分（切面冲突惩罚）条上不占正比
 export function scoreParts(candidate: DebugCandidate): ScorePart[] {
-  const { semantic, fulltext, glossary, priority } = candidate.breakdown
-  const sum = semantic + fulltext + glossary + priority
-  return [
+  const { semantic, fulltext, glossary, priority, facet, link } = candidate.breakdown
+  const raw = [
     { label: '向量', value: semantic },
     { label: '全文', value: fulltext },
     { label: '关键词', value: glossary },
     { label: '优先级', value: priority },
-  ].map((part) => ({ ...part, share: sum ? (part.value / sum) * 100 : 0 }))
+    { label: '切面', value: facet },
+    { label: '关联', value: link },
+  ]
+  const positiveSum = raw.reduce((acc, p) => acc + Math.max(0, p.value), 0)
+  return raw.map((part) => ({
+    ...part,
+    share: part.value > 0 && positiveSum > 0 ? (part.value / positiveSum) * 100 : 0,
+  }))
 }

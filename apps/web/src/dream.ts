@@ -11,21 +11,36 @@ import type {
 import { originScopeText } from './labels'
 import { formatShort } from './time'
 
-// Dream 的四种建议：名字与执行之后会怎样
+// Dream 的建议类型：名字与执行之后会怎样
 export const suggestionKinds: Record<DreamSuggestionKind, { label: string; effect: string }> = {
   merge: {
     label: '合并重复内容',
-    effect:
-      '执行后保留标记为「保留」的一条（坐标与归属不变），正文替换为合并后的内容，其余几条删除。',
+    effect: '执行后保留标记为「保留」的一条，正文替换为合并后的内容，其余几条删除。',
+  },
+  merge_variants: {
+    label: '合并为多变体词条',
+    effect: '执行后保留标记为「保留」的一条并写入各切面变体切片，其余几条删除。',
+  },
+  facet_tag: {
+    label: '补充切面标签',
+    effect: '执行后为该词条主切片补全建议的适用切面条件，正文保持不变。',
+  },
+  generalize: {
+    label: '泛化上浮共性',
+    effect: '执行后将跨项目共性提炼写入通用切片，各特定项目切片按建议精简或保留。',
   },
   distill: {
-    label: '提炼',
-    effect: '执行后按草稿新建一条记忆，归属由坐标的开头决定；作为来源的事实保持不变。',
+    label: '提炼词条',
+    effect: '执行后按草稿新建一条正式词条；作为来源的事实保持不变。',
+  },
+  distill_episode: {
+    label: '沉淀会话摘要',
+    effect: '执行后将到期会话摘要中的关键结论新建为正式词条；原摘要保持不变。',
   },
   stale: {
     label: '可能已过时',
     effect:
-      '执行后有效期截止到当前时间，不再召回；记忆可在「已过期」中恢复生效，事实可在联系人页恢复生效。',
+      '执行后有效期截止到当前时间，不再召回；词条可在「已过期」中恢复生效，事实可在联系人页恢复生效。',
   },
   review: {
     label: '待确认内容',
@@ -40,16 +55,14 @@ export const suggestionKinds: Record<DreamSuggestionKind, { label: string; effec
 // 建议看的是哪一部分记忆
 export function dreamScopeText(scope: DreamScope): string {
   switch (scope.kind) {
-    case 'core':
-      return '通用'
-    case 'persona':
-      return scope.name ? `人格「${scope.name}」` : '已删除的人格'
-    case 'app':
-      return scope.name ? `应用「${scope.name}」` : '已删除的应用'
-    case 'user':
-      return '本人'
+    case 'circle':
+      return scope.name ? `记忆圈「${scope.name}」` : '当前记忆圈'
+    case 'personal':
+      return scope.name ? `${scope.name} 的私密内容` : '个人范围'
     case 'talk':
       return scope.origin ? `${originScopeText(scope.origin)}中记下的` : '对话中记下的'
+    case 'local_session':
+      return scope.name ? `本地会话「${scope.name}」` : '本地会话'
   }
 }
 
@@ -62,11 +75,11 @@ export const skipReasonLabels: Record<DreamSkipReason, string> = {
   'no-model': '未整理：尚未配置抽取模型（可在实例设置中配置）',
   budget: '未整理：本月抽取预算已用完',
   idle: '无需整理：上次以来没有新增或修改的内容',
-  'opted-out': '本次结果未保存：请求模型期间已关闭本人记忆的整理，重新开启后将再次整理',
+  'opted-out': '本次结果未保存：请求模型期间已关闭个人范围的整理，重新开启后将再次整理',
 }
 
-// 自己在这个空间里的 Dream 设置的查询键：空间设置里的开关与待审页的说明共用一份缓存
-export const dreamSettingsKey = (spaceId: string) => ['dream-settings', spaceId] as const
+// 自己在这个记忆圈里的 Dream 设置的查询键：记忆圈设置里的开关与待处理页的说明共用一份缓存
+export const dreamSettingsKey = (circleId: string) => ['dream-settings', circleId] as const
 
 // 共享部分的汇总（运行记录里范围为空的那一条，每次一条）：各个范围的条目说了用量与建议，这里只说共享的内容整体怎样
 export function sharedSummaryText(entry: DreamRunEntry): string {

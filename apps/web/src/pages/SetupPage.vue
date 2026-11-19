@@ -29,7 +29,7 @@ import {
   VERDICT_NAMES,
 } from '../setup'
 
-// 首次初始化：第一步接上数据库，第二步建第一个管理员与空间。两步都要服务启动日志里的初始化码。
+// 首次初始化：第一步接上数据库，第二步建第一个管理员与记忆圈。两步都要服务启动日志里的初始化码。
 // 数据库来自环境变量或 kioku.json 时，第一步只显示连接与检查结果，不能修改；
 // 都没有时在这里填连接（或者用超级用户代建），检查通过后保存并当场接上
 const router = useRouter()
@@ -37,12 +37,16 @@ const router = useRouter()
 const status = ref<SetupStatus | null>(null)
 const loadError = ref<string | null>(null)
 const step = ref<'database' | 'admin'>('database')
+const circleNameText = ref('')
 const admin = reactive({
   setupCode: '',
   username: '',
   displayName: '',
   password: '',
-  spaceName: '我的空间',
+  circleName: undefined as string | undefined,
+})
+watch(circleNameText, (v) => {
+  admin.circleName = v.trim() || undefined
 })
 
 type Mode = 'fill' | 'provision'
@@ -391,7 +395,7 @@ async function submitAdmin() {
 
       <!-- 第二步：管理员 -->
       <template v-else>
-        <p class="mt-2 text-muted">创建首个账号及其空间，该账号为实例管理员。</p>
+        <p class="mt-2 text-muted">创建首个账号及其个人记忆圈，该账号为实例管理员。</p>
         <p v-if="connected" class="mt-1 text-sm text-muted">已接入数据库 {{ connected }}。</p>
         <UForm
           :schema="SetupRequest"
@@ -426,8 +430,12 @@ async function submitAdmin() {
               class="w-full"
             />
           </UFormField>
-          <UFormField label="空间名" name="spaceName">
-            <UInput v-model="admin.spaceName" size="lg" class="w-full" />
+          <UFormField
+            label="共享记忆圈名（可选）"
+            name="circleName"
+            help="留空仅创建个人记忆圈；填写时同步创建一个共享圈"
+          >
+            <UInput v-model="circleNameText" size="lg" class="w-full" />
           </UFormField>
           <p v-if="error" class="text-error" role="alert">{{ error }}</p>
           <UButton type="submit" size="lg" block :loading="busy === 'admin'">创建并登录</UButton>

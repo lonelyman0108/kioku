@@ -24,7 +24,7 @@ const step = (over: Partial<BenchStepResult> = {}): BenchStepResult => ({
   text: '',
   raw: {},
   ms: 1,
-  uris: [],
+  shortIds: [],
   session: null,
   vectorSkipped: false,
   assertions: [],
@@ -35,8 +35,7 @@ const step = (over: Partial<BenchStepResult> = {}): BenchStepResult => ({
 })
 
 const noChanges: BenchChanges = {
-  memories: [],
-  hiddenReleased: 0,
+  entries: [],
   hiddenOther: 0,
   credentials: [],
   subjects: 0,
@@ -165,13 +164,13 @@ describe('这一步改了什么', () => {
     expect(changesNotListed(noChanges)).toBe(false)
   })
 
-  it('记忆：动作、URI 与字段的中文名', () => {
+  it('记忆：动作、短 ID 与字段的中文名', () => {
     const [item] = changeItems({
       ...noChanges,
-      memories: [
+      entries: [
         {
           type: 'update',
-          uri: 'core://a',
+          shortId: 'm-abc123',
           title: 'a',
           fields: ['content', 'validTo', 'odd'],
           left: false,
@@ -181,7 +180,7 @@ describe('这一步改了什么', () => {
     })
     expect(item).toEqual({
       action: '修改',
-      target: 'core://a',
+      target: 'm-abc123',
       fields: ['正文', '有效期', 'odd'],
       warnings: [],
       notes: [],
@@ -191,10 +190,10 @@ describe('这一步改了什么', () => {
   it('改成 secret 时提示历史正文会被抹掉、向量会删', () => {
     const [item] = changeItems({
       ...noChanges,
-      memories: [
+      entries: [
         {
           type: 'update',
-          uri: 'core://a',
+          shortId: 'm-abc123',
           title: 'a',
           fields: [],
           left: false,
@@ -206,13 +205,13 @@ describe('这一步改了什么', () => {
     expect(item!.warnings.join('')).toContain('向量将被删除')
   })
 
-  it('改后看不到了：说明 URI 是改前的', () => {
+  it('改后看不到了：不提供修改后的内容', () => {
     const [item] = changeItems({
       ...noChanges,
-      memories: [
+      entries: [
         {
           type: 'update',
-          uri: 'core://a',
+          shortId: 'm-abc123',
           title: 'a',
           fields: [],
           left: true,
@@ -220,14 +219,13 @@ describe('这一步改了什么', () => {
         },
       ],
     })
-    expect(item!.notes.join('')).toContain('修改前的 URI')
+    expect(item!.notes.join('')).toContain('不提供修改后的任何内容')
   })
 
   it('看不到的改动只给个数', () => {
-    const items = changeItems({ ...noChanges, hiddenReleased: 2, hiddenOther: 3 })
+    const items = changeItems({ ...noChanges, hiddenOther: 3 })
     expect(items.map((i) => i.action)).toEqual([
-      '已释放 2 条不可见过期记录的 URI（属于其他成员）',
-      '另有 3 处不可见的改动（当前访问密钥可写但不可读的归属）',
+      '另有 3 处不可见的改动（当前访问密钥可写但不可读的范围）',
     ])
   })
 

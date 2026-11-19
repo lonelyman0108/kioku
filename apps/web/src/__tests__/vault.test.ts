@@ -1,25 +1,30 @@
-import type { CredentialEvent, KeyScopes, VaultConnection } from '@kioku/contracts'
+import {
+  ENTRY_KINDS,
+  type CredentialEvent,
+  type LensKeyScopes,
+  type VaultConnection,
+} from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
+import { ApiError } from '../api/client'
 import appKeys from '../components/AppKeys.vue?raw'
-import keyScopeEditor from '../components/KeyScopeEditor.vue?raw'
 import credentialDetail from '../components/CredentialDetail.vue?raw'
 import credentialForm from '../components/CredentialFormModal.vue?raw'
 import keyMatrix from '../components/KeyMatrix.vue?raw'
-import vaultPanel from '../components/VaultConnectionPanel.vue?raw'
-import vaultLogin from '../components/VaultLoginModal.vue?raw'
-import settingsPage from '../components/MasterKeySettings.vue?raw'
 import {
   allowedCredentialCapability,
   issuedCredentialCapability,
   keyPresets,
   presetScopes,
-  tightenScopes,
   sameScopes,
+  tightenScopes,
 } from '../components/keyPresets'
+import keyScopeEditor from '../components/KeyScopeEditor.vue?raw'
+import settingsPage from '../components/MasterKeySettings.vue?raw'
+import vaultPanel from '../components/VaultConnectionPanel.vue?raw'
+import vaultLogin from '../components/VaultLoginModal.vue?raw'
 import { scopesSummary } from '../labels'
 import { remainingTotal } from '../masterKey'
-import { ApiError } from '../api/client'
 import {
   canManageCredentials,
   checkNotice,
@@ -39,7 +44,7 @@ const event = (over: Partial<CredentialEvent> = {}): CredentialEvent => ({
   id: 1,
   type: 'access',
   createdAt: '2026-11-07T00:00:00Z',
-  actor: { accountName: null, keyName: 'MacBook', appName: 'Claude Code' },
+  actor: { accountName: null, keyName: 'MacBook', clientName: 'Claude Code' },
   via: null,
   fields: [],
   purpose: null,
@@ -179,7 +184,7 @@ describe('连接', () => {
     expect(collectionNames(item, list)).toEqual(['运维', 'Agent'])
   })
 
-  it('凭据与连接的操作只给空间所有者', () => {
+  it('凭据与连接的操作只给记忆圈所有者', () => {
     expect(canManageCredentials('owner')).toBe(true)
     expect(canManageCredentials('editor')).toBe(false)
     expect(canManageCredentials('viewer')).toBe(false)
@@ -188,7 +193,7 @@ describe('连接', () => {
 })
 
 describe('访问记录', () => {
-  it('取用：结果与原因、经由、会话上下文、用途、字段，中文名用 names.ts 的', () => {
+  it('取用：结果与原因、经由、会话上下文、用途、字段，中文名用 labels.ts 的', () => {
     expect(
       credentialEventParts(
         event({
@@ -218,16 +223,18 @@ describe('访问记录', () => {
     expect(
       credentialEventParts(event({ via: 'console', result: 'failed', reason: 'item_unavailable' })),
     ).toEqual(['失败：条目不可用', '在管理界面查看'])
-    expect(credentialEventParts(event({ via: 'space_export', result: 'ok' }))).toEqual([
+    expect(credentialEventParts(event({ via: 'circle_export', result: 'ok' }))).toEqual([
       '成功',
-      '随空间导出',
+      '随记忆圈导出',
     ])
   })
 
   it('修改：列出改了哪些部分；不认识的原样显示', () => {
     expect(
-      credentialEventParts(event({ type: 'update', changes: ['fields', 'appIds', 'other'] })),
-    ).toEqual(['修改了字段对应、限定的应用、other'])
+      credentialEventParts(
+        event({ type: 'update', changes: ['fields', 'clientIds', 'allowedRealms', 'other'] }),
+      ),
+    ).toEqual(['修改了字段对应、限定的接入实例、允许的场域、other'])
     expect(credentialEventParts(event({ via: 'mystery', chatType: 'weird' }))).toEqual([
       'mystery',
       '会话上下文：weird',
@@ -236,15 +243,16 @@ describe('访问记录', () => {
 })
 
 describe('凭据能力', () => {
-  const base: KeyScopes = {
-    readLayers: ['core', 'user'],
-    writeLayers: ['user'],
+  const base: LensKeyScopes = {
+    readKinds: [...ENTRY_KINDS],
+    writeKinds: ['entry'],
     maxSensitivity: 'private',
+    allowedRealms: null,
     admin: false,
     credentials: 'none',
   }
 
-  it('不是空间所有者时只能选不可用', () => {
+  it('不是记忆圈所有者时只能选不可用', () => {
     expect(allowedCredentialCapability('use', true)).toBe('use')
     expect(allowedCredentialCapability('manage', true)).toBe('manage')
     expect(allowedCredentialCapability('use', false)).toBe('none')
@@ -260,13 +268,13 @@ describe('凭据能力', () => {
 
   it('签发范围不够时，实际能用到的档位往下收', () => {
     expect(issuedCredentialCapability({ ...base, credentials: 'manage' })).toBe('manage')
-    expect(issuedCredentialCapability({ ...base, credentials: 'manage', writeLayers: [] })).toBe(
+    expect(issuedCredentialCapability({ ...base, credentials: 'manage', writeKinds: [] })).toBe(
       'use',
     )
     expect(
       issuedCredentialCapability({ ...base, credentials: 'use', maxSensitivity: 'internal' }),
     ).toBe('none')
-    expect(issuedCredentialCapability({ ...base, credentials: 'use', readLayers: ['core'] })).toBe(
+    expect(issuedCredentialCapability({ ...base, credentials: 'use', readKinds: ['fact'] })).toBe(
       'none',
     )
   })
@@ -279,12 +287,12 @@ describe('凭据能力', () => {
 })
 
 describe('界面用上了这些规则', () => {
-  it('签发访问密钥：选项与预设都按空间所有者收紧', () => {
+  it('签发访问密钥：选项与预设都按记忆圈所有者收紧', () => {
     expect(keyScopeEditor).toContain(
-      'disabled: allowedCredentialCapability(c, props.isSpaceOwner) !== c',
+      'disabled: allowedCredentialCapability(c, props.isCircleOwner) !== c',
     )
     expect(keyScopeEditor).toContain(':items="credentialItems"')
-    expect(keyScopeEditor).toContain('presetScopes(found, props.isSpaceOwner)')
+    expect(keyScopeEditor).toContain('presetScopes(found, props.isCircleOwner)')
     expect(appKeys).toContain('form.scopes = tightenScopes(form.scopes, owner)')
     expect(tightenScopes(presetScopes(keyPresets[0]!, true), false).credentials).toBe('none')
     expect(presetScopes(keyPresets[0]!, false).credentials).toBe('none')
@@ -298,15 +306,15 @@ describe('界面用上了这些规则', () => {
     expect(credentialForm).toContain('vaultCredentialDraft(item.item, props.identifiers)')
   })
 
-  it('重新检查失败时按错误提示，只重读连接列表；成功时连接与条目重读，凭据由条目列表按修改时间判断', () => {
-    expect(checkRefreshKeys('s1', false)).toEqual([['vault-connections', 's1']])
-    expect(checkRefreshKeys('s1', true)).toEqual([
-      ['vault-connections', 's1'],
-      ['vault-items', 's1'],
+  it('重新检查失败时按错误提示，只重读连接列表；成功时连接与条目重读', () => {
+    expect(checkRefreshKeys('c1', false)).toEqual([['vault-connections', 'c1']])
+    expect(checkRefreshKeys('c1', true)).toEqual([
+      ['vault-connections', 'c1'],
+      ['vault-items', 'c1'],
     ])
     expect(vaultPanel).toContain('toast.add(checkNotice({ error: err }))')
     expect(vaultPanel).toMatch(
-      /finally \{\s+busy\.value = false\s+await Promise\.all\(\s+checkRefreshKeys\(sid, succeeded\)/,
+      /finally \{\s+busy\.value = false\s+await Promise\.all\(\s+checkRefreshKeys\(cid, succeeded\)/,
     )
   })
 
@@ -315,7 +323,7 @@ describe('界面用上了这些规则', () => {
       'enabled: computed(() => open.value && !!connection.value && itemsAvailable(connection.value))',
     )
     expect(credentialForm).toContain(
-      "queryKey: computed(() => ['vault-connections', props.spaceId] as const)",
+      "queryKey: computed(() => ['vault-connections', props.circleId] as const)",
     )
     expect(credentialDetail).toContain('itemsAvailable(connection.value)')
   })
@@ -327,24 +335,20 @@ describe('界面用上了这些规则', () => {
   })
 
   it('主密钥剩余的总数把各类加在一起，算上密码库连接；轮询与显示用同一个函数', () => {
-    expect(remainingTotal({ memories: 1, credentials: 2, vaultConnections: 4, settings: 8 })).toBe(
+    expect(remainingTotal({ entries: 1, credentials: 2, vaultConnections: 4, settings: 8 })).toBe(
       15,
     )
-    expect(remainingTotal({ memories: 0, credentials: 0, vaultConnections: 3, settings: 0 })).toBe(
-      3,
-    )
+    expect(remainingTotal({ entries: 0, credentials: 0, vaultConnections: 3, settings: 0 })).toBe(3)
     expect(remainingTotal(undefined)).toBe(0)
-    // 按清单加，不是把对象里的数都加起来：清单之外的字段不算
-    const extra = { memories: 1, credentials: 0, vaultConnections: 0, settings: 0, other: 100 }
+    const extra = { entries: 1, credentials: 0, vaultConnections: 0, settings: 0, other: 100 }
     expect(remainingTotal(extra)).toBe(1)
     expect(settingsPage.match(/remainingTotal\(/g)).toHaveLength(2)
-    // 出了错时后台任务照样重试：各行照写「轮换中」，错误在上面，照常刷新只是放慢
     expect(settingsPage).not.toContain('已停止')
     expect(settingsPage).toContain('<UIcon :name="icons.refresh" class="state-icon" />轮换中')
     expect(settingsPage).toContain('<NoteLine v-if="masterKey.data.value.lastError" tone="error">')
     expect(settingsPage).toContain('if (remainingTotal(data?.remaining) === 0) return false')
     expect(settingsPage).toContain('return data?.lastError ? 15_000 : 5_000')
-    expect(settingsPage).not.toContain('.memories +')
+    expect(settingsPage).not.toContain('.entries +')
   })
 
   it('查看的值只放在详情组件里，不进查询缓存', () => {

@@ -17,8 +17,14 @@ import {
 
 import { ApiError } from './api/client'
 import { formatBytes } from './backup'
-import { identifierOf } from './coordinates'
 import { unmatchedNote } from './plaintext'
+
+const lastSegment = (uri: string): string => {
+  const path = uri.split('://')[1] ?? uri
+  return path.split('/').filter(Boolean).at(-1) ?? path
+}
+
+const isSoulUri = (uri: string) => uri === 'core://soul' || uri.startsWith('core://soul/')
 
 // 从 Lore 导入时界面用的纯逻辑：裁剪导出文件、表单能不能看计划、勾选换算成请求、勾选之后这次写什么、计划的分组、执行失败的说明
 
@@ -207,25 +213,45 @@ export function pruneUnconverted(plan: LoreImportPlan, unconverted: Unconverted)
   return kept
 }
 
-const updateKey = (source: string, uri: string) => JSON.stringify([source, uri])
+const updateKey = (source: string, legacyUri: string) => JSON.stringify([source, legacyUri])
 const updatesOf = (plan: LoreImportPlan) =>
   new Set(
-    plan.sync.items.filter((i) => i.state === 'update').map((i) => updateKey(i.source, i.uri)),
+    plan.sync.items
+      .filter((i) => i.state === 'update')
+      .map((i) => updateKey(i.source, i.legacyUri)),
   )
 
 // 这个节点这次会写的目标：新建的，或者有要更新的同步项。和 selectionEffects 同一个判断
 const writtenTargets = (node: LorePlanNode, updates: ReadonlySet<string>) =>
-  node.targets.filter((t) => t.state === 'new' || updates.has(updateKey(node.uri, t.uri)))
+  node.targets.filter((t) => t.state === 'new' || updates.has(updateKey(node.uri, t.legacyUri)))
 
-// 写进去之后是不是机密：新建的看这次勾没勾 secret；同步不改敏感级，要更新的看这个 URI 上的记忆现在是不是 secret。
+// 写进去之后是不是机密：新建的看这次勾没勾 secret；同步不改敏感级，要更新的看这个目标对应的词条现在是不是 secret。
 // 启动加载与占位符放不放得进都按它算
-const targetSecret = (node: LorePlanNode, t: LorePlanTarget, secret: ReadonlySet<string>) =>
-  t.state === 'new' ? secret.has(node.uuid) : t.current.some((c) => c.uri === t.uri && c.secret)
+const targetSecret = (
+  plan: LoreImportPlan,
+  node: LorePlanNode,
+  t: LorePlanTarget,
+  secret: ReadonlySet<string>,
+) => {
+  if (t.state === 'new') return secret.has(node.uuid)
+  const item = plan.sync.items.find((i) => i.source === node.uri && i.legacyUri === t.legacyUri)
+  if (item) return t.current.some((c) => c.shortId === item.shortId && c.secret)
+  return t.current.some((c) => c.shortId !== null && c.secret)
+}
 
-// 新建的目标放不放得进占位符：本人、至少私密，标了机密的按机密算
-const freshAllowed = (node: LorePlanNode, t: LorePlanTarget, secret: ReadonlySet<string>) =>
+// 新建的目标放不放得进占位符：个人圈、正式词条且敏感级不低于私密，标了机密的按机密算
+const freshAllowed = (
+  plan: LoreImportPlan,
+  node: LorePlanNode,
+  t: LorePlanTarget,
+  secret: ReadonlySet<string>,
+) =>
   t.state === 'new' &&
-  placeholderAllowed(t.layer, targetSecret(node, t, secret) ? 'secret' : t.sensitivity)
+  placeholderAllowed(
+    t.targetCircleKind,
+    'entry',
+    targetSecret(plan, node, t, secret) ? 'secret' : t.sensitivity,
+  )
 
 // 一处疑似明文能不能换成占位符。服务端只给新建的、放得进占位符的目标换，同一节点别的写入目标
 // （放不进的新建目标、这次同步的已导入目标）照原样写，原因进结果：
@@ -247,7 +273,7 @@ export function spotState(
   const written = writtenTargets(node, updatesOf(plan))
   if (!written.length) return 'unwritten'
   if (!written.some((t) => t.state === 'new')) return 'synced'
-  return written.some((t) => freshAllowed(node, t, secret)) ? 'convertible' : 'blocked'
+  return written.some((t) => freshAllowed(plan, node, t, secret)) ? 'convertible' : 'blocked'
 }
 
 // 这次要写、却照原样写明文的目标：放不进占位符的新建目标，与这次同步的已导入目标
@@ -256,7 +282,7 @@ export function keptTargets(
   node: LorePlanNode,
   secret: ReadonlySet<string>,
 ): LorePlanTarget[] {
-  return writtenTargets(node, updatesOf(plan)).filter((t) => !freshAllowed(node, t, secret))
+  return writtenTargets(node, updatesOf(plan)).filter((t) => !freshAllowed(plan, node, t, secret))
 }
 
 // 这一处这次会不会换成占位符（至少在一个目标里）：能换，也没有取消勾选
@@ -293,18 +319,18 @@ export interface SelectionEffects {
   // 在 Kioku 里删除了的都不写
   create: number
   update: number
-  // 这次会写、写进去之后会进启动上下文的目标（就是计划里的那些对象）：secret 不进。数量与徽章都看它
+  // 这次会写、写进去之后会进启动上下文的目标（就是计划里的那些条目）：secret 不进。数量与徽章都看它
   boot: ReadonlySet<LorePlanTarget>
   bootNodes: number
   // 这次会写的节点的正文引用的凭据，连同这次换成占位符的那几处对上的凭据
   credentialRefs: string[]
-  // 没勾掉的节点里还有没有要新建的人格层目标（已导入的、换了路径的都不算）。有才会在人格不存在时新建；
-  // 没有时已有的人格照常用，不存在就没有人格可用：不设默认人格，新建的应用默认人格为空
+  // 没勾掉的节点里还有没有要新建的人格设定目标（已导入的、换了路径的都不算）。有才会在人格不存在时新建；
+  // 没有时已有的人格照常用，不存在就没有人格可用：不设默认人格，新建的接入实例默认人格为空
   writesPersona: boolean
-  // 还会动到的应用
-  apps: LoreImportPlan['apps']
-  appsGivenPersona: string[]
-  appsOtherPersona: string[]
+  // 还会动到的接入实例
+  clients: LoreImportPlan['clients']
+  clientsGivenPersona: string[]
+  clientsOtherPersona: string[]
 }
 
 const underRuntime = (uri: string, runtime: string) =>
@@ -335,22 +361,22 @@ export function selectionEffects(
       }
     }
     // secret 不进启动加载
-    const entering = written.filter((t) => t.boot && !targetSecret(node, t, secret))
+    const entering = written.filter((t) => t.boot && !targetSecret(plan, node, t, secret))
     for (const target of entering) boot.add(target)
     if (entering.length) bootNodes++
   }
-  // 和服务端 planImport 循环结束后的过滤同一个规则：勾掉一个运行时下的全部节点，就不建它的应用，也不设它们的默认人格；
-  // 计划里有映射却没有节点可勾的（已有的应用，节点都在映射之后被跳过了）不随勾选变；全部勾掉就什么都不动
-  const apps =
+  // 和服务端 planImport 循环结束后的过滤同一个规则：勾掉一个运行时下的全部节点，就不建它的接入实例，也不设它们的默认人格；
+  // 计划里有映射却没有节点可勾的（已有的接入实例，节点都在映射之后被跳过了）不随勾选变；全部勾掉就什么都不动
+  const clients =
     plan.nodes.length && !kept.length
       ? []
-      : plan.apps.filter(({ runtime }) => {
+      : plan.clients.filter(({ runtime }) => {
           const nodes = plan.nodes.filter((n) => underRuntime(n.uri, runtime))
           return !nodes.length || nodes.some((n) => !excluded.has(n.uuid))
         })
-  const slugs = new Set(apps.flatMap((m) => m.apps.map((a) => a.slug)))
+  const slugs = new Set(clients.flatMap((m) => m.clients.map((a) => a.slug)))
   const writesPersona = kept.some((n) =>
-    n.targets.some((t) => t.layer === 'persona' && t.state === 'new'),
+    n.targets.some((t) => t.state === 'new' && (isSoulUri(n.uri) || isSoulUri(t.legacyUri))),
   )
   const personaUsed = writesPersona || plan.persona.exists
   return {
@@ -360,9 +386,13 @@ export function selectionEffects(
     bootNodes,
     credentialRefs: [...refs].sort(),
     writesPersona,
-    apps,
-    appsGivenPersona: personaUsed ? plan.appsGivenPersona.filter((slug) => slugs.has(slug)) : [],
-    appsOtherPersona: personaUsed ? plan.appsOtherPersona.filter((slug) => slugs.has(slug)) : [],
+    clients,
+    clientsGivenPersona: personaUsed
+      ? plan.clientsGivenPersona.filter((slug) => slugs.has(slug))
+      : [],
+    clientsOtherPersona: personaUsed
+      ? plan.clientsOtherPersona.filter((slug) => slugs.has(slug))
+      : [],
   }
 }
 
@@ -382,10 +412,12 @@ export const targetStateLabels: Record<LoreTargetState, string> = {
   moved: 'Lore 中路径已变更',
 }
 
-// 计划里一个目标的标题：机密的不从正文取（标题是明文），和服务端写入时一样退回坐标的最后一段。
+// 计划里一个目标的标题：机密的不从正文取（标题是明文），和服务端写入时一样退回来源路径的最后一段。
 // secret 是这次要标机密，或者之前导入的那条已经是机密
-export const targetTitle = (target: Pick<LorePlanTarget, 'uri' | 'title'>, secret: boolean) =>
-  secret ? identifierOf(target.uri) : target.title
+export const targetTitle = (
+  target: Pick<LorePlanTarget, 'legacyUri' | 'title'>,
+  secret: boolean,
+) => (secret ? lastSegment(target.legacyUri) : target.title)
 
 const SYNC_CHANGE_LABELS: Record<LoreSyncChange, string> = {
   content: '正文',
@@ -395,11 +427,12 @@ const SYNC_CHANGE_LABELS: Record<LoreSyncChange, string> = {
   glossary: '关键词',
 }
 
-// 同步差异的一行：和计划里的写入目标一样先写标题、再写坐标，后面是要更新的几项或原因；
-// Lore 里换了路径的另给应在的坐标。Lore 中已不存在的只有坐标：节点不在了，取不到标题
+// 同步差异的一行：和计划里的写入目标一样先写标题、再写旧路径与短 ID，后面是要更新的几项或原因；
+// Lore 里换了路径的另给新路径。Lore 中已不存在的只有旧路径：节点不在了，取不到标题
 export interface SyncLine {
   title: string | null
-  uri: string
+  legacyUri: string
+  shortId: string | null
   target: string | null
   detail: string | null
 }
@@ -418,14 +451,15 @@ const SYNC_HEADINGS: Record<Exclude<LoreSyncState, 'current'>, string> = {
     'Lore 中路径已变更，不同步：移动可能改变归属与可见范围，需手动移动（移动后此记忆只能手动更新）',
   deleted: '已在 Kioku 中删除，不同步',
   skipped: '本次未同步（原因见各条）',
-  unmapped: '本次计划未映射到此节点（例如更换了人格，或对应的应用已不存在），未同步',
+  unmapped: '本次计划未映射到此节点（例如更换了人格，或对应的接入实例已不存在），未同步',
   unreadable: '无法同步（原因见各条）',
 }
 
 // 要更新的写要改的几项，不导入的与无法读取的写原因
 const syncLine = (item: LoreSyncItem): SyncLine => ({
   title: item.title,
-  uri: item.uri,
+  legacyUri: item.legacyUri,
+  shortId: item.shortId,
   target: item.target ?? null,
   detail:
     item.state === 'update'
@@ -444,9 +478,10 @@ export function syncGroups(plan: LoreImportPlan): { current: number; groups: Syn
     groups.push({
       state: 'gone',
       heading: 'Lore 中已不存在此节点，Kioku 中保留（如需删除请手动删除）',
-      lines: plan.sync.goneFromLore.map((uri) => ({
+      lines: plan.sync.goneFromLore.map((legacyUri) => ({
         title: null,
-        uri,
+        legacyUri,
+        shortId: null,
         target: null,
         detail: null,
       })),

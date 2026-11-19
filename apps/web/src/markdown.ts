@@ -1,3 +1,4 @@
+import { extractWikiLinks } from '@kioku/contracts'
 import DOMPurify from 'dompurify'
 import { Marked, Tokenizer, type Token, type Tokens } from 'marked'
 
@@ -178,11 +179,37 @@ export interface KeywordLinks {
   self: string
 }
 
-// 正文引用的凭据怎么显示：只有读者自己私人层的记忆才解析，按标识找读者自己的有效凭据
+// 正文引用的凭据怎么显示：只有个人圈的正式词条且读者是当前账号才解析，按标识找有效的凭据
 export interface CredentialLinks {
   byIdentifier: ReadonlyMap<string, { id: string; name: string; fields: readonly string[] }>
   // 凭据详情的地址
   href: (id: string) => string
+}
+
+// 正文中的 [[m-xxxxxx]] / [[m-xxxxxx|别名]] 双链怎么显示：优先从关联记忆里取标题和所在记忆圈
+export interface WikiLinkTargets {
+  byShortId?: ReadonlyMap<string, { circleId: string; title: string }>
+  href: (shortId: string, circleId?: string) => string
+}
+
+export interface WikiLinkSegment {
+  text: string
+  link?: { shortId: string; alias: string | null }
+}
+
+// 把文本段切出双链，按出现顺序返回普通文本和双链段
+export function splitWikiLinks(text: string): WikiLinkSegment[] {
+  const matches = extractWikiLinks(text)
+  if (!matches.length) return text ? [{ text }] : []
+  const segments: WikiLinkSegment[] = []
+  let cursor = 0
+  for (const m of matches) {
+    if (m.start > cursor) segments.push({ text: text.slice(cursor, m.start) })
+    segments.push({ text: m.raw, link: { shortId: m.targetShortId, alias: m.alias } })
+    cursor = m.end
+  }
+  if (cursor < text.length) segments.push({ text: text.slice(cursor) })
+  return segments
 }
 
 // 正文里疑似明文的值按字面切出来，长的优先；值被 Markdown 拆开时找不到，不标
@@ -214,6 +241,7 @@ export function renderMarkdown(
   options: {
     keywords?: KeywordLinks | null
     credentials?: CredentialLinks | null
+    wikiLinks?: WikiLinkTargets | null
     plaintext?: readonly string[] | null
   } = {},
 ): string {
@@ -226,9 +254,9 @@ export function renderMarkdown(
     link.setAttribute('target', '_blank')
     link.setAttribute('rel', 'noopener noreferrer')
   }
-  // 先画凭据的徽章，再标关键词：关键词可能出现在占位符里，先标关键词会把占位符拆开
+  // 先画凭据的徽章，再画双链、疑似明文和关键词：前面已转成元素的节点不让后面的切分规则拆开
   if (options.credentials) markCredentials(fragment, options.credentials)
-  // 明文也在关键词之前：关键词可能出现在值里，先标关键词会把值拆开
+  if (options.wikiLinks) markWikiLinks(fragment, options.wikiLinks)
   if (options.plaintext?.length) markPlaintext(fragment, options.plaintext)
   if (options.keywords) markKeywords(fragment, options.keywords)
   const box = document.createElement('div')
@@ -236,12 +264,18 @@ export function renderMarkdown(
   return box.innerHTML
 }
 
-// 文字节点，跳过链接、代码与折叠块的标题，以及已经画好的凭据徽章
+// 文字节点，跳过链接、代码与折叠块的标题，以及已经画好的凭据徽章、双链和明文标记
 function textNodes(root: DocumentFragment): Text[] {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
   const texts: Text[] = []
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-    if (node.parentElement?.closest('a, code, pre, summary, .kioku-cred, .kioku-plain')) continue
+    if (
+      node.parentElement?.closest(
+        'a, code, pre, summary, .kioku-cred, .kioku-wikilink, .kioku-plain',
+      )
+    ) {
+      continue
+    }
     texts.push(node as Text)
   }
   return texts
@@ -312,7 +346,34 @@ function markCredentials(root: DocumentFragment, { byIdentifier, href }: Credent
   }
 }
 
-// 在清洗过的正文里标出关键词：别的记忆的关键词变成链接（data-uris 里是那些记忆，空格分隔），
+// 把正文中的 [[m-xxxxxx]] / [[m-xxxxxx|别名]] 转成可点击的双链
+function markWikiLinks(root: DocumentFragment, targets: WikiLinkTargets) {
+  for (const text of textNodes(root)) {
+    const segments = splitWikiLinks(text.data)
+    if (!segments.some((s) => s.link)) continue
+    const replacement = document.createDocumentFragment()
+    for (const segment of segments) {
+      if (!segment.link) {
+        replacement.append(segment.text)
+        continue
+      }
+      const { shortId, alias } = segment.link
+      const resolved = targets.byShortId?.get(shortId)
+      const link = document.createElement('a')
+      link.className =
+        targets.byShortId && !resolved ? 'kioku-wikilink kioku-wikilink-missing' : 'kioku-wikilink'
+      link.href = targets.href(shortId, resolved?.circleId)
+      link.dataset.shortId = shortId
+      if (resolved) link.dataset.circleId = resolved.circleId
+      link.title = resolved ? `${resolved.title}（${shortId}）` : shortId
+      link.textContent = alias ?? resolved?.title ?? shortId
+      replacement.append(link)
+    }
+    text.replaceWith(replacement)
+  }
+}
+
+// 在清洗过的正文里标出关键词：别的记忆的关键词变成链接（data-short-ids 里是那些记忆的短 ID，空格分隔），
 // 自己的关键词只加底色。链接、代码与折叠块的标题里的文字不动：标题里放了链接，点它就展不开了
 function markKeywords(root: DocumentFragment, { index, self }: KeywordLinks) {
   for (const text of textNodes(root)) {
@@ -324,7 +385,7 @@ function markKeywords(root: DocumentFragment, { index, self }: KeywordLinks) {
         replacement.append(segment.text)
         continue
       }
-      const others = (index.targets.get(segment.keyword) ?? []).filter((uri) => uri !== self)
+      const others = (index.targets.get(segment.keyword) ?? []).filter((id) => id !== self)
       if (!others.length) {
         const mark = document.createElement('mark')
         mark.className = 'kioku-own-keyword'
@@ -335,7 +396,7 @@ function markKeywords(root: DocumentFragment, { index, self }: KeywordLinks) {
       const link = document.createElement('a')
       link.className = 'kioku-keyword'
       link.href = '#'
-      link.dataset.uris = others.join(' ')
+      link.dataset.shortIds = others.join(' ')
       link.title = others.join('\n')
       link.textContent = segment.text
       replacement.append(link)
