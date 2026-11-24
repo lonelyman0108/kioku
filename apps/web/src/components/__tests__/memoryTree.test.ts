@@ -17,11 +17,10 @@ import {
 } from '../memoryTree'
 
 describe('动态分组目录', () => {
-  it('支持全部 7 种分组维度且顺序固定', () => {
-    expect(GROUP_BY_OPTIONS.map((o) => o.value)).toEqual(
-      expect.arrayContaining([...BROWSE_GROUP_BYS]),
-    )
-    expect(GROUP_BY_OPTIONS).toHaveLength(BROWSE_GROUP_BYS.length)
+  it('单圈浏览支持除记忆圈外的 6 种分组维度且顺序固定', () => {
+    const expected = BROWSE_GROUP_BYS.filter((g) => g !== 'circle')
+    expect(GROUP_BY_OPTIONS.map((o) => o.value)).toEqual(expect.arrayContaining(expected))
+    expect(GROUP_BY_OPTIONS).toHaveLength(expected.length)
   })
 
   it('按分组构建两级树，同词条落在多个分组下保持唯一行键并推导出色带', () => {

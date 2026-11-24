@@ -93,7 +93,7 @@ describe('试算的本地重算', () => {
     expect(used).toEqual({
       minScore: 0.5,
       limit: 3,
-      note: '接入实例「Codex」另有覆盖（最低分 0.50、条数 3），按它的值试算，记忆圈的设置对它不起作用。',
+      note: '客户端「Codex」另有覆盖（最低分 0.50、条数 3），按它的值试算，记忆圈的设置对它不起作用。',
     })
     const cands = Array.from({ length: 10 }, (_, i) => candidate(`c${i}`, 0.9 - i * 0.01))
     expect(trialSummary(trialRows(cands, used.minScore, used.limit))).toBe(
@@ -351,7 +351,7 @@ describe('只读', () => {
     for (const [source, who] of [
       [spaceRecall, '仅记忆圈所有者可修改。'],
       [spaceAdvancedExtraction, '仅记忆圈所有者可修改。'],
-      [appAdvanced, '仅接入实例所有者可修改。'],
+      [appAdvanced, '仅客户端所有者可修改。'],
     ] as const) {
       const tpl = parse(source).descriptor.template!.content
       expect(tpl).toMatch(/<SaveBar\s+v-if="editable"/)

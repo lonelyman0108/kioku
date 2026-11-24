@@ -119,11 +119,13 @@ const inboxBadge = computed(() =>
 
 // 联系人详情也算在「对话」下面
 const CONVERSATION_ROUTES = ['conversations', 'contact']
+// 召回与测试台收归客户端模块内作为二级页签，访问时同样点亮顶栏「客户端」
+const CLIENT_ROUTES = ['clients', 'client', 'recall', 'bench']
 // 设置的三组是同一个页面，都点亮「设置」
 const SETTINGS_ROUTES = ['circle-settings', 'account-settings', 'instance-settings']
 
-// 顶部导航按用途分组：入口名字严格按《术语表》
-const navGroups = computed<{ title?: string; items: NavItem[] }[]>(() => {
+// 顶部导航分为两组共 9 项，与核心领域对象一一对应
+const navGroups = computed<{ items: NavItem[] }[]>(() => {
   const id = circle.value?.id
   if (!id) return []
   const params = { circleId: id }
@@ -138,22 +140,14 @@ const navGroups = computed<{ title?: string; items: NavItem[] }[]>(() => {
         { label: '概览', ...link('overview', icons.overview) },
         { label: '记忆', ...link('memories', icons.memories) },
         { label: '对话', ...link('conversations', icons.conversations, CONVERSATION_ROUTES) },
+        { label: '人格', ...link('personas', icons.personas) },
         { label: '凭据', ...link('credentials', icons.credentials) },
         { label: '待处理', ...link('inbox', icons.review), count: inboxBadge.value },
       ],
     },
     {
-      title: '接入',
       items: [
-        { label: '接入实例', ...link('clients', icons.clients, ['clients', 'client']) },
-        { label: '召回', ...link('recall', icons.recall) },
-        ...(ownsClient.value ? [{ label: '测试台', ...link('bench', icons.bench) }] : []),
-      ],
-    },
-    {
-      title: '记忆圈',
-      items: [
-        { label: '切面词表', ...link('vocabulary', icons.vocabulary) },
+        { label: '客户端', ...link('clients', icons.clients, CLIENT_ROUTES) },
         { label: '变更记录', ...link('activity', icons.activity) },
         // 「设置」进记忆圈组，账号设置与实例设置放在账号菜单里
         { label: '设置', ...link('circle-settings', icons.settings, SETTINGS_ROUTES) },
@@ -182,14 +176,40 @@ const accountNav = computed<NavItem[]>(() => [
 ])
 const isCurrent = (item: NavItem) => item.routes.includes(String(route.name))
 
-// ⌘K 里的页面与导航一致；词条的搜索结果来自服务端
-const pages = computed<CommandPaletteItem[]>(() =>
-  [...navGroups.value.flatMap((group) => group.items), ...accountNav.value].map((item) => ({
-    label: item.label,
-    icon: item.icon,
-    to: item.to,
-  })),
-)
+// ⌘K 里的页面覆盖顶栏导航、客户端二级页签、语境词典及两组全局设置；记忆搜索结果来自服务端跨圈检索
+const pages = computed<CommandPaletteItem[]>(() => {
+  const id = circle.value?.id
+  const subPages: { label: string; icon: string; to: RouteLocationRaw }[] = id
+    ? [
+        {
+          label: '召回与试算',
+          icon: icons.recall,
+          to: { name: 'recall', params: { circleId: id } },
+        },
+        ...(ownsClient.value
+          ? [
+              {
+                label: '测试台',
+                icon: icons.bench,
+                to: { name: 'bench', params: { circleId: id } },
+              },
+            ]
+          : []),
+        {
+          label: '语境词典',
+          icon: icons.vocabulary,
+          to: circleSettingsRoute(id, 'vocabulary'),
+        },
+      ]
+    : []
+  return [
+    ...navGroups.value.flatMap((group) =>
+      group.items.map((item) => ({ label: item.label, icon: item.icon, to: item.to })),
+    ),
+    ...subPages,
+    ...accountNav.value.map((item) => ({ label: item.label, icon: item.icon, to: item.to })),
+  ]
+})
 const {
   term: searchTerm,
   loading: searching,
@@ -197,6 +217,7 @@ const {
 } = useConsoleSearch(
   computed(() => circle.value?.id ?? null),
   pages,
+  circles,
 )
 
 const colorPreference = useColorPreference()
@@ -222,14 +243,19 @@ const userMenu = computed<DropdownMenuItem[][]>(() => [
   [{ label: '退出登录', icon: icons.logout, onSelect: () => void logout() }],
   ...(versionText.value ? [[{ type: 'label' as const, label: versionText.value }]] : []),
 ])
-// 菜单项上额外带的标注：个人圈标「本人」，共享圈标当前账号角色
+// 菜单项上额外带的标注：个人圈标「本人」，独立圈标当前账号角色（多成员时带人数）
 const badgeOf = (item: unknown) => (item as { badge?: string }).badge
-const circleBadge = (c: CircleSummary) => (c.kind === 'personal' ? '本人' : roleName(c.role))
+const circleBadge = (c: CircleSummary) =>
+  c.kind === 'personal'
+    ? '本人'
+    : (c.memberCount ?? 1) > 1
+      ? `${roleName(c.role)} · ${c.memberCount} 人`
+      : roleName(c.role)
+const personalCircles = computed(() => circles.value.filter((c) => c.kind === 'personal'))
+const sharedCircles = computed(() => circles.value.filter((c) => c.kind !== 'personal'))
 
-// 记忆圈切换器：个人圈置顶，其后列各共享圈及角色（当前记忆圈打勾），下面是设置、新建与导入
+// 记忆圈切换器：个人圈置顶，其后列各独立圈及角色（当前记忆圈打勾），下面是设置、新建与导入
 const circleMenu = computed<DropdownMenuItem[][]>(() => {
-  const personal = circles.value.filter((c) => c.kind === 'personal')
-  const shared = circles.value.filter((c) => c.kind !== 'personal')
   const toItem = (c: CircleSummary): DropdownMenuItem => ({
     type: 'checkbox',
     slot: 'circle',
@@ -239,18 +265,28 @@ const circleMenu = computed<DropdownMenuItem[][]>(() => {
     onSelect: () => switchCircle(c.id),
   })
   return [
-    ...(personal.length
-      ? [[{ type: 'label' as const, label: circleKindLabels.personal }, ...personal.map(toItem)]]
+    ...(personalCircles.value.length
+      ? [
+          [
+            { type: 'label' as const, label: circleKindLabels.personal },
+            ...personalCircles.value.map(toItem),
+          ],
+        ]
       : []),
-    ...(shared.length
-      ? [[{ type: 'label' as const, label: circleKindLabels.shared }, ...shared.map(toItem)]]
+    ...(sharedCircles.value.length
+      ? [
+          [
+            { type: 'label' as const, label: circleKindLabels.shared },
+            ...sharedCircles.value.map(toItem),
+          ],
+        ]
       : []),
     // 没有记忆圈时不留空的分隔组
     ...(circle.value
       ? [
           [
             {
-              label: '成员与设置',
+              label: circle.value.kind === 'personal' ? '记忆圈设置' : '成员与设置',
               icon: icons.settings,
               to: circleSettingsRoute(circle.value.id),
             },
@@ -259,7 +295,7 @@ const circleMenu = computed<DropdownMenuItem[][]>(() => {
       : []),
     [
       {
-        label: '新建共享圈',
+        label: '新建独立圈',
         icon: icons.add,
         disabled: Boolean(newCircle.blocked.value),
         onSelect: () => (newCircle.open.value = true),
@@ -333,12 +369,6 @@ provide(LOGOUT, logout)
           class="relative flex items-stretch"
           :class="index > 0 ? 'nav-group ml-1 pl-1 min-[1321px]:ml-2 min-[1321px]:pl-2' : ''"
         >
-          <span
-            v-if="group.title"
-            class="self-center pr-px pl-2 text-xs whitespace-nowrap text-muted max-[1320px]:hidden"
-          >
-            {{ group.title }}
-          </span>
           <RouterLink
             v-for="item in group.items"
             :key="item.label"
@@ -363,7 +393,7 @@ provide(LOGOUT, logout)
           color="neutral"
           class="shrink-0"
           :ui="{
-            label: 'max-[1320px]:hidden',
+            label: 'max-[1320px]:min-[1024px]:hidden',
             trailing: 'hidden min-[1024px]:flex items-center gap-0.5 ms-1',
           }"
         />
@@ -426,7 +456,6 @@ provide(LOGOUT, logout)
                 :key="index"
                 class="border-b border-default px-5 py-2"
               >
-                <p v-if="group.title" class="pt-1 text-xs text-muted">{{ group.title }}</p>
                 <RouterLink
                   v-for="item in group.items"
                   :key="item.label"
@@ -445,28 +474,47 @@ provide(LOGOUT, logout)
             </nav>
             <div class="space-y-3 px-5 py-4">
               <div v-if="circles.length">
-                <p class="pb-1 text-xs text-muted">记忆圈</p>
-                <button
-                  v-for="c in circles"
-                  :key="c.id"
-                  type="button"
-                  class="flex w-full items-baseline gap-2 py-1.5 text-left text-sm/6"
-                  :class="c.id === circle?.id ? 'font-semibold' : ''"
-                  :aria-current="c.id === circle?.id ? 'true' : undefined"
-                  @click="switchCircle(c.id)"
-                >
-                  <span class="min-w-0 truncate" :title="c.name">{{ c.name }}</span>
-                  <span class="ml-auto shrink-0 text-xs font-normal text-muted">{{
-                    circleBadge(c)
-                  }}</span>
-                </button>
+                <template v-if="personalCircles.length">
+                  <p class="pb-1 text-xs text-muted">{{ circleKindLabels.personal }}</p>
+                  <button
+                    v-for="c in personalCircles"
+                    :key="c.id"
+                    type="button"
+                    class="flex w-full items-baseline gap-2 py-1.5 text-left text-sm/6"
+                    :class="c.id === circle?.id ? 'font-semibold' : ''"
+                    :aria-current="c.id === circle?.id ? 'true' : undefined"
+                    @click="switchCircle(c.id)"
+                  >
+                    <span class="min-w-0 truncate" :title="c.name">{{ c.name }}</span>
+                    <span class="ml-auto shrink-0 text-xs font-normal text-muted">{{
+                      circleBadge(c)
+                    }}</span>
+                  </button>
+                </template>
+                <template v-if="sharedCircles.length">
+                  <p class="pt-2 pb-1 text-xs text-muted">{{ circleKindLabels.shared }}</p>
+                  <button
+                    v-for="c in sharedCircles"
+                    :key="c.id"
+                    type="button"
+                    class="flex w-full items-baseline gap-2 py-1.5 text-left text-sm/6"
+                    :class="c.id === circle?.id ? 'font-semibold' : ''"
+                    :aria-current="c.id === circle?.id ? 'true' : undefined"
+                    @click="switchCircle(c.id)"
+                  >
+                    <span class="min-w-0 truncate" :title="c.name">{{ c.name }}</span>
+                    <span class="ml-auto shrink-0 text-xs font-normal text-muted">{{
+                      circleBadge(c)
+                    }}</span>
+                  </button>
+                </template>
                 <RouterLink
                   v-if="circle"
                   :to="circleSettingsRoute(circle.id)"
                   class="block py-1.5 text-sm/6"
                   @click="navOpen = false"
                 >
-                  成员与设置
+                  {{ circle.kind === 'personal' ? '记忆圈设置' : '成员与设置' }}
                 </RouterLink>
               </div>
               <div>
@@ -477,7 +525,7 @@ provide(LOGOUT, logout)
                   :aria-describedby="newCircle.blocked.value ? 'circle-limit-note' : undefined"
                   @click="((navOpen = false), (newCircle.open.value = true))"
                 >
-                  新建共享圈
+                  新建独立圈
                 </button>
                 <button
                   type="button"
@@ -536,7 +584,7 @@ provide(LOGOUT, logout)
       v-model:search-term="searchTerm"
       :groups="searchGroups"
       :loading="searching"
-      placeholder="搜索词条或跳转页面"
+      placeholder="搜索记忆或跳转页面"
     >
       <template #empty>{{ searching ? '搜索中' : '暂无匹配' }}</template>
     </UDashboardSearch>
@@ -608,7 +656,7 @@ provide(LOGOUT, logout)
   color: currentColor;
 }
 .nav-count {
-  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: 13px;
   font-weight: 500;
   line-height: 1;

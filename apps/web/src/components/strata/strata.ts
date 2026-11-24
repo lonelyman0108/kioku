@@ -12,9 +12,10 @@ import {
   type StrataBand,
 } from '@kioku/contracts'
 
-import { bandLabels, scopesSummary, sensitivityLabels } from '../../labels'
+import { bandLabels, entryKindLabels, scopesSummary, sensitivityLabels } from '../../labels'
 
-// 地层编码的全部计算：色带表示形态与来源范围，纹理表示敏感级，纵向顺序固定。地层柱、窄柱、色块、岩芯与权限范围表格共用
+// 地层编码的全部计算：色带表示形态与来源范围，纹理表示敏感级。
+// 跨圈客户端视野使用完整 6 色带（STACK）；单圈库存视图只取当前圈真实存在的 3 类记忆形态（circleBands）
 
 export type TextureScale = 'lg' | 'sm'
 export type StrataCounts = Record<StrataBand, Record<Sensitivity, number>>
@@ -30,33 +31,55 @@ export interface StrataSelection {
   sensitivity: Sensitivity | null
 }
 
-// 纵向顺序：自上而下为会话摘要、联系人事实、个人圈词条、共享客场圈词条、独立人格、主场圈正式词条
+// 跨圈完整纵序：自上而下为会话摘要、联系人事实、个人圈记忆、关联圈记忆、独立人格、主圈记忆
 export const STACK: readonly StrataBand[] = STRATA_BANDS
 
-// 来自对话的两类在最上方，以虚线与下面四类隔开
+// 单圈库存纵序：仅包含当前圈真实存在的会话摘要、联系人事实与本圈正式记忆
+export function circleBands(circleKind: CircleKind): readonly StrataBand[] {
+  return circleKind === 'personal'
+    ? ['episode', 'fact', 'personal']
+    : ['episode', 'fact', 'primary']
+}
+
+// 来自对话的两类在最上方，以虚线与下面隔开
 export const isConversationBand = (band: StrataBand) => band === 'episode' || band === 'fact'
 export const isConversationKind = (kind: EntryKind) => kind === 'episode' || kind === 'fact'
 
 export const bandHints: Record<StrataBand, string> = {
-  episode: '所在的群或私聊，无会话上下文时仅限本接入实例的所属成员',
-  fact: '记下它的群或私聊；启用拟人跨群识人时可在非隔离群间按需召回',
-  personal: '个人记忆圈中的词条；关联客场时仅最高优先级且未限定场域的词条可穿透启动加载',
-  'shared-away': '所关联共享客场记忆圈中的词条',
-  persona: '独立人格设定条目，按设定键沿继承链覆盖',
-  primary: '当前主场记忆圈中的正式词条',
+  episode: '所在的群或私聊，无会话上下文时仅限本客户端的所属成员',
+  fact: '记下它的群或私聊；启用跨群认人时可在非隔离群间按需召回',
+  personal: '个人记忆圈中的正式记忆；作为关联圈时仅最高优先级且未限定场域的记忆可穿透启动加载',
+  'shared-away': '所关联独立圈中的正式记忆',
+  persona: '独立人格设定项，按设定键沿继承链覆盖',
+  primary: '当前主圈中的正式记忆',
 }
 
 export const entryKindHints: Record<EntryKind, string> = {
-  entry: '主动整理保存的正式词条，支持多切面变体与双链',
+  entry: '主动沉淀保存的正式记忆，支持多条件变体与双链',
   fact: '从群聊或私聊中抽取的联系人与群事实',
   episode: '按会话保留的近期讨论摘要，到期后自动清理',
 }
 
 export const sensitivityHints: Record<Sensitivity, string> = {
   public: '任何会话上下文可见',
-  internal: '仅受信客户端与本人私聊提权上下文可见',
+  internal: '仅受信客户端与开启内部记忆的本人私聊可见',
   private: '仅本机私密上下文可见',
-  secret: '密文存储，不进召回，仅主场圈且通过场域锁可按短 ID 读取',
+  secret: '密文存储，不进召回，仅主圈且通过允许场域锁可按短 ID 读取',
+}
+
+// 单圈内展示形态名：本圈的 personal / primary 统一称「正式记忆」，避免在单圈视图出现主客场概念
+export function localBandLabel(band: StrataBand): string {
+  if (band === 'episode') return entryKindLabels.episode
+  if (band === 'fact') return entryKindLabels.fact
+  if (band === 'personal' || band === 'primary') return entryKindLabels.entry
+  return bandLabels[band]
+}
+
+export function localBandHint(band: StrataBand): string {
+  if (band === 'episode') return entryKindHints.episode
+  if (band === 'fact') return entryKindHints.fact
+  if (band === 'personal' || band === 'primary') return entryKindHints.entry
+  return bandHints[band]
 }
 
 export function kindBandForCircle(
@@ -144,6 +167,15 @@ export function tallyCounts(input: readonly TallySlice[] | OverviewTallyInput): 
 export const bandTotal = (counts: StrataCounts, band: StrataBand) =>
   sum(SENSITIVITIES.map((s) => counts[band][s]))
 
+export const bandsTotal = (counts: StrataCounts, list: readonly StrataBand[] = STACK) =>
+  sum(list.map((b) => bandTotal(counts, b)))
+
+export const bandsSensitivityTotal = (
+  counts: StrataCounts,
+  list: readonly StrataBand[],
+  sensitivity: Sensitivity,
+) => sum(list.map((b) => counts[b][sensitivity]))
+
 export const curatedTotal = (counts: StrataCounts) =>
   sum(STACK.filter((b) => !isConversationBand(b)).map((b) => bandTotal(counts, b)))
 
@@ -171,7 +203,14 @@ export const FULL_COLUMN_MIN_WIDTH = 520
 export function columnSize(
   viewport: { width: number; height: number },
   available = viewport.width,
+  bandCount = STACK.length,
 ) {
+  if (bandCount <= 3) {
+    if (viewport.width < 640 || available < FULL_COLUMN_MIN_WIDTH) {
+      return { width: 92, height: 248, compact: true }
+    }
+    return { width: 216, height: 280, compact: false }
+  }
   if (viewport.width < 640 || available < FULL_COLUMN_MIN_WIDTH) {
     return { width: 92, height: 470, compact: true }
   }
@@ -209,11 +248,17 @@ function allot(weights: readonly number[], total: number, min: number): number[]
   return whole
 }
 
-export function stackBands(counts: StrataCounts | null, height: number, gap = 0, min = 1): Band[] {
-  const weights = STACK.map((b) => (counts ? Math.sqrt(Math.max(bandTotal(counts, b), 1)) : 1))
+export function stackBands(
+  counts: StrataCounts | null,
+  height: number,
+  gap = 0,
+  min = 1,
+  list: readonly StrataBand[] = STACK,
+): Band[] {
+  const weights = list.map((b) => (counts ? Math.sqrt(Math.max(bandTotal(counts, b), 1)) : 1))
   const heights = allot(weights, Math.max(0, Math.floor(height - gap)), min)
   let start = 0
-  return STACK.map((band, i) => {
+  return list.map((band, i) => {
     const item = { band, y: start + (isConversationBand(band) ? 0 : gap), h: heights[i]! }
     start += item.h
     return item
@@ -279,7 +324,7 @@ export function textureId(sensitivity: Sensitivity, scale: TextureScale): string
   return null
 }
 
-const bandFill = (band: StrataBand | null) =>
+export const bandFill = (band: StrataBand | null) =>
   band ? `var(--layer-${band})` : 'var(--strata-neutral)'
 
 export function paintCell(
@@ -310,10 +355,13 @@ export function paintSwatch(
   return rects
 }
 
-export function swatchText(band: StrataBand | null, sensitivity: Sensitivity | null): string {
-  return [band && bandLabels[band], sensitivity && sensitivityLabels[sensitivity]]
-    .filter(Boolean)
-    .join(' ')
+export function swatchText(
+  band: StrataBand | null,
+  sensitivity: Sensitivity | null,
+  local = false,
+): string {
+  const bandName = band ? (local ? localBandLabel(band) : bandLabels[band]) : null
+  return [bandName, sensitivity && sensitivityLabels[sensitivity]].filter(Boolean).join(' ')
 }
 
 /* ———— 权限范围 ———— */
@@ -519,14 +567,21 @@ export function issuedBandRows(
   options: {
     primaryKind?: CircleKind
     linkedKinds?: readonly CircleKind[]
+    linkedGrants?: readonly { kind: CircleKind; mode: 'read' | 'read_write' }[]
     hasPersona?: boolean
   } = {},
 ): BandAccessRow[] {
   const primaryKind = options.primaryKind ?? 'shared'
   const limit = SENSITIVITIES.indexOf(scopes.maxSensitivity)
-  const cellsFor = (kind: EntryKind, circleKind: CircleKind, writeAllowed: boolean) =>
+  const linkedCap = Math.min(limit, SENSITIVITIES.indexOf('private'))
+  const cellsFor = (
+    kind: EntryKind,
+    circleKind: CircleKind,
+    writeAllowed: boolean,
+    capRank = limit,
+  ) =>
     SENSITIVITIES.map((sensitivity, rank) => {
-      const reachable = rank <= limit && sensitivityAllowed(circleKind, kind, sensitivity)
+      const reachable = rank <= capRank && sensitivityAllowed(circleKind, kind, sensitivity)
       const readable = reachable && scopes.readKinds.includes(kind)
       return {
         sensitivity,
@@ -538,8 +593,11 @@ export function issuedBandRows(
         write: writeAllowed && reachable && scopes.writeKinds.includes(kind),
       }
     })
-  const hasPersonalAway = (options.linkedKinds ?? []).includes('personal')
-  const hasSharedAway = (options.linkedKinds ?? []).includes('shared')
+  const linkedGrants =
+    options.linkedGrants ??
+    (options.linkedKinds ?? []).map((kind) => ({ kind, mode: 'read' as const }))
+  const personalGrants = linkedGrants.filter((g) => g.kind === 'personal')
+  const sharedGrants = linkedGrants.filter((g) => g.kind === 'shared')
   return STACK.map((band) => {
     switch (band) {
       case 'episode':
@@ -549,27 +607,37 @@ export function issuedBandRows(
       case 'personal':
         return {
           band,
-          cells: hasPersonalAway ? cellsFor('entry', 'personal', false) : emptyBandCells(),
+          cells: personalGrants.length
+            ? cellsFor(
+                'entry',
+                'personal',
+                personalGrants.some((g) => g.mode === 'read_write'),
+                linkedCap,
+              )
+            : emptyBandCells(),
         }
       case 'shared-away':
         return {
           band,
-          cells: hasSharedAway ? cellsFor('entry', 'shared', false) : emptyBandCells(),
+          cells: sharedGrants.length
+            ? cellsFor(
+                'entry',
+                'shared',
+                sharedGrants.some((g) => g.mode === 'read_write'),
+                linkedCap,
+              )
+            : emptyBandCells(),
         }
       case 'persona':
         return {
           band,
-          cells:
-            options.hasPersona || scopes.admin
-              ? SENSITIVITIES.map((sensitivity, rank) => ({
-                  sensitivity,
-                  read:
-                    rank <= limit && sensitivity !== 'secret'
-                      ? ('recall' as const)
-                      : ('none' as const),
-                  write: scopes.admin && rank <= limit && sensitivity !== 'secret',
-                }))
-              : emptyBandCells(),
+          cells: options.hasPersona
+            ? SENSITIVITIES.map((sensitivity) => ({
+                sensitivity,
+                read: sensitivity === 'public' ? ('recall' as const) : ('none' as const),
+                write: false,
+              }))
+            : emptyBandCells(),
         }
       case 'primary':
         return { band, cells: cellsFor('entry', primaryKind, true) }
@@ -683,7 +751,7 @@ export function coreName({
   revoked?: boolean
 }): string {
   if (revoked) return label ? `${label}，已吊销，没有权限` : '已吊销，没有权限'
-  if (rows) return label ? `${label}的权限范围` : '当前会话上下文的权限范围'
+  if (rows) return label ? `${label}的访问范围` : '当前会话上下文的访问范围'
   if (scopes) return `${label ? `${label}，` : ''}签发范围：${scopesSummary(scopes)}`
   return label ? `${label}，暂无权限数据` : '暂无权限数据'
 }

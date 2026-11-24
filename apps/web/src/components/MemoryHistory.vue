@@ -4,15 +4,19 @@ import { SENSITIVITIES, type EntrySnapshot, type HistoryEvent } from '@kioku/con
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref } from 'vue'
 
-import { ApiError, readFailure } from '../api/client'
+import { invalidateActivity } from '../activity'
+import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { diffVariantSnapshots, type VariantDiffItem } from '../diff'
+import { invalidateInboxCounts } from '../inbox'
 import { eventLabel, memoryViaLabels, provenanceLabels, sensitivityLabels } from '../labels'
 import { whenLabel } from '../memoryDetail'
 import { formatRelative, formatTime, isExpired } from '../time'
+import ConsequenceModal from './ConsequenceModal.vue'
 import Hint from './Hint.vue'
 import ActorName from './strata/ActorName.vue'
 import NoteLine from './strata/NoteLine.vue'
+import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 
 const props = defineProps<{
@@ -37,8 +41,8 @@ const facets = useQuery({
   queryFn: ({ queryKey: [, cid] }) => api.facets(cid),
 })
 
-// 最近的在上面
-const events = computed(() => [...(history.data.value?.events ?? [])].reverse())
+// 服务端按时间倒序返回，最近的在最前面
+const events = computed(() => history.data.value?.events ?? [])
 const current = computed(() => history.data.value?.entry)
 // 这条记忆现在过期了：删掉之后才到期的不算（它走撤销删除，见已删除）
 const expiredNow = computed(() => {
@@ -63,7 +67,7 @@ function changes(before: EntrySnapshot | null, after: EntrySnapshot | null): str
     list.push(`优先级：P${before.priority} → P${after.priority}`)
   }
   if (before.disclosure !== after.disclosure) {
-    list.push(`触发场景：${before.disclosure ?? '（无）'} → ${after.disclosure ?? '（无）'}`)
+    list.push(`召回说明：${before.disclosure ?? '（无）'} → ${after.disclosure ?? '（无）'}`)
   }
   const topicsAdded = after.topics.filter((t) => !before.topics.includes(t))
   const topicsRemoved = before.topics.filter((t) => !after.topics.includes(t))
@@ -80,11 +84,10 @@ function changes(before: EntrySnapshot | null, after: EntrySnapshot | null): str
 }
 
 const variantDiffStatusLabels: Record<VariantDiffItem['status'], string> = {
-  added: '新增切片',
-  removed: '移除切片',
+  added: '新增变体',
+  removed: '移除变体',
   modified: '修改',
   unchanged: '未变',
-  secret: '机密',
 }
 
 function variantDiffs(event: HistoryEvent): VariantDiffItem[] {
@@ -93,22 +96,15 @@ function variantDiffs(event: HistoryEvent): VariantDiffItem[] {
 }
 
 function contentChange(event: HistoryEvent): 'none' | 'secret' | 'changed' {
-  const { before, after } = event
+  const { after } = event
   if (!after || event.left) return 'none'
   const diffs = variantDiffs(event)
-  if (
-    diffs.some((d) => d.status === 'added' || d.status === 'removed' || d.status === 'modified')
-  ) {
-    return 'changed'
-  }
-  if (
-    diffs.some((d) => d.status === 'secret') &&
-    (after.variants.some((v) => v.content === null) ||
-      before?.variants.some((v) => v.content === null))
-  ) {
-    return 'secret'
-  }
-  return 'none'
+  const touched = diffs.filter(
+    (d) => d.status === 'added' || d.status === 'removed' || d.status === 'modified',
+  )
+  if (!touched.length) return 'none'
+  if (touched.some((d) => !d.secret || d.rows.length > 0)) return 'changed'
+  return 'secret'
 }
 
 const open = ref<number | null>(null)
@@ -126,12 +122,14 @@ const currentEventId = computed(
 )
 const isCurrent = (event: HistoryEvent) => event.id === currentEventId.value
 
-// 服务端只恢复同物种、敏感级不高于现在的版本
+// 服务端只恢复同形态、当前与目标版本均非机密、且敏感级不高于当前的版本
 function sameScope(snapshot: EntrySnapshot): boolean {
   const now = current.value
   return (
     !!now &&
     snapshot.kind === now.kind &&
+    snapshot.sensitivity !== 'secret' &&
+    now.sensitivity !== 'secret' &&
     SENSITIVITIES.indexOf(snapshot.sensitivity) <= SENSITIVITIES.indexOf(now.sensitivity)
   )
 }
@@ -145,15 +143,20 @@ const restorable = (event: HistoryEvent) =>
   sameScope(event.after)
 
 const confirming = ref<{ event: HistoryEvent; entryId: string; version: number } | null>(null)
+const restoreError = ref<string | null>(null)
 function askRestore(event: HistoryEvent) {
   const version = current.value?.version
-  if (version !== undefined) confirming.value = { event, entryId: props.entryId, version }
+  if (version !== undefined) {
+    restoreError.value = null
+    confirming.value = { event, entryId: props.entryId, version }
+  }
 }
 const restoring = ref(false)
 async function restore() {
   const target = confirming.value
-  if (!target) return
+  if (!target || restoring.value) return
   restoring.value = true
+  restoreError.value = null
   try {
     const restored = await api.restoreEntry(props.circleId, {
       entryId: target.entryId,
@@ -167,11 +170,25 @@ async function restore() {
       await queryClient.cancelQueries({ queryKey: key, exact: true })
       queryClient.setQueryData(key, restored)
     }
-    void queryClient.invalidateQueries({ queryKey: ['entry-expired', props.circleId] })
+    for (const prefix of [
+      'entry-expired',
+      'entry-browse',
+      'entry-list',
+      'overview',
+      'entry-glossary',
+    ]) {
+      void queryClient.invalidateQueries({ queryKey: [prefix, props.circleId] })
+    }
+    void invalidateInboxCounts(queryClient, props.circleId)
+    invalidateActivity(queryClient, props.circleId)
     await history.refetch()
   } catch (err) {
-    toast.add({ title: err instanceof ApiError ? err.message : '恢复失败', color: 'error' })
-    if (err instanceof ApiError && err.status === 409) confirming.value = null
+    const msg = err instanceof ApiError ? err.message : '恢复失败'
+    restoreError.value = msg
+    if (err instanceof ApiError && err.status === 409) {
+      confirming.value = null
+      toast.add({ title: msg, color: 'error' })
+    }
     void history.refetch()
   } finally {
     restoring.value = false
@@ -183,12 +200,7 @@ const versionOf = (event: HistoryEvent) => event.after?.version ?? event.before?
 
 <template>
   <div class="memory-history">
-    <UAlert
-      v-if="history.isError.value"
-      color="error"
-      variant="subtle"
-      :title="readFailure(history.error.value)"
-    />
+    <ReadFailureNote v-if="history.isError.value" :query="history" fallback="历史记录读取失败" />
     <div v-else-if="history.isPending.value" class="space-y-3">
       <USkeleton v-for="n in 4" :key="n" class="h-14 w-full" />
     </div>
@@ -210,7 +222,7 @@ const versionOf = (event: HistoryEvent) => event.after?.version ?? event.before?
       <SectionHeading title="历史">
         <template #hint>
           <Hint>
-            恢复此版本只改正文切片、标题、主题、触发场景、优先级与关键词。所在记忆圈、敏感级与有效期不变（过期的记忆在「已过期」中恢复生效）。敏感级高于当前版本的记录无法恢复。
+            恢复此版本会将正文与变体、标题、主题、召回说明、敏感级、优先级、关键词与有效期一并恢复为该版本内容；所在记忆圈不变。机密记忆与敏感级高于当前的记录不可直接恢复。
           </Hint>
         </template>
         <template v-if="history.data.value?.truncated" #actions>
@@ -253,8 +265,11 @@ const versionOf = (event: HistoryEvent) => event.after?.version ?? event.before?
                   <span class="variant-diff-status">{{
                     variantDiffStatusLabels[item.status]
                   }}</span>
+                  <span v-if="item.secret" class="variant-diff-status">机密</span>
                 </p>
-                <p v-if="item.status === 'secret'" class="history-meta">机密切片历史不含正文</p>
+                <p v-if="item.secret && !item.rows.length" class="history-meta">
+                  机密变体历史不含正文
+                </p>
                 <pre v-else-if="item.rows.length" class="history-diff"><template
                   v-for="(row, index) in item.rows"
                   :key="index"
@@ -295,23 +310,19 @@ const versionOf = (event: HistoryEvent) => event.after?.version ?? event.before?
       <p v-if="!events.length" class="py-3 text-sm text-muted">暂无可查看的变更记录</p>
     </template>
 
-    <UModal
+    <ConsequenceModal
       :open="confirming !== null"
       title="恢复此版本？"
-      @update:open="(v) => !v && (confirming = null)"
-    >
-      <template #body>
-        <p class="text-sm">
-          正文切片、标题、主题、触发场景、优先级与关键词恢复为此次改动后的内容，并记录一次新改动；所在记忆圈与敏感级不变。
-        </p>
-      </template>
-      <template #footer>
-        <div class="flex w-full justify-end gap-2">
-          <UButton color="neutral" variant="ghost" @click="confirming = null">取消</UButton>
-          <UButton :loading="restoring" @click="restore">恢复</UButton>
-        </div>
-      </template>
-    </UModal>
+      :consequences="[
+        '正文与变体、标题、主题、召回说明、敏感级、优先级、关键词与有效期均会恢复为此版本时的内容，并生成一次新的改动记录。',
+        '若该版本包含已失效或未转存的明文敏感内容，恢复时将按当前记忆圈规则重新校验。',
+      ]"
+      action="恢复此版本"
+      :busy="restoring"
+      :error="restoreError"
+      @close="confirming = null"
+      @confirm="restore"
+    />
   </div>
 </template>
 

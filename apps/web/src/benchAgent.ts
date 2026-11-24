@@ -74,7 +74,7 @@ export function agentLoopDetail(loop: BenchAgentLoop, turnEnd: boolean): string 
     ? '回复后不发 turn.end。'
     : loop === 'chat'
       ? '回复后发 turn.end（需带私聊、群聊或频道的会话上下文，否则不发）。'
-      : '回复后发 turn.end；不带会话上下文时按接入实例与所属成员缓冲，只写会话摘要。'
+      : '回复后发 turn.end；不带会话上下文时按客户端与所属成员缓冲，只写会话摘要。'
   return `${AGENT_LOOP_DETAILS[loop]}${after}`
 }
 
@@ -201,7 +201,7 @@ export const agentPhaseLabels: Record<AgentPhase, string> = {
 
 // 这条消息怎么结束的。done：模型给了最终回复；empty：模型没有文字也没有工具调用（包括拒绝回答）；stopped：用户停止；limit：到了轮数上限；
 // blocked：写入放不进重放日志；toolFailed：工具的运行请求失败；diverged：重放分叉；
-// modelFailed：请求模型失败；lifecycleFailed：生命周期事件的运行请求失败；abandoned：换了接入实例、Key 或模式
+// modelFailed：请求模型失败；lifecycleFailed：生命周期事件的运行请求失败；abandoned：换了客户端、Key 或模式
 export type AgentEnd =
   | 'done'
   | 'empty'
@@ -433,7 +433,7 @@ export function acceptAgentDivergence(conversation: AgentConversation): AgentCon
 }
 
 // turn.end 的请求体，带页面上的会话上下文：群聊机器人带私聊、群聊或频道的，群里要有发言人；
-// Claude Code 不带时按接入实例与所属成员缓冲
+// Claude Code 不带时按客户端与所属成员缓冲
 export function turnEndBody(
   context: SessionContextInput | undefined,
   user: string,

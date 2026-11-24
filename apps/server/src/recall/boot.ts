@@ -274,6 +274,7 @@ export async function recentEntries(tx: Tx, access: Access, limit: number): Prom
   return rows.map((r) => ({
     shortId: r.shortId,
     title: r.title,
+    circleId: r.circleId,
     circleSlug: visibleCircleSlug(access, r.circleId, r.circleSlug),
     priority: r.priority,
     disclosure: r.disclosure,

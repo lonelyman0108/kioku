@@ -40,7 +40,7 @@ export function useCreateCircle(signedIn: Ref<boolean>) {
   async function created(circle: CreatedCircle) {
     open.value = false
     await refreshCircles(queryClient, undefined, { accounts: true })
-    toast.add({ title: `已新建共享圈「${circle.name}」`, color: 'success' })
+    toast.add({ title: `已新建独立圈「${circle.name}」`, color: 'success' })
     await router.push({ name: 'overview', params: { circleId: circle.id } })
   }
   return { blocked, open, importing, created }

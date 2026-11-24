@@ -6,8 +6,9 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import EntryFrame from '../components/strata/EntryFrame.vue'
 import SectionHeading from '../components/strata/SectionHeading.vue'
-import { ME_KEY } from '../composables/useSession'
+import { forgetCircle, ME_KEY } from '../composables/useSession'
 import { queryClient } from '../query'
+import { retryTarget } from '../unavailable'
 
 const router = useRouter()
 const route = useRoute()
@@ -20,17 +21,11 @@ async function submit() {
   error.value = null
   try {
     const me = await api.login(state.username, state.password)
-    // 换了账号：之前缓存的记忆、应用等都不能再用
+    // 换了账号：之前缓存的记忆、应用与最近圈都不能再用
+    forgetCircle()
     queryClient.clear()
     queryClient.setQueryData(ME_KEY, me)
-    // 只接受站内路径，避免登录后被带到别的站点
-    const next =
-      typeof route.query.next === 'string' &&
-      route.query.next.startsWith('/') &&
-      !route.query.next.startsWith('//')
-        ? route.query.next
-        : '/'
-    await router.replace(next)
+    await router.replace(retryTarget(route.query.next))
   } catch (err) {
     error.value = err instanceof ApiError ? err.message : '登录失败'
   } finally {

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { PasswordLinkInfo } from '@kioku/contracts'
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import {
@@ -29,6 +29,8 @@ const info = ref<PasswordLinkInfo | null>(null)
 const loadError = ref<unknown>(null)
 async function load() {
   state.value = 'loading'
+  loadError.value = null
+  error.value = null
   try {
     info.value = await api.inspectPasswordLink(token.value)
     state.value = 'ready'
@@ -37,7 +39,7 @@ async function load() {
     state.value = linkLoadState(err)
   }
 }
-onMounted(load)
+watch(token, () => void load(), { immediate: true })
 
 const title = computed(() => {
   const i = info.value

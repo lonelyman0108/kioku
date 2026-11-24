@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { normalizeWhen, whenSignature } from '@kioku/contracts'
 import { useToast } from '@nuxt/ui/composables'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
@@ -10,6 +11,7 @@ import { useAfterCircleGone, useLeaveCircle } from '../composables/useLeaveSpace
 import { fieldProblems } from '../composables/useSavedField'
 import { useSession } from '../composables/useSession'
 import { circleKindLabels } from '../labels'
+import { whenLabel } from '../memoryDetail'
 import { roleName } from '../settingsSections'
 import {
   CIRCLE_NAME_RANGE,
@@ -26,13 +28,14 @@ import { localDate } from '../time'
 import ConsequenceModal from './ConsequenceModal.vue'
 import DangerZone from './DangerZone.vue'
 import DeleteSpaceModal from './DeleteSpaceModal.vue'
+import FacetWhenPicker from './FacetWhenPicker.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SaveBar from './strata/SaveBar.vue'
 import SettingsBlock from './strata/SettingsBlock.vue'
 import SettingsRow from './strata/SettingsRow.vue'
 
-// 记忆圈 › 概况：名称（所有者可改）、类型、当前账号的角色、成员数与建立时间；共享圈下方有危险操作：转让所有者、离开、删除。
-// 个人记忆圈不可转让、离开或删除
+// 记忆圈 › 概况：名称、默认适用条件（独立圈）、类型、当前账号角色、成员数与建立时间；
+// 独立圈下方有危险操作：转让所有者、离开、删除；个人圈不可转让、离开或删除
 const dirtyModel = defineModel<boolean>('dirty', { default: false })
 const route = useRoute()
 const toast = useToast()
@@ -52,30 +55,69 @@ const members = useQuery({
   queryFn: () => api.members(circleId.value),
   enabled: computed(() => detail.data.value?.kind === 'shared'),
 })
+const facets = useQuery({
+  queryKey: computed(() => ['facets', circleId.value] as const),
+  queryFn: ({ queryKey: [, cid] }) => api.facets(cid),
+  enabled: computed(() => detail.data.value?.kind === 'shared'),
+})
 
-// 名称：基准是服务端最新的名字，没改过时跟着它
+// 名称与默认适用条件：基准是服务端最新的数据，没改过时跟着它
 const savedName = computed(() => detail.data.value?.name)
 const name = ref(savedName.value ?? '')
 const baseline = ref(savedName.value)
-watch(savedName, (next) => {
-  if (next === undefined) return
-  // 第一次读到时表单跟上；之后本地没改过才跟上
-  if (baseline.value === undefined || name.value === baseline.value) name.value = next
-  baseline.value = next
-})
-const changed = computed(() => baseline.value !== undefined && name.value.trim() !== baseline.value)
-const nameIssue = computed(() => (changed.value ? circleNameIssue(name.value) : null))
+const defaultFacets = ref<Record<string, string[]>>({})
+const baselineFacets = ref<Record<string, string[]> | undefined>(undefined)
+
+watch(
+  () => detail.data.value,
+  (next) => {
+    if (!next) return
+    if (baseline.value === undefined || name.value === baseline.value) name.value = next.name
+    baseline.value = next.name
+    const norm = normalizeWhen(next.defaultFacets)
+    if (
+      baselineFacets.value === undefined ||
+      whenSignature(defaultFacets.value) === whenSignature(baselineFacets.value)
+    ) {
+      defaultFacets.value = norm
+    }
+    baselineFacets.value = norm
+  },
+  { immediate: true },
+)
+
+const nameChanged = computed(
+  () => baseline.value !== undefined && name.value.trim() !== baseline.value,
+)
+const facetsChanged = computed(
+  () =>
+    detail.data.value?.kind === 'shared' &&
+    baselineFacets.value !== undefined &&
+    whenSignature(defaultFacets.value) !== whenSignature(baselineFacets.value),
+)
+const changeCount = computed(() => Number(nameChanged.value) + Number(facetsChanged.value))
+const changed = computed(() => changeCount.value > 0)
+const nameIssue = computed(() => (nameChanged.value ? circleNameIssue(name.value) : null))
 const problem = computed(() => fieldProblems([{ label: '名称', issue: nameIssue.value }]))
 watch(changed, (d) => (dirtyModel.value = d), { immediate: true })
 const saving = ref(false)
 async function save() {
   if (saving.value || !changed.value || problem.value) return
   const submitted = name.value.trim()
+  const submittedFacets = normalizeWhen(defaultFacets.value)
   saving.value = true
   try {
-    const saved = await api.renameCircle(circleId.value, submitted)
+    const saved = await api.updateCircle(circleId.value, {
+      ...(nameChanged.value ? { name: submitted } : {}),
+      ...(facetsChanged.value ? { defaultFacets: submittedFacets } : {}),
+    })
     if (name.value.trim() === submitted) name.value = saved.name
     baseline.value = saved.name
+    const savedNorm = normalizeWhen(saved.defaultFacets)
+    if (whenSignature(defaultFacets.value) === whenSignature(submittedFacets)) {
+      defaultFacets.value = savedNorm
+    }
+    baselineFacets.value = savedNorm
     await refreshCircles(queryClient, circleId.value)
     toast.add({ title: '已保存', color: 'success' })
   } catch (err) {
@@ -84,7 +126,14 @@ async function save() {
     saving.value = false
   }
 }
-const discard = () => (name.value = baseline.value ?? '')
+function discard() {
+  name.value = baseline.value ?? ''
+  defaultFacets.value = baselineFacets.value ? normalizeWhen(baselineFacets.value) : {}
+}
+const readonlyDefaultFacets = computed(() => {
+  const f = detail.data.value?.defaultFacets
+  return f && Object.keys(f).length ? whenLabel(f, facets.data.value) : '未设置'
+})
 
 // 转让所有者：选一个别的成员
 const list = computed(() => members.data.value ?? [])
@@ -128,7 +177,7 @@ const deleteOpen = ref(false)
 const afterGone = useAfterCircleGone()
 async function deleted() {
   deleteOpen.value = false
-  toast.add({ title: '已删除共享圈', color: 'success' })
+  toast.add({ title: '已删除独立圈', color: 'success' })
   await afterGone(circleId.value)
 }
 </script>
@@ -144,14 +193,27 @@ async function deleted() {
             <UInput id="circle-name" v-model="name" class="w-full max-w-xs" autocomplete="off" />
             <p v-if="nameIssue" class="w-full text-xs text-error">{{ CIRCLE_NAME_RANGE }}</p>
           </SettingsRow>
-          <SaveBar
-            :count="changed ? 1 : 0"
-            :saving="saving"
-            :problem="problem"
-            @discard="discard"
-          />
+          <SettingsRow
+            v-if="detail.data.value.kind === 'shared'"
+            label="默认适用条件"
+            description="本圈记忆未单独指定同维条件时自动沿用；机密记忆与凭据的允许场域锁同样按此兜底"
+          >
+            <div class="w-full">
+              <FacetWhenPicker
+                v-model="defaultFacets"
+                :circle-id="circleId"
+                :vocabulary="facets.data.value"
+              />
+            </div>
+          </SettingsRow>
+          <SaveBar :count="changeCount" :saving="saving" :problem="problem" @discard="discard" />
         </form>
-        <SettingsRow v-else label="名称">{{ detail.data.value.name }}</SettingsRow>
+        <template v-else>
+          <SettingsRow label="名称">{{ detail.data.value.name }}</SettingsRow>
+          <SettingsRow v-if="detail.data.value.kind === 'shared'" label="默认适用条件">{{
+            readonlyDefaultFacets
+          }}</SettingsRow>
+        </template>
         <SettingsRow label="类型">{{ circleKindLabels[detail.data.value.kind] }}</SettingsRow>
         <SettingsRow label="当前账号的角色">{{ roleName(detail.data.value.role) }}</SettingsRow>
         <SettingsRow v-if="detail.data.value.kind === 'shared'" label="成员">
@@ -191,12 +253,12 @@ async function deleted() {
       </div>
       <div v-if="isOwner || isAdmin" class="danger-row">
         <div class="danger-text">
-          <p class="danger-name">删除共享圈</p>
+          <p class="danger-name">删除独立圈</p>
           <p class="danger-note">
-            记忆圈内的词条、会话、凭据与访问密钥全部删除，关联的接入实例立即失去访问。
+            记忆圈内的记忆、会话、凭据与访问密钥全部删除，关联的客户端立即失去访问。
           </p>
         </div>
-        <UButton color="error" @click="deleteOpen = true">删除共享圈</UButton>
+        <UButton color="error" @click="deleteOpen = true">删除独立圈</UButton>
       </div>
     </DangerZone>
 

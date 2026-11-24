@@ -149,7 +149,7 @@ const timeline = computed(() => [...session.value.timeline].reverse())
 const shown = computed(
   () => timeline.value.find((entry) => entry.id === shownId.value) ?? timeline.value[0] ?? null,
 )
-// 换了接入实例、Key 或模式时会话已经换了一份新的，这里清掉报错：它们属于别的 Key 或别的模式
+// 换了客户端、Key 或模式时会话已经换了一份新的，这里清掉报错：它们属于别的 Key 或别的模式
 watch(generation, () => {
   failure.value = null
   shownId.value = null

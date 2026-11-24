@@ -4,7 +4,11 @@ import { api } from './api/endpoints'
 import { loadMe, rememberCircle } from './composables/useSession'
 import { legacyReviewTab } from './inbox'
 import UnavailablePage from './pages/UnavailablePage.vue'
-import { legacyCircleSettingsRedirect, legacySettingsRedirect } from './settingsSections'
+import {
+  circleSettingsRoute,
+  legacyCircleSettingsRedirect,
+  legacySettingsRedirect,
+} from './settingsSections'
 
 export const routes: RouteRecordRaw[] = [
   { path: '/setup', name: 'setup', component: () => import('./pages/SetupPage.vue') },
@@ -51,9 +55,22 @@ export const routes: RouteRecordRaw[] = [
         component: () => import('./pages/MemoriesPage.vue'),
       },
       {
+        path: 'circles/:circleId/personas',
+        name: 'personas',
+        component: () => import('./pages/PersonasPage.vue'),
+      },
+      // 旧地址重定向：原词表与人格页按分页跳往人格页或记忆圈语境词典设置
+      {
         path: 'circles/:circleId/vocabulary',
         name: 'vocabulary',
-        component: () => import('./pages/VocabularyPage.vue'),
+        redirect: (to) =>
+          to.query.tab === 'personas'
+            ? {
+                name: 'personas',
+                params: to.params,
+                query: typeof to.query.persona === 'string' ? { persona: to.query.persona } : {},
+              }
+            : circleSettingsRoute(String(to.params.circleId), 'vocabulary'),
       },
       {
         path: 'circles/:circleId/activity',
@@ -64,16 +81,6 @@ export const routes: RouteRecordRaw[] = [
         path: 'circles/:circleId/credentials',
         name: 'credentials',
         component: () => import('./pages/CredentialsPage.vue'),
-      },
-      // 旧地址重定向：人格管理并入词表页的独立人格分页
-      {
-        path: 'circles/:circleId/personas',
-        name: 'personas',
-        redirect: (to) => ({
-          name: 'vocabulary',
-          params: to.params,
-          query: { tab: 'personas' },
-        }),
       },
       {
         path: 'circles/:circleId/conversations',
@@ -199,13 +206,6 @@ export const entryRoute = (circleId: string, id: string) => ({
   name: 'memories',
   params: { circleId },
   query: { id },
-})
-
-// 记忆页按分组打开，或跳转到指定条目
-export const memoryNodeRoute = (circleId: string, node: string) => ({
-  name: 'memories',
-  params: { circleId },
-  query: { node },
 })
 
 // 初始化状态只会从「需要」变成「不需要」，确认过一次就不再请求；

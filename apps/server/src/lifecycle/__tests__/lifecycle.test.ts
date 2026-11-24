@@ -29,6 +29,7 @@ const candidate: RecordableCandidate = {
 const recentEntry = {
   shortId: 'm-234568',
   title: '近期更新',
+  circleId: PRIMARY_CIRCLE,
   circleSlug: 'personal-alice',
   priority: 1,
   disclosure: null,

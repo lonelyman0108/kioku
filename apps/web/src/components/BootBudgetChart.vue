@@ -30,18 +30,18 @@ const allocation = computed(() => {
   const total = Math.max(core + personaApp + clampedExtras + headroom, 1)
   return [
     {
-      key: 'core',
-      label: '通用记忆参考',
-      chars: core,
-      pct: (core / total) * 100,
-      color: 'var(--layer-core)',
-    },
-    {
       key: 'persona',
-      label: '人格与应用参考',
+      label: '独立人格设定',
       chars: personaApp,
       pct: (personaApp / total) * 100,
       color: 'var(--layer-persona)',
+    },
+    {
+      key: 'core',
+      label: '正式记忆展开',
+      chars: core,
+      pct: (core / total) * 100,
+      color: 'var(--layer-primary)',
     },
     {
       key: 'extras',

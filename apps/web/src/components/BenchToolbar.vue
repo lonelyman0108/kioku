@@ -13,7 +13,7 @@ import PageHead from './strata/PageHead.vue'
 import ScopeTags from './strata/ScopeTags.vue'
 import StrataCore from './strata/StrataCore.vue'
 
-// 页头：标题在左，选接入实例与 Key、切模式在右。只列自己是所有者的接入实例与还有效的 Key
+// 页头：标题在左，选客户端与访问密钥、切模式在右。只列自己是所有者的客户端与还有效的访问密钥
 const {
   circleId,
   clients,
@@ -60,7 +60,7 @@ const retryKeys = computed(() => retryOf(keys))
   <div class="toolbar">
     <PageHead title="测试台">
       <template v-if="owned.length" #note>
-        模拟接入实例调用 Kioku，不接入真实客户端。
+        模拟客户端调用 Kioku，不发起真实外部连接。
         <Hint>
           工具走真实的 MCP
           服务端，权限按当前访问密钥的有效上限。不记录召回事件，不更新访问密钥的最近使用时间。机密正文与凭据的值一律打码，查看原值请到记忆页、凭据页。
@@ -68,12 +68,12 @@ const retryKeys = computed(() => retryOf(keys))
       </template>
       <template v-if="owned.length" #actions>
         <div class="pickers">
-          <UFormField label="接入实例" class="w-full sm:w-52 min-[87.5rem]:w-60">
+          <UFormField label="客户端" class="w-full sm:w-52 min-[87.5rem]:w-60">
             <USelect
               :model-value="clientId"
               :items="clientItems"
               :disabled="running"
-              aria-label="接入实例"
+              aria-label="客户端"
               class="w-full"
               @update:model-value="(v) => selectClient(String(v))"
             >
@@ -124,7 +124,7 @@ const retryKeys = computed(() => retryOf(keys))
       <BenchNotice
         v-if="clients.isError.value"
         color="error"
-        :title="readFailure(clients.error.value, '读取接入实例失败')"
+        :title="readFailure(clients.error.value, '读取客户端失败')"
         :actions="retryClients"
       />
       <USkeleton v-if="clients.isPending.value" class="h-16 w-full" />
@@ -133,11 +133,11 @@ const retryKeys = computed(() => retryOf(keys))
         class="no-clients"
       >
         <p class="text-muted">
-          当前账号在此记忆圈暂无接入实例。
-          <Hint>测试台仅限接入实例所有者使用：调用会读取所有者的本人记忆。</Hint>
+          当前账号在此记忆圈暂无客户端。
+          <Hint>测试台仅限客户端所有者使用：调用会读取所有者的本人记忆。</Hint>
         </p>
         <UButton :to="{ name: 'clients', params: { circleId } }" size="sm" variant="outline">
-          管理接入实例
+          管理客户端
         </UButton>
       </div>
       <template v-else-if="owned.length">
@@ -155,7 +155,7 @@ const retryKeys = computed(() => retryOf(keys))
           :actions="retryKeys"
         />
         <p v-if="keys.data.value && !usable.length && !keys.isError.value" class="text-muted">
-          当前接入实例暂无有效访问密钥，
+          当前客户端暂无有效访问密钥，
           <RouterLink :to="{ name: 'client', params: { circleId, clientId } }" class="text-primary"
             >签发访问密钥</RouterLink
           >

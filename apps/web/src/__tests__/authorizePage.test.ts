@@ -329,10 +329,10 @@ describe('几个平台', () => {
     expect(ancestors(editors[1]!)).not.toContain(list)
   })
 
-  it('接入实例、访问密钥名称与标识的说明收在提示层里', () => {
-    expect(authorizePage).toContain('仅列出当前账号的 ${runtimeNames[row.runtimeFamily]} 接入实例')
+  it('客户端、访问密钥名称与标识的说明收在提示层里', () => {
+    expect(authorizePage).toContain('仅列出当前账号的 ${runtimeNames[row.runtimeFamily]} 客户端')
     expect(authorizePage).toContain('用于辨认，例如设备加工具')
-    expect(authorizePage).toContain('用于命令行与接口中识别这个接入实例')
+    expect(authorizePage).toContain('用于命令行与接口中识别这个客户端')
     const row = elements.find((el) => attr(el, 'class') === 'platform')!
     expect(walk(row).filter((el) => el.tag === 'Hint')).toHaveLength(3)
   })

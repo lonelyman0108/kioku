@@ -37,8 +37,8 @@ export const facetMatchModeLabels = FACET_MATCH_MODE_NAMES
 export const builtinFacetLabels = BUILTIN_FACET_NAMES
 export const dreamKindLabels = DREAM_KIND_NAMES
 
-// 访问密钥的 admin 权限对应「管理词表与人格」，避免被误解为记忆圈管理员
-export const ADMIN_SCOPE_LABEL = '管理词表与人格'
+// 访问密钥的 admin 权限对应「管理语境词典与人格」，避免被误解为记忆圈管理员
+export const ADMIN_SCOPE_LABEL = '管理语境词典与人格'
 
 export interface ScopeTag {
   key: 'read' | 'write' | 'max' | 'realms' | 'credentials' | 'admin'
@@ -97,9 +97,9 @@ export const accessContextShortLabels: Record<AccessContext, string> = {
 export const originScopeLabels: Record<KeyAccessMatrix['contexts'][number]['originScope'], string> =
   {
     any: '来源不限',
-    client: '来源仅限全局与本接入实例',
-    group: '来源仅限全局、本接入实例与本群（按跨群识人设置）',
-    direct: '来源仅限全局、本接入实例与此人的对话',
+    client: '来源仅限全局与本客户端',
+    group: '来源仅限全局、本客户端与本群（按跨群认人设置）',
+    direct: '来源仅限全局、本客户端与此人的对话',
   }
 
 export const recallSourceLabels: Record<RecallSource, string> = {
@@ -118,12 +118,12 @@ export const sessionExtraLabels: Record<SessionExtra, string> = {
 export const readDenialLabels: Record<ReadDenial, string> = {
   deleted: '已删除',
   expired: '已失效或过期',
-  kind: '超出访问密钥的可读物种',
+  kind: '超出访问密钥的可读记忆类型',
   circle: '不在访问密钥的可读记忆圈内',
   sensitivity: '超出访问密钥的敏感级上限',
-  secret: '机密词条仅可按短 ID 读取，不参与召回',
-  realm: '静态场域白名单不允许',
-  client: '仅限对应接入实例可见',
+  secret: '机密记忆仅可按短 ID 读取，不参与召回',
+  realm: '允许场域白名单不允许',
+  client: '仅限对应客户端可见',
   origin: '来源作用域不匹配',
   owner: '属于其他成员',
   group_lock: '受单群隔离锁拦截',
@@ -181,7 +181,7 @@ export function originScopeText(scope: OriginScope): string {
     case 'direct':
       return scope.name ? `与「${scope.name}」的私聊` : '已删除的联系人'
     case 'client':
-      return scope.name ? `接入实例「${scope.name}」` : '已删除的接入实例'
+      return scope.name ? `客户端「${scope.name}」` : '已删除的客户端'
     default:
       return '全局'
   }
@@ -206,9 +206,9 @@ export const benchAccountLabel = (mark: BenchMark) => mark.accountName ?? '已�
 export const changeLabels: Record<string, string> = {
   content: '正文',
   title: '标题',
-  variants: '变体切片',
+  variants: '变体',
   topics: '主题标签',
-  disclosure: '触发场景',
+  disclosure: '召回说明',
   priority: '优先级',
   sensitivity: '敏感级',
   glossary: '关键词',
@@ -242,7 +242,7 @@ export const credentialChangeLabels: Record<string, string> = {
   description: '说明',
   values: '值',
   fields: '字段对应',
-  clientIds: '限定的接入实例',
+  clientIds: '限定的客户端',
   allowedRealms: '允许的场域',
   expiresAt: '到期时间',
   needsRotation: CREDENTIAL_ROTATION_NAME,
@@ -254,15 +254,15 @@ export function restrictedClientsLabel(
   me: string | undefined,
 ): string {
   if (clientIds === null) return '不限定'
-  if (!clientIds.length) return '不开放给任何接入实例'
+  if (!clientIds.length) return '不开放给任何客户端'
   if (!clients) return '…'
   return clientIds
     .map((id) => {
       const client = clients.find((c) => c.id === id)
-      if (!client) return '已删除的接入实例'
+      if (!client) return '已删除的客户端'
       return client.ownerAccountId === me
         ? client.name
-        : `${client.name}（非当前账号的接入实例，不可用）`
+        : `${client.name}（非当前账号的客户端，不可用）`
     })
     .join('、')
 }
@@ -295,7 +295,7 @@ export const activityActorIcons: Record<ActivityActorKind, string> = {
 export function activityActorName(kind: ActivityActorKind, name: string | null): string {
   if (kind === 'bench') return '测试台'
   if (kind === 'unknown') return '未知'
-  return name ?? (kind === 'account' ? '已删除的账号' : '已删除的接入实例')
+  return name ?? (kind === 'account' ? '已删除的账号' : '已删除的客户端')
 }
 
 export function activityActor(item: Pick<ActivityItem, 'actor' | 'actorKey' | 'bench'>): {
@@ -312,7 +312,7 @@ export function activityActor(item: Pick<ActivityItem, 'actor' | 'actorKey' | 'b
     kind === 'account'
       ? (item.actor.accountName ?? '已删除的账号')
       : kind === 'client'
-        ? (item.actor.clientName ?? '已删除的接入实例')
+        ? (item.actor.clientName ?? '已删除的客户端')
         : '未知'
   return {
     kind,

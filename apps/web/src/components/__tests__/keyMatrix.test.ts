@@ -96,12 +96,12 @@ function render(context: (typeof ACCESS_CONTEXTS)[number], key = keyInfo()) {
   return renderToString(app)
 }
 
-describe('权限范围', () => {
+describe('访问范围', () => {
   it('五种上下文各一根小岩芯，文字是全称', async () => {
     const html = await render('none')
     expect(html.match(/type="radio"/g)).toHaveLength(ACCESS_CONTEXTS.length)
     for (const c of ACCESS_CONTEXTS) {
-      expect(html).toContain(`aria-label="${accessContextLabels[c]}的权限范围"`)
+      expect(html).toContain(`aria-label="${accessContextLabels[c]}的访问范围"`)
     }
   })
 

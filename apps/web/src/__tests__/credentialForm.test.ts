@@ -126,7 +126,7 @@ describe('新建', () => {
 
   it('开启限定接入实例或限定场域但列表为空时拦下；网址与到期时间照规则检查', () => {
     expect(formProblem(input({ form: form({ restrictClients: true, clientIds: [] }) }))).toBe(
-      '限定接入实例时至少选择一个',
+      '限定客户端时至少选择一个',
     )
     expect(formProblem(input({ form: form({ restrictRealms: true, allowedRealms: [] }) }))).toBe(
       '限定场域时至少选择一个',
@@ -388,7 +388,7 @@ describe('409 之后重新读取', () => {
     const fresh = { ...before, version: 4, clientIds: null, allowedRealms: null }
     const { input: merged, conflicts } = mergeReloaded(mine, before, fresh, key)
     expect(conflicts).toEqual([
-      '限定接入实例在别处也修改过，保存时以表单中的为准，请核对',
+      '限定客户端在别处也修改过，保存时以表单中的为准，请核对',
       '允许场域在别处也修改过，保存时以表单中的为准，请核对',
     ])
     expect(merged.form.restrictClients).toBe(true)

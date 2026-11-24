@@ -2,7 +2,7 @@ import { z } from 'zod'
 
 import { FacetTermSlug, normalizeWhen, WhenCondition, whenSignature } from './facets'
 import { EntryLinkNeighbor, ShortId } from './links'
-import { EntryKind, Provenance, Sensitivity } from './memory'
+import { EntryKind, Provenance, Sensitivity, SubjectKind } from './memory'
 import { StoredSensitiveFinding } from './sensitive'
 
 export const ENTRY_TITLE_MAX = 200
@@ -113,10 +113,21 @@ export const EntryView = z
   .meta({ id: 'EntryView' })
 export type EntryView = z.infer<typeof EntryView>
 
+export const EntrySubjectRef = z.object({
+  id: z.uuid(),
+  kind: SubjectKind,
+  displayName: z.string(),
+})
+export type EntrySubjectRef = z.infer<typeof EntrySubjectRef>
+
 export const ConsoleEntryView = EntryView.extend({
   contentHidden: z.boolean(),
   plaintextIgnored: z.boolean(),
   variants: z.array(ConsoleVariantView),
+  subject: EntrySubjectRef.nullable().default(null),
+  conversationId: z.uuid().nullable().default(null),
+  clientId: z.uuid().nullable().default(null),
+  expiresAt: z.string().nullable().default(null),
 })
 export type ConsoleEntryView = z.infer<typeof ConsoleEntryView>
 

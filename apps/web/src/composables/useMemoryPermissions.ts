@@ -12,7 +12,10 @@ import { useSession } from './useSession'
 
 // 成员在管理界面里能对词条做什么：
 // owner 都能写；editor 最高到 private，viewer 只读。跨圈关联只读，若条目位于别的记忆圈则按对应记忆圈角色判断
-export function useMemoryPermissions(circleId: Ref<string>) {
+export function useMemoryPermissions(
+  circleId: Ref<string>,
+  options: { withClients?: boolean } = {},
+) {
   const { me, circle } = useSession()
   const activeCircle = computed(
     () =>
@@ -24,9 +27,10 @@ export function useMemoryPermissions(circleId: Ref<string>) {
   const clients = useQuery({
     queryKey: computed(() => ['clients', circleId.value] as const),
     queryFn: ({ queryKey: [, cid] }) => api.clients(cid),
+    enabled: computed(() => Boolean(options.withClients && circleId.value)),
   })
   const canWrite = computed(() => role.value === 'owner' || role.value === 'editor')
-  const canEditPersonas = computed(() => role.value === 'owner')
+  const canEditPersonas = computed(() => role.value === 'owner' || role.value === 'editor')
   const canEditVocabulary = computed(() => role.value === 'owner' || role.value === 'editor')
   const sensitivities = computed(() =>
     SENSITIVITIES.filter((s) => role.value === 'owner' || s !== 'secret'),

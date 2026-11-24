@@ -10,7 +10,7 @@ import {
 import { keyToSimulate } from '../access/simulate'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
-import { consoleMemberFor } from '../memory/context'
+import { consoleAllCirclesAccessFor } from '../memory/context'
 import { bootPreview, recallDebug } from '../recall/debug'
 
 const KeyParams = z.object({ circleId: z.uuid(), clientId: z.uuid(), keyId: z.uuid() })
@@ -50,7 +50,7 @@ export function previewRoutes(deps: Deps) {
       const params = c.req.valid('param')
       const found = await keyToSimulate(deps, params, accountId)
       if ('error' in found) return c.json({ error: found.error }, found.status)
-      const { service } = await consoleMemberFor(deps, params.circleId, accountId)
-      return c.json(await recallDebug(deps, found.key, service.access, c.req.valid('json')), 200)
+      const memberAccess = await consoleAllCirclesAccessFor(deps, params.circleId, accountId)
+      return c.json(await recallDebug(deps, found.key, memberAccess, c.req.valid('json')), 200)
     })
 }

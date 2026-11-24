@@ -4,7 +4,7 @@ import type { BackupRunStatus, BackupTestResult } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
-import { ApiError, readFailure } from '../api/client'
+import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import {
   BACKUP_OBJECTS_KEY,
@@ -335,9 +335,7 @@ async function clear() {
           列的是外部的存储桶，出错时不留读到过的列表：改了接口地址或存储桶之后，
           错误下面还是旧桶的备份，会让人以为新位置有可恢复的备份
         -->
-        <NoteLine v-if="objects.isError.value" tone="error">
-          {{ readFailure(objects.error.value, '无法列出备份') }}
-        </NoteLine>
+        <ReadFailureNote v-if="objects.isError.value" :query="objects" fallback="无法列出备份" />
         <USkeleton v-else-if="objects.isPending.value" class="h-16 w-full" />
         <p v-else-if="objects.data.value && !objects.data.value.objects.length" class="text-muted">
           暂无备份
@@ -362,6 +360,7 @@ async function clear() {
     :open="confirmingClear"
     title="清除备份存储设置？"
     :dismissible="!clearing"
+    :close="!clearing"
     @update:open="(v) => !v && !clearing && (confirmingClear = false)"
   >
     <template #body>

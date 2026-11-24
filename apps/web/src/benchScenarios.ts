@@ -51,7 +51,7 @@ export const scenarioEdited = (text: string, loaded: string) =>
 export function runtimeMismatch(scenario: BenchScenario, runtime: string): string | null {
   const { runtimes } = scenario
   if (!runtimes || runtimes.includes(runtime)) return null
-  return `仅适用于 ${runtimes.join('、')}，当前接入实例是 ${runtime}`
+  return `仅适用于 ${runtimes.join('、')}，当前客户端是 ${runtime}`
 }
 
 // 场景里的明文：只看输入，服务端的打码管不到这里。导出的文件是拿来回归的，容易被提交进仓库
@@ -92,41 +92,19 @@ const hasWrittenContent = (args: Record<string, unknown>): boolean =>
   hasVariantContent(args.variants) ||
   hasVariantContent(args.upsert_variants)
 
-// 这个场景里哪些词条变成过 secret。只看写法、不看执行结果，宁可多提示：迁移可能失败，
-// 删掉之后可能又建了一条，这里都不区分。kioku_move / kioku_transfer 的两头算同一条词条，先迁移再改成 secret 也算
+// 这个场景里哪些记忆变成过 secret。只看写法、不看执行结果，宁可多提示：kioku_transfer 只迁移所属圈、
+// 不改变短 ID 与标识，前后按同一标识追踪；删掉之后可能又建了一条，这里也不区分
 function secretEntryCheck(steps: readonly BenchStep[]): (key: string) => boolean {
   const secret = new Set<string>()
-  const moves: [string, string][] = []
   for (const step of steps) {
     if (step.kind !== 'tool') continue
-    const { sensitivity, from, to } = step.arguments
     const key = entryKey(step.arguments)
-    if (writesEntry(step.tool) && secretLevel(sensitivity) && key !== null) {
+    if (writesEntry(step.tool) && secretLevel(step.arguments.sensitivity) && key !== null) {
       secret.add(key)
     }
-    if (
-      (step.tool === 'kioku_move' || step.tool === 'kioku_transfer') &&
-      typeof from === 'string' &&
-      typeof to === 'string'
-    ) {
-      moves.push([from, to])
-    }
   }
-  const isSecret = (key: string) =>
+  return (key: string) =>
     secret.has(key) || (hasCapture(key) && secret.size > 0) || [...secret].some(hasCapture)
-  // 连续迁移时一遍传不完，传到不再变为止
-  let grew = true
-  while (grew) {
-    grew = false
-    for (const [from, to] of moves) {
-      if (isSecret(from) !== isSecret(to)) {
-        secret.add(from)
-        secret.add(to)
-        grew = true
-      }
-    }
-  }
-  return isSecret
 }
 
 function plaintextOf(step: BenchStep, isSecret: (key: string) => boolean): string | null {

@@ -73,7 +73,7 @@ defineProps<{
   color: var(--ui-text-highlighted);
 }
 .entry-desc {
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.5;
   color: var(--ui-text-muted);
 }

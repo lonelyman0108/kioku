@@ -1,16 +1,42 @@
 <script setup lang="ts">
 import type { EntryKind, Sensitivity, StrataBand } from '@kioku/contracts'
+import { computed } from 'vue'
 
 import { bandLabels, entryKindLabels } from '../../labels'
+import { localBandLabel } from './strata'
 
-// 目录和列表一行末尾的标记：机密反白，优先级只标最高的两档，变体数量大于 1 时标注，色带或物种写文字
-defineProps<{
-  band?: StrataBand | null
-  kind?: EntryKind | null
-  sensitivity?: Sensitivity | null
-  priority?: number | null
-  variantCount?: number | null
-}>()
+// 目录和列表一行末尾的标记：机密反白，优先级只标最高的两档，变体数量大于 1 时标注；
+// 同圈列表里普通正式记忆不重复打「正式记忆」尾标，只对对话形态或跨圈来源显示类型文字
+const props = withDefaults(
+  defineProps<{
+    band?: StrataBand | null
+    kind?: EntryKind | null
+    sensitivity?: Sensitivity | null
+    priority?: number | null
+    variantCount?: number | null
+    local?: boolean
+  }>(),
+  {
+    band: null,
+    kind: null,
+    sensitivity: null,
+    priority: null,
+    variantCount: null,
+    local: false,
+  },
+)
+
+const typeText = computed(() => {
+  if (props.local) {
+    if (props.band === 'episode' || props.band === 'fact') return localBandLabel(props.band)
+    if (props.kind && props.kind !== 'entry') return entryKindLabels[props.kind]
+    if (props.band === 'shared-away') return bandLabels['shared-away']
+    return null
+  }
+  if (props.band) return bandLabels[props.band]
+  if (props.kind && props.kind !== 'entry') return entryKindLabels[props.kind]
+  return null
+})
 </script>
 
 <template>
@@ -23,10 +49,9 @@ defineProps<{
       >P{{ priority }}</span
     >
     <span v-if="variantCount && variantCount > 1" class="flag-variants"
-      >{{ variantCount }} 切片</span
+      >{{ variantCount }} 变体</span
     >
-    <span v-if="band" class="flag-layer">{{ bandLabels[band] }}</span>
-    <span v-else-if="kind && kind !== 'entry'" class="flag-layer">{{ entryKindLabels[kind] }}</span>
+    <span v-if="typeText" class="flag-layer">{{ typeText }}</span>
   </span>
 </template>
 

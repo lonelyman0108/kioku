@@ -5,6 +5,7 @@ import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 
 import { api } from '../api/endpoints'
+import ClientsSubnav from '../components/ClientsSubnav.vue'
 import Hint from '../components/Hint.vue'
 import RecallDebugPanel from '../components/RecallDebugPanel.vue'
 import MemoryFlags from '../components/strata/MemoryFlags.vue'
@@ -35,128 +36,131 @@ const bandOf = (kind: EntryKind) => entryBand({ kind }, circle.value)
 </script>
 
 <template>
-  <div class="recall-page">
-    <ReadFailureNote v-if="stats.isError.value" :query="stats" />
-    <div v-if="stats.isPending.value" class="stats">
-      <USkeleton v-for="n in 4" :key="n" class="h-48 w-full" />
-    </div>
-    <section v-else-if="data" class="stats">
-      <div class="stat-total">
-        <h1>召回</h1>
-        <div class="total-number">{{ total.toLocaleString() }}</div>
-        <p class="total-label">{{ data.retentionDays }} 天召回</p>
-        <p class="total-note">
-          <span>{{ formatShort(data.recordingSince) }} 开始记录，</span>
-          <span class="me-1.5">明细保留 {{ data.retentionDays }} 天</span>
-          <Hint>
-            更早的事件只保留每条记忆的累计次数。次数仅统计当前账号有权查看的记忆；各接入实例的调用量仅列出当前账号可管理访问密钥的接入实例。
-          </Hint>
-        </p>
+  <div class="flex min-h-0 min-w-0 flex-1 flex-col">
+    <ClientsSubnav :circle-id="circleId" />
+    <div class="recall-page">
+      <ReadFailureNote v-if="stats.isError.value" :query="stats" />
+      <div v-if="stats.isPending.value" class="stats">
+        <USkeleton v-for="n in 4" :key="n" class="h-48 w-full" />
       </div>
-
-      <div class="stat-apps">
-        <SectionHeading title="接入实例">
-          <template #hint>
-            <Hint>条长按调用量的平方根，确切的次数写在旁边；条内按来路分段。</Hint>
-          </template>
-        </SectionHeading>
-        <ul v-if="bars.length">
-          <li v-for="bar in bars" :key="bar.volume.clientId" class="volume">
-            <p class="volume-head">
-              <RouterLink
-                v-if="bar.volume.name"
-                :to="{ name: 'client', params: { circleId, clientId: bar.volume.clientId } }"
-                >{{ bar.volume.name }}</RouterLink
-              >
-              <span v-else class="volume-gone">已删除的接入实例</span>
-              <span class="font-mono">{{ bar.volume.total.toLocaleString() }}</span>
-            </p>
-            <div class="volume-bar" :style="{ width: `${bar.width}%` }">
-              <i
-                v-for="segment in bar.segments"
-                :key="segment.source"
-                :class="`source-${segment.source.replace('.', '-')}`"
-                :style="{ width: `${segment.share}%` }"
-                :title="`${segment.label} ${segment.count}`"
-              />
-            </div>
-            <p class="volume-key">
-              <span v-for="segment in bar.segments" :key="segment.source">
-                <i :class="`source-${segment.source.replace('.', '-')}`" />{{ segment.label }}
-                <b class="font-mono">{{ segment.count.toLocaleString() }}</b>
-              </span>
-            </p>
-          </li>
-        </ul>
-        <p v-else class="stat-empty">保留期内暂无召回</p>
-      </div>
-
-      <div class="stat-top">
-        <SectionHeading title="常被召回" />
-        <ul v-if="data.top.length">
-          <li v-for="entry in data.top" :key="entry.id" class="top-row">
-            <StrataSwatch :band="bandOf(entry.kind)" :sensitivity="entry.sensitivity" />
-            <span class="row-uri">
-              <RouterLink :to="entryLink(entry.shortId)" class="min-w-0"
-                ><MemoryName :short-id="entry.shortId" :title="entry.title"
-              /></RouterLink>
-              <MemoryFlags :band="bandOf(entry.kind)" :sensitivity="entry.sensitivity" />
-            </span>
-            <span class="font-mono top-count">{{ entry.total }}</span>
-            <time
-              v-if="entry.lastRecalledAt"
-              class="top-when"
-              :datetime="entry.lastRecalledAt"
-              :title="`最近一次 ${formatTime(entry.lastRecalledAt)}`"
-            >
-              {{ formatRelative(entry.lastRecalledAt) }}
-            </time>
-            <span v-else class="top-when">–</span>
-          </li>
-        </ul>
-        <p v-else class="stat-empty">暂无被召回的记忆</p>
-      </div>
-
-      <div class="stat-never">
-        <SectionHeading>
-          从未召回
-          <span class="never-count font-mono">{{ data.neverTotal }}</span>
-          <template #hint>
+      <section v-else-if="data" class="stats">
+        <div class="stat-total">
+          <h1>召回与试算</h1>
+          <div class="total-number tabular-nums">{{ total.toLocaleString() }}</div>
+          <p class="total-label">{{ data.retentionDays }} 天召回</p>
+          <p class="total-note">
+            <span>{{ formatShort(data.recordingSince) }} 开始记录，</span>
+            <span class="me-1.5">明细保留 {{ data.retentionDays }} 天</span>
             <Hint>
-              创建已满
-              {{ data.retentionDays }}
-              天，未被任何接入实例召回。最早创建的排在前面。记忆创建和开始记录召回事件都满
-              {{ data.retentionDays }}
-              天才计入。不含机密内容（不参与召回）和启动加载的词条（每次会话开始时注入）。长期未被召回时，可检查是否缺少关键词与触发场景、内容过于笼统或已无用处。
+              更早的事件只保留每条记忆的累计次数。次数仅统计当前账号有权查看的记忆；各客户端的调用量仅列出当前账号可管理访问密钥的客户端。
             </Hint>
-          </template>
-        </SectionHeading>
-        <ul v-if="data.never.length">
-          <li v-for="entry in data.never" :key="entry.id" class="never-row">
-            <StrataSwatch :band="bandOf(entry.kind)" :sensitivity="entry.sensitivity" />
-            <span class="row-uri">
-              <RouterLink :to="entryLink(entry.shortId)" class="min-w-0"
-                ><MemoryName :short-id="entry.shortId" :title="entry.title"
-              /></RouterLink>
-              <MemoryFlags :band="bandOf(entry.kind)" :sensitivity="entry.sensitivity" />
-            </span>
-            <time
-              class="never-when"
-              :datetime="entry.createdAt"
-              :title="formatTime(entry.createdAt)"
-            >
-              创建于 {{ formatShort(entry.createdAt) }}
-            </time>
-          </li>
-        </ul>
-        <p v-else class="stat-empty">暂无从未召回的记忆</p>
-        <p v-if="data.neverTotal > data.never.length" class="never-more">
-          仅显示最早的 {{ data.never.length }} 条
-        </p>
-      </div>
-    </section>
+          </p>
+        </div>
 
-    <RecallDebugPanel class="debug" :circle-id="circleId" />
+        <div class="stat-apps">
+          <SectionHeading title="客户端">
+            <template #hint>
+              <Hint>条长按调用量的平方根，确切的次数写在旁边；条内按来路分段。</Hint>
+            </template>
+          </SectionHeading>
+          <ul v-if="bars.length">
+            <li v-for="bar in bars" :key="bar.volume.clientId" class="volume">
+              <p class="volume-head">
+                <RouterLink
+                  v-if="bar.volume.name"
+                  :to="{ name: 'client', params: { circleId, clientId: bar.volume.clientId } }"
+                  >{{ bar.volume.name }}</RouterLink
+                >
+                <span v-else class="volume-gone">已删除的客户端</span>
+                <span class="tabular-nums">{{ bar.volume.total.toLocaleString() }}</span>
+              </p>
+              <div class="volume-bar" :style="{ width: `${bar.width}%` }">
+                <i
+                  v-for="segment in bar.segments"
+                  :key="segment.source"
+                  :class="`source-${segment.source.replace('.', '-')}`"
+                  :style="{ width: `${segment.share}%` }"
+                  :title="`${segment.label} ${segment.count}`"
+                />
+              </div>
+              <p class="volume-key">
+                <span v-for="segment in bar.segments" :key="segment.source">
+                  <i :class="`source-${segment.source.replace('.', '-')}`" />{{ segment.label }}
+                  <b class="tabular-nums">{{ segment.count.toLocaleString() }}</b>
+                </span>
+              </p>
+            </li>
+          </ul>
+          <p v-else class="stat-empty">保留期内暂无召回</p>
+        </div>
+
+        <div class="stat-top">
+          <SectionHeading title="常被召回" />
+          <ul v-if="data.top.length">
+            <li v-for="entry in data.top" :key="entry.id" class="top-row">
+              <StrataSwatch :band="bandOf(entry.kind)" :sensitivity="entry.sensitivity" local />
+              <span class="row-uri">
+                <RouterLink :to="entryLink(entry.shortId)" class="min-w-0"
+                  ><MemoryName :short-id="entry.shortId" :title="entry.title"
+                /></RouterLink>
+                <MemoryFlags :band="bandOf(entry.kind)" :sensitivity="entry.sensitivity" local />
+              </span>
+              <span class="top-count tabular-nums">{{ entry.total }}</span>
+              <time
+                v-if="entry.lastRecalledAt"
+                class="top-when"
+                :datetime="entry.lastRecalledAt"
+                :title="`最近一次 ${formatTime(entry.lastRecalledAt)}`"
+              >
+                {{ formatRelative(entry.lastRecalledAt) }}
+              </time>
+              <span v-else class="top-when">–</span>
+            </li>
+          </ul>
+          <p v-else class="stat-empty">暂无被召回的记忆</p>
+        </div>
+
+        <div class="stat-never">
+          <SectionHeading>
+            从未召回
+            <span class="never-count tabular-nums">{{ data.neverTotal }}</span>
+            <template #hint>
+              <Hint>
+                创建已满
+                {{ data.retentionDays }}
+                天，未被任何客户端召回。最早创建的排在前面。记忆创建和开始记录召回事件都满
+                {{ data.retentionDays }}
+                天才计入。不含机密内容（不参与召回）和启动加载的记忆（每次会话开始时注入）。长期未被召回时，可检查是否缺少关键词与召回说明、内容过于笼统或已无用处。
+              </Hint>
+            </template>
+          </SectionHeading>
+          <ul v-if="data.never.length">
+            <li v-for="entry in data.never" :key="entry.id" class="never-row">
+              <StrataSwatch :band="bandOf(entry.kind)" :sensitivity="entry.sensitivity" local />
+              <span class="row-uri">
+                <RouterLink :to="entryLink(entry.shortId)" class="min-w-0"
+                  ><MemoryName :short-id="entry.shortId" :title="entry.title"
+                /></RouterLink>
+                <MemoryFlags :band="bandOf(entry.kind)" :sensitivity="entry.sensitivity" local />
+              </span>
+              <time
+                class="never-when"
+                :datetime="entry.createdAt"
+                :title="formatTime(entry.createdAt)"
+              >
+                创建于 {{ formatShort(entry.createdAt) }}
+              </time>
+            </li>
+          </ul>
+          <p v-else class="stat-empty">暂无从未召回的记忆</p>
+          <p v-if="data.neverTotal > data.never.length" class="never-more">
+            仅显示最早的 {{ data.never.length }} 条
+          </p>
+        </div>
+      </section>
+
+      <RecallDebugPanel class="debug" :circle-id="circleId" />
+    </div>
   </div>
 </template>
 
@@ -183,7 +187,6 @@ const bandOf = (kind: EntryKind) => entryBand({ kind }, circle.value)
   line-height: 1.3;
 }
 .total-number {
-  font-family: var(--font-mono);
   font-size: 38px;
   font-weight: 300;
   line-height: 1.2;
@@ -296,7 +299,7 @@ const bandOf = (kind: EntryKind) => entryBand({ kind }, circle.value)
   font-size: 14px;
   line-height: 1.5;
 }
-/* 层名跟在 URI 后面，和记忆列表一样：色块旁边要有文字。URI 放不下时先缩它，层名不缩 */
+/* 形态与敏感级跟在名称后面，和记忆列表一样：色块旁边要有文字。名称放不下时先缩它，状态标志不缩 */
 .row-uri {
   display: flex;
   align-items: baseline;

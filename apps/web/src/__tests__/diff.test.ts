@@ -77,11 +77,11 @@ describe('多变体切片对比', () => {
         { when: { realm: ['work'] }, content: null },
       ],
     )
-    expect(items.map((i) => [i.sig, i.status])).toEqual([
-      ['{}', 'modified'],
-      ['{"env":["macos"]}', 'added'],
-      ['{"realm":["work"]}', 'secret'],
-      ['{"env":["win"]}', 'removed'],
+    expect(items.map((i) => [i.sig, i.status, i.secret])).toEqual([
+      ['{}', 'modified', false],
+      ['{"env":["macos"]}', 'added', false],
+      ['{"realm":["work"]}', 'unchanged', true],
+      ['{"env":["win"]}', 'removed', false],
     ])
     expect(items[0]!.rows).toEqual([
       { kind: 'same', text: '甲' },

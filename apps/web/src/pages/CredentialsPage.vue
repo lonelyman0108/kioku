@@ -7,6 +7,7 @@ import { useRoute, useRouter } from 'vue-router'
 
 import { ApiError, retryable } from '../api/client'
 import { api } from '../api/endpoints'
+import ConsequenceModal from '../components/ConsequenceModal.vue'
 import CredentialDetail from '../components/CredentialDetail.vue'
 import CredentialFormModal from '../components/CredentialFormModal.vue'
 import Hint from '../components/Hint.vue'
@@ -31,6 +32,9 @@ const toast = useToast()
 const queryClient = useQueryClient()
 const { me, circle } = useSession()
 const circleId = computed(() => String(route.params.circleId))
+const personalCircle = computed(
+  () => me.data.value?.circles.find((c) => c.kind === 'personal') ?? null,
+)
 // 凭据与密码库连接的操作都只给记忆圈所有者，别的成员只看列表
 const canManage = computed(() => canManageCredentials(circle.value?.role))
 
@@ -128,6 +132,7 @@ watch(circleId, () => {
   formOpen.value = false
   loginOpen.value = false
   removing.value = null
+  removeError.value = null
 })
 
 async function refreshLists(cid: string) {
@@ -177,12 +182,18 @@ function onConflict() {
 
 // 删除确认：打开时记下这一版，期间被改过就返回冲突，不会删掉没看过的修改
 const removing = ref<ConsoleCredential | null>(null)
+const removeError = ref<string | null>(null)
 const busy = ref(false)
+function openRemove(target: ConsoleCredential) {
+  removeError.value = null
+  removing.value = target
+}
 async function remove() {
   const target = removing.value
   if (!target || busy.value) return
   const cid = circleId.value
   busy.value = true
+  removeError.value = null
   try {
     await api.deleteCredential(cid, target.id, target.version)
     removing.value = null
@@ -192,8 +203,7 @@ async function remove() {
     queryClient.removeQueries({ queryKey: ['credential', cid, target.id], exact: true })
     await refreshLists(cid)
   } catch (err) {
-    toast.add({ title: err instanceof ApiError ? err.message : '删除失败', color: 'error' })
-    removing.value = null
+    removeError.value = err instanceof ApiError ? err.message : '删除失败'
     void selected.refetch()
   } finally {
     busy.value = false
@@ -221,9 +231,22 @@ async function undelete(c: ConsoleCredential) {
   <div class="credentials">
     <PageHead title="凭据">
       <template #note>
-        密码与令牌存为凭据，记忆正文只放占位符，例如
-        <code v-pre class="font-mono text-[13px]">{{cred:file-server#password}}</code
-        >。<Hint>
+        <template v-if="circle?.kind === 'personal'">
+          密码与令牌存为凭据，个人圈私密及以上正式记忆的正文只放占位符，例如
+          <code v-pre class="font-mono text-[13px]">{{cred:file-server#password}}</code
+          >。
+        </template>
+        <template v-else>
+          本独立圈的凭据供以本圈为主圈且通过允许场域锁的客户端直接取用；独立圈共享记忆中不写个人凭据占位符<template
+            v-if="personalCircle"
+            >（占位符凭据请在<RouterLink
+              class="underline underline-offset-3"
+              :to="{ name: 'credentials', params: { circleId: personalCircle.id } }"
+              >个人圈凭据</RouterLink
+            >中管理）</template
+          >。
+        </template>
+        <Hint>
           Agent 用到时向 Kioku 取值。值由 Kioku
           加密保存，或保留在连接的密码库中、取用时获取；设了去处时，新建的凭据写进密码库。凭据与密码库连接仅所有者可见。<template
             v-if="!canManage"
@@ -271,6 +294,9 @@ async function undelete(c: ConsoleCredential) {
           <div v-if="credentials.isError.value" class="pt-3.5">
             <ReadFailureNote :query="credentials" />
           </div>
+          <div v-if="clients.isError.value" class="pt-3.5">
+            <ReadFailureNote :query="clients" />
+          </div>
           <div v-if="credentials.isPending.value" class="space-y-2 pt-3.5">
             <USkeleton v-for="n in 5" :key="n" class="h-10 w-full" />
           </div>
@@ -281,7 +307,7 @@ async function undelete(c: ConsoleCredential) {
               <span>来源</span>
               <span>字段</span>
               <span class="num">引用</span>
-              <span>限定接入实例</span>
+              <span>限定客户端</span>
               <span class="num">更新</span>
             </div>
             <ul>
@@ -308,11 +334,7 @@ async function undelete(c: ConsoleCredential) {
                   >
                     {{ c.referenceCount }}
                   </span>
-                  <span
-                    class="row-muted row-apps"
-                    data-label="限定接入实例"
-                    :title="realmsTitle(c)"
-                  >
+                  <span class="row-muted row-apps" data-label="限定客户端" :title="realmsTitle(c)">
                     {{ clientsOf(c) }}
                   </span>
                   <time
@@ -463,7 +485,7 @@ async function undelete(c: ConsoleCredential) {
           :clients="clients.data.value"
           :can-manage="canManage"
           @edit="openEdit"
-          @remove="removing = detail"
+          @remove="openRemove(detail)"
           @undelete="undelete(detail)"
         />
       </template>
@@ -489,23 +511,19 @@ async function undelete(c: ConsoleCredential) {
     @connected="(_, cid) => refreshLists(cid)"
   />
 
-  <UModal
+  <ConsequenceModal
     :open="removing !== null"
     :title="`删除凭据 ${removing?.identifier ?? ''}？`"
-    @update:open="(v) => !v && (removing = null)"
-  >
-    <template #body>
-      <p class="text-sm">
-        删除后，引用它的占位符将无法取值。可在「已删除」中恢复。仍有记忆引用时无法删除。
-      </p>
-    </template>
-    <template #footer>
-      <div class="flex w-full justify-end gap-2">
-        <UButton color="neutral" variant="ghost" @click="removing = null">取消</UButton>
-        <UButton color="error" :loading="busy" @click="remove">删除</UButton>
-      </div>
-    </template>
-  </UModal>
+    :consequences="[
+      '删除后，引用它的占位符将无法取值。',
+      '可在「已删除」中恢复；仍有记忆引用时无法删除。',
+    ]"
+    action="删除"
+    :busy="busy"
+    :error="removeError"
+    @confirm="remove"
+    @close="removing = null"
+  />
 </template>
 
 <style scoped>
@@ -605,7 +623,7 @@ button.row-name::after {
   color: var(--ui-text-toned);
 }
 .row-count {
-  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-weight: 500;
 }
 .row-count.zero {
@@ -614,6 +632,10 @@ button.row-name::after {
 }
 .row-muted {
   color: var(--ui-text-muted);
+}
+.row-time,
+.row-deleted {
+  font-variant-numeric: tabular-nums;
 }
 .row-time {
   font-size: 13px;
@@ -645,7 +667,7 @@ button.row-name::after {
   clip-path: inset(50%);
   white-space: nowrap;
 }
-/* 窄屏：一行拆成几行，字段和限定接入实例带上名字 */
+/* 窄屏：一行拆成几行，字段和限定客户端带上名字 */
 @media (max-width: 1023.98px) {
   .column-head {
     padding: 0 16px 0 7px;

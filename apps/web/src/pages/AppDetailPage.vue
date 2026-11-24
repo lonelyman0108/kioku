@@ -20,6 +20,8 @@ import AppGroupPersonas from '../components/AppGroupPersonas.vue'
 import AppKeys from '../components/AppKeys.vue'
 import AppRecallEvents from '../components/AppRecallEvents.vue'
 import AppSimulator from '../components/AppSimulator.vue'
+import ClientsSubnav from '../components/ClientsSubnav.vue'
+import ConsequenceModal from '../components/ConsequenceModal.vue'
 import Hint from '../components/Hint.vue'
 import KeyMatrix from '../components/KeyMatrix.vue'
 import RuntimeLabel from '../components/RuntimeLabel.vue'
@@ -163,26 +165,33 @@ const transferName = computed(
 )
 const confirmingTransfer = ref(false)
 const transferringId = ref<string | null>(null)
+const transferError = ref<string | null>(null)
 const transferring = computed(() => transferringId.value === clientId.value)
 function closeTransfer() {
   if (transferring.value) return
   confirmingTransfer.value = false
   transferTo.value = undefined
+  transferError.value = null
 }
 async function transfer() {
   if (!transferTo.value || transferring.value) return
   const cid = circleId.value
   const id = clientId.value
   transferringId.value = id
+  transferError.value = null
   try {
-    const done = await update(
-      { ownerAccountId: transferTo.value },
-      '已转移，原有访问密钥已全部吊销',
+    const saved = await api.updateClient(cid, id, { ownerAccountId: transferTo.value })
+    queryClient.setQueryData<ClientInfo[]>(['clients', cid], (list) =>
+      list?.map((a) => (a.id === id ? saved : a)),
     )
-    if (done && stillOn(cid, id)) {
+    await refreshClientCaches(queryClient, cid, id)
+    toast.add({ title: '已转移，原有访问密钥已全部吊销', color: 'success' })
+    if (stillOn(cid, id)) {
       confirmingTransfer.value = false
       transferTo.value = undefined
     }
+  } catch (err) {
+    transferError.value = err instanceof ApiError ? err.message : '转移失败'
   } finally {
     if (transferringId.value === id) transferringId.value = null
   }
@@ -190,21 +199,27 @@ async function transfer() {
 
 const confirmingDelete = ref(false)
 const deletingId = ref<string | null>(null)
+const deleteError = ref<string | null>(null)
 const deleting = computed(() => deletingId.value === clientId.value)
+const deleteConsequences = computed(() => [
+  `客户端「${client.value?.name ?? ''}」及其全部访问密钥、按群规则将被永久删除，且不可撤销。`,
+  '使用这些访问密钥的应用与终端将立即失去访问权限。',
+])
 async function remove(target: ClientInfo) {
   if (deleting.value) return
   const cid = circleId.value
   deletingId.value = target.id
+  deleteError.value = null
   try {
     await api.deleteClient(cid, target.id)
     if (stillOn(cid, target.id)) {
       confirmingDelete.value = false
       await router.replace({ name: 'clients', params: { circleId: cid } })
     }
-    toast.add({ title: `已删除接入实例「${target.name}」`, color: 'success' })
+    toast.add({ title: `已删除客户端「${target.name}」`, color: 'success' })
     await forgetClient(queryClient, cid, target.id)
   } catch (err) {
-    failed(err, '删除失败')
+    deleteError.value = err instanceof ApiError ? err.message : '删除失败'
   } finally {
     if (deletingId.value === target.id) deletingId.value = null
   }
@@ -212,229 +227,237 @@ async function remove(target: ClientInfo) {
 
 watch([circleId, clientId], () => {
   confirmingTransfer.value = false
-  confirmingDelete.value = false
   transferTo.value = undefined
+  transferError.value = null
+  confirmingDelete.value = false
+  deleteError.value = null
 })
 </script>
 
 <template>
-  <div class="app-page">
-    <div v-if="failures.length" class="app-failed">
-      <ReadFailureNote v-for="failure in failures" :key="failure.key" :query="failure.read" />
-    </div>
-    <div v-if="clients.isPending.value" class="app-state"><USkeleton class="h-40 w-full" /></div>
-    <div v-else-if="clients.data.value && !client" class="app-state">
-      <NoteLine>接入实例不存在或已删除</NoteLine>
-      <UButton
-        :to="{ name: 'clients', params: { circleId } }"
-        size="sm"
-        color="primary"
-        variant="outline"
-      >
-        返回接入实例列表
-      </UButton>
-    </div>
-    <template v-else-if="client">
-      <header class="app-head">
-        <div class="app-title">
-          <nav class="crumbs" aria-label="路径">
-            <RouterLink :to="{ name: 'clients', params: { circleId } }">接入实例</RouterLink>
-            <i aria-hidden="true">›</i>
-            <span>{{ client.name }}</span>
-          </nav>
-          <h1>{{ client.name }}</h1>
-          <code>{{ client.slug }}</code>
-        </div>
-        <dl class="app-meta">
-          <div>
-            <dt>运行时</dt>
-            <dd><RuntimeLabel :family="client.runtimeFamily" /></dd>
+  <div class="flex min-h-0 min-w-0 flex-1 flex-col">
+    <ClientsSubnav :circle-id="circleId" />
+    <div class="app-page">
+      <div v-if="failures.length" class="app-failed">
+        <ReadFailureNote v-for="failure in failures" :key="failure.key" :query="failure.read" />
+      </div>
+      <div v-if="clients.isPending.value" class="app-state"><USkeleton class="h-40 w-full" /></div>
+      <div v-else-if="clients.data.value && !client" class="app-state">
+        <NoteLine>客户端不存在或已删除</NoteLine>
+        <UButton
+          :to="{ name: 'clients', params: { circleId } }"
+          size="sm"
+          color="primary"
+          variant="outline"
+        >
+          返回客户端列表
+        </UButton>
+      </div>
+      <template v-else-if="client">
+        <header class="app-head">
+          <div class="app-title">
+            <nav class="crumbs" aria-label="路径">
+              <RouterLink :to="{ name: 'clients', params: { circleId } }">客户端</RouterLink>
+              <i aria-hidden="true">›</i>
+              <span>{{ client.name }}</span>
+            </nav>
+            <h1>{{ client.name }}</h1>
+            <code>{{ client.slug }}</code>
           </div>
-          <div>
-            <dt>默认人格</dt>
-            <dd>{{ personaName ?? '–' }}</dd>
-          </div>
-          <div>
-            <dt>有效访问密钥</dt>
-            <dd class="font-mono">{{ seenKeys ? usable.length : '–' }}</dd>
-          </div>
-          <div>
-            <dt>最近使用</dt>
-            <dd>
-              <time v-if="lastUsed" :datetime="lastUsed" :title="formatTime(lastUsed)">
-                {{ formatRelative(lastUsed) }}
-              </time>
-              <template v-else>{{ usable.length ? '尚未使用' : '–' }}</template>
-            </dd>
-          </div>
-          <div>
-            <dt>所有者</dt>
-            <dd>{{ ownerName ?? '–' }}<span v-if="isClientOwner" class="app-mine">我的</span></dd>
-          </div>
-        </dl>
-      </header>
-
-      <div class="app-grid" :class="{ solo: !selectedKey }">
-        <AppKeys
-          class="app-keys-area"
-          :circle-id="circleId"
-          :circle-kind="circle?.kind ?? 'shared'"
-          :client-id="client.id"
-          :is-client-owner="isClientOwner"
-          :can-issue="canManage"
-          :is-circle-owner="isCircleOwner"
-          :selected="selectedKey?.id ?? null"
-          :personas="personas.data.value ?? []"
-          :linked-circle-options="me.data.value?.circles ?? []"
-          :vocabulary="facets.data.value ?? null"
-          @select="selectKey"
-        />
-
-        <KeyMatrix
-          v-if="selectedKey"
-          v-model:context="context"
-          class="app-matrix-area"
-          :circle-id="circleId"
-          :client-id="client.id"
-          :key-info="selectedKey"
-        />
-
-        <section class="app-settings-area">
-          <SectionHeading title="设置" />
-          <p v-if="!canManage" class="set-note">仅接入实例所有者可修改设置</p>
-          <div class="set">
-            <label :for="`client-name-${client.id}`">名称</label>
-            <div class="set-name">
-              <UInput :id="`client-name-${client.id}`" v-model="name" :disabled="!canManage" />
-              <UButton
-                v-if="canManage"
-                color="primary"
-                variant="outline"
-                :disabled="!name.trim() || name === client.name"
-                @click="update({ name: name.trim() })"
-                >保存</UButton
-              >
+          <dl class="app-meta">
+            <div>
+              <dt>运行时</dt>
+              <dd><RuntimeLabel :family="client.runtimeFamily" /></dd>
             </div>
-          </div>
-          <div class="set">
-            <span class="set-label">
-              默认人格
-              <Hint>未配置按群规则或密钥人格覆盖时使用的人格设定。</Hint>
-              <RouterLink
-                v-if="client.defaultPersonaId"
-                :to="{
-                  name: 'vocabulary',
-                  params: { circleId },
-                  query: { tab: 'personas', persona: client.defaultPersonaId },
-                }"
-                class="set-link"
-                >查看人格</RouterLink
-              >
-            </span>
-            <USelect
-              :model-value="client.defaultPersonaId"
-              :items="personaItems"
-              value-key="value"
-              class="set-select"
-              aria-label="默认人格"
-              :disabled="!canManage"
-              @update:model-value="
-                (v) => update({ defaultPersonaId: (v as string | null) ?? null })
-              "
-            />
-          </div>
-          <div class="set col">
-            <div class="set-mode-row">
-              <span class="set-label">
-                人物跨群识人模式
-                <Hint>
-                  严格单群隔离下各群事实互不流转；拟人跨群识人允许在未开单群隔离锁的群与私聊间按需召回同一发言人事实。
-                </Hint>
-              </span>
-              <SegmentedChoice
-                :model-value="client.config.personMemoryMode ?? 'strict'"
-                :items="personModeItems"
-                label="人物跨群识人模式"
-                @update:model-value="(v) => updateConfig({ personMemoryMode: v })"
-              />
+            <div>
+              <dt>默认人格</dt>
+              <dd>{{ personaName ?? '–' }}</dd>
             </div>
-          </div>
-          <div class="set">
-            <USwitch
-              label="本人私聊提权至内部敏感级"
-              :model-value="client.config.elevateOwnerDirect === 'internal'"
-              :disabled="!canManage || savingConfig === client.id"
-              @update:model-value="
-                (v) => updateConfig({ elevateOwnerDirect: v ? 'internal' : undefined })
-              "
-            />
-            <Hint>识别为本人的私聊可读取内部及以下词条（受接入实例与密钥透镜上限约束）。</Hint>
-          </div>
-          <div class="set">
-            <USwitch
-              label="记录召回提示语"
-              :model-value="client.config.recordPrompt !== false"
-              :disabled="!canManage || savingConfig === client.id"
-              @update:model-value="(v) => updateConfig({ recordPrompt: v ? undefined : false })"
-            />
-            <Hint>保留提示语前 200 字，疑似凭据的片段自动打码，仅所有者可见。</Hint>
-          </div>
-          <div class="set col">
-            <AppGroupPersonas
-              :circle-id="circleId"
-              :client-id="client.id"
-              :can-manage="canManage"
-              :personas="personas.data.value ?? []"
-              :personas-loaded="personas.isSuccess.value"
-            />
-          </div>
-          <div v-if="isCircleOwner || canDelete" class="set-actions">
-            <UButton
-              v-if="isCircleOwner"
-              color="primary"
-              variant="outline"
-              @click="confirmingTransfer = true"
-            >
-              转移接入实例
-            </UButton>
-            <UButton
-              v-if="canDelete"
-              color="error"
-              variant="outline"
-              @click="confirmingDelete = true"
-            >
-              删除接入实例
-            </UButton>
-          </div>
-        </section>
+            <div>
+              <dt>有效访问密钥</dt>
+              <dd class="tabular-nums">{{ seenKeys ? usable.length : '–' }}</dd>
+            </div>
+            <div>
+              <dt>最近使用</dt>
+              <dd>
+                <time v-if="lastUsed" :datetime="lastUsed" :title="formatTime(lastUsed)">
+                  {{ formatRelative(lastUsed) }}
+                </time>
+                <template v-else>{{ usable.length ? '尚未使用' : '–' }}</template>
+              </dd>
+            </div>
+            <div>
+              <dt>所有者</dt>
+              <dd>{{ ownerName ?? '–' }}<span v-if="isClientOwner" class="app-mine">我的</span></dd>
+            </div>
+          </dl>
+        </header>
 
-        <div class="app-side-area">
-          <!-- 模拟按接入实例所有者的视角执行，仅给接入实例所有者 -->
-          <AppSimulator
-            v-if="isClientOwner"
-            class="app-boot-area"
+        <div class="app-grid" :class="{ solo: !selectedKey }">
+          <AppKeys
+            class="app-keys-area"
+            :circle-id="circleId"
+            :circle-kind="circle?.kind ?? 'shared'"
+            :client-id="client.id"
+            :is-client-owner="isClientOwner"
+            :can-issue="canManage"
+            :is-circle-owner="isCircleOwner"
+            :selected="selectedKey?.id ?? null"
+            :personas="personas.data.value ?? []"
+            :linked-circle-options="me.data.value?.circles ?? []"
+            :vocabulary="facets.data.value ?? null"
+            @select="selectKey"
+          />
+
+          <KeyMatrix
+            v-if="selectedKey"
+            v-model:context="context"
+            class="app-matrix-area"
             :circle-id="circleId"
             :client-id="client.id"
-            :key-id="selectedKey?.id"
-            :settings="`${client.defaultPersonaId}:${client.config.elevateOwnerDirect ?? ''}:${client.config.personMemoryMode ?? ''}`"
-            :vocabulary="facets.data.value ?? null"
+            :key-info="selectedKey"
           />
-          <AppRecallEvents class="app-events-area" :circle-id="circleId" :client-id="client.id" />
+
+          <section class="app-settings-area">
+            <SectionHeading title="设置" />
+            <p v-if="!canManage" class="set-note">仅客户端所有者可修改设置</p>
+            <div class="set">
+              <label :for="`client-name-${client.id}`">名称</label>
+              <div class="set-name">
+                <UInput :id="`client-name-${client.id}`" v-model="name" :disabled="!canManage" />
+                <UButton
+                  v-if="canManage"
+                  color="primary"
+                  variant="outline"
+                  :disabled="!name.trim() || name === client.name"
+                  @click="update({ name: name.trim() })"
+                  >保存</UButton
+                >
+              </div>
+            </div>
+            <div class="set">
+              <span class="set-label">
+                默认人格
+                <Hint>未配置按群规则或密钥人格覆盖时使用的人格设定。</Hint>
+                <RouterLink
+                  v-if="client.defaultPersonaId"
+                  :to="{
+                    name: 'personas',
+                    params: { circleId },
+                    query: { persona: client.defaultPersonaId },
+                  }"
+                  class="set-link"
+                  >查看人格</RouterLink
+                >
+              </span>
+              <USelect
+                :model-value="client.defaultPersonaId"
+                :items="personaItems"
+                value-key="value"
+                class="set-select"
+                aria-label="默认人格"
+                :disabled="!canManage"
+                @update:model-value="
+                  (v) => update({ defaultPersonaId: (v as string | null) ?? null })
+                "
+              />
+            </div>
+            <div class="set col">
+              <div class="set-mode-row">
+                <span class="set-label">
+                  群聊人物认人模式
+                  <Hint>
+                    按群隔离下各群事实互不流转；跨群认人允许在同一客户端下未开启单群隔离锁的群与私聊间按需召回同一发言人的事实。
+                  </Hint>
+                </span>
+                <SegmentedChoice
+                  :model-value="client.config.personMemoryMode ?? 'strict'"
+                  :items="personModeItems"
+                  label="群聊人物认人模式"
+                  @update:model-value="(v) => updateConfig({ personMemoryMode: v })"
+                />
+              </div>
+            </div>
+            <div class="set">
+              <USwitch
+                label="本人私聊开放内部记忆"
+                :model-value="client.config.elevateOwnerDirect === 'internal'"
+                :disabled="!canManage || savingConfig === client.id"
+                @update:model-value="
+                  (v) => updateConfig({ elevateOwnerDirect: v ? 'internal' : undefined })
+                "
+              />
+              <Hint
+                >标记为「这是我」的本人私聊可读取内部及以下记忆（仍受客户端与访问密钥范围上限约束）。</Hint
+              >
+            </div>
+            <div class="set">
+              <USwitch
+                label="记录召回提示语"
+                :model-value="client.config.recordPrompt !== false"
+                :disabled="!canManage || savingConfig === client.id"
+                @update:model-value="(v) => updateConfig({ recordPrompt: v ? undefined : false })"
+              />
+              <Hint>保留提示语前 200 字，疑似凭据的片段自动打码，仅所有者可见。</Hint>
+            </div>
+            <div class="set col">
+              <AppGroupPersonas
+                :circle-id="circleId"
+                :client-id="client.id"
+                :can-manage="canManage"
+                :personas="personas.data.value ?? []"
+                :personas-loaded="personas.isSuccess.value"
+              />
+            </div>
+            <div v-if="isCircleOwner || canDelete" class="set-actions">
+              <UButton
+                v-if="isCircleOwner"
+                color="primary"
+                variant="outline"
+                @click="((confirmingTransfer = true), (transferError = null))"
+              >
+                转移客户端
+              </UButton>
+              <UButton
+                v-if="canDelete"
+                color="error"
+                variant="outline"
+                @click="((confirmingDelete = true), (deleteError = null))"
+              >
+                删除客户端
+              </UButton>
+            </div>
+          </section>
+
+          <div class="app-side-area">
+            <!-- 试算按客户端所有者的视角执行，仅给客户端所有者 -->
+            <AppSimulator
+              v-if="isClientOwner"
+              class="app-boot-area"
+              :circle-id="circleId"
+              :client-id="client.id"
+              :key-id="selectedKey?.id"
+              :settings="`${client.defaultPersonaId}:${client.config.elevateOwnerDirect ?? ''}:${client.config.personMemoryMode ?? ''}`"
+              :vocabulary="facets.data.value ?? null"
+            />
+            <AppRecallEvents class="app-events-area" :circle-id="circleId" :client-id="client.id" />
+          </div>
+          <AppAdvancedSettings
+            v-if="canSeeKeys"
+            class="app-advanced-area"
+            :circle-id="circleId"
+            :client-id="client.id"
+          />
         </div>
-        <AppAdvancedSettings
-          v-if="canSeeKeys"
-          class="app-advanced-area"
-          :circle-id="circleId"
-          :client-id="client.id"
-        />
-      </div>
-    </template>
+      </template>
+    </div>
   </div>
 
   <UModal
     :open="confirmingTransfer"
-    title="转移这个接入实例？"
+    title="转移这个客户端？"
     :dismissible="!transferring"
+    :close="!transferring"
     @update:open="(v) => !v && closeTransfer()"
   >
     <template #body>
@@ -455,8 +478,9 @@ watch([circleId, clientId], () => {
         </p>
         <p v-else>
           转移后现有访问密钥全部吊销，新所有者需重新签发。
-          <Hint>接入实例无上下文请求与凭据授权属于其所有者，转移后改为新所有者。</Hint>
+          <Hint>客户端无上下文请求与凭据授权属于其所有者，转移后改为新所有者。</Hint>
         </p>
+        <p v-if="transferError" class="text-error" role="alert">{{ transferError }}</p>
       </div>
     </template>
     <template #footer>
@@ -471,34 +495,16 @@ watch([circleId, clientId], () => {
     </template>
   </UModal>
 
-  <UModal
+  <ConsequenceModal
     :open="confirmingDelete"
-    title="删除这个接入实例？"
-    :dismissible="!deleting"
-    @update:open="(v) => !v && !deleting && (confirmingDelete = false)"
-  >
-    <template #body>
-      <div class="space-y-2 text-sm">
-        <p>
-          删除「{{
-            client?.name
-          }}」后，其全部访问密钥与按群规则将一并删除，使用这些访问密钥的客户端将立即失去访问权限。
-        </p>
-      </div>
-    </template>
-    <template #footer>
-      <div class="flex w-full justify-end gap-2">
-        <UButton
-          color="neutral"
-          variant="ghost"
-          :disabled="deleting"
-          @click="confirmingDelete = false"
-          >取消</UButton
-        >
-        <UButton color="error" :loading="deleting" @click="client && remove(client)">删除</UButton>
-      </div>
-    </template>
-  </UModal>
+    title="删除这个客户端？"
+    :consequences="deleteConsequences"
+    action="删除"
+    :busy="deleting"
+    :error="deleteError"
+    @close="confirmingDelete = false"
+    @confirm="client && remove(client)"
+  />
 </template>
 
 <style scoped>

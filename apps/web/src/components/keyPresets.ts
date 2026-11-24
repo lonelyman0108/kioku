@@ -18,7 +18,7 @@ export interface KeyPreset {
 export const CUSTOM_PRESET = 'custom'
 export const CUSTOM_PRESET_HELP = '逐项勾选下面的表格'
 
-// 签发访问密钥时的常用组合，与设计里的透镜授权模型对应；表格里改了任何一格就按 matchPreset 重新对
+// 签发访问密钥时的常用组合，与多维切面授权模型对应；表格里改了任何一格就按 matchPreset 重新对
 export const keyPresets: KeyPreset[] = [
   {
     id: 'agent',
@@ -67,7 +67,7 @@ function sameStringSet(a: readonly string[], b: readonly string[]): boolean {
   return sa.length === sb.length && sa.every((v, i) => v === sb[i])
 }
 
-// 两组透镜权限是否相同（物种与场域集合的元素先后不算，区分 allowedRealms 的 null 与数组）
+// 两组访问范围是否相同（形态与场域集合的元素先后不算，区分 allowedRealms 的 null 与数组）
 export function sameScopes(a: LensKeyScopes, b: LensKeyScopes): boolean {
   const realmsEqual =
     a.allowedRealms === null || b.allowedRealms === null
@@ -83,7 +83,7 @@ export function sameScopes(a: LensKeyScopes, b: LensKeyScopes): boolean {
   )
 }
 
-// 签发时能选的凭据能力：只有记忆圈所有者的接入实例能有取用与管理，别的成员只能选不可用
+// 签发时能选的凭据能力：只有记忆圈所有者的客户端能有取用与管理，别的成员只能选不可用
 export function allowedCredentialCapability(
   capability: CredentialCapability,
   isCircleOwner: boolean,
@@ -92,7 +92,7 @@ export function allowedCredentialCapability(
 }
 
 // 按签发范围，凭据能力实际能用到哪一档：与服务端 credentialDenial 对齐。
-// 取用与管理都需要可读正式词条且最高敏感级不低于私密；管理另需可写正式词条。
+// 取用与管理都需要可读正式记忆且最高敏感级不低于私密；管理另需可写正式记忆。
 export function issuedCredentialCapability(scopes: LensKeyScopes): CredentialCapability {
   if (scopes.credentials === 'none') return 'none'
   const canReadEntries =
@@ -103,7 +103,7 @@ export function issuedCredentialCapability(scopes: LensKeyScopes): CredentialCap
   return scopes.credentials
 }
 
-function cloneScopes(scopes: LensKeyScopes): LensKeyScopes {
+export function cloneScopes(scopes: LensKeyScopes): LensKeyScopes {
   return {
     readKinds: [...scopes.readKinds] as EntryKind[],
     writeKinds: [...scopes.writeKinds] as EntryKind[],
@@ -125,7 +125,7 @@ export function presetScopes(preset: KeyPreset, isCircleOwner: boolean): LensKey
 
 // 凭据能力的适用条件，签发弹窗与浏览器授权确认页共用这一句
 export const CREDENTIAL_CAPABILITY_HINT =
-  '取用与管理都需要可读正式词条、最高敏感级不低于私密，管理还需要可写正式词条。带会话上下文（群聊、私聊、定时任务）或客场圈时凭据一律不可用。'
+  '取用与管理都需要可读正式记忆、最高敏感级不低于私密，管理还需要可写正式记忆。带会话上下文（群聊、私聊、定时任务）或关联圈时凭据一律不可用。'
 
 // 签发范围按签发人收紧：不是记忆圈所有者时，凭据能力、机密级与管理词表及人格权限都不能带着
 export function tightenScopes(scopes: LensKeyScopes, isCircleOwner: boolean): LensKeyScopes {

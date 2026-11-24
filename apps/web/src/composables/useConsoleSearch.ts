@@ -1,5 +1,5 @@
 import type { CommandPaletteGroup, CommandPaletteItem } from '@nuxt/ui'
-import type { ConsoleSearchResponse } from '@kioku/contracts'
+import type { CircleSummary, ConsoleSearchResponse, EntryKind } from '@kioku/contracts'
 import { computed, onBeforeUnmount, ref, watch, type Ref } from 'vue'
 
 import { ApiError } from '../api/client'
@@ -11,9 +11,20 @@ import { entryRoute } from '../routes'
 // 输入停下来这么久之后再去服务端搜，免得每敲一个字都请求一次
 const SEARCH_DELAY_MS = 250
 
-// ⌘K 搜索：页面跳转由搜索框自己过滤；词条交给服务端，分成短 ID / 标题 / 关键词直接命中、召回候选两组。
+function itemIcon(kind: EntryKind, sensitivity?: string, recall = false): string {
+  if (sensitivity === 'secret') return icons.secret
+  if (kind === 'fact') return icons.user
+  if (kind === 'episode') return icons.conversations
+  return recall ? icons.memories : icons.file
+}
+
+// ⌘K 搜索：页面跳转由搜索框自己过滤；词条交给服务端跨全部加入圈检索，分成短 ID / 标题 / 召回说明直接命中、召回候选两组。
 // 换了记忆圈或改了输入，之前发出的请求晚到也不采用
-export function useConsoleSearch(circleId: Ref<string | null>, pages: Ref<CommandPaletteItem[]>) {
+export function useConsoleSearch(
+  circleId: Ref<string | null>,
+  pages: Ref<CommandPaletteItem[]>,
+  circles?: Ref<readonly Pick<CircleSummary, 'id' | 'name'>[]>,
+) {
   const term = ref('')
   const loading = ref(false)
   const results = ref<ConsoleSearchResponse | null>(null)
@@ -36,7 +47,7 @@ export function useConsoleSearch(circleId: Ref<string | null>, pages: Ref<Comman
     loading.value = true
     timer = setTimeout(async () => {
       try {
-        const found = await api.searchEntries(id, query)
+        const found = await api.searchEntries(id, query, { allCircles: true })
         if (mine === seq) results.value = found
       } catch (err) {
         if (mine !== seq) return
@@ -48,6 +59,8 @@ export function useConsoleSearch(circleId: Ref<string | null>, pages: Ref<Comman
     }, SEARCH_DELAY_MS)
   })
   onBeforeUnmount(() => clearTimeout(timer))
+
+  const circleNames = computed(() => new Map((circles?.value ?? []).map((c) => [c.id, c.name])))
 
   const groups = computed<CommandPaletteGroup<CommandPaletteItem>[]>(() => {
     const list: CommandPaletteGroup<CommandPaletteItem>[] = [
@@ -64,19 +77,35 @@ export function useConsoleSearch(circleId: Ref<string | null>, pages: Ref<Comman
     }
     const found = results.value
     if (!id || !found) return list
-    const to = (shortId: string) => entryRoute(id, shortId)
-    const direct = new Set(found.matches.map((m) => m.shortId))
+    const suffixFor = (
+      item: {
+        shortId: string
+        circleId: string
+        circleSlug: string | null
+        kind: EntryKind
+      },
+      extra: string | null | undefined,
+    ) => {
+      const circleTag =
+        item.circleId !== id
+          ? (circleNames.value.get(item.circleId) ?? item.circleSlug ?? '跨圈')
+          : null
+      return [item.shortId, entryKindLabels[item.kind], circleTag, extra]
+        .filter(Boolean)
+        .join(' · ')
+    }
+    const direct = new Set(found.matches.map((m) => `${m.circleId}:${m.shortId}`))
     // 服务端已经按查询词筛过，不再交给搜索框按文字过滤
     list.push(
       {
         id: 'matches',
-        label: '标题、短 ID 与关键词',
+        label: '标题、短 ID 与召回说明',
         ignoreFilter: true,
         items: found.matches.map((m) => ({
           label: m.title,
-          suffix: m.disclosure ?? entryKindLabels[m.kind],
-          icon: m.sensitivity === 'secret' ? icons.secret : icons.file,
-          to: to(m.shortId),
+          suffix: suffixFor(m, m.disclosure),
+          icon: itemIcon(m.kind, m.sensitivity),
+          to: entryRoute(m.circleId, m.shortId),
         })),
       },
       {
@@ -84,12 +113,12 @@ export function useConsoleSearch(circleId: Ref<string | null>, pages: Ref<Comman
         label: '召回',
         ignoreFilter: true,
         items: found.candidates
-          .filter((c) => !direct.has(c.shortId))
+          .filter((c) => !direct.has(`${c.circleId}:${c.shortId}`))
           .map((c) => ({
             label: c.title,
-            suffix: c.cues.length ? c.cues.join(' · ') : (c.disclosure ?? ''),
-            icon: icons.memories,
-            to: to(c.shortId),
+            suffix: suffixFor(c, c.cues.length ? c.cues.join(' · ') : c.disclosure),
+            icon: itemIcon(c.kind, undefined, true),
+            to: entryRoute(c.circleId, c.shortId),
           })),
       },
     )

@@ -820,7 +820,7 @@ describe('Claude Code：hook 循环回复后发 turn.end', () => {
       expect(agentLoopDetail(loop, false)).toBe(`${AGENT_LOOP_DETAILS[loop]}回复后不发 turn.end。`)
     }
     expect(agentLoopDetail('hook', true)).toContain('回复后发 turn.end')
-    expect(agentLoopDetail('hook', true)).toContain('不带会话上下文时按接入实例与所属成员缓冲')
+    expect(agentLoopDetail('hook', true)).toContain('不带会话上下文时按客户端与所属成员缓冲')
     expect(agentLoopDetail('chat', true)).toContain('需带私聊、群聊或频道的会话上下文')
   })
 })

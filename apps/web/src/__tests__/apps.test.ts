@@ -63,7 +63,7 @@ describe('签发上限和当前有效上限', () => {
   it('所有者离开记忆圈时说已作废，不算收紧', () => {
     const voided = key({ effectiveScopes: null })
     expect(isNarrowed(voided)).toBe(false)
-    expect(effectiveNote(voided)).toBe('已作废：接入实例所有者已不在此记忆圈')
+    expect(effectiveNote(voided)).toBe('已作废：客户端所有者已不在此记忆圈')
   })
 
   it('吊销了的不再说', () => {

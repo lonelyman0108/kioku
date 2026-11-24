@@ -102,16 +102,17 @@ export function collapseUnchanged(lines: DiffLine[], context = 3): DiffRow[] {
   return rows
 }
 
-export type VariantDiffStatus = 'added' | 'removed' | 'modified' | 'unchanged' | 'secret'
+export type VariantDiffStatus = 'added' | 'removed' | 'modified' | 'unchanged'
 
 export interface VariantDiffItem {
   sig: string
   when: WhenCondition
   status: VariantDiffStatus
+  secret: boolean
   rows: DiffRow[]
 }
 
-// 历史中前后两次词条快照的多变体切片按 when 签名配对比较
+// 历史中前后两次词条快照的多变体切片按 when 签名配对比较；机密加密状态独立于结构增删改状态
 export function diffVariantSnapshots(
   before: readonly VariantSnapshot[] | null,
   after: readonly VariantSnapshot[],
@@ -141,33 +142,43 @@ export function diffVariantSnapshots(
   return ordered.map(({ sig, prev, next }) => {
     const when = next?.when ?? prev!.when
     if (!next) {
-      if (prev!.content === null) return { sig, when, status: 'secret', rows: [] }
       return {
         sig,
         when,
         status: 'removed',
-        rows: prev!.content.split('\n').map((text) => ({ kind: 'remove' as const, text })),
+        secret: prev!.content === null,
+        rows:
+          prev!.content === null
+            ? []
+            : prev!.content.split('\n').map((text) => ({ kind: 'remove' as const, text })),
       }
     }
     if (!prev) {
-      if (next.content === null) return { sig, when, status: 'secret', rows: [] }
       return {
         sig,
         when,
         status: 'added',
-        rows: next.content.split('\n').map((text) => ({ kind: 'add' as const, text })),
+        secret: next.content === null,
+        rows:
+          next.content === null
+            ? []
+            : next.content.split('\n').map((text) => ({ kind: 'add' as const, text })),
       }
     }
+    if (prev.content === null && next.content === null) {
+      return { sig, when, status: 'unchanged', secret: true, rows: [] }
+    }
     if (prev.content === null || next.content === null) {
-      return { sig, when, status: 'secret', rows: [] }
+      return { sig, when, status: 'modified', secret: true, rows: [] }
     }
     if (prev.content === next.content) {
-      return { sig, when, status: 'unchanged', rows: [] }
+      return { sig, when, status: 'unchanged', secret: false, rows: [] }
     }
     return {
       sig,
       when,
       status: 'modified',
+      secret: false,
       rows: collapseUnchanged(diffLines(prev.content, next.content)),
     }
   })

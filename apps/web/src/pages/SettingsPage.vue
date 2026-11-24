@@ -63,7 +63,7 @@ function linkTo(key: SettingsGroupKey, section: string) {
     : { name, params: { section } }
 }
 
-// 小节后面的条数（成员数）：只有共享记忆圈组的左栏用得上，别的组不读
+// 小节后面的条数（成员数）：只有独立圈组的左栏用得上，别的组不读
 const counts = useSectionCounts(
   computed(() =>
     group.value === 'circle' && circle.value?.kind === 'shared' ? circle.value.id : null,

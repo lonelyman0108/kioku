@@ -177,7 +177,7 @@ function askDisable(account: AdminAccount) {
   confirming.value = {
     account,
     title: `停用 ${account.displayName}？`,
-    body: '停用后：无法登录，会话立即失效，其接入实例的访问密钥停止工作；重新启用后恢复。',
+    body: '停用后：无法登录，会话立即失效，其客户端的访问密钥停止工作；重新启用后恢复。',
     action: '停用',
     danger: true,
     change: { disabled: true },
@@ -189,7 +189,7 @@ function askEnable(account: AdminAccount) {
   confirming.value = {
     account,
     title: `启用 ${account.displayName}？`,
-    body: '启用后：可以重新登录，其接入实例的访问密钥恢复工作。',
+    body: '启用后：可以重新登录，其客户端的访问密钥恢复工作。',
     action: '启用',
     danger: false,
     change: { disabled: false },
@@ -338,9 +338,9 @@ async function apply() {
     <UModal
       :open="createOpen"
       :title="created ? '设置密码链接' : '新建账号'"
-      :dismissible="!created"
-      :close="!created"
-      @update:open="(v) => (v ? openCreate() : closeCreate())"
+      :dismissible="!creating && !created"
+      :close="!creating && !created"
+      @update:open="(v) => (v ? openCreate() : !creating && closeCreate())"
     >
       <template #body>
         <PasswordLinkOnce v-if="created" :link="created.link" :display-name="created.displayName" />
@@ -372,7 +372,9 @@ async function apply() {
         <div class="flex w-full justify-end gap-2">
           <UButton v-if="created" @click="closeCreate">完成</UButton>
           <template v-else>
-            <UButton color="neutral" variant="ghost" @click="closeCreate">取消</UButton>
+            <UButton color="neutral" variant="ghost" :disabled="creating" @click="closeCreate"
+              >取消</UButton
+            >
             <UButton :loading="creating" :disabled="!canCreate" @click="create">新建</UButton>
           </template>
         </div>
@@ -384,9 +386,9 @@ async function apply() {
       :title="
         regenerated ? '设置密码链接' : linkTarget?.passwordSet ? '重置密码？' : '重新生成链接？'
       "
-      :dismissible="!regenerated"
-      :close="!regenerated"
-      @update:open="(v) => !v && closeLink()"
+      :dismissible="!regenerating && !regenerated"
+      :close="!regenerating && !regenerated"
+      @update:open="(v) => !v && !regenerating && closeLink()"
     >
       <template #body>
         <PasswordLinkOnce
@@ -404,7 +406,9 @@ async function apply() {
         <div class="flex w-full justify-end gap-2">
           <UButton v-if="regenerated" @click="closeLink">完成</UButton>
           <template v-else>
-            <UButton color="neutral" variant="ghost" @click="closeLink">取消</UButton>
+            <UButton color="neutral" variant="ghost" :disabled="regenerating" @click="closeLink"
+              >取消</UButton
+            >
             <UButton :loading="regenerating" @click="regenerate">生成链接</UButton>
           </template>
         </div>
@@ -414,7 +418,9 @@ async function apply() {
     <UModal
       :open="confirming !== null"
       :title="confirming?.title"
-      @update:open="(v) => !v && (confirming = null)"
+      :dismissible="!applying"
+      :close="!applying"
+      @update:open="(v) => !v && !applying && (confirming = null)"
     >
       <template #body>
         <p class="text-sm">{{ confirming?.body }}</p>
@@ -427,7 +433,9 @@ async function apply() {
       </template>
       <template #footer>
         <div class="flex w-full justify-end gap-2">
-          <UButton color="neutral" variant="ghost" @click="confirming = null">取消</UButton>
+          <UButton color="neutral" variant="ghost" :disabled="applying" @click="confirming = null"
+            >取消</UButton
+          >
           <UButton
             :color="confirming?.danger ? 'error' : 'primary'"
             :loading="applying"

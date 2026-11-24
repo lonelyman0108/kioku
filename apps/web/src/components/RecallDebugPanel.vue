@@ -1,36 +1,42 @@
 <script setup lang="ts">
 import {
+  CHAT_TYPES,
   normalizeWhen,
+  type ChatType,
   type EntryKind,
+  type PreviewTargets,
   type RecallDebug,
   type Sensitivity,
   type StrataBand,
 } from '@kioku/contracts'
 import { useQueries, useQuery } from '@tanstack/vue-query'
-import { computed, ref, toRef, useId, watch } from 'vue'
+import { computed, reactive, ref, toRef, useId, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { ApiError, readFailure } from '../api/client'
+import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { ownedClients } from '../apps'
+import { chatTypeLabels, usesGroup, usesSender } from '../benchForm'
 import { useKeyMatrices } from '../composables/useKeyMatrices'
 import { useSession } from '../composables/useSession'
 import { readDenialLabels } from '../labels'
 import { whenLabel } from '../memoryDetail'
 import { debugKeyChoices, scoreAxis, scoreParts, type ScorePart } from '../recall'
 import { entryRoute } from '../routes'
+import CrossCirclePreviewDrawer from './CrossCirclePreviewDrawer.vue'
 import FacetWhenPicker from './FacetWhenPicker.vue'
 import Hint from './Hint.vue'
 import MemoryFlags from './strata/MemoryFlags.vue'
 import MemoryName from './strata/MemoryName.vue'
 import NoteLine from './strata/NoteLine.vue'
+import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 import StrataCore from './strata/StrataCore.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
-import { entryBand } from './strata/strata'
+import { entryBand, kindBandForCircle } from './strata/strata'
 
-// 召回调试：按一个访问密钥模拟一句话的召回。只有接入实例所有者能用（会读到所有者的个人内容，记忆圈所有者也不行），
-// 所以只列自己是所有者的接入实例的有效访问密钥。选的是哪个访问密钥记在地址里
+// 召回调试：按一个访问密钥模拟一句话的召回。只有客户端所有者能用（会读到所有者的个人内容，记忆圈所有者也不行），
+// 所以只列自己是所有者的客户端的有效访问密钥。选的是哪个访问密钥记在地址里
 const props = defineProps<{ circleId: string }>()
 const route = useRoute()
 const router = useRouter()
@@ -47,7 +53,7 @@ const facetsQuery = useQuery({
 })
 const vocab = computed(() => facetsQuery.data.value ?? undefined)
 const owned = computed(() => ownedClients(clients.data.value ?? [], me.data.value?.id))
-// 和接入实例详情的访问密钥列表同一份缓存
+// 和客户端详情的访问密钥列表同一份缓存
 const keyResults = useQueries({
   queries: computed(() =>
     owned.value.map((client) => ({
@@ -58,8 +64,8 @@ const keyResults = useQueries({
 })
 const choices = computed(() => debugKeyChoices(owned.value, keyResults.value))
 const options = computed(() => choices.value.options)
-// 所有接入实例的访问密钥都有结果（成功或失败）才显示表单：先到的先显示的话，后到的读到后选中项会变，
-// 进行中和已有的结果都被清掉；地址里的访问密钥属于慢的接入实例时，这段时间还会用错密钥运行
+// 所有客户端的访问密钥都有结果（成功或失败）才显示表单：先到的先显示的话，后到的读到后选中项会变，
+// 进行中和已有的结果都被清掉；地址里的访问密钥属于慢的客户端时，这段时间还会用错密钥运行
 const keysPending = computed(() => keyResults.value.some((result) => result.isPending))
 // 地址里的访问密钥不在列表里（失效了、不是自己的）就用第一个
 const selected = computed(
@@ -75,15 +81,61 @@ const { rowsOf, failureOf } = useKeyMatrices(
 )
 
 const query = ref('')
+const optionsOpen = ref(false)
+const chatType = ref<ChatType | null>(null)
+const groupSubjectId = ref<string | null>(null)
+const senderSubjectId = ref<string | null>(null)
+const senderIsOwner = ref(false)
+const project = reactive({ dirName: '', repoName: '' })
 const facets = ref<Record<string, string[]>>({})
 const crossCircle = ref(true)
 const failure = ref<string | null>(null)
+const drawerTarget = ref<{ circleId: string; shortId: string } | null>(null)
 // 每次模拟一个序号，current 是进行中的那次：结果、报错与 loading 都只认它；
-// 换了访问密钥或接入实例设置时清掉，进行中的那次就作废了
+// 换了访问密钥或客户端设置时清掉，进行中的那次就作废了
 let counter = 0
 const current = ref<number | null>(null)
 const running = computed(() => current.value !== null)
 const debug = ref<RecallDebug | null>(null)
+
+const chatTypeItems = [
+  { label: '无会话上下文', value: null },
+  ...CHAT_TYPES.map((type) => ({ label: chatTypeLabels[type], value: type })),
+]
+
+const groupSubjects = useQuery({
+  queryKey: computed(() => ['subjects', props.circleId, 'group', 'debug'] as const),
+  queryFn: ({ queryKey: [, cid] }) => api.subjects(cid, { kind: 'group' }),
+  enabled: computed(() => optionsOpen.value && usesGroup(chatType.value)),
+})
+const senderSubjects = useQuery({
+  queryKey: computed(() => ['subjects', props.circleId, 'person', 'debug'] as const),
+  queryFn: ({ queryKey: [, cid] }) => api.subjects(cid, { kind: 'person' }),
+  enabled: computed(() => optionsOpen.value && usesSender(chatType.value)),
+})
+
+const groupItems = computed(() => [
+  { label: '不指定具体群聊', value: null },
+  ...(groupSubjects.data.value?.items ?? []).map((s) => ({
+    label: s.displayName,
+    value: s.id,
+  })),
+])
+const senderItems = computed(() => [
+  { label: '不指定具体联系人', value: null },
+  ...(senderSubjects.data.value?.items ?? []).map((s) => ({
+    label: s.displayName,
+    value: s.id,
+  })),
+])
+
+watch(chatType, (next) => {
+  if (!usesGroup(next)) groupSubjectId.value = null
+  if (!usesSender(next)) {
+    senderSubjectId.value = null
+    senderIsOwner.value = false
+  }
+})
 
 // 默认人格、本人私聊时读取个人内容与认人模式变了的话，之前的结果就不是现在的样子了
 const settings = computed(() => {
@@ -97,6 +149,40 @@ watch([() => props.circleId, () => selected.value?.key.id, settings], () => {
   debug.value = null
   failure.value = null
 })
+watch(
+  () => props.circleId,
+  () => {
+    query.value = ''
+    chatType.value = null
+    groupSubjectId.value = null
+    senderSubjectId.value = null
+    senderIsOwner.value = false
+    project.dirName = ''
+    project.repoName = ''
+    facets.value = {}
+    crossCircle.value = true
+    hovered.value = null
+    drawerTarget.value = null
+  },
+)
+
+function buildPreviewTargets(): PreviewTargets | undefined {
+  const type = chatType.value
+  if (!type) return undefined
+  return {
+    chatType: type,
+    ...(usesGroup(type) && groupSubjectId.value ? { groupSubjectId: groupSubjectId.value } : {}),
+    ...(usesSender(type) && senderSubjectId.value
+      ? { senderSubjectId: senderSubjectId.value }
+      : {}),
+    ...(usesSender(type) && senderIsOwner.value ? { senderIsOwner: true } : {}),
+  }
+}
+
+async function switchToEntry(targetCircleId: string, shortId: string) {
+  await router.push(entryRoute(targetCircleId, shortId))
+  drawerTarget.value = null
+}
 
 async function run() {
   const target = selected.value
@@ -106,11 +192,18 @@ async function run() {
   current.value = id
   failure.value = null
   const normalizedFacets = normalizeWhen(facets.value)
+  const dirName = project.dirName.trim()
+  const repoName = project.repoName.trim()
+  const previewTargets = buildPreviewTargets()
   try {
     const result = await api.recallDebug(props.circleId, target.client.id, target.key.id, {
       query: text,
       ...(Object.keys(normalizedFacets).length ? { facets: normalizedFacets } : {}),
       crossCircle: crossCircle.value,
+      ...(dirName || repoName
+        ? { project: { ...(dirName ? { dirName } : {}), ...(repoName ? { repoName } : {}) } }
+        : {}),
+      ...(previewTargets ? { previewTargets } : {}),
     })
     if (id === current.value) debug.value = result
   } catch (err) {
@@ -133,7 +226,7 @@ const widthOf = (score: number) => `${Math.max(0, score / axis.value!.max) * 100
 // 悬停一行时，在所选访问密钥的岩芯上标出这条记忆的位置：落在空白处就是当前访问密钥碰不到
 const hovered = ref<{ band: StrataBand; sensitivity: Sensitivity | null } | null>(null)
 
-function bandOf(c: { kind: EntryKind; circleId?: string; circleSlug?: string | null }): StrataBand {
+function circleMetaOf(c: { circleId?: string; circleSlug?: string | null }) {
   const list = me.data.value?.circles ?? []
   const byId = c.circleId ? list.find((ci) => ci.id === c.circleId) : undefined
   const bySlug = !byId && c.circleSlug ? list.find((ci) => ci.slug === c.circleSlug) : undefined
@@ -142,6 +235,11 @@ function bandOf(c: { kind: EntryKind; circleId?: string; circleSlug?: string | n
   const resolvedKind =
     matched?.kind ??
     (c.circleSlug === 'personal' ? 'personal' : c.circleSlug ? 'shared' : undefined)
+  return { resolvedId, resolvedKind }
+}
+
+function bandOf(c: { kind: EntryKind; circleId?: string; circleSlug?: string | null }): StrataBand {
+  const { resolvedId, resolvedKind } = circleMetaOf(c)
   return entryBand(
     {
       kind: c.kind,
@@ -152,11 +250,25 @@ function bandOf(c: { kind: EntryKind; circleId?: string; circleSlug?: string | n
   )
 }
 
+function hoverBandOf(c: {
+  kind: EntryKind
+  circleId?: string
+  circleSlug?: string | null
+}): StrataBand {
+  const { resolvedId, resolvedKind } = circleMetaOf(c)
+  const primaryKind = circle.value?.kind ?? 'shared'
+  const isPrimary = !resolvedId || resolvedId === props.circleId
+  return kindBandForCircle(c.kind, {
+    circleKind: isPrimary ? primaryKind : (resolvedKind ?? 'shared'),
+    isPrimary,
+  })
+}
+
 const hasFacets = (when: Record<string, readonly string[]> | undefined) =>
   !!when && Object.keys(normalizeWhen(when)).length > 0
 
 function formatPartValue(part: ScorePart): string {
-  if (part.label === '切面') {
+  if (part.label === '语境') {
     if (part.value > 0) return `+${part.value.toFixed(2)}`
     if (part.value < 0) return part.value.toFixed(2)
     return '–'
@@ -173,27 +285,25 @@ const groupName = useId()
       召回调试
       <template #hint>
         <Hint>
-          按所选访问密钥的当前权限模拟一句话的召回，不计入召回记录。会话上下文（私聊、群聊）暂不可选，当前按无上下文模拟；支持显式切面条件与跨圈关联开关。模拟会读取接入实例所有者的个人内容，只能选当前账号是所有者的接入实例的访问密钥。
+          按所选访问密钥的当前权限模拟一句话的召回，不计入召回记录。支持设置会话上下文、项目信息、显式适用条件与跨圈关联开关。模拟会读取客户端所有者的个人内容，只能选当前账号是所有者的客户端的访问密钥。
         </Hint>
       </template>
     </SectionHeading>
 
-    <NoteLine v-if="clients.isError.value" class="debug-note" tone="error">
-      {{ readFailure(clients.error.value) }}
-    </NoteLine>
-    <!-- 一个接入实例的访问密钥读取失败不挡别的 -->
+    <ReadFailureNote v-if="clients.isError.value" class="debug-note" :query="clients" />
+    <!-- 一个客户端的访问密钥读取失败不挡别的 -->
     <NoteLine
       v-for="failed in choices.failures"
       :key="failed.client.id"
       class="debug-note"
       tone="error"
     >
-      接入实例「{{ failed.client.name }}」的访问密钥：{{ failed.text }}
+      客户端「{{ failed.client.name }}」的访问密钥：{{ failed.text }}
     </NoteLine>
     <USkeleton v-if="clients.isPending.value || keysPending" class="mt-3 h-40 w-full" />
     <NoteLine v-else-if="clients.data.value && !owned.length" class="debug-note">
-      当前账号暂无接入实例，无法调试
-      <template #detail>召回调试只能使用当前账号是所有者的接入实例的访问密钥。</template>
+      当前账号暂无客户端，无法调试
+      <template #detail>召回调试只能使用当前账号是所有者的客户端的访问密钥。</template>
       <template #actions>
         <UButton
           :to="{ name: 'clients', params: { circleId } }"
@@ -201,7 +311,7 @@ const groupName = useId()
           color="primary"
           variant="outline"
         >
-          管理接入实例
+          管理客户端
         </UButton>
       </template>
     </NoteLine>
@@ -264,13 +374,53 @@ const groupName = useId()
           />
         </UFormField>
         <UCheckbox v-model="crossCircle" label="允许跨圈关联召回" />
-        <details class="debug-facets">
-          <summary>显式切面条件（可选）</summary>
+        <details
+          class="debug-facets"
+          @toggle="optionsOpen = ($event.target as HTMLDetailsElement).open"
+        >
+          <summary>会话上下文、项目与适用条件（可选）</summary>
           <div class="debug-facets-body">
+            <div class="debug-sim-grid">
+              <UFormField label="聊天类型">
+                <USelect v-model="chatType" :items="chatTypeItems" class="w-full" />
+              </UFormField>
+              <UFormField v-if="usesGroup(chatType)" label="群聊或频道">
+                <USelect
+                  v-model="groupSubjectId"
+                  :items="groupItems"
+                  :loading="groupSubjects.isFetching.value"
+                  class="w-full"
+                />
+              </UFormField>
+              <UFormField v-if="usesSender(chatType)" label="发言人">
+                <USelect
+                  v-model="senderSubjectId"
+                  :items="senderItems"
+                  :loading="senderSubjects.isFetching.value"
+                  class="w-full"
+                />
+              </UFormField>
+            </div>
+            <UCheckbox
+              v-if="usesSender(chatType)"
+              v-model="senderIsOwner"
+              label="以所有者身份发言"
+            />
+            <ReadFailureNote v-if="groupSubjects.isError.value" :query="groupSubjects" size="xs" />
+            <ReadFailureNote
+              v-if="senderSubjects.isError.value"
+              :query="senderSubjects"
+              size="xs"
+            />
+            <div class="debug-project-row">
+              <UInput v-model="project.dirName" placeholder="项目目录名" aria-label="项目目录名" />
+              <UInput v-model="project.repoName" placeholder="项目仓库名" aria-label="项目仓库名" />
+            </div>
             <FacetWhenPicker
               v-model="facets"
               :circle-id="circleId"
-              :vocabulary="facetsQuery.data.value ?? null"
+              :vocabulary="facetsQuery.data.value ?? undefined"
+              mode="context"
             />
           </div>
         </details>
@@ -297,7 +447,7 @@ const groupName = useId()
             class="debug-resolved"
           >
             <span v-if="hasFacets(debug.resolvedFacets)" class="resolved-item">
-              <b>匹配切面</b>{{ whenLabel(debug.resolvedFacets, vocab) }}
+              <b>匹配语境</b>{{ whenLabel(debug.resolvedFacets, vocab) }}
             </span>
             <span v-if="debug.flippedTerms.length" class="resolved-item">
               <b>命中别名</b>
@@ -321,7 +471,7 @@ const groupName = useId()
             <div class="ax-score">分数</div>
             <div class="ax-scale">
               <span class="ax-threshold" :style="{ left: `${axis.threshold}%` }">
-                <b>阈值</b> <span class="font-mono">{{ debug.minScore.toFixed(2) }}</span>
+                <b>阈值</b> <span class="ax-num">{{ debug.minScore.toFixed(2) }}</span>
               </span>
               <span
                 v-for="(tick, i) in axis.ticks"
@@ -338,7 +488,7 @@ const groupName = useId()
             <li class="rg">
               <div class="rg-label">
                 <b>将注入</b>
-                <span class="font-mono">{{ debug.injected.length }}</span>
+                <span class="rg-count">{{ debug.injected.length }}</span>
                 <Hint>分数达到 {{ debug.minScore }} 的前几条将注入。</Hint>
               </div>
               <div class="rg-scale" />
@@ -351,15 +501,26 @@ const groupName = useId()
               v-for="c in debug.injected"
               :key="c.entryId"
               class="rr"
-              @mouseenter="hovered = { band: bandOf(c), sensitivity: null }"
+              @mouseenter="hovered = { band: hoverBandOf(c), sensitivity: null }"
             >
               <div class="rr-uri">
                 <StrataSwatch :band="bandOf(c)" plain />
                 <div class="rr-uri-text">
                   <span class="rr-uri-line">
-                    <RouterLink :to="entryRoute(c.circleId, c.shortId)"
+                    <RouterLink
+                      v-if="c.circleId === circleId"
+                      :to="entryRoute(c.circleId, c.shortId)"
                       ><MemoryName :short-id="c.shortId" :title="c.title"
                     /></RouterLink>
+                    <button
+                      v-else
+                      type="button"
+                      class="rr-cross"
+                      :title="`${c.shortId}（其他记忆圈，点击侧栏预览）`"
+                      @click="drawerTarget = { circleId: c.circleId, shortId: c.shortId }"
+                    >
+                      <MemoryName :short-id="c.shortId" :title="c.title" />
+                    </button>
                     <code class="rr-id">{{ c.shortId }}</code>
                     <MemoryFlags :band="bandOf(c)" />
                   </span>
@@ -380,7 +541,7 @@ const groupName = useId()
                       whenLabel(c.matchedWhen, vocab)
                     }}</span>
                     <span v-if="c.otherVariantsCount > 0" class="rr-tag"
-                      >另有 {{ c.otherVariantsCount }} 切片</span
+                      >另有 {{ c.otherVariantsCount }} 变体</span
                     >
                     <span v-if="c.crossGroup" class="rr-tag">跨群</span>
                   </span>
@@ -415,7 +576,7 @@ const groupName = useId()
               <li class="rg">
                 <div class="rg-label">
                   <b>未注入</b>
-                  <span class="font-mono">{{ debug.others.length }}</span>
+                  <span class="rg-count">{{ debug.others.length }}</span>
                   <Hint>未达到阈值，或排在注入的前几条之后。</Hint>
                 </div>
                 <div class="rg-scale" />
@@ -424,15 +585,26 @@ const groupName = useId()
                 v-for="c in debug.others"
                 :key="c.entryId"
                 class="rr below"
-                @mouseenter="hovered = { band: bandOf(c), sensitivity: null }"
+                @mouseenter="hovered = { band: hoverBandOf(c), sensitivity: null }"
               >
                 <div class="rr-uri">
                   <StrataSwatch :band="bandOf(c)" plain />
                   <div class="rr-uri-text">
                     <span class="rr-uri-line">
-                      <RouterLink :to="entryRoute(c.circleId, c.shortId)"
+                      <RouterLink
+                        v-if="c.circleId === circleId"
+                        :to="entryRoute(c.circleId, c.shortId)"
                         ><MemoryName :short-id="c.shortId" :title="c.title"
                       /></RouterLink>
+                      <button
+                        v-else
+                        type="button"
+                        class="rr-cross"
+                        :title="`${c.shortId}（其他记忆圈，点击侧栏预览）`"
+                        @click="drawerTarget = { circleId: c.circleId, shortId: c.shortId }"
+                      >
+                        <MemoryName :short-id="c.shortId" :title="c.title" />
+                      </button>
                       <code class="rr-id">{{ c.shortId }}</code>
                       <MemoryFlags :band="bandOf(c)" />
                     </span>
@@ -452,7 +624,7 @@ const groupName = useId()
                         whenLabel(c.matchedWhen, vocab)
                       }}</span>
                       <span v-if="c.otherVariantsCount > 0" class="rr-tag"
-                        >另有 {{ c.otherVariantsCount }} 切片</span
+                        >另有 {{ c.otherVariantsCount }} 变体</span
                       >
                       <span v-if="c.crossGroup" class="rr-tag">跨群</span>
                     </span>
@@ -489,7 +661,7 @@ const groupName = useId()
             <li class="rg">
               <div class="rg-label">
                 <b>未进入当前访问密钥的召回</b>
-                <span class="font-mono">{{ debug.filtered.length }}</span>
+                <span class="rg-count">{{ debug.filtered.length }}</span>
                 <Hint>管理界面能搜索到，但当前访问密钥不会召回的记忆，每条后面写着原因。</Hint>
               </div>
             </li>
@@ -497,15 +669,31 @@ const groupName = useId()
               v-for="f in debug.filtered"
               :key="f.shortId"
               class="rr denied"
-              @mouseenter="hovered = { band: bandOf(f), sensitivity: f.sensitivity }"
+              @mouseenter="hovered = { band: hoverBandOf(f), sensitivity: f.sensitivity }"
             >
               <div class="rr-uri">
                 <StrataSwatch :band="bandOf(f)" :sensitivity="f.sensitivity" />
                 <div class="rr-uri-text">
                   <span class="rr-uri-line">
-                    <MemoryName :short-id="f.shortId" :title="f.title" />
+                    <RouterLink
+                      v-if="f.circleId === circleId"
+                      :to="entryRoute(f.circleId, f.shortId)"
+                      ><MemoryName :short-id="f.shortId" :title="f.title"
+                    /></RouterLink>
+                    <button
+                      v-else
+                      type="button"
+                      class="rr-cross"
+                      :title="`${f.shortId}（其他记忆圈，点击侧栏预览）`"
+                      @click="drawerTarget = { circleId: f.circleId, shortId: f.shortId }"
+                    >
+                      <MemoryName :short-id="f.shortId" :title="f.title" />
+                    </button>
                     <code class="rr-id">{{ f.shortId }}</code>
                     <MemoryFlags :band="bandOf(f)" :sensitivity="f.sensitivity" />
+                  </span>
+                  <span v-if="f.circleId !== circleId && f.circleSlug" class="rr-tags">
+                    <span class="rr-tag">{{ f.circleSlug }}</span>
                   </span>
                 </div>
               </div>
@@ -521,6 +709,13 @@ const groupName = useId()
         </div>
       </div>
     </div>
+
+    <CrossCirclePreviewDrawer
+      :target="drawerTarget"
+      :current-circle-id="circleId"
+      @close="drawerTarget = null"
+      @switch-to="switchToEntry"
+    />
   </section>
 </template>
 
@@ -623,7 +818,16 @@ legend {
   cursor: pointer;
 }
 .debug-facets-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
   margin-top: 8px;
+}
+.debug-sim-grid,
+.debug-project-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
 }
 .debug-resolved {
   display: flex;
@@ -716,7 +920,7 @@ legend {
 .ax-tick {
   position: absolute;
   bottom: 3px;
-  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: 12px;
   line-height: 1.4;
   color: var(--ui-text-muted);
@@ -740,6 +944,9 @@ legend {
 .ax-threshold b {
   font-weight: 600;
 }
+.ax-num {
+  font-variant-numeric: tabular-nums;
+}
 .rg {
   align-items: center;
   min-height: 30px;
@@ -755,7 +962,8 @@ legend {
 .rg-label b {
   font-weight: 600;
 }
-.rg-label .font-mono {
+.rg-count {
+  font-variant-numeric: tabular-nums;
   color: var(--ui-text-muted);
 }
 .rg-scale,
@@ -793,17 +1001,28 @@ legend {
   font-size: 14px;
   line-height: 1.5;
 }
-/* 层名跟在 URI 后面，和记忆列表一样：色块旁边要有文字。URI 放不下时先缩它，层名不缩 */
+/* 归属名跟在短 ID 后面，和记忆列表一样：色块旁边要有文字。名称放不下时先缩它，短 ID 与标志不缩 */
 .rr-uri-line {
   display: flex;
   align-items: baseline;
   gap: 7px;
   min-width: 0;
 }
-.rr-uri-line > a {
+.rr-uri-line > a,
+.rr-uri-line > .rr-cross {
   min-width: 0;
 }
-.rr-uri-text a:hover {
+.rr-cross {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.rr-uri-text a:hover,
+.rr-uri-text .rr-cross:hover {
   text-decoration: underline;
   text-underline-offset: 3px;
 }
@@ -812,7 +1031,7 @@ legend {
   overflow-wrap: anywhere;
 }
 .rr-score {
-  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: 16px;
   font-weight: 500;
   line-height: 1;
@@ -861,7 +1080,7 @@ legend {
   white-space: nowrap;
 }
 .parts b {
-  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-weight: 400;
   color: var(--ui-text);
 }

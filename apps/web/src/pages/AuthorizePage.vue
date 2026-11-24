@@ -46,6 +46,7 @@ import Hint from '../components/Hint.vue'
 import KeyScopeEditor from '../components/KeyScopeEditor.vue'
 import {
   CREDENTIAL_CAPABILITY_HINT,
+  cloneScopes,
   issuedCredentialCapability,
   matchPreset,
   tightenScopes,
@@ -141,6 +142,15 @@ const otherCircles = computed(() => allCircles.value.filter((c) => c.id !== circ
 
 watch(circleId, (cid) => {
   linkedCircles.value = linkedCircles.value.filter((g) => g.circleId !== cid)
+  contextFacets.value = {}
+  shared.scopes = { ...cloneScopes(shared.scopes), allowedRealms: null }
+  shared.preset = matchPreset(shared.scopes, isCircleOwner.value)
+  for (const row of rows.value) {
+    row.picked = null
+    row.slugRejected = null
+    row.form.scopes = { ...cloneScopes(row.form.scopes), allowedRealms: null }
+    row.form.preset = matchPreset(row.form.scopes, isCircleOwner.value)
+  }
 })
 
 function isCircleLinked(cid: string): boolean {
@@ -203,17 +213,18 @@ const clientItems = (runtimeFamily: RuntimeFamily) => [
     label: `${c.name}（${c.slug}）`,
     value: c.id,
   })),
-  { label: '新建接入实例', value: NEW_CLIENT },
+  { label: '新建客户端', value: NEW_CLIENT },
 ]
+const machineOf = (row: PlatformRow) => row.clientName ?? machine.value
 const clientChoice = (row: PlatformRow) =>
   row.picked !== null &&
   (row.picked === NEW_CLIENT || ownClients(row.runtimeFamily).some((c) => c.id === row.picked))
     ? row.picked
-    : defaultClientChoice(ownClients(row.runtimeFamily), row.runtimeFamily, machine.value)
+    : defaultClientChoice(ownClients(row.runtimeFamily), row.runtimeFamily, machineOf(row))
 const clientName = (row: PlatformRow) =>
-  row.typed.clientName ?? defaultClientName(row.runtimeFamily, machine.value)
+  row.typed.clientName ?? defaultClientName(row.runtimeFamily, machineOf(row))
 const keyName = (row: PlatformRow) =>
-  row.typed.keyName ?? defaultKeyName(machine.value, row.runtimeFamily)
+  row.typed.keyName ?? defaultKeyName(machineOf(row), row.runtimeFamily)
 
 const slugs = computed(() =>
   newClientSlugs(
@@ -251,7 +262,7 @@ const scopesOf = (row: PlatformRow) => (sameScopes.value ? shared.scopes : row.f
 watch(sameScopes, (same) => {
   if (same) return
   for (const row of rows.value) {
-    row.form = { preset: shared.preset, scopes: { ...shared.scopes } }
+    row.form = { preset: shared.preset, scopes: cloneScopes(shared.scopes) }
   }
 })
 const tighten = (form: ScopeForm, owner: boolean) => {
@@ -278,7 +289,7 @@ function resetChoice() {
     selected: true,
     picked: null,
     typed: { slug: null, clientName: null, keyName: null },
-    form: { preset: shared.preset, scopes: { ...shared.scopes } },
+    form: { preset: shared.preset, scopes: cloneScopes(shared.scopes) },
     slugRejected: null,
   }))
   error.value = null
@@ -463,7 +474,7 @@ async function deny() {
         <template #detail>签发需要记忆圈所有者或编辑者角色。</template>
       </NoteLine>
       <template v-else>
-        <UFormField label="主场记忆圈" class="space-field">
+        <UFormField label="主圈" class="space-field">
           <USelect
             v-if="circles.length > 1"
             v-model="circleId"
@@ -476,7 +487,7 @@ async function deny() {
         <ReadFailureNote
           v-if="clients.isError.value"
           :query="clients"
-          fallback="接入实例读取失败"
+          fallback="客户端读取失败"
           data-state="clients-failed"
         />
 
@@ -513,10 +524,10 @@ async function deny() {
               <div class="fields">
                 <UFormField>
                   <template #label>
-                    接入实例<Hint v-if="clients.isSuccess.value" label="接入实例列表说明">{{
+                    客户端<Hint v-if="clients.isSuccess.value" label="客户端列表说明">{{
                       ownClients(row.runtimeFamily).length
-                        ? `仅列出当前账号的 ${runtimeNames[row.runtimeFamily]} 接入实例`
-                        : `当前账号在此记忆圈暂无 ${runtimeNames[row.runtimeFamily]} 接入实例`
+                        ? `仅列出当前账号的 ${runtimeNames[row.runtimeFamily]} 客户端`
+                        : `当前账号在此记忆圈暂无 ${runtimeNames[row.runtimeFamily]} 客户端`
                     }}</Hint>
                   </template>
                   <USkeleton v-if="clients.isPending.value" class="h-8 w-full" />
@@ -528,7 +539,7 @@ async function deny() {
                     class="w-full"
                     @update:model-value="(value: string) => (row.picked = value)"
                   />
-                  <p v-else class="only">新建接入实例</p>
+                  <p v-else class="only">新建客户端</p>
                 </UFormField>
                 <UFormField :error="nameProblem(keyName(row)) ?? undefined">
                   <template #label>
@@ -541,10 +552,7 @@ async function deny() {
                   />
                 </UFormField>
                 <template v-if="clients.isSuccess.value && clientChoice(row) === NEW_CLIENT">
-                  <UFormField
-                    label="接入实例名称"
-                    :error="nameProblem(clientName(row)) ?? undefined"
-                  >
+                  <UFormField label="客户端名称" :error="nameProblem(clientName(row)) ?? undefined">
                     <UInput
                       :model-value="clientName(row)"
                       class="w-full"
@@ -553,9 +561,7 @@ async function deny() {
                   </UFormField>
                   <UFormField :error="slugProblems[index] ?? undefined">
                     <template #label>
-                      接入实例标识<Hint label="接入实例标识说明"
-                        >用于命令行与接口中识别这个接入实例</Hint
-                      >
+                      客户端标识<Hint label="客户端标识说明">用于命令行与接口中识别这个客户端</Hint>
                     </template>
                     <UInput
                       :model-value="slugs[index] ?? ''"
@@ -593,7 +599,7 @@ async function deny() {
         </template>
 
         <div v-if="otherCircles.length" class="lens-extra">
-          <SectionHeading title="关联客场记忆圈" :level="2" />
+          <SectionHeading title="关联圈" :level="2" />
           <ul class="linked-list">
             <li v-for="c in otherCircles" :key="c.id" class="linked-row">
               <UCheckbox
@@ -607,7 +613,7 @@ async function deny() {
                 :items="[
                   { label: '仅读取', value: 'read' },
                   {
-                    label: '可跨圈写入词条',
+                    label: '可跨圈写入记忆',
                     value: 'read_write',
                     disabled: c.role === 'viewer',
                   },
@@ -622,11 +628,18 @@ async function deny() {
         </div>
 
         <div v-if="circleId" class="lens-extra">
-          <SectionHeading title="固定切面透镜" :level="2" />
+          <SectionHeading title="默认语境（动态焦点）" :level="2" />
+          <ReadFailureNote
+            v-if="facets.isError.value"
+            :query="facets"
+            fallback="语境词典读取失败"
+          />
           <FacetWhenPicker
             v-model="contextFacets"
             :circle-id="circleId"
             :vocabulary="facets.data.value ?? null"
+            :exclude-dimensions="['runtime']"
+            mode="context"
           />
         </div>
       </template>
@@ -665,7 +678,7 @@ async function deny() {
             :groups="[
               [
                 { key: 'platform', label: '平台' },
-                { key: 'client', label: '接入实例' },
+                { key: 'client', label: '客户端' },
                 { key: 'access', label: '访问密钥', value: item.keyName },
               ],
             ]"

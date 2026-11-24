@@ -2,8 +2,10 @@
 import {
   CONVERT_SCOPE_TEXT,
   SENSITIVE_KIND_NAMES,
+  hasHomogeneousRealms,
   isProtectedPersonalEntry,
   placeholderAllowed,
+  sensitivityAllowed,
   type EntryListItem,
   type RedactMode,
   type SensitiveCategory,
@@ -16,6 +18,7 @@ import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
 import { usePlaintextActions } from '../composables/usePlaintextActions'
+import { useSession } from '../composables/useSession'
 import { entryRoute } from '../routes'
 import { formatRelative, formatTime } from '../time'
 import ConvertCredentialModal from './ConvertCredentialModal.vue'
@@ -33,6 +36,7 @@ import { entryBand } from './strata/strata'
 // 疑似敏感内容：明文凭据建议转存为凭据；个人信息保留原值，建议移入个人圈私密或设为机密，抹除敏感段作为确认后的清理动作
 const props = defineProps<{ circleId: string }>()
 const circleId = toRef(props, 'circleId')
+const { me } = useSession()
 const permissions = useMemoryPermissions(circleId)
 const actions = usePlaintextActions(circleId)
 
@@ -53,6 +57,9 @@ const categories = [
 watch(circleId, () => {
   filter.value = 'true'
   category.value = 'all'
+  convertOpen.value = false
+  converting.value = null
+  redactTarget.value = null
 })
 
 const active = useActivated()
@@ -106,6 +113,14 @@ async function confirmRedact(mode: RedactMode) {
 // 占位符放不进这条记忆时，转存一定失败：这一行的操作换成去调整它
 const convertible = (item: EntryListItem) =>
   placeholderAllowed(permissions.circleKind.value, item.kind, item.sensitivity)
+const canMovePersonalPrivate = (item: EntryListItem) =>
+  item.provenance !== 'untrusted' &&
+  item.kind === 'entry' &&
+  (permissions.circleKind.value === 'personal' || Boolean(me.data.value?.personalCircleId))
+const canProtectSecret = (item: EntryListItem) =>
+  permissions.sensitivities.value.includes('secret') &&
+  sensitivityAllowed(permissions.circleKind.value, item.kind, 'secret', item.provenance) &&
+  hasHomogeneousRealms(item.variantsWhen.map((when) => ({ when })))
 const bandOf = (item: EntryListItem) =>
   entryBand(
     { kind: item.kind, circleId: item.circleId, circleKind: permissions.circleKind.value },
@@ -118,7 +133,7 @@ const bandOf = (item: EntryListItem) =>
     <SectionHeading title="疑似敏感内容">
       <template #hint>
         <Hint>
-          共享记忆圈或非私密范围内疑似包含明文凭据或个人信息。明文凭据建议转存为凭据并以占位符引用；个人信息建议保留原值并移入个人圈私密或设为机密，外发至模型与嵌入前会自动脱敏。误粘贴的冗余文本可抹除敏感段；规则误判时可忽略。
+          独立圈或非私密范围内疑似包含明文凭据或个人信息。明文凭据建议转存为凭据并以占位符引用；个人信息建议保留原值并移入个人圈私密或设为机密，外发至模型与嵌入前会自动脱敏。误粘贴的冗余文本可抹除敏感段；规则误判时可忽略。
         </Hint>
       </template>
     </SectionHeading>
@@ -149,7 +164,7 @@ const bandOf = (item: EntryListItem) =>
       <ul v-else>
         <li v-for="item in items" :key="item.id" class="plain-row">
           <div class="plain-uri">
-            <StrataSwatch :band="bandOf(item)" :sensitivity="item.sensitivity" />
+            <StrataSwatch :band="bandOf(item)" :sensitivity="item.sensitivity" local />
             <RouterLink :to="entryRoute(circleId, item.shortId)" class="min-w-0"
               ><MemoryName :short-id="item.shortId" :title="item.title"
             /></RouterLink>
@@ -165,8 +180,11 @@ const bandOf = (item: EntryListItem) =>
             <time :datetime="item.updatedAt" :title="formatTime(item.updatedAt)">
               更新于 {{ formatRelative(item.updatedAt) }}
             </time>
+            <span v-if="filter === 'true' && item.provenance === 'untrusted'" class="plain-blocked">
+              来源未确认，待确认后才可移入个人圈或设为机密
+            </span>
             <span
-              v-if="
+              v-else-if="
                 filter === 'true' &&
                 !permissions.readOnlyReason(item) &&
                 item.sensitiveCredential &&
@@ -197,37 +215,59 @@ const bandOf = (item: EntryListItem) =>
                   查看记忆
                 </UButton>
               </template>
+              <UButton
+                v-if="item.provenance === 'untrusted'"
+                color="primary"
+                variant="outline"
+                :to="{ name: 'inbox', params: { circleId }, query: { tab: 'review' } }"
+              >
+                前往待确认
+              </UButton>
               <template
-                v-if="
+                v-else-if="
                   item.sensitivePii &&
                   !isProtectedPersonalEntry(
                     permissions.circleKind.value,
                     item.sensitivity,
                     item.provenance,
-                  )
+                  ) &&
+                  canMovePersonalPrivate(item)
                 "
               >
                 <UButton
+                  v-if="permissions.circleKind.value === 'personal'"
                   color="primary"
                   variant="outline"
                   :loading="actions.busy.value === item.id"
                   :disabled="actions.busy.value !== null"
                   @click="
                     actions.protect(
-                      {
-                        id: item.id,
-                        version: item.version,
-                        inPersonal: permissions.circleKind.value === 'personal',
-                      },
+                      { id: item.id, version: item.version, inPersonal: true },
                       'personal_private',
                     )
                   "
                 >
-                  {{ permissions.circleKind.value === 'personal' ? '设为私密' : '移入个人圈私密' }}
+                  设为私密
+                </UButton>
+                <UButton
+                  v-else
+                  color="primary"
+                  variant="outline"
+                  :loading="actions.busy.value === item.id"
+                  :disabled="actions.busy.value !== null"
+                  @click="
+                    actions.moveToPersonalAndProtect({
+                      id: item.id,
+                      version: item.version,
+                      personalCircleId: me.data.value!.personalCircleId!,
+                    })
+                  "
+                >
+                  移入个人圈私密
                 </UButton>
               </template>
               <UButton
-                v-if="permissions.sensitivities.value.includes('secret')"
+                v-if="canProtectSecret(item)"
                 color="neutral"
                 variant="outline"
                 :loading="actions.busy.value === item.id"

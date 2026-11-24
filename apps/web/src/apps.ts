@@ -3,7 +3,7 @@ import type { BootPreview, ClientInfo, KeyInfo } from '@kioku/contracts'
 import { sameScopes } from './components/keyPresets'
 import { scopesSummary } from './labels'
 
-// 接入实例页的说法与通用计算
+// 客户端页的说法与通用计算
 
 export const ownedClients = (clients: readonly ClientInfo[], accountId: string | undefined) =>
   clients.filter((client) => client.ownerAccountId === accountId)
@@ -30,7 +30,7 @@ export function effectiveNote(
   key: Pick<KeyInfo, 'revokedAt' | 'scopes' | 'effectiveScopes'>,
 ): string | null {
   if (key.revokedAt) return null
-  if (!key.effectiveScopes) return '已作废：接入实例所有者已不在此记忆圈'
+  if (!key.effectiveScopes) return '已作废：客户端所有者已不在此记忆圈'
   if (!isNarrowed(key)) return null
   return `当前有效范围：${scopesSummary(key.effectiveScopes)}（已按所有者当前角色收紧）`
 }
@@ -61,13 +61,13 @@ export interface BootUsage {
   used: number
   limit: number | null
   segments: BootSegment[]
-  // 词条之外的部分（标题、设定段、会话摘要、近期更新、相关记忆）占整条的百分比
+  // 记忆之外的部分（标题、设定段、会话摘要、近期更新、相关记忆）占整条的百分比
   other: number
   // 超出客户端能完整接收的字数
   over: boolean
 }
 
-// 用量条：整条是客户端能完整接收的字数，每个词条按字数占一段，没有上限或超出上限时整条就是用掉的字数
+// 用量条：整条是客户端能完整接收的字数，每条记忆按字数占一段，没有上限或超出上限时整条就是用掉的字数
 export function bootUsage(preview: BootPreview): BootUsage {
   const used = preview.context.length
   const limit = preview.limit

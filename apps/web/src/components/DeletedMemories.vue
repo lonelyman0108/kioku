@@ -4,11 +4,13 @@ import type { DeletedEntry } from '@kioku/contracts'
 import { useInfiniteQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref } from 'vue'
 
+import { invalidateActivity } from '../activity'
 import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
 import { useNow } from '../composables/useNow'
+import { invalidateInboxCounts } from '../inbox'
 import { deletionNotice, purgeAt, purgeNote } from '../retention'
 import { formatRelative, formatTime, isExpired } from '../time'
 import Hint from './Hint.vue'
@@ -78,6 +80,11 @@ async function undelete(item: DeletedEntry) {
       toast.add({ title: `已恢复「${entry.title || entry.shortId}」`, color: 'success' })
       if (props.circleId === cid) emit('restored', entry.shortId)
     }
+    for (const prefix of ['overview', 'entry-browse', 'entry-list', 'entry-glossary']) {
+      void queryClient.invalidateQueries({ queryKey: [prefix, cid] })
+    }
+    void invalidateInboxCounts(queryClient, cid)
+    invalidateActivity(queryClient, cid)
     await queryClient.invalidateQueries({ queryKey: key }, { cancelRefetch: false })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '恢复失败', color: 'error' })
@@ -118,6 +125,7 @@ async function undelete(item: DeletedEntry) {
             :kind="item.kind"
             :sensitivity="item.sensitivity"
             :priority="item.priority"
+            local
           >
             <span>
               删除于
@@ -128,7 +136,7 @@ async function undelete(item: DeletedEntry) {
                 ·
                 <span
                   :class="{ 'text-warning': notes.get(item.id)!.soon }"
-                  :title="`最早于 ${formatTime(purgeAt(item.deletedAt, retention).toISOString())} 后清除`"
+                  :title="`最早于 ${formatTime(item.expiresAt ?? purgeAt(item.deletedAt, retention).toISOString())} 后清除`"
                 >
                   {{ notes.get(item.id)!.text }}
                 </span>

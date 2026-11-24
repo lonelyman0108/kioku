@@ -96,7 +96,7 @@ async function save() {
     syncedSnapshot = JSON.stringify({ extraction: savedExt, dream: savedDr })
     await Promise.all([
       queryClient.invalidateQueries({ queryKey }),
-      queryClient.invalidateQueries({ queryKey: ['settings', 'system'] }),
+      queryClient.invalidateQueries({ queryKey: ['instance-system'] }),
     ])
     extractionResult.value = null
     dreamResult.value = null
@@ -150,7 +150,7 @@ async function clear() {
     confirmingClear.value = false
     await Promise.all([
       queryClient.invalidateQueries({ queryKey }),
-      queryClient.invalidateQueries({ queryKey: ['settings', 'system'] }),
+      queryClient.invalidateQueries({ queryKey: ['instance-system'] }),
     ])
     toast.add({ title: '已清除，抽取已停止', color: 'success' })
   } catch (err) {

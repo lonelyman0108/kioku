@@ -54,7 +54,7 @@ describe('色块旁边的层名', () => {
     ['召回调试的结果', recallDebugPanel, 3],
     ['召回页的常被召回与从未召回', recallPage, 2],
     ['整理建议卡里的记忆', dreamSuggestions, 1],
-    ['应用详情的启动加载与相关记忆', appSimulator, 2],
+    ['应用详情的启动加载、近期更新与相关记忆', appSimulator, 3],
     ['记忆列表的一行', memoryRow, 1],
   ])('%s：每一行都写了层名', (name, source, count) => {
     const rows = swatchRows(source)

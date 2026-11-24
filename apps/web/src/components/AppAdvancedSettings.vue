@@ -28,7 +28,7 @@ import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SaveBar from './strata/SaveBar.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 
-// 接入实例详情里这个接入实例的覆盖：召回与启动加载的几项（没覆盖的沿用记忆圈）与使用指引的补充。
+// 客户端详情里这个客户端的覆盖：召回与启动加载的几项（没覆盖的沿用记忆圈）与使用指引的补充。
 const props = defineProps<{ circleId: string; clientId: string }>()
 const toast = useToast()
 const queryClient = useQueryClient()
@@ -71,7 +71,7 @@ const row = (key: (typeof CLIENT_TUNING_KEYS)[number]) => ({
   inherited: view.data.value?.inherited[key] ?? 0,
 })
 
-// 换了接入实例时之前的输入作废：跟着新的基准走
+// 换了客户端时之前的输入作废：跟着新的基准走
 watch(
   () => props.clientId,
   () => {
@@ -159,11 +159,11 @@ async function save() {
         :fixed="[{ text: view.data.value.guidance.fixed }]"
         why="工具用法、凭据与安全规则，改动会放开注入"
         :inherited="{ level: '实例', text: view.data.value.guidance.instance }"
-        level="接入实例"
+        level="客户端"
         :editable="editable"
         :invalid="guidance.invalid.value"
       />
-      <p v-if="!editable" class="pt-4 text-muted">仅接入实例所有者可修改。</p>
+      <p v-if="!editable" class="pt-4 text-muted">仅客户端所有者可修改。</p>
       <SaveBar
         v-if="editable"
         :count="changedCount"

@@ -114,7 +114,7 @@ export const turnNotBuffered = (step: BenchStepResult) =>
 export const VECTOR_SKIPPED_NOTE =
   '此步只使用全文与关键词：查询向量在事务开始前计算，此查询未计算到（依赖前面步骤的结果，或嵌入接口出错、超时）。'
 
-// session.start 多带的三项：客户端能完整接收的字数、未包含的节点、放不下的附加块
+// session.start 多带的三项：客户端能完整接收的字数、未包含的记忆、放不下的附加块
 export function sessionNotes(session: BenchSessionStart, text: string) {
   return {
     size:
@@ -156,8 +156,8 @@ export function changeItems(changes: BenchChanges): ChangeItem[] {
       action: eventLabel(m.type).label,
       target: m.shortId,
       fields: m.fields.map((f) => changeLabels[f] ?? f),
-      warnings: m.becameSecret ? ['改为机密：此词条历史中的正文将被抹除，向量将被删除'] : [],
-      notes: m.left ? ['修改后当前访问密钥无法读取此词条：不提供修改后的任何内容'] : [],
+      warnings: m.becameSecret ? ['改为机密：此记忆历史中的正文将被抹除，向量将被删除'] : [],
+      notes: m.left ? ['修改后当前访问密钥无法读取此记忆：不提供修改后的任何内容'] : [],
     })
   }
   if (changes.hiddenOther) {

@@ -41,6 +41,7 @@ export const CircleSummary = z.object({
   name: z.string(),
   kind: CircleKind,
   role: MemberRole,
+  memberCount: z.number().int().min(1).optional(),
 })
 export type CircleSummary = z.infer<typeof CircleSummary>
 
@@ -192,6 +193,7 @@ export const PersonaInfo = z.object({
   name: z.string(),
   extendsId: z.uuid().nullable(),
   description: z.string().nullable(),
+  groupRuleCount: z.number().int().min(0).default(0),
 })
 export type PersonaInfo = z.infer<typeof PersonaInfo>
 
@@ -217,12 +219,22 @@ export const ResolvedPersonaTrait = PersonaTrait.extend({
 })
 export type ResolvedPersonaTrait = z.infer<typeof ResolvedPersonaTrait>
 
+export const PersonaGroupRuleRef = z.object({
+  clientId: z.uuid(),
+  clientName: z.string(),
+  groupSubjectId: z.uuid(),
+  groupName: z.string(),
+})
+export type PersonaGroupRuleRef = z.infer<typeof PersonaGroupRuleRef>
+
 export const PersonaDetail = PersonaInfo.extend({
   ancestors: z.array(PersonaInfo),
   children: z.array(PersonaInfo),
   ownTraits: z.array(ResolvedPersonaTrait),
   inheritedTraits: z.array(ResolvedPersonaTrait),
   clients: z.array(ClientRef),
+  groupRules: z.array(PersonaGroupRuleRef).default([]),
+  overrideKeyCount: z.number().int().min(0).default(0),
 })
 export type PersonaDetail = z.infer<typeof PersonaDetail>
 

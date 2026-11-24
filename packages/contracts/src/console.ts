@@ -64,6 +64,7 @@ export type EntryList = z.infer<typeof EntryList>
 export const ConsoleSearchRequest = z.object({
   query: z.string().trim().min(1).max(2000),
   limit: z.number().int().min(1).max(30).default(10),
+  allCircles: z.boolean().default(false),
 })
 export type ConsoleSearchRequest = z.infer<typeof ConsoleSearchRequest>
 
@@ -198,6 +199,7 @@ export const DeletedEntry = z.object({
   version: z.number().int(),
   deletedAt: z.string(),
   validTo: z.string().nullable(),
+  expiresAt: z.string().nullable().default(null),
 })
 export type DeletedEntry = z.infer<typeof DeletedEntry>
 

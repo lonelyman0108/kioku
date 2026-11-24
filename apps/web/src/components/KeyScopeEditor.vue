@@ -55,7 +55,7 @@ import {
   type PaintRect,
 } from './strata/strata'
 
-// 签发透镜访问密钥时编辑签发范围：四张模板卡片 + 物种×敏感级矩阵 + 静态场域白名单 + 凭据与管理权限
+// 签发访问密钥时编辑签发范围：模板卡片 + 形态×敏感级矩阵 + 静态场域锁 + 凭据与管理权限
 const scopes = defineModel<LensKeyScopes>('scopes', { required: true })
 const preset = defineModel<string>('preset', { required: true })
 const props = withDefaults(
@@ -246,9 +246,9 @@ const credentialShortfall = computed(() => {
     <div class="field">
       <div class="field-head">
         <span class="field-label">
-          权限<Hint>
-            按记忆物种与敏感级换算的签发范围，不是实际权限：接入实例与会话上下文另有收紧规则，签发后在权限范围里查看。机密仅可按短
-            ID 读取且仅在主场圈有效；联系人事实与会话摘要的写入指对话抽取。粗线右侧超出最高敏感级。
+          访问范围<Hint>
+            按记忆形态与敏感级换算的签发上限，客户端与会话上下文另有收紧规则，签发后在访问范围里查看。机密仅可按短
+            ID 读取且仅在主圈有效；联系人事实与会话摘要的写入指对话抽取。粗线右侧超出最高敏感级。
           </Hint>
         </span>
         <span class="max-label" aria-hidden="true">最高敏感级</span>
@@ -264,7 +264,7 @@ const credentialShortfall = computed(() => {
         <table class="mx">
           <thead>
             <tr>
-              <th scope="col" class="col-layer">物种</th>
+              <th scope="col" class="col-layer">记忆形态</th>
               <th scope="col" class="col-rw">读</th>
               <th scope="col" class="col-rw">写</th>
               <th
@@ -349,8 +349,8 @@ const credentialShortfall = computed(() => {
     <div class="field">
       <div class="field-row">
         <span class="row-label">
-          静态场域白名单<Hint>
-            仅可向下收紧安全边界：设为限定场域后，即使请求或提问携带其他场域信号，也只允许读写白名单内的词条和凭据；选「仅限指定场域」且不勾任何项将阻止访问所有带场域限制的内容。
+          允许场域锁<Hint>
+            安全硬边界：设为仅限指定场域后，机密记忆与凭据严格锁在所选场域内，绝不随客户端动态上报项目或提问唤醒别名放宽；选「仅限指定场域」且不勾任何项将阻止访问所有带场域限制的机密与凭据。
           </Hint>
         </span>
         <SegmentedChoice
@@ -359,7 +359,7 @@ const credentialShortfall = computed(() => {
             { value: 'open', label: '不限定场域' },
             { value: 'restricted', label: '仅限指定场域' },
           ]"
-          label="静态场域白名单"
+          label="允许场域锁"
           @update:model-value="(v) => setRealmMode(v === 'restricted')"
         />
       </div>
@@ -395,6 +395,9 @@ const credentialShortfall = computed(() => {
           >
           <span v-if="customRealmError" class="text-xs text-error">{{ customRealmError }}</span>
         </div>
+        <NoteLine v-if="!scopes.allowedRealms?.length" tone="warning" flush class="mt-2">
+          已启用场域锁但尚未选择任何场域：将阻止访问所有带场域限制的机密与凭据，请至少勾选一项或切回「不限定场域」。
+        </NoteLine>
       </div>
     </div>
 
@@ -407,7 +410,7 @@ const credentialShortfall = computed(() => {
         @update:model-value="(v) => update({ credentials: v })"
       />
       <span class="row-help">
-        <template v-if="!isCircleOwner">仅记忆圈所有者的接入实例可以取用或管理凭据。</template>
+        <template v-if="!isCircleOwner">仅记忆圈所有者的客户端可以取用或管理凭据。</template>
         <template v-else>{{ credentialHelp[scopes.credentials] }}</template>
       </span>
     </div>
@@ -424,7 +427,7 @@ const credentialShortfall = computed(() => {
         @update:model-value="(v: boolean) => update({ admin: v })"
       />
       <span class="row-help">
-        可管理切面词表与独立人格设定<template v-if="!isCircleOwner"
+        可管理语境词典与独立人格设定<template v-if="!isCircleOwner"
           >；仅记忆圈所有者可开启</template
         >
       </span>

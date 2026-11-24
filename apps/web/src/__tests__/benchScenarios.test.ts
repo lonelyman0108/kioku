@@ -158,7 +158,7 @@ describe('按运行时筛', () => {
     const only = scenario([{ kind: 'boot' }], { runtimes: ['claudecode', 'codex'] })
     expect(runtimeMismatch(only, 'codex')).toBeNull()
     expect(runtimeMismatch(only, 'astrbot')).toBe(
-      '仅适用于 claudecode、codex，当前接入实例是 astrbot',
+      '仅适用于 claudecode、codex，当前客户端是 astrbot',
     )
   })
 })
@@ -292,52 +292,52 @@ describe('导出前检测明文', () => {
       ).toEqual([1])
     })
 
-    it('移动跟着走：移过去之后写新 URI 的正文也算', () => {
+    it('跨圈转移保持同一标识：建成 secret 后转移并更新正文，两步都算', () => {
       expect(
         stepsIn(
-          tool('kioku_create', { uri: 'a://b', content: '机密', sensitivity: 'secret' }),
-          tool('kioku_move', { from: 'a://b', to: 'a://c' }),
-          tool('kioku_update', { uri: 'a://c', content: '新的机密' }),
+          tool('kioku_create', { id: 'm-secret', content: '机密', sensitivity: 'secret' }),
+          tool('kioku_transfer', { id: 'm-secret', to_circle: 'work' }),
+          tool('kioku_update', { id: 'm-secret', content: '新的机密' }),
         ),
       ).toEqual([1, 3])
     })
 
-    it('移动之后才改成 secret：移动之前写的正文也算', () => {
+    it('跨圈转移之后才改成 secret：转移之前写的正文也算', () => {
       expect(
         stepsIn(
-          tool('kioku_create', { uri: 'a://b', content: '之后才变成机密' }),
-          tool('kioku_move', { from: 'a://b', to: 'a://c' }),
-          tool('kioku_update', { uri: 'a://c', sensitivity: 'secret' }),
+          tool('kioku_create', { shortId: 'm-later', content: '之后才变成机密' }),
+          tool('kioku_transfer', { shortId: 'm-later', to_circle: 'work' }),
+          tool('kioku_update', { shortId: 'm-later', sensitivity: 'secret' }),
         ),
       ).toEqual([1])
     })
 
-    it('连续移动：不管先后都顺着找得到', () => {
+    it('连续跨圈转移：按同一标识前后都顺着找得到', () => {
       expect(
         stepsIn(
-          tool('kioku_create', { uri: 'a://one', content: '之后才变成机密' }),
-          tool('kioku_move', { from: 'a://one', to: 'a://two' }),
-          tool('kioku_move', { from: 'a://two', to: 'a://three' }),
-          tool('kioku_update', { uri: 'a://three', sensitivity: 'secret' }),
+          tool('kioku_create', { id: 'm-chain', content: '之后才变成机密' }),
+          tool('kioku_transfer', { id: 'm-chain', to_circle: 'work' }),
+          tool('kioku_transfer', { id: 'm-chain', to_circle: 'home' }),
+          tool('kioku_update', { id: 'm-chain', sensitivity: 'secret' }),
         ),
       ).toEqual([1])
       expect(
         stepsIn(
-          tool('kioku_create', { uri: 'a://one', content: '机密', sensitivity: 'secret' }),
-          tool('kioku_move', { from: 'a://one', to: 'a://two' }),
-          tool('kioku_move', { from: 'a://two', to: 'a://three' }),
-          tool('kioku_update', { uri: 'a://three', content: '新的机密' }),
+          tool('kioku_create', { id: 'm-chain', content: '机密', sensitivity: 'secret' }),
+          tool('kioku_transfer', { id: 'm-chain', to_circle: 'work' }),
+          tool('kioku_transfer', { id: 'm-chain', to_circle: 'home' }),
+          tool('kioku_update', { id: 'm-chain', content: '新的机密' }),
         ),
       ).toEqual([1, 4])
     })
 
-    it('移动的两头都不是 secret 时不算', () => {
+    it('跨圈转移的记忆不是 secret 时不算', () => {
       expect(
         stepsIn(
-          tool('kioku_create', { uri: 'a://secret', content: '机密', sensitivity: 'secret' }),
-          tool('kioku_create', { uri: 'a://b', content: '普通的' }),
-          tool('kioku_move', { from: 'a://b', to: 'a://c' }),
-          tool('kioku_update', { uri: 'a://c', content: '普通的' }),
+          tool('kioku_create', { id: 'm-secret', content: '机密', sensitivity: 'secret' }),
+          tool('kioku_create', { id: 'm-plain', content: '普通的' }),
+          tool('kioku_transfer', { id: 'm-plain', to_circle: 'work' }),
+          tool('kioku_update', { id: 'm-plain', content: '普通的' }),
         ),
       ).toEqual([1])
     })
@@ -372,9 +372,9 @@ describe('导出前检测明文', () => {
       ).toEqual([2])
       expect(
         stepsIn(
-          tool('kioku_create', { uri: 'a://b', content: '机密', sensitivity: 'secret' }),
-          tool('kioku_move', { from: '${target}', to: 'a://c' }),
-          tool('kioku_update', { uri: 'a://c', content: '可能是它' }),
+          tool('kioku_create', { id: 'm-secret', content: '机密', sensitivity: 'secret' }),
+          tool('kioku_transfer', { id: '${target}', to_circle: 'work' }),
+          tool('kioku_update', { id: '${target}', content: '可能是它' }),
         ),
       ).toEqual([1, 3])
     })

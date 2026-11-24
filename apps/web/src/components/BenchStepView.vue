@@ -62,7 +62,7 @@ const emptyText = computed(() =>
 <template>
   <details :open="open" class="step">
     <summary class="step-head">
-      <span v-if="number !== undefined" class="step-number">{{ number }}</span>
+      <span v-if="number !== undefined" class="step-number tabular-nums">{{ number }}</span>
       <BenchStatus :badge="badge" />
       <span class="step-label">{{ step.label }}</span>
       <!-- 按断言通过的步骤也可能报了错（预期之中，或者没带断言）：折叠时也看得出来 -->
@@ -87,7 +87,7 @@ const emptyText = computed(() =>
         <li v-for="(a, i) in assertions" :key="i" class="assertion">
           <UIcon
             :name="a.ok ? icons.passed : icons.failed"
-            class="mt-[3px] size-3.5 shrink-0"
+            class="mt-[3px] inline-block size-3.5 shrink-0"
             :class="a.ok ? 'text-muted' : 'text-error'"
           />
           <span class="wrap-anywhere" :class="{ 'text-error': !a.ok }">{{ a.message }}</span>
@@ -97,7 +97,7 @@ const emptyText = computed(() =>
       <BenchRawText v-if="responded" title="收到的原文" :text="step.text || emptyText" open />
 
       <section v-if="step.shortIds?.length">
-        <h4>结果中的短 ID（{{ step.shortIds.length }}）</h4>
+        <h4 class="tabular-nums">结果中的短 ID（{{ step.shortIds.length }}）</h4>
         <ul class="uris">
           <li v-for="shortId in step.shortIds" :key="shortId">
             <code>{{ shortId }}</code>
@@ -107,11 +107,11 @@ const emptyText = computed(() =>
 
       <section v-if="session">
         <h4>会话开始</h4>
-        <p class="note" :class="session.overLimit ? 'text-warning' : 'text-muted'">
+        <p class="note tabular-nums" :class="session.overLimit ? 'text-warning' : 'text-muted'">
           {{ session.size }}<template v-if="session.overLimit">：超出部分客户端可能截断</template>
         </p>
         <p v-if="session.omitted.length" class="note break-all text-muted">
-          超出预算、未展开的节点：{{ session.omitted.join('、') }}
+          超出预算、未展开的记忆：{{ session.omitted.join('、') }}
         </p>
         <p v-if="session.dropped.length" class="note text-warning">
           超出上限，未附上：{{ session.dropped.join('、') }}
@@ -119,7 +119,7 @@ const emptyText = computed(() =>
       </section>
 
       <p v-if="step.vectorSkipped" class="note vector text-warning">
-        <UIcon :name="icons.vector" class="mt-[3px] size-3.5 shrink-0" />
+        <UIcon :name="icons.vector" class="mt-[3px] inline-block size-3.5 shrink-0" />
         {{ VECTOR_SKIPPED_NOTE }}
       </p>
 
@@ -212,7 +212,7 @@ const emptyText = computed(() =>
 .step-number {
   flex: none;
   min-width: 1.5em;
-  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: 13px;
   line-height: 1.5;
   text-align: right;

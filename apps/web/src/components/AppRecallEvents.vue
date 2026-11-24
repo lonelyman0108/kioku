@@ -5,12 +5,14 @@ import { computed } from 'vue'
 import { readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { recallSourceLabels } from '../labels'
+import { entryRoute } from '../routes'
 import { formatRelative, formatTime } from '../time'
 import Hint from './Hint.vue'
 import NoteLine from './strata/NoteLine.vue'
+import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 
-// 这个接入实例的召回记录：服务端只给事件发生时的接入实例所有者，所以列的是当前账号作为所有者期间的那些
+// 这个客户端的召回记录：服务端只给事件发生时的客户端所有者，所以列的是当前账号作为所有者期间的那些
 const props = defineProps<{ circleId: string; clientId: string }>()
 
 const events = useInfiniteQuery({
@@ -21,11 +23,6 @@ const events = useInfiniteQuery({
   getNextPageParam: (last) => last.nextCursor ?? undefined,
 })
 const items = computed(() => events.data.value?.pages.flatMap((p) => p.items) ?? [])
-const entryLink = (targetCircleId: string, shortId: string) => ({
-  name: 'memories',
-  params: { circleId: targetCircleId },
-  query: { id: shortId },
-})
 </script>
 
 <template>
@@ -33,17 +30,15 @@ const entryLink = (targetCircleId: string, shortId: string) => ({
     <SectionHeading title="召回记录">
       <template #hint>
         <Hint>
-          此接入实例每次召回的命中结果。仅列出当前账号作为接入实例所有者期间的记录。明细按实例设置的天数保留。接入实例转移后，新所有者无法查看此前的记录。
+          此客户端每次召回的命中结果。仅列出当前账号作为客户端所有者期间的记录。明细按实例设置的天数保留。客户端转移后，新所有者无法查看此前的记录。
         </Hint>
       </template>
     </SectionHeading>
-    <NoteLine
+    <ReadFailureNote
       v-if="events.isError.value && !events.isFetchNextPageError.value"
       class="events-note"
-      tone="error"
-    >
-      {{ readFailure(events.error.value) }}
-    </NoteLine>
+      :query="events"
+    />
     <USkeleton v-if="events.isPending.value" class="mt-3 h-24 w-full" />
     <p v-else-if="events.data.value && !items.length" class="events-empty">暂无召回记录</p>
     <ol v-else-if="events.data.value">
@@ -59,10 +54,10 @@ const entryLink = (targetCircleId: string, shortId: string) => ({
         <p v-if="!event.hits.length" class="event-miss">未命中</p>
         <ul v-else class="event-hits">
           <li v-for="hit in event.hits" :key="hit.rank">
-            <span class="hit-score">{{ hit.score.toFixed(2) }}</span>
+            <span class="hit-score tabular-nums">{{ hit.score.toFixed(2) }}</span>
             <RouterLink
               v-if="hit.shortId"
-              :to="entryLink(hit.targetCircleId, hit.shortId)"
+              :to="entryRoute(hit.targetCircleId, hit.shortId)"
               class="hit-uri"
               :title="hit.shortId"
             >
@@ -139,7 +134,7 @@ const entryLink = (targetCircleId: string, shortId: string) => ({
   min-width: 0;
 }
 .hit-score {
-  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: 13px;
   color: var(--ui-text-muted);
 }

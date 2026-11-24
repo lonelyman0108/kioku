@@ -188,9 +188,12 @@ describe('记忆页取统计', () => {
 
   it('invalidateLists 不再让概览跟着失效重取', () => {
     const body = /function invalidateLists\(\) \{[\s\S]*?\n\}/.exec(memoriesPage)![0]
-    const list = /for \(const key of \[([\s\S]*?)\]\)/.exec(body)![1]!
+    expect(body).toContain('invalidateCircleMemories(circleId.value)')
+    const helper = /function invalidateCircleMemories\([\s\S]*?\n\}/.exec(memoriesPage)![0]
+    const list = /for \(const key of \[([\s\S]*?)\]\)/.exec(helper)![1]!
     expect(list).not.toContain('overview')
-    expect(body).not.toContain('overview.refetch')
+    expect(helper).toContain("refetchType: 'none'")
+    expect(helper).not.toContain('overview.refetch')
   })
 })
 
@@ -305,6 +308,16 @@ describe('记忆详情', () => {
     expect(memoryEditor).toContain('<EntryLinksPanel')
     expect(memoryEditor).toContain('<ShortIdLine')
     expect(memoryEditor).toContain('<FacetWhenPicker')
+  })
+
+  it('严格对齐正式记忆、联系人事实、会话摘要三形态约束，跨圈双链支持抽屉预览', () => {
+    expect(memoryEditor).toContain("base.value?.kind === 'entry'")
+    expect(memoryEditor).toContain("isEpisode = computed(() => base.value?.kind === 'episode')")
+    expect(memoryEditor).toContain('isEpisode ? 1 : 0')
+    expect(moveMemoryModal).toContain('CREDENTIAL_PLACEHOLDER_START')
+    expect(memoriesPage).toContain('<CrossCirclePreviewDrawer')
+    expect(memoriesPage).toContain(':circle-kind=')
+    expect(overviewPage).toContain(':circle-kind="activeCircleKind"')
   })
 
   it('机密的正文只放在组件里，不写进查询缓存', () => {

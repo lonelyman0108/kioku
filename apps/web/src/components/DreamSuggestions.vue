@@ -1,11 +1,17 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
 import {
+  ApplyDreamSuggestion,
+  DISCLOSURE_MAX,
+  ENTRY_TITLE_MAX,
+  EntryTitle,
   PLAINTEXT_CREDENTIAL,
+  TOPICS_MAX,
+  TopicTag,
   VARIANTS_MAX,
   normalizeWhen,
   whenSignature,
-  type ApplyDreamSuggestion,
+  type ApplyDreamSuggestion as ApplyDreamSuggestionBody,
   type DreamEntryRef,
   type DreamSuggestion,
   type VariantInput,
@@ -14,6 +20,7 @@ import {
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 
+import { invalidateActivity } from '../activity'
 import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
@@ -34,6 +41,7 @@ import { whenLabel } from '../memoryDetail'
 import { entryRoute } from '../routes'
 import { circleSettingsRoute } from '../settingsSections'
 import { formatRelative, formatTime } from '../time'
+import ConsequenceModal from './ConsequenceModal.vue'
 import FacetWhenPicker from './FacetWhenPicker.vue'
 import Hint from './Hint.vue'
 import EmptyState from './strata/EmptyState.vue'
@@ -116,7 +124,11 @@ const makeDraftVariant = (when: WhenCondition = {}, content = ''): DraftVariant 
 const drafts = reactive(new Map<string, Draft>())
 watch(
   () => props.circleId,
-  () => drafts.clear(),
+  () => {
+    drafts.clear()
+    confirming.value = null
+    confirmError.value = null
+  },
 )
 function startEdit(item: DreamSuggestion) {
   const variants = (item.variants ?? []).map((v) => makeDraftVariant(v.when, v.content))
@@ -130,9 +142,37 @@ function startEdit(item: DreamSuggestion) {
     when: normalizeWhen(item.when ?? {}),
     topicsText: (item.topics ?? []).join(', '),
     disclosure: item.disclosure ?? '',
-    priority: item.targetPriority ?? 1,
+    priority: item.targetPriority ?? (item.kind === 'promote' ? 1 : 2),
   })
 }
+function parseDraftTopics(text: string) {
+  const raw = text
+    .split(/[,，、\s]+/)
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean)
+  const seen = new Set<string>()
+  const list: string[] = []
+  for (const tag of raw) {
+    const res = TopicTag.safeParse(tag)
+    if (!res.success) {
+      return { ok: false as const, message: res.error.issues[0]?.message ?? '主题标签格式有误' }
+    }
+    if (!seen.has(res.data)) {
+      seen.add(res.data)
+      list.push(res.data)
+    }
+  }
+  if (list.length > TOPICS_MAX) {
+    return { ok: false as const, message: `主题标签最多 ${TOPICS_MAX} 个` }
+  }
+  return { ok: true as const, list }
+}
+const distillPriorityItems = [
+  { label: '0 · 最高（启动加载）', value: 0 },
+  { label: '1 · 重要', value: 1 },
+  { label: '2 · 普通', value: 2 },
+  { label: '3 · 低', value: 3 },
+]
 function addDraftVariant(id: string) {
   const draft = drafts.get(id)
   if (!draft || draft.variants.length >= VARIANTS_MAX) return
@@ -161,23 +201,42 @@ function draftProblem(item: DreamSuggestion): string | null {
   const draft = drafts.get(item.id)
   if (!draft) return null
   if (item.kind === 'promote' || item.kind === 'facet_tag') return null
-  if (item.kind === 'merge') return !draft.content.trim() ? '正文不能为空' : null
+  if (item.kind === 'distill' || item.kind === 'distill_episode') {
+    if (draft.title.trim()) {
+      const titleRes = EntryTitle.safeParse(draft.title.trim())
+      if (!titleRes.success) return titleRes.error.issues[0]?.message ?? '标题格式有误'
+    }
+    const topicsRes = parseDraftTopics(draft.topicsText)
+    if (!topicsRes.ok) return topicsRes.message
+    if (draft.disclosure.trim().length > DISCLOSURE_MAX) {
+      return `召回说明最多 ${DISCLOSURE_MAX} 字`
+    }
+  }
+  if (item.kind === 'merge') {
+    if (!draft.content.trim()) return '正文不能为空'
+    const res = ApplyDreamSuggestion.shape.content.safeParse(draft.content)
+    return res.success ? null : (res.error.issues[0]?.message ?? '正文长度超出限制')
+  }
   if (item.kind === 'merge_variants' || item.kind === 'generalize' || draft.useVariants) {
-    if (!draft.variants.length) return '至少保留一个切片'
+    if (!draft.variants.length) return '至少保留一个变体'
+    if (draft.variants.length > VARIANTS_MAX) return `最多 ${VARIANTS_MAX} 个变体`
     const seen = new Set<string>()
     for (const v of draft.variants) {
       if (!v.content.trim()) return '正文不能为空'
+      const contentRes = ApplyDreamSuggestion.shape.content.safeParse(v.content)
+      if (!contentRes.success) return contentRes.error.issues[0]?.message ?? '变体正文长度超出限制'
       const sig = whenSignature(normalizeWhen(v.when))
-      if (seen.has(sig)) return '存在相同切面条件的重复切片'
+      if (seen.has(sig)) return '存在相同适用条件的重复变体'
       seen.add(sig)
     }
     return null
   }
   if (!draft.content.trim()) return '正文不能为空'
-  return null
+  const res = ApplyDreamSuggestion.shape.content.safeParse(draft.content)
+  return res.success ? null : (res.error.issues[0]?.message ?? '正文长度超出限制')
 }
 
-function bodyOf(item: DreamSuggestion): ApplyDreamSuggestion {
+function bodyOf(item: DreamSuggestion): ApplyDreamSuggestionBody {
   const draft = drafts.get(item.id)
   if (!draft) return {}
   switch (item.kind) {
@@ -196,10 +255,8 @@ function bodyOf(item: DreamSuggestion): ApplyDreamSuggestion {
       return { when: normalizeWhen(draft.when) }
     case 'distill':
     case 'distill_episode': {
-      const topics = draft.topicsText
-        .split(/[,，、\s]+/)
-        .map((s) => s.trim().toLowerCase())
-        .filter(Boolean)
+      const parsedTopics = parseDraftTopics(draft.topicsText)
+      const topics = parsedTopics.ok ? parsedTopics.list : []
       const variants: VariantInput[] = draft.variants.map((v, i) => ({
         when: normalizeWhen(v.when),
         content: v.content.trim(),
@@ -210,7 +267,8 @@ function bodyOf(item: DreamSuggestion): ApplyDreamSuggestion {
         ...(draft.useVariants
           ? { variants }
           : { content: draft.content, when: normalizeWhen(draft.when) }),
-        ...(topics.length ? { topics } : {}),
+        topics,
+        priority: draft.priority,
         disclosure: draft.disclosure.trim() || null,
       }
     }
@@ -231,13 +289,13 @@ function actionLabel(item: DreamSuggestion): string {
     case 'merge_variants':
       return '合并为多变体'
     case 'facet_tag':
-      return '应用切面标签'
+      return '应用适用条件'
     case 'generalize':
       return '应用泛化上浮'
     case 'distill':
-      return '新建词条'
+      return '新建记忆'
     case 'distill_episode':
-      return '沉淀为词条'
+      return '沉淀为记忆'
     case 'stale':
       return '设为过时'
     case 'promote':
@@ -252,7 +310,7 @@ const destructive = (item: DreamSuggestion) =>
   item.kind === 'merge_variants' ||
   (item.kind === 'review' && item.verdict === 'delete')
 
-// 处理之后要刷新的：建议与运行记录、待确认内容、词条列表、联系人页、变更记录、概览与待处理的条数
+// 处理之后要刷新的：建议与运行记录、待确认内容、记忆与双链、联系人页、变更记录、概览与待处理的条数
 function refresh(circleId: string) {
   for (const key of [
     'dream-suggestions',
@@ -261,36 +319,48 @@ function refresh(circleId: string) {
     'entry',
     'entry-list',
     'entry-browse',
+    'entry-links',
     'entry-deleted',
     'entry-expired',
     'entry-history',
-    'activity-event',
     'subjects',
     'subject',
-    'activity',
     'overview',
   ]) {
     void queryClient.invalidateQueries({ queryKey: [key, circleId] })
   }
+  void invalidateActivity(queryClient, circleId)
 }
 
 const busy = ref<string | null>(null)
 const confirming = ref<DreamSuggestion | null>(null)
+const confirmError = ref<string | null>(null)
+const confirmConsequences = computed(() => {
+  const target = confirming.value
+  if (!target) return []
+  return [suggestionKinds[target.kind].effect]
+})
+
 async function apply(item: DreamSuggestion) {
   if (busy.value) return
   // 请求期间可能换了记忆圈（页面会被复用）：按发出请求时的记忆圈刷新
   const circleId = props.circleId
+  const fromModal = confirming.value?.id === item.id
   busy.value = item.id
+  if (fromModal) confirmError.value = null
   try {
     const result = await api.applyDreamSuggestion(circleId, item.id, bodyOf(item))
     drafts.delete(item.id)
+    if (fromModal) confirming.value = null
     toast.add({
       title: result.entry ? `已新建「${result.entry.title}」` : `已${actionLabel(item)}`,
       color: 'success',
     })
     refresh(circleId)
   } catch (err) {
-    toast.add({ title: err instanceof ApiError ? err.message : '执行失败', color: 'error' })
+    const message = err instanceof ApiError ? err.message : '执行失败'
+    if (fromModal) confirmError.value = message
+    else toast.add({ title: message, color: 'error' })
     // 建议作废了、已经被别人处理了：刷新列表
     if (err instanceof ApiError && (err.status === 404 || err.status === 409)) {
       void queryClient.invalidateQueries({ queryKey: ['dream-suggestions', circleId] })
@@ -298,7 +368,6 @@ async function apply(item: DreamSuggestion) {
     }
   } finally {
     busy.value = null
-    confirming.value = null
   }
 }
 async function reject(item: DreamSuggestion) {
@@ -372,24 +441,32 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
     <SectionHeading title="整理建议">
       <template #hint>
         <Hint>
-          每天自动整理一次，只提建议，执行后才会修改记忆。建议包含合并重复内容、合并多变体词条、补全切面标签、跨项目泛化上浮、提炼词条、沉淀会话摘要、标记过时、审核待确认内容与调整优先级。执行后写入的来源记为本人；已拒绝的相同建议不再提出。
+          每天自动整理一次，只提建议，执行后才会修改记忆。建议包含合并重复内容、合并多变体记忆、补全适用条件、跨项目泛化上浮、提炼记忆、沉淀会话摘要、标记过时、审核待确认内容与调整优先级。执行后写入的来源记为本人；已拒绝的相同建议不再提出。
         </Hint>
       </template>
       <template v-if="lastRun" #actions>
-        <span class="dream-last">{{ lastRun }}</span>
+        <span class="dream-last tabular-nums">{{ lastRun }}</span>
       </template>
     </SectionHeading>
 
-    <NoteLine v-if="mine.isError.value" class="dream-note" tone="error">
-      {{ readFailure(mine.error.value) }}
-    </NoteLine>
+    <ReadFailureNote v-if="mine.isError.value" class="dream-note" :query="mine" />
     <div class="dream-intro">
       <p v-if="mine.data.value">
-        {{
-          mine.data.value.includePrivate
-            ? '当前账号的个人内容（机密除外）也会发送给实例配置的抽取模型整理，'
-            : '当前账号已关闭个人内容的整理，目前仅整理共享内容，'
-        }}<RouterLink :to="circleSettingsRoute(circleId, 'extraction')" class="text-primary"
+        <template v-if="circle?.kind === 'personal'">
+          {{
+            mine.data.value.includePrivate
+              ? '当前为个人圈，整理时会将非机密记忆发送给实例配置的抽取模型，'
+              : '当前已在个人圈关闭整理，暂不生成新建议，'
+          }}
+        </template>
+        <template v-else>
+          {{
+            mine.data.value.includePrivate
+              ? '当前账号在个人范围的非机密记忆也会发送给实例配置的抽取模型整理，'
+              : '当前账号已关闭个人范围的整理，目前仅整理共享内容，'
+          }}
+        </template>
+        <RouterLink :to="circleSettingsRoute(circleId, 'extraction')" class="text-primary"
           >可在记忆圈设置中{{ mine.data.value.includePrivate ? '关闭' : '开启' }}</RouterLink
         >。
       </p>
@@ -437,7 +514,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
           <ul class="suggestion-memories">
             <li v-for="entry in item.entries" :key="entry.id">
               <p class="memory-head">
-                <StrataSwatch :band="bandOf(entry)" :sensitivity="entry.sensitivity" />
+                <StrataSwatch :band="bandOf(entry)" :sensitivity="entry.sensitivity" local />
                 <RouterLink
                   v-if="entry.kind === 'entry'"
                   :to="entryRoute(circleId, entry.shortId)"
@@ -487,7 +564,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
           <template v-else-if="item.kind === 'merge_variants' || item.kind === 'generalize'">
             <div v-if="drafts.has(item.id)" class="draft-form">
               <div class="draft-variants-head">
-                <p class="draft-label">切片列表</p>
+                <p class="draft-label">变体列表</p>
                 <UButton
                   v-if="drafts.get(item.id)!.variants.length < VARIANTS_MAX"
                   size="xs"
@@ -495,7 +572,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
                   variant="outline"
                   @click="addDraftVariant(item.id)"
                 >
-                  新增切片
+                  新增变体
                 </UButton>
               </div>
               <div
@@ -504,7 +581,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
                 class="draft-variant"
               >
                 <div class="draft-variant-head">
-                  <span class="draft-label">切片 {{ idx + 1 }}</span>
+                  <span class="draft-label">变体 {{ idx + 1 }}</span>
                   <UButton
                     v-if="drafts.get(item.id)!.variants.length > 1"
                     size="xs"
@@ -512,7 +589,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
                     variant="ghost"
                     @click="removeDraftVariant(item.id, idx)"
                   >
-                    删除切片
+                    删除变体
                   </UButton>
                 </div>
                 <FacetWhenPicker
@@ -531,7 +608,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
               </div>
             </div>
             <div v-else class="draft">
-              <span class="draft-label">建议切片列表</span>
+              <span class="draft-label">建议变体列表</span>
               <div v-for="(variant, idx) in item.variants ?? []" :key="idx" class="draft-slice">
                 <p class="draft-meta">{{ whenLabel(variant.when, vocab) }}</p>
                 <p>{{ variant.content }}</p>
@@ -540,7 +617,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
           </template>
           <template v-else-if="item.kind === 'facet_tag'">
             <div v-if="drafts.has(item.id)" class="draft-form">
-              <p class="draft-label">适用切面</p>
+              <p class="draft-label">适用条件</p>
               <FacetWhenPicker
                 v-model="drafts.get(item.id)!.when"
                 :circle-id="circleId"
@@ -548,7 +625,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
               />
             </div>
             <div v-else class="draft">
-              <span class="draft-label">建议适用切面</span>
+              <span class="draft-label">建议适用条件</span>
               <p>{{ whenLabel(item.when ?? {}, vocab) }}</p>
             </div>
           </template>
@@ -556,17 +633,34 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
             <div v-if="drafts.has(item.id)" class="draft-form">
               <p class="draft-label">草稿</p>
               <UFormField label="标题">
-                <UInput v-model="drafts.get(item.id)!.title" class="w-full" />
+                <UInput
+                  v-model="drafts.get(item.id)!.title"
+                  :maxlength="ENTRY_TITLE_MAX"
+                  class="w-full"
+                />
+              </UFormField>
+              <UFormField label="优先级">
+                <USelect
+                  v-model="drafts.get(item.id)!.priority"
+                  :items="distillPriorityItems"
+                  value-key="value"
+                  aria-label="优先级"
+                  class="w-60"
+                />
               </UFormField>
               <UFormField label="主题标签" help="多个标签用逗号分隔">
                 <UInput v-model="drafts.get(item.id)!.topicsText" class="w-full" />
               </UFormField>
-              <UFormField label="触发场景" help="什么场景下应该想起这条记忆">
-                <UInput v-model="drafts.get(item.id)!.disclosure" class="w-full" />
+              <UFormField label="召回说明" help="什么场景下应该想起这条记忆">
+                <UInput
+                  v-model="drafts.get(item.id)!.disclosure"
+                  :maxlength="DISCLOSURE_MAX"
+                  class="w-full"
+                />
               </UFormField>
               <template v-if="drafts.get(item.id)!.useVariants">
                 <div class="draft-variants-head">
-                  <span class="draft-label">切片列表</span>
+                  <span class="draft-label">变体列表</span>
                   <UButton
                     v-if="drafts.get(item.id)!.variants.length < VARIANTS_MAX"
                     size="xs"
@@ -574,7 +668,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
                     variant="outline"
                     @click="addDraftVariant(item.id)"
                   >
-                    新增切片
+                    新增变体
                   </UButton>
                 </div>
                 <div
@@ -583,7 +677,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
                   class="draft-variant"
                 >
                   <div class="draft-variant-head">
-                    <span class="draft-label">切片 {{ idx + 1 }}</span>
+                    <span class="draft-label">变体 {{ idx + 1 }}</span>
                     <UButton
                       v-if="drafts.get(item.id)!.variants.length > 1"
                       size="xs"
@@ -591,7 +685,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
                       variant="ghost"
                       @click="removeDraftVariant(item.id, idx)"
                     >
-                      删除切片
+                      删除变体
                     </UButton>
                   </div>
                   <FacetWhenPicker
@@ -610,7 +704,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
                 </div>
               </template>
               <template v-else>
-                <UFormField label="适用切面">
+                <UFormField label="适用条件">
                   <FacetWhenPicker
                     v-model="drafts.get(item.id)!.when"
                     :circle-id="circleId"
@@ -635,7 +729,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
               <p v-if="item.topics?.length" class="draft-meta">
                 主题标签：{{ item.topics.join('、') }}
               </p>
-              <p v-if="item.disclosure" class="draft-meta">触发场景：{{ item.disclosure }}</p>
+              <p v-if="item.disclosure" class="draft-meta">召回说明：{{ item.disclosure }}</p>
               <template v-if="item.variants?.length">
                 <div v-for="(variant, idx) in item.variants" :key="idx" class="draft-slice">
                   <p class="draft-meta">{{ whenLabel(variant.when, vocab) }}</p>
@@ -644,7 +738,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
               </template>
               <template v-else>
                 <p v-if="hasWhen(item.when)" class="draft-meta">
-                  适用切面：{{ whenLabel(item.when ?? {}, vocab) }}
+                  适用条件：{{ whenLabel(item.when ?? {}, vocab) }}
                 </p>
                 <p>{{ item.content }}</p>
               </template>
@@ -683,7 +777,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
           </NoteLine>
           <p class="suggestion-effect">{{ suggestionKinds[item.kind].effect }}</p>
           <p v-if="canAct && !item.actionable" class="suggestion-effect">
-            包含当前账号无权写入的记忆（如其他成员的接入实例的记忆），需由有权限的成员处理。
+            包含当前账号无权写入的记忆（如其他成员的客户端的记忆），需由有权限的成员处理。
           </p>
           <p v-if="draftProblem(item)" class="suggestion-problem">{{ draftProblem(item) }}</p>
         </div>
@@ -695,7 +789,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
             variant="outline"
             :loading="busy === item.id"
             :disabled="Boolean(busy) || Boolean(draftProblem(item))"
-            @click="destructive(item) ? (confirming = item) : apply(item)"
+            @click="destructive(item) ? ((confirming = item), (confirmError = null)) : apply(item)"
           >
             {{ actionLabel(item) }}
           </UButton>
@@ -749,9 +843,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
           </Hint>
         </template>
       </SectionHeading>
-      <NoteLine v-if="runs.isError.value" class="dream-note" tone="error">
-        {{ readFailure(runs.error.value) }}
-      </NoteLine>
+      <ReadFailureNote v-if="runs.isError.value" class="dream-note" :query="runs" />
       <USkeleton v-if="runs.isPending.value" class="mt-3 h-16 w-full" />
       <p v-else-if="runs.data.value && !runs.data.value.runs.length" class="dream-empty">
         暂无整理记录
@@ -773,33 +865,20 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
       </ul>
     </section>
 
-    <UModal
+    <ConsequenceModal
       :open="confirming !== null"
       :title="
         confirming?.kind === 'merge' || confirming?.kind === 'merge_variants'
           ? '合并这几条记忆？'
           : '删除这条内容？'
       "
-      @update:open="(v) => !v && (confirming = null)"
-    >
-      <template #body>
-        <p class="text-sm">{{ confirming && suggestionKinds[confirming.kind].effect }}</p>
-      </template>
-      <template #footer>
-        <div class="flex w-full justify-end gap-2">
-          <UButton color="neutral" variant="ghost" @click="confirming = null">取消</UButton>
-          <UButton
-            :color="
-              confirming?.kind === 'review' && confirming.verdict === 'delete' ? 'error' : 'primary'
-            "
-            :loading="busy !== null"
-            @click="confirming && apply(confirming)"
-          >
-            {{ confirming && actionLabel(confirming) }}
-          </UButton>
-        </div>
-      </template>
-    </UModal>
+      :consequences="confirmConsequences"
+      :action="confirming ? actionLabel(confirming) : '确定'"
+      :busy="busy !== null"
+      :error="confirmError"
+      @close="confirming = null"
+      @confirm="confirming && apply(confirming)"
+    />
   </div>
 </template>
 

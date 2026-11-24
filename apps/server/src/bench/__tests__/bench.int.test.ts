@@ -888,7 +888,7 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
       )
       const result = (await res.json()) as BenchRunResult
       expect(result.steps.map((s) => s.status)).toEqual(['passed', 'skipped'])
-      expect(result.steps[1]!.reason).toContain('无权写入词条（entry）')
+      expect(result.steps[1]!.reason).toContain('无权写入正式记忆（entry）')
       expect(result.whoami.scopes.writeKinds).toEqual([])
       expect(result.ok).toBe(true)
     })

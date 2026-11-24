@@ -3,31 +3,28 @@ import type { ConsoleEntryView, ProtectTarget, RedactMode } from '@kioku/contrac
 import { useQueryClient, type QueryClient } from '@tanstack/vue-query'
 import { ref, type Ref } from 'vue'
 
+import { invalidateActivity } from '../activity'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { invalidateInboxCounts } from '../inbox'
 
-// 疑似明文的提示处理之后要刷新的：条数、列表、浏览目录、概览、变更记录，这条记忆的历史和详情
+// 疑似敏感内容提示处理之后要刷新的：条数、列表、浏览目录、双链、概览、变更记录，这条记忆的历史和详情
 export function refreshAfterPlaintext(
   queryClient: QueryClient,
   circleId: string,
   entry?: ConsoleEntryView,
 ) {
-  for (const key of [
-    'inbox-counts',
-    'entry-list',
-    'entry-browse',
-    'overview',
-    'activity',
-    'activity-event',
-  ]) {
+  for (const key of ['inbox-counts', 'entry-list', 'entry-browse', 'entry-links', 'overview']) {
     void queryClient.invalidateQueries({ queryKey: [key, circleId] })
   }
+  void invalidateActivity(queryClient, circleId)
   if (!entry) return
   if (entry.circleId !== circleId) {
-    for (const key of ['inbox-counts', 'entry-list', 'entry-browse', 'overview', 'activity']) {
+    for (const key of ['inbox-counts', 'entry-list', 'entry-browse', 'entry-links', 'overview']) {
       void queryClient.invalidateQueries({ queryKey: [key, entry.circleId] })
     }
+    void invalidateActivity(queryClient, entry.circleId)
+    void queryClient.invalidateQueries({ queryKey: ['entry', circleId] })
   }
   if (!entry.contentHidden) {
     queryClient.setQueryData(['entry', entry.circleId, entry.shortId], entry)
@@ -111,5 +108,40 @@ export function usePlaintextActions(circleId: Ref<string>) {
         '已抹除敏感段',
         target,
       ),
+    moveToPersonalAndProtect: async (target: {
+      id: string
+      version: number
+      personalCircleId: string
+    }): Promise<ConsoleEntryView | null> => {
+      if (busy.value) return null
+      const cid = circleId.value
+      busy.value = target.id
+      try {
+        let next = await api.transferEntry(cid, {
+          entryId: target.id,
+          toCircleId: target.personalCircleId,
+          expectedVersion: target.version,
+        })
+        if (next.sensitivity !== 'private') {
+          next = await api.protectEntry(target.personalCircleId, {
+            entryId: next.id,
+            expectedVersion: next.version,
+            target: 'personal_private',
+          })
+        }
+        toast.add({ title: '已移入个人圈私密，原文已保留', color: 'success' })
+        refreshAfterPlaintext(queryClient, cid, next)
+        return next
+      } catch (err) {
+        toast.add({ title: err instanceof ApiError ? err.message : '操作失败', color: 'error' })
+        if (err instanceof ApiError && (err.status === 404 || err.status === 409)) {
+          refreshAfterPlaintext(queryClient, cid)
+          void queryClient.invalidateQueries({ queryKey: ['entry', cid] })
+        }
+        return null
+      } finally {
+        busy.value = null
+      }
+    },
   }
 }

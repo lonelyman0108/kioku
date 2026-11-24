@@ -80,7 +80,7 @@ const version = computed(() => {
   return a === null || a === b ? `${b}` : `${b} → ${a}`
 })
 
-// 正文按行对比；单一切片且切面未变、两边都有正文时直接对比
+// 正文按行对比；单一变体且适用条件未变、两边都有正文时直接对比
 const diff = computed(() => {
   const bv = event.data.value?.before?.variants
   const av = event.data.value?.after?.variants
@@ -104,12 +104,14 @@ const variantDiffs = computed<VariantDiffItem[]>(() => {
     (d) => d.status !== 'unchanged',
   )
 })
+const hasVariantsChange = computed(
+  () => item.value?.fieldChanges.some((c) => c.field === 'variants') ?? false,
+)
 const variantDiffStatusLabels: Record<VariantDiffItem['status'], string> = {
-  added: '新增切片',
-  removed: '移除切片',
+  added: '新增变体',
+  removed: '移除变体',
   modified: '修改',
   unchanged: '未变',
-  secret: '机密',
 }
 // 增删的行数：逐行对齐算出了差异时用画出来的这份，和下面的差异对得上；正文太长没有逐行对齐（整段算删掉
 // 再加上）或者没有对比时，用列表给的近似值（按行做集合的差）
@@ -200,7 +202,7 @@ const historyOpen = ref(false)
           <span class="font-mono">{{ item.shortId }}</span>
         </template>
         <template #version>
-          <span class="font-mono">{{ version }}</span>
+          <span class="version-num">{{ version }}</span>
         </template>
       </PropertyList>
 
@@ -229,14 +231,15 @@ const historyOpen = ref(false)
                 :class="row.kind"
               >{{ row.text }}</span></template></pre>
               </template>
-              <template v-else-if="variantDiffs.length">
+              <template v-else-if="!hasVariantsChange && variantDiffs.length">
                 <div v-for="v in variantDiffs" :key="v.sig" class="variant-diff">
                   <p class="variant-diff-head">
                     <span>{{ variantDiffStatusLabels[v.status] }}</span>
                     <span class="text-muted">{{ whenLabel(v.when, vocab) }}</span>
                   </p>
+                  <p v-if="v.secret" class="detail-note">机密变体不展示内容。</p>
                   <pre
-                    v-if="v.rows.length"
+                    v-else-if="v.rows.length"
                     class="diff"
                   ><template v-for="(row, index) in v.rows" :key="index"><span
                     v-if="row.kind === 'skip'"
@@ -268,7 +271,7 @@ const historyOpen = ref(false)
                   <span>{{ variantDiffStatusLabels[v.status] }}</span>
                   <span class="text-muted">{{ whenLabel(v.when, vocab) }}</span>
                 </p>
-                <p v-if="v.status === 'secret'" class="detail-note">机密切片不展示内容。</p>
+                <p v-if="v.secret" class="detail-note">机密变体不展示内容。</p>
                 <pre
                   v-else-if="v.rows.length"
                   class="diff"
@@ -456,5 +459,8 @@ const historyOpen = ref(false)
   flex-wrap: wrap;
   gap: 6px;
   margin-top: 18px;
+}
+.version-num {
+  font-variant-numeric: tabular-nums;
 }
 </style>

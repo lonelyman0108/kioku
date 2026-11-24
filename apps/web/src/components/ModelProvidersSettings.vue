@@ -40,7 +40,7 @@ const refreshAll = async () => {
   await Promise.all([
     queryClient.invalidateQueries({ queryKey: ['settings', 'models'] }),
     queryClient.invalidateQueries({ queryKey: ['settings', 'embedding'] }),
-    queryClient.invalidateQueries({ queryKey: ['settings', 'system'] }),
+    queryClient.invalidateQueries({ queryKey: ['instance-system'] }),
   ])
 }
 
@@ -358,7 +358,8 @@ async function confirmDelete() {
       :open="editorOpen"
       :title="editingId ? '编辑模型服务商' : '添加模型服务商'"
       :dismissible="!saving"
-      @update:open="(v) => !v && (editorOpen = false)"
+      :close="!saving"
+      @update:open="(v) => (!v && saving) || (editorOpen = v)"
     >
       <template #body>
         <form id="provider-editor-form" class="space-y-4" @submit.prevent="saveProvider">
@@ -514,7 +515,8 @@ async function confirmDelete() {
       :open="Boolean(deletingTarget)"
       title="删除模型服务商？"
       :dismissible="!deleting"
-      @update:open="(v) => !v && (deletingTarget = null)"
+      :close="!deleting"
+      @update:open="(v) => !v && !deleting && (deletingTarget = null)"
     >
       <template #body>
         <p class="text-sm">

@@ -1,12 +1,16 @@
 <script setup lang="ts">
-import type { Sensitivity, StrataBand } from '@kioku/contracts'
+import type { CircleKind, Sensitivity, StrataBand } from '@kioku/contracts'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import { bandLabels } from '../../labels'
 import {
+  STACK,
   bandHints,
   bandTotal,
+  circleBands,
   isConversationBand,
+  localBandHint,
+  localBandLabel,
   paintCell,
   segments,
   stackBands,
@@ -19,22 +23,28 @@ const props = withDefaults(
   defineProps<{
     // 条数还没读到或读取失败时为 null：带等高、不写数字，筛选照样能点
     counts: StrataCounts | null
+    // 单圈记忆页传入当前圈类型时，只展示本圈真实存在的 3 类记忆形态
+    circleKind?: CircleKind | null
     orientation?: 'vertical' | 'horizontal'
     // 竖排的总高，横排的总宽
     length?: number
     selected?: StrataBand | null
     // 筛选到某个敏感级时，带里只留这一段
     sensitivity?: Sensitivity | null
-    // 当前打开的词条在哪条色带：带左边一个小三角
+    // 在已删除 / 已过期视图时「全部」不高亮
+    allActive?: boolean
+    // 当前打开的记忆在哪条色带：带左边一个小三角
     current?: StrataBand | null
     // 外面悬停着的列表行属于哪条色带
     near?: StrataBand | null
   }>(),
   {
+    circleKind: null,
     orientation: 'vertical',
     length: undefined,
     selected: null,
     sensitivity: null,
+    allActive: true,
     current: null,
     near: null,
   },
@@ -44,6 +54,10 @@ const emit = defineEmits<{
   clear: []
   hover: [band: StrataBand | null]
 }>()
+
+const activeList = computed(() => (props.circleKind ? circleBands(props.circleKind) : STACK))
+const labelOf = (band: StrataBand) => (props.circleKind ? localBandLabel(band) : bandLabels[band])
+const hintText = (band: StrataBand) => (props.circleKind ? localBandHint(band) : bandHints[band])
 
 const root = ref<HTMLElement | null>(null)
 const measured = ref(0)
@@ -64,7 +78,7 @@ const THICKNESS = 26
 const FLAT_THICKNESS = 22
 // 竖排的带放得下两行标签（12px 字、1.35 倍行高），横排的带放得下四个字的简称
 const MIN_BAND = 34
-const FLAT_MIN_BAND = 38
+const FLAT_MIN_BAND = 68
 const vertical = computed(() => props.orientation === 'vertical')
 const size = computed(() => {
   const total = props.length ?? measured.value
@@ -77,6 +91,7 @@ const bands = computed(() =>
         size.value,
         vertical.value ? 12 : 6,
         vertical.value ? MIN_BAND : FLAT_MIN_BAND,
+        activeList.value,
       )
     : [],
 )
@@ -88,13 +103,13 @@ const bandSize = (band: Band) =>
 const parts = (band: Band) =>
   props.counts ? segments(props.counts[band.band], bandSize(band).w, 1) : []
 const countText = (band: StrataBand) =>
-  props.counts ? `${bandLabels[band]} ${bandTotal(props.counts, band)} 条` : bandLabels[band]
+  props.counts ? `${labelOf(band)} ${bandTotal(props.counts, band)} 条` : labelOf(band)
 const dividers = (band: Band) =>
   parts(band)
     .filter((p) => p.x > 0)
     .map((p) => `M${p.x + 0.5} 0V${bandSize(band).h}`)
     .join('')
-const hint = (band: Band) => `${countText(band.band)}\n${bandHints[band.band]}`
+const hint = (band: Band) => `${countText(band.band)}\n${hintText(band.band)}`
 const faded = (band: Band, sensitivity: Sensitivity) =>
   Boolean(props.sensitivity) &&
   sensitivity !== props.sensitivity &&
@@ -113,8 +128,8 @@ const faded = (band: Band, sensitivity: Sensitivity) =>
       v-if="vertical"
       type="button"
       class="rb-all"
-      :class="{ on: !selected && !sensitivity }"
-      :aria-pressed="!selected && !sensitivity"
+      :class="{ on: allActive && !selected && !sensitivity }"
+      :aria-pressed="allActive && !selected && !sensitivity"
       @click="emit('clear')"
     >
       <span>全部</span>
@@ -178,7 +193,7 @@ const faded = (band: Band, sensitivity: Sensitivity) =>
         </svg>
         <i v-if="vertical" class="rb-tick" />
         <span class="rb-label">
-          {{ bandLabels[band.band] }}<b v-if="counts">{{ bandTotal(counts, band.band) }}</b>
+          {{ labelOf(band.band) }}<b v-if="counts">{{ bandTotal(counts, band.band) }}</b>
         </span>
       </button>
     </div>
@@ -276,7 +291,7 @@ const faded = (band: Band, sensitivity: Sensitivity) =>
   padding: 3px 0 0;
 }
 .rb-label b {
-  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-weight: 400;
   color: var(--ui-text-muted);
 }

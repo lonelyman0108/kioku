@@ -139,8 +139,8 @@ describe('签发弹窗的权限表', () => {
       expect(html).toContain(`aria-label="读 ${entryKindLabels[k]}"`)
       expect(html).toContain(`aria-label="写 ${entryKindLabels[k]}"`)
     }
-    expect(html).not.toMatch(/aria-label="写 词条" checked/)
-    expect(html).toMatch(/aria-label="读 词条" checked/)
+    expect(html).not.toMatch(/aria-label="写 正式记忆" checked/)
+    expect(html).toMatch(/aria-label="读 正式记忆" checked/)
   })
 
   it('边界线画在最高敏感级那一列', async () => {
@@ -158,10 +158,10 @@ describe('签发弹窗的权限表', () => {
     expect(html.match(/class="scope-tags tpl-tags"/g)).toHaveLength(keyPresets.length)
   })
 
-  it('不是记忆圈所有者：机密、取用、管理与管理词表及人格权限禁用，并写出原因', async () => {
+  it('不是记忆圈所有者：机密、取用、管理与管理语境词典及人格权限禁用，并写出原因', async () => {
     const html = await render(scopesOf('agent', false), 'agent', false)
     expect(html).toContain('仅记忆圈所有者可签发机密级')
-    expect(html).toContain('仅记忆圈所有者的接入实例可以取用或管理凭据。')
+    expect(html).toContain('仅记忆圈所有者的客户端可以取用或管理凭据。')
     expect(html).toContain('仅记忆圈所有者可开启')
     expect(html).toMatch(/value="secret" disabled/)
     expect(html).toMatch(/value="use" disabled/)

@@ -43,9 +43,9 @@ const quiet = (tab: InboxTab) =>
   (role.value !== undefined && !inboxTabActionable(tab, role.value))
 const tab = useInboxTab(counts)
 const refreshing = computed(() => counts.isFetching.value)
-// 换分类时回到顶上：各类共用一个滚动区
+// 换分类或切换记忆圈时回到顶上：各类共用一个滚动区
 const scroller = ref<HTMLElement | null>(null)
-watch(tab, () => {
+watch([tab, circleId], () => {
   if (scroller.value) scroller.value.scrollTop = 0
 })
 </script>
@@ -84,6 +84,11 @@ watch(tab, () => {
         </nav>
       </aside>
       <section class="inbox-main" :aria-label="tab ? inboxTabLabels[tab] : '待处理'">
+        <div v-if="tab === null" class="space-y-3">
+          <USkeleton class="h-8 w-40" />
+          <USkeleton class="h-24 w-full" />
+          <USkeleton class="h-24 w-full" />
+        </div>
         <!-- 切到别的分类时不卸载：勾选的条目和改了一半的草稿都还在 -->
         <KeepAlive>
           <InboxBindings v-if="tab === 'binding'" :circle-id="circleId" />

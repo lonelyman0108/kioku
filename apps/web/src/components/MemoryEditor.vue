@@ -2,8 +2,14 @@
 import { useToast } from '@nuxt/ui/composables'
 import {
   CONVERT_SCOPE_TEXT,
+  CREDENTIAL_PLACEHOLDER_PREFIX,
+  CREDENTIAL_PLACEHOLDER_START,
+  DISCLOSURE_MAX,
+  ENTRY_CONTENT_MAX,
   ENTRY_TITLE_MAX,
   EntryTitle,
+  GLOSSARY_MAX,
+  Keyword,
   PLAINTEXT_CREDENTIAL,
   TOPICS_MAX,
   TopicTag,
@@ -25,19 +31,21 @@ import {
   type StrataBand,
 } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { computed, nextTick, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
+import { invalidateActivity } from '../activity'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { hasUnsavedChanges, useUnsavedChangesGuard } from '../composables/unsavedChanges'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
 import { useNow } from '../composables/useNow'
 import { usePlaintextActions } from '../composables/usePlaintextActions'
+import { useSession } from '../composables/useSession'
 import type { PlaintextSaveRequest, PlaintextSaveResult } from '../composables/usePlaintextSave'
 import { icons } from '../icons'
 import { buildKeywordIndex } from '../keywords'
-import { entryKindLabels, provenanceLabels, sensitivityLabels } from '../labels'
+import { provenanceLabels, sensitivityLabels } from '../labels'
 import type { CredentialLinks, WikiLinkTargets } from '../markdown'
 import {
   BOOT_HINT,
@@ -83,6 +91,7 @@ import {
   validToTooSoon,
 } from '../time'
 import { canManageCredentials } from '../vault'
+import ConsequenceModal from './ConsequenceModal.vue'
 import ConvertCredentialModal from './ConvertCredentialModal.vue'
 import EntryLinksPanel from './EntryLinksPanel.vue'
 import FacetWhenPicker from './FacetWhenPicker.vue'
@@ -130,6 +139,7 @@ const emit = defineEmits<{
 const toast = useToast()
 const queryClient = useQueryClient()
 const router = useRouter()
+const { me } = useSession()
 
 const queryKey = computed(() => ['entry', props.circleId, props.shortId] as const)
 const entry = useQuery({
@@ -141,10 +151,21 @@ const entry = useQuery({
     }),
 })
 
-const permissions = useMemoryPermissions(computed(() => props.circleId))
+const permissions = useMemoryPermissions(
+  computed(() => props.circleId),
+  { withClients: true },
+)
 const facets = useQuery({
   queryKey: computed(() => ['facets', props.circleId] as const),
   queryFn: ({ queryKey: [, cid] }) => api.facets(cid),
+})
+const circleDetail = useQuery({
+  queryKey: computed(() => ['circle', props.circleId] as const),
+  queryFn: ({ queryKey: [, cid] }) => api.circle(cid),
+})
+const defaultFacetsText = computed(() => {
+  const f = circleDetail.data.value?.defaultFacets
+  return f && Object.keys(f).length ? whenLabel(f, facets.data.value) : null
 })
 
 const form = reactive({
@@ -163,6 +184,7 @@ const editVariants = ref<EditVariant[]>([])
 const editSliceIdx = ref(0)
 const readSliceIdx = ref(0)
 const compareMode = ref(false)
+const showEditConditions = ref(false)
 
 // 表单是从哪一版载入的：改动与保存时的版本号都以它为准，而不是缓存里最新的那份
 const base = ref<ConsoleEntryView | null>(null)
@@ -305,13 +327,35 @@ watch(
   { immediate: true },
 )
 
-const recallable = computed(() => !!base.value && base.value.sensitivity !== 'secret')
+const isEpisode = computed(() => base.value?.kind === 'episode')
+const isEntry = computed(() => base.value?.kind === 'entry')
+const isLocalEntry = computed(() => !base.value || base.value.circleId === props.circleId)
+const recallable = computed(
+  () => !!base.value && base.value.kind !== 'episode' && base.value.sensitivity !== 'secret',
+)
 const recallStat = useQuery({
   queryKey: computed(() => ['entry-recall', props.circleId, base.value?.id] as const),
   queryFn: ({ queryKey: [, cid, id] }) => api.entryRecallStat(cid, id!),
   enabled: recallable,
 })
 const readOnly = computed(() => (base.value ? permissions.readOnlyReason(base.value) : null))
+const hasCredentialPlaceholder = computed(
+  () =>
+    !!base.value &&
+    base.value.variants.some((v) => v.content?.includes(CREDENTIAL_PLACEHOLDER_START)),
+)
+const transferBlockedReason = computed(() =>
+  entryCircleKind.value === 'personal' && hasCredentialPlaceholder.value
+    ? '正文包含个人凭据引用，移除引用后可迁出个人圈'
+    : null,
+)
+const editConditionsExpanded = computed(
+  () =>
+    !isEpisode.value &&
+    (showEditConditions.value ||
+      editVariants.value.length > 1 ||
+      Object.keys(editVariants.value[0]?.when ?? {}).length > 0),
+)
 
 const mode = ref<'read' | 'edit'>('read')
 const preview = ref(false)
@@ -355,6 +399,8 @@ function startEditing() {
   minValidTo.value = earliestValidTo()
   historyOpen.value = false
   editSliceIdx.value = Math.min(readSliceIdx.value, Math.max(editVariants.value.length - 1, 0))
+  showEditConditions.value =
+    editVariants.value.length > 1 || Object.keys(editVariants.value[0]?.when ?? {}).length > 0
   mode.value = 'edit'
 }
 
@@ -372,22 +418,35 @@ function cancelEditing() {
 
 // 机密词条的所有切片须保持相同场域
 const primaryRealms = computed(() => normalizeWhen(editVariants.value[0]?.when).realm ?? [])
-function syncSecretRealms() {
+function syncSecretRealms(notify = false) {
   if (form.sensitivity !== 'secret' || editVariants.value.length <= 1) return
   const baseRealms = primaryRealms.value
+  let changed = false
   for (let i = 1; i < editVariants.value.length; i++) {
     const slice = editVariants.value[i]!
+    const prevSig = whenSignature(slice.when)
     const nextWhen = { ...normalizeWhen(slice.when) }
     if (baseRealms.length) nextWhen.realm = [...baseRealms]
     else delete nextWhen.realm
-    slice.when = normalizeWhen(nextWhen)
+    const normalized = normalizeWhen(nextWhen)
+    if (whenSignature(normalized) !== prevSig) {
+      changed = true
+      slice.when = normalized
+    }
+  }
+  if (notify && changed) {
+    toast.add({
+      title: '已将各变体的场域同步为与首个变体一致',
+      description: '机密记忆的所有变体须保持同一场域。',
+      color: 'info',
+    })
   }
 }
 watch(
   () => form.sensitivity,
-  (s) => s === 'secret' && syncSecretRealms(),
+  (s) => s === 'secret' && syncSecretRealms(true),
 )
-watch(primaryRealms, () => syncSecretRealms())
+watch(primaryRealms, () => syncSecretRealms(false))
 
 function addEditVariant() {
   if (editVariants.value.length >= VARIANTS_MAX) return
@@ -471,10 +530,39 @@ const canReference = computed(
   () =>
     !!base.value && placeholderAllowed(entryCircleKind.value, base.value.kind, form.sensitivity),
 )
+const canWikiLink = computed(
+  () =>
+    !!base.value &&
+    !isEpisode.value &&
+    form.sensitivity !== 'secret' &&
+    base.value.provenance !== 'untrusted',
+)
+const wikiLinkDisabledReason = computed(() => {
+  if (isEpisode.value) return '会话摘要暂不支持编辑双链'
+  if (form.sensitivity === 'secret') return '机密记忆不建立双链索引'
+  if (base.value?.provenance === 'untrusted') return '未确认内容暂不建立双链索引，确认后生效'
+  return undefined
+})
 const contentInput = ref<{ textareaRef: HTMLTextAreaElement | null } | null>(null)
 const picking = ref(false)
 const linkPicking = ref(false)
+const linkCircleId = ref(props.circleId)
 const linkQuery = ref('')
+const debouncedLinkQuery = ref('')
+let linkDebounceTimer: ReturnType<typeof setTimeout> | undefined
+watch(linkQuery, (value) => {
+  clearTimeout(linkDebounceTimer)
+  linkDebounceTimer = setTimeout(() => {
+    debouncedLinkQuery.value = value.trim()
+  }, 250)
+})
+onBeforeUnmount(() => clearTimeout(linkDebounceTimer))
+const linkCircleItems = computed(() =>
+  (me.data.value?.circles ?? []).map((c) => ({
+    label: c.kind === 'personal' ? `${c.name}（个人圈）` : c.name,
+    value: c.id,
+  })),
+)
 const caret = ref<{ start: number; end: number; content: string; key: number } | null>(null)
 const WHOLE = '*'
 const pick = reactive({ credentialId: undefined as string | undefined, field: WHOLE })
@@ -500,19 +588,25 @@ watch(
 )
 
 const linkSearch = useQuery({
-  queryKey: computed(() => ['entry-link-search', props.circleId, linkQuery.value.trim()] as const),
+  queryKey: computed(
+    () => ['entry-link-search', linkCircleId.value, debouncedLinkQuery.value] as const,
+  ),
   queryFn: async ({ queryKey: [, cid, q] }): Promise<(EntryMatch | EntryListItem)[]> => {
     if (!q) {
-      const res = await api.entryList(cid, { limit: 12 })
+      const res = await api.entryList(cid, { limit: 20 })
       return res.items
     }
-    const res = await api.searchEntries(cid, q, 12)
+    const res = await api.searchEntries(cid, q, 20)
     return res.matches
   },
-  enabled: linkPicking,
+  enabled: computed(() => linkPicking.value && Boolean(linkCircleId.value)),
 })
 const linkCandidates = computed(() =>
-  (linkSearch.data.value ?? []).filter((item) => item.shortId !== props.shortId),
+  (linkSearch.data.value ?? []).filter(
+    (item) =>
+      item.sensitivity !== 'secret' &&
+      !(linkCircleId.value === props.circleId && item.shortId === props.shortId),
+  ),
 )
 
 function captureCaret() {
@@ -557,7 +651,9 @@ function insertPlaceholder() {
 
 function startLinkPicking() {
   captureCaret()
+  linkCircleId.value = props.circleId
   linkQuery.value = ''
+  debouncedLinkQuery.value = ''
   linkPicking.value = true
 }
 function insertWikiLink(shortId: string, title: string) {
@@ -592,17 +688,21 @@ async function onMoved(next: ConsoleEntryView, targetCircleId: string) {
     load(next)
   } else {
     void queryClient.invalidateQueries({ queryKey: ['entry', next.circleId, next.shortId] })
+    invalidateActivity(queryClient, targetCircleId)
   }
+  void queryClient.invalidateQueries({ queryKey: ['entry-history', targetCircleId, next.id] })
   void queryClient.invalidateQueries({ queryKey: ['entry-history', props.circleId, next.id] })
-  void queryClient.invalidateQueries({ queryKey: ['activity-event', props.circleId] })
+  invalidateActivity(queryClient, props.circleId)
   emit('moved', next, targetCircleId)
 }
 
-// 个人圈不设公开：选项里也不给
+// 个人圈不设公开，未确认与会话摘要不设机密：选项里都不给
 const sensitivityOptions = computed(() =>
   permissions.sensitivities.value
     .filter(
-      (value) => !base.value || sensitivityAllowed(entryCircleKind.value, base.value.kind, value),
+      (value) =>
+        !base.value ||
+        sensitivityAllowed(entryCircleKind.value, base.value.kind, value, base.value.provenance),
     )
     .map((value) => ({
       value,
@@ -613,6 +713,8 @@ const sensitivityOptions = computed(() =>
 )
 const saving = ref(false)
 const deleting = ref<ConsoleEntryView | null>(null)
+const deletingBusy = ref(false)
+const deleteError = ref<string | null>(null)
 
 function failed(err: unknown, fallback: string) {
   toast.add({ title: err instanceof ApiError ? err.message : fallback, color: 'error' })
@@ -637,8 +739,20 @@ const hasDuplicateWhen = computed(() => {
 const hasEmptySlice = computed(() => editVariants.value.some((v) => !v.content.trim()))
 
 function formProblem(
-  values: { title: string; validTo: string; topics?: readonly string[] },
+  values: {
+    title: string
+    validTo: string
+    topics?: readonly string[]
+    disclosure?: string
+    priority?: number
+    glossary?: readonly string[]
+    sensitivity?: Sensitivity
+  },
   m: ConsoleEntryView,
+  variantsToCheck: readonly {
+    when: Record<string, string[]>
+    content: string
+  }[] = editVariants.value,
 ) {
   const title = EntryTitle.safeParse(values.title)
   if (values.title !== m.title && !title.success) {
@@ -653,10 +767,38 @@ function formProblem(
       return `主题标签最多 ${TOPICS_MAX} 个`
     }
   }
-  if (hasEmptySlice.value) return '每个变体切片的正文不能为空'
-  if (hasDuplicateWhen.value) return '同一条记忆下不能存在适用切面相同的变体切片'
-  if (form.sensitivity === 'secret' && !hasHomogeneousRealms(editVariants.value)) {
-    return '机密记忆的所有变体切片须保持相同的场域'
+  if (values.priority !== undefined) {
+    const minPriority = m.kind === 'episode' ? 1 : 0
+    if (
+      !Number.isInteger(values.priority) ||
+      values.priority < minPriority ||
+      values.priority > 99
+    ) {
+      return m.kind === 'episode' ? '会话摘要的优先级须在 1 到 99 之间' : '优先级须在 0 到 99 之间'
+    }
+  }
+  if (m.kind !== 'episode' && values.disclosure !== undefined) {
+    const trimmed = values.disclosure.trim()
+    if (trimmed.length > DISCLOSURE_MAX) return `召回说明最多 ${DISCLOSURE_MAX} 个字符`
+    if (trimmed.includes(CREDENTIAL_PLACEHOLDER_PREFIX)) return '凭据占位符只能写在正文里'
+  }
+  if (m.kind !== 'episode' && values.glossary) {
+    if (values.glossary.length > GLOSSARY_MAX) return `关键词最多 ${GLOSSARY_MAX} 个`
+    for (const raw of values.glossary) {
+      const parsed = Keyword.safeParse(raw)
+      if (!parsed.success) return parsed.error.issues[0]?.message ?? '关键词至少两个字'
+    }
+  }
+  if (variantsToCheck.some((v) => !v.content.trim())) return '每个变体的正文不能为空'
+  if (variantsToCheck.some((v) => v.content.length > ENTRY_CONTENT_MAX)) {
+    return `每个变体的正文最多 ${ENTRY_CONTENT_MAX.toLocaleString()} 个字符`
+  }
+  if (hasDuplicateWhen.value) return '同一条记忆下不能存在适用条件相同的变体'
+  if (
+    (values.sensitivity ?? form.sensitivity) === 'secret' &&
+    !hasHomogeneousRealms(variantsToCheck)
+  ) {
+    return '机密记忆的所有变体须保持相同的场域'
   }
   if (values.validTo === validToInput(m) || !values.validTo) return null
   if (!fromLocalInput(values.validTo)) return '有效期的日期和时间不完整'
@@ -666,6 +808,8 @@ function formProblem(
   }
   return null
 }
+
+const liveProblem = computed(() => (base.value ? formProblem(form, base.value) : null))
 
 function gateFor(
   m: ConsoleEntryView,
@@ -701,7 +845,14 @@ function requestSave() {
       return
     }
   } else if (form.sensitivity !== 'secret' && variantsChanged.value) {
-    const { content, spots } = addedVariantSpots(m.variants, editVariants.value)
+    const { content, spots } = addedVariantSpots(
+      m.variants,
+      editVariants.value.map((v) => ({
+        when: normalizeWhen(v.when),
+        content: v.content,
+        label: whenLabel(v.when, facets.data.value),
+      })),
+    )
     if (spots.length) {
       plaintextGate.value = gateFor(m, content, spots, false)
       return
@@ -750,7 +901,7 @@ async function save(flags: SaveFlags = {}) {
     })),
     variantsDirty: variantsChanged.value,
   }
-  const problem = formProblem(sent, m)
+  const problem = formProblem(sent, m, sent.variants)
   if (problem) {
     toast.add({ title: problem, color: 'error' })
     return
@@ -769,16 +920,21 @@ async function save(flags: SaveFlags = {}) {
       ...(title.success && title.data !== m.title ? { title: title.data } : {}),
       ...(sent.variantsDirty ? { variants: sent.variants } : {}),
       ...(topicsChanged ? { topics: sent.topics } : {}),
-      ...((sent.disclosure.trim() || null) !== (m.disclosure ?? null)
+      ...(m.kind !== 'episode' && (sent.disclosure.trim() || null) !== (m.disclosure ?? null)
         ? { disclosure: sent.disclosure.trim() || null }
         : {}),
       priority: sent.priority,
       sensitivity: sent.sensitivity,
-      glossaryAdd: sent.glossary.filter((k) => !m.glossary.includes(k)),
-      glossaryRemove: m.glossary.filter((k) => !sent.glossary.includes(k)),
+      ...(m.kind !== 'episode'
+        ? {
+            glossaryAdd: sent.glossary.filter((k) => !m.glossary.includes(k)),
+            glossaryRemove: m.glossary.filter((k) => !sent.glossary.includes(k)),
+          }
+        : {}),
       ...(validToChanged ? { validTo } : {}),
       ...flags,
     })
+    if (base.value?.id !== m.id) return
     await queryClient.cancelQueries({ queryKey: queryKey.value })
     queryClient.setQueryData(queryKey.value, next)
     revealed.value = revealedAfterWrite(next, sent.variants, revealed.value)
@@ -799,10 +955,14 @@ async function save(flags: SaveFlags = {}) {
     toast.add({ title: '已保存', color: 'success' })
     if (!dirty.value) mode.value = 'read'
     void queryClient.invalidateQueries({ queryKey: ['entry-history', props.circleId, next.id] })
-    void queryClient.invalidateQueries({ queryKey: ['activity-event', props.circleId] })
+    invalidateActivity(queryClient, props.circleId)
     emit('changed', next, m)
   } catch (err) {
     const findings = plaintextRejection(err)
+    if (findings && m.sensitivity === 'secret' && sent.sensitivity !== 'secret') {
+      downgradeWarning.value = true
+      return
+    }
     const currentJoined = joinVariantContents(editVariants.value) ?? ''
     const gate = findings && spotsAfterRejection(beforeJoined, sentJoined, currentJoined, findings)
     if (gate) {
@@ -818,20 +978,27 @@ async function save(flags: SaveFlags = {}) {
 
 async function remove() {
   const m = deleting.value
-  if (!m) return
+  if (!m || deletingBusy.value) return
+  deletingBusy.value = true
+  deleteError.value = null
   try {
     await api.deleteEntry(props.circleId, m.shortId, m.version)
     deleting.value = null
     toast.add({ title: '已删除', color: 'success' })
+    invalidateActivity(queryClient, props.circleId)
     leaving.value = true
     hasUnsavedChanges.value = false
     emit('deleted', m.shortId)
   } catch (err) {
-    failed(err, '删除失败')
+    deleteError.value = err instanceof ApiError ? err.message : '删除失败'
     if (err instanceof ApiError && err.status === 409) {
       deleting.value = null
+      deleteError.value = null
+      toast.add({ title: '这条记忆已在别处修改，已刷新最新版本', color: 'warning' })
       void entry.refetch()
     }
+  } finally {
+    deletingBusy.value = false
   }
 }
 
@@ -885,6 +1052,45 @@ const protectedPii = computed(() => {
   )
 })
 
+const canProtectSecret = computed(() => {
+  const m = base.value
+  return (
+    !!m &&
+    permissions.sensitivities.value.includes('secret') &&
+    sensitivityAllowed(entryCircleKind.value, m.kind, 'secret', m.provenance) &&
+    hasHomogeneousRealms(m.variants)
+  )
+})
+const movingToPersonal = ref(false)
+async function moveToPersonalAndProtect() {
+  const m = base.value
+  const personalCircleId = me.data.value?.personalCircleId
+  if (!m || !personalCircleId || movingToPersonal.value) return
+  movingToPersonal.value = true
+  try {
+    let next = await api.transferEntry(props.circleId, {
+      entryId: m.id,
+      toCircleId: personalCircleId,
+      expectedVersion: m.version,
+    })
+    if (next.sensitivity !== 'private') {
+      next = await api.protectEntry(personalCircleId, {
+        entryId: next.id,
+        expectedVersion: next.version,
+        target: 'personal_private',
+      })
+    }
+    toast.add({ title: '已移入个人圈私密，原文已保留', color: 'success' })
+    await onMoved(next, personalCircleId)
+  } catch (err) {
+    failed(err, '移入个人圈私密失败')
+    if (err instanceof ApiError && (err.status === 404 || err.status === 409)) {
+      void entry.refetch()
+    }
+  } finally {
+    movingToPersonal.value = false
+  }
+}
 const convertOpen = ref(false)
 const redactOpen = ref(false)
 const convertible = computed(
@@ -930,32 +1136,55 @@ const properties = computed<Property[][]>(() => {
   if (!m) return []
   return [
     [
-      { key: 'band', label: '地层' },
-      { key: 'kind', label: '类型', value: entryKindLabels[m.kind] },
+      { key: 'band', label: '形态' },
       { key: 'sensitivity', label: '敏感级' },
       { key: 'priority', label: '优先级' },
     ],
     [
       { key: 'topics', label: '主题', stacked: true },
-      { key: 'disclosure', label: '触发场景', stacked: true },
-      { key: 'glossary', label: '关键词', stacked: true },
+      ...(defaultFacetsText.value && isLocalEntry.value
+        ? [
+            {
+              key: 'defaultFacets',
+              label: '本圈默认条件',
+              value: defaultFacetsText.value,
+              stacked: true,
+            },
+          ]
+        : []),
+      ...(m.kind !== 'episode'
+        ? [
+            { key: 'disclosure', label: '召回说明', stacked: true },
+            { key: 'glossary', label: '关键词', stacked: true },
+          ]
+        : []),
       { key: 'validity', label: '有效期' },
+      ...(m.expiresAt
+        ? [{ key: 'expires', label: '清除时间', value: formatShort(m.expiresAt) }]
+        : []),
     ],
     [
       { key: 'provenance', label: '来源', value: provenanceLabels[m.provenance] },
       { key: 'origin', label: '作用域', value: originScopeLabel(m.originScope, clientName) },
+      ...(m.subject ? [{ key: 'subject', label: '联系人' }] : []),
+      ...(m.conversationId ? [{ key: 'conversation', label: '所属会话' }] : []),
+      ...(m.clientId ? [{ key: 'client', label: '客户端' }] : []),
       { key: 'version', label: '版本', value: m.version },
       { key: 'created', label: '创建' },
       { key: 'updated', label: '更新' },
-      {
-        key: 'recall',
-        label: '召回',
-        value: recallText(
-          recallable.value ? recallStat.data.value : undefined,
-          { secret: !recallable.value, boot: bootNode.value },
-          now.value,
-        ),
-      },
+      ...(m.kind !== 'episode'
+        ? [
+            {
+              key: 'recall',
+              label: '召回',
+              value: recallText(
+                recallable.value ? recallStat.data.value : undefined,
+                { secret: m.sensitivity === 'secret', boot: bootNode.value },
+                now.value,
+              ),
+            },
+          ]
+        : []),
     ],
   ]
 })
@@ -985,11 +1214,15 @@ function previewVariantContent(): string {
       </div>
       <template v-if="base && entryStrataBand">
         <div class="detail-tag">
-          <StrataBandTag :band="entryStrataBand" :sensitivity="shownSensitivity" />
+          <StrataBandTag
+            :band="entryStrataBand"
+            :sensitivity="shownSensitivity"
+            :local="isLocalEntry"
+          />
           <span class="tag-priority">P{{ shownPriority }}</span>
           <span v-if="readVariants.length > 1" class="tag-variants">
             <UIcon :name="icons.variants" class="size-3.5" />
-            <span>{{ readVariants.length }} 切片</span>
+            <span>{{ readVariants.length }} 变体</span>
           </span>
           <span v-if="bootNode" class="inline-flex items-center gap-1.5">
             <span class="boot-flag">启动加载</span>
@@ -1022,15 +1255,21 @@ function previewVariantContent(): string {
             >
               历史
             </UButton>
-            <UButton
-              v-if="!readOnly"
-              size="sm"
-              color="primary"
-              variant="outline"
-              @click="moveOpen = true"
+            <UTooltip
+              v-if="!readOnly && isEntry"
+              :text="transferBlockedReason ?? undefined"
+              :disabled="!transferBlockedReason"
             >
-              迁移
-            </UButton>
+              <UButton
+                size="sm"
+                color="primary"
+                variant="outline"
+                :disabled="Boolean(transferBlockedReason)"
+                @click="moveOpen = true"
+              >
+                迁移
+              </UButton>
+            </UTooltip>
             <UButton
               v-if="!readOnly"
               size="sm"
@@ -1090,7 +1329,7 @@ function previewVariantContent(): string {
           这条记忆将于 {{ formatTime(base.validTo!) }} 到期，到期后不再召回，也不进启动加载。
         </NoteLine>
 
-        <!-- 编辑：就地改多切面原文，可以并排预览与插双链 -->
+        <!-- 编辑：就地改正文与多变体，支持并排预览与插入双链 -->
         <template v-if="mode === 'edit'">
           <div class="grid gap-3 pb-3 sm:grid-cols-2">
             <UFormField label="标题" class="edit-title">
@@ -1104,29 +1343,46 @@ function previewVariantContent(): string {
           </div>
 
           <div class="edit-head">
-            <div class="slice-bar" role="tablist" aria-label="内容切片">
-              <button
-                v-for="(slice, idx) in editVariants"
-                :key="slice.key"
+            <div v-if="!isEpisode" class="slice-bar" role="tablist" aria-label="变体">
+              <template v-if="editVariants.length > 1">
+                <div
+                  v-for="(slice, idx) in editVariants"
+                  :key="slice.key"
+                  class="slice-tab"
+                  :class="{ active: idx === editSliceIdx }"
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    :aria-selected="idx === editSliceIdx"
+                    class="slice-tab-btn"
+                    @click="editSliceIdx = idx"
+                  >
+                    {{ whenLabel(slice.when, facets.data.value) }}
+                  </button>
+                  <UButton
+                    v-if="editVariants.length > 1"
+                    type="button"
+                    size="xs"
+                    color="neutral"
+                    variant="ghost"
+                    :icon="icons.cancel"
+                    aria-label="删除此变体"
+                    @click="removeEditVariant(idx)"
+                  />
+                </div>
+              </template>
+              <UButton
+                v-if="!editConditionsExpanded"
                 type="button"
-                role="tab"
-                :aria-selected="idx === editSliceIdx"
-                class="slice-tab"
-                :class="{ active: idx === editSliceIdx }"
-                @click="editSliceIdx = idx"
+                size="xs"
+                color="neutral"
+                variant="outline"
+                :icon="icons.facets"
+                @click="showEditConditions = true"
               >
-                <span>{{ whenLabel(slice.when, facets.data.value) }}</span>
-                <UButton
-                  v-if="editVariants.length > 1"
-                  type="button"
-                  size="xs"
-                  color="neutral"
-                  variant="ghost"
-                  :icon="icons.cancel"
-                  aria-label="删除此切片"
-                  @click.stop="removeEditVariant(idx)"
-                />
-              </button>
+                设置适用条件
+              </UButton>
               <UButton
                 v-if="editVariants.length < VARIANTS_MAX"
                 type="button"
@@ -1136,22 +1392,26 @@ function previewVariantContent(): string {
                 :icon="icons.add"
                 @click="addEditVariant"
               >
-                添加切片
+                添加变体
               </UButton>
             </div>
+            <span v-else class="text-xs text-muted">会话摘要仅保留单篇无条件正文</span>
             <div class="edit-tools">
-              <UButton
-                type="button"
-                size="sm"
-                color="neutral"
-                variant="outline"
-                :icon="icons.links"
-                @click="startLinkPicking"
-              >
-                插入双链
-              </UButton>
+              <UTooltip :text="wikiLinkDisabledReason" :disabled="canWikiLink">
+                <UButton
+                  type="button"
+                  size="sm"
+                  color="neutral"
+                  variant="outline"
+                  :icon="icons.links"
+                  :disabled="!canWikiLink"
+                  @click="startLinkPicking"
+                >
+                  插入双链
+                </UButton>
+              </UTooltip>
               <UTooltip
-                :text="canReference ? undefined : '仅个人圈中敏感级不低于私密的正式词条可引用凭据'"
+                :text="canReference ? undefined : '仅个人圈中敏感级不低于私密的正式记忆可引用凭据'"
                 :disabled="canReference"
               >
                 <UButton
@@ -1171,6 +1431,7 @@ function previewVariantContent(): string {
 
           <div v-if="activeEditVariant" class="space-y-3">
             <FacetWhenPicker
+              v-if="editConditionsExpanded"
               :model-value="activeEditVariant.when"
               :circle-id="circleId"
               :vocabulary="facets.data.value"
@@ -1179,9 +1440,13 @@ function previewVariantContent(): string {
               "
               @update:model-value="updateActiveEditWhen"
             />
-            <NoteLine v-if="hasDuplicateWhen" tone="warning">
-              存在适用切面相同的变体切片，请调整条件后再保存。
-            </NoteLine>
+            <p
+              v-if="form.sensitivity === 'secret' && editVariants.length > 1"
+              class="text-xs text-muted"
+            >
+              机密记忆的所有变体须归属同一场域，已与首个变体同步锁定。
+            </p>
+            <NoteLine v-if="liveProblem" tone="warning">{{ liveProblem }}</NoteLine>
             <div class="grid gap-3" :class="preview ? 'xl:grid-cols-2' : ''">
               <UTextarea
                 ref="contentInput"
@@ -1253,16 +1518,36 @@ function previewVariantContent(): string {
             </Hint>
             <template v-if="!readOnly" #actions>
               <UButton
+                v-if="base.provenance === 'untrusted'"
+                size="sm"
+                color="primary"
+                variant="outline"
+                :to="{ name: 'inbox', params: { circleId }, query: { tab: 'review' } }"
+              >
+                前往待确认内容
+              </UButton>
+              <UButton
+                v-else-if="entryCircleKind === 'personal'"
                 size="sm"
                 color="primary"
                 variant="outline"
                 :loading="plaintextActions.busy.value === base.id"
                 @click="protectCurrent('personal_private')"
               >
-                {{ entryCircleKind === 'personal' ? '设为私密' : '移入个人圈私密' }}
+                设为私密
               </UButton>
               <UButton
-                v-if="permissions.sensitivities.value.includes('secret')"
+                v-else-if="isEntry"
+                size="sm"
+                color="primary"
+                variant="outline"
+                :loading="movingToPersonal"
+                @click="moveToPersonalAndProtect"
+              >
+                移入个人圈私密
+              </UButton>
+              <UButton
+                v-if="canProtectSecret"
                 size="sm"
                 color="neutral"
                 variant="outline"
@@ -1320,7 +1605,7 @@ function previewVariantContent(): string {
             </template>
           </NoteLine>
           <NoteLine v-if="base.otherVariants.length">
-            另有 {{ base.otherVariants.length }} 个未展开的切面切片：{{
+            另有 {{ base.otherVariants.length }} 个未展开的变体：{{
               base.otherVariants.map((o) => whenLabel(o.when, facets.data.value)).join('、')
             }}
           </NoteLine>
@@ -1359,7 +1644,7 @@ function previewVariantContent(): string {
             </NoteLine>
 
             <div v-if="readVariants.length >= 2" class="read-variant-bar">
-              <div class="slice-bar" role="tablist" aria-label="切面切片">
+              <div class="slice-bar" role="tablist" aria-label="变体">
                 <button
                   v-for="(v, idx) in readVariants"
                   :key="v.id"
@@ -1389,7 +1674,7 @@ function previewVariantContent(): string {
               class="single-when-note"
             >
               <UIcon :name="icons.facets" class="size-3.5" />
-              <span>适用切面：{{ whenLabel(readVariants[0]!.when, facets.data.value) }}</span>
+              <span>适用条件：{{ whenLabel(readVariants[0]!.when, facets.data.value) }}</span>
             </p>
 
             <div v-if="compareMode && readVariants.length >= 2" class="compare-grid">
@@ -1439,11 +1724,29 @@ function previewVariantContent(): string {
       <aside class="detail-side">
         <div v-if="mode === 'edit'" class="edit-fields">
           <div class="edit-layer">
-            <span>地层</span>
-            <StrataSwatch v-if="entryStrataBand" :band="entryStrataBand" plain label="band" />
+            <span>形态</span>
+            <StrataSwatch
+              v-if="entryStrataBand"
+              :band="entryStrataBand"
+              :local="isLocalEntry"
+              plain
+              label="band"
+            />
           </div>
-          <UFormField label="优先级" help="0 最重要">
-            <UInputNumber v-model="form.priority" :min="0" :max="99" class="w-full" />
+          <UFormField
+            label="优先级"
+            :help="
+              isEpisode
+                ? '会话摘要不设最高优先级 0，1 最重要'
+                : '0 最重要，最高优先级正式记忆参与启动加载'
+            "
+          >
+            <UInputNumber
+              v-model="form.priority"
+              :min="isEpisode ? 1 : 0"
+              :max="99"
+              class="w-full"
+            />
           </UFormField>
           <div>
             <p class="edit-label">敏感级</p>
@@ -1453,11 +1756,16 @@ function previewVariantContent(): string {
               :options="sensitivityOptions"
             />
           </div>
-          <UFormField label="触发场景">
+          <UFormField v-if="!isEpisode" label="召回说明">
             <template #hint><Hint>什么场景下应该想起这条记忆</Hint></template>
-            <UInput ref="disclosureInput" v-model="form.disclosure" class="w-full" />
+            <UInput
+              ref="disclosureInput"
+              v-model="form.disclosure"
+              :maxlength="DISCLOSURE_MAX"
+              class="w-full"
+            />
           </UFormField>
-          <UFormField label="关键词">
+          <UFormField v-if="!isEpisode" label="关键词">
             <template #hint><Hint>召回时按关键词命中，至少两个字</Hint></template>
             <UInputTags v-model="form.glossary" class="w-full" />
           </UFormField>
@@ -1506,13 +1814,20 @@ function previewVariantContent(): string {
         </div>
         <PropertyList v-else :groups="properties">
           <template #band>
-            <StrataSwatch v-if="entryStrataBand" :band="entryStrataBand" plain label="band" />
+            <StrataSwatch
+              v-if="entryStrataBand"
+              :band="entryStrataBand"
+              :local="isLocalEntry"
+              plain
+              label="band"
+            />
           </template>
           <template #sensitivity>
             <StrataSwatch
               v-if="entryStrataBand"
               :band="entryStrataBand"
               :sensitivity="base.sensitivity"
+              :local="isLocalEntry"
               label="sensitivity"
             />
           </template>
@@ -1545,6 +1860,37 @@ function previewVariantContent(): string {
             >
               {{ base.validTo ? formatShort(base.validTo) : '长期有效' }}
             </span>
+          </template>
+          <template v-if="base.subject" #subject>
+            <RouterLink
+              :to="{
+                name: 'contact',
+                params: { circleId: base.circleId, subjectId: base.subject.id },
+              }"
+              class="side-link"
+            >
+              {{ base.subject.displayName }}
+            </RouterLink>
+          </template>
+          <template v-if="base.conversationId" #conversation>
+            <RouterLink
+              :to="{
+                name: 'conversations',
+                params: { circleId: base.circleId },
+                query: { id: base.conversationId },
+              }"
+              class="side-link"
+            >
+              查看会话
+            </RouterLink>
+          </template>
+          <template v-if="base.clientId" #client>
+            <RouterLink
+              :to="{ name: 'client', params: { circleId: base.circleId, clientId: base.clientId } }"
+              class="side-link"
+            >
+              {{ clientName(base.clientId) ?? base.clientId }}
+            </RouterLink>
           </template>
           <template #version
             ><span class="font-mono">{{ base.version }}</span></template
@@ -1587,6 +1933,14 @@ function previewVariantContent(): string {
       <UModal v-model:open="linkPicking" title="插入双链" @after:leave="restoreCaret">
         <template #body>
           <div class="space-y-3">
+            <UFormField v-if="linkCircleItems.length > 1" label="目标记忆圈">
+              <USelect
+                v-model="linkCircleId"
+                :items="linkCircleItems"
+                value-key="value"
+                class="w-full"
+              />
+            </UFormField>
             <UInput
               v-model="linkQuery"
               placeholder="搜索标题或短 ID"
@@ -1594,7 +1948,13 @@ function previewVariantContent(): string {
               class="w-full"
               autofocus
             />
-            <div v-if="linkSearch.isPending.value" class="space-y-2">
+            <ReadFailureNote
+              v-if="linkSearch.isError.value"
+              :query="linkSearch"
+              fallback="搜索失败"
+              size="xs"
+            />
+            <div v-else-if="linkSearch.isPending.value" class="space-y-2">
               <USkeleton v-for="n in 3" :key="n" class="h-9 w-full" />
             </div>
             <ul v-else-if="linkCandidates.length" class="link-pick-list">
@@ -1641,26 +2001,18 @@ function previewVariantContent(): string {
         </template>
       </UModal>
 
-      <UModal
+      <ConsequenceModal
         :open="downgradeWarning"
-        title="正文疑似包含明文凭据，仍要降级？"
-        @update:open="(v) => !v && (downgradeWarning = false)"
-      >
-        <template #body>
-          <p class="text-sm">
-            {{ PLAINTEXT_DOWNGRADE_TEXT
-            }}<Hint>检测规则可能误判。确认正文不含明文后，可继续降级。</Hint>
-          </p>
-        </template>
-        <template #footer>
-          <div class="flex w-full justify-end gap-2">
-            <UButton color="neutral" variant="ghost" @click="downgradeWarning = false"
-              >取消</UButton
-            >
-            <UButton color="error" @click="confirmDowngrade">确认不含明文并降级</UButton>
-          </div>
-        </template>
-      </UModal>
+        title="正文疑似包含敏感凭据，仍要降级？"
+        :consequences="[
+          PLAINTEXT_DOWNGRADE_TEXT,
+          '若规则属于误判且确认正文不含明文凭据，可继续降级。',
+        ]"
+        action="确认不含明文并降级"
+        :busy="saving"
+        @close="downgradeWarning = false"
+        @confirm="confirmDowngrade"
+      />
 
       <PlaintextSaveModal
         v-model:request="plaintextGate"
@@ -1678,23 +2030,19 @@ function previewVariantContent(): string {
         @confirm="redactCurrent"
       />
 
-      <UModal
+      <ConsequenceModal
         :open="deleting !== null"
         title="删除这条记忆？"
-        @update:open="(v) => !v && (deleting = null)"
-      >
-        <template #body>
-          <p class="text-sm">
-            删除「{{ deleting?.title }}」。历史事件将保留，可在「已删除」中恢复。
-          </p>
-        </template>
-        <template #footer>
-          <div class="flex w-full justify-end gap-2">
-            <UButton color="neutral" variant="ghost" @click="deleting = null">取消</UButton>
-            <UButton color="error" @click="remove">删除</UButton>
-          </div>
-        </template>
-      </UModal>
+        :consequences="[
+          `将删除「${deleting?.title || deleting?.shortId}」。`,
+          '历史事件将保留，保留期内可在「已删除」中恢复。',
+        ]"
+        action="删除"
+        :busy="deletingBusy"
+        :error="deleteError"
+        @close="((deleting = null), (deleteError = null))"
+        @confirm="remove"
+      />
     </template>
   </article>
 </template>
@@ -1838,12 +2186,16 @@ function previewVariantContent(): string {
 .slice-tab {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 4px 10px;
+  gap: 2px;
+  padding: 2px 4px 2px 10px;
   border: 1px solid var(--ui-border-accented);
   font-size: 12px;
   background: var(--ui-bg);
   color: var(--ui-text-muted);
+}
+.slice-tab-btn {
+  padding: 2px 4px 2px 0;
+  color: inherit;
   cursor: pointer;
 }
 .slice-tab:hover {
@@ -1854,6 +2206,14 @@ function previewVariantContent(): string {
   background: var(--strata-selected);
   border-color: var(--strata-selected-frame);
   color: var(--strata-on-selected);
+}
+.side-link {
+  text-decoration: underline;
+  text-decoration-color: var(--ui-border-accented);
+  text-underline-offset: 3px;
+}
+.side-link:hover {
+  text-decoration-color: currentColor;
 }
 .read-variant-bar {
   display: flex;

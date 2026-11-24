@@ -36,6 +36,7 @@ import {
   type EffectiveSettings,
 } from '../settings/advanced'
 import {
+  consoleAllCirclesAccessFor,
   consoleCircleFor,
   consoleMemberFor,
   consoleRoleFor,
@@ -52,6 +53,7 @@ import { readableConditions } from './filter'
 
 export {
   accessForKey,
+  consoleAllCirclesAccessFor,
   consoleCircleFor,
   consoleMemberFor,
   consoleRoleFor,
@@ -161,7 +163,10 @@ export function recallScopeForKey(
   const readIds = [...access.circles.keys()]
   const primaryWriteAllowed = (access.circles.get(key.circleId)?.writeKinds.size ?? 0) > 0
   const shouldRegisterProject = Boolean(
-    primaryWriteAllowed && normalizeProjectSlug(options.project) && !session.context.chatType,
+    options.recordEvents !== false &&
+    primaryWriteAllowed &&
+    normalizeProjectSlug(options.project) &&
+    !session.context.chatType,
   )
   const circleScope = shouldRegisterProject
     ? { read: readIds, write: [key.circleId] }

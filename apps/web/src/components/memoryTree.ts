@@ -19,8 +19,7 @@ export const GROUP_BY_OPTIONS: { value: BrowseGroupBy; label: string }[] = [
   { value: 'env', label: '环境' },
   { value: 'runtime', label: '客户端' },
   { value: 'project', label: '项目' },
-  { value: 'kind', label: '类型' },
-  { value: 'circle', label: '记忆圈' },
+  { value: 'kind', label: '形态' },
 ]
 
 export interface MemoryTreeItem {

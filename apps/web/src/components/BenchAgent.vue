@@ -32,7 +32,7 @@ import BenchNotice from './BenchNotice.vue'
 import Hint from './Hint.vue'
 
 // 模型对话：用实例设置里抽取模型的接口与 Key，让模型自己决定调哪个工具。循环由浏览器驱动（benchAgent.ts），
-// 对话不存服务端、不进浏览器存储，状态在 useBench 里，换接入实例、Key、模式时清掉
+// 对话不存服务端、不进浏览器存储，状态在 useBench 里，换客户端、Key、模式时清掉
 const {
   circleId,
   clientId,
@@ -232,7 +232,7 @@ function requestClear() {
   if (agent.value.mayHaveWritten) confirmingClear.value = true
   else clear()
 }
-// 换了接入实例、Key 或模式时对话已经清掉了（useBench），这里的提示也不算数了。输入框里没发的留着
+// 换了客户端、访问密钥或模式时对话已经清掉了（useBench），这里的提示也不算数了。输入框里没发的留着
 watch(generation, () => {
   exporting.value = null
   exportNote.value = null

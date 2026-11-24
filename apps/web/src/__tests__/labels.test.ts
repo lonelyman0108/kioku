@@ -24,18 +24,18 @@ const client = (id: string, name: string, owner: string): ClientInfo => ({
   config: { personMemoryMode: 'strict' },
 })
 
-describe('凭据限定的接入实例与场域', () => {
+describe('凭据限定的客户端与场域', () => {
   const clients = [client('a', '编码 agent', 'me'), client('b', '别人的机器人', 'other')]
 
-  it('不限定、不开放给任何接入实例、接入实例列表还没读出来时不下结论', () => {
+  it('不限定、不开放给任何客户端、客户端列表还没读出来时不下结论', () => {
     expect(restrictedClientsLabel(null, clients, 'me')).toBe('不限定')
-    expect(restrictedClientsLabel([], clients, 'me')).toBe('不开放给任何接入实例')
+    expect(restrictedClientsLabel([], clients, 'me')).toBe('不开放给任何客户端')
     expect(restrictedClientsLabel(['a'], undefined, 'me')).toBe('…')
   })
 
-  it('不是自己的接入实例标出来，找不到的算已删除', () => {
+  it('不是自己的客户端标出来，找不到的算已删除', () => {
     expect(restrictedClientsLabel(['a', 'b', 'gone'], clients, 'me')).toBe(
-      '编码 agent、别人的机器人（非当前账号的接入实例，不可用）、已删除的接入实例',
+      '编码 agent、别人的机器人（非当前账号的客户端，不可用）、已删除的客户端',
     )
   })
 
@@ -56,11 +56,11 @@ describe('访问密钥的权限', () => {
     credentials: 'none',
   }
 
-  it('拆成标签，场域白名单、凭据能力与管理词表有才写', () => {
+  it('拆成标签，场域白名单、凭据能力与管理语境词典有才写', () => {
     expect(scopeTags(scopes).map(scopeTagText)).toEqual(['读 2 类', '写 1 类', '至私密'])
     expect(scopesSummary(scopes)).toBe('读 2 类，写 1 类，至私密')
     expect(scopesSummary({ ...scopes, admin: true })).toBe(
-      '读 2 类，写 1 类，至私密，管理词表与人格',
+      '读 2 类，写 1 类，至私密，管理语境词典与人格',
     )
     expect(scopesSummary({ ...scopes, allowedRealms: ['work'], credentials: 'use' })).toBe(
       '读 2 类，写 1 类，至私密，场域 work，凭据取用',
@@ -104,9 +104,9 @@ describe('词条事件与来源', () => {
     expect(Object.keys(entryViaLabels).sort()).toEqual([...vias].sort())
   })
 
-  it('来源作用域按群、私聊、接入实例与全局显示', () => {
-    expect(originScopeText({ kind: 'client', id: 'c1', name: 'Codex' })).toBe('接入实例「Codex」')
-    expect(originScopeText({ kind: 'client', id: 'c1', name: null })).toBe('已删除的接入实例')
+  it('来源作用域按群、私聊、客户端与全局显示', () => {
+    expect(originScopeText({ kind: 'client', id: 'c1', name: 'Codex' })).toBe('客户端「Codex」')
+    expect(originScopeText({ kind: 'client', id: 'c1', name: null })).toBe('已删除的客户端')
     expect(originScopeText({ kind: 'global', id: '', name: null })).toBe('全局')
   })
 })

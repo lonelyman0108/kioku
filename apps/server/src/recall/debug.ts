@@ -11,7 +11,7 @@ import type {
 import { eq, inArray } from 'drizzle-orm'
 
 import { readDenial, type Access } from '../access/access'
-import { defaultSession, resolveKeySession } from '../access/session'
+import { defaultSession, resolvePreviewSession } from '../access/session'
 import { nowOf, withCircles, type Tx } from '../db/client'
 import { circles, entries } from '../db/schema'
 import type { Deps, KeyPrincipal } from '../http/env'
@@ -38,12 +38,20 @@ export async function bootPreview(
   request: BootPreviewRequest,
   options: { context?: SessionContextInput } = {},
 ): Promise<BootPreview> {
-  const session = options.context
-    ? await resolveKeySession(deps, key, options.context)
-    : defaultSession(key)
+  const context = options.context ?? request.context
+  const session =
+    context || request.previewTargets
+      ? await resolvePreviewSession(deps, key, {
+          ...(context !== undefined ? { context } : {}),
+          ...(request.previewTargets !== undefined
+            ? { previewTargets: request.previewTargets }
+            : {}),
+        })
+      : defaultSession(key)
   const scope = recallScopeForKey(deps, key, session, {
     ...(request.deviceKey !== undefined ? { deviceKey: request.deviceKey } : {}),
     ...(request.project !== undefined ? { project: request.project } : {}),
+    ...(request.facets !== undefined ? { facets: request.facets } : {}),
     recordEvents: false,
   })
   const start = await sessionStart(scope, key.client.runtimeFamily, {
@@ -83,12 +91,20 @@ export async function recallDebug(
   options: { project?: LifecycleProject; context?: SessionContextInput } = {},
 ): Promise<RecallDebug> {
   const query = normalizeQuery(request.query)
-  const session = options.context
-    ? await resolveKeySession(deps, key, options.context)
-    : defaultSession(key)
+  const context = options.context ?? request.context
+  const project = options.project ?? request.project
+  const session =
+    context || request.previewTargets
+      ? await resolvePreviewSession(deps, key, {
+          ...(context !== undefined ? { context } : {}),
+          ...(request.previewTargets !== undefined
+            ? { previewTargets: request.previewTargets }
+            : {}),
+        })
+      : defaultSession(key)
   const keyAccess = accessForKey(key, session)
   const scope = recallScopeForKey(deps, key, session, {
-    ...(options.project !== undefined ? { project: options.project } : {}),
+    ...(project !== undefined ? { project } : {}),
     ...(request.facets !== undefined ? { facets: request.facets } : {}),
     crossCircle: request.crossCircle,
     recordEvents: false,
@@ -178,6 +194,7 @@ async function explainHidden(
       {
         shortId: item.entry.shortId,
         title: item.entry.title,
+        circleId: item.entry.circleId,
         circleSlug: visibleCircleSlug(keyAccess, item.entry.circleId, item.circleSlug),
         kind: item.entry.kind,
         sensitivity: item.entry.sensitivity,

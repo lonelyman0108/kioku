@@ -422,7 +422,10 @@ describe('详情与时区', () => {
     for (const [path, source] of Object.entries(sources)) {
       if (path.includes('__tests__') || path.endsWith('MemoryHistory.vue')) continue
       if (!source.includes("'entry-history'")) continue
-      expect(source.includes("'activity-event'"), path).toBe(true)
+      expect(
+        source.includes("'activity-event'") || source.includes('invalidateActivity('),
+        path,
+      ).toBe(true)
     }
   })
 

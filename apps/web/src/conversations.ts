@@ -16,7 +16,7 @@ export const conversationKindLabels: Record<ConversationKind, string> = {
   none: '本地会话',
 }
 
-// 列表上的名字：群名、私聊的人、频道名；本地会话按接入实例、项目与设备区分
+// 列表上的名字：群名、私聊的人、频道名；本地会话按客户端、项目与设备区分
 export function conversationTitle(
   c: Pick<
     ConversationInfo,
@@ -35,11 +35,11 @@ export function conversationTitle(
 export const conversationKind = (c: Pick<ConversationInfo, 'kind'>) =>
   c.kind === 'none' ? '本人' : conversationKindLabels[c.kind]
 
-// 第二行：哪个接入实例、会话类型；本地会话写「本人」
+// 第二行：哪个客户端、会话类型；本地会话写「本人」
 export const conversationSubline = (c: Pick<ConversationInfo, 'kind' | 'client'>) =>
-  c.kind === 'none' ? '本人' : `${c.client?.name ?? '已删除的接入实例'} · ${conversationKind(c)}`
+  c.kind === 'none' ? '本人' : `${c.client?.name ?? '已删除的客户端'} · ${conversationKind(c)}`
 
-// 列表或详情里的附加信息标签：接入实例、项目、设备
+// 列表或详情里的附加信息标签：客户端、项目、设备
 export function conversationMeta(
   c: Pick<ConversationInfo, 'client' | 'deviceKey' | 'projectSlug'>,
 ): string[] {
@@ -50,7 +50,7 @@ export function conversationMeta(
   ].filter((v): v is string => Boolean(v))
 }
 
-// 事实听自哪里：群或私聊前面写「听自」，全局与接入实例写下的照原样说
+// 事实听自哪里：群或私聊前面写「听自」，全局与客户端写下的照原样说
 export function heardFrom(scope: OriginScope): string {
   const place = originScopeText(scope)
   return scope.kind === 'group' || scope.kind === 'direct' ? `听自${place}` : place

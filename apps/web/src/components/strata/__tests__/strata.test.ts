@@ -585,10 +585,10 @@ describe('多圈权限范围矩阵与色带投影', () => {
     ]
     const html = await render(AccessMatrix, { circles })
     expect(html).toContain('工作圈')
-    expect(html).toContain('主场')
+    expect(html).toContain('主圈')
     expect(html).toContain('凭据取用')
     expect(html).toContain('个人圈')
-    expect(html).toContain('客场')
+    expect(html).toContain('关联圈')
     expect(cellHtml(html, entryKindLabels.episode, 'secret')).toContain('不适用')
     const projected = matrixToBandRows(circles)
     expect(projected.find((r) => r.band === 'primary')!.cells[0]!.write).toBe(true)
@@ -665,7 +665,7 @@ describe('多圈权限范围矩阵与色带投影', () => {
   it('读屏读到的是接口给的范围，不是前端算的', async () => {
     const rows = singleBand('shared-away', 'public', 'recall', true)
     const html = await render(StrataCore, { rows, label: '群聊' })
-    expect(html).toContain('aria-label="群聊的权限范围"')
+    expect(html).toContain('aria-label="群聊的访问范围"')
   })
 })
 
@@ -766,8 +766,8 @@ describe('岩芯', () => {
   }
 
   it('格子的说明：写明色带、敏感级与权限；会话摘要 × 机密写不适用', () => {
-    expect(accessCellText('personal', 'private', 'read-write')).toBe('个人圈词条 私密：读写')
-    expect(accessCellText('primary', 'secret', 'explicit')).toBe('主场词条 机密：仅按短 ID 读取')
+    expect(accessCellText('personal', 'private', 'read-write')).toBe('个人圈记忆 私密：读写')
+    expect(accessCellText('primary', 'secret', 'explicit')).toBe('主圈记忆 机密：仅按短 ID 读取')
     expect(accessCellText('episode', 'secret', 'none')).toBe(
       '会话摘要 机密：不适用，会话摘要不设机密',
     )
@@ -845,7 +845,7 @@ describe('岩芯', () => {
   it('传了服务端算的 rows 就说是当前上下文的范围，哪怕也传了 scopes', async () => {
     const rows = issuedBandRows(scopes)
     expect(await render(StrataCore, { rows, scopes })).toContain(
-      'aria-label="当前会话上下文的权限范围"',
+      'aria-label="当前会话上下文的访问范围"',
     )
   })
 
@@ -854,14 +854,14 @@ describe('岩芯', () => {
     expect(html).toContain('aria-label="MacBook，签发范围：读 3 类，写 1 类，至私密"')
     const rows = issuedBandRows(scopes)
     expect(await render(StrataCore, { rows, label: '群聊' })).toContain(
-      'aria-label="群聊的权限范围"',
+      'aria-label="群聊的访问范围"',
     )
   })
 
-  it('没有数据时不读成权限范围，框是虚线，和没有权限的岩芯分得开', async () => {
+  it('没有数据时不读成访问范围，框是虚线，和没有权限的岩芯分得开', async () => {
     const html = await render(StrataCore, {})
     expect(html).toContain('aria-label="暂无权限数据"')
-    expect(html).not.toContain('权限范围')
+    expect(html).not.toContain('访问范围')
     expect(html.match(/stroke-dasharray="3 2"/g)).toHaveLength(2)
     expect(await render(StrataCore, { label: 'MacBook' })).toContain(
       'aria-label="MacBook，暂无权限数据"',
@@ -869,7 +869,7 @@ describe('岩芯', () => {
     expect(coreName({ rows: null, scopes: null })).toBe('暂无权限数据')
     const none = issuedBandRows({ ...scopes, readKinds: [], writeKinds: [] })
     const blank = await render(StrataCore, { rows: none })
-    expect(blank).toContain('aria-label="当前会话上下文的权限范围"')
+    expect(blank).toContain('aria-label="当前会话上下文的访问范围"')
     expect(blank.match(/stroke-dasharray="3 2"/g)).toHaveLength(1)
   })
 
@@ -909,22 +909,36 @@ describe('地层柱', () => {
     expect(rule).not.toContain('error')
   })
 
-  it('一类的合计能点，这一类没有词条时不能点', async () => {
+  it('一类的合计能点，这一类没有记忆时不能点；单圈视角按 3 条色带绘制并显示正式记忆', async () => {
     const counts = sample()
     counts.episode = { public: 0, internal: 0, private: 0, secret: 0 }
     const html = await render(StrataColumn, { counts })
-    expect(html).toContain('aria-label="个人圈词条 142 条"')
+    expect(html).toContain('aria-label="个人圈记忆 142 条"')
     expect(html).not.toMatch(/<button[^>]*aria-label="会话摘要 0 条"/)
+    const localHtml = await render(StrataColumn, {
+      counts,
+      circleKind: 'personal',
+    })
+    expect(localHtml).toContain('aria-label="正式记忆 142 条"')
+    expect(localHtml).not.toContain('关联圈记忆')
+    expect(localHtml).not.toContain('独立人格')
   })
 })
 
 describe('窄柱', () => {
-  it('条数读到之前带等高、不写数字，筛选照样能点', async () => {
+  it('条数读到之前带等高、不写数字，筛选照样能点；单圈模式仅画 3 条真实色带', async () => {
     const html = await render(StrataRibbon, { counts: null, length: 400 })
     expect(html.match(/<button[^>]*class="rb-band/g)).toHaveLength(6)
-    expect(html).toContain('aria-label="个人圈词条"')
+    expect(html).toContain('aria-label="个人圈记忆"')
     expect(html).not.toMatch(/\d+ 条/)
     expect(html).not.toContain('<b>')
+    const localRibbon = await render(StrataRibbon, {
+      counts: null,
+      length: 300,
+      circleKind: 'shared',
+    })
+    expect(localRibbon.match(/<button[^>]*class="rb-band/g)).toHaveLength(3)
+    expect(localRibbon).toContain('aria-label="正式记忆"')
   })
 
   it('顶上的「全部」读到条数之后也不写总数', async () => {
@@ -933,7 +947,7 @@ describe('窄柱', () => {
     expect(all.slice(0, all.indexOf('</button>'))).toMatch(/>\s*<span[^>]*>全部<\/span>\s*$/)
   })
 
-  it('选中的色带、当前词条所在的色带都标出来', async () => {
+  it('选中的色带、当前记忆所在的色带都标出来', async () => {
     const html = await render(StrataRibbon, {
       counts: sample(),
       length: 600,
@@ -942,28 +956,30 @@ describe('窄柱', () => {
     })
     const band = (label: string) =>
       html.split('<button').find((chunk) => chunk.includes(`aria-label="${label}"`))!
-    expect(band('个人圈词条 142 条')).toContain('class="on rb-band"')
-    expect(band('个人圈词条 142 条')).toContain('aria-pressed="true"')
-    expect(band('主场词条 18 条')).toContain('aria-pressed="false"')
-    expect(band('主场词条 18 条')).toContain('rb-here')
-    expect(band('个人圈词条 142 条')).not.toContain('rb-here')
+    expect(band('个人圈记忆 142 条')).toContain('class="on rb-band"')
+    expect(band('个人圈记忆 142 条')).toContain('aria-pressed="true"')
+    expect(band('主圈记忆 18 条')).toContain('aria-pressed="false"')
+    expect(band('主圈记忆 18 条')).toContain('rb-here')
+    expect(band('个人圈记忆 142 条')).not.toContain('rb-here')
   })
 })
 
-describe('词条的标记', () => {
+describe('记忆的标记', () => {
   const priority = (n: number) => `P${n}`
 
-  it('优先级只标最高的两档，机密带文字，多切片显示数量', async () => {
+  it('优先级只标最高的两档，机密带文字，多变体显示数量', async () => {
     expect(await render(MemoryFlags, { priority: 0 })).toContain(priority(0))
     expect(await render(MemoryFlags, { priority: 1 })).toContain(priority(1))
     expect(await render(MemoryFlags, { priority: 2 })).not.toContain(priority(2))
     expect(await render(MemoryFlags, { sensitivity: 'secret' })).toContain('机密')
     expect(await render(MemoryFlags, { sensitivity: 'private' })).not.toContain('flag-secret')
-    expect(await render(MemoryFlags, { variantCount: 3 })).toContain('3 切片')
+    expect(await render(MemoryFlags, { variantCount: 3 })).toContain('3 变体')
   })
 
-  it('写色带的名字，色块不单独说明是哪一类', async () => {
-    expect(await render(MemoryFlags, { band: 'personal' })).toContain('个人圈词条')
+  it('写色带的名字，单圈内省去冗余正式记忆尾标、保留对话形态标签', async () => {
+    expect(await render(MemoryFlags, { band: 'personal' })).toContain('个人圈记忆')
+    expect(await render(MemoryFlags, { band: 'personal', local: true })).not.toContain('个人圈记忆')
+    expect(await render(MemoryFlags, { band: 'fact', local: true })).toContain('联系人事实')
   })
 
   it('机密的标记和标签都不用红', async () => {
@@ -975,12 +991,18 @@ describe('词条的标记', () => {
 })
 
 describe('详情的标签和条带', () => {
-  it('标签写全色带和敏感级的名字，纹理跟着敏感级', async () => {
+  it('标签写全色带和敏感级的名字，单圈内支持显示形态名，纹理跟着敏感级', async () => {
     const html = await render(StrataTag, { band: 'personal', sensitivity: 'private' })
-    expect(html).toContain('个人圈词条')
+    expect(html).toContain('个人圈记忆')
     expect(html).toContain('私密')
     expect(html).toContain('--layer-personal')
     expect(html).toContain(`url(#${TEXTURES.lines.lg})`)
+    const localTag = await render(StrataTag, {
+      band: 'personal',
+      sensitivity: 'private',
+      local: true,
+    })
+    expect(localTag).toContain('正式记忆')
   })
 
   it('机密的条带和标签是实心，看不出底色的地方靠文字', async () => {
@@ -988,7 +1010,7 @@ describe('详情的标签和条带', () => {
       '--strata-solid',
     )
     const html = await render(StrataTag, { band: 'personal', sensitivity: 'secret' })
-    expect(html).toContain('个人圈词条')
+    expect(html).toContain('个人圈记忆')
     expect(html).toContain('机密')
     expect(html).toContain('--strata-solid')
   })
@@ -1031,7 +1053,7 @@ describe('带色块的单选', () => {
     expect(html).toContain('aria-hidden="true"')
     expect(html).not.toContain('title=')
     expect(await render(StrataSwatch, { band: 'primary', sensitivity: 'public' })).toContain(
-      'aria-label="主场词条 公开"',
+      'aria-label="主圈记忆 公开"',
     )
   })
 })

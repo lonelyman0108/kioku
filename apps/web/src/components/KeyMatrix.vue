@@ -42,10 +42,10 @@ const groupName = useId()
 
 <template>
   <section class="key-matrix">
-    <SectionHeading title="权限范围">
+    <SectionHeading title="访问范围">
       <template #hint>
         <Hint>
-          实际权限按当前有效上限与接入实例配置计算。会话上下文由客户端上报，只能收紧权限，不能放宽。「按短
+          实际可读写范围按当前有效上限与客户端配置计算。会话上下文由客户端上报，只能收紧范围，不能放宽。「按短
           ID 读取」只能显式读取，不进入召回与启动加载。联系人事实与会话摘要的写指对话抽取写入。
         </Hint>
       </template>
@@ -87,7 +87,7 @@ const groupName = useId()
       <p class="origin">
         凭据能力：<b class="capability">{{ credentialCapabilityLabels[current.credentials] }}</b>
         <Hint>
-          取用与管理需要可读正式词条且最高敏感级不低于私密；带会话上下文或客场记忆圈一律不可用，非记忆圈所有者一律不可用。
+          取用与管理需要可读正式记忆且最高敏感级不低于私密；带会话上下文或关联记忆圈一律不可用，非记忆圈所有者一律不可用。
         </Hint>
       </p>
     </template>

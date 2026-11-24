@@ -114,7 +114,7 @@ describe('分数轴', () => {
 describe('分数的分项', () => {
   const candidate = (breakdown: DebugCandidate['breakdown']) => ({ breakdown }) as DebugCandidate
 
-  it('六路都列出来，正值比例加起来是整条，负切面调制在条上占 0%', () => {
+  it('六路都列出来，正值比例加起来是整条，负语境调制在条上占 0%', () => {
     const parts = scoreParts(
       candidate({
         semantic: 0.4,
@@ -125,15 +125,15 @@ describe('分数的分项', () => {
         link: 0.05,
       }),
     )
-    expect(parts.map((p) => p.label)).toEqual(['向量', '全文', '关键词', '优先级', '切面', '关联'])
+    expect(parts.map((p) => p.label)).toEqual(['向量', '全文', '关键词', '优先级', '语境', '关联'])
     expect(parts.map((p) => p.value)).toEqual([0.4, 0.25, 0.15, 0.1, 0.05, 0.05])
     expect(parts.reduce((a, p) => a + p.share, 0)).toBeCloseTo(100)
 
     const penalized = scoreParts(
       candidate({ semantic: 0.5, fulltext: 0.5, glossary: 0, priority: 0, facet: -0.06, link: 0 }),
     )
-    expect(penalized.find((p) => p.label === '切面')).toEqual({
-      label: '切面',
+    expect(penalized.find((p) => p.label === '语境')).toEqual({
+      label: '语境',
       value: -0.06,
       share: 0,
     })

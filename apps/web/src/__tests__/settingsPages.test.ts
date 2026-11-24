@@ -186,6 +186,7 @@ describe('小节的注册', () => {
     expect(keysOf('circle')).toEqual([
       'general',
       'members',
+      'vocabulary',
       'recall',
       'extraction',
       'privacy',
@@ -205,6 +206,7 @@ describe('小节的注册', () => {
       '外观',
       '概况',
       '成员',
+      '语境词典',
       '召回与启动加载',
       '抽取与整理',
       '隐私与脱敏',
@@ -242,6 +244,7 @@ describe('小节的注册', () => {
     expect(visibleSections('circle', member).map((s) => s.key)).toEqual([
       'general',
       'members',
+      'vocabulary',
       'recall',
       'extraction',
       'privacy',
@@ -1296,9 +1299,10 @@ describe('读取失败', () => {
   it('存储桶的列表出错时只显示错误：外部的状态，错误下面还是旧桶的备份会有误导', () => {
     const elements = elementsOf(template(backupSettings))
     const error = elements.find(
-      (el) => el.tag === 'NoteLine' && condition(el) === 'objects.isError.value',
+      (el) => el.tag === 'ReadFailureNote' && condition(el) === 'objects.isError.value',
     )
     expect(error).toBeDefined()
+    expect(bound(error!, 'query')).toBe('objects')
     const empty = elements.find((el) => textOf(el) === '暂无备份')!
     expect(condition(empty)).toBeUndefined()
     expect(directive(empty, 'else-if')?.exp?.content).toBe(
@@ -1321,7 +1325,7 @@ describe('读取失败', () => {
       expect(source, name).not.toMatch(/isError\.value && !/)
     }
     // 服务端没给说明时用具体的说法，和别处的「读取失败」分得开
-    expect(backupSettings).toContain("readFailure(objects.error.value, '无法列出备份')")
+    expect(backupSettings).toContain('fallback="无法列出备份"')
     expect(embeddingSettings).toContain(
       '<ReadFailureNote v-if="settings.isError.value" :query="settings" />',
     )
@@ -1478,18 +1482,18 @@ describe('带后果的文字整句留着', () => {
       spaceTransferSettings,
       'Kioku导出的记忆圈文件在下方「导入记忆圈」导入。',
     ],
-    ['导入共享圈名额用完', spaceImport, '{{ blocked }}，删除或转让一个共享圈后再导入共享记忆圈。'],
+    ['导入独立圈名额用完', spaceImport, '{{ blocked }}，删除或转让一个独立圈后再导入独立圈。'],
     ['导出的口令提示', spaceExport, '请另行保存口令。Kioku不保存口令，丢失后无法打开此文件。'],
     ['导入记忆圈', spaceImport, '仅导入本人导出、或导出人同意移交的文件。'],
     [
       '导入记忆圈的归属',
       spaceImport,
-      '个人圈导出文件将合并进入当前账号的个人记忆圈；共享圈导出文件将新建为一个由当前账号所有的共享记忆圈。',
+      '个人圈导出文件将合并进入当前账号的个人记忆圈；独立圈导出文件将新建为一个由当前账号所有的独立圈。',
     ],
     [
       '导入记忆圈没有主密钥',
       spaceImport,
-      '当前实例未配置主密钥：文件包含机密词条或托管的凭据时无法导入。请先配置KIOKU_MASTER_KEY。',
+      '当前实例未配置主密钥：文件包含机密记忆或托管的凭据时无法导入。请先配置KIOKU_MASTER_KEY。',
     ],
     ['Lore 来源', loreImport, '只导入本人导出的文件或本人的Lore'],
     ['Lore 指令', loreImport, '来源不明的内容写入后，会成为当前账号Agent的指令。'],
@@ -1617,11 +1621,11 @@ describe('登录', () => {
   })
 
   it('只回到站内路径，换账号时清掉缓存', () => {
-    expect(script).toContain("route.query.next.startsWith('/')")
-    expect(script).toContain("!route.query.next.startsWith('//')")
+    expect(script).toContain('retryTarget(route.query.next)')
+    expect(retryTarget('//example.com')).toBe('/')
     expect(script).toContain('queryClient.clear()')
     expect(script).toContain('queryClient.setQueryData(ME_KEY, me)')
-    expect(script).toContain('await router.replace(next)')
+    expect(script).toContain('await router.replace(retryTarget(route.query.next))')
   })
 
   it('出错时显示服务端的说明', () => {

@@ -8,10 +8,17 @@ import {
   type ActivityFieldChange,
   type ActivityItem,
 } from '@kioku/contracts'
+import type { QueryClient } from '@tanstack/vue-query'
 import type { LocationQuery, LocationQueryRaw } from 'vue-router'
 
 import { sensitivityLabels } from './labels'
 import { localDate } from './time'
+
+export function invalidateActivity(client: QueryClient, circleId: string): void {
+  for (const prefix of ['activity', 'activity-facets', 'activity-days', 'activity-event']) {
+    void client.invalidateQueries({ queryKey: [prefix, circleId] })
+  }
+}
 
 const WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六']
 

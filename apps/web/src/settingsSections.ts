@@ -68,6 +68,13 @@ export const SETTINGS_SECTIONS = [
   },
   {
     group: 'circle',
+    key: 'vocabulary',
+    label: '语境词典',
+    icon: icons.vocabulary,
+    component: lazy(() => import('./components/SpaceVocabularySettings.vue')),
+  },
+  {
+    group: 'circle',
     key: 'recall',
     label: '召回与启动加载',
     icon: icons.tuning,

@@ -4,7 +4,8 @@ import { describe, expect, it } from 'vitest'
 import { sameScopes } from '../components/keyPresets'
 import { guideLines } from '../components/memoryTree'
 import personaDetailSource from '../components/PersonaDetail.vue?raw'
-import vocabularyPageSource from '../pages/VocabularyPage.vue?raw'
+import spaceVocabularySettingsSource from '../components/SpaceVocabularySettings.vue?raw'
+import personasPageSource from '../pages/PersonasPage.vue?raw'
 import {
   canBeParent,
   hasCycle,
@@ -25,6 +26,7 @@ const persona = (id: string, extendsId: string | null = null): PersonaInfo => ({
   name: id,
   extendsId,
   description: null,
+  groupRuleCount: 0,
 })
 
 const trait = (
@@ -161,14 +163,16 @@ describe('两组透镜访问密钥权限是否相同', () => {
   })
 })
 
-describe('词表与独立人格页面源码结构', () => {
-  it('VocabularyPage 覆盖切面词表 CRUD 与独立人格分页且不含 persona://', () => {
-    expect(vocabularyPageSource).toContain('切面词表')
-    expect(vocabularyPageSource).toContain('独立人格')
-    expect(vocabularyPageSource).toContain('createFacetDimension')
-    expect(vocabularyPageSource).toContain('createFacetTerm')
-    expect(vocabularyPageSource).toContain('implies')
-    expect(vocabularyPageSource).not.toContain('persona://')
+describe('语境词典与独立人格页面源码结构', () => {
+  it('SpaceVocabularySettings 覆盖语境词典 CRUD，PersonasPage 独立管理人格且不含 persona://', () => {
+    expect(spaceVocabularySettingsSource).toContain('语境词典')
+    expect(spaceVocabularySettingsSource).toContain('createFacetDimension')
+    expect(spaceVocabularySettingsSource).toContain('createFacetTerm')
+    expect(spaceVocabularySettingsSource).toContain('implies')
+    expect(personasPageSource).toContain('人格')
+    expect(personasPageSource).toContain('PersonaPanel')
+    expect(spaceVocabularySettingsSource).not.toContain('persona://')
+    expect(personasPageSource).not.toContain('persona://')
     expect(personaDetailSource).not.toContain('persona://')
   })
 })

@@ -40,31 +40,31 @@ describe('顶部导航', () => {
       '概览',
       '记忆',
       '对话',
+      '人格',
       '凭据',
       '待处理',
-      '接入实例',
-      '召回',
-      '测试台',
-      '切面词表',
+      '客户端',
       '变更记录',
       '设置',
     ])
-    expect([...script.matchAll(/title: '([^']+)'/g)].map((m) => m[1])).toEqual(['接入', '记忆圈'])
   })
 
-  it('详情页点亮列表的入口', () => {
+  it('详情页与二级页签点亮对应入口，⌘K 覆盖召回与试算、测试台与语境词典', () => {
     expect(script).toContain("link('conversations', icons.conversations, CONVERSATION_ROUTES)")
     expect(script).toContain("const CONVERSATION_ROUTES = ['conversations', 'contact']")
-    expect(script).toContain("link('clients', icons.clients, ['clients', 'client'])")
+    expect(script).toContain("link('clients', icons.clients, CLIENT_ROUTES)")
+    expect(script).toContain("const CLIENT_ROUTES = ['clients', 'client', 'recall', 'bench']")
+    expect(script).toContain("label: '召回与试算'")
+    expect(script).toContain("label: '语境词典'")
   })
 
-  it('每个入口都有图标，图标旁一定有文字；放不下时先收组标题、再收图标', () => {
+  it('每个入口都有图标，图标旁一定有文字；放不下时先收图标', () => {
     const link = elements.find((el) => el.tag === 'RouterLink' && bound(el, 'to') === 'item.to')!
     const icon = link.children!.find((c) => c.tag === 'UIcon')!
     expect(bound(icon, 'name')).toBe('item.icon')
     expect(classes(icon)).toContain('max-[1180px]:hidden')
-    const title = elements.find((el) => el.tag === 'span' && condition(el) === 'group.title')!
-    expect(classes(title)).toContain('max-[1320px]:hidden')
+    const groups = elements.filter((el) => bound(el, 'class')?.includes('nav-group'))
+    expect(groups).toHaveLength(1)
     expect(template).toContain('{{ item.label }}')
   })
 
@@ -84,16 +84,18 @@ describe('顶部导航', () => {
     expect(script).not.toMatch(/\{ label: '实例设置', \.\.\.link\(/)
   })
 
-  it('记忆圈切换器一直显示：个人圈置顶与共享圈角色，当前圈打勾，下面是成员与设置、新建共享圈与导入记忆圈', () => {
+  it('记忆圈切换器一直显示：个人圈置顶与独立圈角色，当前圈打勾，下面是成员与设置、新建独立圈与导入记忆圈', () => {
     const switcher = elements.find(
       (el) => el.tag === 'UDropdownMenu' && bound(el, 'items') === 'circleMenu',
     )!
     expect(condition(switcher)).toBeUndefined()
-    expect(script).toContain("c.kind === 'personal' ? '本人' : roleName(c.role)")
+    expect(script).toContain("c.kind === 'personal'")
+    expect(script).toContain("'本人'")
     expect(script).toContain('checked: c.id === circle.value?.id')
-    expect(script).toContain("label: '成员与设置'")
-    expect(script).not.toContain("label: '记忆圈设置'")
-    expect(script).toContain("label: '新建共享圈'")
+    expect(script).toContain(
+      "label: circle.value.kind === 'personal' ? '记忆圈设置' : '成员与设置'",
+    )
+    expect(script).toContain("label: '新建独立圈'")
     expect(script).toContain("label: '导入记忆圈'")
     expect(script).toContain('icon: icons.importCircle')
     expect(template).toContain('<CreateSpaceModal')

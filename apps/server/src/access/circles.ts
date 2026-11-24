@@ -227,6 +227,15 @@ export async function loadSessionUser(db: Db | Tx, accountId: string): Promise<S
   ])
   const personal = memberships.find((m) => m.kind === 'personal')
   if (!personal) return null
+  const circleIds = memberships.map((m) => m.id)
+  const memberCounts = circleIds.length
+    ? await db
+        .select({ circleId: circleMembers.circleId, n: count() })
+        .from(circleMembers)
+        .where(inArray(circleMembers.circleId, circleIds))
+        .groupBy(circleMembers.circleId)
+    : []
+  const countByCircle = new Map(memberCounts.map((r) => [r.circleId, r.n]))
   const ownedSharedCirclesCount = memberships.filter(
     (m) => m.kind === 'shared' && m.role === 'owner',
   ).length
@@ -236,7 +245,10 @@ export async function loadSessionUser(db: Db | Tx, accountId: string): Promise<S
     displayName: account.displayName,
     isAdmin: account.isAdmin,
     personalCircleId: personal.id,
-    circles: memberships,
+    circles: memberships.map((m) => ({
+      ...m,
+      memberCount: countByCircle.get(m.id) ?? 1,
+    })),
     ownedSharedCircles: ownedSharedCirclesCount,
     maxOwnedCircles,
   }

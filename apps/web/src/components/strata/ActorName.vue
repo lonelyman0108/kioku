@@ -13,7 +13,7 @@ const label = computed(() => actorLabel(props.actor))
 <template>
   <span :title="label.name">
     <template v-if="label.viaClient">
-      <UIcon :name="icons.bot" class="actor-app" /><span class="sr-only">接入实例：</span>
+      <UIcon :name="icons.bot" class="actor-app" /><span class="sr-only">客户端：</span>
     </template>
     {{ label.name }}
   </span>

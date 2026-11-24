@@ -63,8 +63,11 @@ const {
   load,
   reset,
   submit,
-} = useConvertCredential(toRef(props, 'circleId'), toRef(props, 'shortId'), (changed, done) =>
-  emit('converted', changed, done),
+} = useConvertCredential(
+  toRef(props, 'circleId'),
+  toRef(props, 'shortId'),
+  (changed, done) => emit('converted', changed, done),
+  toRef(() => open.value),
 )
 
 watch(open, (isOpen) => {

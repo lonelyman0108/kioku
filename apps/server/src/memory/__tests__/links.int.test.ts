@@ -298,6 +298,12 @@ describe.skipIf(!testDatabaseUrl)('双链索引、权限过滤、待确认联动
       { accessMode: 'read only' },
     )
 
+    // 管理界面查看单圈记忆详情时同样可解析当前账号其他已加入记忆圈的非机密双链邻居
+    const consoleView = await consolePersonal.get({ id: homeSource.shortId }, 'console')
+    expect(
+      consoleView.links.some((l) => l.shortId === workTarget.shortId && l.circleId === workId),
+    ).toBe(true)
+
     // protect 为 secret 后清除已有明文出链
     await consolePersonal.protect({
       entryId: homeSource.id,

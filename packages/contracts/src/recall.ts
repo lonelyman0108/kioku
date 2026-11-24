@@ -50,37 +50,57 @@ export const CHAT_TYPES = ['direct', 'group', 'channel', 'cron', 'subagent'] as 
 export const ChatType = z.enum(CHAT_TYPES).meta({ id: 'ChatType' })
 export type ChatType = z.infer<typeof ChatType>
 
-export const PlatformRef = z
-  .object({
-    id: z.string().trim().min(1).max(200),
-    name: z.string().trim().max(4000).optional(),
-  })
-  .meta({ id: 'PlatformRef' })
+const platformPattern = /^[a-z0-9][a-z0-9_.-]{0,31}$/
+
+const platformRefShape = {
+  id: z.string().trim().min(1).max(200),
+  name: z.string().trim().max(4000).optional(),
+}
+
+export const PlatformRef = z.object(platformRefShape).meta({ id: 'PlatformRef' })
 export type PlatformRef = z.infer<typeof PlatformRef>
+
+function checkSessionContext(
+  c: {
+    chatType: ChatType
+    platform?: string | undefined
+    group?: PlatformRef | undefined
+    sender?: PlatformRef | undefined
+  },
+  ctx: z.RefinementCtx,
+) {
+  if ((c.chatType === 'group' || c.chatType === 'channel') && !c.group) {
+    ctx.addIssue({ code: 'custom', path: ['group'], message: '群聊与频道须带上群' })
+  }
+  if (c.chatType === 'direct' && !c.sender) {
+    ctx.addIssue({ code: 'custom', path: ['sender'], message: '私聊须带上发言人' })
+  }
+  if ((c.group || c.sender) && !c.platform) {
+    ctx.addIssue({ code: 'custom', path: ['platform'], message: '带群或发言人时须带上平台' })
+  }
+}
 
 export const SessionContextInput = z
   .object({
     chatType: ChatType,
-    platform: z
-      .string()
-      .regex(/^[a-z0-9][a-z0-9_.-]{0,31}$/, '平台标识只能包含小写字母、数字和 _.-')
-      .optional(),
+    platform: z.string().regex(platformPattern, '平台标识只能包含小写字母、数字和 _.-').optional(),
     group: PlatformRef.optional(),
     sender: PlatformRef.optional(),
   })
-  .superRefine((c, ctx) => {
-    if ((c.chatType === 'group' || c.chatType === 'channel') && !c.group) {
-      ctx.addIssue({ code: 'custom', path: ['group'], message: '群聊与频道须带上群' })
-    }
-    if (c.chatType === 'direct' && !c.sender) {
-      ctx.addIssue({ code: 'custom', path: ['sender'], message: '私聊须带上发言人' })
-    }
-    if ((c.group || c.sender) && !c.platform) {
-      ctx.addIssue({ code: 'custom', path: ['platform'], message: '带群或发言人时须带上平台' })
-    }
-  })
+  .superRefine(checkSessionContext)
   .meta({ id: 'SessionContext' })
 export type SessionContextInput = z.infer<typeof SessionContextInput>
+
+// 控制台模拟预览专用会话上下文：结构与校验与 SessionContext 完全一致，避免额外触发 OpenAPI SDK 组件排序变动
+const PreviewPlatformRef = z.object(platformRefShape)
+const PreviewSessionContextInput = z
+  .object({
+    chatType: z.enum(CHAT_TYPES),
+    platform: z.string().regex(platformPattern, '平台标识只能包含小写字母、数字和 _.-').optional(),
+    group: PreviewPlatformRef.optional(),
+    sender: PreviewPlatformRef.optional(),
+  })
+  .superRefine(checkSessionContext)
 
 // 客户端当前所在项目与设备标识
 export const LifecycleProject = z
@@ -132,6 +152,7 @@ export type RecallResponse = z.infer<typeof RecallResponse>
 export const RecentEntry = z.object({
   shortId: ShortId,
   title: z.string(),
+  circleId: z.uuid(),
   circleSlug: z.string().nullable(),
   priority: z.number().int(),
   disclosure: z.string().nullable(),
@@ -262,12 +283,23 @@ export const READ_DENIALS = [
 export const ReadDenial = z.enum(READ_DENIALS)
 export type ReadDenial = z.infer<typeof ReadDenial>
 
+export const PreviewTargets = z.object({
+  chatType: z.enum(CHAT_TYPES).optional(),
+  groupSubjectId: z.uuid().optional(),
+  senderSubjectId: z.uuid().optional(),
+  senderIsOwner: z.boolean().optional(),
+})
+export type PreviewTargets = z.infer<typeof PreviewTargets>
+
 export const RecallDebugRequest = z.object({
   query: z.string().trim().min(1).max(4000),
   minScore: MinScoreSetting.optional(),
   limit: RecallLimitSetting.optional(),
   facets: WhenCondition.optional(),
   crossCircle: z.boolean().default(true),
+  project: LifecycleProject.optional(),
+  context: PreviewSessionContextInput.optional(),
+  previewTargets: PreviewTargets.optional(),
 })
 export type RecallDebugRequest = z.infer<typeof RecallDebugRequest>
 
@@ -292,6 +324,7 @@ export const RecallDebug = z.object({
     z.object({
       shortId: ShortId,
       title: z.string(),
+      circleId: z.uuid(),
       circleSlug: z.string().nullable(),
       kind: EntryKind,
       sensitivity: Sensitivity,
@@ -305,6 +338,9 @@ export const BootPreviewRequest = z.object({
   project: LifecycleProject.optional(),
   deviceKey: z.string().trim().max(128).optional(),
   sessionId: z.string().max(200).optional(),
+  facets: WhenCondition.optional(),
+  context: PreviewSessionContextInput.optional(),
+  previewTargets: PreviewTargets.optional(),
 })
 export type BootPreviewRequest = z.infer<typeof BootPreviewRequest>
 

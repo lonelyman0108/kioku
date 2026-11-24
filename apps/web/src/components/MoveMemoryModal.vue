@@ -1,5 +1,10 @@
 <script setup lang="ts">
-import { sensitivityAllowed, type CircleSummary, type ConsoleEntryView } from '@kioku/contracts'
+import {
+  CREDENTIAL_PLACEHOLDER_START,
+  sensitivityAllowed,
+  type CircleSummary,
+  type ConsoleEntryView,
+} from '@kioku/contracts'
 import { useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 
@@ -9,7 +14,7 @@ import { useSession } from '../composables/useSession'
 import { circleKindLabels, sensitivityLabels } from '../labels'
 import NoteLine from './strata/NoteLine.vue'
 
-// 跨记忆圈迁移词条：保留短 ID、标题、各切面变体与双链，只在目的圈重新归属并校验权限与敏感级
+// 跨记忆圈迁移正式记忆：保留短 ID、标题、各变体与双链，在目标圈重新归属并校验权限与凭据占位符边界
 const props = defineProps<{ circleId: string; entry: ConsoleEntryView }>()
 const open = defineModel<boolean>('open', { required: true })
 const emit = defineEmits<{ done: [entry: ConsoleEntryView, toCircleId: string] }>()
@@ -50,17 +55,41 @@ const stale = computed(
     (props.entry.id !== origin.value.id || props.entry.version !== origin.value.version),
 )
 
-// 个人圈不设公开：公开的记忆要先调高敏感级才能移进个人圈
+const hasCredentialPlaceholder = computed(() =>
+  origin.value.variants.some((v) => v.content?.includes(CREDENTIAL_PLACEHOLDER_START)),
+)
+
+const effectiveTargetSensitivity = computed(() =>
+  targetCircle.value?.kind === 'personal' && origin.value.sensitivity === 'public'
+    ? 'private'
+    : origin.value.sensitivity,
+)
+
+const autoUpgradedToPrivate = computed(
+  () => targetCircle.value?.kind === 'personal' && origin.value.sensitivity === 'public',
+)
+
 const problem = computed(() => {
+  if (origin.value.kind !== 'entry') return '仅正式记忆支持跨记忆圈迁移'
   if (!writableCircles.value.length) return '没有可移入的目标记忆圈'
   if (!targetCircle.value) return '请选择目标记忆圈'
-  if (!sensitivityAllowed(targetCircle.value.kind, origin.value.kind, origin.value.sensitivity)) {
-    return `个人圈不设${sensitivityLabels[origin.value.sensitivity]}：先把敏感级调到内部或更高，再移入个人圈`
+  if (targetCircle.value.kind !== 'personal' && hasCredentialPlaceholder.value) {
+    return '正文包含个人凭据引用，移除引用后方可移出个人圈'
+  }
+  if (
+    !sensitivityAllowed(
+      targetCircle.value.kind,
+      origin.value.kind,
+      effectiveTargetSensitivity.value,
+      origin.value.provenance,
+    )
+  ) {
+    return `目标记忆圈不支持${sensitivityLabels[effectiveTargetSensitivity.value]}敏感级`
   }
   return null
 })
 
-// 在个人圈与共享圈之间迁移会改变谁可见，提醒一句
+// 在个人圈与独立圈之间迁移会改变可见范围，提醒一句
 const crossing = computed(
   () =>
     !!sourceCircle.value &&
@@ -132,13 +161,17 @@ async function submit() {
             <span class="target-kind">{{ circleKindLabels[circle.kind] }}</span>
           </label>
         </div>
-        <NoteLine v-if="crossing" tone="warning">
-          可见范围将改变
+        <NoteLine v-if="targetCircle" tone="warning">
+          {{ crossing ? '可见范围将改变' : '迁移说明' }}
           <template #detail>
             {{
-              sourceCircle?.kind === 'personal'
-                ? '移入共享圈后，共享圈内其他成员与授权接入实例均可读取。'
-                : '移入个人圈后，这条记忆仅属于当前账号，共享圈内其他成员将无法读取。'
+              autoUpgradedToPrivate
+                ? '公开记忆移入个人圈后将自动升为私密，仅归属当前账号，原独立圈成员无法再读取；历史快照与事件仍留在原记忆圈。'
+                : sourceCircle?.kind === 'personal'
+                  ? '移入独立圈后，该独立圈内的成员与授权客户端均可按敏感级读取；历史快照与事件仍留在原记忆圈。'
+                  : crossing
+                    ? '移入个人圈后，这条记忆仅归属当前账号，原独立圈内其他成员将无法读取；历史快照与事件仍留在原记忆圈。'
+                    : '迁移后记忆归属目标独立圈，原有短 ID、标题与多变体保留，但历史快照与事件仍留在原记忆圈。'
             }}
           </template>
         </NoteLine>

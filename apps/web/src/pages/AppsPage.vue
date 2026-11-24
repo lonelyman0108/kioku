@@ -9,6 +9,7 @@ import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { refreshClientCaches } from '../appQueries'
 import { lastUsedAt, usableKeys } from '../apps'
+import ClientsSubnav from '../components/ClientsSubnav.vue'
 import Hint from '../components/Hint.vue'
 import RuntimeIcon from '../components/RuntimeIcon.vue'
 import RuntimeLabel from '../components/RuntimeLabel.vue'
@@ -56,7 +57,7 @@ const personaName = (id: string | null) =>
 const ownerName = (id: string) =>
   members.data.value?.find((m) => m.accountId === id)?.displayName ?? '–'
 
-// 只有接入实例所有者和记忆圈所有者能看访问密钥：别人的接入实例不去请求，请求了也是 403
+// 只有客户端所有者和记忆圈所有者能看访问密钥：别人的客户端不去请求，请求了也是 403
 const visibleClients = computed(() =>
   (clients.data.value ?? []).filter(
     (c) => isCircleOwner.value || c.ownerAccountId === me.data.value?.id,
@@ -121,7 +122,7 @@ async function create() {
     open.value = false
     resetForm()
     await refreshClientCaches(queryClient, cid)
-    toast.add({ title: '已创建接入实例', color: 'success' })
+    toast.add({ title: '已创建客户端', color: 'success' })
   } catch (err) {
     failed(err, '创建失败')
   } finally {
@@ -131,137 +132,140 @@ async function create() {
 </script>
 
 <template>
-  <div class="apps-page">
-    <header class="apps-head">
-      <div>
-        <h1>接入实例</h1>
-        <p>
-          每个接入的工具或机器人（如 Claude Code、AstrBot）对应一个接入实例。
-          <Hint>
-            访问密钥的权限由签发透镜范围与所有者当前角色共同决定，并可关联客场记忆圈与固定切面。点击名称进入设置、访问密钥与按群规则。
-          </Hint>
-        </p>
-      </div>
-      <UButton
-        v-if="canCreate"
-        class="shrink-0"
-        color="primary"
-        variant="outline"
-        @click="open = true"
-      >
-        新建接入实例
-      </UButton>
-    </header>
-
-    <ReadFailureNote v-for="failure in failures" :key="failure.key" :query="failure.read" />
-    <USkeleton v-if="clients.isPending.value" class="h-40 w-full" />
-    <EmptyState v-else-if="clients.data.value && !clients.data.value.length" title="暂无接入实例">
-      <template v-if="canCreate" #actions>
-        <UButton size="sm" color="primary" variant="outline" @click="open = true">
-          新建接入实例
+  <div class="flex min-h-0 min-w-0 flex-1 flex-col">
+    <ClientsSubnav :circle-id="circleId" />
+    <div class="apps-page">
+      <header class="apps-head">
+        <div>
+          <h1>客户端</h1>
+          <p>
+            每个接入的工具或机器人（如 Claude Code、AstrBot）对应一个客户端，本记忆圈为其主圈。
+            <Hint>
+              访问密钥挂在客户端下，轮换密钥不会中断历史会话与按群规则。访问密钥可额外关联其他记忆圈、声明默认语境，并由允许场域锁与敏感级上限收紧访问范围。
+            </Hint>
+          </p>
+        </div>
+        <UButton
+          v-if="canCreate"
+          class="shrink-0"
+          color="primary"
+          variant="outline"
+          @click="open = true"
+        >
+          新建客户端
         </UButton>
-      </template>
-    </EmptyState>
-    <template v-else-if="clients.data.value">
-      <div class="apps-table">
-        <table>
-          <thead>
-            <tr>
-              <th scope="col">名称</th>
-              <th scope="col">运行时</th>
-              <th scope="col">默认人格</th>
-              <th scope="col">有效访问密钥</th>
-              <th scope="col">最近使用</th>
-              <th scope="col">所有者</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="{ client, canSeeKeys, keys, keysFailure, usable, lastUsed } in rows"
-              :key="client.id"
-            >
-              <td class="cell-name">
-                <RouterLink :to="{ name: 'client', params: { circleId, clientId: client.id } }">
-                  <b>{{ client.name }}</b>
-                  <code>{{ client.slug }}</code>
-                </RouterLink>
-              </td>
-              <td class="cell-runtime">
-                <RuntimeLabel :family="client.runtimeFamily" />
-              </td>
-              <td class="cell-persona">{{ personaName(client.defaultPersonaId) }}</td>
-              <td class="cell-keys">
-                <div v-if="canSeeKeys" class="keys-inner">
-                  <span class="key-count">{{ keys ? usable.length : '–' }}</span>
-                  <ul v-if="usable.length" class="tray">
-                    <li v-for="key in usable" :key="key.id">
-                      <RouterLink
-                        :to="{
-                          name: 'client',
-                          params: { circleId, clientId: client.id },
-                          query: { key: key.id },
-                        }"
-                      >
-                        <StrataCore
-                          :rows="rowsOf(key.id)"
-                          :label="`${key.name} 无上下文时`"
-                          :width="44"
-                          :height="72"
-                        />
-                        <span class="tray-text">
-                          <b>{{ key.name }}</b>
-                          <code>{{ key.prefix }}</code>
-                          <ScopeTags
-                            class="tray-tags"
-                            :scopes="key.effectiveScopes ?? key.scopes"
-                            :title="scopesSummary(key.effectiveScopes ?? key.scopes)"
+      </header>
+
+      <ReadFailureNote v-for="failure in failures" :key="failure.key" :query="failure.read" />
+      <USkeleton v-if="clients.isPending.value" class="h-40 w-full" />
+      <EmptyState v-else-if="clients.data.value && !clients.data.value.length" title="暂无客户端">
+        <template v-if="canCreate" #actions>
+          <UButton size="sm" color="primary" variant="outline" @click="open = true">
+            新建客户端
+          </UButton>
+        </template>
+      </EmptyState>
+      <template v-else-if="clients.data.value">
+        <div class="apps-table">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">名称</th>
+                <th scope="col">运行时</th>
+                <th scope="col">默认人格</th>
+                <th scope="col">有效访问密钥</th>
+                <th scope="col">最近使用</th>
+                <th scope="col">所有者</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="{ client, canSeeKeys, keys, keysFailure, usable, lastUsed } in rows"
+                :key="client.id"
+              >
+                <td class="cell-name">
+                  <RouterLink :to="{ name: 'client', params: { circleId, clientId: client.id } }">
+                    <b>{{ client.name }}</b>
+                    <code>{{ client.slug }}</code>
+                  </RouterLink>
+                </td>
+                <td class="cell-runtime">
+                  <RuntimeLabel :family="client.runtimeFamily" />
+                </td>
+                <td class="cell-persona">{{ personaName(client.defaultPersonaId) }}</td>
+                <td class="cell-keys">
+                  <div v-if="canSeeKeys" class="keys-inner">
+                    <span class="key-count tabular-nums">{{ keys ? usable.length : '–' }}</span>
+                    <ul v-if="usable.length" class="tray">
+                      <li v-for="key in usable" :key="key.id">
+                        <RouterLink
+                          :to="{
+                            name: 'client',
+                            params: { circleId, clientId: client.id },
+                            query: { key: key.id },
+                          }"
+                        >
+                          <StrataCore
+                            :rows="rowsOf(key.id)"
+                            :label="`${key.name} 无上下文时`"
+                            :width="44"
+                            :height="72"
                           />
-                          <span v-if="key.lastUsedAt" :title="formatTime(key.lastUsedAt)">
-                            {{ formatRelative(key.lastUsedAt) }}
+                          <span class="tray-text">
+                            <b>{{ key.name }}</b>
+                            <code>{{ key.prefix }}</code>
+                            <ScopeTags
+                              class="tray-tags"
+                              :scopes="key.effectiveScopes ?? key.scopes"
+                              :title="scopesSummary(key.effectiveScopes ?? key.scopes)"
+                            />
+                            <span v-if="key.lastUsedAt" :title="formatTime(key.lastUsedAt)">
+                              {{ formatRelative(key.lastUsedAt) }}
+                            </span>
+                            <span v-else>尚未使用</span>
+                            <span v-if="failureOf(key.id)" class="key-failed">
+                              访问范围：{{ failureOf(key.id) }}
+                            </span>
                           </span>
-                          <span v-else>尚未使用</span>
-                          <span v-if="failureOf(key.id)" class="key-failed">
-                            权限范围：{{ failureOf(key.id) }}
-                          </span>
-                        </span>
-                      </RouterLink>
-                    </li>
-                  </ul>
-                </div>
-                <span v-else class="key-hidden">仅接入实例所有者可查看访问密钥</span>
-                <p v-if="keysFailure" class="key-failed">{{ keysFailure }}</p>
-              </td>
-              <td class="cell-used">
-                <time v-if="lastUsed" :datetime="lastUsed" :title="formatTime(lastUsed)">
-                  {{ formatRelative(lastUsed) }}
-                </time>
-                <template v-else>–</template>
-              </td>
-              <td class="cell-owner">
-                {{ ownerName(client.ownerAccountId)
-                }}<span v-if="client.ownerAccountId === me.data.value?.id" class="app-mine"
-                  >我的</span
-                >
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <div v-if="liveKeys.length" class="apps-legend">
-        <AccessLegend :kinds="legendKinds" />
-        <ul class="sensitivity-legend">
-          <li v-for="s in SENSITIVITIES" :key="s">
-            <StrataSwatch :sensitivity="s" :width="28" :height="18" decorative />
-            <span>{{ sensitivityLabels[s] }}</span>
-          </li>
-        </ul>
-      </div>
-    </template>
+                        </RouterLink>
+                      </li>
+                    </ul>
+                  </div>
+                  <span v-else class="key-hidden">仅客户端所有者可查看访问密钥</span>
+                  <p v-if="keysFailure" class="key-failed">{{ keysFailure }}</p>
+                </td>
+                <td class="cell-used">
+                  <time v-if="lastUsed" :datetime="lastUsed" :title="formatTime(lastUsed)">
+                    {{ formatRelative(lastUsed) }}
+                  </time>
+                  <template v-else>–</template>
+                </td>
+                <td class="cell-owner">
+                  {{ ownerName(client.ownerAccountId)
+                  }}<span v-if="client.ownerAccountId === me.data.value?.id" class="app-mine"
+                    >我的</span
+                  >
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-if="liveKeys.length" class="apps-legend">
+          <AccessLegend :kinds="legendKinds" />
+          <ul class="sensitivity-legend">
+            <li v-for="s in SENSITIVITIES" :key="s">
+              <StrataSwatch :sensitivity="s" :width="28" :height="18" decorative />
+              <span>{{ sensitivityLabels[s] }}</span>
+            </li>
+          </ul>
+        </div>
+      </template>
+    </div>
   </div>
 
   <UModal
     v-model:open="open"
-    title="新建接入实例"
+    title="新建客户端"
     :dismissible="!creating"
     :close="!creating"
     :ui="{ content: 'sm:max-w-xl' }"
@@ -461,7 +465,7 @@ td {
 .key-count {
   flex: none;
   min-width: 18px;
-  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
 .key-hidden {
   color: var(--ui-text-muted);

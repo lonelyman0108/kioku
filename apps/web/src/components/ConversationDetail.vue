@@ -1,11 +1,15 @@
 <script setup lang="ts">
-import { useQuery } from '@tanstack/vue-query'
+import { useToast } from '@nuxt/ui/composables'
+import type { ClientGroupRule } from '@kioku/contracts'
+import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref } from 'vue'
 
-import { retryable } from '../api/client'
+import { ApiError, retryable } from '../api/client'
 import { api } from '../api/endpoints'
+import { useSession } from '../composables/useSession'
 import { conversationKindLabels, conversationTitle, runCounts } from '../conversations'
-import { provenanceLabels } from '../labels'
+import { personMemoryModeLabels, provenanceLabels } from '../labels'
+import { entryRoute } from '../routes'
 import { formatRelative, formatShort, formatTime } from '../time'
 import Hint from './Hint.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
@@ -14,8 +18,11 @@ import StrataStrip from './strata/StrataStrip.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
 
 // 会话详情：会话摘要的时间线、在这里记下的事实、抽取记录，都是新的在前。
-// 事实挂在各自的联系人上，删、确认或提炼都去联系人详情或待处理
+// 群聊和频道会话在头部就地展示并允许客户端所有者切换当前人格与单群隔离锁
 const props = defineProps<{ circleId: string; id: string }>()
+const toast = useToast()
+const queryClient = useQueryClient()
+const { me, circle } = useSession()
 
 const detail = useQuery({
   queryKey: computed(() => ['conversation', props.circleId, props.id] as const),
@@ -24,6 +31,105 @@ const detail = useQuery({
 const data = computed(() =>
   detail.data.value && detail.data.value.id === props.id ? detail.data.value : null,
 )
+const hasGroupRule = computed(
+  () =>
+    (data.value?.kind === 'group' || data.value?.kind === 'channel') &&
+    Boolean(data.value?.subject?.id),
+)
+const activeClientId = computed(() => (hasGroupRule.value ? (data.value?.client.id ?? null) : null))
+
+const clients = useQuery({
+  queryKey: computed(() => ['clients', props.circleId] as const),
+  queryFn: ({ queryKey: [, cid] }) => api.clients(cid),
+  enabled: hasGroupRule,
+})
+const personas = useQuery({
+  queryKey: computed(() => ['personas', props.circleId] as const),
+  queryFn: ({ queryKey: [, cid] }) => api.personas(cid),
+  enabled: hasGroupRule,
+})
+const groupRules = useQuery({
+  queryKey: computed(() => ['client-group-rules', props.circleId, activeClientId.value] as const),
+  queryFn: ({ queryKey: [, cid, clid] }) => api.clientGroupRules(cid, clid!),
+  enabled: computed(() => Boolean(activeClientId.value)),
+})
+const groupPolicyFailedQuery = computed(() => {
+  if (groupRules.isError.value) return groupRules
+  if (clients.isError.value) return clients
+  if (personas.isError.value) return personas
+  return null
+})
+
+const clientInfo = computed(
+  () => clients.data.value?.find((c) => c.id === activeClientId.value) ?? null,
+)
+const canManageGroupRule = computed(
+  () =>
+    Boolean(clientInfo.value) &&
+    clientInfo.value?.ownerAccountId === me.data.value?.id &&
+    circle.value?.role !== 'viewer',
+)
+const currentGroupRule = computed(() => {
+  const sid = data.value?.subject?.id
+  if (!sid) return null
+  return groupRules.data.value?.rules.find((r) => r.groupSubjectId === sid) ?? null
+})
+const defaultPersonaLabel = computed(() => {
+  const pid = clientInfo.value?.defaultPersonaId
+  const found = pid ? personas.data.value?.find((p) => p.id === pid)?.name : null
+  return found ? `沿用默认人格（${found}）` : '沿用默认人格（无）'
+})
+const groupPersonaItems = computed(() => [
+  { label: defaultPersonaLabel.value, value: null },
+  ...(personas.data.value ?? []).map((p) => ({ label: p.name, value: p.id })),
+])
+const effectiveGroupPersonaText = computed(() => {
+  const overrideId = currentGroupRule.value?.personaId
+  if (overrideId) {
+    return personas.data.value?.find((p) => p.id === overrideId)?.name ?? '已指定人格'
+  }
+  return defaultPersonaLabel.value
+})
+const savingRule = ref(false)
+async function patchGroupRule(patch: { personaId?: string | null; isolateGroupMemory?: boolean }) {
+  const sid = data.value?.subject?.id
+  const clid = activeClientId.value
+  if (!sid || !clid || savingRule.value) return
+  const existing = (groupRules.data.value?.rules ?? []).map(
+    ({ groupSubjectId, personaId, isolateGroupMemory }): ClientGroupRule => ({
+      groupSubjectId,
+      personaId,
+      isolateGroupMemory,
+    }),
+  )
+  const prev = existing.find((r) => r.groupSubjectId === sid)
+  const nextPersona = patch.personaId !== undefined ? patch.personaId : (prev?.personaId ?? null)
+  const nextIsolate =
+    patch.isolateGroupMemory !== undefined
+      ? patch.isolateGroupMemory
+      : (prev?.isolateGroupMemory ?? false)
+  const rest = existing.filter((r) => r.groupSubjectId !== sid)
+  const nextRules =
+    nextPersona !== null || nextIsolate
+      ? [...rest, { groupSubjectId: sid, personaId: nextPersona, isolateGroupMemory: nextIsolate }]
+      : rest
+  const key = ['client-group-rules', props.circleId, clid] as const
+  savingRule.value = true
+  try {
+    const saved = await api.saveClientGroupRules(props.circleId, clid, { rules: nextRules })
+    queryClient.setQueryData(key, saved)
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['personas', props.circleId] }),
+      queryClient.invalidateQueries({ queryKey: ['persona', props.circleId] }),
+      queryClient.invalidateQueries({ queryKey: ['clients', props.circleId] }),
+    ])
+    toast.add({ title: '已更新本群规则', color: 'success' })
+  } catch (err) {
+    toast.add({ title: err instanceof ApiError ? err.message : '保存失败', color: 'error' })
+  } finally {
+    savingRule.value = false
+  }
+}
 
 // 窄屏上打开一个会话之后，页面把焦点放到这里
 const titleEl = ref<HTMLElement | null>(null)
@@ -52,13 +158,14 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
         <h2 ref="titleEl" tabindex="-1">{{ conversationTitle(data) }}</h2>
         <p class="head-meta">
           <RouterLink
-            v-if="data.kind !== 'none'"
             :to="{ name: 'client', params: { circleId, clientId: data.client.id } }"
             class="head-link"
           >
             {{ data.client.name }}
           </RouterLink>
-          <span>{{ data.kind === 'none' ? '本人' : conversationKindLabels[data.kind] }}</span>
+          <span>{{
+            data.kind === 'none' ? '本人（本机无上下文）' : conversationKindLabels[data.kind]
+          }}</span>
           <span v-if="data.projectSlug" class="font-mono">项目 {{ data.projectSlug }}</span>
           <span v-if="data.deviceKey" class="font-mono">设备 {{ data.deviceKey }}</span>
           <RouterLink
@@ -75,6 +182,58 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
             </time>
           </span>
         </p>
+
+        <div v-if="hasGroupRule && groupPolicyFailedQuery" class="mt-2.5">
+          <ReadFailureNote :query="groupPolicyFailedQuery" />
+        </div>
+        <div v-else-if="hasGroupRule && groupRules.data.value" class="group-policy-bar">
+          <RouterLink
+            v-if="clientInfo"
+            :to="{ name: 'client', params: { circleId, clientId: clientInfo.id } }"
+            class="policy-mode head-link"
+          >
+            客户端模式：{{ personMemoryModeLabels[clientInfo.config.personMemoryMode ?? 'strict'] }}
+          </RouterLink>
+          <template v-if="canManageGroupRule">
+            <label class="policy-field">
+              <span>{{ data.kind === 'channel' ? '本频道人格' : '本群人格' }}</span>
+              <USelect
+                :model-value="currentGroupRule?.personaId ?? null"
+                :items="groupPersonaItems"
+                value-key="value"
+                size="xs"
+                class="w-48"
+                aria-label="按群人格"
+                :disabled="savingRule"
+                @update:model-value="
+                  (v) => patchGroupRule({ personaId: (v as string | null) ?? null })
+                "
+              />
+            </label>
+            <span class="policy-field">
+              <USwitch
+                size="xs"
+                label="单群隔离锁"
+                :model-value="Boolean(currentGroupRule?.isolateGroupMemory)"
+                :disabled="savingRule"
+                @update:model-value="(v) => patchGroupRule({ isolateGroupMemory: Boolean(v) })"
+              />
+              <Hint>
+                开启后，本群产生的人物事实不向其他群流出，其他群产生的人物印象也不带入本群。
+              </Hint>
+            </span>
+          </template>
+          <template v-else>
+            <span class="policy-readonly">
+              {{ data.kind === 'channel' ? '本频道人格' : '本群人格' }}：{{
+                effectiveGroupPersonaText
+              }}
+            </span>
+            <span class="policy-readonly">
+              单群隔离锁：{{ currentGroupRule?.isolateGroupMemory ? '已开启' : '未开启' }}
+            </span>
+          </template>
+        </div>
       </header>
 
       <div v-if="detail.isError.value" class="stale-note">
@@ -110,7 +269,13 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
               <div class="entry-body">
                 <p class="entry-text">{{ summary.content }}</p>
                 <p class="entry-meta">
-                  <code v-if="summary.shortId" class="short-id">{{ summary.shortId }}</code>
+                  <RouterLink
+                    v-if="summary.shortId"
+                    :to="entryRoute(circleId, summary.shortId)"
+                    class="short-id entry-link"
+                  >
+                    {{ summary.shortId }}
+                  </RouterLink>
                   <span>{{ provenanceLabels[summary.provenance] }}</span>
                   <span v-if="summary.expiresAt">{{ formatTime(summary.expiresAt) }} 到期</span>
                 </p>
@@ -134,7 +299,13 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
               <div class="entry-body">
                 <p class="entry-text">{{ fact.content }}</p>
                 <p class="entry-meta">
-                  <code v-if="fact.shortId" class="short-id">{{ fact.shortId }}</code>
+                  <RouterLink
+                    v-if="fact.shortId"
+                    :to="entryRoute(circleId, fact.shortId)"
+                    class="short-id entry-link"
+                  >
+                    {{ fact.shortId }}
+                  </RouterLink>
                   <RouterLink
                     :to="{ name: 'contact', params: { circleId, subjectId: fact.subject.id } }"
                     class="entry-link"
@@ -272,6 +443,25 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
   font-family: var(--font-mono);
   font-size: 12px;
   color: var(--ui-text-toned);
+}
+.group-policy-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 18px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--ui-border);
+  font-size: 13px;
+}
+.policy-mode,
+.policy-readonly {
+  color: var(--ui-text-muted);
+}
+.policy-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 @media (max-width: 1023.98px) {
   .detail-note {

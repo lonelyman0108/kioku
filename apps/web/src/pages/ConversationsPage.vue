@@ -35,7 +35,7 @@ function setTab(value: string | number) {
   void router.replace({ query: value === 'contacts' ? { tab: 'contacts' } : {} })
 }
 
-// 选中的会话、按接入实例与类型的筛选记在地址里：从接入实例或联系人详情点过来时直接打开
+// 选中的会话、按客户端与类型的筛选记在地址里：从客户端或联系人详情点过来时直接打开
 const text = (key: string) => {
   const value = route.query[key]
   return typeof value === 'string' && value ? value : null
@@ -84,7 +84,7 @@ const list = useInfiniteQuery({
 })
 const items = computed(() => list.data.value?.pages.flatMap((page) => page.items) ?? [])
 
-// 筛选条上写接入实例的名字：列表里有就用列表里的，没有再去列表里找
+// 筛选条上写客户端的名字：列表里有就用列表里的，没有再去列表里找
 const clients = useQuery({
   queryKey: computed(() => ['clients', circleId.value] as const),
   queryFn: () => api.clients(circleId.value),
@@ -153,7 +153,7 @@ watch(selectedId, async (id, previous) => {
         </div>
       </div>
       <p v-if="clientId" class="list-filter">
-        <span class="min-w-0 truncate">接入实例「{{ clientName }}」的会话</span>
+        <span class="min-w-0 truncate">客户端「{{ clientName }}」的会话</span>
         <button type="button" aria-label="清除筛选" @click="clearClient">
           <UIcon :name="icons.cancel" class="size-3.5" />
         </button>

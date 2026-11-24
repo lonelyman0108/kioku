@@ -71,7 +71,7 @@ function accounts(subject: SubjectInfo) {
     <div class="contacts-bar">
       <p class="contacts-note">
         对话中遇到的人和群，以及记下的事实。<Hint>
-          新遇到的排在前面。将本人在各平台的账号标记为「这是我」后，当前账号的接入实例会将这些私聊视为本人对话。
+          新遇到的排在前面。将本人在各平台的账号标记为「这是我」后，当前账号的客户端会将这些私聊视为本人对话。
         </Hint>
       </p>
       <div class="contacts-actions">
@@ -110,7 +110,7 @@ function accounts(subject: SubjectInfo) {
           @click="shown = section.kind"
         >
           {{ section.title }}
-          <span v-if="section.count.value !== null" class="kind-count">
+          <span v-if="section.count.value !== null" class="kind-count tabular-nums">
             {{ section.count.value }}
           </span>
         </button>
@@ -159,7 +159,7 @@ function accounts(subject: SubjectInfo) {
                       }}
                     </span>
                   </span>
-                  <span class="subject-count" :class="{ zero: !subject.factCount }">
+                  <span class="subject-count tabular-nums" :class="{ zero: !subject.factCount }">
                     {{ subject.factCount }}<span class="sr-only"> 条事实</span>
                   </span>
                   <time
@@ -287,7 +287,7 @@ function accounts(subject: SubjectInfo) {
   font-weight: 500;
 }
 .subject-count {
-  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: 14px;
   font-weight: 500;
   text-align: right;

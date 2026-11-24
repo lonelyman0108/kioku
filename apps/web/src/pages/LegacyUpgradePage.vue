@@ -48,7 +48,7 @@ function summaryGroups(summary: LegacyUpgradeSummary): Property[][] {
       { key: 'accounts', label: '账号', value: `${summary.accounts} 个（含个人记忆圈）` },
       {
         key: 'circles',
-        label: '共享圈',
+        label: '独立圈',
         value: circlesText,
         stacked: summary.sharedCircles.length > 2,
       },
@@ -59,7 +59,7 @@ function summaryGroups(summary: LegacyUpgradeSummary): Property[][] {
       },
       {
         key: 'clients',
-        label: '接入实例',
+        label: '客户端',
         value: `${summary.clients} 个，${summary.groupRules} 条群规则`,
       },
       {
@@ -71,7 +71,7 @@ function summaryGroups(summary: LegacyUpgradeSummary): Property[][] {
     [
       {
         key: 'entries',
-        label: '正式词条',
+        label: '正式记忆',
         value: `${summary.entries.entry} 条（含机密 ${summary.entries.secret} 条）`,
       },
       { key: 'facts', label: '联系人事实', value: `${summary.entries.fact} 条` },
@@ -184,7 +184,7 @@ async function goLogin() {
       <NoteLine v-if="upgradeStatus && !upgradeStatus.masterKey" tone="warning" class="mt-4">
         尚未配置 <code>KIOKU_MASTER_KEY</code>。
         <template #detail>
-          若旧库包含机密词条、托管凭据、密码库连接或已加密的模型服务商密钥，请先配置
+          若旧库包含机密记忆、托管凭据、密码库连接或已加密的模型服务商密钥，请先配置
           <code>KIOKU_MASTER_KEY</code> 后重启服务再迁移。
         </template>
       </NoteLine>
@@ -252,7 +252,7 @@ async function goLogin() {
           color="neutral"
           variant="outline"
           :disabled="busy !== null"
-          @click="stage = 'auth'"
+          @click="((error = null), (stage = 'auth'))"
         >
           返回
         </UButton>

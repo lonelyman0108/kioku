@@ -436,9 +436,9 @@ async function submitAdmin() {
             />
           </UFormField>
           <UFormField
-            label="共享记忆圈名（可选）"
+            label="独立圈名称（可选）"
             name="circleName"
-            help="留空仅创建个人记忆圈；填写时同步创建一个共享圈"
+            help="留空仅创建个人记忆圈；填写时同步创建一个独立圈"
           >
             <UInput v-model="circleNameText" size="lg" class="w-full" />
           </UFormField>

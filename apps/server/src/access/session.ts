@@ -1,13 +1,20 @@
-import type { PlatformRef, SessionContextInput, SubjectKind } from '@kioku/contracts'
+import type {
+  PlatformRef,
+  PreviewTargets,
+  SessionContextInput,
+  SubjectKind,
+} from '@kioku/contracts'
 import { and, eq, inArray, isNotNull, sql } from 'drizzle-orm'
 
-import { withCircle, type Tx } from '../db/client'
+import { withCircle, withCircles, type Tx } from '../db/client'
 import { clientGroupRules, conversations, subjectIdentities, subjects } from '../db/schema'
 import type { Deps, KeyPrincipal } from '../http/env'
 import { clipChars } from '../recall/text'
 import { resolveAccess, type Access, type SessionContext } from './access'
 
 const PLATFORM_NAME_CHARS = 128
+const PREVIEW_SENDER_PLACEHOLDER_ID = '00000000-0000-0000-0000-000000000001'
+const PREVIEW_GROUP_PLACEHOLDER_ID = '00000000-0000-0000-0000-000000000002'
 
 export interface KeySession {
   context: SessionContext
@@ -56,6 +63,99 @@ export function defaultSession(key: KeyPrincipal): KeySession {
   return { context: {}, personaId: defaultPersonaOf(key), subjects: [] }
 }
 
+interface PreviewSessionInput {
+  context?: SessionContextInput
+  previewTargets?: PreviewTargets
+}
+
+async function buildGroupSessionState(
+  tx: Tx,
+  key: KeyPrincipal,
+  params: {
+    chatType: 'direct' | 'group' | 'channel'
+    sender: (ResolvedSubject & { persisted?: boolean }) | null
+    group: (ResolvedSubject & { persisted?: boolean }) | null
+    senderIsOwnerOverride?: boolean | undefined
+  },
+): Promise<KeySession> {
+  // 查出接入实例的全部按群规则，用于识别单群强隔离锁与按群人格覆盖
+  const rules = await tx
+    .select({
+      groupSubjectId: clientGroupRules.groupSubjectId,
+      personaId: clientGroupRules.personaId,
+      isolateGroupMemory: clientGroupRules.isolateGroupMemory,
+    })
+    .from(clientGroupRules)
+    .where(eq(clientGroupRules.clientId, key.client.id))
+
+  const lockedGroupIds = new Set(
+    rules.filter((r) => r.isolateGroupMemory).map((r) => r.groupSubjectId),
+  )
+  const lockedGroupScopes = [...lockedGroupIds].map((id) => `group:${id}`)
+
+  const loadSharedGroupScopes = async (): Promise<string[]> => {
+    if (key.client.config.personMemoryMode !== 'persona_shared') return []
+    const convs = await tx
+      .select({ subjectId: conversations.subjectId })
+      .from(conversations)
+      .where(
+        and(
+          eq(conversations.clientId, key.client.id),
+          inArray(conversations.kind, ['group', 'channel']),
+          isNotNull(conversations.subjectId),
+        ),
+      )
+    return convs
+      .map((c) => c.subjectId!)
+      .filter((id) => !lockedGroupIds.has(id))
+      .map((id) => `group:${id}`)
+  }
+
+  if (params.chatType === 'direct') {
+    const sender = params.sender!
+    const sharedGroupScopes = await loadSharedGroupScopes()
+    const senderIsOwner =
+      params.senderIsOwnerOverride ?? sender.accountId === key.client.ownerAccountId
+    return {
+      context: {
+        chatType: params.chatType,
+        senderSubjectId: sender.id,
+        senderIsOwner,
+        sharedGroupScopes,
+        lockedGroupScopes,
+      },
+      personaId: defaultPersonaOf(key),
+      subjects:
+        sender.persisted === false ? [] : [{ id: sender.id, role: 'sender', name: sender.name }],
+    }
+  }
+
+  const group = params.group!
+  const currentRule = rules.find((r) => r.groupSubjectId === group.id)
+  const currentGroupIsolated = currentRule?.isolateGroupMemory === true
+  const sharedGroupScopes = currentGroupIsolated ? [] : await loadSharedGroupScopes()
+  const resolvedSubjects: SessionSubject[] = []
+  if (params.sender && params.sender.persisted !== false) {
+    resolvedSubjects.push({ id: params.sender.id, role: 'sender', name: params.sender.name })
+  }
+  if (group.persisted !== false) {
+    resolvedSubjects.push({ id: group.id, role: 'group', name: group.name })
+  }
+
+  return {
+    context: {
+      chatType: params.chatType,
+      groupSubjectId: group.id,
+      ...(params.sender ? { senderSubjectId: params.sender.id } : {}),
+      currentGroupIsolated,
+      sharedGroupScopes,
+      lockedGroupScopes,
+    },
+    personaId: currentRule?.personaId ?? defaultPersonaOf(key),
+    subjects: resolvedSubjects,
+  }
+}
+
 // 把接入方上报的会话上下文解析成数据库对象与会话上下文：平台账号按 (circleId, platform, kind, externalId) 查找或创建
 export async function resolveKeySession(
   deps: Deps,
@@ -75,78 +175,129 @@ export async function resolveKeySession(
           refresh: chatType === 'direct',
         })
       : null
-
-    // 查出接入实例的全部按群规则，用于识别单群强隔离锁与按群人格覆盖
-    const rules = await tx
-      .select({
-        groupSubjectId: clientGroupRules.groupSubjectId,
-        personaId: clientGroupRules.personaId,
-        isolateGroupMemory: clientGroupRules.isolateGroupMemory,
-      })
-      .from(clientGroupRules)
-      .where(eq(clientGroupRules.clientId, key.client.id))
-
-    const lockedGroupIds = new Set(
-      rules.filter((r) => r.isolateGroupMemory).map((r) => r.groupSubjectId),
-    )
-    const lockedGroupScopes = [...lockedGroupIds].map((id) => `group:${id}`)
-
-    const loadSharedGroupScopes = async (): Promise<string[]> => {
-      if (key.client.config.personMemoryMode !== 'persona_shared') return []
-      const convs = await tx
-        .select({ subjectId: conversations.subjectId })
-        .from(conversations)
-        .where(
-          and(
-            eq(conversations.clientId, key.client.id),
-            inArray(conversations.kind, ['group', 'channel']),
-            isNotNull(conversations.subjectId),
-          ),
-        )
-      return convs
-        .map((c) => c.subjectId!)
-        .filter((id) => !lockedGroupIds.has(id))
-        .map((id) => `group:${id}`)
-    }
-
-    if (chatType === 'direct') {
-      const sharedGroupScopes = await loadSharedGroupScopes()
-      return {
-        context: {
-          chatType,
-          senderSubjectId: sender!.id,
-          senderIsOwner: sender!.accountId === key.client.ownerAccountId,
-          sharedGroupScopes,
-          lockedGroupScopes,
-        },
-        personaId: defaultPersonaOf(key),
-        subjects: [{ id: sender!.id, role: 'sender', name: sender!.name }],
-      }
-    }
-
-    const group = await resolveSubject(tx, key.circleId, platform, 'group', input.group!, {
-      refresh: true,
-    })
-    const currentRule = rules.find((r) => r.groupSubjectId === group.id)
-    const currentGroupIsolated = currentRule?.isolateGroupMemory === true
-    const sharedGroupScopes = currentGroupIsolated ? [] : await loadSharedGroupScopes()
-
-    return {
-      context: {
-        chatType,
-        groupSubjectId: group.id,
-        ...(sender ? { senderSubjectId: sender.id } : {}),
-        currentGroupIsolated,
-        sharedGroupScopes,
-        lockedGroupScopes,
-      },
-      personaId: currentRule?.personaId ?? defaultPersonaOf(key),
-      subjects: [
-        ...(sender ? [{ id: sender.id, role: 'sender' as const, name: sender.name }] : []),
-        { id: group.id, role: 'group', name: group.name },
-      ],
-    }
+    const group =
+      chatType === 'direct'
+        ? null
+        : await resolveSubject(tx, key.circleId, platform, 'group', input.group!, {
+            refresh: true,
+          })
+    return buildGroupSessionState(tx, key, { chatType, sender, group })
   })
+}
+
+// 控制台只读仿真会话：不写 subjects / subject_identities，按需解析已有对象或使用临时占位 ID
+export async function resolvePreviewSession(
+  deps: Deps,
+  key: KeyPrincipal,
+  input: PreviewSessionInput,
+): Promise<KeySession> {
+  const { context, previewTargets } = input
+  if (!context && !previewTargets) return defaultSession(key)
+
+  const requestedChatType =
+    previewTargets?.chatType ??
+    context?.chatType ??
+    (previewTargets?.groupSubjectId
+      ? 'group'
+      : previewTargets?.senderSubjectId || previewTargets?.senderIsOwner !== undefined
+        ? 'direct'
+        : undefined)
+
+  if (!requestedChatType) return defaultSession(key)
+  if (requestedChatType === 'cron' || requestedChatType === 'subagent') {
+    return { ...defaultSession(key), context: { chatType: requestedChatType } }
+  }
+
+  return withCircles(
+    deps.db,
+    { read: [key.circleId] },
+    async (tx) => {
+      const lookupById = async (
+        id: string,
+      ): Promise<(ResolvedSubject & { persisted: true }) | null> => {
+        const [row] = await tx
+          .select({ id: subjects.id, name: subjects.displayName, accountId: subjects.accountId })
+          .from(subjects)
+          .where(and(eq(subjects.circleId, key.circleId), eq(subjects.id, id)))
+        return row
+          ? { id: row.id, name: row.name, accountId: row.accountId, persisted: true }
+          : null
+      }
+
+      const lookupByRef = async (
+        kind: SubjectKind,
+        ref: PlatformRef,
+      ): Promise<(ResolvedSubject & { persisted: true }) | null> => {
+        if (!context?.platform) return null
+        const found = await findIdentity(tx, key.circleId, context.platform, kind, ref.id)
+        if (!found) return null
+        return {
+          id: found.subjectId,
+          name: ref.name ?? found.identityName ?? found.subjectName,
+          accountId: found.accountId,
+          persisted: true,
+        }
+      }
+
+      let sender: (ResolvedSubject & { persisted: boolean }) | null = null
+      if (previewTargets?.senderSubjectId) {
+        sender = (await lookupById(previewTargets.senderSubjectId)) ?? {
+          id: previewTargets.senderSubjectId,
+          name: null,
+          accountId: previewTargets.senderIsOwner ? key.client.ownerAccountId : null,
+          persisted: false,
+        }
+      } else if (context?.sender) {
+        sender = (await lookupByRef('person', context.sender)) ?? {
+          id: PREVIEW_SENDER_PLACEHOLDER_ID,
+          name: context.sender.name ?? context.sender.id,
+          accountId: previewTargets?.senderIsOwner ? key.client.ownerAccountId : null,
+          persisted: false,
+        }
+      } else if (requestedChatType === 'direct') {
+        sender = {
+          id: PREVIEW_SENDER_PLACEHOLDER_ID,
+          name: null,
+          accountId: previewTargets?.senderIsOwner ? key.client.ownerAccountId : null,
+          persisted: false,
+        }
+      }
+
+      let group: (ResolvedSubject & { persisted: boolean }) | null = null
+      if (requestedChatType !== 'direct') {
+        if (previewTargets?.groupSubjectId) {
+          group = (await lookupById(previewTargets.groupSubjectId)) ?? {
+            id: previewTargets.groupSubjectId,
+            name: null,
+            accountId: null,
+            persisted: false,
+          }
+        } else if (context?.group) {
+          group = (await lookupByRef('group', context.group)) ?? {
+            id: PREVIEW_GROUP_PLACEHOLDER_ID,
+            name: context.group.name ?? context.group.id,
+            accountId: null,
+            persisted: false,
+          }
+        } else {
+          group = {
+            id: PREVIEW_GROUP_PLACEHOLDER_ID,
+            name: null,
+            accountId: null,
+            persisted: false,
+          }
+        }
+      }
+
+      return buildGroupSessionState(tx, key, {
+        chatType: requestedChatType,
+        sender,
+        group,
+        senderIsOwnerOverride: previewTargets?.senderIsOwner,
+      })
+    },
+    { accessMode: 'read only' },
+  )
 }
 
 export async function groupPersona(

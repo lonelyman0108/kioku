@@ -15,7 +15,9 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { api } from '../api/endpoints'
+import { invalidateActivity } from '../activity'
 import CreateMemoryModal from '../components/CreateMemoryModal.vue'
+import CrossCirclePreviewDrawer from '../components/CrossCirclePreviewDrawer.vue'
 import DeletedMemories from '../components/DeletedMemories.vue'
 import ExpiredMemories from '../components/ExpiredMemories.vue'
 import MemoryEditor from '../components/MemoryEditor.vue'
@@ -40,26 +42,21 @@ import StrataRibbon from '../components/strata/StrataRibbon.vue'
 import StrataSwatch from '../components/strata/StrataSwatch.vue'
 import { tallyCounts } from '../components/strata/strata'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
-import { useSession } from '../composables/useSession'
 import { useViewport } from '../composables/useViewport'
 import { icons } from '../icons'
 import { invalidateInboxCounts } from '../inbox'
 import { statsChanged } from '../memoryDetail'
 import { entryRoute } from '../routes'
+import { circleSettingsRoute } from '../settingsSections'
 
 const route = useRoute()
 const router = useRouter()
 const toast = useToast()
 const queryClient = useQueryClient()
-const { me } = useSession()
 
 const circleId = computed(() => String(route.params.circleId))
 const selectedId = computed(() => (typeof route.query.id === 'string' ? route.query.id : null))
-const { circleKind, canWrite } = useMemoryPermissions(circleId)
-
-const circleKindsMap = computed(
-  () => new Map((me.data.value?.circles ?? []).map((c) => [c.id, c.kind])),
-)
+const { circleKind, role, canWrite } = useMemoryPermissions(circleId)
 
 function withQuery(changes: Record<string, string | null>) {
   const query = { ...route.query }
@@ -88,7 +85,9 @@ function setView(value: string | number) {
 
 const groupBy = computed<BrowseGroupBy>(() => {
   const raw = route.query.groupBy
-  return typeof raw === 'string' && (BROWSE_GROUP_BYS as readonly string[]).includes(raw)
+  return typeof raw === 'string' &&
+    raw !== 'circle' &&
+    (BROWSE_GROUP_BYS as readonly string[]).includes(raw)
     ? (raw as BrowseGroupBy)
     : 'topic'
 })
@@ -133,11 +132,12 @@ function selectBand(band: StrataBand) {
       view: 'list',
       band: same ? null : band,
       sensitivity: same ? filterSensitivity.value : null,
+      kind: null,
     }),
   )
 }
 function clearStrataFilter() {
-  void router.replace(withQuery({ band: null, sensitivity: null }))
+  void router.replace(withQuery({ band: null, sensitivity: null, kind: null }))
 }
 
 const currentBand = ref<StrataBand | null>(null)
@@ -150,15 +150,15 @@ function onIndexHover(event: MouseEvent) {
 
 const browse = useQuery({
   queryKey: computed(() => ['entry-browse', circleId.value, groupBy.value] as const),
-  queryFn: ({ queryKey: [, cid, gb] }) => api.browseEntries(cid, { groupBy: gb }),
+  queryFn: ({ queryKey: [, cid, gb] }) =>
+    api.browseEntries(cid, {
+      groupBy: gb,
+      ...(gb === 'kind' ? {} : { kind: 'entry' }),
+    }),
 })
 const treeItems = computed<MemoryTreeItem[]>(() =>
   browse.data.value
-    ? buildBrowseTree(
-        browse.data.value,
-        { id: circleId.value, kind: circleKind.value },
-        circleKindsMap.value,
-      )
+    ? buildBrowseTree(browse.data.value, { id: circleId.value, kind: circleKind.value })
     : [],
 )
 
@@ -209,21 +209,29 @@ const createOpen = ref(false)
 // 刚删掉的那条：目录和列表马上就要去掉它，窄屏返回时焦点不放回那一行
 let deletedId: string | null = null
 
-// 列表、浏览目录、已删除、已过期与关键词索引按查询缓存；概览只标记过期
-function invalidateLists() {
+// 列表、浏览目录、已删除、已过期、变更记录、关联搜索与凭据引用按圈失效；概览只标记过期
+function invalidateCircleMemories(cid: string) {
   for (const key of [
     'entry-list',
     'entry-browse',
     'entry-deleted',
     'entry-expired',
     'entry-glossary',
+    'credentials',
+    'credential-references',
   ]) {
-    void queryClient.invalidateQueries({ queryKey: [key, circleId.value] })
+    void queryClient.invalidateQueries({ queryKey: [key, cid] })
   }
+  void queryClient.invalidateQueries({ queryKey: ['entry-link-search'] })
+  void invalidateInboxCounts(queryClient, cid)
+  invalidateActivity(queryClient, cid)
   void queryClient.invalidateQueries({
-    queryKey: ['overview', circleId.value],
+    queryKey: ['overview', cid],
     refetchType: 'none',
   })
+}
+function invalidateLists() {
+  invalidateCircleMemories(circleId.value)
 }
 
 function resetEntry(shortId: string, cid = circleId.value) {
@@ -278,15 +286,7 @@ function onChanged(entry: ConsoleEntryView, before?: ConsoleEntryView) {
 async function onMoved(entry: ConsoleEntryView, toCircleId: string) {
   const fromCircleId = circleId.value
   invalidateLists()
-  if (toCircleId !== fromCircleId) {
-    for (const key of ['entry-list', 'entry-browse', 'entry-glossary']) {
-      void queryClient.invalidateQueries({ queryKey: [key, toCircleId] })
-    }
-    void queryClient.invalidateQueries({
-      queryKey: ['overview', toCircleId],
-      refetchType: 'none',
-    })
-  }
+  if (toCircleId !== fromCircleId) invalidateCircleMemories(toCircleId)
   refreshCounts()
   if (entry.circleId === fromCircleId) {
     return onChanged(entry)
@@ -303,16 +303,24 @@ async function onRevived(shortId: string) {
   await select(shortId)
 }
 
+const crossPreview = ref<{ circleId: string; shortId: string } | null>(null)
+
 function openLinked(shortId: string, targetCircleId?: string) {
   if (targetCircleId && targetCircleId !== circleId.value) {
-    void router.push(entryRoute(targetCircleId, shortId))
+    crossPreview.value = { circleId: targetCircleId, shortId }
     return
   }
   void router.push(withQuery({ id: shortId }))
 }
 
+async function switchToCrossCircle(targetCircleId: string, shortId: string) {
+  const failure = await router.push(entryRoute(targetCircleId, shortId))
+  if (!failure) crossPreview.value = null
+}
+
 watch(circleId, () => {
   createOpen.value = false
+  crossPreview.value = null
   preferredItemKey.value = null
   expanded.value = []
 })
@@ -440,8 +448,10 @@ const createInitialTopic = computed(() =>
     <aside class="ribbon-column">
       <StrataRibbon
         :counts="stackCounts"
+        :circle-kind="circleKind"
         :selected="filterBand"
         :sensitivity="filterSensitivity"
+        :all-active="view === 'tree' || view === 'list'"
         :current="currentBand"
         :near="nearBand"
         @select="selectBand"
@@ -491,6 +501,7 @@ const createInitialTopic = computed(() =>
         <StrataRibbon
           orientation="horizontal"
           :counts="stackCounts"
+          :circle-kind="circleKind"
           :selected="filterBand"
           :sensitivity="filterSensitivity"
           @select="selectBand"
@@ -579,22 +590,17 @@ const createInitialTopic = computed(() =>
                 class="me-[7px] shrink-0"
                 :band="item.band"
                 :sensitivity="item.sensitivity"
+                :local="!item.circleId || item.circleId === circleId"
               />
-              <span class="tree-label">{{ item.label }}</span>
-              <span v-if="item.circleId && item.circleId !== circleId" class="tree-meta">
-                {{
-                  (circleKindsMap.get(item.circleId) ??
-                    (item.circleSlug === 'personal' ? 'personal' : 'shared')) === 'personal'
-                    ? '个人圈'
-                    : item.circleSlug
-                }}
-              </span>
+              <span class="tree-label" :title="item.label">{{ item.label }}</span>
               <span class="tree-trail">
                 <MemoryFlags
                   v-if="item.kind === 'entry'"
+                  :kind="item.entryKind"
                   :sensitivity="item.sensitivity"
                   :priority="item.priority"
                   :variant-count="item.variantCount"
+                  local
                 />
                 <span v-if="item.kind === 'group' && item.count !== undefined" class="tree-count">
                   {{ item.count }}
@@ -603,7 +609,18 @@ const createInitialTopic = computed(() =>
             </div>
           </template>
         </UTree>
-        <p v-else class="index-empty">当前记忆圈暂无记忆</p>
+        <EmptyState
+          v-else-if="browse.data.value"
+          class="index-empty"
+          title="当前记忆圈暂无记忆"
+          :description="
+            canWrite ? '可新建一条正式记忆，或先配置语境词典。' : '当前账号是查看者，无法新建记忆。'
+          "
+        >
+          <template v-if="canWrite" #actions>
+            <UButton size="sm" color="primary" @click="createOpen = true">新建记忆</UButton>
+          </template>
+        </EmptyState>
       </template>
 
       <!-- 列表、已删除与已过期切走时不卸载：保留筛选与位置 -->
@@ -613,6 +630,7 @@ const createInitialTopic = computed(() =>
             v-if="view === 'list'"
             :circle-id="circleId"
             :circle-kind="circleKind"
+            :can-see-secret="role === 'owner'"
             :selected-id="selectedId"
             :overview="overview.data.value"
             @select="select"
@@ -655,23 +673,23 @@ const createInitialTopic = computed(() =>
       <div v-else class="detail-empty">
         <EmptyState
           title="选择或新建记忆"
-          description="从左侧按主题、场域、环境、客户端或项目浏览词条，或从对话与凭据快速整理。"
+          description="从左侧按主题、场域、环境、客户端、项目或形态浏览记忆，也可通过双链将相关记忆串联起来。"
         >
           <template #actions>
             <UButton v-if="canWrite" color="primary" @click="createOpen = true">新建记忆</UButton>
             <UButton
               color="neutral"
               variant="outline"
-              :to="{ name: 'vocabulary', params: { circleId } }"
+              :to="circleSettingsRoute(circleId, 'vocabulary')"
             >
-              管理词表
+              语境词典
             </UButton>
             <UButton
               color="neutral"
               variant="outline"
               :to="{ name: 'personas', params: { circleId } }"
             >
-              人格与特质
+              人格
             </UButton>
           </template>
         </EmptyState>
@@ -684,13 +702,20 @@ const createInitialTopic = computed(() =>
       :initial-topic="createInitialTopic"
       @created="onCreated"
     />
+
+    <CrossCirclePreviewDrawer
+      :target="crossPreview"
+      :current-circle-id="circleId"
+      @close="crossPreview = null"
+      @switch-to="switchToCrossCircle"
+    />
   </div>
 </template>
 
 <style scoped>
 .memories {
   display: grid;
-  grid-template-columns: 88px 370px minmax(0, 1fr);
+  grid-template-columns: 104px 370px minmax(0, 1fr);
   height: 100%;
   min-height: 0;
 }
@@ -733,7 +758,7 @@ const createInitialTopic = computed(() =>
   color: var(--ui-text-muted);
 }
 .index-count-num b {
-  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-weight: 600;
   color: var(--ui-text);
 }
@@ -885,7 +910,7 @@ const createInitialTopic = computed(() =>
   font-family: var(--font-sans);
 }
 .tree-count {
-  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: 12px;
   color: var(--ui-text-muted);
 }
@@ -914,7 +939,7 @@ const createInitialTopic = computed(() =>
 
 @media (max-width: 1240px) {
   .memories {
-    grid-template-columns: 80px 324px minmax(0, 1fr);
+    grid-template-columns: 104px 324px minmax(0, 1fr);
   }
 }
 @media (max-width: 1023.98px) {

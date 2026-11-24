@@ -22,7 +22,8 @@ import appsPage from '../pages/AppsPage.vue?raw'
 import credentialsPage from '../pages/CredentialsPage.vue?raw'
 import memoriesPage from '../pages/MemoriesPage.vue?raw'
 import overviewPage from '../pages/OverviewPage.vue?raw'
-import vocabularyPage from '../pages/VocabularyPage.vue?raw'
+import personasPage from '../pages/PersonasPage.vue?raw'
+import spaceVocabularySettings from '../components/SpaceVocabularySettings.vue?raw'
 import personaPanel from '../components/PersonaPanel.vue?raw'
 import recallPage from '../pages/RecallPage.vue?raw'
 import subjectsPage from '../components/ContactList.vue?raw'
@@ -209,8 +210,8 @@ describe('读取失败', () => {
     ['整理建议', dreamSuggestions, 'suggestions'],
     ['疑似明文凭据', inboxPlaintext, 'list'],
     ['账号绑定', inboxBindings, 'overview'],
-    ['切面词表', vocabularyPage, 'facetsQuery'],
-    ['人格列表', vocabularyPage, 'personasQuery'],
+    ['语境词典', spaceVocabularySettings, 'facetsQuery'],
+    ['人格列表', personasPage, 'personasQuery'],
     ['人格详情', personaPanel, 'selected'],
     ['联系人', subjectsPage, 'section.query'],
     ['联系人详情', subjectDetailPage, 'subject'],

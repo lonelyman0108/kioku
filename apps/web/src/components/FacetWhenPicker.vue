@@ -5,6 +5,7 @@ import {
   FacetTermSlug,
   normalizeWhen,
   type FacetDimensionView,
+  type FacetTermView,
   type FacetVocabularyView,
 } from '@kioku/contracts'
 import { useQuery } from '@tanstack/vue-query'
@@ -12,18 +13,25 @@ import { computed, reactive } from 'vue'
 
 import { api } from '../api/endpoints'
 import { icons } from '../icons'
+import { facetMatchModeLabels } from '../labels'
 import { whenLabel } from '../memoryDetail'
+import { circleSettingsRoute } from '../settingsSections'
+import ReadFailureNote from './strata/ReadFailureNote.vue'
 
 const props = withDefaults(
   defineProps<{
     circleId: string
     vocabulary?: FacetVocabularyView | null
     lockedRealms?: readonly string[] | null
+    excludeDimensions?: readonly string[]
+    mode?: 'variant' | 'context'
     disabled?: boolean
   }>(),
   {
     vocabulary: undefined,
     lockedRealms: undefined,
+    excludeDimensions: undefined,
+    mode: 'variant',
     disabled: false,
   },
 )
@@ -37,26 +45,59 @@ const facetsQuery = useQuery({
 })
 
 const vocab = computed(() => props.vocabulary ?? facetsQuery.data.value ?? null)
+const selfFetching = computed(() => props.vocabulary === undefined)
 
 const dimensions = computed<FacetDimensionView[]>(() => {
-  if (vocab.value?.dimensions.length) return vocab.value.dimensions
-  return BUILTIN_FACET_KEYS.map((key) => ({
-    ...BUILTIN_FACET_DIMENSIONS[key],
-    builtin: true,
-  }))
+  const excluded = new Set(props.excludeDimensions ?? [])
+  const raw: FacetDimensionView[] = vocab.value?.dimensions.length
+    ? vocab.value.dimensions
+    : BUILTIN_FACET_KEYS.map((key) => ({
+        ...BUILTIN_FACET_DIMENSIONS[key],
+        builtin: true,
+      }))
+  return raw.filter((d) => !excluded.has(d.key))
 })
 
 const normalized = computed(() => normalizeWhen(modelValue.value))
-const hasConditions = computed(() => Object.keys(normalized.value).length > 0)
+const hasLockedRealms = computed(
+  () => props.lockedRealms !== undefined && props.lockedRealms !== null,
+)
+const hasClearableConditions = computed(() => {
+  if (!hasLockedRealms.value) return Object.keys(normalized.value).length > 0
+  return Object.keys(normalized.value).some((k) => k !== 'realm')
+})
 const summary = computed(() => whenLabel(normalized.value, vocab.value ?? undefined))
+const summaryPrefix = computed(() => (props.mode === 'context' ? '默认语境：' : '适用条件：'))
+const clearLabel = computed(() =>
+  props.mode === 'context'
+    ? '清空语境'
+    : hasLockedRealms.value
+      ? '清空其他条件'
+      : '设为默认（无条件）',
+)
 
-function termsForDimension(dimKey: string) {
+interface TermItem {
+  slug: string
+  label: string
+  hint: string
+}
+
+function termHint(term: FacetTermView): string {
+  const parts = [term.slug]
+  if (term.aliases.length) parts.push(`唤醒别名：${term.aliases.join('、')}`)
+  if (Object.keys(term.implies).length) {
+    parts.push(`自动关联：${whenLabel(term.implies, vocab.value ?? undefined)}`)
+  }
+  return parts.join('\n')
+}
+
+function termsForDimension(dimKey: string): TermItem[] {
   const registered = (vocab.value?.terms ?? []).filter((t) => t.dimensionKey === dimKey)
   const known = new Set(registered.map((t) => t.slug))
   const extra = (normalized.value[dimKey] ?? [])
     .filter((slug) => !known.has(slug))
-    .map((slug) => ({ slug, label: slug }))
-  return [...registered.map((t) => ({ slug: t.slug, label: t.label })), ...extra]
+    .map((slug) => ({ slug, label: slug, hint: slug }))
+  return [...registered.map((t) => ({ slug: t.slug, label: t.label, hint: termHint(t) })), ...extra]
 }
 
 function isSelected(dimKey: string, slug: string): boolean {
@@ -64,10 +105,7 @@ function isSelected(dimKey: string, slug: string): boolean {
 }
 
 function isDimLocked(dimKey: string): boolean {
-  return (
-    props.disabled ||
-    (dimKey === 'realm' && props.lockedRealms !== undefined && props.lockedRealms !== null)
-  )
+  return props.disabled || (dimKey === 'realm' && hasLockedRealms.value)
 }
 
 function toggleTerm(dimKey: string, slug: string) {
@@ -86,8 +124,10 @@ function toggleTerm(dimKey: string, slug: string) {
 
 function clearAll() {
   if (props.disabled) return
-  if (props.lockedRealms?.length) {
-    modelValue.value = normalizeWhen({ realm: props.lockedRealms })
+  if (hasLockedRealms.value) {
+    modelValue.value = props.lockedRealms?.length
+      ? normalizeWhen({ realm: props.lockedRealms })
+      : {}
     return
   }
   modelValue.value = {}
@@ -121,31 +161,39 @@ function addCustomTerm(dimKey: string) {
     <div class="facet-summary">
       <span class="facet-summary-label">
         <UIcon :name="icons.facets" class="facet-summary-icon" />
-        <span>适用切面：</span>
+        <span>{{ summaryPrefix }}</span>
         <strong>{{ summary }}</strong>
       </span>
       <UButton
-        v-if="hasConditions && !disabled"
+        v-if="hasClearableConditions && !disabled"
         type="button"
         size="xs"
         color="neutral"
         variant="ghost"
         @click="clearAll"
       >
-        设为默认（无条件）
+        {{ clearLabel }}
       </UButton>
     </div>
 
-    <div class="facet-dims">
+    <ReadFailureNote
+      v-if="selfFetching && facetsQuery.isError.value"
+      :query="facetsQuery"
+      fallback="语境词典读取失败"
+      size="xs"
+    />
+    <div v-else-if="selfFetching && facetsQuery.isPending.value" class="space-y-2">
+      <USkeleton v-for="n in 2" :key="n" class="h-6 w-full" />
+    </div>
+    <div v-else class="facet-dims">
       <div v-for="dim in dimensions" :key="dim.key" class="facet-dim">
         <div class="facet-dim-head">
           <span class="facet-dim-name">{{ dim.name }}</span>
           <span class="facet-dim-key">{{ dim.key }}</span>
-          <span
-            v-if="dim.key === 'realm' && lockedRealms !== undefined && lockedRealms !== null"
-            class="facet-dim-lock"
-          >
-            机密词条各切片须保持同一场域
+          <span class="facet-dim-mode">{{ facetMatchModeLabels[dim.matchMode] }}</span>
+          <span v-if="dim.description" class="facet-dim-desc">{{ dim.description }}</span>
+          <span v-if="dim.key === 'realm' && hasLockedRealms" class="facet-dim-lock">
+            机密记忆各变体须保持同一场域
           </span>
         </div>
 
@@ -158,14 +206,22 @@ function addCustomTerm(dimKey: string) {
             :class="{ selected: isSelected(dim.key, term.slug) }"
             :aria-pressed="isSelected(dim.key, term.slug)"
             :disabled="isDimLocked(dim.key)"
-            :title="term.slug"
+            :title="term.hint"
             @click="toggleTerm(dim.key, term.slug)"
           >
             <span>{{ term.label }}</span>
             <span v-if="term.label !== term.slug" class="facet-chip-slug">{{ term.slug }}</span>
           </button>
           <span v-if="!termsForDimension(dim.key).length && !dim.autoRegister" class="facet-empty">
-            词表中暂无词条
+            语境词典中暂无条件项<template v-if="circleId">
+              ·
+              <RouterLink
+                :to="circleSettingsRoute(circleId, 'vocabulary')"
+                class="facet-vocab-link"
+              >
+                去语境词典添加
+              </RouterLink>
+            </template>
           </span>
         </div>
 
@@ -255,8 +311,23 @@ function addCustomTerm(dimKey: string) {
   font-family: var(--font-mono);
   color: var(--ui-text-muted);
 }
+.facet-dim-mode {
+  padding: 0 4px;
+  border: 1px solid var(--ui-border);
+  color: var(--ui-text-muted);
+}
+.facet-dim-desc {
+  color: var(--ui-text-muted);
+}
 .facet-dim-lock {
   color: var(--ui-text-muted);
+}
+.facet-vocab-link {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.facet-vocab-link:hover {
+  color: var(--ui-text-highlighted);
 }
 .facet-chips {
   display: flex;

@@ -62,21 +62,25 @@ describe('账号绑定那一行', () => {
 })
 
 describe('点地层柱去哪里', () => {
-  it('来自对话的两类去对话页对应的分页，独立人格去词表页的人格分页', () => {
+  it('来自对话的两类未选敏感级时去对话页对应的分页，选了敏感级去记忆列表，独立人格去人格页', () => {
     expect(strataTarget('c1', { band: 'episode', sensitivity: null })).toEqual({
       name: 'conversations',
       params: { circleId: 'c1' },
       query: {},
     })
-    expect(strataTarget('c1', { band: 'fact', sensitivity: 'public' })).toEqual({
+    expect(strataTarget('c1', { band: 'fact', sensitivity: null })).toEqual({
       name: 'conversations',
       params: { circleId: 'c1' },
       query: { tab: 'contacts' },
     })
-    expect(strataTarget('c1', { band: 'persona', sensitivity: null })).toEqual({
-      name: 'vocabulary',
+    expect(strataTarget('c1', { band: 'fact', sensitivity: 'public' })).toEqual({
+      name: 'memories',
       params: { circleId: 'c1' },
-      query: { tab: 'personas' },
+      query: { view: 'list', band: 'fact', sensitivity: 'public' },
+    })
+    expect(strataTarget('c1', { band: 'persona', sensitivity: null })).toEqual({
+      name: 'personas',
+      params: { circleId: 'c1' },
     })
   })
 

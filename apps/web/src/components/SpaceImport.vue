@@ -16,7 +16,7 @@ import { useCircleLimit } from '../composables/useCreateSpace'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
 import { circleKindLabels } from '../labels'
-import { refreshCircles } from '../spaces'
+import { isCircleQuery, refreshCircles } from '../spaces'
 import { formatTime } from '../time'
 import Hint from './Hint.vue'
 import ModalOrBare from './strata/ModalOrBare.vue'
@@ -111,12 +111,13 @@ async function importCircle() {
     title:
       result.circleKind === 'personal'
         ? `已合并导入个人圈「${result.name}」`
-        : `已导入共享圈「${result.name}」`,
-    description: `共导入 ${c.entries} 条词条（${c.variants} 个切片）、${c.credentials} 条凭据。请为接入实例重新签发访问密钥；向量在后台重新生成。`,
+        : `已导入独立圈「${result.name}」`,
+    description: `共导入 ${c.entries} 条记忆（${c.variants} 个变体）、${c.credentials} 条凭据。请为客户端重新签发访问密钥；向量在后台重新生成。`,
     color: 'success',
   })
-  // 新记忆圈要先出现在列表中，跳过去才不会被当成无权访问；名额与实例列表一起刷新
-  await refreshCircles(queryClient, undefined, { accounts: true }).catch(() => {})
+  // 新记忆圈要先出现在列表中，跳过去才不会被当成无权访问；目标记忆圈缓存（尤其是合并入个人圈）与名额一起刷新
+  await refreshCircles(queryClient, result.circleId, { accounts: true }).catch(() => {})
+  await queryClient.invalidateQueries({ predicate: isCircleQuery(result.circleId) }).catch(() => {})
   busy.value = false
   modalOpen.value = false
   emit('imported')
@@ -130,7 +131,7 @@ async function importCircle() {
     :bare="props.bare"
     title="导入记忆圈"
     entry-title="导入记忆圈文件（.kioku-circle）"
-    entry-description="选择导出的记忆圈文件并在弹窗中核对内容；个人圈包合并入本人个人圈，共享圈包导入为新共享圈。"
+    entry-description="选择导出的记忆圈文件并在弹窗中核对内容；个人圈包合并入本人个人圈，独立圈包导入为新独立圈。"
     action-label="导入记忆圈"
     :icon="icons.importCircle"
     :busy="busy"
@@ -139,16 +140,16 @@ async function importCircle() {
       从导出文件恢复或迁移记忆圈。仅导入本人导出、或导出人同意移交的文件。
       <Hint>
         <p>
-          个人圈导出文件将合并进入当前账号的个人记忆圈；共享圈导出文件将新建为一个由当前账号所有的共享记忆圈。其中高优先级词条会按接入配置进入启动加载。
+          个人圈导出文件将合并进入当前账号的个人记忆圈；独立圈导出文件将新建为一个由当前账号所有的独立圈。其中高优先级记忆会按接入配置进入启动加载。
         </p>
         <p class="mt-1">
-          机密词条与托管的凭据值使用当前实例的主密钥重新加密。访问密钥不在文件中，导入后需为接入实例重新签发。
+          机密记忆与托管的凭据值使用当前实例的主密钥重新加密。访问密钥不在文件中，导入后需为客户端重新签发。
         </p>
       </Hint>
     </template>
     <template #alerts>
       <NoteLine v-if="masterKey.data.value && !masterKey.data.value.configured" tone="warning">
-        当前实例未配置主密钥：文件包含机密词条或托管的凭据时无法导入。请先配置 KIOKU_MASTER_KEY。
+        当前实例未配置主密钥：文件包含机密记忆或托管的凭据时无法导入。请先配置 KIOKU_MASTER_KEY。
       </NoteLine>
     </template>
     <form class="space-y-4" @submit.prevent="preview ? importCircle() : inspect()">
@@ -187,11 +188,11 @@ async function importCircle() {
               文件记录来源：{{ circleKindLabels[preview.circleKind] }}「{{
                 preview.circleName
               }}」，导出时间 {{ formatTime(preview.exportedAt) }}。共
-              {{ preview.counts.entries }} 条词条（{{ preview.counts.variants }} 个切片、其中机密
+              {{ preview.counts.entries }} 条记忆（{{ preview.counts.variants }} 个变体、其中机密
               {{ preview.counts.secrets }} 条）、{{ preview.counts.personas }} 个人格、{{
                 preview.counts.clients
               }}
-              个接入实例、{{ preview.counts.facetTerms }} 个切面词条、{{ preview.counts.subjects }}
+              个客户端、{{ preview.counts.facetTerms }} 个条件项、{{ preview.counts.subjects }}
               个联系人。
             </p>
             <p v-if="preview.circleKind === 'personal'">
@@ -200,7 +201,7 @@ async function importCircle() {
               {{ preview.counts.vaultConnections }} 个密码库连接；冲突的短 ID 将自动重映射。
             </p>
             <p v-else>
-              导入后，当前账号将成为新共享记忆圈的所有者，并接收文件中的
+              导入后，当前账号将成为新独立圈的所有者，并接收文件中的
               {{ preview.counts.credentials }} 条凭据与
               {{ preview.counts.vaultConnections }} 个密码库连接及关联本人联系人（{{
                 preview.counts.linkedSubjects
@@ -213,11 +214,11 @@ async function importCircle() {
           </div>
         </div>
         <NoteLine v-if="importBlocked && blocked" tone="warning">
-          {{ blocked }}，删除或转让一个共享圈后再导入共享记忆圈。
+          {{ blocked }}，删除或转让一个独立圈后再导入独立圈。
         </NoteLine>
         <UFormField
           v-if="preview.circleKind === 'shared'"
-          label="新共享圈名称"
+          label="新独立圈名称"
           :help="`留空时使用导出时的名称「${preview.circleName}」`"
         >
           <UInput

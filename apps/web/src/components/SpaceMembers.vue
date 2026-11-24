@@ -30,7 +30,7 @@ import SettingsBlock from './strata/SettingsBlock.vue'
 import SettingsTable from './strata/SettingsTable.vue'
 
 // 记忆圈 › 成员：所有者按用户名添加成员；成员表（角色只有所有者能改别人的）、移除与离开；角色与权限的说明。
-// 各成员自己的凭据数量不在这里展开，只显示在本圈创建的接入实例数
+// 各成员自己的凭据数量不在这里展开，只显示在本圈创建的客户端数
 const route = useRoute()
 const toast = useToast()
 const queryClient = useQueryClient()
@@ -75,7 +75,7 @@ async function add() {
   }
 }
 
-// 改角色：失败（例如共享记忆圈至少要有一个所有者）时用 toast 说明，下拉回到原来的角色
+// 改角色：失败（例如独立圈至少要有一个所有者）时用 toast 说明，下拉回到原来的角色
 const changing = ref<string | null>(null)
 async function changeRole(row: CircleMember, role: MemberRole) {
   if (role === row.role || changing.value) return
@@ -125,12 +125,12 @@ const selfBlocked = computed(() =>
 
 // 角色与权限：和服务端的角色上限一致（见设计文档「账号与角色」）
 const CAPABILITIES: { label: string; owner: string; editor: string; viewer: string }[] = [
-  { label: '读词条与切面词表', owner: '✓', editor: '✓', viewer: '✓' },
-  { label: '写词条、改切面与人格', owner: '至机密', editor: '至私密', viewer: '—' },
+  { label: '读记忆与语境词典', owner: '✓', editor: '✓', viewer: '✓' },
+  { label: '写记忆、改语境词典与人格', owner: '至机密', editor: '至私密', viewer: '—' },
   {
-    label: '接入实例与访问密钥',
-    owner: '全部实例（他人的仅吊销）',
-    editor: '自己的实例',
+    label: '客户端与访问密钥',
+    owner: '全部客户端（他人的仅吊销）',
+    editor: '自己的客户端',
     viewer: '—',
   },
   { label: '凭据与密码库', owner: '✓', editor: '只看自己的列表', viewer: '—' },
@@ -142,7 +142,7 @@ const CAPABILITIES: { label: string; owner: string; editor: string; viewer: stri
   <div>
     <SettingsBlock title="成员列表" wide>
       <template #note
-        >共享圈的词条由成员共享；个人敏感信息可存放在各自个人圈，其他成员不可见。</template
+        >独立圈的记忆由成员共享；个人敏感信息可存放在各自个人圈，其他成员不可见。</template
       >
 
       <div v-if="isOwner" class="add-member">
@@ -170,7 +170,7 @@ const CAPABILITIES: { label: string; owner: string; editor: string; viewer: stri
           <tr>
             <th>成员</th>
             <th>角色</th>
-            <th class="num">接入实例</th>
+            <th class="num">客户端</th>
             <th>加入时间</th>
             <th><span class="sr-only">操作</span></th>
           </tr>

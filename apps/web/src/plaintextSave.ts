@@ -2,9 +2,11 @@ import {
   addedPlaintextCredentials,
   EntryWriteError,
   findPlaintextCredentials,
+  whenSignature,
   type PlaintextCredentialMatch,
   type PlaintextFinding,
   type PlaintextKind,
+  type WhenCondition,
 } from '@kioku/contracts'
 
 import { ApiError } from './api/client'
@@ -20,9 +22,15 @@ export interface PlaintextSpot {
   kind: PlaintextKind
   // 建议的字段名
   field: string
+  // 多变体情况下指出属于哪个变体
+  variantLabel?: string | undefined
 }
 
-function groupSpots(content: string, matches: readonly PlaintextCredentialMatch[]) {
+function groupSpots(
+  content: string,
+  matches: readonly PlaintextCredentialMatch[],
+  variantLabel?: string,
+) {
   const spots: PlaintextSpot[] = []
   const byValue = new Map<string, PlaintextSpot>()
   for (const m of matches) {
@@ -32,7 +40,13 @@ function groupSpots(content: string, matches: readonly PlaintextCredentialMatch[
       if (!known.lines.includes(m.line)) known.lines.push(m.line)
       continue
     }
-    const spot: PlaintextSpot = { value, lines: [m.line], kind: m.kind, field: m.field }
+    const spot: PlaintextSpot = {
+      value,
+      lines: [m.line],
+      kind: m.kind,
+      field: m.field,
+      ...(variantLabel ? { variantLabel } : {}),
+    }
     byValue.set(value, spot)
     spots.push(spot)
   }
@@ -43,7 +57,7 @@ function groupSpots(content: string, matches: readonly PlaintextCredentialMatch[
 export const addedSpots = (before: string | null, after: string) =>
   groupSpots(after, addedPlaintextCredentials(before, after))
 
-// 多变体切片合并正文（用于多变体写入前的明文比较：同一词条切片间搬移同一值不算新增）
+// 多变体切片合并正文
 export function joinVariantContents(
   variants: readonly { content?: string | null }[] | null | undefined,
 ): string | null {
@@ -52,14 +66,41 @@ export function joinVariantContents(
   return texts.length ? texts.join('\n') : null
 }
 
-// 计算整组变体相对于上一版的新增疑似明文
+// 逐变体独立计算相对于上一版的新增疑似明文：行号与服务端逐变体校验完全一致，保留各变体标注
 export function addedVariantSpots(
-  beforeVariants: readonly { content?: string | null }[] | null,
-  afterVariants: readonly { content: string }[],
+  beforeVariants: readonly { content?: string | null; when?: WhenCondition }[] | null,
+  afterVariants: readonly { content: string; when?: WhenCondition; label?: string }[],
 ): { content: string; spots: PlaintextSpot[] } {
-  const before = joinVariantContents(beforeVariants)
   const content = afterVariants.map((v) => v.content).join('\n')
-  return { content, spots: addedSpots(before, content) }
+  const beforeBySig = new Map<string, string | null>()
+  for (const v of beforeVariants ?? []) {
+    if (v.when) beforeBySig.set(whenSignature(v.when), v.content ?? null)
+  }
+  const multi = afterVariants.length > 1
+  const spots: PlaintextSpot[] = []
+  afterVariants.forEach((v, idx) => {
+    const prev = v.when
+      ? (beforeBySig.get(whenSignature(v.when)) ?? null)
+      : (beforeVariants?.[idx]?.content ?? null)
+    const variantSpots = groupSpots(
+      v.content,
+      addedPlaintextCredentials(prev, v.content),
+      multi ? v.label : undefined,
+    )
+    for (const s of variantSpots) {
+      if (s.value !== null) {
+        const existing = spots.find((item) => item.value === s.value)
+        if (existing) {
+          for (const line of s.lines) {
+            if (!existing.lines.includes(line)) existing.lines.push(line)
+          }
+          continue
+        }
+      }
+      spots.push(s)
+    }
+  })
+  return { content, spots }
 }
 
 // 逐切片将已转存的值替换为占位符

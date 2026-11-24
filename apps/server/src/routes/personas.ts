@@ -10,11 +10,11 @@ import {
   UpsertPersonaTraitRequest,
   type ResolvedPersonaTrait,
 } from '@kioku/contracts'
-import { and, asc, count, eq, inArray, sql } from 'drizzle-orm'
+import { and, asc, count, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm'
 
 import { memberRole } from '../auth/middleware'
 import { withCircle, type Tx } from '../db/client'
-import { clientGroupRules, clients, personaTraits, personas } from '../db/schema'
+import { apiKeys, clientGroupRules, clients, personaTraits, personas, subjects } from '../db/schema'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { consoleRoleFor } from '../memory/context'
@@ -27,13 +27,14 @@ const TraitParams = PersonaParams.extend({ traitKey: TraitKey })
 const forbidden = jsonResponse('没有权限', ErrorResponse)
 const notFound = jsonResponse('不存在', ErrorResponse)
 
-const toInfo = (row: typeof personas.$inferSelect) => ({
+const toInfo = (row: typeof personas.$inferSelect, groupRuleCount = 0) => ({
   id: row.id,
   circleId: row.circleId,
   slug: row.slug,
   name: row.name,
   extendsId: row.extendsId,
   description: row.description,
+  groupRuleCount,
 })
 
 const toTrait = (row: typeof personaTraits.$inferSelect): PersonaTrait => ({
@@ -183,10 +184,24 @@ export function personaRoutes(deps: Deps) {
     .openapi(list, async (c) => {
       const { circleId } = c.req.valid('param')
       await consoleRoleFor(deps, c.get('console').accountId, circleId)
-      const rows = await withCircle(deps.db, circleId, (tx) =>
-        tx.select().from(personas).orderBy(asc(personas.createdAt)),
+      const { rows, ruleCounts } = await withCircle(deps.db, circleId, async (tx) => {
+        const [personaRows, ruleRows] = await Promise.all([
+          tx.select().from(personas).orderBy(asc(personas.createdAt)),
+          tx
+            .select({ personaId: clientGroupRules.personaId, n: count() })
+            .from(clientGroupRules)
+            .where(isNotNull(clientGroupRules.personaId))
+            .groupBy(clientGroupRules.personaId),
+        ])
+        return { rows: personaRows, ruleCounts: ruleRows }
+      })
+      const countByPersona = new Map(
+        ruleCounts.filter((r) => r.personaId).map((r) => [r.personaId!, r.n]),
       )
-      return c.json(rows.map(toInfo), 200)
+      return c.json(
+        rows.map((r) => toInfo(r, countByPersona.get(r.id) ?? 0)),
+        200,
+      )
     })
     .openapi(create, async (c) => {
       const { circleId } = c.req.valid('param')
@@ -231,75 +246,102 @@ export function personaRoutes(deps: Deps) {
     .openapi(detail, async (c) => {
       const { circleId, personaId } = c.req.valid('param')
       await consoleRoleFor(deps, c.get('console').accountId, circleId)
-      const result = await withCircle(deps.db, circleId, async (tx) => {
-        const [row] = await tx.select().from(personas).where(eq(personas.id, personaId))
-        if (!row) return null
-        const chain = await personaChain(tx, personaId)
-        const [related, children, userClients, traitRows] = await Promise.all([
-          tx.select().from(personas).where(inArray(personas.id, chain)),
-          tx
-            .select()
-            .from(personas)
-            .where(eq(personas.extendsId, personaId))
-            .orderBy(asc(personas.createdAt)),
-          tx
-            .select({ id: clients.id, slug: clients.slug, name: clients.name })
-            .from(clients)
-            .where(eq(clients.defaultPersonaId, personaId))
-            .orderBy(asc(clients.createdAt)),
-          tx
-            .select()
-            .from(personaTraits)
-            .where(inArray(personaTraits.personaId, chain))
-            .orderBy(asc(personaTraits.sortOrder), asc(personaTraits.traitKey)),
-        ])
-        const byId = new Map(related.map((p) => [p.id, p]))
-        const rank = (id: string) => {
-          const idx = chain.indexOf(id)
-          return idx < 0 ? 999 : idx
-        }
-        // 每个 traitKey 在继承链上最近的提供者（index 最小）即为生效覆盖者
-        const winnerByKey = new Map<string, string>()
-        for (const t of traitRows) {
-          const cur = winnerByKey.get(t.traitKey)
-          if (!cur || rank(t.personaId) < rank(cur)) {
-            winnerByKey.set(t.traitKey, t.personaId)
+      const [[overrideRow], result] = await Promise.all([
+        deps.db
+          .select({ n: count() })
+          .from(apiKeys)
+          .where(
+            and(
+              eq(apiKeys.circleId, circleId),
+              eq(apiKeys.personaOverrideId, personaId),
+              isNull(apiKeys.revokedAt),
+            ),
+          ),
+        withCircle(deps.db, circleId, async (tx) => {
+          const [row] = await tx.select().from(personas).where(eq(personas.id, personaId))
+          if (!row) return null
+          const chain = await personaChain(tx, personaId)
+          const [related, children, userClients, groupRuleRows, traitRows] = await Promise.all([
+            tx.select().from(personas).where(inArray(personas.id, chain)),
+            tx
+              .select()
+              .from(personas)
+              .where(eq(personas.extendsId, personaId))
+              .orderBy(asc(personas.createdAt)),
+            tx
+              .select({ id: clients.id, slug: clients.slug, name: clients.name })
+              .from(clients)
+              .where(eq(clients.defaultPersonaId, personaId))
+              .orderBy(asc(clients.createdAt)),
+            tx
+              .select({
+                clientId: clients.id,
+                clientName: clients.name,
+                groupSubjectId: subjects.id,
+                groupName: subjects.displayName,
+              })
+              .from(clientGroupRules)
+              .innerJoin(clients, eq(clients.id, clientGroupRules.clientId))
+              .innerJoin(subjects, eq(subjects.id, clientGroupRules.groupSubjectId))
+              .where(eq(clientGroupRules.personaId, personaId))
+              .orderBy(asc(clients.name), asc(subjects.displayName)),
+            tx
+              .select()
+              .from(personaTraits)
+              .where(inArray(personaTraits.personaId, chain))
+              .orderBy(asc(personaTraits.sortOrder), asc(personaTraits.traitKey)),
+          ])
+          const byId = new Map(related.map((p) => [p.id, p]))
+          const rank = (id: string) => {
+            const idx = chain.indexOf(id)
+            return idx < 0 ? 999 : idx
           }
-        }
-        const ownTraits: ResolvedPersonaTrait[] = traitRows
-          .filter((t) => t.personaId === personaId)
-          .map((t) => ({
-            ...toTrait(t),
-            personaId: t.personaId,
-            overriddenBy: null,
-          }))
-        const inheritedTraits: ResolvedPersonaTrait[] = traitRows
-          .filter((t) => t.personaId !== personaId)
-          .sort(
-            (a, b) =>
-              rank(a.personaId) - rank(b.personaId) ||
-              a.sortOrder - b.sortOrder ||
-              a.traitKey.localeCompare(b.traitKey),
-          )
-          .map((t) => {
-            const winner = winnerByKey.get(t.traitKey)
-            return {
+          // 每个 traitKey 在继承链上最近的提供者（index 最小）即为生效覆盖者
+          const winnerByKey = new Map<string, string>()
+          for (const t of traitRows) {
+            const cur = winnerByKey.get(t.traitKey)
+            if (!cur || rank(t.personaId) < rank(cur)) {
+              winnerByKey.set(t.traitKey, t.personaId)
+            }
+          }
+          const ownTraits: ResolvedPersonaTrait[] = traitRows
+            .filter((t) => t.personaId === personaId)
+            .map((t) => ({
               ...toTrait(t),
               personaId: t.personaId,
-              overriddenBy: winner && rank(winner) < rank(t.personaId) ? winner : null,
-            }
-          })
-        return {
-          ...toInfo(row),
-          ancestors: chain.slice(1).flatMap((id) => (byId.has(id) ? [toInfo(byId.get(id)!)] : [])),
-          children: children.map(toInfo),
-          ownTraits,
-          inheritedTraits,
-          clients: userClients,
-        }
-      })
+              overriddenBy: null,
+            }))
+          const inheritedTraits: ResolvedPersonaTrait[] = traitRows
+            .filter((t) => t.personaId !== personaId)
+            .sort(
+              (a, b) =>
+                rank(a.personaId) - rank(b.personaId) ||
+                a.sortOrder - b.sortOrder ||
+                a.traitKey.localeCompare(b.traitKey),
+            )
+            .map((t) => {
+              const winner = winnerByKey.get(t.traitKey)
+              return {
+                ...toTrait(t),
+                personaId: t.personaId,
+                overriddenBy: winner && rank(winner) < rank(t.personaId) ? winner : null,
+              }
+            })
+          return {
+            ...toInfo(row, groupRuleRows.length),
+            ancestors: chain
+              .slice(1)
+              .flatMap((id) => (byId.has(id) ? [toInfo(byId.get(id)!)] : [])),
+            children: children.map((child) => toInfo(child)),
+            ownTraits,
+            inheritedTraits,
+            clients: userClients,
+            groupRules: groupRuleRows,
+          }
+        }),
+      ])
       if (!result) return c.json({ error: '人格不存在' }, 404)
-      return c.json(result, 200)
+      return c.json({ ...result, overrideKeyCount: overrideRow?.n ?? 0 }, 200)
     })
     .openapi(update, async (c) => {
       const { circleId, personaId } = c.req.valid('param')

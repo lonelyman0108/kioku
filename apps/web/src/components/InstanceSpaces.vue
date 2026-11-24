@@ -28,7 +28,7 @@ import SettingsBlock from './strata/SettingsBlock.vue'
 import SettingsRow from './strata/SettingsRow.vue'
 import SettingsTable from './strata/SettingsTable.vue'
 
-// 实例 › 记忆圈：共享记忆圈数量上限，和实例里的全部记忆圈（不含内容，仅共享圈可删除）。新建与导入在记忆圈切换器里，各账号自己做
+// 实例 › 记忆圈：独立圈数量上限，和实例里的全部记忆圈（不含内容，仅独立圈可删除）。新建与导入在记忆圈切换器里，各账号自己做
 const dirtyModel = defineModel<boolean>('dirty', { default: false })
 const toast = useToast()
 const router = useRouter()
@@ -49,7 +49,7 @@ const max = useSavedField(() => limit.data.value?.maxOwnedCircles, {
   max: CIRCLE_LIMIT_MAX,
   schema: MaxOwnedCircles,
 })
-const problem = computed(() => fieldProblems([{ label: '共享圈数量上限', issue: max.issue.value }]))
+const problem = computed(() => fieldProblems([{ label: '独立圈数量上限', issue: max.issue.value }]))
 watch(max.changed, (d) => (dirtyModel.value = d), { immediate: true })
 const saving = ref(false)
 async function save() {
@@ -74,7 +74,7 @@ async function deleted() {
   const gone = deleting.value
   deleting.value = null
   if (gone) await afterGone(gone.id)
-  toast.add({ title: `已删除共享圈「${gone?.name ?? ''}」`, color: 'success' })
+  toast.add({ title: `已删除独立圈「${gone?.name ?? ''}」`, color: 'success' })
 }
 const owners = (c: AdminCircle) => c.owners.map((o) => o.displayName).join('、') || '—'
 const open = (c: AdminCircle) => void router.push({ name: 'overview', params: { circleId: c.id } })
@@ -82,22 +82,22 @@ const open = (c: AdminCircle) => void router.push({ name: 'overview', params: { 
 
 <template>
   <div>
-    <SettingsBlock title="共享记忆圈数量">
+    <SettingsBlock title="独立圈数量">
       <template #note>
-        每个账号可新建、导入共享记忆圈，数量受此上限约束；个人圈不占配额。
+        每个账号可新建、导入独立圈，数量受此上限约束；个人圈不占配额。
         <Hint>
           <p>
-            按账号作为所有者的共享记忆圈计数，实例管理员同样适用。新建共享圈、导入为新共享圈与接受所有者转让各占一个。
+            按账号作为所有者的独立圈计数，实例管理员同样适用。新建独立圈、导入为新独立圈与接受所有者转让各占一个。
           </p>
-          <p class="mt-1">调低后已超出的账号保留现有共享圈，减少到上限以下才能再新建。</p>
+          <p class="mt-1">调低后已超出的账号保留现有独立圈，减少到上限以下才能再新建。</p>
         </Hint>
       </template>
       <ReadFailureNote v-if="limit.isError.value" :query="limit" />
       <USkeleton v-if="limit.isPending.value" class="h-14 w-full" />
       <form v-else-if="limit.data.value" @submit.prevent="save">
         <SettingsRow
-          label="共享圈数量上限"
-          description="每个账号最多拥有的共享圈"
+          label="独立圈数量上限"
+          description="每个账号最多拥有的独立圈"
           for="circle-limit"
         >
           <UInputNumber
@@ -133,7 +133,7 @@ const open = (c: AdminCircle) => void router.push({ name: 'overview', params: { 
       <EmptyState
         v-else-if="circles.isSuccess.value && !circles.data.value?.length"
         title="暂无记忆圈"
-        description="各账号在记忆圈切换器中新建共享圈或导入记忆圈。"
+        description="各账号在记忆圈切换器中新建独立圈或导入记忆圈。"
       />
       <SettingsTable v-else-if="circles.data.value?.length">
         <thead>

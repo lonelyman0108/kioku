@@ -24,6 +24,7 @@ const status = ref<SetupStatus | null>(null)
 const checkedAt = ref<string | null>(null)
 const checking = ref(false)
 let timer: ReturnType<typeof setTimeout> | null = null
+let disposed = false
 
 const facts = computed(() => {
   const db = status.value?.database
@@ -43,12 +44,15 @@ const facts = computed(() => {
 })
 
 async function check() {
+  if (disposed) return
   if (timer) clearTimeout(timer)
   checking.value = true
   try {
-    status.value = await api.setupStatus()
+    const next = await api.setupStatus()
+    if (disposed) return
+    status.value = next
     checkedAt.value = new Date().toISOString()
-    if (status.value.database.state !== 'unavailable') {
+    if (next.database.state !== 'unavailable') {
       // 接上了（或者变成了要初始化）：让守卫重新判断
       setupLost()
       await router.replace(target.value)
@@ -57,13 +61,14 @@ async function check() {
   } catch {
     // 服务本身也连不上：下一轮再问，守卫会带到连接失败页
   } finally {
-    checking.value = false
+    if (!disposed) checking.value = false
   }
-  timer = setTimeout(() => void check(), POLL_MS)
+  if (!disposed) timer = setTimeout(() => void check(), POLL_MS)
 }
 
 onMounted(check)
 onBeforeUnmount(() => {
+  disposed = true
   if (timer) clearTimeout(timer)
 })
 </script>

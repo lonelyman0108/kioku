@@ -14,6 +14,7 @@ const props = defineProps<{
   circleId: string
   personas: readonly PersonaInfo[]
   editing: PersonaInfo | null
+  initialParentId?: string | null
 }>()
 const open = defineModel<boolean>('open', { required: true })
 const emit = defineEmits<{ saved: [persona: PersonaInfo, created: boolean] }>()
@@ -21,6 +22,8 @@ const toast = useToast()
 const queryClient = useQueryClient()
 
 const form = reactive({ slug: '', name: '', extendsId: null as string | null, description: '' })
+const touched = reactive({ slug: false, name: false })
+const attempted = ref(false)
 const error = ref<string | null>(null)
 
 watch(open, (value) => {
@@ -29,26 +32,29 @@ watch(open, (value) => {
   Object.assign(form, {
     slug: p?.slug ?? '',
     name: p?.name ?? '',
-    extendsId: p?.extendsId ?? null,
+    extendsId: p ? p.extendsId : (props.initialParentId ?? null),
     description: p?.description ?? '',
   })
+  touched.slug = false
+  touched.name = false
+  attempted.value = false
   error.value = null
 })
 
 const parentItems = computed(() => personaOptionItems(props.personas, props.editing?.id ?? null))
 
-const problem = computed(() => {
-  if (!props.editing) {
-    const slugCheck = Slug.safeParse(form.slug)
-    if (!slugCheck.success) return slugCheck.error.issues[0]?.message ?? '标识格式有误'
-  }
-  if (!form.name.trim()) return '请填写名称'
-  return null
+const slugProblem = computed(() => {
+  if (props.editing) return null
+  const slugCheck = Slug.safeParse(form.slug)
+  return slugCheck.success ? null : (slugCheck.error.issues[0]?.message ?? '标识格式有误')
 })
+const nameProblem = computed(() => (form.name.trim() ? null : '请填写名称'))
+const problem = computed(() => slugProblem.value ?? nameProblem.value)
 
 // 保存中不接受第二次提交：连点两次新建会先成功、再报标识已被占用
 const saving = ref(false)
 async function save() {
+  attempted.value = true
   if (saving.value || problem.value) return
   saving.value = true
   error.value = null
@@ -75,6 +81,8 @@ async function save() {
       queryClient.invalidateQueries({ queryKey: ['persona', cid] }),
       queryClient.invalidateQueries({ queryKey: ['overview', cid] }),
       queryClient.invalidateQueries({ queryKey: ['clients', cid] }),
+      queryClient.invalidateQueries({ queryKey: ['keys', cid] }),
+      queryClient.invalidateQueries({ queryKey: ['key-matrix'] }),
     ])
     toast.add({ title: target ? '已保存' : '已创建人格', color: 'success' })
     emit('saved', saved, !target)
@@ -98,20 +106,29 @@ async function save() {
       <!-- 不用 form：下拉选单选择与输入回车显式点击提交按钮 -->
       <div class="space-y-4">
         <p class="text-sm text-muted">
-          人格是独立的设定实体，供接入实例与访问密钥绑定，并支持沿父人格继承设定段。
+          人格是独立的设定实体，供客户端、群聊规则与访问密钥绑定，并支持沿父人格继承设定段。
         </p>
         <UFormField
           label="标识"
+          :error="!editing && (touched.slug || attempted) ? (slugProblem ?? undefined) : undefined"
           :help="
             editing
               ? '标识用于命令与接口引用，创建后不可修改'
               : '小写字母、数字和连字符，例如 assistant、doubao'
           "
         >
-          <UInput v-model="form.slug" class="w-full font-mono" :disabled="editing !== null" />
+          <UInput
+            v-model="form.slug"
+            class="w-full font-mono"
+            :disabled="editing !== null"
+            @blur="touched.slug = true"
+          />
         </UFormField>
-        <UFormField label="名称">
-          <UInput v-model="form.name" class="w-full" />
+        <UFormField
+          label="名称"
+          :error="touched.name || attempted ? (nameProblem ?? undefined) : undefined"
+        >
+          <UInput v-model="form.name" class="w-full" @blur="touched.name = true" />
         </UFormField>
         <UFormField label="继承" help="例如群聊版继承通用版，仅覆盖需要收敛的设定段">
           <USelect v-model="form.extendsId" :items="parentItems" value-key="value" class="w-full" />

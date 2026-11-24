@@ -221,7 +221,9 @@ async function signOutOthers() {
     <UModal
       :open="passwordOpen"
       title="修改密码"
-      @update:open="(v) => (v ? openPassword() : closePassword())"
+      :dismissible="!changing"
+      :close="!changing"
+      @update:open="(v) => (v ? openPassword() : !changing && closePassword())"
     >
       <template #body>
         <!-- 只有密码框，没有单选：回车提交就是点「修改」 -->
@@ -265,7 +267,9 @@ async function signOutOthers() {
       </template>
       <template #footer>
         <div class="flex w-full justify-end gap-2">
-          <UButton color="neutral" variant="ghost" @click="closePassword">取消</UButton>
+          <UButton color="neutral" variant="ghost" :disabled="changing" @click="closePassword"
+            >取消</UButton
+          >
           <UButton type="submit" form="change-password" :loading="changing" :disabled="!canChange"
             >修改</UButton
           >

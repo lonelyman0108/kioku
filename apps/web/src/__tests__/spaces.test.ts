@@ -56,14 +56,16 @@ describe('删除共享记忆圈要输对名字', () => {
     expect(deleteSpaceModal).toContain('confirmsName(typed.value, props.circleName)')
     expect(deleteSpaceModal).toContain("circleSettingsRoute(circleId, 'transfer')")
     expect(deleteSpaceModal).not.toContain('<form')
-    expect(DELETE_CONSEQUENCES.join('')).toContain('记忆圈内的词条、会话、凭据与访问密钥全部删除')
-    expect(DELETE_CONSEQUENCES.join('')).toContain('关联的接入实例立即失去访问')
+    expect(DELETE_CONSEQUENCES.join('')).toContain('记忆圈内的记忆、会话、凭据与访问密钥全部删除')
+    expect(DELETE_CONSEQUENCES.join('')).toContain('关联的客户端立即失去访问')
   })
 
-  it('个人圈不可转让、离开或删除；实例列表仅共享圈显示删除', () => {
+  it('个人圈不可转让、离开或删除；独立圈支持编辑默认适用条件；实例列表仅独立圈显示删除', () => {
     expect(circleGeneral).toContain(
       'v-if="detail.data.value && detail.data.value.kind === \'shared\'"',
     )
+    expect(circleGeneral).toContain('api.updateCircle(')
+    expect(circleGeneral).toContain('defaultFacets')
     expect(circleGeneral).toContain('v-if="isOwner || isAdmin"')
     expect(instanceCircles).toContain('v-if="c.kind === \'shared\'"')
     expect(instanceCircles).toContain('<DeleteSpaceModal')
@@ -277,9 +279,10 @@ describe('离开后跳转', () => {
 })
 
 describe('新建共享圈与导入记忆圈的入口', () => {
-  it('首页没有记忆圈时给新建共享圈与导入记忆圈', () => {
+  it('首页没有记忆圈时给新建共享圈与导入记忆圈，达上限时禁用并写出原因', () => {
     expect(homePage).toContain('<template v-if="newCircle" #actions>')
-    expect(homePage).not.toContain('blocked')
+    expect(homePage).toContain(':disabled="Boolean(newCircle.blocked.value)"')
+    expect(homePage).toContain('{{ newCircle.blocked.value }}')
     expect(homePage).toContain('@click="newCircle.importing.value = true"')
     expect(homePage).toContain('请记忆圈所有者将当前账号加为成员')
     expect(homePage).toContain('<EmptyState')
@@ -293,11 +296,11 @@ describe('新建共享圈与导入记忆圈的入口', () => {
     expect(instanceCircles).not.toContain('SpaceImport')
   })
 
-  it('共享圈名额的说明：用完才有，写出上限是几个；没读到时不拦', () => {
+  it('独立圈名额的说明：用完才有，写出上限是几个；没读到时不拦', () => {
     expect(circleLimitNote(undefined)).toBeNull()
     expect(circleLimitNote({ maxOwnedCircles: 5, ownedCircles: 4, canCreate: true })).toBeNull()
     expect(circleLimitNote({ maxOwnedCircles: 5, ownedCircles: 5, canCreate: false })).toBe(
-      '已达共享记忆圈数量上限（5 个）',
+      '已达独立圈数量上限（5 个）',
     )
   })
 
@@ -316,7 +319,7 @@ describe('新建共享圈与导入记忆圈的入口', () => {
     await refreshCircles(client)
     expect(client.getQueryState(CIRCLE_LIMIT_KEY)?.isInvalidated).toBe(true)
     expect(circleImport).toContain(
-      'await refreshCircles(queryClient, undefined, { accounts: true })',
+      'await refreshCircles(queryClient, result.circleId, { accounts: true })',
     )
     expect(useCreateSpace).toContain(
       'await refreshCircles(queryClient, undefined, { accounts: true })',
@@ -340,7 +343,7 @@ describe('新建共享圈与导入记忆圈的入口', () => {
 
   it('导入记忆圈的弹窗：检查、导入期间不能关；导入表单在设置里与弹窗里是同一个组件', () => {
     expect(importSpaceModal).toContain(':dismissible="!busy"')
-    expect(importSpaceModal).toContain('<SpaceImport v-model:busy="busy" bare')
+    expect(importSpaceModal).toContain('<SpaceImport v-if="open" v-model:busy="busy" bare')
     expect(circleTransferSettings).toContain('<SpaceImport />')
     expect(circleImport).toContain('enabled: computed(() => me.data.value?.isAdmin ?? false)')
   })

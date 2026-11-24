@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { keepPreviousData, useInfiniteQuery, useQuery } from '@tanstack/vue-query'
+import { useInfiniteQuery, useQuery } from '@tanstack/vue-query'
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -87,17 +87,22 @@ watch(
 const days = computed(() => selectedDays(state.value, today.value))
 const filter = computed(() => filterQuery(state.value, today.value, utcFallback.value))
 
+const sameCirclePlaceholder = <T,>(
+  prev: T | undefined,
+  prevQuery: { queryKey: readonly unknown[] } | undefined,
+) => (prevQuery?.queryKey[1] === circleId.value ? prev : undefined)
+
 // 筛选计数：每组的条数，以及合计
 const facets = useQuery({
-  queryKey: computed(() => ['activity-facets', circleId.value, filter.value]),
+  queryKey: computed(() => ['activity-facets', circleId.value, filter.value] as const),
   queryFn: () => api.activityFacets(circleId.value, filter.value),
-  placeholderData: keepPreviousData,
+  placeholderData: sameCirclePlaceholder,
 })
 const options = computed(() => facetOptions(facets.data.value, state.value.off))
 
 // 列表：一页一页往后加载；看不到的记忆的改动服务端已经滤掉
 const activity = useInfiniteQuery({
-  queryKey: computed(() => ['activity', circleId.value, filter.value]),
+  queryKey: computed(() => ['activity', circleId.value, filter.value] as const),
   queryFn: ({ pageParam }) => api.activity(circleId.value, filter.value, pageParam),
   initialPageParam: undefined as string | undefined,
   getNextPageParam: (last) => last.nextCursor ?? undefined,
@@ -107,9 +112,9 @@ const groups = computed(() => groupByDay(items.value, today.value, utcFallback.v
 
 // 每天的条数：选中范围内的给柱条与每天的小标题，日历上那个月的给格子
 const rangeDays = useQuery({
-  queryKey: computed(() => ['activity-days', circleId.value, filter.value, tz.value]),
+  queryKey: computed(() => ['activity-days', circleId.value, filter.value, tz.value] as const),
   queryFn: () => api.activityDays(circleId.value, filter.value, tz.value),
-  placeholderData: keepPreviousData,
+  placeholderData: sameCirclePlaceholder,
 })
 const month = ref(monthOf(days.value?.to ?? today.value))
 const calendarFilter = computed(() => ({
@@ -117,9 +122,11 @@ const calendarFilter = computed(() => ({
   ...dayBounds(gridDays(month.value), utcFallback.value),
 }))
 const calendarDays = useQuery({
-  queryKey: computed(() => ['activity-days', circleId.value, calendarFilter.value, tz.value]),
+  queryKey: computed(
+    () => ['activity-days', circleId.value, calendarFilter.value, tz.value] as const,
+  ),
   queryFn: () => api.activityDays(circleId.value, calendarFilter.value, tz.value),
-  placeholderData: keepPreviousData,
+  placeholderData: sameCirclePlaceholder,
 })
 watch([() => rangeDays.error.value, () => calendarDays.error.value], (errors) => {
   if (errors.some(tzUnknown)) tz.value = 'UTC'
@@ -211,7 +218,7 @@ function select(id: number) {
 const closeDetail = () => update({ event: null })
 const detailOpen = computed(() => state.value.event !== null)
 
-// 折叠起来的几次修改：展开哪几行只是这一页上的事，不进地址
+// 折叠起来的几次修改：展开哪几行只是这一页上的事，不进地址；地址里选中了折起来的那条时自动展开
 const expanded = ref(new Set<number>())
 function toggleFold(id: number) {
   const next = new Set(expanded.value)
@@ -219,6 +226,28 @@ function toggleFold(id: number) {
   else next.add(id)
   expanded.value = next
 }
+watch(circleId, () => {
+  expanded.value = new Set()
+  anchor.value = null
+  filtersOpen.value = false
+})
+watch(
+  [() => state.value.event, groups],
+  ([eventId, dayList]) => {
+    if (eventId === null) return
+    for (const day of dayList) {
+      for (const row of day.rows) {
+        if (row.more.some((sub) => sub.id === eventId) && !expanded.value.has(row.item.id)) {
+          const next = new Set(expanded.value)
+          next.add(row.item.id)
+          expanded.value = next
+          return
+        }
+      }
+    }
+  },
+  { immediate: true },
+)
 
 // 窄屏（< 1024px）：筛选与详情进抽屉。中等宽度（< 1280px）表格放不下六列：
 // 平时去掉状态列（并进记忆那一列），详情打开时只留时间与记忆两列
@@ -289,7 +318,7 @@ const columns = computed(() => ({ narrow: 2, compact: 5, full: 6 })[layout.value
     <div class="main">
       <div class="toolbar">
         <h1>变更记录</h1>
-        <Hint>通过访问密钥写入的改动，操作者显示为接入实例。</Hint>
+        <Hint>通过访问密钥写入的改动，操作者显示为客户端。</Hint>
         <UInput
           v-model="qInput"
           class="search"
