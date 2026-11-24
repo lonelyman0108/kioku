@@ -1,12 +1,12 @@
-import type { CircleKind, MemberRole } from '@kioku/contracts'
+import { ENTRY_KINDS, type CircleKind, type EntryKind, type MemberRole } from '@kioku/contracts'
 import { eq } from 'drizzle-orm'
 
-import { consoleAccess, type Access } from '../access/access'
+import { consoleAccess, type Access, type CircleAccess } from '../access/access'
 import { accessForKey, defaultSession, type KeySession } from '../access/session'
 import { memberRole } from '../auth/middleware'
 import type { MasterKey } from '../crypto/keyring'
 import type { Db } from '../db/client'
-import { circles } from '../db/schema'
+import { circleMembers, circles } from '../db/schema'
 import type { Deps, KeyPrincipal } from '../http/env'
 import { MemoryError } from './errors'
 import { EntryService } from './service'
@@ -14,6 +14,8 @@ import { EntryService } from './service'
 export interface EntryContext {
   db: Db
   access: Access
+  // 管理界面跨圈双链邻居解析权限：仅用于单条记忆详情的出链与反向链接展示，不影响单圈列表与检索
+  neighborAccess?: Access
   masterKey: MasterKey | null
   actor: { keyId?: string; accountId?: string }
   onChanged?: (circleId: string, entryId: string) => void
@@ -105,6 +107,33 @@ export function entryServiceForKey(
   })
 }
 
+async function consoleNeighborAccess(
+  deps: Pick<Deps, 'db'>,
+  accountId: string,
+  target: ConsoleCircleAccess,
+): Promise<Access> {
+  const rows = await deps.db
+    .select({ id: circles.id, kind: circles.kind })
+    .from(circleMembers)
+    .innerJoin(circles, eq(circles.id, circleMembers.circleId))
+    .where(eq(circleMembers.accountId, accountId))
+  const allKinds = new Set<EntryKind>(ENTRY_KINDS)
+  const circleMap = new Map<string, CircleAccess>(target.access.circles)
+  for (const r of rows) {
+    if (circleMap.has(r.id)) continue
+    circleMap.set(r.id, {
+      circleId: r.id,
+      circleKind: r.kind,
+      isPrimary: false,
+      readKinds: allKinds,
+      writeKinds: new Set(),
+      maxSensitivity: 'private',
+      canReadSecret: false,
+    })
+  }
+  return { ...target.access, circles: circleMap }
+}
+
 export async function entryServiceForConsole(
   deps: Pick<Deps, 'db' | 'masterKey' | 'jobs'>,
   circleId: string,
@@ -113,9 +142,11 @@ export async function entryServiceForConsole(
 ): Promise<EntryService> {
   const target = resolved ?? (await consoleCircleFor(deps, accountId, circleId))
   if (!target) throw new MemoryError(403, '无权访问此记忆圈')
+  const neighborAccess = await consoleNeighborAccess(deps, accountId, target)
   return new EntryService({
     db: deps.db,
     access: target.access,
+    neighborAccess,
     masterKey: deps.masterKey,
     actor: { accountId },
     ...(deps.jobs
@@ -125,6 +156,17 @@ export async function entryServiceForConsole(
     secretRead: 'explicit',
     circleOwner: target.role === 'owner',
   })
+}
+
+export async function consoleAllCirclesAccessFor(
+  deps: Pick<Deps, 'db'>,
+  circleId: string,
+  accountId: string,
+  resolved?: ConsoleCircleAccess,
+): Promise<Access> {
+  const target = resolved ?? (await consoleCircleFor(deps, accountId, circleId))
+  if (!target) throw new MemoryError(403, '无权访问此记忆圈')
+  return consoleNeighborAccess(deps, accountId, target)
 }
 
 export async function consoleMemberFor(

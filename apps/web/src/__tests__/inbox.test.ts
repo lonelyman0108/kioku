@@ -141,15 +141,14 @@ describe('待处理页', () => {
 
   it('整理建议每张卡的操作都是线框，和其他三类一样；确认对话框里的按钮保持实心', () => {
     const actions =
-      /<div v-if="canAct && item\.actionable" class="suggestion-actions">[^]*?\n {8}<\/div>/.exec(
+      /<div v-if="canAct && item\.actionable" class="suggestion-actions">[^]*?<\/div>/.exec(
         dreamSuggestions,
       )![0]
     const buttons = actions.match(/<UButton[^>]*>/g)!
     expect(buttons.length).toBeGreaterThanOrEqual(3)
     for (const button of buttons) expect(button).toContain('variant="outline"')
-    const dialog = /<UModal[^]*?<\/UModal>/.exec(dreamSuggestions)![0]
-    const confirm = dialog.match(/<UButton[^>]*>/g)!.find((b) => b.includes('apply(confirming)'))!
-    expect(confirm).not.toContain('variant=')
+    expect(dreamSuggestions).toContain('<ConsequenceModal')
+    expect(dreamSuggestions).toContain('@confirm="confirming && apply(confirming)"')
   })
 })
 

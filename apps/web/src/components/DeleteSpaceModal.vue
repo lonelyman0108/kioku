@@ -49,9 +49,9 @@ async function remove() {
 <template>
   <ConsequenceModal
     :open="open"
-    :title="`删除共享圈「${circleName}」`"
+    :title="`删除独立圈「${circleName}」`"
     :consequences="DELETE_CONSEQUENCES"
-    action="删除共享圈"
+    action="删除独立圈"
     :busy="busy"
     :error="error"
     :disabled="!matches"

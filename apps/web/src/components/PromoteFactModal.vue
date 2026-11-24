@@ -3,6 +3,7 @@ import { useToast } from '@nuxt/ui/composables'
 import {
   DEFAULT_SENSITIVITY,
   DISCLOSURE_MAX,
+  ENTRY_CONTENT_MAX,
   ENTRY_TITLE_MAX,
   EntryTitle,
   SENSITIVITIES,
@@ -17,17 +18,21 @@ import {
 } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, reactive, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 
+import { invalidateActivity } from '../activity'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { useSession } from '../composables/useSession'
 import { sensitivityLabels } from '../labels'
+import { entryRoute } from '../routes'
 import { refreshSubjectCaches } from '../subjectQueries'
 import FacetWhenPicker from './FacetWhenPicker.vue'
 import NoteLine from './strata/NoteLine.vue'
+import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SwatchOptions from './strata/SwatchOptions.vue'
 
-// 将联系人的事实提炼为正式词条：选目标记忆圈、敏感级、标题、切面与双链标签；保留原事实记录不删除
+// 将联系人的事实提炼为正式记忆：选目标记忆圈、敏感级、标题、适用条件与主题标签；保留原事实记录不删除
 const props = defineProps<{
   circleId: string
   subjectId: string
@@ -39,6 +44,7 @@ const emit = defineEmits<{ promoted: [entry: ConsoleEntryView] }>()
 
 const toast = useToast()
 const queryClient = useQueryClient()
+const router = useRouter()
 const { me } = useSession()
 
 const writableCircles = computed<CircleSummary[]>(() =>
@@ -95,6 +101,10 @@ watch(open, (value) => {
   form.disclosure = ''
   when.value = {}
   error.value = null
+})
+
+watch(targetCircleId, (next, previous) => {
+  if (next !== previous) when.value = {}
 })
 
 watch(targetCircle, (circle) => {
@@ -161,13 +171,16 @@ const problem = computed(() => {
   if (!writableCircles.value.length) return '没有可写入的目标记忆圈'
   if (!targetCircleId.value) return '请选择目标记忆圈'
   if (!form.content.trim()) return '正文不能为空'
+  if (form.content.trim().length > ENTRY_CONTENT_MAX) {
+    return `正文最多 ${ENTRY_CONTENT_MAX} 字`
+  }
   if (form.title.trim()) {
     const res = EntryTitle.safeParse(form.title.trim())
     if (!res.success) return res.error.issues[0]?.message ?? '标题格式错误'
   }
   if (!parsedTopics.value.ok) return parsedTopics.value.message
   if (form.disclosure.trim().length > DISCLOSURE_MAX) {
-    return `触发场景最多 ${DISCLOSURE_MAX} 字`
+    return `召回说明最多 ${DISCLOSURE_MAX} 字`
   }
   return null
 })
@@ -177,9 +190,10 @@ async function submit() {
   if (!fact || problem.value || saving.value) return
   saving.value = true
   error.value = null
+  const destinationCircleId = targetCircleId.value
   try {
     const entry = await api.promoteFact(props.circleId, props.subjectId, fact.id, {
-      targetCircleId: targetCircleId.value,
+      targetCircleId: destinationCircleId,
       sensitivity: form.sensitivity,
       ...(form.title.trim() ? { title: form.title.trim() } : {}),
       content: form.content.trim(),
@@ -190,12 +204,23 @@ async function submit() {
     })
     await Promise.all([
       refreshSubjectCaches(queryClient, props.circleId, props.subjectId),
-      queryClient.invalidateQueries({ queryKey: ['overview', targetCircleId.value] }),
-      queryClient.invalidateQueries({ queryKey: ['entries', targetCircleId.value] }),
-      queryClient.invalidateQueries({ queryKey: ['entry-list', targetCircleId.value] }),
-      queryClient.invalidateQueries({ queryKey: ['browse-entries', targetCircleId.value] }),
+      queryClient.invalidateQueries({ queryKey: ['overview', destinationCircleId] }),
+      queryClient.invalidateQueries({ queryKey: ['entry', destinationCircleId] }),
+      queryClient.invalidateQueries({ queryKey: ['entry-list', destinationCircleId] }),
+      queryClient.invalidateQueries({ queryKey: ['entry-browse', destinationCircleId] }),
+      queryClient.invalidateQueries({ queryKey: ['entry-links', destinationCircleId] }),
+      invalidateActivity(queryClient, destinationCircleId),
     ])
-    toast.add({ title: `已提炼为正式词条（${entry.shortId}）`, color: 'success' })
+    toast.add({
+      title: `已提炼为正式记忆（${entry.shortId}）`,
+      color: 'success',
+      actions: [
+        {
+          label: '查看',
+          onClick: () => void router.push(entryRoute(destinationCircleId, entry.shortId)),
+        },
+      ],
+    })
     open.value = false
     emit('promoted', entry)
   } catch (err) {
@@ -208,11 +233,12 @@ async function submit() {
 
 <template>
   <UModal
-    v-model:open="open"
+    :open="open"
     :title="`提炼来自「${subjectName}」的事实`"
     :dismissible="!saving"
     :close="!saving"
     :ui="{ content: 'sm:max-w-2xl' }"
+    @update:open="(v) => !saving && (open = v)"
   >
     <template #body>
       <!-- 不用 form：单选与切面按钮在表单里回车会隐式提交，确认后再创建 -->
@@ -238,7 +264,7 @@ async function submit() {
             <UInput
               v-model="form.title"
               :maxlength="ENTRY_TITLE_MAX"
-              placeholder="词条标题，留空按正文开头生成"
+              placeholder="记忆标题，留空按正文开头生成"
               class="w-full"
             />
           </UFormField>
@@ -265,7 +291,7 @@ async function submit() {
               class="w-full"
             />
           </UFormField>
-          <UFormField label="触发场景" help="非启动加载词条建议写清">
+          <UFormField label="召回说明" help="非启动加载记忆建议写清">
             <UInput
               v-model="form.disclosure"
               :maxlength="DISCLOSURE_MAX"
@@ -275,11 +301,14 @@ async function submit() {
           </UFormField>
         </div>
 
-        <UFormField label="适用切面">
+        <UFormField label="适用条件">
+          <ReadFailureNote v-if="facets.isError.value" :query="facets" />
+          <USkeleton v-else-if="facets.isPending.value" class="h-16 w-full" />
           <FacetWhenPicker
+            v-else-if="facets.data.value"
             v-model="when"
             :circle-id="targetCircleId || circleId"
-            :vocabulary="facets.data.value ?? null"
+            :vocabulary="facets.data.value"
           />
         </UFormField>
 
@@ -293,7 +322,7 @@ async function submit() {
           取消
         </UButton>
         <UButton :disabled="Boolean(problem)" :loading="saving" @click="submit">
-          提炼为正式词条
+          提炼为正式记忆
         </UButton>
       </div>
     </template>

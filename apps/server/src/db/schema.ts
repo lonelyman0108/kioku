@@ -314,6 +314,16 @@ export const apiKeys = pgTable(
   ],
 )
 
+// 升级前签发的访问密钥（身份表）：就地迁移时只记下前缀与哈希，不能再用来访问，只用来认出旧密钥、
+// 回 401 时提示重新接入。所有者用旧实例的账号 id（迁移保留账号 id），账号删了跟着删
+export const legacyApiKeys = pgTable('legacy_api_keys', {
+  prefix: text().primaryKey(),
+  secretHash: text().notNull(),
+  name: text().notNull(),
+  ownerAccountId: uuid().references(() => accounts.id, { onDelete: 'cascade' }),
+  createdAt: createdAt(),
+})
+
 export interface DeviceGrantPlatform {
   runtimeFamily: string
   clientName: string | null

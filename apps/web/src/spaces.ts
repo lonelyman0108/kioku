@@ -24,7 +24,7 @@ export function circleNameIssue(input: string): FieldIssue | null {
 }
 export const CIRCLE_NAME_RANGE = `记忆圈名称为 1 到 ${CIRCLE_NAME_MAX} 个字符。`
 
-// 删除共享记忆圈要输入现在的名称，逐字一致才能删（和服务端一样，不去空白、不忽略大小写）
+// 删除独立圈要输入现在的名称，逐字一致才能删（和服务端一样，不去空白、不忽略大小写）
 export const confirmsName = (input: string, name: string): boolean =>
   name.length > 0 && input === name
 
@@ -35,7 +35,7 @@ export const ownerCount = (members: readonly MemberLike[]): number =>
 export const isLastOwner = (members: readonly MemberLike[], accountId: string): boolean =>
   members.some((m) => m.accountId === accountId && m.role === 'owner') && ownerCount(members) < 2
 
-export const LAST_OWNER_NOTE = '共享记忆圈至少保留一个所有者：先将其他成员设为所有者或转让所有者。'
+export const LAST_OWNER_NOTE = '独立圈至少保留一个所有者：先将其他成员设为所有者或转让所有者。'
 
 // 成员表里一行的操作：所有者可以移除别人；自己那一行是离开记忆圈。别人的行对非所有者没有操作。
 // 唯一的所有者离开时按钮给出但不能点，旁边写原因
@@ -77,32 +77,32 @@ export function nextCircle(
 
 // 离开、移除与删除的后果。不可逆操作按结果、影响、动作写
 export const LEAVE_CONSEQUENCES = [
-  '当前账号在本圈接入实例的访问密钥立即吊销。',
+  '当前账号在本圈客户端的访问密钥立即吊销。',
   `本人在本圈留下的会话摘要与凭据保留 ${DEPARTURE_RETENTION_DAYS} 天，期间重新加入即恢复，到期删除。`,
 ]
 export const LEAVE_NOTE = `当前账号在本圈的访问密钥立即吊销，留下的会话摘要与凭据保留 ${DEPARTURE_RETENTION_DAYS} 天。`
 export const REMOVE_CONSEQUENCES = [
-  '此成员在本圈接入实例的访问密钥立即吊销，接入实例保留，可由记忆圈所有者转移或删除。',
+  '此成员在本圈客户端的访问密钥立即吊销，客户端保留，可由记忆圈所有者转移或删除。',
   `其在本圈留下的会话摘要与凭据保留 ${DEPARTURE_RETENTION_DAYS} 天，期间重新加入即恢复，到期删除。`,
 ]
 export const DELETE_CONSEQUENCES = [
-  '记忆圈内的词条、会话、凭据与访问密钥全部删除，无法恢复。',
-  '关联的接入实例立即失去访问。',
+  '记忆圈内的记忆、会话、凭据与访问密钥全部删除，无法恢复。',
+  '关联的客户端立即失去访问。',
 ]
 export const TRANSFER_CONSEQUENCES = [
   '对方成为所有者，当前账号改为编辑者。',
   '之后成员、记忆圈设置与导出由所有者管理。',
 ]
 
-// 共享记忆圈数量上限与当前账号的名额：新建、导入的入口与实例 › 记忆圈共用这一个查询
+// 独立圈数量上限与当前账号的名额：新建、导入的入口与实例 › 记忆圈共用这一个查询
 export const CIRCLE_LIMIT_KEY = ['instance', 'circle-limit'] as const
 
 // 名额用完时入口旁写的原因；还有名额、或者还没读到时为 null（服务端照样检查）
 export const circleLimitNote = (view: CircleLimitView | undefined): string | null =>
-  view && !view.canCreate ? `已达共享记忆圈数量上限（${view.maxOwnedCircles} 个）` : null
+  view && !view.canCreate ? `已达独立圈数量上限（${view.maxOwnedCircles} 个）` : null
 
 // 记忆圈的名字、成员与角色变了：会话里的记忆圈列表（切换器、角色）、成员表与实例的记忆圈列表一起刷新，
-// 当前账号拥有几个共享记忆圈也可能变了，名额一起重取。
+// 当前账号拥有几个独立圈也可能变了，名额一起重取。
 // me 为 false 时不刷新会话，由调用方自己取一次。accounts 为 true 时实例的账号列表（所在记忆圈与角色、
 // 唯一可用的所有者）一起刷新：新建、删除、转让、加入、移除、离开与改角色时传，改名不用
 export async function refreshCircles(
@@ -127,7 +127,7 @@ export async function refreshCircles(
 export const isCircleQuery = (circleId: string) => (query: { queryKey: readonly unknown[] }) =>
   query.queryKey.includes(circleId)
 
-// 已经不在的记忆圈的查询（成员、概况、接入实例……）：先停下正在取的，不让它们失效重取（已无权访问，重取只会拿到 403）
+// 已经不在的记忆圈的查询（成员、概况、客户端……）：先停下正在取的，不让它们失效重取（已无权访问，重取只会拿到 403）
 export async function stopCircleQueries(client: QueryClient, circleId: string): Promise<void> {
   await client.cancelQueries({ predicate: isCircleQuery(circleId) })
 }

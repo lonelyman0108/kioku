@@ -4,11 +4,13 @@ import type { ExpiredEntry } from '@kioku/contracts'
 import { useInfiniteQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref } from 'vue'
 
+import { invalidateActivity } from '../activity'
 import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
 import { useNow } from '../composables/useNow'
+import { invalidateInboxCounts } from '../inbox'
 import { formatRelative, formatTime } from '../time'
 import Hint from './Hint.vue'
 import MemoryHistory from './MemoryHistory.vue'
@@ -55,8 +57,11 @@ async function reactivate(item: ExpiredEntry, version = item.version) {
     })
     queryClient.setQueryData(['entry', cid, entry.shortId], entry)
     void queryClient.invalidateQueries({ queryKey: ['entry-history', cid, entry.id] })
-    // 变更记录详情里的前后快照也可能带着刚抹掉的正文
-    void queryClient.invalidateQueries({ queryKey: ['activity-event', cid] })
+    for (const prefix of ['overview', 'entry-browse', 'entry-list', 'entry-glossary']) {
+      void queryClient.invalidateQueries({ queryKey: [prefix, cid] })
+    }
+    void invalidateInboxCounts(queryClient, cid)
+    invalidateActivity(queryClient, cid)
     toast.add({ title: `已恢复生效「${entry.title || entry.shortId}」`, color: 'success' })
     if (viewing.value?.id === item.id) viewing.value = null
     if (props.circleId === cid) emit('reactivated', entry.shortId)
@@ -94,6 +99,7 @@ async function reactivate(item: ExpiredEntry, version = item.version) {
             :kind="item.kind"
             :sensitivity="item.sensitivity"
             :priority="item.priority"
+            local
           >
             <span>
               过期于

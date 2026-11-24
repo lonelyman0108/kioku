@@ -21,7 +21,7 @@ import NoteLine from './strata/NoteLine.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 import StrataStrip from './strata/StrataStrip.vue'
 
-// 独立人格详情：管理按 traitKey 组织的自有设定段，展示继承设定段与覆盖状态，以及绑定此人格的接入实例
+// 独立人格详情：管理按 traitKey 组织的自有设定段，展示继承设定段与覆盖状态，以及绑定此人格的客户端、按群规则和密钥覆盖
 const props = defineProps<{
   circleId: string
   persona: PersonaDetail
@@ -30,6 +30,7 @@ const props = defineProps<{
 }>()
 defineEmits<{
   edit: []
+  createChild: []
   remove: []
   open: [personaId: string]
 }>()
@@ -41,12 +42,23 @@ const groups = computed(() => inheritedGroups(props.persona))
 
 const blockers = computed(() =>
   [
-    props.persona.clients.length
-      ? `${props.persona.clients.length} 个接入实例将其设为默认人格`
+    props.persona.clients.length ? `${props.persona.clients.length} 个客户端将其设为默认人格` : '',
+    props.persona.groupRules.length
+      ? `${props.persona.groupRules.length} 条按群规则使用此人格`
       : '',
     props.persona.children.length ? `${props.persona.children.length} 个人格继承此人格` : '',
   ].filter(Boolean),
 )
+
+const inheritedKeyMap = computed(() => {
+  const map = new Map<string, string>()
+  for (const g of groups.value) {
+    for (const t of g.traits) {
+      if (!map.has(t.traitKey)) map.set(t.traitKey, g.persona.name)
+    }
+  }
+  return map
+})
 
 const personaNameMap = computed(() => {
   const map = new Map<string, string>()
@@ -74,8 +86,26 @@ const traitForm = reactive({
   content: '',
   sortOrder: 0,
 })
+const traitInitial = ref({ traitKey: '', title: '', content: '', sortOrder: 0 })
+const traitTouched = reactive({ traitKey: false, sortOrder: false, title: false, content: false })
+const traitAttempted = ref(false)
 const traitError = ref<string | null>(null)
 const savingTrait = ref(false)
+
+function resetTraitValidation() {
+  traitInitial.value = {
+    traitKey: traitForm.traitKey,
+    title: traitForm.title,
+    content: traitForm.content,
+    sortOrder: Number(traitForm.sortOrder),
+  }
+  traitTouched.traitKey = false
+  traitTouched.sortOrder = false
+  traitTouched.title = false
+  traitTouched.content = false
+  traitAttempted.value = false
+  traitError.value = null
+}
 
 function openCreateTrait() {
   keyLocked.value = false
@@ -84,7 +114,7 @@ function openCreateTrait() {
   traitForm.title = ''
   traitForm.content = ''
   traitForm.sortOrder = (props.persona.ownTraits.length + 1) * 10
-  traitError.value = null
+  resetTraitValidation()
   traitModalOpen.value = true
 }
 
@@ -95,7 +125,7 @@ function openEditTrait(trait: ResolvedPersonaTrait) {
   traitForm.title = trait.title
   traitForm.content = trait.content
   traitForm.sortOrder = trait.sortOrder
-  traitError.value = null
+  resetTraitValidation()
   traitModalOpen.value = true
 }
 
@@ -106,26 +136,49 @@ function openOverrideTrait(trait: ResolvedPersonaTrait) {
   traitForm.title = trait.title
   traitForm.content = trait.content
   traitForm.sortOrder = trait.sortOrder
-  traitError.value = null
+  resetTraitValidation()
   traitModalOpen.value = true
 }
 
-const traitProblem = computed(() => {
-  if (!keyLocked.value) {
-    const keyRes = TraitKey.safeParse(traitForm.traitKey)
-    if (!keyRes.success) return keyRes.error.issues[0]?.message ?? '设定键格式有误'
-  }
-  const parsed = UpsertPersonaTraitRequest.safeParse({
-    traitKey: traitForm.traitKey,
-    title: traitForm.title,
-    content: traitForm.content,
-    sortOrder: Number(traitForm.sortOrder),
-  })
-  if (!parsed.success) return parsed.error.issues[0]?.message ?? '设定内容有误'
-  return null
+const traitDirty = computed(
+  () =>
+    traitModalOpen.value &&
+    (traitForm.traitKey !== traitInitial.value.traitKey ||
+      traitForm.title !== traitInitial.value.title ||
+      traitForm.content !== traitInitial.value.content ||
+      Number(traitForm.sortOrder) !== traitInitial.value.sortOrder),
+)
+
+const traitKeyProblem = computed(() => {
+  if (keyLocked.value) return null
+  const res = TraitKey.safeParse(traitForm.traitKey)
+  return res.success ? null : (res.error.issues[0]?.message ?? '设定键格式有误')
 })
+const sortOrderProblem = computed(() => {
+  const res = UpsertPersonaTraitRequest.shape.sortOrder.safeParse(Number(traitForm.sortOrder))
+  return res.success ? null : '请填写 0 至 999 之间的整数'
+})
+const titleProblem = computed(() => {
+  const res = UpsertPersonaTraitRequest.shape.title.safeParse(traitForm.title)
+  return res.success ? null : (res.error.issues[0]?.message ?? '设定标题格式有误')
+})
+const contentProblem = computed(() => {
+  const res = UpsertPersonaTraitRequest.shape.content.safeParse(traitForm.content)
+  return res.success ? null : (res.error.issues[0]?.message ?? '设定正文格式有误')
+})
+const traitProblem = computed(
+  () =>
+    traitKeyProblem.value ?? sortOrderProblem.value ?? titleProblem.value ?? contentProblem.value,
+)
+
+function requestCloseTraitModal() {
+  if (savingTrait.value) return
+  if (traitDirty.value && !window.confirm('设定段有未保存的改动，确定放弃吗？')) return
+  traitModalOpen.value = false
+}
 
 async function saveTrait() {
+  traitAttempted.value = true
   if (savingTrait.value || traitProblem.value) return
   savingTrait.value = true
   traitError.value = null
@@ -153,6 +206,24 @@ async function saveTrait() {
 const deletingTrait = ref<ResolvedPersonaTrait | null>(null)
 const deletingTraitBusy = ref(false)
 const deleteTraitError = ref<string | null>(null)
+
+const deletingTraitAncestor = computed(() =>
+  deletingTrait.value ? (inheritedKeyMap.value.get(deletingTrait.value.traitKey) ?? null) : null,
+)
+const deleteTraitConsequences = computed(() => {
+  const target = deletingTrait.value
+  if (!target) return []
+  const ancestor = deletingTraitAncestor.value
+  return ancestor
+    ? [
+        `设定键 ${target.traitKey} 在当前人格的覆盖定义将被移除。`,
+        `移除后将恢复沿用祖先人格「${ancestor}」的设定，子人格也会同步继承该祖先版本。`,
+      ]
+    : [
+        `设定键 ${target.traitKey} 将从当前人格删除。`,
+        '若祖先人格定义了同名设定键，此人格及子人格将恢复继承祖先的版本。',
+      ]
+})
 
 async function removeTrait() {
   const target = deletingTrait.value
@@ -189,11 +260,20 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
         <code class="detail-slug">{{ persona.slug }}</code>
       </div>
       <p v-if="persona.description" class="detail-description">{{ persona.description }}</p>
-      <p v-if="canEdit && blockers.length" class="detail-blocked">
+      <p v-if="canEdit && blockers.length" class="detail-blocked tabular-nums">
         无法删除：{{ blockers.join('；') }}
       </p>
       <div v-if="canEdit" class="detail-actions">
         <UButton size="sm" :icon="icons.add" @click="openCreateTrait">新增设定段</UButton>
+        <UButton
+          size="sm"
+          color="neutral"
+          variant="outline"
+          :icon="icons.add"
+          @click="$emit('createChild')"
+        >
+          创建子人格
+        </UButton>
         <UButton size="sm" color="primary" variant="outline" @click="$emit('edit')">
           修改人格
         </UButton>
@@ -230,7 +310,10 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
               <div class="trait-head">
                 <span class="trait-title">{{ trait.title }}</span>
                 <code class="trait-key">{{ trait.traitKey }}</code>
-                <span class="trait-order">顺序 {{ trait.sortOrder }}</span>
+                <span v-if="inheritedKeyMap.has(trait.traitKey)" class="trait-badge override">
+                  已覆盖
+                </span>
+                <span class="trait-order tabular-nums">顺序 {{ trait.sortOrder }}</span>
                 <time
                   class="trait-time"
                   :datetime="trait.updatedAt"
@@ -248,6 +331,16 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
                     @click="openEditTrait(trait)"
                   />
                   <UButton
+                    v-if="inheritedKeyMap.has(trait.traitKey)"
+                    size="xs"
+                    color="neutral"
+                    variant="ghost"
+                    @click="((deletingTrait = trait), (deleteTraitError = null))"
+                  >
+                    恢复沿用
+                  </UButton>
+                  <UButton
+                    v-else
                     size="xs"
                     color="neutral"
                     variant="ghost"
@@ -288,6 +381,7 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
                   <div class="trait-head">
                     <span class="trait-title">{{ trait.title }}</span>
                     <code class="trait-key">{{ trait.traitKey }}</code>
+                    <span v-if="!trait.overriddenBy" class="trait-badge inherited">沿用</span>
                     <span v-if="trait.overriddenBy" class="trait-overridden">
                       已被「{{ overriddenByLabel(trait.overriddenBy) }}」覆盖
                     </span>
@@ -345,7 +439,7 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
         </section>
 
         <section>
-          <SectionHeading title="使用此人格的接入实例" />
+          <SectionHeading title="使用此人格的客户端" />
           <ul v-if="persona.clients.length">
             <li v-for="client in persona.clients" :key="client.id" class="side-row">
               <RouterLink
@@ -357,7 +451,35 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
               <span class="side-code">{{ client.slug }}</span>
             </li>
           </ul>
-          <p v-else class="side-empty">暂无接入实例将其设为默认人格</p>
+          <p v-else class="side-empty">暂无客户端将其设为默认人格</p>
+        </section>
+
+        <section>
+          <SectionHeading title="按群规则" />
+          <ul v-if="persona.groupRules.length">
+            <li
+              v-for="rule in persona.groupRules"
+              :key="`${rule.clientId}:${rule.groupSubjectId}`"
+              class="side-row"
+            >
+              <RouterLink
+                :to="{ name: 'client', params: { circleId, clientId: rule.clientId } }"
+                class="side-name link"
+              >
+                {{ rule.groupName }}
+              </RouterLink>
+              <span class="side-meta">客户端：{{ rule.clientName }}</span>
+            </li>
+          </ul>
+          <p v-else class="side-empty">暂无按群规则使用此人格</p>
+        </section>
+
+        <section v-if="persona.overrideKeyCount > 0">
+          <SectionHeading title="访问密钥覆盖" />
+          <p class="side-note tabular-nums">
+            {{ persona.overrideKeyCount }}
+            个访问密钥单独指定了此人格；删除此人格后，这些密钥将恢复沿用客户端默认人格或按群规则。
+          </p>
         </section>
       </aside>
     </div>
@@ -366,33 +488,71 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
   <UModal
     :open="traitModalOpen"
     :title="editingKey ? '修改设定段' : keyLocked ? '覆盖继承的设定段' : '新增设定段'"
-    :dismissible="!savingTrait"
+    :dismissible="!savingTrait && !traitDirty"
     :close="!savingTrait"
     :ui="{ content: 'sm:max-w-xl' }"
-    @update:open="(v) => !v && !savingTrait && (traitModalOpen = false)"
+    @update:open="(v) => !v && requestCloseTraitModal()"
   >
     <template #body>
       <!-- 不用 form：输入框回车显式点保存 -->
       <div class="space-y-4">
         <div class="grid gap-3 sm:grid-cols-2">
-          <UFormField label="设定键" help="小写字母、数字、_ 或 -，例如 tone、rules">
-            <UInput v-model="traitForm.traitKey" class="w-full font-mono" :disabled="keyLocked" />
+          <UFormField
+            label="设定键"
+            help="小写字母、数字、_ 或 -，例如 tone、rules"
+            :error="
+              !keyLocked && (traitTouched.traitKey || traitAttempted)
+                ? (traitKeyProblem ?? undefined)
+                : undefined
+            "
+          >
+            <UInput
+              v-model="traitForm.traitKey"
+              class="w-full font-mono"
+              :disabled="keyLocked"
+              @blur="traitTouched.traitKey = true"
+            />
           </UFormField>
-          <UFormField label="排序权重" help="数字越小越靠前注入">
+          <UFormField
+            label="排序权重"
+            help="数字越小越靠前注入"
+            :error="
+              traitTouched.sortOrder || traitAttempted ? (sortOrderProblem ?? undefined) : undefined
+            "
+          >
             <UInput
               v-model.number="traitForm.sortOrder"
               type="number"
               min="0"
               max="999"
               class="w-full font-mono"
+              @blur="traitTouched.sortOrder = true"
             />
           </UFormField>
         </div>
-        <UFormField label="标题">
-          <UInput v-model="traitForm.title" placeholder="例如 说话语气与称呼习惯" class="w-full" />
+        <UFormField
+          label="标题"
+          :error="traitTouched.title || traitAttempted ? (titleProblem ?? undefined) : undefined"
+        >
+          <UInput
+            v-model="traitForm.title"
+            placeholder="例如 说话语气与称呼习惯"
+            class="w-full"
+            @blur="traitTouched.title = true"
+          />
         </UFormField>
-        <UFormField label="设定正文">
-          <UTextarea v-model="traitForm.content" :rows="6" class="w-full" />
+        <UFormField
+          label="设定正文"
+          :error="
+            traitTouched.content || traitAttempted ? (contentProblem ?? undefined) : undefined
+          "
+        >
+          <UTextarea
+            v-model="traitForm.content"
+            :rows="6"
+            class="w-full"
+            @blur="traitTouched.content = true"
+          />
         </UFormField>
         <NoteLine v-if="traitError" tone="error" flush>{{ traitError }}</NoteLine>
       </div>
@@ -403,7 +563,7 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
           color="neutral"
           variant="ghost"
           :disabled="savingTrait"
-          @click="traitModalOpen = false"
+          @click="requestCloseTraitModal"
         >
           取消
         </UButton>
@@ -416,12 +576,13 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
 
   <ConsequenceModal
     :open="deletingTrait !== null"
-    :title="`删除设定段「${deletingTrait?.title ?? ''}」？`"
-    :consequences="[
-      `设定键 ${deletingTrait?.traitKey ?? ''} 将从当前人格删除。`,
-      '若祖先人格定义了同名设定键，此人格及子人格将恢复继承祖先的版本。',
-    ]"
-    action="删除设定段"
+    :title="
+      deletingTraitAncestor
+        ? `恢复沿用「${deletingTrait?.title ?? ''}」？`
+        : `删除设定段「${deletingTrait?.title ?? ''}」？`
+    "
+    :consequences="deleteTraitConsequences"
+    :action="deletingTraitAncestor ? '恢复沿用' : '删除设定段'"
     :busy="deletingTraitBusy"
     :error="deleteTraitError"
     @close="deletingTrait = null"
@@ -509,7 +670,7 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
   margin-top: 24px;
 }
 .count {
-  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-weight: 600;
 }
 .empty {
@@ -648,6 +809,30 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
   line-height: 1.5;
   color: var(--ui-text-muted);
   overflow-wrap: anywhere;
+}
+.side-meta {
+  display: block;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ui-text-muted);
+  overflow-wrap: anywhere;
+}
+.side-note {
+  padding: 9px 0;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--ui-text-muted);
+}
+.trait-badge {
+  padding: 0 5px;
+  border: 1px solid var(--ui-border-accented);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ui-text-muted);
+}
+.trait-badge.override {
+  border-color: var(--strata-rule);
+  color: var(--ui-text);
 }
 .link:hover {
   text-decoration: underline;

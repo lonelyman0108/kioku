@@ -51,13 +51,14 @@ import type { AppEnv, Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { withDeletionRetention } from '../jobs/retention'
 import {
+  consoleAllCirclesAccessFor,
   consoleCircleFor,
   consoleMemberFor,
   entryServiceForKey,
   recallForConsole,
   recallScopeForKey,
 } from '../memory/context'
-import { UnknownTimeZoneError } from '../memory/service'
+import { EntryService, UnknownTimeZoneError } from '../memory/service'
 
 const MATCH_LIMIT = 10
 
@@ -423,8 +424,26 @@ function consoleEntryRoutes(deps: Deps) {
       return c.json(await service.list(c.req.valid('query')), 200)
     })
     .openapi(search, async (c) => {
-      const { circleId, service } = await consoleMember(deps, c)
-      const { query, limit } = c.req.valid('json')
+      const accountId = c.get('console').accountId
+      const { circleId, service, resolved } = await consoleMember(deps, c)
+      const { query, limit, allCircles } = c.req.valid('json')
+      if (allCircles) {
+        const allAccess = await consoleAllCirclesAccessFor(deps, circleId, accountId, resolved)
+        const allService = new EntryService({
+          db: deps.db,
+          access: allAccess,
+          masterKey: deps.masterKey,
+          actor: { accountId },
+          listSecret: resolved.role === 'owner',
+          secretRead: 'explicit',
+          circleOwner: resolved.role === 'owner',
+        })
+        const [matches, candidates] = await Promise.all([
+          allService.searchMatches(query, MATCH_LIMIT),
+          recallForConsole(deps, circleId, allAccess, query, limit),
+        ])
+        return c.json({ matches, candidates }, 200)
+      }
       const [matches, candidates] = await Promise.all([
         service.searchMatches(query, MATCH_LIMIT),
         recallForConsole(deps, circleId, service.access, query, limit),

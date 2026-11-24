@@ -17,6 +17,7 @@ import { columnSize, tallyCounts, type StrataSelection } from '../components/str
 import { useSession } from '../composables/useSession'
 import { useViewport } from '../composables/useViewport'
 import { actionableInboxCount, inboxTabActionable, inboxTabLabels } from '../inbox'
+import { whenLabel } from '../memoryDetail'
 import { bindingNote, budgetWarning, splitNote, strataTarget } from '../overview'
 import { circleSettingsRoute, instanceSettingsRoute } from '../settingsSections'
 import { formatRelative, formatTime } from '../time'
@@ -29,7 +30,26 @@ const overview = useQuery({
   queryKey: computed(() => ['overview', circleId.value]),
   queryFn: () => api.overview(circleId.value),
 })
+const circleDetail = useQuery({
+  queryKey: computed(() => ['circle', circleId.value]),
+  queryFn: () => api.circle(circleId.value),
+})
+const personas = useQuery({
+  queryKey: computed(() => ['personas', circleId.value] as const),
+  queryFn: ({ queryKey: [, cid] }) => api.personas(cid),
+})
+const facets = useQuery({
+  queryKey: computed(() => ['facets', circleId.value] as const),
+  queryFn: ({ queryKey: [, cid] }) => api.facets(cid),
+})
 const data = computed(() => overview.data.value)
+const activeCircleKind = computed(
+  () => circle.value?.kind ?? circleDetail.data.value?.kind ?? 'shared',
+)
+const defaultFacetsNote = computed(() => {
+  const f = circleDetail.data.value?.defaultFacets
+  return f && Object.keys(f).length ? whenLabel(f, facets.data.value) : null
+})
 
 const viewport = useViewport()
 // 地层柱所在那一栏的实际宽度：窄屏、中等宽度的两栏里都可能比视口窄得多
@@ -44,13 +64,15 @@ onMounted(() => {
   strataObserver.observe(strataBox.value)
 })
 onBeforeUnmount(() => strataObserver?.disconnect())
-const size = computed(() => columnSize(viewport.value, strataWidth.value ?? viewport.value.width))
+const size = computed(() =>
+  columnSize(viewport.value, strataWidth.value ?? viewport.value.width, 3),
+)
 
 // 色带 × 敏感级的条数：记忆加上来自对话的两类
 const counts = computed(() =>
   data.value
     ? tallyCounts({
-        circleKind: circle.value?.kind ?? 'shared',
+        circleKind: activeCircleKind.value,
         counts: data.value.counts,
         extractedCounts: data.value.extractedCounts,
       })
@@ -95,9 +117,9 @@ const pending = computed(() => {
       to: { name: 'inbox', params, query: { tab: 'dream' } },
     },
     {
-      title: '疑似明文凭据',
+      title: '疑似敏感内容',
       count: inbox.plaintext,
-      note: '建议转存为凭据，正文改用占位符',
+      note: '建议转存为凭据或设为本人私密',
       action: canAct.value ? '逐条处理' : '查看',
       hot: false,
       to: { name: 'inbox', params, query: { tab: 'plaintext' } },
@@ -150,27 +172,92 @@ const canAdjustBudget = computed(() => circle.value?.role === 'owner')
     <div v-else-if="data && counts" class="overview-grid">
       <div class="overview-col plate">
         <header class="plate-head">
-          <h1>{{ data.total }} 条记忆，{{ pendingTotal }} 项待处理</h1>
+          <h1>{{ data.total }} 条正式记忆，{{ pendingTotal }} 项待处理</h1>
           <p>
             <span v-if="extracted">另有 {{ extracted }} 条来自对话</span>
             <span v-else>统计范围</span>
-            <Hint>统计范围为当前账号有权查看的内容，不含从对话中记下的事实与会话摘要。</Hint>
+            <Hint>统计范围为当前账号有权查看的正式记忆，不含从对话中记下的事实与会话摘要。</Hint>
           </p>
         </header>
         <section ref="strataBox">
           <SectionHeading title="记忆分布">
             <template #hint>
               <Hint>
-                带的高度表示条数的多少，数字是确切的条数。点色带名打开对应列表或分页，点一格按色带与敏感级查看记忆列表。
+                带的高度表示条数的多少，数字是确切的条数。虚线框为对话产生的会话摘要与联系人事实，实线框为本圈主动沉淀的正式记忆。点形态名或敏感级数字查看对应列表。
               </Hint>
             </template>
           </SectionHeading>
           <StrataColumn
             :counts="counts"
+            :circle-kind="activeCircleKind"
             :height="size.height"
             :width="size.width"
             :compact="size.compact"
             @select="openStrata"
+          />
+        </section>
+
+        <section>
+          <SectionHeading title="本圈配置" />
+          <ReadFailureNote
+            v-if="personas.isError.value"
+            :query="personas"
+            fallback="人格读取失败"
+            size="xs"
+            class="mt-2"
+          />
+          <OverviewRow
+            v-else
+            title="人格"
+            :value="personas.isPending.value ? '–' : (personas.data.value?.length ?? 0)"
+            :note="
+              personas.isPending.value
+                ? '正在读取…'
+                : personas.data.value?.length
+                  ? '可沿继承链覆盖设定并绑定客户端'
+                  : '暂无人格，客户端将只注入记忆'
+            "
+            action="查看"
+            :to="{ name: 'personas', params: { circleId } }"
+            :zero="!personas.data.value?.length"
+          />
+          <template v-if="activeCircleKind === 'shared'">
+            <ReadFailureNote
+              v-if="circleDetail.isError.value"
+              :query="circleDetail"
+              fallback="默认适用条件读取失败"
+              size="xs"
+              class="mt-2"
+            />
+            <OverviewRow
+              v-else
+              title="默认适用条件"
+              :value="circleDetail.isPending.value ? '–' : defaultFacetsNote ? '已设' : '未设'"
+              :note="
+                circleDetail.isPending.value
+                  ? '正在读取…'
+                  : (defaultFacetsNote ?? '本圈记忆未单独指定同维条件时自动沿用')
+              "
+              :action="canAdjustBudget ? '设置' : '查看'"
+              :to="circleSettingsRoute(circleId, 'general')"
+              :zero="!defaultFacetsNote"
+            />
+          </template>
+          <ReadFailureNote
+            v-if="facets.isError.value"
+            :query="facets"
+            fallback="语境词典读取失败"
+            size="xs"
+            class="mt-2"
+          />
+          <OverviewRow
+            v-else
+            title="语境词典"
+            :value="facets.isPending.value ? '–' : (facets.data.value?.terms.length ?? 0)"
+            :note="facets.isPending.value ? '正在读取…' : '适用条件项、自动关联与唤醒别名'"
+            action="查看"
+            :to="circleSettingsRoute(circleId, 'vocabulary')"
+            :zero="!facets.data.value?.terms.length"
           />
         </section>
       </div>
@@ -206,7 +293,7 @@ const canAdjustBudget = computed(() => circle.value?.role === 'owner')
         <section>
           <SectionHeading title="记忆健康" />
           <OverviewRow
-            title="未设触发场景"
+            title="未设召回说明"
             :value="data.missingDisclosure"
             note="补全后召回更准确"
             :action="data.missingDisclosure ? (canAct ? '去补全' : '查看') : null"
@@ -225,8 +312,8 @@ const canAdjustBudget = computed(() => circle.value?.role === 'owner')
             :zero="!data.neverRecalled"
           >
             <template #note>
-              创建已久，未被任何接入实例召回<Hint>
-                创建与开始记录召回均已满明细保留天数才计入，不含机密内容与启动加载的词条。可能缺少关键词、内容过于笼统，或已不再需要。
+              创建已久，未被任何客户端召回<Hint>
+                创建与开始记录召回均已满明细保留天数才计入，不含机密内容与启动加载的记忆。可能缺少关键词、内容过于笼统，或已不再需要。
               </Hint>
             </template>
           </OverviewRow>
@@ -336,10 +423,10 @@ const canAdjustBudget = computed(() => circle.value?.role === 'owner')
         </section>
 
         <section>
-          <SectionHeading title="接入实例">
+          <SectionHeading title="客户端">
             <template #actions>
               <RouterLink :to="{ name: 'clients', params: { circleId } }" class="heading-link">
-                管理接入实例
+                管理客户端
               </RouterLink>
             </template>
           </SectionHeading>
@@ -354,7 +441,7 @@ const canAdjustBudget = computed(() => circle.value?.role === 'owner')
               </RouterLink>
               <template v-if="client.keys">
                 <span class="app-meta">
-                  有效访问密钥 <span class="font-mono">{{ client.keys.active }}</span>
+                  有效访问密钥 <span class="tabular-nums">{{ client.keys.active }}</span>
                 </span>
                 <time
                   v-if="client.keys.lastUsedAt"
@@ -367,10 +454,10 @@ const canAdjustBudget = computed(() => circle.value?.role === 'owner')
                 <span v-else-if="client.keys.active" class="app-meta">尚未使用</span>
                 <span v-else class="app-meta" />
               </template>
-              <span v-else class="app-meta app-hidden">仅接入实例所有者可查看访问密钥</span>
+              <span v-else class="app-meta app-hidden">仅客户端所有者可查看访问密钥</span>
             </li>
           </ul>
-          <p v-else class="empty">暂无接入实例</p>
+          <p v-else class="empty">暂无客户端</p>
         </section>
       </div>
     </div>

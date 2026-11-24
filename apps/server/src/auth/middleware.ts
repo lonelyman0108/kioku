@@ -1,5 +1,6 @@
 import {
   ClientConfig,
+  LEGACY_KEY_CODE,
   LensKeyScopes,
   type CircleEffectiveGrant,
   type MemberRole,
@@ -15,12 +16,36 @@ import {
 } from '../access/access'
 import { resolveStaticContextRealms } from '../access/realms'
 import { withCircle, type Db, type Tx } from '../db/client'
-import { accounts, apiKeys, circleMembers, circles, clients, facetTerms } from '../db/schema'
+import {
+  accounts,
+  apiKeys,
+  circleMembers,
+  circles,
+  clients,
+  facetTerms,
+  legacyApiKeys,
+} from '../db/schema'
 import type { AppEnv, Deps, KeyPrincipal } from '../http/env'
 import { parseApiKey, verifyApiKey } from './keys'
 import { resolveSession, SESSION_COOKIE } from './session'
 
 const unauthorized = { error: '未登录或凭据无效' }
+
+// 升级前签发的访问密钥：就地迁移时记下了前缀与哈希。只有密钥整串对得上才这样回，
+// 光凭前缀不说明它是旧密钥
+const legacyKey = {
+  error: '访问密钥是升级前签发的，已失效：运行 npx @kioku-memory/cli migrate 重新接入',
+  code: LEGACY_KEY_CODE,
+}
+
+async function isLegacyKey(db: Db, prefix: string, plaintext: string): Promise<boolean> {
+  const [legacy] = await db
+    .select({ secretHash: legacyApiKeys.secretHash })
+    .from(legacyApiKeys)
+    .where(eq(legacyApiKeys.prefix, prefix))
+    .limit(1)
+  return Boolean(legacy && verifyApiKey(plaintext, legacy.secretHash))
+}
 
 export function requireConsole(deps: Deps) {
   return createMiddleware<AppEnv>(async (c, next) => {
@@ -44,7 +69,12 @@ export function requireKey(deps: Deps) {
       .from(apiKeys)
       .where(and(eq(apiKeys.prefix, parsed.prefix), isNull(apiKeys.revokedAt)))
       .limit(1)
-    if (!key || !verifyApiKey(plaintext, key.secretHash)) return c.json(unauthorized, 401)
+    if (!key || !verifyApiKey(plaintext, key.secretHash)) {
+      if (!key && (await isLegacyKey(deps.db, parsed.prefix, plaintext))) {
+        return c.json(legacyKey, 401)
+      }
+      return c.json(unauthorized, 401)
+    }
     const principal = await principalOf(deps.db, key)
     if (!principal) return c.json(unauthorized, 401)
 

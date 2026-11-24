@@ -28,7 +28,13 @@ const reconnecting = computed(() => props.connection !== null)
 </script>
 
 <template>
-  <UModal v-model:open="open" :title="reconnecting ? '重新登录密码库' : '连接密码库'">
+  <UModal
+    :open="open"
+    :title="reconnecting ? '重新登录密码库' : '连接密码库'"
+    :dismissible="!submitting"
+    :close="!submitting"
+    @update:open="(v) => (!v && submitting) || (open = v)"
+  >
     <template #body>
       <form id="vault-login" class="space-y-4" autocomplete="off" @submit.prevent="submit">
         <template v-if="step === 'login'">
@@ -87,10 +93,18 @@ const reconnecting = computed(() => props.connection !== null)
     <template #footer>
       <div class="flex w-full items-center justify-end gap-2">
         <span v-if="hint" class="mr-auto text-sm text-muted">{{ hint }}</span>
-        <UButton v-if="step === 'two_factor'" color="neutral" variant="ghost" @click="back">
+        <UButton
+          v-if="step === 'two_factor'"
+          color="neutral"
+          variant="ghost"
+          :disabled="submitting"
+          @click="back"
+        >
           上一步
         </UButton>
-        <UButton color="neutral" variant="ghost" @click="open = false">取消</UButton>
+        <UButton color="neutral" variant="ghost" :disabled="submitting" @click="open = false"
+          >取消</UButton
+        >
         <UButton type="submit" form="vault-login" :loading="submitting" :disabled="!!problem">
           {{ step === 'two_factor' ? '验证' : reconnecting ? '登录' : '连接' }}
         </UButton>

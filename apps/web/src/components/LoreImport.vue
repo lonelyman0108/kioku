@@ -369,7 +369,7 @@ const targetBand = (node: LorePlanNode, target: LorePlanTarget): StrataBand => {
 // 之前导入的那条现在的样子：删除了或给出短 ID
 function currentNote(target: LorePlanTarget): string | null {
   const notes = target.current.flatMap((c) =>
-    c.shortId === null ? ['已在 Kioku 中删除'] : [`当前词条 ${c.shortId}`],
+    c.shortId === null ? ['已在 Kioku 中删除'] : [`当前记忆 ${c.shortId}`],
   )
   return notes.length ? notes.join('；') : null
 }
@@ -439,7 +439,7 @@ const entryStatus = computed(() => {
       导入 Lore 的节点，确认计划后才写入。查看计划与确认在独立弹窗中完成。
       <Hint>
         映射规则与命令行相同：core://agent 进入通用，core://soul
-        进入人格，core://agent/&lt;运行时&gt; 进入当前账号的对应接入实例，preferences://
+        进入人格，core://agent/&lt;运行时&gt; 进入当前账号的对应客户端，preferences://
         进入个人圈（内部），其余进入个人圈（私密）。可重复执行：已导入的不重复写入，Lore
         中修改过的按 Lore 同步；在 Kioku 中修改、移动或删除过的不变。
       </Hint>
@@ -535,18 +535,18 @@ const entryStatus = computed(() => {
             </li>
             <li v-else>
               人格 {{ persona.slug }} 不存在，本次也没有要写入的
-              core://soul：未新建人格，新建接入实例的默认人格为空
+              core://soul：未新建人格，新建客户端的默认人格为空
             </li>
             <li v-if="result.clientsCreated.length">
-              新建接入实例：{{
+              新建客户端：{{
                 result.clientsCreated.join('、')
-              }}。暂无访问密钥，请在「接入实例」中为要接入的实例签发
+              }}。暂无访问密钥，请在「客户端」中为要接入的客户端签发
             </li>
             <li v-if="result.clientsGivenPersona.length">
               设为默认人格 {{ persona.slug }}：{{ result.clientsGivenPersona.join('、') }}
             </li>
             <li v-if="result.clientsOtherPersona.length">
-              以下接入实例使用其他人格，core://soul 不会进入其启动加载：{{
+              以下客户端使用其他人格，core://soul 不会进入其启动加载：{{
                 result.clientsOtherPersona.join('、')
               }}
             </li>
@@ -740,7 +740,7 @@ const entryStatus = computed(() => {
                 <dd>{{ effects.bootNodes }}</dd>
               </div>
               <div class="kpi-cell">
-                <dt>涉及接入实例</dt>
+                <dt>涉及客户端</dt>
                 <dd>{{ effects.clients.reduce((n, m) => n + m.clients.length, 0) }}</dd>
               </div>
             </dl>
@@ -809,7 +809,7 @@ const entryStatus = computed(() => {
                 @click="planTab = 'mapping'"
                 @keydown="onPlanTabKeydown($event, 'mapping')"
               >
-                人格与接入实例（{{ effects.clients.length + 1 }}）
+                人格与客户端（{{ effects.clients.length + 1 }}）
               </button>
               <button
                 id="lore-tab-sync"
@@ -926,7 +926,7 @@ const entryStatus = computed(() => {
                         />
                         <span v-if="plaintextState(node, spot) === 'blocked'" class="text-warning">
                           无法写成占位符<Hint>
-                            凭据占位符只能放在个人圈、正式词条且敏感级不低于私密的记忆中。
+                            凭据占位符只能放在个人圈、正式记忆且敏感级不低于私密的记忆中。
                           </Hint>
                         </span>
                         <span
@@ -963,7 +963,7 @@ const entryStatus = computed(() => {
                     {{ credentialNote(node) }}
                   </p>
                   <p v-if="node.credentialHints.extras" class="text-warning">
-                    触发场景或关键词疑似包含明文凭据：机密只加密正文，这两项仍为明文
+                    召回说明或关键词疑似包含明文凭据：机密只加密正文，这两项仍为明文
                   </p>
                   <p
                     v-if="
@@ -972,7 +972,7 @@ const entryStatus = computed(() => {
                     "
                     class="text-muted"
                   >
-                    触发场景过长，写入时截断
+                    召回说明过长，写入时截断
                   </p>
                 </li>
               </ul>
@@ -995,12 +995,12 @@ const entryStatus = computed(() => {
                 <p v-else-if="plan.persona.exists">
                   本次没有要新写入的 core://soul，不新建人格。已有人格
                   <code class="uri">{{ plan.persona.slug }}</code>
-                  照常使用：新建接入实例和暂无默认人格的接入实例将设为此人格。
+                  照常使用：新建客户端和暂无默认人格的客户端将设为此人格。
                 </p>
                 <p v-else>
                   本次没有要新写入的 core://soul，人格
                   <code class="uri">{{ plan.persona.slug }}</code>
-                  也不存在：不新建，新建接入实例的默认人格为空。
+                  也不存在：不新建，新建客户端的默认人格为空。
                 </p>
                 <p v-if="effects.writesPersona && otherPersonas.length" class="text-warning">
                   此前的导入写入了人格 {{ otherPersonas.join('、') }}：本次将另写一份
@@ -1008,7 +1008,7 @@ const entryStatus = computed(() => {
                 </p>
               </div>
 
-              <SectionHeading title="接入实例映射" :level="4" />
+              <SectionHeading title="客户端映射" :level="4" />
               <div v-if="effects.clients.length" class="plan-body space-y-2">
                 <p v-for="mapping in effects.clients" :key="mapping.runtime" class="break-all">
                   core://agent/{{ mapping.runtime }} →
@@ -1023,17 +1023,17 @@ const entryStatus = computed(() => {
                   >
                 </p>
                 <p v-if="effects.clientsGivenPersona.length">
-                  以下接入实例暂无默认人格，将设为 {{ plan.persona.slug }}：{{
+                  以下客户端暂无默认人格，将设为 {{ plan.persona.slug }}：{{
                     effects.clientsGivenPersona.join('、')
                   }}
                 </p>
                 <p v-if="effects.clientsOtherPersona.length" class="text-warning">
-                  以下接入实例使用其他人格，core://soul 不会进入其启动加载：{{
+                  以下客户端使用其他人格，core://soul 不会进入其启动加载：{{
                     effects.clientsOtherPersona.join('、')
                   }}
                 </p>
               </div>
-              <p v-else class="text-muted">本次节点未涉及接入实例映射。</p>
+              <p v-else class="text-muted">本次节点未涉及客户端映射。</p>
             </section>
 
             <section

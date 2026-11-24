@@ -12,7 +12,6 @@ export const icons = {
   inherits: 'i-lucide-arrow-right',
   preview: 'i-lucide-play',
   recall: 'i-lucide-chart-column',
-  apps: 'i-lucide-key-round',
   credentials: 'i-lucide-vault',
   provider: 'i-lucide-database',
   reveal: 'i-lucide-eye',
@@ -31,12 +30,11 @@ export const icons = {
   file: 'i-lucide-file-text',
   secret: 'i-lucide-lock',
   // 按记忆圈导出与导入
-  exportSpace: 'i-lucide-file-down',
-  importSpace: 'i-lucide-file-up',
   exportCircle: 'i-lucide-file-down',
   importCircle: 'i-lucide-file-up',
   // 切面词表、多变体切片、双链与跨群锁定
   vocabulary: 'i-lucide-tags',
+  personas: 'i-lucide-drama',
   facets: 'i-lucide-sliders-horizontal',
   variants: 'i-lucide-layers',
   splitView: 'i-lucide-columns-2',
@@ -86,7 +84,6 @@ export const icons = {
   unknownActor: 'i-lucide-circle-help',
   // 设置：三组与各小节、记忆圈切换器、保存条
   account: 'i-lucide-user',
-  space: 'i-lucide-layers',
   circle: 'i-lucide-layers',
   instance: 'i-lucide-server',
   appearance: 'i-lucide-sun-moon',
@@ -96,7 +93,6 @@ export const icons = {
   security: 'i-lucide-shield-check',
   privacy: 'i-lucide-shield-alert',
   data: 'i-lucide-database',
-  spaces: 'i-lucide-boxes',
   circles: 'i-lucide-boxes',
   members: 'i-lucide-users',
   general: 'i-lucide-info',

@@ -1,22 +1,36 @@
 <script setup lang="ts">
-import type { BootPreview, EntryKind, FacetVocabularyView } from '@kioku/contracts'
+import {
+  CHAT_TYPES,
+  normalizeWhen,
+  type BootPreview,
+  type ChatType,
+  type EntryKind,
+  type FacetVocabularyView,
+  type PreviewTargets,
+} from '@kioku/contracts'
 import { useQuery } from '@tanstack/vue-query'
 import { computed, reactive, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 
 import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { bootUsage, simulatorState } from '../apps'
+import { chatTypeLabels, usesGroup, usesSender } from '../benchForm'
 import { useSession } from '../composables/useSession'
 import { entryKindLabels, sessionExtraLabels } from '../labels'
 import { whenLabel } from '../memoryDetail'
+import { entryRoute } from '../routes'
 import { formatShort, formatTime } from '../time'
+import CrossCirclePreviewDrawer from './CrossCirclePreviewDrawer.vue'
+import FacetWhenPicker from './FacetWhenPicker.vue'
 import Hint from './Hint.vue'
 import NoteLine from './strata/NoteLine.vue'
+import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
 import { entryBand } from './strata/strata'
 
-// 启动加载预览：按接入实例的一个访问密钥模拟会话开始，只给接入实例所有者
+// 启动加载预览：按客户端的一个访问密钥模拟会话开始，只给客户端所有者
 const props = withDefaults(
   defineProps<{
     circleId: string
@@ -27,6 +41,8 @@ const props = withDefaults(
   }>(),
   { vocabulary: null },
 )
+
+const router = useRouter()
 
 const keys = useQuery({
   queryKey: computed(() => ['keys', props.circleId, props.clientId] as const),
@@ -44,7 +60,80 @@ let counter = 0
 const current = ref<number | null>(null)
 const running = computed(() => current.value !== null)
 const project = reactive({ dirName: '', repoName: '' })
+const optionsOpen = ref(false)
+const chatType = ref<ChatType | null>(null)
+const groupSubjectId = ref<string | null>(null)
+const senderSubjectId = ref<string | null>(null)
+const senderIsOwner = ref(false)
+const facets = ref<Record<string, string[]>>({})
 const preview = ref<BootPreview | null>(null)
+const drawerTarget = ref<{ circleId: string; shortId: string } | null>(null)
+
+const chatTypeItems = [
+  { label: '无会话上下文', value: null },
+  ...CHAT_TYPES.map((type) => ({ label: chatTypeLabels[type], value: type })),
+]
+
+const groupSubjects = useQuery({
+  queryKey: computed(() => ['subjects', props.circleId, 'group', 'preview'] as const),
+  queryFn: ({ queryKey: [, cid] }) => api.subjects(cid, { kind: 'group' }),
+  enabled: computed(() => optionsOpen.value && usesGroup(chatType.value)),
+})
+const senderSubjects = useQuery({
+  queryKey: computed(() => ['subjects', props.circleId, 'person', 'preview'] as const),
+  queryFn: ({ queryKey: [, cid] }) => api.subjects(cid, { kind: 'person' }),
+  enabled: computed(() => optionsOpen.value && usesSender(chatType.value)),
+})
+
+const groupItems = computed(() => [
+  { label: '不指定具体群聊', value: null },
+  ...(groupSubjects.data.value?.items ?? []).map((s) => ({
+    label: s.displayName,
+    value: s.id,
+  })),
+])
+const senderItems = computed(() => [
+  { label: '不指定具体联系人', value: null },
+  ...(senderSubjects.data.value?.items ?? []).map((s) => ({
+    label: s.displayName,
+    value: s.id,
+  })),
+])
+
+watch(chatType, (next) => {
+  if (!usesGroup(next)) groupSubjectId.value = null
+  if (!usesSender(next)) {
+    senderSubjectId.value = null
+    senderIsOwner.value = false
+  }
+})
+
+watch([() => props.circleId, () => props.clientId], () => {
+  chatType.value = null
+  groupSubjectId.value = null
+  senderSubjectId.value = null
+  senderIsOwner.value = false
+  facets.value = {}
+  drawerTarget.value = null
+})
+
+function buildPreviewTargets(): PreviewTargets | undefined {
+  const type = chatType.value
+  if (!type) return undefined
+  return {
+    chatType: type,
+    ...(usesGroup(type) && groupSubjectId.value ? { groupSubjectId: groupSubjectId.value } : {}),
+    ...(usesSender(type) && senderSubjectId.value
+      ? { senderSubjectId: senderSubjectId.value }
+      : {}),
+    ...(usesSender(type) && senderIsOwner.value ? { senderIsOwner: true } : {}),
+  }
+}
+
+async function switchToEntry(targetCircleId: string, shortId: string) {
+  await router.push(entryRoute(targetCircleId, shortId))
+  drawerTarget.value = null
+}
 
 async function run<T>(call: () => Promise<T>, apply: (result: T) => void) {
   if (running.value || !props.keyId) return
@@ -66,12 +155,16 @@ function runPreview() {
   if (!id) return
   const dirName = project.dirName.trim()
   const repoName = project.repoName.trim()
+  const normalizedFacets = normalizeWhen(facets.value)
+  const previewTargets = buildPreviewTargets()
   return run(
     () =>
       api.bootPreview(props.circleId, props.clientId, id, {
         ...(dirName || repoName
           ? { project: { ...(dirName ? { dirName } : {}), ...(repoName ? { repoName } : {}) } }
           : {}),
+        ...(Object.keys(normalizedFacets).length ? { facets: normalizedFacets } : {}),
+        ...(previewTargets ? { previewTargets } : {}),
       }),
     (result) => (preview.value = result),
   )
@@ -115,11 +208,6 @@ const entryBandOf = (
     { id: props.circleId, kind: currentKind },
   )
 }
-const entryLink = (targetCircleId: string, shortId: string) => ({
-  name: 'memories',
-  params: { circleId: targetCircleId },
-  query: { id: shortId },
-})
 </script>
 
 <template>
@@ -127,7 +215,7 @@ const entryLink = (targetCircleId: string, shortId: string) => ({
     <SectionHeading title="启动加载">
       <template #hint>
         <Hint>
-          按所选访问密钥的当前权限与固定切面透镜模拟会话开始时注入的内容，不计入召回记录。当前按无会话上下文模拟。
+          按所选访问密钥的当前访问范围、默认语境与模拟条件模拟会话开始时注入的内容，不计入召回记录。可在下方展开设置会话上下文与适用条件。
         </Hint>
       </template>
       <template v-if="usage" #actions>
@@ -155,7 +243,7 @@ const entryLink = (targetCircleId: string, shortId: string) => ({
       <NoteLine v-if="failure" class="boot-note" tone="error">{{ failure }}</NoteLine>
       <USkeleton v-if="running && !preview" class="mt-3 h-40 w-full" />
       <template v-if="preview && usage">
-        <p v-if="resolvedFacetsText" class="boot-facets">展开切面：{{ resolvedFacetsText }}</p>
+        <p v-if="resolvedFacetsText" class="boot-facets">展开语境：{{ resolvedFacetsText }}</p>
         <div
           class="boot-bar"
           role="img"
@@ -200,17 +288,27 @@ const entryLink = (targetCircleId: string, shortId: string) => ({
           <li v-for="entry in preview.entries" :key="`${entry.circleId}:${entry.shortId}`">
             <StrataSwatch :band="entryBandOf(entry)" plain />
             <RouterLink
-              :to="entryLink(entry.circleId, entry.shortId)"
+              v-if="entry.circleId === circleId"
+              :to="entryRoute(entry.circleId, entry.shortId)"
               class="boot-uri"
               :title="entry.shortId"
             >
               {{ entry.title }}
             </RouterLink>
+            <button
+              v-else
+              type="button"
+              class="boot-uri boot-cross"
+              :title="`${entry.shortId}（其他记忆圈，点击侧栏预览）`"
+              @click="drawerTarget = { circleId: entry.circleId, shortId: entry.shortId }"
+            >
+              {{ entry.title }}
+            </button>
             <span class="boot-layer">{{ entry.circleSlug ?? entryKindLabels.entry }}</span>
             <span class="boot-chars">{{ entry.chars.toLocaleString() }}</span>
           </li>
         </ul>
-        <p v-else class="boot-empty">暂无启动加载的词条</p>
+        <p v-else class="boot-empty">暂无启动加载的正式记忆</p>
         <p
           v-if="preview.omitted.length"
           class="boot-omitted"
@@ -224,7 +322,7 @@ const entryLink = (targetCircleId: string, shortId: string) => ({
         <div v-if="preview.summaries.length" class="boot-summaries">
           <SectionHeading title="会话摘要" :level="3" class="boot-sub-head">
             <template #hint>
-              <Hint>不带会话上下文的会话最近几条摘要；群聊、私聊的摘要不进入启动加载。</Hint>
+              <Hint>对应当前模拟会话上下文的最近几条摘要；群聊与私聊摘要按会话范围隔离。</Hint>
             </template>
           </SectionHeading>
           <ul class="boot-list">
@@ -250,43 +348,116 @@ const entryLink = (targetCircleId: string, shortId: string) => ({
         <div v-if="preview">
           <SectionHeading title="近期更新" :level="3" class="boot-sub-head" />
           <ul v-if="preview.recent.length" class="boot-list">
-            <li v-for="memory in preview.recent" :key="memory.shortId">
+            <li v-for="memory in preview.recent" :key="`${memory.circleId}:${memory.shortId}`">
+              <StrataSwatch :band="entryBandOf(memory)" plain />
               <RouterLink
-                :to="entryLink(circleId, memory.shortId)"
+                v-if="memory.circleId === circleId"
+                :to="entryRoute(memory.circleId, memory.shortId)"
                 class="boot-uri"
                 :title="memory.shortId"
               >
                 {{ memory.title }}
               </RouterLink>
-              <span v-if="memory.circleSlug" class="boot-layer">{{ memory.circleSlug }}</span>
+              <button
+                v-else
+                type="button"
+                class="boot-uri boot-cross"
+                :title="`${memory.shortId}（其他记忆圈，点击侧栏预览）`"
+                @click="drawerTarget = { circleId: memory.circleId, shortId: memory.shortId }"
+              >
+                {{ memory.title }}
+              </button>
+              <span class="boot-layer">{{ memory.circleSlug ?? entryKindLabels.entry }}</span>
             </li>
           </ul>
           <p v-else class="boot-empty">暂无</p>
         </div>
         <div>
-          <SectionHeading title="与当前项目相关" :level="3" class="boot-sub-head">
+          <SectionHeading title="模拟参数" :level="3" class="boot-sub-head">
             <template #hint>
-              <Hint>目录名与仓库名用于召回与当前项目相关的记忆，可留空。</Hint>
+              <Hint>目录名与仓库名用于匹配项目相关记忆，也可展开模拟会话上下文与适用条件。</Hint>
             </template>
           </SectionHeading>
           <!-- 表单一直在：第一次预览失败时，这里也是重试的地方 -->
-          <form class="boot-project" @submit.prevent="runPreview">
-            <UInput v-model="project.dirName" placeholder="目录名" aria-label="目录名" />
-            <UInput v-model="project.repoName" placeholder="仓库名" aria-label="仓库名" />
-            <UButton type="submit" color="primary" variant="outline" :loading="running">
-              预览
-            </UButton>
+          <form class="boot-sim-form" @submit.prevent="runPreview">
+            <div class="boot-project">
+              <UInput v-model="project.dirName" placeholder="目录名" aria-label="目录名" />
+              <UInput v-model="project.repoName" placeholder="仓库名" aria-label="仓库名" />
+              <UButton type="submit" color="primary" variant="outline" :loading="running">
+                预览
+              </UButton>
+            </div>
+            <details
+              class="boot-options"
+              @toggle="optionsOpen = ($event.target as HTMLDetailsElement).open"
+            >
+              <summary>会话上下文与适用条件（可选）</summary>
+              <div class="boot-options-body">
+                <div class="boot-context-grid">
+                  <UFormField label="聊天类型">
+                    <USelect v-model="chatType" :items="chatTypeItems" class="w-full" />
+                  </UFormField>
+                  <UFormField v-if="usesGroup(chatType)" label="群聊或频道">
+                    <USelect
+                      v-model="groupSubjectId"
+                      :items="groupItems"
+                      :loading="groupSubjects.isFetching.value"
+                      class="w-full"
+                    />
+                  </UFormField>
+                  <UFormField v-if="usesSender(chatType)" label="发言人">
+                    <USelect
+                      v-model="senderSubjectId"
+                      :items="senderItems"
+                      :loading="senderSubjects.isFetching.value"
+                      class="w-full"
+                    />
+                  </UFormField>
+                </div>
+                <UCheckbox
+                  v-if="usesSender(chatType)"
+                  v-model="senderIsOwner"
+                  label="以所有者身份发言"
+                />
+                <ReadFailureNote
+                  v-if="groupSubjects.isError.value"
+                  :query="groupSubjects"
+                  size="xs"
+                />
+                <ReadFailureNote
+                  v-if="senderSubjects.isError.value"
+                  :query="senderSubjects"
+                  size="xs"
+                />
+                <FacetWhenPicker
+                  v-model="facets"
+                  :circle-id="circleId"
+                  :vocabulary="vocabulary ?? undefined"
+                  mode="context"
+                />
+              </div>
+            </details>
           </form>
           <ul v-if="preview?.related.length" class="boot-list">
             <li v-for="candidate in preview.related" :key="candidate.entryId">
               <StrataSwatch :band="entryBandOf(candidate, candidate.kind)" plain />
               <RouterLink
-                :to="entryLink(candidate.circleId, candidate.shortId)"
+                v-if="candidate.circleId === circleId"
+                :to="entryRoute(candidate.circleId, candidate.shortId)"
                 class="boot-uri"
                 :title="candidate.shortId"
               >
                 {{ candidate.title }}
               </RouterLink>
+              <button
+                v-else
+                type="button"
+                class="boot-uri boot-cross"
+                :title="`${candidate.shortId}（其他记忆圈，点击侧栏预览）`"
+                @click="drawerTarget = { circleId: candidate.circleId, shortId: candidate.shortId }"
+              >
+                {{ candidate.title }}
+              </button>
               <span class="boot-layer">{{ entryKindLabels[candidate.kind] }}</span>
               <span class="boot-chars">{{ candidate.score.toFixed(2) }}</span>
             </li>
@@ -319,12 +490,19 @@ const entryLink = (targetCircleId: string, shortId: string) => ({
         在测试台打开
       </UButton>
     </div>
+
+    <CrossCirclePreviewDrawer
+      :target="drawerTarget"
+      :current-circle-id="circleId"
+      @close="drawerTarget = null"
+      @switch-to="switchToEntry"
+    />
   </section>
 </template>
 
 <style scoped>
 .boot-total {
-  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: 14px;
   white-space: nowrap;
 }
@@ -377,6 +555,15 @@ const entryLink = (targetCircleId: string, shortId: string) => ({
   flex: 1 1 0;
   min-width: 0;
 }
+.boot-cross {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
 .boot-uri:hover {
   text-decoration: underline;
   text-underline-offset: 3px;
@@ -395,7 +582,7 @@ const entryLink = (targetCircleId: string, shortId: string) => ({
 .boot-chars {
   flex: none;
   min-width: 44px;
-  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: 13px;
   text-align: right;
 }
@@ -413,7 +600,7 @@ const entryLink = (targetCircleId: string, shortId: string) => ({
 }
 .boot-date {
   flex: none;
-  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: 13px;
   color: var(--ui-text-muted);
 }
@@ -431,11 +618,36 @@ const entryLink = (targetCircleId: string, shortId: string) => ({
 .boot-sub-head {
   border-color: var(--ui-border-accented);
 }
+.boot-sim-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 9px;
+}
 .boot-project {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
   gap: 6px;
-  margin-top: 9px;
+}
+.boot-options {
+  border: 1px solid var(--ui-border);
+  padding: 6px 8px;
+}
+.boot-options summary {
+  font-size: 13px;
+  color: var(--ui-text-muted);
+  cursor: pointer;
+}
+.boot-options-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+.boot-context-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
 }
 .boot-raw {
   margin-top: 12px;

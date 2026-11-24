@@ -56,6 +56,7 @@ export function useConvertCredential(
   circleId: Ref<string>,
   shortId: Ref<string | null>,
   onConverted: (entry: ConsoleEntryView, result: ConvertedToCredential) => void,
+  open: Ref<boolean> = computed(() => shortId.value !== null),
 ) {
   const queryClient = useQueryClient()
 
@@ -73,7 +74,7 @@ export function useConvertCredential(
   })
   const newStore = useNewCredentialStore(
     circleId,
-    computed(() => shortId.value !== null),
+    computed(() => open.value && shortId.value !== null),
   )
   const candidates = ref<PlaintextCandidate[]>([])
   const shown = ref(false)

@@ -101,6 +101,11 @@ async function loadStatus() {
     await router.replace({ name: 'database-unavailable' })
     return
   }
+  // 库是重构之前的结构：到旧版升级页就地迁移
+  if (status.value.database.state === 'legacy') {
+    await router.replace({ name: 'legacy-upgrade' })
+    return
+  }
   if (!status.value.needsSetup) {
     // 接入的是已有实例：用已有账号登录
     await router.replace({ name: 'login' })
@@ -431,9 +436,9 @@ async function submitAdmin() {
             />
           </UFormField>
           <UFormField
-            label="共享记忆圈名（可选）"
+            label="独立圈名称（可选）"
             name="circleName"
-            help="留空仅创建个人记忆圈；填写时同步创建一个共享圈"
+            help="留空仅创建个人记忆圈；填写时同步创建一个独立圈"
           >
             <UInput v-model="circleNameText" size="lg" class="w-full" />
           </UFormField>

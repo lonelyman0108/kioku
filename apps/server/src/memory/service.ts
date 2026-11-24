@@ -1171,10 +1171,21 @@ export class EntryService {
       }
     }
 
-    const links = await resolveEntryNeighbors(tx, this.ctx.access, row, {
-      allowedSourceVariantIds: options.allowedSourceVariantIds ?? activeVariantIds,
-      ...(options.now ? { now: options.now } : {}),
-    })
+    const links =
+      this.ctx.neighborAccess && this.ctx.neighborAccess.circles.size > this.ctx.access.circles.size
+        ? await withCircles(
+            tx,
+            { read: [...this.ctx.neighborAccess.circles.keys()] },
+            (linkTx, linkNow) =>
+              resolveEntryNeighbors(linkTx, this.ctx.neighborAccess!, row, {
+                allowedSourceVariantIds: options.allowedSourceVariantIds ?? activeVariantIds,
+                now: options.now ?? linkNow,
+              }),
+          )
+        : await resolveEntryNeighbors(tx, this.ctx.access, row, {
+            allowedSourceVariantIds: options.allowedSourceVariantIds ?? activeVariantIds,
+            ...(options.now ? { now: options.now } : {}),
+          })
 
     const baseView: EntryView = {
       id: row.id,
@@ -1205,11 +1216,24 @@ export class EntryService {
       const anyIgnored = variantRows.every((v) => !v.sensitiveCredential && !v.sensitivePii)
         ? false
         : variantRows.some((v) => variantIgnoredNow(v))
+      let subjectRef: ConsoleEntryView['subject'] = null
+      if (row.subjectId) {
+        const [subjectRow] = await tx
+          .select({ id: subjects.id, kind: subjects.kind, displayName: subjects.displayName })
+          .from(subjects)
+          .where(eq(subjects.id, row.subjectId))
+          .limit(1)
+        if (subjectRow) subjectRef = subjectRow
+      }
       const consoleView: ConsoleEntryView = {
         ...baseView,
         contentHidden: secret && !options.revealContent,
         plaintextIgnored: anyIgnored,
         variants: consoleVariants,
+        subject: subjectRef,
+        conversationId: row.conversationId ?? null,
+        clientId: row.clientId ?? null,
+        expiresAt: row.expiresAt ? row.expiresAt.toISOString() : null,
       }
       if (options.untouchedPlaintext) {
         Object.defineProperty(consoleView, UNTOUCHED_PLAINTEXT, { value: true })
@@ -2904,14 +2928,18 @@ export class EntryService {
           const variants = byEntry.get(row.id) ?? []
           const activeFindings = variants
             .filter((v) =>
-              needsSensitiveInboxAlert({
-                circleKind,
-                sensitivity: row.sensitivity,
-                provenance: row.provenance,
-                sensitiveCredential: v.sensitiveCredential,
-                sensitivePii: v.sensitivePii,
-                plaintextIgnored: variantIgnoredNow(v),
-              }),
+              query.plaintext === 'ignored'
+                ? row.sensitivity !== 'secret' &&
+                  variantIgnoredNow(v) &&
+                  (v.sensitiveCredential || v.sensitivePii)
+                : needsSensitiveInboxAlert({
+                    circleKind,
+                    sensitivity: row.sensitivity,
+                    provenance: row.provenance,
+                    sensitiveCredential: v.sensitiveCredential,
+                    sensitivePii: v.sensitivePii,
+                    plaintextIgnored: variantIgnoredNow(v),
+                  }),
             )
             .flatMap((v) => v.sensitiveFindings)
           const hasCred = variants.some(
@@ -5036,6 +5064,7 @@ export class EntryService {
             version: row.version,
             deletedAt: row.deletedAt!.toISOString(),
             validTo: row.validTo ? row.validTo.toISOString() : null,
+            expiresAt: row.expiresAt ? row.expiresAt.toISOString() : null,
           })),
           nextCursor:
             rows.length > query.limit && last ? encodeTimeCursor(last.micros, last.row.id) : null,

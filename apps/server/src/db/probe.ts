@@ -2,6 +2,7 @@ import { createHash, createHmac, pbkdf2Sync, randomBytes } from 'node:crypto'
 
 import {
   DATABASE_EXTENSIONS,
+  LEGACY_SCHEMA,
   type DatabaseCheck,
   type DatabaseConnection,
   type DatabaseExtension,
@@ -245,7 +246,14 @@ async function gatherFacts(
     select n.nspname as schema, c.relname as name
     from pg_class c join pg_namespace n on n.oid = c.relnamespace
     where c.relkind in ('r', 'p', 'v', 'm', 'f') and not c.relispartition
-      and n.nspname not in ('pg_catalog', 'information_schema', 'drizzle', 'pgboss')
+      and n.nspname not in (
+        'pg_catalog',
+        'information_schema',
+        'drizzle',
+        'pgboss',
+        ${LEGACY_SCHEMA},
+        ${`${LEGACY_SCHEMA}_pgboss`}
+      )
       and n.nspname not like 'pg\\_%'
       and not exists (
         select 1 from pg_depend d

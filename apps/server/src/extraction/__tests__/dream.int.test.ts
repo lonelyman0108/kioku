@@ -7,7 +7,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { addMember, createPersonalCircle, createSharedCircle } from '../../access/circles'
 import { createClient } from '../../access/clients'
 import { saveCirclePrivacy } from '../../credential/privacy'
-import { withCircle, type Database, type Db } from '../../db/client'
+import { databaseNow, withCircle, type Database, type Db } from '../../db/client'
 import {
   accounts,
   circleMembers,
@@ -541,7 +541,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     })
 
     const conv = await seedLocalConversation(aliceId, 'macbook', 'kioku')
-    const now = new Date('2026-11-19T00:00:00Z')
+    const now = await databaseNow(database.db)
     const expiringDate = new Date(now.getTime() + 3 * 86_400_000)
     const distantDate = new Date(now.getTime() + 12 * 86_400_000)
 

@@ -104,6 +104,9 @@ const anyConvertible = computed(() => rows.value.some((row) => !save.convertBloc
         <ul class="spots">
           <li v-for="(row, i) in rows" :key="i" class="spot">
             <p class="spot-head">
+              <span v-if="row.spot.variantLabel" class="text-xs text-muted">{{
+                row.spot.variantLabel
+              }}</span>
               <span>{{ linesText(row.spot.lines) }}</span>
               <span>{{ PLAINTEXT_KIND_NAMES[row.spot.kind] }}</span>
               <code v-if="row.spot.value" class="spot-preview">{{

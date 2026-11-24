@@ -27,6 +27,16 @@ const html = computed(() =>
 // 点了关键词：只有一条记忆有它就直接打开，有好几条就列出来选
 const choices = ref<{ keyword: string; shortIds: string[] } | null>(null)
 function onClick(event: MouseEvent) {
+  if (
+    event.defaultPrevented ||
+    event.button !== 0 ||
+    event.metaKey ||
+    event.ctrlKey ||
+    event.shiftKey ||
+    event.altKey
+  ) {
+    return
+  }
   const target = event.target as HTMLElement | null
   const credential = target?.closest<HTMLAnchorElement>('a.kioku-cred')
   if (credential?.dataset.credential) {
@@ -257,7 +267,7 @@ function choose(shortId: string) {
 .kioku-markdown :deep(mark.kioku-own-keyword) {
   background: none;
   color: inherit;
-  text-decoration: underline 2px var(--layer-user);
+  text-decoration: underline 2px var(--layer-personal);
   text-underline-offset: 3px;
 }
 /* 疑似明文的值：红色加下划线，红色是留给告警的 */

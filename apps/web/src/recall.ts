@@ -10,9 +10,9 @@ import { readFailure } from './api/client'
 import { usableKeys } from './apps'
 import { recallSourceLabels } from './labels'
 
-// 召回页的计算：各接入实例的调用量、分数轴
+// 召回页的计算：各客户端的调用量、分数轴
 
-// 调试能选的访问密钥：只来自传进来的接入实例（当前账号是所有者的），只要有效的。一个接入实例读取失败不影响别的，
+// 调试能选的访问密钥：只来自传进来的客户端（当前账号是所有者的），只要有效的。一个客户端读取失败不影响别的，
 // 失败的单独列出来；读到过又刷新失败的，手里的访问密钥照样能选。results 和 clients 一一对应
 export function debugKeyChoices(
   clients: readonly ClientInfo[],
@@ -29,7 +29,7 @@ export function debugKeyChoices(
   }
 }
 
-// 一个接入实例的调用量条里的一段：按来路分，占这个接入实例总量的比例
+// 一个客户端的调用量条里的一段：按来路分，占这个客户端总量的比例
 export interface VolumeSegment {
   source: RecallSource
   label: string
@@ -44,10 +44,10 @@ export interface VolumeBar {
   segments: VolumeSegment[]
 }
 
-// 段的先后固定：每轮输入最多，放最前面，各接入实例之间能对着看
+// 段的先后固定：每轮输入最多，放最前面，各客户端之间能对着看
 const SOURCE_ORDER: RecallSource[] = ['prompt.submit', 'session.start', 'mcp.search', 'rest.recall']
 
-// 条长按调用量的平方根：几十倍的差距下小接入实例也看得清，确切的次数写在旁边
+// 条长按调用量的平方根：几十倍的差距下小客户端也看得清，确切的次数写在旁边
 export function volumeBars(clients: readonly ClientRecallVolume[]): VolumeBar[] {
   const longest = Math.sqrt(Math.max(0, ...clients.map((client) => client.total)))
   return clients.map((volume) => ({
@@ -69,7 +69,7 @@ export function volumeBars(clients: readonly ClientRecallVolume[]): VolumeBar[] 
   }))
 }
 
-// 调用次数加起来：只有当前账号能管访问密钥的接入实例，服务端只给这些
+// 调用次数加起来：只有当前账号能管访问密钥的客户端，服务端只给这些
 export const recallTotal = (clients: readonly ClientRecallVolume[]) =>
   clients.reduce((sum, client) => sum + client.total, 0)
 
@@ -104,7 +104,7 @@ export interface ScorePart {
   share: number
 }
 
-// 六路的得分（向量、全文、关键词、优先级、切面、关联）。没走到的一路 value 是 0，负分（切面冲突惩罚）条上不占正比
+// 六路的得分（向量、全文、关键词、优先级、语境、关联）。没走到的一路 value 是 0，负分（语境冲突惩罚）条上不占正比
 export function scoreParts(candidate: DebugCandidate): ScorePart[] {
   const { semantic, fulltext, glossary, priority, facet, link } = candidate.breakdown
   const raw = [
@@ -112,7 +112,7 @@ export function scoreParts(candidate: DebugCandidate): ScorePart[] {
     { label: '全文', value: fulltext },
     { label: '关键词', value: glossary },
     { label: '优先级', value: priority },
-    { label: '切面', value: facet },
+    { label: '语境', value: facet },
     { label: '关联', value: link },
   ]
   const positiveSum = raw.reduce((acc, p) => acc + Math.max(0, p.value), 0)

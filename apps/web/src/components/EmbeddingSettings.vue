@@ -57,7 +57,11 @@ const errorOf = (model: string | undefined) => {
   const e = status.data.value?.lastError
   return e && e.model === model ? e : null
 }
-const refresh = () => queryClient.invalidateQueries({ queryKey: ['settings', 'embedding'] })
+const refresh = () =>
+  Promise.all([
+    queryClient.invalidateQueries({ queryKey: ['settings', 'embedding'] }),
+    queryClient.invalidateQueries({ queryKey: ['instance-system'] }),
+  ])
 
 // 正在用的模型：模型标识只在第一次配置时填，之后要换就走换模型
 const modelId = ref('')
@@ -532,7 +536,13 @@ async function rebuild() {
     </template>
   </SettingsColumns>
 
-  <UModal :open="confirmStart" title="开始更换模型？" @update:open="(v) => (confirmStart = v)">
+  <UModal
+    :open="confirmStart"
+    title="开始更换模型？"
+    :dismissible="!savingNext"
+    :close="!savingNext"
+    @update:open="(v) => (!v && savingNext) || (confirmStart = v)"
+  >
     <template #body>
       <p class="text-sm">
         后台将为全部记忆生成 {{ nextModel }} 的向量，产生大量接口请求。补齐前召回继续使用
@@ -541,12 +551,24 @@ async function rebuild() {
     </template>
     <template #footer>
       <div class="flex w-full justify-end gap-2">
-        <UButton color="neutral" variant="ghost" @click="confirmStart = false">取消</UButton>
+        <UButton
+          color="neutral"
+          variant="ghost"
+          :disabled="savingNext"
+          @click="confirmStart = false"
+          >取消</UButton
+        >
         <UButton :loading="savingNext" @click="saveNext">开始</UButton>
       </div>
     </template>
   </UModal>
-  <UModal :open="confirmSwitch" title="立即切换？" @update:open="(v) => (confirmSwitch = v)">
+  <UModal
+    :open="confirmSwitch"
+    title="立即切换？"
+    :dismissible="!switching"
+    :close="!switching"
+    @update:open="(v) => (!v && switching) || (confirmSwitch = v)"
+  >
     <template #body>
       <p class="text-sm">
         <template v-if="remaining">
@@ -559,12 +581,24 @@ async function rebuild() {
     </template>
     <template #footer>
       <div class="flex w-full justify-end gap-2">
-        <UButton color="neutral" variant="ghost" @click="confirmSwitch = false">取消</UButton>
+        <UButton
+          color="neutral"
+          variant="ghost"
+          :disabled="switching"
+          @click="confirmSwitch = false"
+          >取消</UButton
+        >
         <UButton :loading="switching" @click="switchNow">切换</UButton>
       </div>
     </template>
   </UModal>
-  <UModal :open="confirmAbort" title="放弃更换模型？" @update:open="(v) => (confirmAbort = v)">
+  <UModal
+    :open="confirmAbort"
+    title="放弃更换模型？"
+    :dismissible="!aborting"
+    :close="!aborting"
+    @update:open="(v) => (!v && aborting) || (confirmAbort = v)"
+  >
     <template #body>
       <p class="text-sm">
         {{ next?.model }} 已生成的向量将被删除，召回继续使用 {{ active?.model }}。
@@ -572,7 +606,9 @@ async function rebuild() {
     </template>
     <template #footer>
       <div class="flex w-full justify-end gap-2">
-        <UButton color="neutral" variant="ghost" @click="confirmAbort = false">取消</UButton>
+        <UButton color="neutral" variant="ghost" :disabled="aborting" @click="confirmAbort = false"
+          >取消</UButton
+        >
         <UButton color="error" :loading="aborting" @click="abort">放弃</UButton>
       </div>
     </template>

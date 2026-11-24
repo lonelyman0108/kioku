@@ -4,11 +4,14 @@ import type { ReviewKind } from '@kioku/contracts'
 import { useInfiniteQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 
+import { invalidateActivity } from '../activity'
 import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
 import { heardFrom } from '../conversations'
+import { entryRoute } from '../routes'
 import { formatRelative, formatTime } from '../time'
+import ConsequenceModal from './ConsequenceModal.vue'
 import Hint from './Hint.vue'
 import EmptyState from './strata/EmptyState.vue'
 import NoteLine from './strata/NoteLine.vue'
@@ -50,6 +53,14 @@ const total = computed(() => queue.data.value?.pages[0]?.total ?? 0)
 type Seen = { id: string; version: number }
 const selected = ref(new Map<string, number>())
 watch([() => props.circleId, kind], () => (selected.value = new Map()))
+watch(
+  () => props.circleId,
+  () => {
+    kind.value = 'all'
+    deleting.value = null
+    deleteError.value = null
+  },
+)
 const allSelected = computed(
   () => items.value.length > 0 && items.value.every((i) => selected.value.has(i.id)),
 )
@@ -66,6 +77,7 @@ const chosen = (): Seen[] => [...selected.value].map(([id, version]) => ({ id, v
 
 const busy = ref(false)
 const deleting = ref<Seen[] | null>(null)
+const deleteError = ref<string | null>(null)
 // 一次最多提交这么多条（接口的上限），选得多就分几批
 const BATCH = 100
 
@@ -73,6 +85,7 @@ async function act(action: 'confirm' | 'delete', items: Seen[]) {
   const cid = props.circleId
   const verb = action === 'confirm' ? '确认' : '删除'
   busy.value = true
+  if (action === 'delete') deleteError.value = null
   let done = 0
   let skipped = 0
   const submitted: string[] = []
@@ -84,6 +97,7 @@ async function act(action: 'confirm' | 'delete', items: Seen[]) {
       skipped += result.skipped
       submitted.push(...batch.map((b) => b.id))
     }
+    if (action === 'delete') deleting.value = null
     toast.add({
       title: skipped ? `已${verb} ${done} 条，${skipped} 条已被处理或修改` : `已${verb} ${done} 条`,
       color: 'success',
@@ -91,31 +105,31 @@ async function act(action: 'confirm' | 'delete', items: Seen[]) {
   } catch (err) {
     const message = err instanceof ApiError ? err.message : '处理失败'
     // 分批时前面几批已经提交了，告诉用户；没提交的留在选择里，可以再试
-    toast.add({
-      title: submitted.length ? `${message}（此前已${verb} ${done} 条）` : message,
-      color: 'error',
-    })
+    const fullMessage = submitted.length ? `${message}（此前已${verb} ${done} 条）` : message
+    if (action === 'delete') deleteError.value = fullMessage
+    else toast.add({ title: fullMessage, color: 'error' })
   } finally {
     const next = new Map(selected.value)
     for (const id of submitted) next.delete(id)
     selected.value = next
-    // 处理过的会出现在联系人页、记忆列表、已删除、变更记录与概览里；涉及它们的整理建议随之作废；条数跟着变
+    // 处理过的会出现在联系人页、记忆列表、双链、已删除、变更记录与概览里；涉及它们的整理建议随之作废；条数跟着变
     for (const key of [
       'review',
       'dream-suggestions',
       'subjects',
       'subject',
+      'entry',
       'entry-list',
       'entry-browse',
+      'entry-links',
       'entry-deleted',
-      'activity',
       'overview',
       'inbox-counts',
     ]) {
       void queryClient.invalidateQueries({ queryKey: [key, cid] })
     }
+    void invalidateActivity(queryClient, cid)
     busy.value = false
-    deleting.value = null
   }
 }
 </script>
@@ -124,9 +138,10 @@ async function act(action: 'confirm' | 'delete', items: Seen[]) {
   <div>
     <SectionHeading title="待确认内容">
       <template #hint>
-        <Hint
-          >这些内容来自群聊与陌生人私聊，来源未确认。确认后记为本人来源，有误的内容可删除。</Hint
-        >
+        <Hint>
+          这些内容来自群聊与陌生人私聊，来源未确认。确认后记为本人来源（可参与启动加载并激活正文中的
+          <span class="font-mono">[[m-xxxxxx]]</span> 双链），有误的内容可删除。
+        </Hint>
       </template>
     </SectionHeading>
     <div class="review-bar">
@@ -136,8 +151,12 @@ async function act(action: 'confirm' | 'delete', items: Seen[]) {
         label="全选已加载项"
         @update:model-value="(v) => toggleAll(v === true)"
       />
-      <span v-if="canAct && selected.size" class="review-count">已选 {{ selected.size }} 条</span>
-      <span v-else-if="queue.data.value" class="review-count">{{ total }} 条待确认</span>
+      <span v-if="canAct && selected.size" class="review-count tabular-nums"
+        >已选 {{ selected.size }} 条</span
+      >
+      <span v-else-if="queue.data.value" class="review-count tabular-nums"
+        >{{ total }} 条待确认</span
+      >
       <UTabs v-model="kind" :items="tabs" :content="false" size="sm" class="w-auto" />
       <div v-if="canAct && items.length" class="review-bulk">
         <UButton
@@ -153,7 +172,7 @@ async function act(action: 'confirm' | 'delete', items: Seen[]) {
           color="error"
           variant="outline"
           :disabled="!selected.size || busy"
-          @click="deleting = chosen()"
+          @click="((deleting = chosen()), (deleteError = null))"
         >
           删除所选
         </UButton>
@@ -196,6 +215,9 @@ async function act(action: 'confirm' | 'delete', items: Seen[]) {
           </span>
           <div class="row-content">
             <p>{{ item.content }}</p>
+            <RouterLink :to="entryRoute(circleId, item.shortId)" class="row-short-id">
+              {{ item.shortId }}
+            </RouterLink>
           </div>
           <span class="row-source">{{ heardFrom(item.scope) }}</span>
           <time class="row-time" :datetime="item.createdAt" :title="formatTime(item.createdAt)">
@@ -216,7 +238,7 @@ async function act(action: 'confirm' | 'delete', items: Seen[]) {
               color="error"
               variant="outline"
               :disabled="busy"
-              @click="deleting = [item]"
+              @click="((deleting = [item]), (deleteError = null))"
             >
               删除
             </UButton>
@@ -238,27 +260,19 @@ async function act(action: 'confirm' | 'delete', items: Seen[]) {
       </div>
     </template>
 
-    <UModal
+    <ConsequenceModal
       :open="deleting !== null"
       title="删除选中的内容？"
-      @update:open="(v) => !v && (deleting = null)"
-    >
-      <template #body>
-        <p class="text-sm">
-          将删除
-          {{ deleting?.length ?? 0 }}
-          条内容，删除后不再注入对话。从对话中抽取的内容删除后，无法在管理界面恢复。
-        </p>
-      </template>
-      <template #footer>
-        <div class="flex w-full justify-end gap-2">
-          <UButton color="neutral" variant="ghost" @click="deleting = null">取消</UButton>
-          <UButton color="error" :loading="busy" @click="deleting && act('delete', deleting)"
-            >删除</UButton
-          >
-        </div>
-      </template>
-    </UModal>
+      :consequences="[
+        `将删除 ${deleting?.length ?? 0} 条待确认内容，删除后立即停止注入对话。`,
+        '已删除的内容会进入「记忆 → 已删除」，可在保留期内恢复，过期后永久清理。',
+      ]"
+      action="删除"
+      :busy="busy"
+      :error="deleteError"
+      @close="deleting = null"
+      @confirm="deleting && act('delete', deleting)"
+    />
   </div>
 </template>
 
@@ -328,6 +342,18 @@ async function act(action: 'confirm' | 'delete', items: Seen[]) {
 .row-content p {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+.row-short-id {
+  display: inline-block;
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.row-short-id:hover {
+  color: var(--ui-text-highlighted);
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 .row-source,
 .row-time {

@@ -104,7 +104,12 @@ async function save(next: ClientGroupRule[], done: string): Promise<boolean> {
     await queryClient.cancelQueries({ queryKey: key })
     const saved = await api.saveClientGroupRules(cid, id, { rules: next })
     queryClient.setQueryData(key, saved)
-    void queryClient.invalidateQueries({ queryKey: key })
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: key }),
+      queryClient.invalidateQueries({ queryKey: ['personas', cid] }),
+      queryClient.invalidateQueries({ queryKey: ['persona', cid] }),
+      queryClient.invalidateQueries({ queryKey: ['clients', cid] }),
+    ])
     toast.add({ title: done, color: 'success' })
     return true
   } catch (err) {
@@ -161,7 +166,7 @@ function remove(groupSubjectId: string) {
     <p class="group-title">
       按群规则
       <Hint>
-        可为指定群（或频道）单独覆盖人格，或开启单群隔离锁。开启单群隔离锁后，本群发言人的事实不会通过「拟人跨群识人」流入其他群，其他群的印象也不会流入本群。每条规则须指定人格或开启隔离锁之一。
+        可为指定群（或频道）单独覆盖人格，或开启单群隔离锁。开启单群隔离锁后，本群发言人的事实不会通过「跨群认人」流入其他群，其他群的印象也不会流入本群。每条规则须指定人格或开启隔离锁之一。
       </Hint>
     </p>
     <NoteLine v-if="rules.isError.value" tone="error">
@@ -192,7 +197,7 @@ function remove(groupSubjectId: string) {
           <span v-else class="group-persona">{{ personaName(rule.personaId) }}</span>
 
           <label v-if="canManage" class="lock-toggle" :title="'单群隔离锁'">
-            <UIcon :name="icons.lock" class="size-3.5 text-muted" />
+            <UIcon :name="icons.lock" class="inline-block size-3.5 text-muted" />
             <USwitch
               size="xs"
               :model-value="rule.isolateGroupMemory"
@@ -205,7 +210,7 @@ function remove(groupSubjectId: string) {
             <span class="lock-label">单群隔离锁</span>
           </label>
           <span v-else-if="rule.isolateGroupMemory" class="lock-badge">
-            <UIcon :name="icons.lock" class="size-3" />
+            <UIcon :name="icons.lock" class="inline-block size-3" />
             单群隔离锁
           </span>
 
@@ -221,7 +226,7 @@ function remove(groupSubjectId: string) {
           />
         </li>
       </ul>
-      <p v-else class="group-empty">暂无按群规则，所有群沿用接入实例默认人格与跨群识人模式</p>
+      <p v-else class="group-empty">暂无按群规则，所有群沿用客户端默认人格与跨群认人模式</p>
       <div v-if="canManage" class="group-add">
         <USelectMenu
           v-model="newGroup"

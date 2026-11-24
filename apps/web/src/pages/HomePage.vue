@@ -29,14 +29,28 @@ const newCircle = useNewCircleEntry()
         "
       >
         <template v-if="newCircle" #actions>
-          <UButton :icon="icons.add" @click="newCircle.open.value = true">新建共享圈</UButton>
-          <UButton
-            :icon="icons.importCircle"
-            color="neutral"
-            variant="outline"
-            @click="newCircle.importing.value = true"
-            >导入记忆圈</UButton
-          >
+          <div class="grid justify-items-start gap-2">
+            <div class="flex flex-wrap gap-2">
+              <UButton
+                :icon="icons.add"
+                :disabled="Boolean(newCircle.blocked.value)"
+                @click="newCircle.open.value = true"
+              >
+                新建独立圈
+              </UButton>
+              <UButton
+                :icon="icons.importCircle"
+                color="neutral"
+                variant="outline"
+                @click="newCircle.importing.value = true"
+              >
+                导入记忆圈
+              </UButton>
+            </div>
+            <p v-if="newCircle.blocked.value" class="text-xs text-muted">
+              {{ newCircle.blocked.value }}
+            </p>
+          </div>
         </template>
       </EmptyState>
     </template>

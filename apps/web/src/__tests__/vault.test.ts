@@ -234,7 +234,7 @@ describe('访问记录', () => {
       credentialEventParts(
         event({ type: 'update', changes: ['fields', 'clientIds', 'allowedRealms', 'other'] }),
       ),
-    ).toEqual(['修改了字段对应、限定的接入实例、允许的场域、other'])
+    ).toEqual(['修改了字段对应、限定的客户端、允许的场域、other'])
     expect(credentialEventParts(event({ via: 'mystery', chatType: 'weird' }))).toEqual([
       'mystery',
       '会话上下文：weird',

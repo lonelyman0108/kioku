@@ -145,10 +145,12 @@ describe('requires', () => {
       '个人圈（personal）',
     )
     expect(unmetRequirement({ circleKind: 'personal' }, READONLY, 'personal')).toBeNull()
-    expect(unmetRequirement({ writeKinds: ['entry'] }, READONLY)).toContain('无权写入词条（entry）')
+    expect(unmetRequirement({ writeKinds: ['entry'] }, READONLY)).toContain(
+      '无权写入正式记忆（entry）',
+    )
     expect(
       unmetRequirement({ readKinds: ['fact'] }, { ...READONLY, readKinds: ['entry'] }),
-    ).toContain('无权读取事实（fact）')
+    ).toContain('无权读取联系人事实（fact）')
     expect(unmetRequirement({ maxSensitivity: 'secret' }, READONLY)).toContain(
       '低于机密级（secret）',
     )
@@ -369,7 +371,7 @@ describe('变量与 capture', () => {
       ),
     )
     expect(result.steps.map((s) => s.status)).toEqual(['skipped', 'skipped'])
-    expect(result.steps[0]!.reason).toContain('无权写入词条（entry）')
+    expect(result.steps[0]!.reason).toContain('无权写入正式记忆（entry）')
     expect(result.steps[1]!.reason).toContain('${version}')
     expect(seen).toHaveLength(0)
     expect(result.ok).toBe(true)

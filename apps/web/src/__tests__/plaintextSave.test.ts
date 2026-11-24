@@ -174,18 +174,20 @@ describe('弹窗处理完之后', () => {
 })
 
 describe('多变体切片保存检测', () => {
-  it('多变体切片搬移已有明文不算新增，仅检出新加入的值并可批量替换', () => {
-    const before = [{ content: '密码：hunter22' }]
-    const moved = addedVariantSpots(before, [
-      { content: '说明文字' },
-      { content: 'token: hunter22' },
+  it('多变体逐变体独立检出新增明文并按变体内行号标注，可批量替换', () => {
+    const before = [{ when: {}, content: '密码：hunter22' }]
+    const unchanged = addedVariantSpots(before, [
+      { when: {}, content: '密码：hunter22' },
+      { when: { env: ['macos'] }, content: '普通补充说明' },
     ])
-    expect(moved.spots).toEqual([])
+    expect(unchanged.spots).toEqual([])
     const added = addedVariantSpots(before, [
-      { content: '密码：hunter22' },
-      { content: 'token=abcd1234' },
+      { when: {}, content: '密码：hunter22' },
+      { when: { env: ['macos'] }, content: 'token=abcd1234', label: 'macOS' },
     ])
-    expect(added.spots).toEqual([{ value: 'abcd1234', lines: [2], kind: 'label', field: 'token' }])
+    expect(added.spots).toEqual([
+      { value: 'abcd1234', lines: [1], kind: 'label', field: 'token', variantLabel: 'macOS' },
+    ])
     expect(
       replaceVariantsValues(
         [{ content: '密码：hunter22' }, { content: 'token=abcd1234' }],

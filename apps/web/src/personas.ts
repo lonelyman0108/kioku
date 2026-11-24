@@ -146,6 +146,7 @@ export function inheritedGroups(
         name: '祖先人格',
         extendsId: null,
         description: null,
+        groupRuleCount: 0,
       }
       groups.set(trait.personaId, { persona: ancestor, traits: [trait] })
     }

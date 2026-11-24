@@ -18,7 +18,7 @@ const busy = ref(false)
     @update:open="(v) => !v && !busy && emit('close')"
   >
     <template #body>
-      <SpaceImport v-model:busy="busy" bare @imported="emit('close')" />
+      <SpaceImport v-if="open" v-model:busy="busy" bare @imported="emit('close')" />
     </template>
   </UModal>
 </template>

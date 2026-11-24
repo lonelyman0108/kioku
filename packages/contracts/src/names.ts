@@ -27,22 +27,22 @@ import type {
 
 export const CIRCLE_KIND_NAMES: Record<CircleKind, string> = {
   personal: '个人圈',
-  shared: '共享圈',
+  shared: '独立圈',
 }
 
 export const ENTRY_KIND_NAMES: Record<EntryKind, string> = {
-  entry: '词条',
-  fact: '事实',
-  episode: '摘要',
+  entry: '正式记忆',
+  fact: '联系人事实',
+  episode: '会话摘要',
 }
 
 export const STRATA_BAND_NAMES: Record<StrataBand, string> = {
   episode: '会话摘要',
   fact: '联系人事实',
-  personal: '个人圈词条',
-  'shared-away': '客场共享词条',
+  personal: '个人圈记忆',
+  'shared-away': '关联圈记忆',
   persona: '独立人格',
-  primary: '主场词条',
+  primary: '主圈记忆',
 }
 
 export const SENSITIVITY_NAMES: Record<Sensitivity, string> = {
@@ -59,13 +59,13 @@ export const CREDENTIAL_CAPABILITY_NAMES: Record<CredentialCapability, string> =
 }
 
 export const PERSON_MEMORY_MODE_NAMES: Record<PersonMemoryMode, string> = {
-  persona_shared: '拟人跨群识人',
-  strict: '严格按群隔离',
+  persona_shared: '跨群认人',
+  strict: '按群隔离',
 }
 
 export const FACET_MATCH_MODE_NAMES: Record<FacetMatchMode, string> = {
-  exclusive: '互斥聚焦',
-  additive: '叠加加权',
+  exclusive: '单选互斥',
+  additive: '多选叠加',
 }
 
 export const BUILTIN_FACET_NAMES: Record<BuiltinFacetKey, string> = {
@@ -111,10 +111,10 @@ export const CREDENTIAL_ACCESS_RESULT_NAMES: Record<CredentialAccessResult, stri
 export const CREDENTIAL_ACCESS_REASON_NAMES: Record<CredentialAccessReason, string> = {
   capability: '凭据能力不足',
   scope: '读取范围不足',
-  circle: '不在主场圈范围',
+  circle: '不在主圈范围',
   realm: '场域白名单不允许',
   context: '会话上下文不允许',
-  client: '限定给了别的接入实例',
+  client: '限定给了别的客户端',
   item_unavailable: '条目不可用',
   field_missing: '条目里没有这个字段',
   reauth_required: '需要重新登录',
@@ -171,9 +171,9 @@ export const ACTIVITY_TYPE_NAMES: Record<ActivityType, string> = {
 export const ACTIVITY_FIELD_NAMES: Record<ActivityField, string> = {
   content: '正文',
   title: '标题',
-  variants: '切面切片',
+  variants: '变体',
   topics: '主题',
-  disclosure: '触发场景',
+  disclosure: '召回说明',
   priority: '优先级',
   sensitivity: '敏感级',
   glossary: '关键词',
@@ -181,15 +181,15 @@ export const ACTIVITY_FIELD_NAMES: Record<ActivityField, string> = {
 }
 
 export const DREAM_KIND_NAMES: Record<DreamSuggestionKind, string> = {
-  merge: '合并重复词条',
-  merge_variants: '合并为多变体词条',
-  facet_tag: '补充切面标签',
-  generalize: '跨项目共性去标上浮',
-  distill: '事实提炼为词条',
+  merge: '合并重复记忆',
+  merge_variants: '合并为多变体记忆',
+  facet_tag: '补充适用条件',
+  generalize: '共性记忆去条件上浮',
+  distill: '事实提炼为正式记忆',
   distill_episode: '摘要沉淀重要事件',
   stale: '疑似过时失效',
   review: '待确认内容审核',
-  promote: '高频词条提权',
+  promote: '高频记忆提权',
 }
 
 export const PLAINTEXT_KIND_NAMES: Record<PlaintextKind, string> = {

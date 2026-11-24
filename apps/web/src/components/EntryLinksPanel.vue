@@ -54,6 +54,8 @@ function bandOf(item: EntryLinkNeighbor) {
 }
 
 function circleLabel(item: EntryLinkNeighbor): string {
+  const found = me.data.value?.circles.find((c) => c.id === item.circleId)
+  if (found) return found.kind === 'personal' ? '个人圈' : found.name
   return kindOf(item) === 'personal' ? '个人圈' : item.circleSlug
 }
 </script>
@@ -73,11 +75,11 @@ function circleLabel(item: EntryLinkNeighbor): string {
             :band="bandOf(item)"
             :kind="item.kind"
             :sensitivity="item.sensitivity"
+            :local="item.circleId === circleId"
             @click="emit('open', item.shortId, item.circleId)"
           >
-            <span class="flex items-center gap-2 text-xs text-muted">
-              <span class="font-mono">{{ item.shortId }}</span>
-              <span v-if="item.circleId !== circleId">{{ circleLabel(item) }}</span>
+            <span v-if="item.circleId !== circleId" class="text-xs text-muted">
+              {{ circleLabel(item) }}
             </span>
           </MemoryRow>
         </li>
@@ -97,11 +99,11 @@ function circleLabel(item: EntryLinkNeighbor): string {
             :band="bandOf(item)"
             :kind="item.kind"
             :sensitivity="item.sensitivity"
+            :local="item.circleId === circleId"
             @click="emit('open', item.shortId, item.circleId)"
           >
-            <span class="flex items-center gap-2 text-xs text-muted">
-              <span class="font-mono">{{ item.shortId }}</span>
-              <span v-if="item.circleId !== circleId">{{ circleLabel(item) }}</span>
+            <span v-if="item.circleId !== circleId" class="text-xs text-muted">
+              {{ circleLabel(item) }}
             </span>
           </MemoryRow>
         </li>

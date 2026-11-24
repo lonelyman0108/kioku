@@ -31,7 +31,7 @@ const fields = computed(() => props.item.changes.map((c) => changeLabels[c] ?? c
 <template>
   <li class="recent-change">
     <span class="change-uri">
-      <StrataSwatch :band="band" :sensitivity="item.sensitivity" :width="14" :height="10" />
+      <StrataSwatch :band="band" :sensitivity="item.sensitivity" :width="14" :height="10" local />
       <RouterLink
         v-if="activityLinkable(item)"
         :to="entryRoute(circleId, item.shortId)"

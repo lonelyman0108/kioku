@@ -14,7 +14,7 @@ import type { QueryClient } from '@tanstack/vue-query'
 export { runtimeName } from './runtimes'
 
 // 高级设置的界面：各项的名称与单位、取值范围、来源的说法、试算的本地重算与补充的拼接。
-// 取值顺序是「实例默认 → 记忆圈 → 接入实例」，每一级只存覆盖了的项；补充只叠加，固定部分在前
+// 取值顺序是「实例默认 → 记忆圈 → 客户端」，每一级只存覆盖了的项；补充只叠加，固定部分在前
 
 export const SUPPLEMENT_MAX = PROMPT_SUPPLEMENT_MAX_CHARS
 
@@ -31,8 +31,8 @@ export const TUNING_META: Record<TuningKey, TuningMeta> = {
     description: '向量、全文、关键词加权后的分数，低于它的不注入',
   },
   'recall.relevanceFloor': {
-    label: '切面相关性门槛',
-    description: '达到此原始相关性后才叠加切面亲和调制',
+    label: '语境相关性门槛',
+    description: '达到此原始相关性后才叠加适用条件亲和加权',
   },
   'recall.subjectFacts': {
     label: '联系人事实条数',
@@ -51,12 +51,12 @@ export const TUNING_META: Record<TuningKey, TuningMeta> = {
   'recallWeights.priority': { label: '优先级', description: '优先级数字越小加分越多' },
   'boot.charBudget': {
     label: '字数预算',
-    description: '超出的词条只列标题，模型需要时再按短 ID 读取',
+    description: '超出的正式记忆只列标题，模型需要时再按短 ID 读取',
     unit: '字',
   },
   'boot.summaries.enabled': { label: '同一会话的会话摘要' },
   'boot.summaries.count': { label: '会话摘要条数', unit: '条' },
-  'boot.recent.enabled': { label: '近期更新的词条' },
+  'boot.recent.enabled': { label: '近期更新的记忆' },
   'boot.recent.count': { label: '近期更新条数', unit: '条' },
   'boot.related.enabled': { label: '与当前项目相关' },
   'boot.related.count': { label: '项目相关条数', unit: '条' },
@@ -135,7 +135,7 @@ export const LEVEL_NAMES: Record<SettingSource, string> = {
   builtin: '内置',
   instance: '实例',
   circle: '记忆圈',
-  client: '接入实例',
+  client: '客户端',
 }
 
 export const overriddenAt = (sources: TuningSources | undefined, level: SettingSource) =>
@@ -189,7 +189,7 @@ export function trialSettings(
     limit: limit ?? form.limit,
     note:
       client && parts.length
-        ? `接入实例「${client.name}」另有覆盖（${parts.join('、')}），按它的值试算，记忆圈的设置对它不起作用。`
+        ? `客户端「${client.name}」另有覆盖（${parts.join('、')}），按它的值试算，记忆圈的设置对它不起作用。`
         : null,
   }
 }
@@ -204,7 +204,7 @@ export function promptText(fixed: string, supplements: readonly (string | null |
   return [fixed, ...supplements.filter((s): s is string => !!s && s.trim() !== '')].join('\n')
 }
 
-// 查询键：三级的视图互相依赖（实例改了，记忆圈与接入实例的沿用值跟着变），保存后整组失效
+// 查询键：三级的视图互相依赖（实例改了，记忆圈与客户端的沿用值跟着变），保存后整组失效
 export const ADVANCED_KEY = ['advanced-settings'] as const
 export const instanceAdvancedKey = () => [...ADVANCED_KEY, 'instance'] as const
 export const circleAdvancedKey = (circleId: string) =>

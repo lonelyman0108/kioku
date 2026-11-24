@@ -24,6 +24,7 @@ import { icons } from '../icons'
 import { circleKindLabels, scopesSummary } from '../labels'
 import { whenLabel } from '../memoryDetail'
 import { formatRelative, formatShort, formatTime } from '../time'
+import ConsequenceModal from './ConsequenceModal.vue'
 import FacetWhenPicker from './FacetWhenPicker.vue'
 import Hint from './Hint.vue'
 import KeyScopeEditor from './KeyScopeEditor.vue'
@@ -48,7 +49,7 @@ const props = withDefaults(
     circleKind?: CircleKind
     clientId: string
     isClientOwner: boolean
-    // 签发与轮换还要求接入实例所有者在记忆圈里是所有者或编辑者；列表与吊销只看归属
+    // 签发与轮换还要求客户端所有者在记忆圈里是所有者或编辑者；列表与吊销只看归属
     canIssue: boolean
     isCircleOwner: boolean
     // 右边权限范围看的是哪个访问密钥
@@ -69,7 +70,7 @@ const toast = useToast()
 const queryClient = useQueryClient()
 const queryKey = computed(() => ['keys', props.circleId, props.clientId] as const)
 
-// 只有接入实例所有者和记忆圈所有者能看访问密钥列表
+// 只有客户端所有者和记忆圈所有者能看访问密钥列表
 const keys = useQuery({
   queryKey,
   queryFn: () => api.keys(props.circleId, props.clientId),
@@ -99,7 +100,7 @@ const otherCircles = computed(() =>
 )
 
 const personaItems = computed(() => [
-  { label: '沿用接入实例默认人格', value: null },
+  { label: '沿用客户端默认人格', value: null },
   ...props.personas.map((p) => ({ label: `${p.name}（${p.slug}）`, value: p.id })),
 ])
 
@@ -114,6 +115,22 @@ const form = reactive({
   contextFacets: {} as Record<string, string[]>,
   personaOverrideId: null as string | null,
 })
+
+function resetIssueForm() {
+  form.name = ''
+  form.preset = keyPresets[0]!.id
+  form.scopes = presetScopes(keyPresets[0]!, props.isCircleOwner)
+  form.linkedCircles = []
+  form.contextFacets = {}
+  form.personaOverrideId = null
+}
+
+function openIssue() {
+  resetIssueForm()
+  issued.value = null
+  issuedMode.value = 'create'
+  issueOpen.value = true
+}
 
 watch(
   () => props.isCircleOwner,
@@ -177,10 +194,11 @@ async function issue() {
 }
 
 function closeIssue() {
+  if (issuing.value) return
   issueOpen.value = false
   issued.value = null
   issuedMode.value = 'create'
-  form.name = ''
+  resetIssueForm()
 }
 
 // 轮换访问密钥：生成同名或重命名的新密钥，旧密钥立即吊销，新明文仅展示一次
@@ -229,9 +247,19 @@ const copy = (text: string) => copyText(text, '浏览器不允许自动复制，
 
 const revoking = ref<KeyInfo | null>(null)
 const revokingBusy = ref(false)
+const revokeError = ref<string | null>(null)
+const revokeConsequences = computed(() =>
+  revoking.value
+    ? [
+        `访问密钥 ${revoking.value.prefix}（${revoking.value.name}）将立即失效，使用它的客户端会立刻失去访问权限。`,
+        '吊销后不可恢复，需重新签发新访问密钥。',
+      ]
+    : [],
+)
 async function revoke() {
   if (!revoking.value || revokingBusy.value) return
   revokingBusy.value = true
+  revokeError.value = null
   try {
     await api.revokeKey(props.circleId, props.clientId, revoking.value.id)
     revoking.value = null
@@ -243,29 +271,59 @@ async function revoke() {
     ])
     toast.add({ title: '访问密钥已吊销', color: 'success' })
   } catch (err) {
-    toast.add({ title: err instanceof ApiError ? err.message : '吊销失败', color: 'error' })
+    revokeError.value = err instanceof ApiError ? err.message : '吊销失败'
   } finally {
     revokingBusy.value = false
   }
 }
 
+watch(
+  () => [props.circleId, props.clientId],
+  () => {
+    issueOpen.value = false
+    issued.value = null
+    issuedMode.value = 'create'
+    rotatingTarget.value = null
+    rotateName.value = ''
+    revoking.value = null
+    revokeError.value = null
+    resetIssueForm()
+  },
+)
+
 const personaLabel = (id: string | null) =>
   id ? (props.personas.find((p) => p.id === id)?.name ?? id) : null
 const facetsLabel = (when: Record<string, string[]>) =>
   Object.keys(when).length ? whenLabel(when, props.vocabulary ?? undefined) : null
+const linkedGrants = (key: KeyInfo) => {
+  const nonPrimary = key.circleGrants.filter((g) => !g.isPrimary)
+  if (nonPrimary.length) {
+    return nonPrimary.map((g) => ({
+      id: g.circleId,
+      name: g.circleName,
+      suffix: !g.active ? '（已失效）' : g.mode === 'read_write' ? '（可跨圈写入）' : '（只读）',
+    }))
+  }
+  const byId = new Map(props.linkedCircleOptions.map((c) => [c.id, c.name]))
+  return key.linkedCircles.map((g) => ({
+    id: g.circleId,
+    name: byId.get(g.circleId) ?? g.circleId.slice(0, 8),
+    suffix: g.mode === 'read_write' ? '（可跨圈写入）' : '（只读）',
+  }))
+}
 </script>
 
 <template>
   <section class="app-keys">
     <SectionHeading title="访问密钥">
       <template v-if="canIssue" #actions>
-        <UButton size="sm" color="primary" variant="outline" @click="issueOpen = true">
+        <UButton size="sm" color="primary" variant="outline" @click="openIssue">
           签发访问密钥
         </UButton>
       </template>
     </SectionHeading>
     <p v-if="!isClientOwner && !isCircleOwner" class="keys-empty">
-      仅接入实例所有者或记忆圈所有者可查看访问密钥
+      仅客户端所有者或记忆圈所有者可查看访问密钥
     </p>
     <template v-else>
       <NoteLine v-if="keys.isError.value" class="keys-failed" tone="error">
@@ -274,7 +332,7 @@ const facetsLabel = (when: Record<string, string[]>) =>
       <USkeleton v-if="keys.isPending.value" class="mt-3 h-24 w-full" />
       <EmptyState v-else-if="keys.data.value && !keys.data.value.length" title="暂无访问密钥">
         <template v-if="canIssue" #actions>
-          <UButton size="sm" color="primary" variant="outline" @click="issueOpen = true">
+          <UButton size="sm" color="primary" variant="outline" @click="openIssue">
             签发访问密钥
           </UButton>
         </template>
@@ -302,31 +360,32 @@ const facetsLabel = (when: Record<string, string[]>) =>
                 :scopes="key.scopes"
                 :title="`签发范围：${scopesSummary(key.scopes)}`"
               />
-              <span
+              <ul
                 v-if="
-                  key.linkedCircles.length ||
+                  linkedGrants(key).length ||
                   facetsLabel(key.contextFacets) ||
-                  key.personaOverrideId
+                  personaLabel(key.personaOverrideId)
                 "
-                class="key-lens"
+                class="key-lens-tags"
               >
-                <template v-if="key.linkedCircles.length">
-                  关联 {{ key.linkedCircles.length }} 个客场圈
-                </template>
-                <template v-if="facetsLabel(key.contextFacets)">
-                  · 切面 {{ facetsLabel(key.contextFacets) }}
-                </template>
-                <template v-if="personaLabel(key.personaOverrideId)">
-                  · 人格 {{ personaLabel(key.personaOverrideId) }}
-                </template>
-              </span>
+                <li v-for="grant in linkedGrants(key)" :key="grant.id">
+                  <span>关联圈 </span><b>{{ grant.name }}</b
+                  ><span>{{ grant.suffix }}</span>
+                </li>
+                <li v-if="facetsLabel(key.contextFacets)">
+                  <span>语境 </span><b>{{ facetsLabel(key.contextFacets) }}</b>
+                </li>
+                <li v-if="personaLabel(key.personaOverrideId)">
+                  <span>人格 </span><b>{{ personaLabel(key.personaOverrideId) }}</b>
+                </li>
+              </ul>
               <span v-if="key.lastUsedAt" :title="formatTime(key.lastUsedAt)">
                 最近使用 {{ formatRelative(key.lastUsedAt) }}
               </span>
               <span v-else>尚未使用</span>
               <span v-if="effectiveNote(key)" class="key-note">{{ effectiveNote(key) }}</span>
               <span v-if="failureOf(key.id)" class="key-note">
-                权限范围：{{ failureOf(key.id) }}
+                访问范围：{{ failureOf(key.id) }}
               </span>
             </span>
           </component>
@@ -347,7 +406,7 @@ const facetsLabel = (when: Record<string, string[]>) =>
               color="error"
               variant="outline"
               :aria-label="`吊销 ${key.name}`"
-              @click="revoking = key"
+              @click="((revoking = key), (revokeError = null))"
             >
               吊销
             </UButton>
@@ -378,10 +437,10 @@ const facetsLabel = (when: Record<string, string[]>) =>
     <UModal
       :open="issueOpen"
       :title="issuedMode === 'rotate' ? '已轮换访问密钥' : '签发访问密钥'"
-      :dismissible="!issued"
-      :close="!issued"
+      :dismissible="!issued && !issuing"
+      :close="!issued && !issuing"
       :ui="{ content: 'sm:max-w-4xl' }"
-      @update:open="(v) => (v ? (issueOpen = true) : !issued && closeIssue())"
+      @update:open="(v) => (v ? (issueOpen = true) : !issued && !issuing && closeIssue())"
     >
       <template #body>
         <div v-if="issued" class="space-y-3">
@@ -409,7 +468,7 @@ const facetsLabel = (when: Record<string, string[]>) =>
             <UFormField label="名称" help="用于辨认，例如设备加工具">
               <UInput v-model="form.name" class="w-full" :placeholder="defaultName" />
             </UFormField>
-            <UFormField label="人格覆盖" help="不指定时使用接入实例的默认人格或按群规则">
+            <UFormField label="人格覆盖" help="不指定时使用客户端默认人格或按群规则">
               <USelect
                 v-model="form.personaOverrideId"
                 :items="personaItems"
@@ -417,6 +476,22 @@ const facetsLabel = (when: Record<string, string[]>) =>
                 class="w-full"
               />
             </UFormField>
+          </div>
+
+          <div class="lens-block">
+            <p class="lens-title">
+              默认语境（动态焦点）
+              <Hint>
+                声明此访问密钥所在终端的环境或场域条件，决定启动加载变体编译与默认召回侧重；提问命中唤醒别名或切换项目时，普通记忆仍可跨语境与跨关联圈读取。
+              </Hint>
+            </p>
+            <FacetWhenPicker
+              v-model="form.contextFacets"
+              :circle-id="circleId"
+              :vocabulary="vocabulary"
+              :exclude-dimensions="['runtime']"
+              mode="context"
+            />
           </div>
 
           <KeyScopeEditor
@@ -429,9 +504,9 @@ const facetsLabel = (when: Record<string, string[]>) =>
 
           <div v-if="otherCircles.length" class="lens-block">
             <p class="lens-title">
-              关联客场记忆圈
+              关联记忆圈（跨圈访问范围）
               <Hint>
-                为密钥附加其他记忆圈的只读或跨圈写入视野（仅允许写入正式词条、敏感级最高私密，且受当前账号在该圈的角色约束）。
+                本客户端所在记忆圈为主圈；此处可额外勾选当前账号所属的其他记忆圈作为关联圈（仅允许跨圈写入正式记忆、最高私密，机密与凭据在关联圈一律不可读取）。
               </Hint>
             </p>
             <ul class="linked-list">
@@ -453,30 +528,18 @@ const facetsLabel = (when: Record<string, string[]>) =>
                   :items="[
                     { label: '仅读取', value: 'read' },
                     {
-                      label: '可跨圈写入词条',
+                      label: '可跨圈写入正式记忆',
                       value: 'read_write',
                       disabled: circle.role === 'viewer',
                     },
                   ]"
                   value-key="value"
                   size="xs"
-                  class="w-40"
+                  class="w-44"
                   @update:model-value="(v) => setLinkedMode(circle.id, v as LinkedCircleMode)"
                 />
               </li>
             </ul>
-          </div>
-
-          <div class="lens-block">
-            <p class="lens-title">
-              固定切面透镜
-              <Hint>为此访问密钥声明在场切面，影响召回排序与关联个人圈高优词条的穿透过滤。</Hint>
-            </p>
-            <FacetWhenPicker
-              v-model="form.contextFacets"
-              :circle-id="circleId"
-              :vocabulary="vocabulary"
-            />
           </div>
         </div>
       </template>
@@ -491,7 +554,9 @@ const facetsLabel = (when: Record<string, string[]>) =>
             <Hint label="凭据能力说明">{{ CREDENTIAL_CAPABILITY_HINT }}</Hint>
           </div>
           <div class="issue-actions">
-            <UButton color="neutral" variant="ghost" @click="closeIssue">取消</UButton>
+            <UButton color="neutral" variant="ghost" :disabled="issuing" @click="closeIssue"
+              >取消</UButton
+            >
             <UButton :loading="issuing" @click="issue">签发</UButton>
           </div>
         </div>
@@ -532,27 +597,16 @@ const facetsLabel = (when: Record<string, string[]>) =>
       </template>
     </UModal>
 
-    <UModal
+    <ConsequenceModal
       :open="revoking !== null"
       title="吊销这个访问密钥？"
-      :dismissible="!revokingBusy"
-      @update:open="(v) => !v && !revokingBusy && (revoking = null)"
-    >
-      <template #body>
-        <p class="text-sm">
-          吊销 <code>{{ revoking?.prefix }}</code
-          >（{{ revoking?.name }}）后，使用它的客户端将立即失去访问权限。
-        </p>
-      </template>
-      <template #footer>
-        <div class="flex w-full justify-end gap-2">
-          <UButton color="neutral" variant="ghost" :disabled="revokingBusy" @click="revoking = null"
-            >取消</UButton
-          >
-          <UButton color="error" :loading="revokingBusy" @click="revoke">吊销</UButton>
-        </div>
-      </template>
-    </UModal>
+      :consequences="revokeConsequences"
+      action="吊销"
+      :busy="revokingBusy"
+      :error="revokeError"
+      @close="revoking = null"
+      @confirm="revoke"
+    />
   </section>
 </template>
 
@@ -604,8 +658,24 @@ button.key-main:focus-visible {
   font-size: 13px;
   color: var(--ui-text);
 }
-.key-lens {
+.key-lens-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 2px 0;
+}
+.key-lens-tags li {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 5px;
+  border: 1px solid var(--ui-border-accented);
   font-size: 12px;
+  line-height: 18px;
+  color: var(--ui-text-toned);
+}
+.key-lens-tags b {
+  font-weight: 600;
+  color: var(--ui-text-highlighted);
 }
 .key-note {
   color: var(--ui-warning);
@@ -713,11 +783,13 @@ button.key-main:focus-visible {
 .key-tags {
   margin: 2px 0;
 }
-.key-row.on .key-tags :deep(li) {
+.key-row.on .key-tags :deep(li),
+.key-row.on .key-lens-tags li {
   border-color: var(--strata-on-selected-muted);
   color: var(--strata-on-selected-muted);
 }
-.key-row.on .key-tags :deep(b) {
+.key-row.on .key-tags :deep(b),
+.key-row.on .key-lens-tags b {
   color: var(--strata-on-selected);
 }
 </style>

@@ -5,7 +5,11 @@ import { VueQueryPlugin } from '@tanstack/vue-query'
 import { createApp } from 'vue'
 import { createRouter, createWebHistory } from 'vue-router'
 
-import { setDatabaseUnavailableHandler, setUnauthorizedHandler } from './api/client'
+import {
+  setDatabaseUnavailableHandler,
+  setLegacyDatabaseHandler,
+  setUnauthorizedHandler,
+} from './api/client'
 import App from './App.vue'
 import { ME_KEY, queryClient } from './query'
 import { installGuards, routes, setupLost } from './routes'
@@ -18,8 +22,21 @@ setUnauthorizedHandler(() => void queryClient.invalidateQueries({ queryKey: ME_K
 setDatabaseUnavailableHandler(() => {
   setupLost()
   const current = router.currentRoute.value
-  if (current.name === 'setup' || current.name === 'database-unavailable') return
+  if (
+    current.name === 'setup' ||
+    current.name === 'database-unavailable' ||
+    current.name === 'legacy-upgrade'
+  ) {
+    return
+  }
   void router.replace({ name: 'database-unavailable', query: { next: current.fullPath } })
+})
+// 库是重构之前的结构：带到旧版升级页
+setLegacyDatabaseHandler(() => {
+  setupLost()
+  if (router.currentRoute.value.name !== 'legacy-upgrade') {
+    void router.replace({ name: 'legacy-upgrade' })
+  }
 })
 
 createApp(App).use(router).use(ui).use(VueQueryPlugin, { queryClient }).mount('#app')

@@ -379,7 +379,7 @@ const LIFECYCLE_TARGETS: CallTarget[] = [
   ]),
   lifecycleTarget(
     'turn.end',
-    '一轮结束：本轮写入对话缓冲，累积成批后抽取。私聊、群聊与频道按会话上下文缓冲；不带会话上下文时按接入实例与所属成员缓冲，只写会话摘要。',
+    '一轮结束：本轮写入对话缓冲，累积成批后抽取。私聊、群聊与频道按会话上下文缓冲；不带会话上下文时按客户端与所属成员缓冲，只写会话摘要。',
     [
       sessionIdField(true),
       textField('user', 'user', { required: true, multiline: true }),
@@ -399,14 +399,14 @@ const REST_TARGETS: CallTarget[] = [
     fixed: {},
     toStep: (body) => ({ kind: 'recall', body }),
   }),
-  staticTarget('/boot', 'rest', '启动加载的节点，含结构化 entries，与 GET /v1/boot 相同。', {
+  staticTarget('/boot', 'rest', '启动加载的记忆，含结构化 entries，与 GET /v1/boot 相同。', {
     fields: [],
     hasBody: false,
     usesContext: false,
     fixed: {},
     toStep: () => ({ kind: 'boot' }),
   }),
-  staticTarget('/whoami', 'rest', '当前访问密钥的接入实例与当前上限，与 GET /v1/whoami 相同。', {
+  staticTarget('/whoami', 'rest', '当前访问密钥的客户端与当前上限，与 GET /v1/whoami 相同。', {
     fields: [],
     hasBody: false,
     usesContext: false,

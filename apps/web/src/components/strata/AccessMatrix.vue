@@ -41,7 +41,7 @@ import {
   type BandAccessRow,
 } from './strata'
 
-// 权限范围矩阵：支持多圈明细（circles：每个记忆圈 3 物种 × 4 敏感级）与单表 6 色带视图（rows）。
+// 访问范围表：支持多圈明细（circles：每个记忆圈 3 类记忆形态 × 4 档敏感级）与单表 6 色带视图（rows）。
 const props = withDefaults(
   defineProps<{
     circles?: readonly CircleAccessMatrix[] | null
@@ -80,7 +80,7 @@ const sections = computed<DisplaySection[]>(() => {
         key: circle.circleId,
         title: circle.circleName,
         badges: [
-          circle.isPrimary ? '主场' : '客场',
+          circle.isPrimary ? '主圈' : '关联圈',
           circleKindLabels[circle.circleKind],
           ...(circle.credentials !== 'none'
             ? [`凭据${credentialCapabilityLabels[circle.credentials]}`]

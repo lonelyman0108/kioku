@@ -18,7 +18,7 @@ import type { StepView } from './benchResult'
 // 测试台的共享逻辑：谁能用、选择写回地址、真实模式的后果、运行失败与中途作废的说明、
 // 切换模式会清掉什么、连续调用（重放日志与时间线）
 
-// 只有接入实例所有者能用测试台（会读到所有者的本人记忆，记忆圈所有者也不行），所以只列自己是所有者的接入实例
+// 只有客户端所有者能用测试台（会读到所有者的本人记忆，记忆圈所有者也不行），所以只列自己是所有者的客户端
 export const ownedClients = (clients: readonly ClientInfo[], accountId: string | undefined) =>
   clients.filter((client) => client.ownerAccountId === accountId)
 
@@ -26,9 +26,9 @@ export const ownedClients = (clients: readonly ClientInfo[], accountId: string |
 export const usableKeys = (keys: readonly KeyInfo[]) => keys.filter((key) => key.effectiveScopes)
 
 export const CLIENT_REPLACED_NOTICE =
-  '所选接入实例不属于当前账号，或已转移、删除。测试台仅限接入实例所有者使用，已切换到当前账号的另一个接入实例。'
+  '所选客户端不属于当前账号，或已转移、删除。测试台仅限客户端所有者使用，已切换到当前账号的另一个客户端。'
 export const KEY_REPLACED_NOTICE =
-  '所选访问密钥已失效或不属于当前接入实例，已切换到该接入实例的其他有效访问密钥，权限可能不同。'
+  '所选访问密钥已失效或不属于当前客户端，已切换到该客户端的其他有效访问密钥，权限可能不同。'
 
 export interface SelectionFix {
   // 要写回地址的参数，undefined 表示去掉
@@ -39,7 +39,7 @@ export interface SelectionFix {
 
 // 地址里的选择和读到的列表对一对，解析出的写回地址。默认选中的也要固定下来：不然默认的一变（新签发的 Key 排到前面、
 // 默认的 Key 被吊销），界面就悄悄换成另一把权限可能完全不同的 Key，地址里又没有东西可比，给不出提示。
-// clients、keys 是自己的接入实例、这个接入实例有效的 Key 的 id，没读到时是 null，这时不判断。
+// clients、keys 是自己的客户端、这个客户端有效的 Key 的 id，没读到时是 null，这时不判断。
 // 一个都没有时也不动：没有可换的，不能说换了（页面上另有「暂无」的说明）
 export function selectionFix(
   selected: { client?: string | undefined; key?: string | undefined },
@@ -49,7 +49,7 @@ export function selectionFix(
   const firstClient = clients?.[0]
   if (!firstClient) return null
   if (!selected.client) return { query: { client: firstClient }, notice: null }
-  // 地址里的 Key 是原来那个接入实例的，留着只会再提示一次
+  // 地址里的 Key 是原来那个客户端的，留着只会再提示一次
   if (!clients.includes(selected.client)) {
     return { query: { client: firstClient, key: undefined }, notice: CLIENT_REPLACED_NOTICE }
   }
@@ -66,7 +66,7 @@ export const REAL_MODE_CONSEQUENCES = [
   '写入的事件带「测试台」标记与当前账号，可在变更记录和凭据访问记录中查看。',
 ] as const
 
-// 一次运行的结果。stale：运行期间换了接入实例、Key 或模式，结果作废（真实模式下记进 abandoned）；
+// 一次运行的结果。stale：运行期间换了客户端、Key 或模式，结果作废（真实模式下记进 abandoned）；
 // 或者上一次还没结束，这次没有发出去。failed 的 retryable：再发一次可能就好了（见 runRetryable）
 export type RunOutcome =
   | { kind: 'done'; result: BenchRunResult }
@@ -94,7 +94,7 @@ export function runFailureMessage(err: unknown, mode: BenchMode): string {
 export const catalogFailure = (err: unknown) =>
   `读取工具目录失败：${err instanceof ApiError ? err.message : NOT_API_FAILURE}`
 
-// 真实模式的一次运行中途作废了：运行期间接入实例、Key 或模式变了（例如 Key 被吊销）。
+// 真实模式的一次运行中途作废了：运行期间客户端、Key 或模式变了（例如 Key 被吊销）。
 // 它的结果不属于现在的选择，进不了时间线，但写入可能已经落库，不能不说
 export interface AbandonedRun {
   id: number
@@ -113,7 +113,7 @@ export function abandonedRun(
   if ('error' in settled && refusedBeforeWrite(settled.error)) return null
   const { id, view } = run
   const title =
-    '本次真实运行已中途作废（运行期间接入实例、访问密钥或模式发生变化），但可能已写入，请到变更记录确认。'
+    '本次真实运行已中途作废（运行期间客户端、访问密钥或模式发生变化），但可能已写入，请到变更记录确认。'
   const what = `「${run.label}」按「${run.client}」的访问密钥「${run.key}」真实执行`
   if ('result' in settled) {
     return { id, title, description: `${what}，结果如下。`, view, result: settled.result }
@@ -173,7 +173,7 @@ export interface TimelineEntry {
 }
 
 // 这次会话。回滚模式下每次运行都在新的事务里、结束就回滚，「后面的调用读得到前面的写入」靠重放日志：
-// 下一次运行先把它们再执行一遍。换了接入实例、Key 或模式就换一份新的
+// 下一次运行先把它们再执行一遍。换了客户端、Key 或模式就换一份新的
 export interface BenchSession {
   // 已经成功做过的写步骤。参数是服务端返回的展开之后的（${run} 与 capture 不再求值）
   replay: BenchReplayStep[]

@@ -41,7 +41,7 @@ import SettingsStageBar from './strata/SettingsStageBar.vue'
 import SettingsSummaryStrip, { type SummaryStripItem } from './strata/SettingsSummaryStrip.vue'
 import SettingsTable from './strata/SettingsTable.vue'
 
-// 记忆圈 › 召回与启动加载：记忆圈内接入实例的默认值。没覆盖的项沿用实例默认，接入实例可以再单独覆盖。
+// 记忆圈 › 召回与启动加载：记忆圈内客户端的默认值。没覆盖的项沿用实例默认，客户端可以再单独覆盖。
 // 只有记忆圈所有者能改（canEdit），别的成员只读：控件禁用，不显示保存条
 const dirty = defineModel<boolean>('dirty', { default: false })
 const route = useRoute()
@@ -86,7 +86,7 @@ const STAGES: { key: StageFilter; label: string }[] = [
   { key: 'all', label: '全部' },
   { key: 'recall', label: '每轮召回' },
   { key: 'boot', label: '启动加载' },
-  { key: 'clients', label: '接入实例覆盖' },
+  { key: 'clients', label: '客户端覆盖' },
 ]
 
 // 每一行：名称旁边的表单值、来源与恢复
@@ -189,9 +189,9 @@ const summaryItems = computed<SummaryStripItem[]>(() => [
     tone: overriddenCount.value ? 'warn' : 'ok',
   },
   {
-    label: '接入实例独立覆盖',
+    label: '客户端独立覆盖',
     value: `${overriddenClients.value.length} / ${clientCount.value} 个`,
-    sub: '各接入实例可在接入实例详情单独调整',
+    sub: '各客户端可在客户端详情单独调整',
   },
 ])
 
@@ -233,7 +233,7 @@ async function save() {
 <template>
   <div>
     <p class="section-note">
-      记忆圈内接入实例的默认值。未覆盖的项沿用实例默认，接入实例可以再单独覆盖。
+      记忆圈内客户端的默认值。未覆盖的项沿用实例默认，客户端可以再单独覆盖。
     </p>
     <div class="chain-row">
       <p class="chain" aria-label="取值顺序">
@@ -244,7 +244,7 @@ async function save() {
         >
         <UIcon :name="icons.chevronRight" class="chain-arrow" aria-hidden="true" />
         <span class="chain-step"
-          ><UIcon :name="icons.clients" aria-hidden="true" />接入实例 · {{ clientCount }} 个，{{
+          ><UIcon :name="icons.clients" aria-hidden="true" />客户端 · {{ clientCount }} 个，{{
             overriddenClients.length
           }}
           个有覆盖</span
@@ -425,17 +425,17 @@ async function save() {
 
       <SettingsBlock
         v-show="stage === 'all' || stage === 'clients'"
-        title="接入实例的覆盖"
-        badge="在接入实例详情中修改"
+        title="客户端的覆盖"
+        badge="在客户端详情中修改"
         wide
       >
-        <template #note>已为单个接入实例单独调整的参数会列在这里。</template>
-        <EmptyState v-if="!overriddenClients.length" title="暂无接入实例覆盖" />
+        <template #note>已为单个客户端单独调整的参数会列在这里。</template>
+        <EmptyState v-if="!overriddenClients.length" title="暂无客户端覆盖" />
         <SettingsTable v-else>
           <thead>
             <tr>
-              <th>接入实例</th>
-              <th>覆盖的项与接入实例的值</th>
+              <th>客户端</th>
+              <th>覆盖的项与客户端的值</th>
               <th>记忆圈的值</th>
               <th>使用指引的补充</th>
             </tr>

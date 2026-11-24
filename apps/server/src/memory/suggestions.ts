@@ -11,7 +11,7 @@ import type {
   WhenCondition,
 } from '@kioku/contracts'
 import { normalizeWhen, whenSignature } from '@kioku/contracts'
-import { and, count, desc, eq, inArray, sql } from 'drizzle-orm'
+import { and, asc, count, desc, eq, inArray, sql } from 'drizzle-orm'
 
 import { canModify, type Access } from '../access/access'
 import { withCircle, type Db, type Tx } from '../db/client'
@@ -221,6 +221,7 @@ export async function listSuggestions(
             })
             .from(entryVariants)
             .where(inArray(entryVariants.entryId, entryIds))
+            .orderBy(asc(entryVariants.sortOrder), asc(entryVariants.createdAt))
         : []
       const primaryVariant = new Map<string, { when: WhenCondition; content: string }>()
       for (const v of vRows) {

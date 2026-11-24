@@ -56,7 +56,7 @@ function iconOf(group: FilterGroup, key: string): string | null {
   if (group === 'type') return eventLabel(key).icon
   return null
 }
-// 页面可能不接受这次勾选（每组至少留一项、操作者最多排除 MAX_ACTOR_FILTER 个），这时状态没变、
+// 页面可能不接受这次勾选（每组至少留一项、操作者最多取消勾选 MAX_ACTOR_FILTER 个），这时状态没变、
 // 视图不会重画，勾选框要自己改回状态里的样子
 function onChange(group: FilterGroup, key: string, event: Event) {
   const box = event.target as HTMLInputElement
@@ -94,7 +94,7 @@ const groups = computed(() =>
       </legend>
       <p v-if="!g.items.length" class="none">暂无</p>
       <p v-if="g.group === 'actor' && off.actor.length >= MAX_ACTOR_FILTER" class="none">
-        最多排除 {{ MAX_ACTOR_FILTER }} 个操作者
+        最多取消勾选 {{ MAX_ACTOR_FILTER }} 个操作者
       </p>
       <label
         v-for="item in g.items"

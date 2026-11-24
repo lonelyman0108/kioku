@@ -4,7 +4,11 @@ import { api } from './api/endpoints'
 import { loadMe, rememberCircle } from './composables/useSession'
 import { legacyReviewTab } from './inbox'
 import UnavailablePage from './pages/UnavailablePage.vue'
-import { legacyCircleSettingsRedirect, legacySettingsRedirect } from './settingsSections'
+import {
+  circleSettingsRoute,
+  legacyCircleSettingsRedirect,
+  legacySettingsRedirect,
+} from './settingsSections'
 
 export const routes: RouteRecordRaw[] = [
   { path: '/setup', name: 'setup', component: () => import('./pages/SetupPage.vue') },
@@ -13,6 +17,12 @@ export const routes: RouteRecordRaw[] = [
     path: '/database-unavailable',
     name: 'database-unavailable',
     component: () => import('./pages/DatabaseUnavailablePage.vue'),
+  },
+  // 库是记忆圈重构之前的结构：引导用旧管理员账号就地升级
+  {
+    path: '/legacy-upgrade',
+    name: 'legacy-upgrade',
+    component: () => import('./pages/LegacyUpgradePage.vue'),
   },
   { path: '/login', name: 'login', component: () => import('./pages/LoginPage.vue') },
   // 设置密码链接：不需要登录，已登录时也照样打开
@@ -45,9 +55,22 @@ export const routes: RouteRecordRaw[] = [
         component: () => import('./pages/MemoriesPage.vue'),
       },
       {
+        path: 'circles/:circleId/personas',
+        name: 'personas',
+        component: () => import('./pages/PersonasPage.vue'),
+      },
+      // 旧地址重定向：原词表与人格页按分页跳往人格页或记忆圈语境词典设置
+      {
         path: 'circles/:circleId/vocabulary',
         name: 'vocabulary',
-        component: () => import('./pages/VocabularyPage.vue'),
+        redirect: (to) =>
+          to.query.tab === 'personas'
+            ? {
+                name: 'personas',
+                params: to.params,
+                query: typeof to.query.persona === 'string' ? { persona: to.query.persona } : {},
+              }
+            : circleSettingsRoute(String(to.params.circleId), 'vocabulary'),
       },
       {
         path: 'circles/:circleId/activity',
@@ -58,16 +81,6 @@ export const routes: RouteRecordRaw[] = [
         path: 'circles/:circleId/credentials',
         name: 'credentials',
         component: () => import('./pages/CredentialsPage.vue'),
-      },
-      // 旧地址重定向：人格管理并入词表页的独立人格分页
-      {
-        path: 'circles/:circleId/personas',
-        name: 'personas',
-        redirect: (to) => ({
-          name: 'vocabulary',
-          params: to.params,
-          query: { tab: 'personas' },
-        }),
       },
       {
         path: 'circles/:circleId/conversations',
@@ -195,13 +208,6 @@ export const entryRoute = (circleId: string, id: string) => ({
   query: { id },
 })
 
-// 记忆页按分组打开，或跳转到指定条目
-export const memoryNodeRoute = (circleId: string, node: string) => ({
-  name: 'memories',
-  params: { circleId },
-  query: { node },
-})
-
 // 初始化状态只会从「需要」变成「不需要」，确认过一次就不再请求；
 // 服务回报没接上数据库时（重启后连不上库）由 setupLost 清掉，下次导航重新确认
 let setupDone = false
@@ -226,10 +232,20 @@ export function installGuards(router: Router): void {
             ? true
             : { name: 'database-unavailable', query: { next: to.fullPath } }
         }
+        // 库是重构之前的结构：只去升级页，完成后重新确认状态
+        if (status.database.state === 'legacy') {
+          return to.name === 'legacy-upgrade' ? true : { name: 'legacy-upgrade' }
+        }
         setupDone = !status.needsSetup
         if (!setupDone) return to.name === 'setup' ? true : { name: 'setup' }
       }
-      if (to.name === 'setup' || to.name === 'database-unavailable') return { name: 'home' }
+      if (
+        to.name === 'setup' ||
+        to.name === 'database-unavailable' ||
+        to.name === 'legacy-upgrade'
+      ) {
+        return { name: 'home' }
+      }
       if (to.name === 'password') return true
       const me = await loadMe()
       if (!me) return to.name === 'login' ? true : { name: 'login', query: { next: to.fullPath } }

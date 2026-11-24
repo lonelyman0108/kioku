@@ -268,20 +268,23 @@ const itemFieldItems = computed(() =>
 const unusedItemField = () =>
   itemFields.value.find((f) => !vaultRows.value.some((r) => r.itemField === f))
 
-// 只列出自己是所有者的接入实例：访问密钥按接入实例所有者取凭据，别人的接入实例取不到这些凭据。
-// 已经限定了的照样列出来，免得改别的地方时被悄悄去掉
+// 只列出自己是所有者的客户端：访问密钥按客户端所有者取凭据，别人的客户端取不到这些凭据。
+// 已经限定了的照样列出来（已删掉的保留占位项），免得改别的地方时被悄悄去掉
 const { me } = useSession()
-const clientItems = computed(() =>
-  props.clients
+const clientItems = computed(() => {
+  const known = props.clients
     .filter((a) => a.ownerAccountId === me.data.value?.id || form.clientIds.includes(a.id))
     .map((a) => ({
       label:
-        a.ownerAccountId === me.data.value?.id
-          ? a.name
-          : `${a.name}（非当前账号的接入实例，不可用）`,
+        a.ownerAccountId === me.data.value?.id ? a.name : `${a.name}（非当前账号的客户端，不可用）`,
       value: a.id,
-    })),
-)
+    }))
+  const knownIds = new Set(props.clients.map((a) => a.id))
+  const missing = form.clientIds
+    .filter((id) => !knownIds.has(id))
+    .map((id) => ({ label: '已删除的客户端', value: id }))
+  return [...known, ...missing]
+})
 
 const input = (): CredentialFormInput => ({
   mode: mode.value,
@@ -401,7 +404,14 @@ const orphanText = computed(() => (orphan.value ? orphanNotice(orphan.value) : n
 </script>
 
 <template>
-  <UModal v-model:open="open" :title="title" :ui="{ content: 'max-w-2xl' }">
+  <UModal
+    :open="open"
+    :title="title"
+    :dismissible="!saving"
+    :close="!saving"
+    :ui="{ content: 'max-w-2xl' }"
+    @update:open="(v) => (!v && saving) || (open = v)"
+  >
     <template #body>
       <form id="credential-form" class="space-y-4" @submit.prevent="submit">
         <UFormField
@@ -601,22 +611,22 @@ const orphanText = computed(() => (orphan.value ? orphanNotice(orphan.value) : n
           <USwitch v-model="form.needsRotation" :label="`标记为${CREDENTIAL_ROTATION_NAME}`" />
         </UFormField>
 
-        <UFormField label="限定接入实例">
+        <UFormField label="限定客户端">
           <template #help>
-            仅选中接入实例的访问密钥可以取用。
+            仅选中客户端的访问密钥可以取用。
             <Hint>
-              列表仅含当前账号所有的接入实例。通过访问密钥新建的凭据默认限定给该接入实例，只能在此处修改。
+              列表仅含当前账号所有的客户端。通过访问密钥新建的凭据默认限定给该客户端，只能在此处修改。
             </Hint>
           </template>
           <div class="space-y-2">
-            <USwitch v-model="form.restrictClients" label="仅限部分接入实例" />
+            <USwitch v-model="form.restrictClients" label="仅限部分客户端" />
             <USelect
               v-if="form.restrictClients"
               v-model="form.clientIds"
               :items="clientItems"
               multiple
               class="w-full"
-              placeholder="选择接入实例"
+              placeholder="选择客户端"
             />
           </div>
         </UFormField>
@@ -643,7 +653,7 @@ const orphanText = computed(() => (orphan.value ? orphanNotice(orphan.value) : n
               <UInputTags
                 v-model="form.allowedRealms"
                 class="w-full font-mono"
-                placeholder="输入场域词条标识（如 work、home）"
+                placeholder="输入场域条件项标识（如 work、home）"
               />
             </template>
           </div>
@@ -690,7 +700,9 @@ const orphanText = computed(() => (orphan.value ? orphanNotice(orphan.value) : n
     <template #footer>
       <div class="flex w-full items-center justify-end gap-2">
         <span v-if="problem" class="mr-auto text-sm text-muted">{{ problem }}</span>
-        <UButton color="neutral" variant="ghost" @click="open = false">取消</UButton>
+        <UButton color="neutral" variant="ghost" :disabled="saving" @click="open = false"
+          >取消</UButton
+        >
         <UButton
           type="submit"
           form="credential-form"

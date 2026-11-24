@@ -59,7 +59,7 @@ describe('启动加载', () => {
 
   it('提示层说的是够格，不是一定加载', () => {
     expect(BOOT_HINT).toContain('符合启动加载条件')
-    expect(BOOT_HINT).toContain('访问密钥的透镜权限、切面匹配和字数上限')
+    expect(BOOT_HINT).toContain('访问密钥的访问范围、适用条件匹配和字数上限')
   })
 })
 
@@ -101,19 +101,19 @@ describe('没写触发场景时的提示', () => {
     expect(missingDisclosure(entry({ priority: 0, sensitivity: 'secret' }), now)!.hint).toBe(secret)
   })
 
-  it('启动加载的词条写明是启动加载，要补的写「未设触发场景」', () => {
+  it('启动加载的记忆写明是启动加载，要补的写「未设召回说明」', () => {
     expect(missingDisclosure(entry({}), now)).toMatchObject({
       tone: 'warning',
-      text: '未设触发场景',
-      short: '未设触发场景',
+      text: '未设召回说明',
+      short: '未设召回说明',
     })
     expect(missingDisclosure(entry({ priority: 0 }), now)).toMatchObject({
       tone: 'muted',
-      text: '启动加载不依赖触发场景',
+      text: '启动加载不依赖召回说明',
       short: '启动加载',
     })
     expect(missingDisclosure(entry({ priority: 0, sensitivity: 'secret' }), now)!.short).toBe(
-      '未设触发场景',
+      '未设召回说明',
     )
   })
 })
@@ -176,10 +176,10 @@ describe('疑似明文（多变体切片）', () => {
 describe('来源范围与切面标签', () => {
   const clientName = (id: string) => (id === 'c1' ? 'Claude Code' : undefined)
 
-  it('全局和带名字的接入实例', () => {
+  it('全局和带名字的客户端', () => {
     expect(originScopeLabel('global', clientName)).toBe('全局')
-    expect(originScopeLabel('client:c1', clientName)).toBe('接入实例「Claude Code」')
-    expect(originScopeLabel('client:c2', clientName)).toBe('接入实例')
+    expect(originScopeLabel('client:c1', clientName)).toBe('客户端「Claude Code」')
+    expect(originScopeLabel('client:c2', clientName)).toBe('客户端')
     expect(originScopeLabel('group:g1', clientName)).toBe('群聊')
     expect(originScopeLabel('direct:s1', clientName)).toBe('私聊')
     expect(originScopeLabel('other', clientName)).toBe('other')
@@ -293,6 +293,10 @@ describe('这次改动动没动统计', () => {
       ],
       otherVariants: [],
       links: [],
+      subject: null,
+      conversationId: null,
+      clientId: null,
+      expiresAt: null,
       createdAt: later(-9),
       updatedAt: later(-9),
       contentHidden: false,

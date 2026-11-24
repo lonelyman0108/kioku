@@ -82,11 +82,11 @@ describe('设置密码链接只显示一次', () => {
   it('新建账号与重新生成链接：链接显示期间不能点遮罩、按 Esc 或右上角关掉', () => {
     const modals = elementsOf(instanceAccounts).filter((el) => el.tag === 'UModal')
     const create = modals.find((m) => bound(m, 'title')?.includes("'新建账号'"))!
-    expect(bound(create, 'dismissible')).toBe('!created')
-    expect(bound(create, 'close')).toBe('!created')
+    expect(bound(create, 'dismissible')).toBe('!creating && !created')
+    expect(bound(create, 'close')).toBe('!creating && !created')
     const regenerate = modals.find((m) => bound(m, 'title')?.includes("'重新生成链接？'"))!
-    expect(bound(regenerate, 'dismissible')).toBe('!regenerated')
-    expect(bound(regenerate, 'close')).toBe('!regenerated')
+    expect(bound(regenerate, 'dismissible')).toBe('!regenerating && !regenerated')
+    expect(bound(regenerate, 'close')).toBe('!regenerating && !regenerated')
     // 关掉之后明文就清了，再打开看不到
     expect(instanceAccounts).toMatch(/function resetCreate\(\) \{[^}]*created\.value = null/)
     expect(instanceAccounts).toMatch(/function closeCreate\(\) \{[^}]*resetCreate\(\)/)
@@ -188,7 +188,7 @@ describe('账号列表', () => {
 
   it('停用的确认写出后果；唯一可用所有者的记忆圈单独列出', () => {
     expect(instanceAccounts).toContain(
-      '停用后：无法登录，会话立即失效，其接入实例的访问密钥停止工作；重新启用后恢复。',
+      '停用后：无法登录，会话立即失效，其客户端的访问密钥停止工作；重新启用后恢复。',
     )
     const circle = (name: string, n: number, soleActiveOwner: boolean) => ({
       id: `00000000-0000-4000-8000-00000000000${n}`,

@@ -11,52 +11,34 @@ import {
   type FacetMatchMode,
   type FacetTermView,
   type FacetVocabularyView,
-  type PersonaInfo,
 } from '@kioku/contracts'
-import type { TabsItem } from '@nuxt/ui'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, reactive, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRoute } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
-import ConsequenceModal from '../components/ConsequenceModal.vue'
-import FacetWhenPicker from '../components/FacetWhenPicker.vue'
-import Hint from '../components/Hint.vue'
-import PersonaFormModal from '../components/PersonaFormModal.vue'
-import PersonaPanel from '../components/PersonaPanel.vue'
-import { guideLines } from '../components/memoryTree'
-import EmptyState from '../components/strata/EmptyState.vue'
-import NoteLine from '../components/strata/NoteLine.vue'
-import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
-import SectionHeading from '../components/strata/SectionHeading.vue'
-import StrataSwatch from '../components/strata/StrataSwatch.vue'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
 import { icons } from '../icons'
 import { facetMatchModeLabels } from '../labels'
-import { personaRows } from '../personas'
+import ConsequenceModal from './ConsequenceModal.vue'
+import FacetWhenPicker from './FacetWhenPicker.vue'
+import Hint from './Hint.vue'
+import EmptyState from './strata/EmptyState.vue'
+import NoteLine from './strata/NoteLine.vue'
+import ReadFailureNote from './strata/ReadFailureNote.vue'
+import SectionHeading from './strata/SectionHeading.vue'
+import SettingsBlock from './strata/SettingsBlock.vue'
 
-// 词表与人格页：集中管理当前记忆圈的切面维度、词条（含蕴含边与别名）与独立人格树
+// 记忆圈设置 › 语境词典：管理本记忆圈的适用条件维度、条件项、自动关联与唤醒别名
+defineModel<boolean>('dirty', { default: false })
+
 const route = useRoute()
-const router = useRouter()
 const toast = useToast()
 const queryClient = useQueryClient()
 
 const circleId = computed(() => String(route.params.circleId))
-const { canEditVocabulary, canEditPersonas } = useMemoryPermissions(circleId)
-
-type Tab = 'facets' | 'personas'
-const tab = computed<Tab>(() => (route.query.tab === 'personas' ? 'personas' : 'facets'))
-const tabItems: TabsItem[] = [
-  { label: '切面词表', value: 'facets' },
-  { label: '独立人格', value: 'personas' },
-]
-
-function setTab(value: string | number) {
-  void router.replace({ query: value === 'personas' ? { tab: 'personas' } : {} })
-}
-
-/* ———— 切面词表 ———— */
+const { canEditVocabulary } = useMemoryPermissions(circleId)
 
 const facetsQuery = useQuery({
   queryKey: computed(() => ['facets', circleId.value] as const),
@@ -115,7 +97,6 @@ async function invalidateFacets(cid: string) {
   ])
 }
 
-// 维度创建与修改弹窗
 const dimModalOpen = ref(false)
 const editingDim = ref<FacetDimensionView | null>(null)
 const dimForm = reactive({
@@ -212,7 +193,6 @@ async function removeDimension() {
   }
 }
 
-// 词条创建与修改弹窗（含 implies DAG 与别名）
 const termModalOpen = ref(false)
 const editingTerm = ref<FacetTermView | null>(null)
 const termForm = reactive({
@@ -263,7 +243,7 @@ const parsedAliases = computed(() => {
   for (const item of raw) {
     const res = FacetAlias.safeParse(item)
     if (!res.success) {
-      return { ok: false as const, message: res.error.issues[0]?.message ?? '触发词格式有误' }
+      return { ok: false as const, message: res.error.issues[0]?.message ?? '唤醒别名格式有误' }
     }
     if (!seen.has(res.data)) {
       seen.add(res.data)
@@ -271,7 +251,7 @@ const parsedAliases = computed(() => {
     }
   }
   if (list.length > MAX_FACET_ALIASES) {
-    return { ok: false as const, message: `触发词最多 ${MAX_FACET_ALIASES} 个` }
+    return { ok: false as const, message: `唤醒别名最多 ${MAX_FACET_ALIASES} 个` }
   }
   return { ok: true as const, list }
 })
@@ -279,7 +259,7 @@ const parsedAliases = computed(() => {
 const termProblem = computed(() => {
   if (!editingTerm.value) {
     const slugRes = FacetTermSlug.safeParse(termForm.slug)
-    if (!slugRes.success) return slugRes.error.issues[0]?.message ?? '词条标识格式有误'
+    if (!slugRes.success) return slugRes.error.issues[0]?.message ?? '标识格式有误'
   }
   if (!termForm.label.trim()) return '请填写显示名称'
   if (!parsedAliases.value.ok) return parsedAliases.value.message
@@ -301,7 +281,7 @@ async function saveTerm() {
         aliases,
         implies,
       })
-      toast.add({ title: '已保存词条', color: 'success' })
+      toast.add({ title: '已保存条件项', color: 'success' })
     } else {
       await api.createFacetTerm(cid, {
         dimensionKey: dim.key,
@@ -310,12 +290,11 @@ async function saveTerm() {
         aliases,
         implies,
       })
-      toast.add({ title: '已添加词条', color: 'success' })
+      toast.add({ title: '已添加条件项', color: 'success' })
     }
     termModalOpen.value = false
     await invalidateFacets(cid)
   } catch (err) {
-    // 包括后端检查出的蕴含成环（400/409）或标识冲突，直接在弹窗内留着修改
     termError.value = err instanceof ApiError ? err.message : '保存失败'
   } finally {
     savingTerm.value = false
@@ -335,7 +314,7 @@ async function removeTerm() {
   try {
     await api.deleteFacetTerm(cid, target.id)
     deletingTerm.value = null
-    toast.add({ title: '已删除词条', color: 'success' })
+    toast.add({ title: '已删除条件项', color: 'success' })
     await invalidateFacets(cid)
   } catch (err) {
     deleteTermError.value = err instanceof ApiError ? err.message : '删除失败'
@@ -343,97 +322,33 @@ async function removeTerm() {
     deletingTermBusy.value = false
   }
 }
-
-/* ———— 独立人格 ———— */
-
-const personasQuery = useQuery({
-  queryKey: computed(() => ['personas', circleId.value] as const),
-  queryFn: ({ queryKey: [, cid] }) => api.personas(cid),
-  enabled: computed(() => tab.value === 'personas'),
-})
-const personas = computed(() => personasQuery.data.value ?? [])
-const rows = computed(() => personaRows(personas.value))
-
-const selectedPersonaId = computed(() => {
-  const fromQuery = typeof route.query.persona === 'string' ? route.query.persona : ''
-  if (fromQuery && personas.value.some((p) => p.id === fromQuery)) return fromQuery
-  return personas.value[0]?.id ?? ''
-})
-
-function selectPersona(id: string) {
-  void router.replace({ query: { tab: 'personas', persona: id } })
-}
-
-const personaFormOpen = ref(false)
-const editingPersona = ref<PersonaInfo | null>(null)
-
-function openCreatePersona() {
-  editingPersona.value = null
-  personaFormOpen.value = true
-}
-
-function openEditPersona(p: PersonaInfo) {
-  editingPersona.value = p
-  personaFormOpen.value = true
-}
-
-function onPersonaSaved(saved: PersonaInfo, created: boolean) {
-  if (created || selectedPersonaId.value === saved.id) selectPersona(saved.id)
-}
-
-function onPersonaRemoved() {
-  const remaining = personas.value.filter((p) => p.id !== selectedPersonaId.value)
-  if (remaining.length) selectPersona(remaining[0]!.id)
-  else void router.replace({ query: { tab: 'personas' } })
-}
 </script>
 
 <template>
-  <div class="vocab-page">
-    <header class="vocab-head">
-      <div class="head-top">
-        <UTabs
-          :model-value="tab"
-          :items="tabItems"
-          :content="false"
-          variant="link"
-          size="md"
-          :ui="{ root: 'min-w-0', list: 'border-0', trigger: 'px-2 py-0 h-11 text-sm/5' }"
-          @update:model-value="setTab"
-        />
-        <div class="head-actions">
-          <UButton
-            v-if="tab === 'facets' && canEditVocabulary"
-            size="sm"
-            variant="outline"
-            :icon="icons.add"
-            @click="openCreateDim"
-          >
-            新建维度
-          </UButton>
-          <UButton
-            v-else-if="tab === 'personas' && canEditPersonas"
-            size="sm"
-            :icon="icons.add"
-            @click="openCreatePersona"
-          >
-            新建人格
-          </UButton>
-        </div>
-      </div>
-    </header>
+  <div>
+    <SettingsBlock
+      title="语境词典"
+      description="定义记忆变体与客户端默认语境可选的适用条件维度、自动关联与唤醒别名"
+    >
+      <template v-if="canEditVocabulary" #actions>
+        <UButton
+          size="sm"
+          color="neutral"
+          variant="outline"
+          :icon="icons.add"
+          @click="openCreateDim"
+        >
+          新建维度
+        </UButton>
+      </template>
 
-    <!-- 切面词表 -->
-    <div v-if="tab === 'facets'" class="vocab-body">
-      <div v-if="facetsQuery.isError.value" class="p-6">
-        <ReadFailureNote :query="facetsQuery" />
+      <ReadFailureNote v-if="facetsQuery.isError.value" :query="facetsQuery" />
+      <div v-if="facetsQuery.isPending.value" class="space-y-3 py-3">
+        <USkeleton class="h-10 w-full" />
+        <USkeleton class="h-44 w-full" />
       </div>
-      <div v-if="facetsQuery.isPending.value" class="p-6 space-y-3">
-        <USkeleton class="h-12 w-full" />
-        <USkeleton class="h-48 w-full" />
-      </div>
-      <div v-else-if="facetsQuery.data.value" class="split-layout">
-        <aside class="side-list" aria-label="切面维度列表">
+      <div v-else-if="facetsQuery.data.value" class="vocab-box">
+        <aside class="dim-list" aria-label="适用条件维度列表">
           <ul>
             <li v-for="dim in dimensions" :key="dim.key">
               <button
@@ -448,30 +363,38 @@ function onPersonaRemoved() {
                 </span>
                 <span class="dim-sub">
                   <code>{{ dim.key }}</code>
-                  <span>{{ terms.filter((t) => t.dimensionKey === dim.key).length }} 词条</span>
+                  <span class="tabular-nums"
+                    >{{ terms.filter((t) => t.dimensionKey === dim.key).length }} 项</span
+                  >
                 </span>
               </button>
             </li>
           </ul>
         </aside>
 
-        <section v-if="selectedDim" class="detail-pane">
+        <section v-if="selectedDim" class="dim-detail">
           <div class="pane-head">
             <div>
               <div class="pane-title-row">
-                <h2>{{ selectedDim.name }}</h2>
+                <h3>{{ selectedDim.name }}</h3>
                 <code class="pane-key">{{ selectedDim.key }}</code>
                 <span class="pane-pill">{{ facetMatchModeLabels[selectedDim.matchMode] }}</span>
                 <span v-if="selectedDim.builtin" class="pane-pill">内置</span>
                 <span v-if="selectedDim.autoRegister" class="pane-pill">支持自动登记</span>
               </div>
               <p v-if="selectedDim.description" class="pane-desc">{{ selectedDim.description }}</p>
-              <p v-if="selectedDim.builtin" class="pane-note">
-                内置维度由系统提供，可自由增删其下的词条。
+              <p class="pane-note">
+                <template v-if="selectedDim.matchMode === 'exclusive'">
+                  单选互斥：启动加载时剔除与当前语境冲突的变体，召回时对冲突条件扣分。
+                </template>
+                <template v-else> 多选叠加：命中当前语境时加分，不同选项之间互不排斥。 </template>
+                <template v-if="selectedDim.autoRegister">
+                  客户端上报新的代码仓库时自动登记条件项，可在此补充自动关联与唤醒别名。
+                </template>
               </p>
             </div>
             <div v-if="canEditVocabulary" class="pane-actions">
-              <UButton size="sm" :icon="icons.add" @click="openCreateTerm">新增词条</UButton>
+              <UButton size="sm" :icon="icons.add" @click="openCreateTerm">新增条件项</UButton>
               <UButton
                 v-if="!selectedDim.builtin"
                 size="sm"
@@ -495,18 +418,20 @@ function onPersonaRemoved() {
             </div>
           </div>
 
-          <SectionHeading :title="`词条（${activeDimTerms.length}）`" class="mt-5">
+          <SectionHeading :title="`条件项（${activeDimTerms.length}）`" class="mt-4">
             <template #hint>
               <Hint>
-                词条可通过「蕴含」展开关联切面（例如特定工作项目蕴含工作场域）；配置「触发词」后，在提问包含对应别名时可作为破壁信号增强召回。
+                条件项可通过「自动关联」展开其他维度的条件（例如某台办公电脑自动关联 Windows
+                与公司场域，最多展开 4
+                级且禁止成环）；配置「唤醒别名」后，提问按词边界命中别名时临时将该条件并入本轮查询焦点。
               </Hint>
             </template>
           </SectionHeading>
 
           <EmptyState
             v-if="!activeDimTerms.length"
-            title="暂无词条"
-            description="在这个维度下添加词条后，可供变体切片与固定切面透镜选用。"
+            title="暂无条件项"
+            description="添加条件项后，可供记忆变体、本圈默认条件与访问密钥默认语境选用。"
           />
           <ul v-else class="term-list">
             <li v-for="term in activeDimTerms" :key="term.id" class="term-row">
@@ -517,11 +442,11 @@ function onPersonaRemoved() {
                   <span v-if="term.autoRegistered" class="term-tag">自动登记</span>
                 </div>
                 <p v-if="term.aliases.length" class="term-meta">
-                  <span class="meta-k">触发词：</span>
+                  <span class="meta-k">唤醒别名：</span>
                   <span v-for="a in term.aliases" :key="a" class="alias-tag">{{ a }}</span>
                 </p>
                 <p v-if="impliesTags(term).length" class="term-meta">
-                  <span class="meta-k">蕴含：</span>
+                  <span class="meta-k">自动关联：</span>
                   <span v-for="imp in impliesTags(term)" :key="imp" class="implies-tag">{{
                     imp
                   }}</span>
@@ -533,7 +458,7 @@ function onPersonaRemoved() {
                   color="neutral"
                   variant="ghost"
                   :icon="icons.edit"
-                  :aria-label="`编辑词条 ${term.label}`"
+                  :aria-label="`编辑条件项 ${term.label}`"
                   @click="openEditTerm(term)"
                 />
                 <UButton
@@ -542,7 +467,7 @@ function onPersonaRemoved() {
                   variant="ghost"
                   class="text-muted hover:text-error"
                   :icon="icons.remove"
-                  :aria-label="`删除词条 ${term.label}`"
+                  :aria-label="`删除条件项 ${term.label}`"
                   @click="((deletingTerm = term), (deleteTermError = null))"
                 />
               </div>
@@ -550,269 +475,172 @@ function onPersonaRemoved() {
           </ul>
         </section>
       </div>
-    </div>
+    </SettingsBlock>
 
-    <!-- 独立人格 -->
-    <div v-else class="vocab-body">
-      <div v-if="personasQuery.isError.value" class="p-6">
-        <ReadFailureNote :query="personasQuery" />
-      </div>
-      <div v-if="personasQuery.isPending.value" class="p-6 space-y-3">
-        <USkeleton class="h-12 w-full" />
-        <USkeleton class="h-48 w-full" />
-      </div>
-      <EmptyState
-        v-else-if="personasQuery.data.value && !personas.length"
-        title="暂无独立人格"
-        description="新建人格后，可为其配置可继承的设定段并绑定到接入实例或访问密钥。"
-      >
-        <template v-if="canEditPersonas" #actions>
-          <UButton @click="openCreatePersona">新建人格</UButton>
-        </template>
-      </EmptyState>
-      <div v-else-if="personasQuery.data.value" class="split-layout">
-        <aside class="side-list" aria-label="人格继承树">
-          <ul>
-            <li v-for="row in rows" :key="row.persona.id">
-              <button
-                type="button"
-                class="persona-row"
-                :class="{ selected: row.persona.id === selectedPersonaId }"
-                :style="{ paddingLeft: `${14 + row.depth * 16}px` }"
-                @click="selectPersona(row.persona.id)"
-              >
-                <span
-                  v-for="(line, i) in guideLines(row)"
-                  :key="i"
-                  class="guide"
-                  :class="{ end: line.end, tick: line.tick }"
-                  :style="{ left: `${line.left}px` }"
-                  aria-hidden="true"
-                />
-                <StrataSwatch band="persona" plain decorative />
-                <span class="persona-name">{{ row.persona.name }}</span>
-                <code class="persona-slug">{{ row.persona.slug }}</code>
-              </button>
-            </li>
-          </ul>
-        </aside>
-
-        <div class="persona-pane">
-          <PersonaPanel
-            v-if="selectedPersonaId"
-            :circle-id="circleId"
-            :persona-id="selectedPersonaId"
-            :personas="personas"
-            :can-edit="canEditPersonas"
-            @edit="openEditPersona"
-            @removed="onPersonaRemoved"
-            @open="selectPersona"
-          />
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- 新建/编辑维度弹窗（不用 form） -->
-  <UModal
-    :open="dimModalOpen"
-    :title="editingDim ? '编辑切面维度' : '新建切面维度'"
-    :dismissible="!savingDim"
-    :close="!savingDim"
-    @update:open="(v) => !v && !savingDim && (dimModalOpen = false)"
-  >
-    <template #body>
-      <div class="space-y-4">
-        <UFormField
-          label="维度键"
-          help="小写字母开头，可包含小写字母、数字和下划线；创建后不可修改"
-        >
-          <UInput v-model="dimForm.key" class="w-full font-mono" :disabled="editingDim !== null" />
-        </UFormField>
-        <UFormField label="维度名称">
-          <UInput v-model="dimForm.name" placeholder="例如 业务领域" class="w-full" />
-        </UFormField>
-        <UFormField
-          label="匹配模式"
-          help="排他维在无交集时会收敛权重或剥离穿透；叠加维仅加分不排斥"
-        >
-          <USelect
-            v-model="dimForm.matchMode"
-            :items="matchModeOptions"
-            value-key="value"
-            class="w-full"
-          />
-        </UFormField>
-        <UFormField label="说明">
-          <UInput v-model="dimForm.description" class="w-full" />
-        </UFormField>
-        <NoteLine v-if="dimError" tone="error" flush>{{ dimError }}</NoteLine>
-      </div>
-    </template>
-    <template #footer>
-      <div class="flex w-full justify-end gap-2">
-        <UButton
-          color="neutral"
-          variant="ghost"
-          :disabled="savingDim"
-          @click="dimModalOpen = false"
-        >
-          取消
-        </UButton>
-        <UButton :disabled="Boolean(dimProblem)" :loading="savingDim" @click="saveDimension">
-          保存
-        </UButton>
-      </div>
-    </template>
-  </UModal>
-
-  <ConsequenceModal
-    :open="deletingDim !== null"
-    :title="`删除维度「${deletingDim?.name ?? ''}」？`"
-    :consequences="[
-      `维度 ${deletingDim?.key ?? ''} 及其下的全部词条将一并删除。`,
-      '若其他维度的词条仍在蕴含引用此维度的词条，将无法删除。',
-    ]"
-    action="删除维度"
-    :busy="deletingDimBusy"
-    :error="deleteDimError"
-    @close="deletingDim = null"
-    @confirm="removeDimension"
-  />
-
-  <!-- 新建/编辑词条弹窗（不用 form） -->
-  <UModal
-    :open="termModalOpen"
-    :title="editingTerm ? '编辑词条' : '新增词条'"
-    :dismissible="!savingTerm"
-    :close="!savingTerm"
-    :ui="{ content: 'sm:max-w-xl' }"
-    @update:open="(v) => !v && !savingTerm && (termModalOpen = false)"
-  >
-    <template #body>
-      <div class="space-y-4">
-        <div class="grid gap-3 sm:grid-cols-2">
-          <UFormField label="标识" help="小写字母、数字、中文及 ._-；创建后不可修改">
+    <UModal
+      :open="dimModalOpen"
+      :title="editingDim ? '编辑维度' : '新建维度'"
+      :dismissible="!savingDim"
+      :close="!savingDim"
+      @update:open="(v) => !v && !savingDim && (dimModalOpen = false)"
+    >
+      <template #body>
+        <div class="space-y-4">
+          <UFormField
+            label="维度键"
+            help="小写字母开头，可包含小写字母、数字和下划线；创建后不可修改"
+          >
             <UInput
-              v-model="termForm.slug"
+              v-model="dimForm.key"
               class="w-full font-mono"
-              :disabled="editingTerm !== null"
+              :disabled="editingDim !== null"
             />
           </UFormField>
-          <UFormField label="显示名称">
-            <UInput v-model="termForm.label" placeholder="例如 公司工作" class="w-full" />
+          <UFormField label="维度名称">
+            <UInput v-model="dimForm.name" placeholder="例如 业务领域" class="w-full" />
           </UFormField>
+          <UFormField
+            label="匹配模式"
+            help="单选互斥维度在无交集时剔除启动冲突并降低召回权重；多选叠加维度仅加分不排斥"
+          >
+            <USelect
+              v-model="dimForm.matchMode"
+              :items="matchModeOptions"
+              value-key="value"
+              class="w-full"
+            />
+          </UFormField>
+          <UFormField label="说明">
+            <UInput v-model="dimForm.description" class="w-full" />
+          </UFormField>
+          <NoteLine v-if="dimError" tone="error" flush>{{ dimError }}</NoteLine>
         </div>
+      </template>
+      <template #footer>
+        <div class="flex w-full justify-end gap-2">
+          <UButton
+            color="neutral"
+            variant="ghost"
+            :disabled="savingDim"
+            @click="dimModalOpen = false"
+          >
+            取消
+          </UButton>
+          <UButton :disabled="Boolean(dimProblem)" :loading="savingDim" @click="saveDimension">
+            保存
+          </UButton>
+        </div>
+      </template>
+    </UModal>
 
-        <UFormField label="触发词（别名）" help="多个触发词用逗号或换行分隔，每个 2 到 48 字">
-          <UTextarea
-            v-model="termForm.aliasesText"
-            :rows="2"
-            placeholder="例如 公司, 办公室, 加班"
-            class="w-full"
-          />
-        </UFormField>
+    <ConsequenceModal
+      :open="deletingDim !== null"
+      :title="`删除维度「${deletingDim?.name ?? ''}」？`"
+      :consequences="[
+        `维度 ${deletingDim?.key ?? ''} 及其下的全部条件项将一并删除。`,
+        '若其他维度的条件项仍在自动关联中引用此维度，将无法删除。',
+      ]"
+      action="删除维度"
+      :busy="deletingDimBusy"
+      :error="deleteDimError"
+      @close="deletingDim = null"
+      @confirm="removeDimension"
+    />
 
-        <UFormField
-          label="蕴含切面（有向无环展开）"
-          help="命中当前词条时，同时自动展开下列切面词条（如成环将被服务端拒绝）"
-        >
-          <FacetWhenPicker
-            v-model="termForm.implies"
-            :circle-id="circleId"
-            :vocabulary="pickerVocab"
-          />
-        </UFormField>
+    <UModal
+      :open="termModalOpen"
+      :title="editingTerm ? '编辑条件项' : '新增条件项'"
+      :dismissible="!savingTerm"
+      :close="!savingTerm"
+      :ui="{ content: 'sm:max-w-xl' }"
+      @update:open="(v) => !v && !savingTerm && (termModalOpen = false)"
+    >
+      <template #body>
+        <div class="space-y-4">
+          <div class="grid gap-3 sm:grid-cols-2">
+            <UFormField label="标识" help="小写字母、数字、中文及 ._-；创建后不可修改">
+              <UInput
+                v-model="termForm.slug"
+                class="w-full font-mono"
+                :disabled="editingTerm !== null"
+              />
+            </UFormField>
+            <UFormField label="显示名称">
+              <UInput v-model="termForm.label" placeholder="例如 公司工作" class="w-full" />
+            </UFormField>
+          </div>
 
-        <NoteLine v-if="termError" tone="error" flush>{{ termError }}</NoteLine>
-      </div>
-    </template>
-    <template #footer>
-      <div class="flex w-full justify-end gap-2">
-        <UButton
-          color="neutral"
-          variant="ghost"
-          :disabled="savingTerm"
-          @click="termModalOpen = false"
-        >
-          取消
-        </UButton>
-        <UButton :disabled="Boolean(termProblem)" :loading="savingTerm" @click="saveTerm">
-          保存
-        </UButton>
-      </div>
-    </template>
-  </UModal>
+          <UFormField label="唤醒别名" help="多个别名用逗号或换行分隔，每个 2 到 48 字">
+            <UTextarea
+              v-model="termForm.aliasesText"
+              :rows="2"
+              placeholder="例如 公司, 办公室, 加班"
+              class="w-full"
+            />
+          </UFormField>
 
-  <ConsequenceModal
-    :open="deletingTerm !== null"
-    :title="`删除词条「${deletingTerm?.label ?? ''}」？`"
-    :consequences="[
-      `词条 ${deletingTerm?.slug ?? ''} 及其触发词配置将被移除。`,
-      '若有变体或蕴含规则引用它，引用保留但不再展开此词条名。',
-    ]"
-    action="删除词条"
-    :busy="deletingTermBusy"
-    :error="deleteTermError"
-    @close="deletingTerm = null"
-    @confirm="removeTerm"
-  />
+          <UFormField
+            label="自动关联"
+            help="命中此条件项时同时自动展开下列适用条件（成环将被服务端拒绝）"
+          >
+            <FacetWhenPicker
+              v-model="termForm.implies"
+              :circle-id="circleId"
+              :vocabulary="pickerVocab"
+            />
+          </UFormField>
 
-  <PersonaFormModal
-    v-model:open="personaFormOpen"
-    :circle-id="circleId"
-    :personas="personas"
-    :editing="editingPersona"
-    @saved="onPersonaSaved"
-  />
+          <NoteLine v-if="termError" tone="error" flush>{{ termError }}</NoteLine>
+        </div>
+      </template>
+      <template #footer>
+        <div class="flex w-full justify-end gap-2">
+          <UButton
+            color="neutral"
+            variant="ghost"
+            :disabled="savingTerm"
+            @click="termModalOpen = false"
+          >
+            取消
+          </UButton>
+          <UButton :disabled="Boolean(termProblem)" :loading="savingTerm" @click="saveTerm">
+            保存
+          </UButton>
+        </div>
+      </template>
+    </UModal>
+
+    <ConsequenceModal
+      :open="deletingTerm !== null"
+      :title="`删除条件项「${deletingTerm?.label ?? ''}」？`"
+      :consequences="[
+        `条件项 ${deletingTerm?.slug ?? ''} 及其唤醒别名将被移除。`,
+        '若有记忆变体或自动关联规则引用它，引用保留但不再展开此条件项名称。',
+      ]"
+      action="删除条件项"
+      :busy="deletingTermBusy"
+      :error="deleteTermError"
+      @close="deletingTerm = null"
+      @confirm="removeTerm"
+    />
+  </div>
 </template>
 
 <style scoped>
-.vocab-page {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
-.vocab-head {
-  flex: none;
-  border-bottom: 1px solid var(--strata-rule);
-}
-.head-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  height: 44px;
-  padding: 0 16px 0 8px;
-}
-.head-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.vocab-body {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-.split-layout {
-  flex: 1;
-  min-height: 0;
+.vocab-box {
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr);
+  grid-template-columns: 220px minmax(0, 1fr);
+  margin-top: 8px;
+  border: 1px solid var(--strata-rule);
 }
-.side-list {
-  overflow-y: auto;
+.dim-list {
   border-right: 1px solid var(--strata-rule);
 }
 .dim-row {
   display: flex;
   flex-direction: column;
   width: 100%;
-  padding: 10px 14px;
+  padding: 10px 12px;
   border-bottom: 1px solid var(--ui-border);
   text-align: left;
 }
@@ -849,17 +677,17 @@ function onPersonaRemoved() {
   color: var(--strata-on-selected-muted);
 }
 
-.detail-pane {
-  overflow-y: auto;
-  padding: 20px 32px 48px;
+.dim-detail {
+  padding: 16px 20px 20px;
+  min-width: 0;
 }
 .pane-head {
   display: flex;
   flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px 24px;
-  padding-bottom: 14px;
+  gap: 12px 20px;
+  padding-bottom: 12px;
   border-bottom: 1px solid var(--ui-border-accented);
 }
 .pane-title-row {
@@ -868,9 +696,9 @@ function onPersonaRemoved() {
   align-items: baseline;
   gap: 8px;
 }
-.pane-title-row h2 {
-  font-size: 20px;
-  font-weight: 500;
+.pane-title-row h3 {
+  font-size: 16px;
+  font-weight: 600;
 }
 .pane-key {
   font-family: var(--font-mono);
@@ -895,9 +723,8 @@ function onPersonaRemoved() {
   flex-wrap: wrap;
   gap: 6px;
 }
-
 .term-list {
-  margin-top: 8px;
+  margin-top: 6px;
 }
 .term-row {
   display: flex;
@@ -906,6 +733,9 @@ function onPersonaRemoved() {
   gap: 12px;
   padding: 10px 0;
   border-bottom: 1px solid var(--ui-border);
+}
+.term-row:last-child {
+  border-bottom: 0;
 }
 .term-main {
   min-width: 0;
@@ -956,76 +786,16 @@ function onPersonaRemoved() {
   gap: 2px;
 }
 
-.persona-row {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--ui-border);
-  text-align: left;
-}
-.persona-row:hover {
-  background: var(--ui-bg-elevated);
-}
-.persona-row.selected {
-  background: var(--strata-selected);
-  color: var(--strata-on-selected);
-}
-.persona-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  font-size: 14px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.persona-slug {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--ui-text-muted);
-}
-.persona-row.selected .persona-slug {
-  color: var(--strata-on-selected-muted);
-}
-.persona-pane {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
-.guide {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 1px;
-  background: var(--ui-border);
-}
-.guide.end {
-  bottom: 50%;
-}
-.guide.tick::after {
-  content: '';
-  position: absolute;
-  top: 50%;
-  left: 0;
-  width: 7px;
-  height: 1px;
-  background: var(--ui-border);
-}
-
-@media (max-width: 1023.98px) {
-  .split-layout {
+@media (max-width: 767.98px) {
+  .vocab-box {
     grid-template-columns: minmax(0, 1fr);
   }
-  .side-list {
-    max-height: 220px;
+  .dim-list {
     border-right: 0;
     border-bottom: 1px solid var(--strata-rule);
   }
-  .detail-pane {
-    padding: 16px;
+  .dim-detail {
+    padding: 14px;
   }
 }
 </style>

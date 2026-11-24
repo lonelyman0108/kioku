@@ -3,6 +3,8 @@ import { createInterface } from 'node:readline'
 import { Writable } from 'node:stream'
 import { parseArgs } from 'node:util'
 
+import type { LegacyUpgradeSummary } from '@kioku/contracts'
+
 import { loadConfig } from '../../config'
 import { parseMasterKey } from '../../crypto/envelope'
 import { keyIdOf, type MasterKey } from '../../crypto/keyring'
@@ -17,17 +19,21 @@ import {
   type LegacyMigrationPlanSummary,
   type LegacySnapshot,
 } from '../../importer/kiokuLegacy'
+import { migrateLegacyInPlace } from '../../importer/legacyInPlace'
 import { DATABASE_ENV_HELP, databaseUrlOf, runCli, UsageError } from '../common'
 import { bold, dim, formatRows, green, renderStrataBox, yellow } from '../format'
 
 export const MIGRATE_LEGACY_HELP = `从旧版 Kioku（v0.5.0 及更早空间结构）迁移到新版记忆圈架构。
 
-用法：kioku-ctl migrate-legacy --from-db <旧库连接串> [选项]
+用法：kioku-ctl migrate-legacy --in-place [选项]
+      kioku-ctl migrate-legacy --from-db <旧库连接串> [选项]
       kioku-ctl migrate-legacy --backup <旧版备份文件> [选项]
       kioku-ctl migrate-legacy --space-export <旧版空间导出文件> --account <用户名> [选项]
       node dist/migrate-legacy.mjs [选项]
 
-三种迁移来源三选一（不能同时指定）：
+四种迁移来源四选一（不能同时指定）：
+  --in-place              就地升级：服务配置的库还是旧版结构时，旧对象移进 kioku_legacy schema 保留，
+                          在同一个库里建新结构并迁入；和管理界面升级页的一键迁移是同一份逻辑。先停服务
   --from-db <连接串>      直连旧版 Kioku PostgreSQL 数据库只读迁入空新库（也可设 LEGACY_DATABASE_URL）
   --backup <文件>         从旧版全实例备份文件（KIOKUBK1）迁入空新库；写 - 从标准输入读
   --space-export <文件>   将旧版空间导出文件（KIOKUSX1）迁入已有实例指定账号的新建共享圈与个人圈
@@ -57,6 +63,7 @@ function parseLegacyOptions(argv: string[]) {
     return parseArgs({
       args: argv,
       options: {
+        'in-place': { type: 'boolean', default: false },
         'from-db': { type: 'string' },
         backup: { type: 'string' },
         'space-export': { type: 'string' },
@@ -222,16 +229,21 @@ async function migrateLegacyMain(argv: string[]): Promise<number> {
     !fromDbFlag && !backupPath && !spaceExportPath ? process.env.LEGACY_DATABASE_URL : undefined
   const dbUrl = fromDbFlag ?? envFromDb
 
+  const inPlace = values['in-place']
   const selectedCount =
-    Number(Boolean(dbUrl)) + Number(Boolean(backupPath)) + Number(Boolean(spaceExportPath))
+    Number(Boolean(dbUrl)) +
+    Number(Boolean(backupPath)) +
+    Number(Boolean(spaceExportPath)) +
+    Number(inPlace)
   if (selectedCount === 0) {
     throw new UsageError(
-      '必须指定 --from-db（或 LEGACY_DATABASE_URL）、--backup 或 --space-export 中的一个来源',
+      '必须指定 --in-place、--from-db（或 LEGACY_DATABASE_URL）、--backup 或 --space-export 中的一个来源',
     )
   }
   if (selectedCount > 1) {
-    throw new UsageError('--from-db、--backup 与 --space-export 三者只能选一个')
+    throw new UsageError('--in-place、--from-db、--backup 与 --space-export 只能选一个')
   }
+  if (inPlace) return migrateInPlace(values)
   if (!spaceExportPath && (values.account || values['circle-name'])) {
     throw new UsageError('--account 与 --circle-name 仅在使用 --space-export 时适用')
   }
@@ -308,6 +320,70 @@ async function migrateLegacyMain(argv: string[]): Promise<number> {
   } finally {
     await database.close()
   }
+}
+
+async function migrateInPlace(values: ReturnType<typeof parseLegacyOptions>): Promise<number> {
+  if (values.account || values['circle-name']) {
+    throw new UsageError('--account 与 --circle-name 仅在使用 --space-export 时适用')
+  }
+  const config = loadConfig()
+  const database = connect(databaseUrlOf(config), { max: 1 })
+  try {
+    await assertRuntimeRole(database.db)
+    const result = await migrateLegacyInPlace(database.db, {
+      migrationsFolder: config.migrationsFolder,
+      masterKey: config.masterKey,
+      legacyMasterKey: resolveLegacyMasterKey(values['legacy-master-key-env'], config.masterKey),
+      apply: values.apply,
+    })
+    if (values.json) console.log(JSON.stringify(result, null, 2))
+    else renderInPlace(result.summary, result.applied)
+    return 0
+  } finally {
+    await database.close()
+  }
+}
+
+function renderInPlace(summary: LegacyUpgradeSummary, applied: boolean): void {
+  const heading = applied ? '就地升级完成' : '就地升级预览（已回滚）'
+  const rows: [string, string][] = [
+    [
+      '状态',
+      applied
+        ? green('✓ 已迁入新结构，旧对象保留在 kioku_legacy')
+        : bold('预览通过（未写入，加 --apply 执行）'),
+    ],
+    ['账号与个人圈', `${summary.accounts} 个`],
+    ['共享记忆圈', `${summary.sharedCircles.length} 个`],
+    ['独立人格', `${summary.personas} 个人格，${summary.personaTraits} 条设定`],
+    [
+      '接入与联系人',
+      `${summary.clients} 个接入实例，${summary.subjects} 个联系人，${summary.conversations} 个会话`,
+    ],
+    ['凭据与密码库', `${summary.vaultConnections} 个连接，${summary.credentials} 条凭据`],
+    [
+      '记忆转换',
+      `正式词条 ${summary.entries.entry}（含机密 ${summary.entries.secret}）、联系人事实 ${summary.entries.fact}、会话摘要 ${summary.entries.episode}`,
+    ],
+    ['旧访问密钥', `${summary.legacyKeys} 个，迁移后失效，需重新签发`],
+  ]
+  if (process.stdout.isTTY) {
+    console.log(
+      renderStrataBox(heading, formatRows(rows, { stream: process.stdout }), {
+        stream: process.stdout,
+      }),
+    )
+  } else {
+    console.log(heading)
+    for (const [k, v] of rows) console.log(`  ${k}：${v}`)
+  }
+  for (const w of summary.warnings) {
+    console.warn(process.stderr.isTTY ? yellow(`! ${w}`, process.stderr) : `! ${w}`)
+  }
+  if (applied)
+    console.log(
+      '\n后续步骤：重启服务；在管理界面重新签发访问密钥，客户端运行 npx @kioku-memory/cli migrate 重新接入。',
+    )
 }
 
 export function runMigrateLegacy(argv: string[]): Promise<number> {

@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import {
+  CREDENTIAL_PLACEHOLDER_PREFIX,
   DEFAULT_SENSITIVITY,
+  DISCLOSURE_MAX,
+  ENTRY_CONTENT_MAX,
   ENTRY_TITLE_MAX,
   EntryTitle,
   PLAINTEXT_CREDENTIAL,
@@ -68,6 +71,15 @@ const facetsQuery = useQuery({
   queryFn: ({ queryKey: [, cid] }) => api.facets(cid),
   enabled: open,
 })
+const circleDetail = useQuery({
+  queryKey: computed(() => ['circle', props.circleId] as const),
+  queryFn: ({ queryKey: [, cid] }) => api.circle(cid),
+  enabled: open,
+})
+const defaultFacetsNote = computed(() => {
+  const f = circleDetail.data.value?.defaultFacets
+  return f && Object.keys(f).length ? whenLabel(f, facetsQuery.data.value) : null
+})
 
 let nextSliceKey = 0
 const makeVariant = (when?: Record<string, string[]> | null): DraftVariant => ({
@@ -86,6 +98,7 @@ const form = reactive({
 })
 const variants = ref<DraftVariant[]>([makeVariant()])
 const activeIdx = ref(0)
+const showConditions = ref(false)
 const error = ref<string | null>(null)
 const saving = ref(false)
 // 有效期最早能选的时间（见 earliestValidTo）：打开、聚焦选择器与提交之前重新算
@@ -93,6 +106,12 @@ const minValidTo = ref('')
 
 const activeSlice = computed(() => variants.value[activeIdx.value] ?? variants.value[0]!)
 const primaryRealms = computed(() => normalizeWhen(variants.value[0]?.when).realm ?? [])
+const conditionsExpanded = computed(
+  () =>
+    showConditions.value ||
+    variants.value.length > 1 ||
+    Object.keys(variants.value[0]?.when ?? {}).length > 0,
+)
 
 watch(open, (value) => {
   if (!value) {
@@ -109,6 +128,7 @@ watch(open, (value) => {
   })
   variants.value = [makeVariant(props.initialWhen)]
   activeIdx.value = 0
+  showConditions.value = Boolean(props.initialWhen && Object.keys(props.initialWhen).length > 0)
   minValidTo.value = earliestValidTo()
   error.value = null
 })
@@ -205,16 +225,27 @@ const hasDuplicateWhen = computed(() => {
 })
 const hasEmptySlice = computed(() => variants.value.some((v) => !v.content.trim()))
 
+const disclosureProblem = computed(() => {
+  const trimmed = form.disclosure.trim()
+  if (trimmed.length > DISCLOSURE_MAX) return `召回说明最多 ${DISCLOSURE_MAX} 个字符`
+  if (trimmed.includes(CREDENTIAL_PLACEHOLDER_PREFIX)) return '凭据占位符只能写在正文里'
+  return null
+})
+
 // 还差什么：没填的必填项只在按钮上禁用，不提前报错
 const problem = computed(() => {
   if (form.title.trim() && !title.value.success) {
     return title.value.error.issues[0]?.message ?? '标题格式错误'
   }
   if (!parsedTopics.value.ok) return parsedTopics.value.message
-  if (hasDuplicateWhen.value) return '同一条记忆下不能存在适用切面相同的变体切片'
-  if (form.sensitivity === 'secret' && !hasHomogeneousRealms(variants.value)) {
-    return '机密记忆的所有变体切片须保持相同的场域'
+  if (variants.value.some((v) => v.content.length > ENTRY_CONTENT_MAX)) {
+    return `每个变体的正文最多 ${ENTRY_CONTENT_MAX.toLocaleString()} 个字符`
   }
+  if (hasDuplicateWhen.value) return '同一条记忆下不能存在适用条件相同的变体'
+  if (form.sensitivity === 'secret' && !hasHomogeneousRealms(variants.value)) {
+    return '机密记忆的所有变体须保持相同的场域'
+  }
+  if (disclosureProblem.value) return disclosureProblem.value
   return null
 })
 
@@ -223,7 +254,9 @@ const ready = computed(
     title.value.success &&
     parsedTopics.value.ok &&
     !hasEmptySlice.value &&
+    !variants.value.some((v) => v.content.length > ENTRY_CONTENT_MAX) &&
     !hasDuplicateWhen.value &&
+    !disclosureProblem.value &&
     (form.sensitivity !== 'secret' || hasHomogeneousRealms(variants.value)),
 )
 
@@ -280,6 +313,7 @@ async function submit(flags?: SaveFlags) {
     when: normalizeWhen(v.when),
     content: v.content,
     sortOrder,
+    label: whenLabel(v.when, facetsQuery.data.value),
   }))
   if (!flags && form.sensitivity !== 'secret') {
     const { content, spots } = addedVariantSpots(null, sentVariants)
@@ -288,13 +322,18 @@ async function submit(flags?: SaveFlags) {
       return
     }
   }
+  const apiVariants = sentVariants.map(({ when, content, sortOrder }) => ({
+    when,
+    content,
+    sortOrder,
+  }))
   const sentJoined = joinVariantContents(sentVariants) ?? ''
   saving.value = true
   error.value = null
   try {
     const created = await api.createEntry(props.circleId, {
       title: title.value.data,
-      variants: sentVariants,
+      variants: apiVariants,
       topics: parsedTopics.value.list,
       sensitivity: form.sensitivity,
       ...(form.disclosure.trim() ? { disclosure: form.disclosure.trim() } : {}),
@@ -318,7 +357,13 @@ async function submit(flags?: SaveFlags) {
 </script>
 
 <template>
-  <UModal v-model:open="open" title="新建记忆" :ui="{ content: 'sm:max-w-2xl' }">
+  <UModal
+    v-model:open="open"
+    title="新建记忆"
+    :dismissible="!saving"
+    :close="!saving"
+    :ui="{ content: 'sm:max-w-2xl' }"
+  >
     <template #body>
       <!-- 不用 form：单选在表单里时回车会隐式提交，敏感级还没看完就建好了。只有点创建才提交 -->
       <div class="space-y-4">
@@ -340,40 +385,67 @@ async function submit(flags?: SaveFlags) {
 
         <UFormField label="敏感级">
           <SwatchOptions v-model="form.sensitivity" label="敏感级" :options="sensitivityOptions" />
+          <p v-if="form.sensitivity === 'secret'" class="mt-1.5 text-xs text-muted">
+            机密记忆的正文将加密存储，仅标题、主题与召回说明保留用于按短 ID
+            或标题索引；所有变体须保持同一场域。
+          </p>
         </UFormField>
 
         <div class="slices-box">
           <div class="slices-head">
             <span class="slices-label">
               <UIcon :name="icons.variants" class="slices-icon" />
-              <span>内容切片</span>
-              <Hint>一条记忆可按场域、环境或项目维护多个变体切片，无条件切片作为默认值。</Hint>
+              <span>{{ conditionsExpanded ? '变体与正文' : '正文' }}</span>
+              <Hint>
+                普通记忆直接填写单篇正文即可；当同一主题在不同环境或场域下规则不同时，可设置适用条件或添加多个变体。
+              </Hint>
             </span>
-            <UButton
-              v-if="variants.length < VARIANTS_MAX"
-              type="button"
-              size="xs"
-              color="neutral"
-              variant="outline"
-              :icon="icons.add"
-              @click="addVariant"
-            >
-              添加切片
-            </UButton>
+            <div class="flex flex-wrap items-center gap-1.5">
+              <UButton
+                v-if="!conditionsExpanded"
+                type="button"
+                size="xs"
+                color="neutral"
+                variant="outline"
+                :icon="icons.facets"
+                @click="showConditions = true"
+              >
+                设置适用条件
+              </UButton>
+              <UButton
+                v-if="variants.length < VARIANTS_MAX"
+                type="button"
+                size="xs"
+                color="neutral"
+                variant="outline"
+                :icon="icons.add"
+                @click="addVariant"
+              >
+                添加变体
+              </UButton>
+            </div>
           </div>
 
-          <div class="slice-tabs" role="tablist" aria-label="变体切片">
-            <button
+          <p v-if="defaultFacetsNote" class="text-xs text-muted">
+            本圈默认适用条件：{{ defaultFacetsNote }}（未单独指定同维条件时自动沿用）
+          </p>
+
+          <div v-if="variants.length > 1" class="slice-tabs" role="tablist" aria-label="变体">
+            <div
               v-for="(v, idx) in variants"
               :key="v.key"
-              type="button"
-              role="tab"
-              :aria-selected="idx === activeIdx"
               class="slice-tab"
               :class="{ active: idx === activeIdx }"
-              @click="activeIdx = idx"
             >
-              <span>{{ whenLabel(v.when, facetsQuery.data.value) }}</span>
+              <button
+                type="button"
+                role="tab"
+                :aria-selected="idx === activeIdx"
+                class="slice-tab-btn"
+                @click="activeIdx = idx"
+              >
+                {{ whenLabel(v.when, facetsQuery.data.value) }}
+              </button>
               <UButton
                 v-if="variants.length > 1"
                 type="button"
@@ -381,14 +453,15 @@ async function submit(flags?: SaveFlags) {
                 color="neutral"
                 variant="ghost"
                 :icon="icons.cancel"
-                aria-label="删除此切片"
-                @click.stop="removeVariant(idx)"
+                aria-label="删除此变体"
+                @click="removeVariant(idx)"
               />
-            </button>
+            </div>
           </div>
 
           <div v-if="activeSlice" class="slice-editor">
             <FacetWhenPicker
+              v-if="conditionsExpanded"
               :model-value="activeSlice.when"
               :circle-id="circleId"
               :vocabulary="facetsQuery.data.value"
@@ -397,11 +470,12 @@ async function submit(flags?: SaveFlags) {
               "
               @update:model-value="updateActiveWhen"
             />
-            <UFormField label="正文">
+            <UFormField :label="conditionsExpanded ? '当前变体正文' : undefined">
               <UTextarea
                 v-model="activeSlice.content"
                 :rows="8"
                 autoresize
+                aria-label="正文"
                 class="w-full font-mono"
               />
             </UFormField>
@@ -414,8 +488,8 @@ async function submit(flags?: SaveFlags) {
           </Hint>
         </NoteLine>
 
-        <UFormField label="触发场景" help="什么场景下应该想起这条记忆">
-          <UInput v-model="form.disclosure" class="w-full" />
+        <UFormField label="召回说明" help="什么场景下应该想起这条记忆">
+          <UInput v-model="form.disclosure" :maxlength="DISCLOSURE_MAX" class="w-full" />
         </UFormField>
 
         <UFormField label="有效期">
@@ -440,7 +514,9 @@ async function submit(flags?: SaveFlags) {
     </template>
     <template #footer>
       <div class="flex w-full justify-end gap-2">
-        <UButton color="neutral" variant="ghost" @click="open = false">取消</UButton>
+        <UButton color="neutral" variant="ghost" :disabled="saving" @click="open = false"
+          >取消</UButton
+        >
         <UButton :loading="saving" :disabled="!ready" @click="submit()">创建</UButton>
       </div>
       <!-- 逐处处理疑似明文：叠在新建的对话框上面 -->
@@ -488,12 +564,16 @@ async function submit(flags?: SaveFlags) {
 .slice-tab {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 4px 10px;
+  gap: 2px;
+  padding: 2px 4px 2px 10px;
   border: 1px solid var(--ui-border-accented);
   font-size: 12px;
   background: var(--ui-bg);
   color: var(--ui-text-muted);
+}
+.slice-tab-btn {
+  padding: 2px 4px 2px 0;
+  color: inherit;
   cursor: pointer;
 }
 .slice-tab:hover {

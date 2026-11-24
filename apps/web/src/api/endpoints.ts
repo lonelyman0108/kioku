@@ -79,6 +79,9 @@ import {
   IssuedKey,
   KeyAccessMatrix,
   KeyInfo,
+  LegacyUpgradeRequest,
+  LegacyUpgradeResult,
+  LegacyUpgradeStatus,
   LoginSessionList,
   LoreImportPlan,
   LoreImportResult,
@@ -201,6 +204,12 @@ export const api = {
     request('POST', '/setup/database', { body, schema: DatabaseConnected }),
   provisionDatabase: (body: DatabaseProvisionRequest) =>
     request('POST', '/setup/database/provision', { body, schema: DatabaseConnected }),
+  legacyUpgradeStatus: () =>
+    request('GET', '/legacy-upgrade/status', { schema: LegacyUpgradeStatus }),
+  previewLegacyUpgrade: (body: LegacyUpgradeRequest) =>
+    request('POST', '/legacy-upgrade/preview', { body, schema: LegacyUpgradeResult }),
+  applyLegacyUpgrade: (body: LegacyUpgradeRequest) =>
+    request('POST', '/legacy-upgrade/apply', { body, schema: LegacyUpgradeResult }),
   login: (username: string, password: string) =>
     request('POST', '/auth/login', { body: { username, password }, schema: Me }),
   logout: () => request('POST', '/auth/logout'),
@@ -430,11 +439,20 @@ export const api = {
   // 列表的筛选都是可选的；查询参数原样是字符串或数字
   entryList: (circleId: string, query: Partial<Record<keyof EntryListQuery, string | number>>) =>
     request('GET', `/circles/${circleId}/entries/list`, { query, schema: EntryList }),
-  searchEntries: (circleId: string, query: string, limit?: number) =>
-    request('POST', `/circles/${circleId}/entries/search`, {
-      body: limit === undefined ? { query } : { query, limit },
+  searchEntries: (
+    circleId: string,
+    query: string,
+    options?: number | { limit?: number; allCircles?: boolean },
+  ) => {
+    const opts = typeof options === 'number' ? { limit: options } : (options ?? {})
+    const body: Record<string, unknown> = { query }
+    if (opts.limit !== undefined) body.limit = opts.limit
+    if (opts.allCircles !== undefined) body.allCircles = opts.allCircles
+    return request('POST', `/circles/${circleId}/entries/search`, {
+      body,
       schema: ConsoleSearchResponse,
-    }),
+    })
+  },
   glossaryIndex: (circleId: string) =>
     request('GET', `/circles/${circleId}/entries/glossary`, { schema: GlossaryIndex }),
   entryHistory: (circleId: string, id: string) =>

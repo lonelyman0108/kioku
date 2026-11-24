@@ -1,5 +1,5 @@
 import { createRoute, OpenAPIHono } from '@hono/zod-openapi'
-import { HealthResponse } from '@kioku/contracts'
+import { API_GENERATION, HealthResponse } from '@kioku/contracts'
 
 import { VERSION } from '../version'
 
@@ -17,5 +17,5 @@ const route = createRoute({
 })
 
 export const health = new OpenAPIHono().openapi(route, (c) =>
-  c.json({ status: 'ok' as const, version: VERSION }, 200),
+  c.json({ status: 'ok' as const, version: VERSION, api: API_GENERATION }, 200),
 )

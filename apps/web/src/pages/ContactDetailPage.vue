@@ -8,8 +8,10 @@ import { useRoute } from 'vue-router'
 import { ApiError, retryable } from '../api/client'
 import { api } from '../api/endpoints'
 import Hint from '../components/Hint.vue'
+import ConsequenceModal from '../components/ConsequenceModal.vue'
 import PromoteFactModal from '../components/PromoteFactModal.vue'
 import SubjectBindings from '../components/SubjectBindings.vue'
+import NoteLine from '../components/strata/NoteLine.vue'
 import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import SectionHeading from '../components/strata/SectionHeading.vue'
 import StrataStrip from '../components/strata/StrataStrip.vue'
@@ -25,6 +27,7 @@ import {
 } from '../conversations'
 import { icons } from '../icons'
 import { originScopeText, provenanceLabels } from '../labels'
+import { entryRoute } from '../routes'
 import { refreshSubjectCaches as refreshCaches } from '../subjectQueries'
 import { formatRelative, formatShort, formatTime } from '../time'
 
@@ -95,20 +98,22 @@ const promoteOpen = computed({
 // 删一条事实：确认框打开时记下这一版，期间被改过服务端会返回冲突
 const deletingFact = ref<SubjectFact | null>(null)
 const removing = ref(false)
+const removeError = ref<string | null>(null)
 async function removeFact() {
   const fact = deletingFact.value
-  if (!fact) return
+  if (!fact || removing.value) return
   const cid = circleId.value
   removing.value = true
+  removeError.value = null
   try {
     await api.deleteFact(cid, subjectId.value, fact.id, fact.version)
+    deletingFact.value = null
     toast.add({ title: '已删除事实', color: 'success' })
+    void refreshSubjectCaches(cid)
   } catch (err) {
-    toast.add({ title: err instanceof ApiError ? err.message : '删除失败', color: 'error' })
+    removeError.value = err instanceof ApiError ? err.message : '删除失败'
   } finally {
     removing.value = false
-    deletingFact.value = null
-    void refreshSubjectCaches(cid)
   }
 }
 
@@ -132,7 +137,8 @@ async function reactivateFact(fact: SupersededFact) {
   }
 }
 
-// 合并：选同种类的另一个联系人并进来。下拉框打开时才按名字或平台账号去查
+// 合并：选同种类的另一个联系人并进来（双方均不得标记为其他成员）。下拉框打开时才按名字或平台账号去查
+const canMergeCurrent = computed(() => !(data.value?.account && !linkedToMe.value))
 const mergeTerm = ref('')
 const mergeQuery = useDebounced(mergeTerm)
 const mergeOpen = ref(false)
@@ -140,14 +146,17 @@ const candidates = useQuery({
   queryKey: computed(() => ['merge-picker', circleId.value, data.value?.kind, mergeQuery.value]),
   queryFn: () =>
     api.subjects(circleId.value, { kind: data.value!.kind, q: mergeQuery.value || undefined }),
-  enabled: computed(() => canEdit.value && mergeOpen.value && data.value !== null),
+  enabled: computed(
+    () => canEdit.value && canMergeCurrent.value && mergeOpen.value && data.value !== null,
+  ),
 })
 type Candidate = { label: string; value: string; description: string }
 // 选中的单独留着：查找词清空后列表换了一页，选中的那个还要显示名字
 const mergePicked = ref<Candidate | null>(null)
 const candidateItems = computed(() => {
+  const meId = me.data.value?.id
   const found: Candidate[] = (candidates.data.value?.items ?? [])
-    .filter((s) => s.id !== subjectId.value)
+    .filter((s) => s.id !== subjectId.value && !(s.account && s.account.id !== meId))
     .map((s) => ({
       label: s.displayName,
       value: s.id,
@@ -165,25 +174,58 @@ watch(mergeFrom, (id) => {
 watch(subjectId, () => {
   mergeFrom.value = undefined
   deletingFact.value = null
+  removeError.value = null
+  confirmMerge.value = false
+  mergeError.value = null
   promotingFact.value = null
 })
 const confirmMerge = ref(false)
 const merging = ref(false)
+const mergeError = ref<string | null>(null)
+
+const deleteFactConsequences = computed(() => {
+  const f = deletingFact.value
+  if (!f) return []
+  return [
+    `「${f.content}」将停止注入后续对话。`,
+    '删除后进入已删除列表，可在保留期内前往「记忆 → 已删除」恢复，过期后永久清除。',
+  ]
+})
+
+const mergeConsequences = computed(() => {
+  const fromName = mergePicked.value?.label ?? ''
+  const targetName = data.value?.displayName ?? ''
+  const lines = [
+    `将「${fromName}」合并到「${targetName}」：平台账号与事实转到「${targetName}」，「${fromName}」随即删除，与被合并方相关的待确认绑定作废。此操作不可撤销。`,
+  ]
+  if (data.value?.kind === 'group') {
+    lines.push(
+      `「${fromName}」群内记下的内容归到「${targetName}」，此后在该群任一平台都能读取。按群规则一并转移；同一客户端两边都有规则时保留「${targetName}」的规则。`,
+    )
+  } else {
+    lines.push(
+      `合并后这些平台账号视作同一人：私聊中记下的内容，用其中任一账号私聊都能读取；任一方已标记为当前账号时，这些账号的私聊都视为当前账号本人对话。群内记下的事实可见范围不变，仍只在原群可见。`,
+    )
+  }
+  return lines
+})
+
 async function merge() {
   const from = mergeFrom.value
-  if (!from) return
+  if (!from || merging.value) return
   const cid = circleId.value
   merging.value = true
+  mergeError.value = null
   try {
     await api.mergeSubject(cid, subjectId.value, from)
-    toast.add({ title: `已合并「${mergePicked.value?.label ?? '联系人'}」`, color: 'success' })
+    confirmMerge.value = false
     mergeFrom.value = undefined
+    toast.add({ title: `已合并「${mergePicked.value?.label ?? '联系人'}」`, color: 'success' })
+    void refreshSubjectCaches(cid)
   } catch (err) {
-    toast.add({ title: err instanceof ApiError ? err.message : '合并失败', color: 'error' })
+    mergeError.value = err instanceof ApiError ? err.message : '合并失败'
   } finally {
     merging.value = false
-    confirmMerge.value = false
-    void refreshSubjectCaches(cid)
   }
 }
 
@@ -226,11 +268,11 @@ const contactsRoute = computed(() => ({
         <dl class="head-stats">
           <div>
             <dt>事实</dt>
-            <dd class="font-mono">{{ data.factCount }}</dd>
+            <dd class="tabular-nums">{{ data.factCount }}</dd>
           </div>
           <div>
             <dt>平台账号</dt>
-            <dd class="font-mono">{{ data.identities.length }}</dd>
+            <dd class="tabular-nums">{{ data.identities.length }}</dd>
           </div>
           <div>
             <dt>首次遇到</dt>
@@ -323,8 +365,12 @@ const contactsRoute = computed(() => ({
                 </template>
               </div>
               <p class="row-note">
-                标记后，当前账号的接入实例会将此人的私聊视为本人对话。<Hint>
-                  开启「本人私聊提权至内部敏感级」的接入实例还可读取当前账号的内部及以下词条。只能标记为当前账号。
+                标记后，当前账号的客户端会将此人的私聊视为本人对话。群内发言人的事实能否被其他群读取，取决于各个
+                <RouterLink :to="{ name: 'clients', params: { circleId } }" class="entry-link">
+                  客户端
+                </RouterLink>
+                设置中的「跨群认人 / 按群隔离」模式。<Hint>
+                  开启「本人私聊开放内部记忆」的客户端还可读取当前账号的内部及以下记忆。只能标记为当前账号。
                 </Hint>
               </p>
             </div>
@@ -334,9 +380,9 @@ const contactsRoute = computed(() => ({
               <p class="row-note">
                 为此群单独指定人格或开启单群隔离锁，需在各
                 <RouterLink :to="{ name: 'clients', params: { circleId } }" class="entry-link">
-                  接入实例
+                  客户端
                 </RouterLink>
-                的按群规则中配置。开启单群隔离锁后，其他群开启拟人跨群识人时也不会读到本群的发言人事实。
+                的按群规则中配置。开启单群隔离锁后，其他群开启跨群认人时也不会读到本群的发言人事实。
               </p>
             </div>
 
@@ -387,44 +433,56 @@ const contactsRoute = computed(() => ({
 
           <section v-if="canEdit">
             <SectionHeading title="合并" />
-            <p class="section-note">
-              同一{{ data.kind === 'group' ? '群' : '人' }}在其他平台的账号可合并到「{{
-                data.displayName
-              }}」，合并后不可撤销。<Hint>
-                被合并方的平台账号、事实、{{
-                  data.kind === 'group' ? '群内' : '私聊中'
-                }}记下的内容都转到「{{ data.displayName }}」名下，被合并方随即删除。<template
-                  v-if="data.kind === 'group'"
-                  >按群规则也随之转移，两边同一接入实例都有规则时保留当前这边的。</template
+            <NoteLine v-if="!canMergeCurrent" tone="warning" flush class="mt-2">
+              当前联系人已标记为其他成员，无法合并。请先让该成员取消标记。
+            </NoteLine>
+            <template v-else>
+              <p class="section-note">
+                同一{{ data.kind === 'group' ? '群' : '人' }}在其他平台的账号可合并到「{{
+                  data.displayName
+                }}」，合并后不可撤销。<Hint>
+                  被合并方的平台账号、事实、{{
+                    data.kind === 'group' ? '群内' : '私聊中'
+                  }}记下的内容都转到「{{
+                    data.displayName
+                  }}」名下，被合并方随即删除。已标记为其他成员的联系人不参与合并。<template
+                    v-if="data.kind === 'group'"
+                    >按群规则也随之转移，两边同一客户端都有规则时保留当前这边的。</template
+                  >
+                </Hint>
+              </p>
+              <div class="merge-form">
+                <USelectMenu
+                  v-model="mergeFrom"
+                  v-model:search-term="mergeTerm"
+                  v-model:open="mergeOpen"
+                  :items="candidateItems"
+                  value-key="value"
+                  ignore-filter
+                  :search-input="{
+                    name: 'merge-q',
+                    placeholder: '名字或平台账号',
+                    loading: candidates.isFetching.value,
+                  }"
+                  :placeholder="data.kind === 'group' ? '选择要合并的群' : '选择要合并的人'"
+                  aria-label="选择要合并的联系人"
+                  class="min-w-0 flex-1"
+                />
+                <UButton
+                  color="primary"
+                  variant="outline"
+                  class="shrink-0"
+                  :disabled="!mergeFrom"
+                  @click="((confirmMerge = true), (mergeError = null))"
+                  >合并</UButton
                 >
-              </Hint>
-            </p>
-            <div class="merge-form">
-              <USelectMenu
-                v-model="mergeFrom"
-                v-model:search-term="mergeTerm"
-                v-model:open="mergeOpen"
-                :items="candidateItems"
-                value-key="value"
-                ignore-filter
-                :search-input="{
-                  name: 'merge-q',
-                  placeholder: '名字或平台账号',
-                  loading: candidates.isFetching.value,
-                }"
-                :placeholder="data.kind === 'group' ? '选择要合并的群' : '选择要合并的人'"
-                aria-label="选择要合并的联系人"
-                class="min-w-0 flex-1"
+              </div>
+              <ReadFailureNote
+                v-if="mergeOpen && candidates.isError.value"
+                class="mt-2"
+                :query="candidates"
               />
-              <UButton
-                color="primary"
-                variant="outline"
-                class="shrink-0"
-                :disabled="!mergeFrom"
-                @click="confirmMerge = true"
-                >合并</UButton
-              >
-            </div>
+            </template>
           </section>
         </div>
 
@@ -445,7 +503,13 @@ const contactsRoute = computed(() => ({
                 <div class="entry-body">
                   <p class="entry-text">{{ fact.content }}</p>
                   <p class="entry-meta">
-                    <code v-if="fact.shortId" class="short-id">{{ fact.shortId }}</code>
+                    <RouterLink
+                      v-if="fact.shortId"
+                      :to="entryRoute(circleId, fact.shortId)"
+                      class="short-id entry-link"
+                    >
+                      {{ fact.shortId }}
+                    </RouterLink>
                     <RouterLink
                       v-if="fact.conversationId"
                       :to="conversationRoute(circleId, fact.conversationId)"
@@ -466,8 +530,8 @@ const contactsRoute = computed(() => ({
                     color="neutral"
                     variant="ghost"
                     size="sm"
-                    title="提炼为正式词条"
-                    :aria-label="`提炼为正式词条：${fact.content}`"
+                    title="提炼为正式记忆"
+                    :aria-label="`提炼为正式记忆：${fact.content}`"
                     @click="promotingFact = fact"
                   />
                   <UButton
@@ -499,7 +563,13 @@ const contactsRoute = computed(() => ({
                     已被「{{ fact.supersededBy }}」取代
                   </p>
                   <p class="entry-meta">
-                    <code v-if="fact.shortId" class="short-id">{{ fact.shortId }}</code>
+                    <RouterLink
+                      v-if="fact.shortId"
+                      :to="entryRoute(circleId, fact.shortId)"
+                      class="short-id entry-link"
+                    >
+                      {{ fact.shortId }}
+                    </RouterLink>
                     <span>{{ heardFrom(fact.scope) }}</span>
                     <span>{{ provenanceLabels[fact.provenance] }}</span>
                     <span>
@@ -571,7 +641,7 @@ const contactsRoute = computed(() => ({
                     <time :datetime="run.createdAt" :title="formatTime(run.createdAt)">
                       {{ formatShort(run.createdAt) }}
                     </time>
-                    <span class="text-default">{{ run.client?.name ?? '已删除的接入实例' }}</span>
+                    <span class="text-default">{{ run.client?.name ?? '已删除的客户端' }}</span>
                     <RouterLink
                       v-if="run.conversationId"
                       :to="conversationRoute(circleId, run.conversationId)"
@@ -603,54 +673,26 @@ const contactsRoute = computed(() => ({
     :fact="promotingFact"
   />
 
-  <UModal
+  <ConsequenceModal
     :open="deletingFact !== null"
     title="删除这条事实？"
-    @update:open="(v) => !v && (deletingFact = null)"
-  >
-    <template #body>
-      <p class="text-sm">
-        删除后，「{{ deletingFact?.content }}」不再注入对话，也无法在管理界面恢复。
-      </p>
-    </template>
-    <template #footer>
-      <div class="flex w-full justify-end gap-2">
-        <UButton color="neutral" variant="ghost" @click="deletingFact = null">取消</UButton>
-        <UButton color="error" :loading="removing" @click="removeFact">删除</UButton>
-      </div>
-    </template>
-  </UModal>
-  <UModal
+    :consequences="deleteFactConsequences"
+    action="删除"
+    :busy="removing"
+    :error="removeError"
+    @close="deletingFact = null"
+    @confirm="removeFact"
+  />
+  <ConsequenceModal
     :open="confirmMerge"
     title="合并联系人？"
-    @update:open="(v) => !v && (confirmMerge = false)"
-  >
-    <template #body>
-      <p class="text-sm">
-        将「{{ mergePicked?.label }}」合并到「{{ data?.displayName }}」：平台账号与事实转到「{{
-          data?.displayName
-        }}」，「{{ mergePicked?.label }}」随即删除，相关的待确认绑定作废。此操作不可撤销。
-      </p>
-      <p v-if="data?.kind === 'group'" class="mt-2 text-sm text-muted">
-        「{{ mergePicked?.label }}」群内记下的内容归到「{{
-          data?.displayName
-        }}」，此后在这个群的任一平台都能读取。按群规则一并转移；两边在同一接入实例都有规则时，保留「{{
-          data?.displayName
-        }}」的规则。
-      </p>
-      <p v-else class="mt-2 text-sm text-muted">
-        合并后这些平台账号算同一个人：私聊中记下的内容，用哪个账号私聊都能读取；任一方标记过成员时，这些账号的私聊都视为该成员本人对话。在群里记下的事实归到「{{
-          data?.displayName
-        }}」，可见范围不变，仍只在那个群可见。
-      </p>
-    </template>
-    <template #footer>
-      <div class="flex w-full justify-end gap-2">
-        <UButton color="neutral" variant="ghost" @click="confirmMerge = false">取消</UButton>
-        <UButton color="error" :loading="merging" @click="merge">合并</UButton>
-      </div>
-    </template>
-  </UModal>
+    :consequences="mergeConsequences"
+    action="合并"
+    :busy="merging"
+    :error="mergeError"
+    @close="confirmMerge = false"
+    @confirm="merge"
+  />
 </template>
 
 <style scoped>

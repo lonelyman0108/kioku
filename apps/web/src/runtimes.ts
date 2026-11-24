@@ -7,7 +7,7 @@ export const RUNTIME_HINTS: Record<RuntimeFamily, string> = {
   gemini: '命令钩子 · MCP',
   agy: '命令钩子 · MCP',
   openclaw: '记忆插件 · 工具转发',
-  hermes: '内存 Provider · 工具转发',
+  hermes: '记忆提供方 · 工具转发',
   opencode: '进程扩展 · MCP',
   pi: '进程扩展 · MCP',
   dsh: 'Cordis 插件 · MCP',

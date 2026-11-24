@@ -12,7 +12,8 @@ export const DATABASE_SOURCES = ['env', 'file'] as const
 export const DatabaseSource = z.enum(DATABASE_SOURCES)
 export type DatabaseSource = z.infer<typeof DatabaseSource>
 
-export const DATABASE_STATES = ['missing', 'unavailable', 'ready'] as const
+// legacy：库是记忆圈重构之前的结构，等管理员在升级页就地迁移
+export const DATABASE_STATES = ['missing', 'unavailable', 'legacy', 'ready'] as const
 export const DatabaseState = z.enum(DATABASE_STATES)
 export type DatabaseState = z.infer<typeof DatabaseState>
 
@@ -197,5 +198,7 @@ export const DatabaseSetupError = z.object({
 export type DatabaseSetupError = z.infer<typeof DatabaseSetupError>
 
 export const DATABASE_UNAVAILABLE_CODE = 'database_unavailable'
+// 库是重构之前的结构、还没迁移：除健康检查与升级接口外的 /v1 都回 503 带这个码
+export const LEGACY_DATABASE_CODE = 'legacy_database'
 export const SETUP_CODE_INVALID = 'setup_code_invalid'
 export const SETUP_CODE_LIMITED = 'setup_code_limited'

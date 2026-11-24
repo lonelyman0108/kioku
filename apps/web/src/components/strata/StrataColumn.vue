@@ -1,15 +1,21 @@
 <script setup lang="ts">
-import { SENSITIVITIES, type Sensitivity, type StrataBand } from '@kioku/contracts'
+import { SENSITIVITIES, type CircleKind, type Sensitivity, type StrataBand } from '@kioku/contracts'
 import { computed, ref } from 'vue'
 
 import { bandLabels, sensitivityLabels } from '../../labels'
 import StrataSwatch from './StrataSwatch.vue'
 import {
+  STACK,
   bandHints,
   bandTotal,
+  bandsSensitivityTotal,
+  bandsTotal,
+  circleBands,
   conversationTotal,
   curatedTotal,
   isConversationBand,
+  localBandHint,
+  localBandLabel,
   paintCell,
   segments,
   sensitivityHints,
@@ -23,23 +29,32 @@ import {
 const props = withDefaults(
   defineProps<{
     counts: StrataCounts
+    // 单圈视图传入当前记忆圈类型时，只画本圈真实存在的 3 类记忆形态
+    circleKind?: CircleKind | null
     // 柱子的高度和宽度；compact 用在窄屏，各列收窄
     height?: number
     width?: number
     compact?: boolean
     selected?: StrataSelection | null
   }>(),
-  { height: 612, width: 216, compact: false, selected: null },
+  { circleKind: null, height: undefined, width: 216, compact: false, selected: null },
 )
 const emit = defineEmits<{
   select: [selection: StrataSelection]
   hover: [selection: StrataSelection | null]
 }>()
 
+const activeList = computed(() => (props.circleKind ? circleBands(props.circleKind) : STACK))
+const resolvedHeight = computed(() => props.height ?? (props.circleKind ? 280 : 612))
+const labelOf = (band: StrataBand) => (props.circleKind ? localBandLabel(band) : bandLabels[band])
+const hintOf = (band: StrataBand) => (props.circleKind ? localBandHint(band) : bandHints[band])
+
 const GAP = 28
 // 一行放得下标签和数字按钮：14px 字、1.4 倍行高、上下各 1px 内边距，加 1px 分隔线
 const MIN_ROW = 24
-const bands = computed(() => stackBands(props.counts, props.height, GAP, MIN_ROW))
+const bands = computed(() =>
+  stackBands(props.counts, resolvedHeight.value, GAP, MIN_ROW, activeList.value),
+)
 const conversation = computed(() => bands.value.filter((b) => isConversationBand(b.band)))
 const curated = computed(() => bands.value.filter((b) => !isConversationBand(b.band)))
 const cuts = computed(() =>
@@ -120,8 +135,8 @@ function enterSegment(
     tip: pointer - (x - width / 2),
     y: event.clientY - (rect?.top ?? 0),
     lines: [
-      `${bandLabels[band]} ${sensitivityLabels[sensitivity]} ${count} 条`,
-      bandHints[band],
+      `${labelOf(band)} ${sensitivityLabels[sensitivity]} ${count} 条`,
+      hintOf(band),
       sensitivityHints[sensitivity],
     ],
   }
@@ -150,12 +165,12 @@ function enterSegment(
       </button>
     </div>
 
-    <div ref="body" class="fig-body" :style="{ height: `${height}px` }">
+    <div ref="body" class="fig-body" :style="{ height: `${resolvedHeight}px` }">
       <svg
         class="fig-col"
         :width="width"
-        :height="height"
-        :viewBox="`0 0 ${width} ${height}`"
+        :height="resolvedHeight"
+        :viewBox="`0 0 ${width} ${resolvedHeight}`"
         aria-hidden="true"
       >
         <template v-for="{ band, parts } in cuts" :key="band.band">
@@ -221,21 +236,21 @@ function enterSegment(
         <button
           type="button"
           class="fig-name"
-          :title="bandHints[band.band]"
+          :title="hintOf(band.band)"
           @mouseenter="enter({ band: band.band, sensitivity: null })"
           @mouseleave="leave"
           @focus="enter({ band: band.band, sensitivity: null })"
           @blur="leave"
           @click="emit('select', { band: band.band, sensitivity: null })"
         >
-          {{ bandLabels[band.band] }}
+          {{ labelOf(band.band) }}
         </button>
         <button
           v-if="bandTotal(counts, band.band)"
           type="button"
           class="fig-total"
           :class="{ on: highlight?.band === band.band && !highlight.sensitivity }"
-          :aria-label="`${bandLabels[band.band]} ${bandTotal(counts, band.band)} 条`"
+          :aria-label="`${labelOf(band.band)} ${bandTotal(counts, band.band)} 条`"
           @mouseenter="enter({ band: band.band, sensitivity: null })"
           @mouseleave="leave"
           @focus="enter({ band: band.band, sensitivity: null })"
@@ -251,7 +266,7 @@ function enterSegment(
             type="button"
             class="fig-n"
             :class="{ sec: s === 'secret', on: numberOn(band.band, s) }"
-            :aria-label="`${bandLabels[band.band]} ${sensitivityLabels[s]} ${counts[band.band][s]} 条`"
+            :aria-label="`${labelOf(band.band)} ${sensitivityLabels[s]} ${counts[band.band][s]} 条`"
             @mouseenter="enter({ band: band.band, sensitivity: s })"
             @mouseleave="leave"
             @focus="enter({ band: band.band, sensitivity: s })"
@@ -287,9 +302,9 @@ function enterSegment(
 
     <div class="fig-foot">
       <span>合计</span>
-      <b>{{ curatedTotal(counts) }}</b>
+      <b>{{ circleKind ? bandsTotal(counts, activeList) : curatedTotal(counts) }}</b>
       <span v-for="s in SENSITIVITIES" :key="s" class="fig-sum">{{
-        sensitivityTotal(counts, s)
+        circleKind ? bandsSensitivityTotal(counts, activeList, s) : sensitivityTotal(counts, s)
       }}</span>
     </div>
   </figure>
@@ -303,7 +318,7 @@ function enterSegment(
 }
 .strata-figure.compact {
   --lead: 9px;
-  --cols: 40px 34px repeat(4, minmax(0, 1fr));
+  --cols: 72px 34px repeat(4, minmax(0, 1fr));
 }
 .fig-head,
 .fig-row,
@@ -385,7 +400,7 @@ function enterSegment(
 .fig-z {
   justify-self: end;
   padding: 1px 5px;
-  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: 14px;
   line-height: 1.4;
   text-align: right;
@@ -421,7 +436,7 @@ button.fig-total:hover,
 .fig-sub b {
   justify-self: end;
   padding: 1px 4px;
-  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-weight: 500;
 }
 .fig-foot {
@@ -436,7 +451,7 @@ button.fig-total:hover,
 .fig-sum {
   justify-self: end;
   padding: 0 5px;
-  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: 14px;
   line-height: 1;
 }

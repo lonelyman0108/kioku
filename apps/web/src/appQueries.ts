@@ -1,7 +1,7 @@
 import type { KeyInfo } from '@kioku/contracts'
 import type { QueryClient } from '@tanstack/vue-query'
 
-// 接入实例的改动会影响别处的缓存：接入实例列表、访问密钥与权限矩阵、人格详情（列出以其为默认人格的接入实例）
+// 客户端的改动会影响别处的缓存：客户端列表、访问密钥与权限矩阵、人格详情（列出以其为默认人格的客户端）
 export function refreshClientCaches(queryClient: QueryClient, circleId: string, clientId?: string) {
   return Promise.all([
     queryClient.invalidateQueries({ queryKey: ['clients', circleId] }),
@@ -31,7 +31,7 @@ export const keyMatrixKey = (
   ] as const
 export const KEY_MATRIX_STALE_TIME = 60_000
 
-// 删掉的接入实例：它的访问密钥与权限矩阵不再请求（请求只会得到 404），直接去掉缓存
+// 删掉的客户端：它的访问密钥与权限矩阵不再请求（请求只会得到 404），直接去掉缓存
 export function forgetClient(queryClient: QueryClient, circleId: string, clientId: string) {
   queryClient.removeQueries({ queryKey: ['keys', circleId, clientId] })
   queryClient.removeQueries({ queryKey: ['key-matrix', circleId, clientId] })

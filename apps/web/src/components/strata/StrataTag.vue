@@ -3,22 +3,31 @@ import type { Sensitivity, StrataBand } from '@kioku/contracts'
 import { computed } from 'vue'
 
 import { bandLabels, sensitivityLabels } from '../../labels'
-import { bandHints, paintCell, sensitivityHints } from './strata'
+import { bandHints, localBandHint, localBandLabel, paintCell, sensitivityHints } from './strata'
 
 // 记忆的标签：色带是实色块加全名，后面接一块敏感级的纹理和它的名字
-const props = defineProps<{ band: StrataBand; sensitivity: Sensitivity }>()
+const props = withDefaults(
+  defineProps<{
+    band: StrataBand
+    sensitivity: Sensitivity
+    local?: boolean
+  }>(),
+  { local: false },
+)
 
 const WIDTH = 38
 const HEIGHT = 24
 const rects = computed(() =>
   paintCell(props.band, props.sensitivity, { x: 0, y: 0, width: WIDTH, height: HEIGHT }),
 )
+const bandName = computed(() => (props.local ? localBandLabel(props.band) : bandLabels[props.band]))
+const bandHint = computed(() => (props.local ? localBandHint(props.band) : bandHints[props.band]))
 </script>
 
 <template>
   <span class="strata-tag">
-    <span class="tag-band" :style="{ background: `var(--layer-${band})` }" :title="bandHints[band]">
-      {{ bandLabels[band] }}
+    <span class="tag-band" :style="{ background: `var(--layer-${band})` }" :title="bandHint">
+      {{ bandName }}
     </span>
     <svg :width="WIDTH" :height="HEIGHT" :viewBox="`0 0 ${WIDTH} ${HEIGHT}`" aria-hidden="true">
       <rect

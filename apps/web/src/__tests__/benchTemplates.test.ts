@@ -264,7 +264,7 @@ describe('真实模式要确认', () => {
     expect(shownIn(line)).toEqual(['line'])
   })
 
-  it('接入实例与 Key 的下拉框接到选择上', () => {
+  it('客户端与 Key 的下拉框接到选择上', () => {
     const select = (label: string) =>
       must(
         toolbar.elements.find(
@@ -274,9 +274,9 @@ describe('真实模式要确认', () => {
         ),
         `下拉框「${label}」`,
       )
-    expect(bound(select('接入实例'), 'model-value')).toBe('clientId')
-    expect(bound(select('接入实例'), 'items')).toBe('clientItems')
-    expect(handler(select('接入实例'), 'update:model-value')).toBe('(v) => selectClient(String(v))')
+    expect(bound(select('客户端'), 'model-value')).toBe('clientId')
+    expect(bound(select('客户端'), 'items')).toBe('clientItems')
+    expect(handler(select('客户端'), 'update:model-value')).toBe('(v) => selectClient(String(v))')
     expect(bound(select('访问密钥'), 'model-value')).toBe('keyId')
     expect(bound(select('访问密钥'), 'items')).toBe('keyItems')
     expect(handler(select('访问密钥'), 'update:model-value')).toBe('(v) => selectKey(String(v))')
@@ -318,9 +318,13 @@ describe('真实模式要确认', () => {
       '滚动区',
     )
     const classOf = (el: TemplateNode) => el.props?.find((p) => p.name === 'class')?.value?.content
-    // 标记和滚动区是兄弟，标记在前；滚动的只有滚动区，它们的上一层不滚
+    // 二级导航、真实模式标记和滚动区是兄弟，前两者固定在顶部，滚动的只有滚动区
+    const subnav = must(
+      page.elements.find((el) => el.tag === 'ClientsSubnav'),
+      '客户端二级导航',
+    )
     const siblings = page.elements[0]!.children!.filter((n) => n.type === ELEMENT)
-    expect(siblings).toEqual([banner, scroller])
+    expect(siblings).toEqual([subnav, banner, scroller])
     const style = descriptor.styles[0]!.content
     const rule = (name: string) => new RegExp(`\\.${name} \\{([^}]*)\\}`).exec(style)?.[1] ?? ''
     expect(rule(classOf(scroller)!)).toContain('overflow-y: auto')
@@ -1543,7 +1547,7 @@ describe('读取失败', () => {
       'else-if',
       'clients.data.value && !owned.length && !clients.isError.value',
     )
-    expect(textOf(noClients)).toContain('暂无接入实例')
+    expect(textOf(noClients)).toContain('暂无客户端')
     const noKeys = withIf(
       toolbar.elements,
       'keys.data.value && !usable.length && !keys.isError.value',
@@ -1962,7 +1966,7 @@ describe('入口', () => {
     expect(consoleLayout).toContain(
       '(clients.data.value ?? []).some((client) => client.ownerAccountId === me.data.value?.id)',
     )
-    expect(consoleLayout).toMatch(/ownsClient\.value\s*\? \[\{ label: '测试台'/)
+    expect(consoleLayout).toMatch(/ownsClient\.value\s*\?\s*\[\s*\{\s*label: '测试台'/)
   })
 
   it('选接入实例只列自己是所有者的', () => {

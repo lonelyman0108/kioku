@@ -198,23 +198,31 @@ describe('待处理', () => {
     )
     expect(inboxBindings).toContain('对方在与机器人的私聊中使用绑定码发起申请')
     expect(inboxBindings).toContain('仅列出前 {{ items.length }} 个，处理后显示其余的。')
-    expect(subjectBindings).toContain('此操作不可撤销')
+    expect(subjectBindings).toContain('<ConsequenceModal')
+    expect(subjectBindings).toContain('且不可撤销')
     expect(subjectBindings).toContain('原联系人随即删除')
-    expect(subjectBindings).toContain('如无法辨认这些账号，或绑定码并非本人申请，请拒绝')
-    expect(handler(buttonOf(subjectBindings, '确认'), 'click')).toBe('confirming = binding')
+    expect(subjectBindings).toContain(
+      '如无法辨认这些账号，或绑定码并非当前账号本人申请，请点击拒绝',
+    )
+    expect(handler(buttonOf(subjectBindings, '确认'), 'click')).toBe(
+      '((confirming = binding), (confirmError = null))',
+    )
   })
 
   it('待确认内容：勾选时记下版本，分批提交，删除要确认，查看者没有操作', () => {
     expect(inboxReview).toContain('next.set(item.id, item.version)')
     expect(inboxReview).toContain('const BATCH = 100')
-    expect(inboxReview).toContain('从对话中抽取的内容删除后，无法在管理界面恢复。')
+    expect(inboxReview).toContain(
+      '已删除的内容会进入「记忆 → 已删除」，可在保留期内恢复，过期后永久清理。',
+    )
     const elements = elementsOf(inboxReview)
     const remove = elements.filter((el) => el.tag === 'UButton' && /删除/.test(textOf(el)))
     expect(remove.map((el) => handler(el, 'click'))).toEqual([
-      'deleting = chosen()',
-      'deleting = [item]',
-      "deleting && act('delete', deleting)",
+      '((deleting = chosen()), (deleteError = null))',
+      '((deleting = [item]), (deleteError = null))',
     ])
+    const confirmModal = elements.find((el) => el.tag === 'ConsequenceModal')!
+    expect(handler(confirmModal, 'confirm')).toBe("deleting && act('delete', deleting)")
     const checks = elements.filter((el) => el.tag === 'UCheckbox')
     for (const check of checks) {
       expect(check.props?.find((p) => p.name === 'if')?.exp?.content).toContain('canAct')
@@ -222,11 +230,14 @@ describe('待处理', () => {
   })
 
   it('整理建议：会删掉记忆的先确认，后果的文字还在', () => {
-    expect(dreamSuggestions).toContain('destructive(item) ? (confirming = item) : apply(item)')
-    expect(dreamSuggestions).toContain('suggestionKinds[item.kind].effect')
-    expect(dreamSuggestions).toContain('suggestionKinds[confirming.kind].effect')
     expect(dreamSuggestions).toContain(
-      '包含当前账号无权写入的记忆（如其他成员的接入实例的记忆），需由有权限的成员处理。',
+      'destructive(item) ? ((confirming = item), (confirmError = null)) : apply(item)',
+    )
+    expect(dreamSuggestions).toContain('suggestionKinds[item.kind].effect')
+    expect(dreamSuggestions).toContain('suggestionKinds[target.kind].effect')
+    expect(dreamSuggestions).toContain('<ConsequenceModal')
+    expect(dreamSuggestions).toContain(
+      '包含当前账号无权写入的记忆（如其他成员的客户端的记忆），需由有权限的成员处理。',
     )
     expect(dreamSuggestions).toContain('正文疑似包含明文凭据')
     expect(dream).toContain('其余几条删除')
@@ -348,24 +359,24 @@ describe('转存对话框', () => {
   })
 })
 
-describe('接入实例', () => {
-  it('只有接入实例所有者和记忆圈所有者能看 Key', () => {
+describe('客户端', () => {
+  it('只有客户端所有者和记忆圈所有者能看 Key', () => {
     expect(appKeys).toContain('enabled: computed(() => props.isClientOwner || props.isCircleOwner)')
-    expect(appKeys).toContain('仅接入实例所有者或记忆圈所有者可查看访问密钥')
+    expect(appKeys).toContain('仅客户端所有者或记忆圈所有者可查看访问密钥')
     expect(appDetailPage).toContain(
       'const canSeeKeys = computed(() => isClientOwner.value || isCircleOwner.value)',
     )
     expect(appDetailPage).toContain('enabled: canSeeKeys')
     expect(appsPage).toContain('isCircleOwner.value || c.ownerAccountId === me.data.value?.id')
-    expect(appsPage).toContain('仅接入实例所有者可查看访问密钥')
+    expect(appsPage).toContain('仅客户端所有者可查看访问密钥')
   })
 
   it('明文 Key 显示期间不能点遮罩、按 Esc 或右上角关掉', () => {
     const modal = elementsOf(appKeys).find(
       (el) => el.tag === 'UModal' && bound(el, 'title')?.includes('签发访问密钥'),
     )!
-    expect(bound(modal, 'dismissible')).toBe('!issued')
-    expect(bound(modal, 'close')).toBe('!issued')
+    expect(bound(modal, 'dismissible')).toBe('!issued && !issuing')
+    expect(bound(modal, 'close')).toBe('!issued && !issuing')
     expect(handler(buttonOf(appKeys, '我已保存'), 'click')).toBe('closeIssue')
   })
 
@@ -390,22 +401,21 @@ describe('接入实例', () => {
   })
 
   it('吊销的后果还在', () => {
-    expect(appKeys).toContain('后，使用它的客户端将立即失去访问权限。')
+    expect(appKeys).toContain('<ConsequenceModal')
+    expect(appKeys).toContain('将立即失效，使用它的客户端会立刻失去访问权限。')
   })
 
   it('转移会吊销 Key、删除要写清后果，只有有权限的人看得到按钮', () => {
     expect(appDetailPage).toContain('全部吊销，新所有者需重新签发')
-    expect(appDetailPage).toContain(
-      '接入实例无上下文请求与凭据授权属于其所有者，转移后改为新所有者',
-    )
+    expect(appDetailPage).toContain('客户端无上下文请求与凭据授权属于其所有者，转移后改为新所有者')
     expect(appDetailPage).toContain("'已转移，原有访问密钥已全部吊销'")
-    expect(appDetailPage).toContain(
-      '其全部访问密钥与按群规则将一并删除，使用这些访问密钥的客户端将立即失去访问权限。',
-    )
+    expect(appDetailPage).toContain('<ConsequenceModal')
+    expect(appDetailPage).toContain('及其全部访问密钥、按群规则将被永久删除，且不可撤销。')
+    expect(appDetailPage).toContain('使用这些访问密钥的应用与终端将立即失去访问权限。')
     const elements = elementsOf(appDetailPage)
     const directive = (el: TemplateNode) => el.props?.find((p) => p.name === 'if')?.exp?.content
-    expect(directive(buttonOf(appDetailPage, '转移接入实例'))).toBe('isCircleOwner')
-    expect(directive(buttonOf(appDetailPage, '删除接入实例'))).toBe('canDelete')
+    expect(directive(buttonOf(appDetailPage, '转移客户端'))).toBe('isCircleOwner')
+    expect(directive(buttonOf(appDetailPage, '删除客户端'))).toBe('canDelete')
     expect(
       elements.some((el) => el.tag === 'AppSimulator' && directive(el) === 'isClientOwner'),
     ).toBe(true)
@@ -466,8 +476,8 @@ describe('召回调试', () => {
     expect(recallDebugPanel).toContain('debugKeyChoices(owned.value, keyResults.value)')
   })
 
-  it('没有自己的接入实例、没有有效 Key 时给出说明', () => {
-    expect(recallDebugPanel).toContain('当前账号暂无接入实例，无法调试')
+  it('没有自己的客户端、没有有效 Key 时给出说明', () => {
+    expect(recallDebugPanel).toContain('当前账号暂无客户端，无法调试')
     expect(recallDebugPanel).toContain('暂无有效访问密钥。签发后可调试。')
   })
 
@@ -496,7 +506,7 @@ describe('召回调试', () => {
   it('召回页挂着调试，统计的说明还在', () => {
     expect(recallPage).toContain('<RecallDebugPanel')
     expect(recallPage).toContain('更早的事件只保留每条记忆的累计次数')
-    expect(recallPage).toContain('不含机密内容（不参与召回）和启动加载的词条')
+    expect(recallPage).toContain('不含机密内容（不参与召回）和启动加载的记忆')
     expect(recallPage).toContain('仅显示最早的 {{ data.never.length }} 条')
   })
 })

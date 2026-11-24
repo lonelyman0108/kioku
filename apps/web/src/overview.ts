@@ -53,15 +53,15 @@ export function strataFilterQuery({ band, sensitivity }: StrataSelection) {
   }
 }
 
-// 点地层柱去哪里：来自对话的两类去对话页对应的分页；独立人格去词表页的独立人格分页；
-// 其余按色带与敏感级去记忆列表
+// 点地层柱去哪里：来自对话的两类未选敏感级时去对话页对应的分页；选了具体敏感级时去记忆列表按色带与敏感级筛选；
+// 独立人格去人格页；其余按色带与敏感级去记忆列表
 export function strataTarget(circleId: string, selection: StrataSelection) {
-  const { band } = selection
-  if (band && isConversationBand(band)) {
+  const { band, sensitivity } = selection
+  if (band && isConversationBand(band) && !sensitivity) {
     return conversationTabRoute(circleId, band as 'fact' | 'episode')
   }
   if (band === 'persona') {
-    return { name: 'vocabulary', params: { circleId }, query: { tab: 'personas' } }
+    return { name: 'personas', params: { circleId } }
   }
   return { name: 'memories', params: { circleId }, query: strataFilterQuery(selection) }
 }

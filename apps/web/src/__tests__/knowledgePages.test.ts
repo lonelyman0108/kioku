@@ -17,7 +17,8 @@ import credentialFormModal from '../components/CredentialFormModal.vue?raw'
 import deletedMemories from '../components/DeletedMemories.vue?raw'
 import expiredMemories from '../components/ExpiredMemories.vue?raw'
 import memoryListView from '../components/MemoryListView.vue?raw'
-import vocabularyPage from '../pages/VocabularyPage.vue?raw'
+import personasPage from '../pages/PersonasPage.vue?raw'
+import spaceVocabularySettings from '../components/SpaceVocabularySettings.vue?raw'
 import personaDetail from '../components/PersonaDetail.vue?raw'
 import personaPanel from '../components/PersonaPanel.vue?raw'
 import MemoryRow from '../components/strata/MemoryRow.vue'
@@ -245,7 +246,7 @@ describe('列表读取失败', () => {
   })
 
   it.each([
-    ['人格', vocabularyPage, 'personasQuery'],
+    ['人格', personasPage, 'personasQuery'],
     ['凭据', credentialsPage, 'credentials'],
     ['已删除的凭据', credentialsPage, 'deleted'],
   ])('%s：错误和读到过的列表可以同时显示，没读到时不说是空的', (_, source, query) => {
@@ -274,7 +275,8 @@ describe('列表读取失败', () => {
 
 describe('改版之后的约束', () => {
   it.each([
-    ['词表与人格页', vocabularyPage],
+    ['人格页', personasPage],
+    ['语境词典设置', spaceVocabularySettings],
     ['人格面板', personaPanel],
     ['人格详情', personaDetail],
     ['联系人页', subjectsPage],
@@ -293,8 +295,8 @@ describe('改版之后的约束', () => {
   it('人格：有引用时不能删，原因与删除后果的提示都在', () => {
     expect(bound(personaDetail, 'UButton', 'disabled')).toBe('blockers.length > 0')
     expect(personaDetail).toContain('无法删除：')
-    expect(personaPanel).toContain('可用于新人格')
-    expect(personaPanel).toContain('仍有子人格或接入实例引用时无法删除')
+    expect(personaPanel).toContain('可用于后续新建人格')
+    expect(personaPanel).toContain('仍有子人格、客户端默认人格或按群规则引用时无法删除')
   })
 
   it('人格：窄屏切换后焦点不掉到 body，标题接得住焦点', () => {
@@ -313,11 +315,14 @@ describe('改版之后的约束', () => {
   })
 
   it('联系人：合并的确认框写明后果，按人和群分开说', () => {
+    expect(subjectDetailPage).toContain('<ConsequenceModal')
     expect(subjectDetailPage).toContain('此操作不可撤销')
-    expect(subjectDetailPage).toContain('v-if="data?.kind === \'group\'"')
+    expect(subjectDetailPage).toContain("data.value?.kind === 'group'")
     expect(subjectDetailPage).toContain('按群规则一并转移')
-    expect(subjectDetailPage).toContain('合并后这些平台账号算同一个人')
-    expect(subjectDetailPage).toContain('不再注入对话，也无法在管理界面恢复')
+    expect(subjectDetailPage).toContain('合并后这些平台账号视作同一人')
+    expect(subjectDetailPage).toContain(
+      '删除后进入已删除列表，可在保留期内前往「记忆 → 已删除」恢复，过期后永久清除。',
+    )
   })
 
   it('联系人：人和群各翻各的页，查询的键还在 subjects 下面，改动之后跟着失效', () => {
@@ -338,12 +343,11 @@ describe('改版之后的约束', () => {
   })
 
   it('密码库：断开要确认，确认框写明后果；断开按钮是唯一的砖红', () => {
-    expect(vaultConnectionPanel).toContain('<p class="text-sm">{{ disconnectNotice(c) }}</p>')
+    expect(vaultConnectionPanel).toContain('<ConsequenceModal')
+    expect(vaultConnectionPanel).toContain('disconnectNotice(c)')
     expect(vaultConnectionPanel).toContain('@click="confirmingDisconnect = true"')
-    expect(vaultConnectionPanel).toContain(
-      '<UButton color="error" :loading="busy" @click="disconnect">',
-    )
-    expect(vaultConnectionPanel.match(/color="error"/g)).toHaveLength(2)
+    expect(vaultConnectionPanel).toContain('@confirm="disconnect"')
+    expect(vaultConnectionPanel.match(/color="error"/g)).toHaveLength(1)
   })
 
   it('密码库：条目列表只在可用的连接上读，起了标识的跳到凭据', () => {

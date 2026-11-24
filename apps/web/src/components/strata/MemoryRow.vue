@@ -16,6 +16,7 @@ withDefaults(
     sensitivity: Sensitivity
     priority?: number | null
     variantCount?: number | null
+    local?: boolean
     selected?: boolean
     as?: string
     to?: RouteLocationRaw | null
@@ -26,6 +27,7 @@ withDefaults(
     kind: null,
     priority: null,
     variantCount: null,
+    local: false,
     selected: false,
     as: 'div',
     to: null,
@@ -42,7 +44,7 @@ withDefaults(
     :data-band="band"
     :data-short-id="shortId"
   >
-    <StrataSwatch class="row-swatch" :band="band" :sensitivity="sensitivity" />
+    <StrataSwatch class="row-swatch" :band="band" :sensitivity="sensitivity" :local="local" />
     <RouterLink
       v-if="to"
       :to="to"
@@ -63,6 +65,7 @@ withDefaults(
         :sensitivity="sensitivity"
         :priority="priority"
         :variant-count="variantCount"
+        :local="local"
       />
     </slot>
     <!-- 整行可能是按钮，里面只放行内元素 -->

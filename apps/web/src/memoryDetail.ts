@@ -29,7 +29,7 @@ export function expiryState(validTo: string | null, now: Date = new Date()): Exp
 
 // 启动加载的标记说的是够不够格，不是一定加载
 export const BOOT_HINT =
-  '符合启动加载条件；实际是否加载取决于访问密钥的透镜权限、切面匹配和字数上限'
+  '符合启动加载条件；实际是否加载取决于访问密钥的访问范围、适用条件匹配和字数上限'
 
 // 够格进启动加载的词条：contracts 的 isBootCandidate（与服务端同一条规则），再除去已过期的
 export function isBootNode(
@@ -54,17 +54,17 @@ export interface MissingDisclosure {
   hint: string
 }
 
-const UNSET = '未设触发场景'
+const UNSET = '未设召回说明'
 
 export function missingDisclosure(
   entry: DisclosureFields,
   now: Date = new Date(),
 ): MissingDisclosure | null {
-  if (entry.disclosure?.trim()) return null
+  if (entry.kind !== 'entry' || entry.disclosure?.trim()) return null
   if (isBootNode(entry, now)) {
     return {
       tone: 'muted',
-      text: '启动加载不依赖触发场景',
+      text: '启动加载不依赖召回说明',
       short: '启动加载',
       hint: '未被加载时（例如超出字数上限），补全后召回更准确。',
     }
@@ -139,8 +139,18 @@ export function plaintextValues(entry: PlaintextFields): string[] {
   return variantPlaintextValues(entry.content ?? null, entry.sensitivity, entry.plaintextIgnored)
 }
 
-// 这次改动动没动统计里的数：记忆圈、物种、敏感级、有效与否、要不要补触发场景、是不是疑似明文。
+// 这次改动动没动统计里的数：记忆圈、形态、敏感级、有效与否、要不要补召回说明、疑似敏感内容状态。
 // 窄柱和列表上方的总数靠概览接口算，它要把整个概览算一遍，别的改动不用为它重取
+function sensitiveSignature(entry: ConsoleEntryView): string {
+  return [
+    entry.plaintextIgnored ? '1' : '0',
+    ...(entry.variants ?? []).map(
+      (v) =>
+        `${v.plaintextIgnored ? '1' : '0'}:${(v.sensitiveFindings ?? []).map((f) => `${f.kind}:${f.line}`).join(',')}`,
+    ),
+  ].join('|')
+}
+
 export function statsChanged(before: ConsoleEntryView, after: ConsoleEntryView): boolean {
   const needsDisclosure = (entry: ConsoleEntryView) => missingDisclosure(entry)?.tone === 'warning'
   return (
@@ -150,7 +160,8 @@ export function statsChanged(before: ConsoleEntryView, after: ConsoleEntryView):
     before.sensitivity !== after.sensitivity ||
     isExpired(before.validTo) !== isExpired(after.validTo) ||
     needsDisclosure(before) !== needsDisclosure(after) ||
-    looksPlaintext(before) !== looksPlaintext(after)
+    looksPlaintext(before) !== looksPlaintext(after) ||
+    sensitiveSignature(before) !== sensitiveSignature(after)
   )
 }
 
@@ -163,7 +174,7 @@ export function originScopeLabel(
   if (kind === 'global') return '全局'
   if (kind === 'client') {
     const name = id ? clientName(id) : undefined
-    return name ? `接入实例「${name}」` : '接入实例'
+    return name ? `客户端「${name}」` : '客户端'
   }
   if (kind === 'group') return '群聊'
   if (kind === 'direct') return '私聊'

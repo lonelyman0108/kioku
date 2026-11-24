@@ -19,9 +19,9 @@ import StrataSwatch from './strata/StrataSwatch.vue'
 import { entryBand } from './strata/strata'
 
 // 试算：选一个访问密钥、填一句提示语，用召回调试取候选的分数，再按表单里的最低分与条数在本地重算，不保存。
-// 召回调试只给接入实例所有者（会读到所有者的个人内容），所以只列当前账号是所有者的接入实例的有效访问密钥
-// minScore、limit 是记忆圈表单里的值；clientOverrides 是记忆圈里覆盖了设置的接入实例：所选访问密钥的接入实例自己覆盖了
-// 最低分或条数时，按接入实例的值算（记忆圈的滑块对它不起作用），并写明
+// 召回调试只给客户端所有者（会读到所有者的个人内容），所以只列当前账号是所有者的客户端的有效访问密钥
+// minScore、limit 是记忆圈表单里的值；clientOverrides 是记忆圈里覆盖了设置的客户端：所选访问密钥的客户端自己覆盖了
+// 最低分或条数时，按客户端的值算（记忆圈的滑块对它不起作用），并写明
 const props = defineProps<{
   circleId: string
   minScore: number
@@ -65,11 +65,11 @@ watch(
 // 没有能选的访问密钥时为什么
 const unavailable = computed(() => {
   if (clients.isError.value) return readFailure(clients.error.value)
-  if (!owned.value.length) return '当前账号在这个记忆圈没有接入实例，无法试算。'
+  if (!owned.value.length) return '当前账号在这个记忆圈没有客户端，无法试算。'
   if (!items.value.length) {
     return choices.value.failures.length
       ? `访问密钥读取失败：${choices.value.failures[0]!.text}`
-      : '当前账号的接入实例暂无有效访问密钥，无法试算。'
+      : '当前账号的客户端暂无有效访问密钥，无法试算。'
   }
   return null
 })
@@ -108,7 +108,7 @@ async function run() {
   }
 }
 
-// 所选访问密钥的接入实例自己覆盖了的最低分与条数
+// 所选访问密钥的客户端自己覆盖了的最低分与条数
 const selectedClient = computed(
   () => choices.value.options.find((o) => o.key.id === keyId.value)?.client ?? null,
 )
@@ -175,7 +175,7 @@ function bandOf(c: { kind: EntryKind; circleId: string; circleSlug: string | nul
           <i :style="{ width: percent(row.candidate.rawScore) }" />
           <b :style="{ left: percent(minScoreUsed) }" />
         </span>
-        <span class="cand-score">{{ row.candidate.score.toFixed(2) }}</span>
+        <span class="cand-score tabular-nums">{{ row.candidate.score.toFixed(2) }}</span>
         <span class="cand-state">{{ TRIAL_STATE_NAMES[row.state] }}</span>
       </div>
     </template>
@@ -247,7 +247,7 @@ function bandOf(c: { kind: EntryKind; circleId: string; circleSlug: string | nul
   border-left: 2px solid var(--ui-text-highlighted);
 }
 .cand-score {
-  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: 12px;
   text-align: right;
 }

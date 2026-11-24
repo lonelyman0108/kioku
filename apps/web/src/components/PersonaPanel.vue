@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import type { PersonaInfo } from '@kioku/contracts'
+import type { PersonaDetail as PersonaDetailData, PersonaInfo } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref } from 'vue'
 
@@ -19,6 +19,7 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{
   edit: [persona: PersonaInfo]
+  createChild: [parentId: string]
   removed: []
   open: [personaId: string]
 }>()
@@ -36,9 +37,24 @@ const detail = computed(() =>
 const detailRef = ref<InstanceType<typeof PersonaDetail> | null>(null)
 defineExpose({ focusTitle: () => detailRef.value?.focusTitle() })
 
-const removing = ref<PersonaInfo | null>(null)
+const removing = ref<PersonaDetailData | null>(null)
 const deleting = ref(false)
 const removeError = ref<string | null>(null)
+
+const removeConsequences = computed(() => {
+  const target = removing.value
+  if (!target) return []
+  const list = [
+    `标识 ${target.slug} 将被释放，可用于后续新建人格。`,
+    '当前人格自有的设定段将一并删除；仍有子人格、客户端默认人格或按群规则引用时无法删除。',
+  ]
+  if (target.overrideKeyCount > 0) {
+    list.push(
+      `${target.overrideKeyCount} 个单独指定此人格的访问密钥将恢复沿用所属客户端的默认人格或按群规则。`,
+    )
+  }
+  return list
+})
 
 async function remove() {
   if (!removing.value || deleting.value) return
@@ -54,6 +70,9 @@ async function remove() {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ['personas', cid] }),
       queryClient.invalidateQueries({ queryKey: ['overview', cid] }),
+      queryClient.invalidateQueries({ queryKey: ['clients', cid] }),
+      queryClient.invalidateQueries({ queryKey: ['keys', cid] }),
+      queryClient.invalidateQueries({ queryKey: ['key-matrix'] }),
     ])
     toast.add({ title: '已删除人格', color: 'success' })
   } catch (err) {
@@ -81,6 +100,7 @@ async function remove() {
     :personas="personas"
     :can-edit="canEdit"
     @edit="emit('edit', detail)"
+    @create-child="emit('createChild', detail.id)"
     @remove="((removing = detail), (removeError = null))"
     @open="(id) => emit('open', id)"
   >
@@ -98,10 +118,7 @@ async function remove() {
   <ConsequenceModal
     :open="removing !== null"
     :title="`删除人格「${removing?.name ?? ''}」？`"
-    :consequences="[
-      `标识 ${removing?.slug ?? ''} 释放，可用于新人格。`,
-      '当前人格自有的设定段将一并删除；仍有子人格或接入实例引用时无法删除。',
-    ]"
+    :consequences="removeConsequences"
     action="删除人格"
     :busy="deleting"
     :error="removeError"

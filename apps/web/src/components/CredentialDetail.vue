@@ -66,7 +66,7 @@ const references = useQuery({
   queryKey: computed(() => ['credential-references', props.circleId, c.value.id] as const),
   queryFn: ({ queryKey: [, cid, id] }) => api.credentialReferences(cid, id),
 })
-// 记录可以只看上次改值以来的取用：值可能泄露时，据此看影响到哪些接入实例。换了凭据回到全部
+// 记录可以只看上次改值以来的取用：值可能泄露时，据此看影响到哪些客户端。换了凭据回到全部
 const sinceChange = ref(false)
 watch(
   () => c.value.id,
@@ -212,13 +212,13 @@ async function reveal() {
             {{ connection.email }}
             <span class="text-muted">{{ connectionStatusText(connection) }}</span>
           </template>
-          <span v-else-if="connections.isError.value" class="text-muted">读取失败</span>
+          <ReadFailureNote v-else-if="connections.isError.value" :query="connections" size="xs" />
           <span v-else-if="connections.data.value" class="text-muted">连接不存在</span>
         </template>
         <template #item>
           <template v-if="item">{{ item.name }}</template>
           <span v-else-if="item === null" class="text-warning">条目不可用</span>
-          <span v-else-if="items.isError.value" class="text-muted">读取失败</span>
+          <ReadFailureNote v-else-if="items.isError.value" :query="items" size="xs" />
           <span v-else class="text-muted">—</span>
         </template>
       </PropertyList>
@@ -332,7 +332,7 @@ async function reveal() {
     </section>
 
     <section>
-      <SectionHeading title="限定接入实例" :level="3" />
+      <SectionHeading title="限定客户端" :level="3" />
       <p class="section-text">{{ clientNames }}</p>
     </section>
 
@@ -348,7 +348,7 @@ async function reveal() {
     <section>
       <SectionHeading title="引用此凭据的记忆" :level="3">
         <template #hint>
-          <Hint>仅统计当前账号个人圈内未删除、非机密、仍有效的正式词条。</Hint>
+          <Hint>仅统计当前账号个人圈内未删除、非机密、仍有效的正式记忆。</Hint>
         </template>
       </SectionHeading>
       <p class="section-note">仍有引用时无法删除凭据。</p>
@@ -432,7 +432,13 @@ async function reveal() {
       </div>
     </section>
 
-    <UModal v-model:open="confirmingReveal" title="查看凭据的值？">
+    <UModal
+      :open="confirmingReveal"
+      title="查看凭据的值？"
+      :dismissible="!revealing"
+      :close="!revealing"
+      @update:open="(v) => (!v && revealing) || (confirmingReveal = v)"
+    >
       <template #body>
         <p class="text-sm">
           值将显示在此页面上，并记录一次访问。<template v-if="c.vault"
@@ -442,7 +448,13 @@ async function reveal() {
       </template>
       <template #footer>
         <div class="flex w-full justify-end gap-2">
-          <UButton color="neutral" variant="ghost" @click="confirmingReveal = false">取消</UButton>
+          <UButton
+            color="neutral"
+            variant="ghost"
+            :disabled="revealing"
+            @click="confirmingReveal = false"
+            >取消</UButton
+          >
           <UButton :loading="revealing" @click="reveal">查看</UButton>
         </div>
       </template>

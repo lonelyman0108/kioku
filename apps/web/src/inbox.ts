@@ -12,7 +12,7 @@ export const inboxTabLabels: Record<InboxTab, string> = {
   binding: '账号绑定',
   review: '待确认内容',
   dream: '整理建议',
-  plaintext: '疑似明文凭据',
+  plaintext: '疑似敏感内容',
   credential: '凭据',
 }
 

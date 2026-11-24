@@ -26,6 +26,7 @@ import {
 } from '@kioku/contracts'
 
 import { ApiError, readFailure } from './api/client'
+import { chatTypeLabels } from './benchForm'
 import { FLAGS, credentialFlagStatuses } from './components/strata/flags'
 import { accessContextLabels, credentialChangeLabels, credentialViaLabels } from './labels'
 import { clipText } from './text'
@@ -139,6 +140,11 @@ export function suggestIdentifier(name: string, taken: readonly string[]): strin
   }
 }
 
+const eventContextLabels: Record<string, string> = {
+  ...chatTypeLabels,
+  ...accessContextLabels,
+}
+
 // 访问记录一行的细节：结果与原因、经由、用途、会话上下文、字段、修改了哪些部分
 export function credentialEventParts(e: CredentialEvent): string[] {
   const parts: string[] = []
@@ -148,7 +154,7 @@ export function credentialEventParts(e: CredentialEvent): string[] {
   }
   if (e.via) parts.push(credentialViaLabels[e.via] ?? e.via)
   if (e.chatType) {
-    const context = accessContextLabels[e.chatType as keyof typeof accessContextLabels]
+    const context = eventContextLabels[e.chatType]
     parts.push(`会话上下文：${context ?? e.chatType}`)
   }
   if (e.purpose) parts.push(`用途：${e.purpose}`)

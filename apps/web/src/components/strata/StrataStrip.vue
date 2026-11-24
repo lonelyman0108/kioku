@@ -2,13 +2,22 @@
 import type { Sensitivity, StrataBand } from '@kioku/contracts'
 import { computed } from 'vue'
 
-import { paintCell } from './strata'
+import { bandFill, paintCell } from './strata'
 
 // 详情顶上的一条地层：一眼看出这条词条在哪一条色带、什么敏感级。文字在下面的标签里，这里不读屏
 const props = defineProps<{ band: StrataBand; sensitivity: Sensitivity }>()
-const rects = computed(() =>
-  paintCell(props.band, props.sensitivity, { x: 0, y: 0, width: '100%', height: '100%' }),
-)
+const rects = computed(() => {
+  const cells = paintCell(props.band, props.sensitivity, {
+    x: 0,
+    y: 0,
+    width: '100%',
+    height: '100%',
+  })
+  if (props.sensitivity === 'secret') {
+    cells.push({ x: 0, y: 0, width: 24, height: '100%', fill: bandFill(props.band) })
+  }
+  return cells
+})
 </script>
 
 <template>

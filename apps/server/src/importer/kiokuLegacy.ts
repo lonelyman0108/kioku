@@ -44,7 +44,7 @@ import {
   type VaultErrorKind,
   type WhenCondition,
 } from '@kioku/contracts'
-import { and, eq, inArray, isNull } from 'drizzle-orm'
+import { and, eq, inArray, isNull, sql } from 'drizzle-orm'
 import postgres from 'postgres'
 import { z } from 'zod'
 
@@ -71,6 +71,7 @@ import {
   entryGlossary,
   entryVariants,
   facetTerms,
+  legacyApiKeys,
   legacyUris,
   personas,
   personaTraits,
@@ -326,6 +327,14 @@ export interface LegacyMemory {
   deletedAt: Date | null
 }
 
+// 旧库里还在用（没有吊销）的访问密钥：前缀、哈希、名称与所属接入的所有者
+export interface LegacyApiKey {
+  prefix: string
+  secretHash: string
+  name: string
+  ownerAccountId: string | null
+}
+
 export interface LegacySnapshot {
   mode: 'instance' | 'space-export'
   sourceVersion: string
@@ -343,6 +352,7 @@ export interface LegacySnapshot {
   vaultConnections: LegacyVaultConnection[]
   credentials: LegacyCredential[]
   memories: LegacyMemory[]
+  legacyApiKeys?: LegacyApiKey[]
   skippedApiKeys: number
   skippedDeletedMemories: number
   skippedDeletedCredentials: number
@@ -1136,6 +1146,13 @@ export function readLegacyInstanceBackup(file: Buffer, legacyMasterKey: MasterKe
   }
 
   const rawMemories: { row: RawRow; spaceId: string }[] = []
+  const rawApiKeys: {
+    prefix: string
+    secretHash: string
+    name: string
+    spaceId: string
+    appId: string
+  }[] = []
   const glossaryByMemory = new Map<string, string[]>()
 
   let currentTable = ''
@@ -1178,6 +1195,19 @@ export function readLegacyInstanceBackup(file: Buffer, legacyMasterKey: MasterKe
         break
       case 'api_keys':
         snap.skippedApiKeys++
+        if (
+          !row.revoked_at &&
+          typeof row.prefix === 'string' &&
+          typeof row.secret_hash === 'string'
+        ) {
+          rawApiKeys.push({
+            prefix: row.prefix,
+            secretHash: row.secret_hash,
+            name: typeof row.name === 'string' ? row.name : '',
+            spaceId: String(row.space_id ?? currentSpaceId),
+            appId: String(row.app_id ?? ''),
+          })
+        }
         break
       case 'personas':
         snap.personas.push(mapPersonaRow(row, currentSpaceId))
@@ -1225,105 +1255,143 @@ export function readLegacyInstanceBackup(file: Buffer, legacyMasterKey: MasterKe
     if (m.deletedAt) snap.skippedDeletedMemories++
     else snap.memories.push(m)
   }
+  const appOwners = new Map(snap.apps.map((a) => [`${a.spaceId}:${a.id}`, a.ownerAccountId]))
+  snap.legacyApiKeys = rawApiKeys.map((k) => ({
+    prefix: k.prefix,
+    secretHash: k.secretHash,
+    name: k.name,
+    ownerAccountId: appOwners.get(`${k.spaceId}:${k.appId}`) ?? null,
+  }))
 
   return snap
 }
 
+// 读旧库用的查询：postgres.js 的事务与 drizzle 的事务都包成同一种带标签的模板
+export type LegacyQuery = (strings: TemplateStringsArray, ...values: unknown[]) => Promise<RawRow[]>
+
 export async function readLegacyDatabase(url: string): Promise<LegacySnapshot> {
   const client = postgres(url, { max: 2, onnotice: () => {} })
   try {
-    return await client.begin('read only', async (tx) => {
-      const [checkNew] = await tx<
-        { has_circles: boolean; has_spaces: boolean }[]
-      >`select to_regclass('circles') is not null as has_circles, to_regclass('spaces') is not null as has_spaces`
-      if (checkNew?.has_circles) {
-        throw new Error('源数据库已经是新版记忆圈结构，无需再用旧版迁移工具')
-      }
-      if (!checkNew?.has_spaces) {
-        throw new Error('源数据库里找不到旧版 spaces 表，请检查数据库连接是否正确')
-      }
-
-      const accountRows = await tx<RawRow[]>`select * from accounts order by created_at, id`
-      const spaceRows = await tx<RawRow[]>`select * from spaces order by created_at, id`
-      const memberRows = await tx<RawRow[]>`select * from space_members order by created_at`
-      const settingRows = await tx<RawRow[]>`select * from settings`
-      const [keyCount] = await tx<{ n: number }[]>`select count(*)::int as n from api_keys`
-
-      const snap: LegacySnapshot = {
-        mode: 'instance',
-        sourceVersion: 'postgres-legacy',
-        accounts: accountRows.map(mapAccountRow),
-        spaces: spaceRows.map(mapSpaceRow),
-        members: memberRows.map(mapMemberRow),
-        settings: settingRows.map((r) => ({
-          key: String(r.key),
-          value: r.value,
-          updatedAt: toDate(r.updated_at),
-        })),
-        personas: [],
-        apps: [],
-        groupPersonas: [],
-        subjects: [],
-        identities: [],
-        conversations: [],
-        vaultConnections: [],
-        credentials: [],
-        memories: [],
-        skippedApiKeys: keyCount?.n ?? 0,
-        skippedDeletedMemories: 0,
-        skippedDeletedCredentials: 0,
-      }
-
-      for (const space of snap.spaces) {
-        await tx`select set_config('app.space_id', ${space.id}, true)`
-
-        const personaRows = await tx<RawRow[]>`select * from personas order by created_at, id`
-        const appRows = await tx<RawRow[]>`select * from apps order by created_at, id`
-        const gpRows = await tx<RawRow[]>`select * from app_group_personas`
-        const subjectRows = await tx<RawRow[]>`select * from subjects order by created_at, id`
-        const idRows = await tx<RawRow[]>`select * from subject_identities order by created_at, id`
-        const convRows = await tx<RawRow[]>`select * from conversations order by created_at, id`
-        const vaultRows = await tx<
-          RawRow[]
-        >`select * from vault_connections order by created_at, id`
-        const credRows = await tx<RawRow[]>`select * from credentials order by created_at, id`
-        const glossRows = await tx<RawRow[]>`select * from memory_glossary`
-        const memRows = await tx<RawRow[]>`select * from memories order by created_at, id`
-
-        for (const r of personaRows) snap.personas.push(mapPersonaRow(r, space.id))
-        for (const r of appRows) snap.apps.push(mapAppRow(r, space.id))
-        for (const r of gpRows) snap.groupPersonas.push(mapGroupPersonaRow(r, space.id))
-        for (const r of subjectRows) snap.subjects.push(mapSubjectRow(r, space.id))
-        for (const r of idRows) snap.identities.push(mapIdentityRow(r, space.id))
-        for (const r of convRows) snap.conversations.push(mapConversationRow(r, space.id))
-        for (const r of vaultRows) snap.vaultConnections.push(mapVaultConnectionRow(r, space.id))
-
-        for (const r of credRows) {
-          const cred = mapCredentialRow(r, space.id)
-          if (cred.deletedAt) snap.skippedDeletedCredentials++
-          else snap.credentials.push(cred)
-        }
-
-        const glossaryByMemory = new Map<string, string[]>()
-        for (const g of glossRows) {
-          const memoryId = String(g.memory_id)
-          const kw = String(g.keyword)
-          const list = glossaryByMemory.get(memoryId)
-          if (list) list.push(kw)
-          else glossaryByMemory.set(memoryId, [kw])
-        }
-        for (const r of memRows) {
-          const m = mapMemoryRow(r, space.id, glossaryByMemory)
-          if (m.deletedAt) snap.skippedDeletedMemories++
-          else snap.memories.push(m)
-        }
-      }
-
-      return snap
-    })
+    return await client.begin('read only', (tx) =>
+      readLegacyRows(async (strings, ...values) => [
+        ...(await tx<RawRow[]>(strings, ...(values as postgres.ParameterOrFragment<never>[]))),
+      ]),
+    )
   } finally {
     await client.end()
   }
+}
+
+// 在调用方的事务里读旧表（就地迁移：旧表还在 public 里，和后面的迁移同一个事务）
+export function readLegacyDatabaseIn(tx: Tx): Promise<LegacySnapshot> {
+  return readLegacyRows(async (strings, ...values) => [
+    ...(await tx.execute<RawRow>(sql(strings, ...values))),
+  ])
+}
+
+async function readLegacyRows(q: LegacyQuery): Promise<LegacySnapshot> {
+  const [checkNew] =
+    await q`select to_regclass('circles') is not null as has_circles, to_regclass('spaces') is not null as has_spaces, to_regclass('vault_connections') is not null as has_vault, to_regclass('credentials') is not null as has_cred`
+  if (checkNew?.has_circles) {
+    throw new Error('源数据库已经是新版记忆圈结构，无需再用旧版迁移工具')
+  }
+  if (!checkNew?.has_spaces) {
+    throw new Error('源数据库里找不到旧版 spaces 表，请检查数据库连接是否正确')
+  }
+
+  const accountRows = await q`select * from accounts order by created_at, id`
+  const spaceRows = await q`select * from spaces order by created_at, id`
+  const memberRows = await q`select * from space_members order by created_at`
+  const settingRows = await q`select * from settings`
+  const apiKeyRows = await q`select * from api_keys`
+
+  const snap: LegacySnapshot = {
+    mode: 'instance',
+    sourceVersion: 'postgres-legacy',
+    accounts: accountRows.map(mapAccountRow),
+    spaces: spaceRows.map(mapSpaceRow),
+    members: memberRows.map(mapMemberRow),
+    settings: settingRows.map((r) => ({
+      key: String(r.key),
+      value: r.value,
+      updatedAt: toDate(r.updated_at),
+    })),
+    personas: [],
+    apps: [],
+    groupPersonas: [],
+    subjects: [],
+    identities: [],
+    conversations: [],
+    vaultConnections: [],
+    credentials: [],
+    memories: [],
+    legacyApiKeys: [],
+    skippedApiKeys: apiKeyRows.length,
+    skippedDeletedMemories: 0,
+    skippedDeletedCredentials: 0,
+  }
+
+  for (const space of snap.spaces) {
+    await q`select set_config('app.space_id', ${space.id}, true)`
+
+    const personaRows = await q`select * from personas order by created_at, id`
+    const appRows = await q`select * from apps order by created_at, id`
+    const gpRows = await q`select * from app_group_personas`
+    const subjectRows = await q`select * from subjects order by created_at, id`
+    const idRows = await q`select * from subject_identities order by created_at, id`
+    const convRows = await q`select * from conversations order by created_at, id`
+    const vaultRows = checkNew?.has_vault
+      ? await q`select * from vault_connections order by created_at, id`
+      : []
+    const credRows = checkNew?.has_cred
+      ? await q`select * from credentials order by created_at, id`
+      : []
+    const glossRows = await q`select * from memory_glossary`
+    const memRows = await q`select * from memories order by created_at, id`
+
+    for (const r of personaRows) snap.personas.push(mapPersonaRow(r, space.id))
+    for (const r of appRows) snap.apps.push(mapAppRow(r, space.id))
+    for (const r of gpRows) snap.groupPersonas.push(mapGroupPersonaRow(r, space.id))
+    for (const r of subjectRows) snap.subjects.push(mapSubjectRow(r, space.id))
+    for (const r of idRows) snap.identities.push(mapIdentityRow(r, space.id))
+    for (const r of convRows) snap.conversations.push(mapConversationRow(r, space.id))
+    for (const r of vaultRows) snap.vaultConnections.push(mapVaultConnectionRow(r, space.id))
+
+    for (const r of credRows) {
+      const cred = mapCredentialRow(r, space.id)
+      if (cred.deletedAt) snap.skippedDeletedCredentials++
+      else snap.credentials.push(cred)
+    }
+
+    const glossaryByMemory = new Map<string, string[]>()
+    for (const g of glossRows) {
+      const memoryId = String(g.memory_id)
+      const kw = String(g.keyword)
+      const list = glossaryByMemory.get(memoryId)
+      if (list) list.push(kw)
+      else glossaryByMemory.set(memoryId, [kw])
+    }
+    for (const r of memRows) {
+      const m = mapMemoryRow(r, space.id, glossaryByMemory)
+      if (m.deletedAt) snap.skippedDeletedMemories++
+      else snap.memories.push(m)
+    }
+  }
+
+  const appOwners = new Map(snap.apps.map((a) => [`${a.spaceId}:${a.id}`, a.ownerAccountId]))
+  snap.legacyApiKeys = apiKeyRows
+    .filter(
+      (r) => !r.revoked_at && typeof r.prefix === 'string' && typeof r.secret_hash === 'string',
+    )
+    .map((r) => ({
+      prefix: String(r.prefix),
+      secretHash: String(r.secret_hash),
+      name: typeof r.name === 'string' ? r.name : '',
+      ownerAccountId:
+        appOwners.get(`${String(r.space_id ?? '')}:${String(r.app_id ?? '')}`) ?? null,
+    }))
+
+  return snap
 }
 
 // ---- 辅助标准化与加密重写 ----
@@ -1922,6 +1990,7 @@ export interface LegacyMigrationPlan {
   credentials: PlannedCredential[]
   entries: PlannedEntry[]
   settings: { key: string; value: unknown; updatedAt: Date }[]
+  legacyApiKeys: LegacyApiKey[]
   warnings: string[]
   summary: LegacyMigrationPlanSummary
 }
@@ -1939,7 +2008,7 @@ export interface LegacyMigrationResult {
 }
 
 async function resolveSpaceExportTarget(
-  db: Db,
+  db: Db | Tx,
   username?: string,
 ): Promise<{
   account: { id: string; username: string; displayName: string }
@@ -1989,7 +2058,7 @@ async function resolveSpaceExportTarget(
 }
 
 export async function planLegacyMigration(
-  db: Db,
+  db: Db | Tx,
   snapshot: LegacySnapshot,
   options: PlanLegacyOptions = {},
 ): Promise<LegacyMigrationPlan> {
@@ -2961,6 +3030,22 @@ export async function planLegacyMigration(
     })
   }
 
+  const seenPrefixes = new Set<string>()
+  const plannedLegacyApiKeys: LegacyApiKey[] = []
+  if (snapshot.mode === 'instance') {
+    for (const key of snapshot.legacyApiKeys ?? []) {
+      if (!key.prefix || seenPrefixes.has(key.prefix)) continue
+      seenPrefixes.add(key.prefix)
+      plannedLegacyApiKeys.push({
+        prefix: key.prefix,
+        secretHash: key.secretHash,
+        name: key.name,
+        ownerAccountId:
+          key.ownerAccountId && accountById.has(key.ownerAccountId) ? key.ownerAccountId : null,
+      })
+    }
+  }
+
   const summary: LegacyMigrationPlanSummary = {
     mode: snapshot.mode,
     sourceVersion: snapshot.sourceVersion,
@@ -3006,6 +3091,7 @@ export async function planLegacyMigration(
     credentials: plannedCredentials,
     entries: plannedEntries,
     settings: plannedSettings,
+    legacyApiKeys: plannedLegacyApiKeys,
     warnings,
     summary,
   }
@@ -3058,7 +3144,7 @@ async function allocateFreshShortIds(
 }
 
 export async function applyLegacyMigration(
-  db: Db,
+  db: Db | Tx,
   plan: LegacyMigrationPlan,
   options: { targetMasterKey?: MasterKey | null } = {},
 ): Promise<LegacyMigrationResult> {
@@ -3143,6 +3229,21 @@ export async function applyLegacyMigration(
           })
       }
       await migrateLegacyModelSettings(outerTx)
+    }
+
+    // 3b. 记下升级前还在用的访问密钥（只用于识别，不能再访问）
+    if (plan.mode === 'instance' && plan.legacyApiKeys.length) {
+      await outerTx
+        .insert(legacyApiKeys)
+        .values(
+          plan.legacyApiKeys.map((k) => ({
+            prefix: k.prefix,
+            secretHash: k.secretHash,
+            name: k.name,
+            ownerAccountId: k.ownerAccountId,
+          })),
+        )
+        .onConflictDoNothing()
     }
 
     const existingCircleRows = await outerTx.select({ id: circles.id }).from(circles)

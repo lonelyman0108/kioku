@@ -423,7 +423,7 @@ const SYNC_CHANGE_LABELS: Record<LoreSyncChange, string> = {
   content: '正文',
   title: '标题',
   priority: '优先级',
-  disclosure: '触发场景',
+  disclosure: '召回说明',
   glossary: '关键词',
 }
 
@@ -451,7 +451,7 @@ const SYNC_HEADINGS: Record<Exclude<LoreSyncState, 'current'>, string> = {
     'Lore 中路径已变更，不同步：移动可能改变归属与可见范围，需手动移动（移动后此记忆只能手动更新）',
   deleted: '已在 Kioku 中删除，不同步',
   skipped: '本次未同步（原因见各条）',
-  unmapped: '本次计划未映射到此节点（例如更换了人格，或对应的接入实例已不存在），未同步',
+  unmapped: '本次计划未映射到此节点（例如更换了人格，或对应的客户端已不存在），未同步',
   unreadable: '无法同步（原因见各条）',
 }
 

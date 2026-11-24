@@ -25,6 +25,7 @@ import {
   vaultItemTypeLabels,
 } from '../vault'
 import { fetchVaultItems } from '../vaultQueries'
+import ConsequenceModal from './ConsequenceModal.vue'
 import Hint from './Hint.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
 
@@ -84,16 +85,21 @@ async function check() {
 }
 
 const confirmingDisconnect = ref(false)
+const disconnectError = ref<string | null>(null)
+watch(confirmingDisconnect, (open) => {
+  if (open) disconnectError.value = null
+})
 async function disconnect() {
   if (busy.value) return
   const cid = props.circleId
   busy.value = true
+  disconnectError.value = null
   try {
     await api.disconnectVault(cid, c.value.id)
     confirmingDisconnect.value = false
     toast.add({ title: '已断开密码库', color: 'success' })
   } catch (err) {
-    toast.add({ title: err instanceof ApiError ? err.message : '断开失败', color: 'error' })
+    disconnectError.value = err instanceof ApiError ? err.message : '断开失败'
   } finally {
     busy.value = false
     await refresh(cid)
@@ -301,7 +307,13 @@ const itemRows = computed(() => {
       <p v-else-if="items.data.value" class="empty">暂无条目</p>
     </template>
 
-    <UModal v-model:open="choosingDestination" title="新凭据的去处">
+    <UModal
+      :open="choosingDestination"
+      title="新凭据的去处"
+      :dismissible="!busy"
+      :close="!busy"
+      @update:open="(v) => (!v && busy) || (choosingDestination = v)"
+    >
       <template #body>
         <p class="text-sm text-muted">
           新建的凭据写进选中的集合。<Hint>
@@ -330,7 +342,12 @@ const itemRows = computed(() => {
       </template>
       <template #footer>
         <div class="flex w-full justify-end gap-2">
-          <UButton color="neutral" variant="ghost" @click="choosingDestination = false">
+          <UButton
+            color="neutral"
+            variant="ghost"
+            :disabled="busy"
+            @click="choosingDestination = false"
+          >
             取消
           </UButton>
           <UButton :loading="busy" :disabled="!chosen" @click="saveDestination(chosen)">
@@ -340,22 +357,19 @@ const itemRows = computed(() => {
       </template>
     </UModal>
 
-    <UModal v-model:open="confirmingDisconnect" :title="`断开密码库 ${c.email}？`">
-      <template #body>
-        <p class="text-sm">{{ disconnectNotice(c) }}</p>
-        <p class="mt-2 text-sm text-muted">
-          要让已发出的令牌立即失效，请在密码库的设备列表中注销 Kioku。
-        </p>
-      </template>
-      <template #footer>
-        <div class="flex w-full justify-end gap-2">
-          <UButton color="neutral" variant="ghost" @click="confirmingDisconnect = false">
-            取消
-          </UButton>
-          <UButton color="error" :loading="busy" @click="disconnect">断开</UButton>
-        </div>
-      </template>
-    </UModal>
+    <ConsequenceModal
+      :open="confirmingDisconnect"
+      :title="`断开密码库 ${c.email}？`"
+      :consequences="[
+        disconnectNotice(c),
+        '要让已发出的令牌立即失效，请在密码库的设备列表中注销 Kioku。',
+      ]"
+      action="断开"
+      :busy="busy"
+      :error="disconnectError"
+      @confirm="disconnect"
+      @close="confirmingDisconnect = false"
+    />
   </section>
 </template>
 
@@ -397,6 +411,7 @@ const itemRows = computed(() => {
   flex-wrap: wrap;
   gap: 2px 14px;
   margin-top: 4px;
+  font-variant-numeric: tabular-nums;
   line-height: 1.6;
   color: var(--ui-text-muted);
 }

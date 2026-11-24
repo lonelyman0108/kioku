@@ -4,6 +4,7 @@ import {
   ENTRY_LIST_SORTS,
   SENSITIVITIES,
   STRATA_BANDS,
+  TopicTag,
   type CircleKind,
   type CircleOverview,
   type EntryKind,
@@ -35,13 +36,17 @@ import {
   tallyCounts,
 } from './strata/strata'
 
-const props = defineProps<{
-  circleId: string
-  circleKind: CircleKind
-  selectedId: string | null
-  // 概览的统计：能算出总数时写在列表上方
-  overview?: CircleOverview | undefined
-}>()
+const props = withDefaults(
+  defineProps<{
+    circleId: string
+    circleKind: CircleKind
+    canSeeSecret?: boolean
+    selectedId: string | null
+    // 概览的统计：能算出总数时写在列表上方
+    overview?: CircleOverview | undefined
+  }>(),
+  { canSeeSecret: false, overview: undefined },
+)
 const emit = defineEmits<{ select: [shortId: string] }>()
 const route = useRoute()
 const router = useRouter()
@@ -60,18 +65,31 @@ const sortLabels: Record<EntryListSort, string> = {
   priority: '按优先级',
   shortId: '按短 ID',
 }
-const filters = computed(() => ({
-  band: oneOf('band', STRATA_BANDS),
-  kind: oneOf('kind', ENTRY_KINDS),
-  sensitivity: oneOf('sensitivity', SENSITIVITIES),
-  topic: text('topic'),
-  dimensionKey: text('dimensionKey'),
-  termSlug: text('termSlug'),
-  missingDisclosure: text('missingDisclosure') === 'true',
-  plaintext: text('plaintext') === 'true',
-  q: text('q'),
-  sort: oneOf('sort', ENTRY_LIST_SORTS) ?? 'updated',
-}))
+function validTopicTag(raw: string | null): string | null {
+  if (!raw) return null
+  const parsed = TopicTag.safeParse(raw)
+  return parsed.success ? parsed.data : null
+}
+
+const filters = computed(() => {
+  const rawTopic = text('topic')
+  return {
+    band: oneOf('band', STRATA_BANDS),
+    kind: oneOf('kind', ENTRY_KINDS),
+    sensitivity: oneOf('sensitivity', SENSITIVITIES),
+    topic: validTopicTag(rawTopic),
+    dimensionKey: text('dimensionKey'),
+    termSlug: text('termSlug'),
+    missingDisclosure: text('missingDisclosure') === 'true',
+    plaintext: text('plaintext') === 'true',
+    q: text('q'),
+    sort: oneOf('sort', ENTRY_LIST_SORTS) ?? 'updated',
+  }
+})
+const topicInvalid = computed(() => {
+  const raw = topicText.value.trim()
+  return Boolean(raw) && !TopicTag.safeParse(raw.toLowerCase()).success
+})
 
 function setFilter(key: string, value: string | null) {
   const query = { ...route.query }
@@ -111,7 +129,15 @@ watch(
 )
 watch(topicText, (value) => {
   clearTimeout(topicTimer)
-  topicTimer = setTimeout(() => setFilter('topic', value.trim().toLowerCase() || null), 300)
+  const normalized = value.trim().toLowerCase()
+  topicTimer = setTimeout(() => {
+    if (!normalized) {
+      setFilter('topic', null)
+      return
+    }
+    const parsed = TopicTag.safeParse(normalized)
+    if (parsed.success) setFilter('topic', parsed.data)
+  }, 300)
 })
 watch(
   () => filters.value.topic,
@@ -133,7 +159,7 @@ const facets = useQuery({
 
 const facetItems = computed(() => {
   const data = facets.data.value
-  const items: { label: string; value: string | null }[] = [{ label: '全部切面', value: null }]
+  const items: { label: string; value: string | null }[] = [{ label: '全部适用条件', value: null }]
   const dimMap = new Map<string, string>()
   for (const d of data?.dimensions ?? []) dimMap.set(d.key, d.name)
   for (const t of data?.terms ?? []) {
@@ -163,7 +189,7 @@ const conversationBand = computed(
   () => !!filters.value.band && isConversationBand(filters.value.band),
 )
 const personaBand = computed(() => filters.value.band === 'persona')
-const specialBand = computed(() => conversationBand.value || personaBand.value)
+const specialBand = computed(() => personaBand.value)
 
 function effectiveKind(band: StrataBand | null, explicit: EntryKind | null): EntryKind | undefined {
   if (explicit) return explicit
@@ -201,6 +227,13 @@ const items = computed(() =>
 // 每一行没写触发场景时怎么提示：随列表算一次，渲染时不再每行重复判断
 const rows = computed(() => items.value.map((item) => ({ item, missing: missingDisclosure(item) })))
 
+const currentEffectiveKind = computed(() => effectiveKind(filters.value.band, filters.value.kind))
+const visibleSensitivities = computed(() =>
+  SENSITIVITIES.filter(
+    (s) => s !== 'secret' || (props.canSeeSecret && currentEffectiveKind.value !== 'episode'),
+  ),
+)
+
 function toggleSensitivity(value: string) {
   setFilter('sensitivity', filters.value.sensitivity === value ? null : value)
 }
@@ -208,15 +241,16 @@ function clearStrata() {
   const query = { ...route.query }
   delete query.band
   delete query.sensitivity
+  delete query.kind
   void router.replace({ query })
 }
 const strataTag = computed(() =>
   filters.value.band || filters.value.sensitivity
-    ? swatchText(filters.value.band, filters.value.sensitivity)
+    ? swatchText(filters.value.band, filters.value.sensitivity, true)
     : null,
 )
 
-// 列表上方的总数：统计里有的才说。带关键字、主题、切面筛选或两个开关合用时算不出来，说已经载入了多少
+// 列表上方的总数：统计里有的才说。带关键字、主题、适用条件筛选或两个开关合用时算不出来，说已经载入了多少
 const total = computed(() => {
   const data = props.overview
   const f = filters.value
@@ -228,7 +262,11 @@ const total = computed(() => {
   if (f.missingDisclosure) return strata ? null : data.missingDisclosure
   if (f.plaintext) return strata ? null : data.plaintextCredentials
   return filteredTotal(
-    tallyCounts({ circleKind: props.circleKind, counts: data.counts }),
+    tallyCounts({
+      circleKind: props.circleKind,
+      counts: data.counts,
+      extractedCounts: data.extractedCounts,
+    }),
     f.band,
     f.sensitivity,
   )
@@ -241,7 +279,8 @@ const total = computed(() => {
       <UInput
         v-model="keyword"
         name="q"
-        placeholder="搜索标题、短 ID 与触发场景"
+        :maxlength="200"
+        placeholder="搜索标题、短 ID 与召回说明"
         aria-label="关键字"
         class="w-full"
       />
@@ -249,7 +288,7 @@ const total = computed(() => {
         <USelect
           :model-value="selectedFacet"
           :items="facetItems"
-          aria-label="切面"
+          aria-label="适用条件"
           @update:model-value="(v) => setFacetFilter((v as string | null) ?? null)"
         />
         <USelect
@@ -263,13 +302,17 @@ const total = computed(() => {
         v-model="topicText"
         name="topic"
         size="sm"
+        :maxlength="64"
         placeholder="按主题标签筛选（例如 deploy）"
         aria-label="主题筛选"
         class="w-full"
       />
+      <p v-if="topicInvalid" class="text-xs text-error">
+        主题标签仅支持小写字母、数字与连字符（1–64 字符）。
+      </p>
       <div class="sensitivity-filter" role="group" aria-label="敏感级">
         <button
-          v-for="s in SENSITIVITIES"
+          v-for="s in visibleSensitivities"
           :key="s"
           type="button"
           :class="{ on: filters.sensitivity === s }"
@@ -285,13 +328,13 @@ const total = computed(() => {
         <USwitch
           :model-value="filters.missingDisclosure"
           size="sm"
-          label="未设触发场景"
+          label="未设召回说明"
           @update:model-value="(v) => setFilter('missingDisclosure', v ? 'true' : null)"
         />
         <USwitch
           :model-value="filters.plaintext"
           size="sm"
-          label="疑似明文凭据"
+          label="疑似敏感内容"
           @update:model-value="(v) => setFilter('plaintext', v ? 'true' : null)"
         />
       </div>
@@ -299,7 +342,7 @@ const total = computed(() => {
 
     <p class="list-count">
       <span v-if="strataTag" class="list-tag">
-        <StrataSwatch :band="filters.band" :sensitivity="filters.sensitivity" decorative />
+        <StrataSwatch :band="filters.band" :sensitivity="filters.sensitivity" local decorative />
         {{ strataTag }}
         <button type="button" aria-label="清除筛选" @click="clearStrata">
           <UIcon :name="icons.cancel" class="size-3.5" />
@@ -315,22 +358,26 @@ const total = computed(() => {
 
     <div v-if="conversationBand" class="list-note">
       <NoteLine>
-        来自对话的内容不在记忆列表中<Hint> 联系人的事实与会话摘要在「对话」中查看。 </Hint>
+        当前列出从对话记录的条目；完整会话与联系人档案可在「对话」中查看。
         <template #actions>
           <UButton
             size="sm"
             color="primary"
             variant="outline"
-            :to="{ name: 'conversations', params: { circleId } }"
+            :to="{
+              name: 'conversations',
+              params: { circleId },
+              query: filters.band === 'fact' ? { tab: 'contacts' } : {},
+            }"
           >
             查看对话
           </UButton>
         </template>
       </NoteLine>
     </div>
-    <div v-else-if="personaBand" class="list-note">
+    <div v-if="personaBand" class="list-note">
       <NoteLine>
-        独立人格设定不在记忆列表中<Hint> 人格与特质覆盖规则在「人格与特质」页面查看和编辑。 </Hint>
+        人格设定独立于记忆列表<Hint> 人格继承树与设定覆盖在「人格」页面查看和编辑。 </Hint>
         <template #actions>
           <UButton
             size="sm"
@@ -370,6 +417,7 @@ const total = computed(() => {
               :sensitivity="item.sensitivity"
               :priority="item.priority"
               :variant-count="item.variantCount"
+              local
               :selected="item.shortId === selectedId"
               :aria-current="item.shortId === selectedId ? 'true' : undefined"
               @click="emit('select', item.shortId)"
@@ -481,7 +529,7 @@ const total = computed(() => {
   display: none;
 }
 .list-count b {
-  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-weight: 600;
 }
 .list-tag {

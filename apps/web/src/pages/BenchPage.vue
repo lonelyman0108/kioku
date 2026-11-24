@@ -7,6 +7,7 @@ import BenchAgent from '../components/BenchAgent.vue'
 import BenchCalls from '../components/BenchCalls.vue'
 import BenchScenarios from '../components/BenchScenarios.vue'
 import BenchToolbar from '../components/BenchToolbar.vue'
+import ClientsSubnav from '../components/ClientsSubnav.vue'
 import { provideBench } from '../composables/useBench'
 import { icons } from '../icons'
 
@@ -15,6 +16,7 @@ const { ready, real } = provideBench()
 
 const route = useRoute()
 const router = useRouter()
+const circleId = computed(() => String(route.params.circleId))
 // 分页记在地址里，刷新、分享都还在。分页组件都留着（v-show）：切回来时草稿与结果还在
 const tabs = [
   { label: '调用台', value: 'calls' },
@@ -27,7 +29,7 @@ const tab = computed<string>({
     void router.replace({ query: { ...route.query, tab: value === 'calls' ? undefined : value } }),
 })
 
-// 换接入实例时 Key 要重新读，这段时间不算就绪。第一次就绪之后分页组件就不再卸载：卸载会丢掉草稿与文本框里的场景
+// 换客户端时 Key 要重新读，这段时间不算就绪。第一次就绪之后分页组件就不再卸载：卸载会丢掉草稿与文本框里的场景
 const mounted = ref(false)
 watchEffect(() => {
   if (ready.value) mounted.value = true
@@ -36,6 +38,7 @@ watchEffect(() => {
 
 <template>
   <div class="bench">
+    <ClientsSubnav :circle-id="circleId" />
     <!-- 放在滚动区外面：内容滚动时一直看得到 -->
     <div v-if="real" role="status" class="real-band">
       <UIcon :name="icons.warning" class="real-icon" />

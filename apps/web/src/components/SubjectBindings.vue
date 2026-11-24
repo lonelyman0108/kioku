@@ -2,7 +2,7 @@
 import { useToast } from '@nuxt/ui/composables'
 import type { SubjectBinding } from '@kioku/contracts'
 import { useQueryClient } from '@tanstack/vue-query'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
@@ -16,6 +16,7 @@ import {
 } from '../bindings'
 import { refreshSubjectCaches } from '../subjectQueries'
 import { formatRelative, formatTime } from '../time'
+import ConsequenceModal from './ConsequenceModal.vue'
 
 // 绑定记录与确认、拒绝：待处理页列出等当前账号确认的，联系人页列出这个联系人的。
 // subjectId 是所在的联系人页；不在联系人页（待处理）时每条都链到绑到的那个联系人
@@ -26,15 +27,18 @@ const router = useRouter()
 
 // 要确认的那一条：确认框打开时记下，框里列出确认之后会并进来的全部平台账号
 const confirming = ref<SubjectBinding | null>(null)
+const confirmError = ref<string | null>(null)
 const busy = ref<string | null>(null)
 
 async function decide(binding: SubjectBinding, action: 'confirm' | 'reject') {
   if (busy.value) return
   const circleId = props.circleId
   busy.value = binding.id
+  if (action === 'confirm') confirmError.value = null
   try {
     if (action === 'confirm') {
       const kept = await api.confirmBinding(circleId, binding.id)
+      confirming.value = null
       toast.add({ title: `已合并到「${kept.displayName}」`, color: 'success' })
       // 在收码那个联系人的页面上确认的：它已经并进别的联系人、不在了，换到保留的那个联系人
       if (props.subjectId && props.subjectId !== kept.id && props.circleId === circleId) {
@@ -46,10 +50,11 @@ async function decide(binding: SubjectBinding, action: 'confirm' | 'reject') {
     }
   } catch (err) {
     // 期间被别人合并、取消了标记、过了期限：服务端说明原因，刷新之后这一条显示作废或过期
-    toast.add({ title: err instanceof ApiError ? err.message : '操作失败', color: 'error' })
+    const message = err instanceof ApiError ? err.message : '操作失败'
+    if (action === 'confirm') confirmError.value = message
+    else toast.add({ title: message, color: 'error' })
   } finally {
     busy.value = null
-    confirming.value = null
     void refreshSubjectCaches(queryClient, circleId, props.subjectId)
   }
 }
@@ -59,6 +64,16 @@ const statusText = { warning: 'text-warning', success: 'text-success', neutral: 
 
 const incomingText = (binding: SubjectBinding) =>
   (binding.incoming?.identities ?? [binding.redeemedBy]).map(accountText).join('、')
+
+const confirmConsequences = computed(() => {
+  const b = confirming.value
+  if (!b) return []
+  return [
+    `将 ${incomingText(b)} 合并到「${b.subject.displayName}」：原联系人随即删除，这些账号的事实与私聊内容转到「${b.subject.displayName}」，且不可撤销。`,
+    '合并后这些账号的私聊均视为当前账号本人对话，用其中任一账号私聊都能读取私聊内容。',
+    '在群里记下的事实也会归到同一联系人，但可见范围不变，仍只在产生它的那个群可见。如无法辨认这些账号，或绑定码并非当前账号本人申请，请点击拒绝。',
+  ]
+})
 </script>
 
 <template>
@@ -90,7 +105,10 @@ const incomingText = (binding: SubjectBinding) =>
           <p class="text-muted">{{ bindingOutcome(binding) }}</p>
         </div>
         <div v-if="binding.canConfirm || binding.canReject" class="binding-actions">
-          <UButton v-if="binding.canConfirm" :disabled="busy !== null" @click="confirming = binding"
+          <UButton
+            v-if="binding.canConfirm"
+            :disabled="busy !== null"
+            @click="((confirming = binding), (confirmError = null))"
             >确认</UButton
           >
           <UButton
@@ -105,40 +123,16 @@ const incomingText = (binding: SubjectBinding) =>
         </div>
       </li>
     </ul>
-    <UModal
+    <ConsequenceModal
       :open="confirming !== null"
       title="确认这次绑定？"
-      @update:open="(open) => !open && busy === null && (confirming = null)"
-    >
-      <template #body>
-        <div v-if="confirming" class="space-y-2 text-sm">
-          <p>
-            将 {{ incomingText(confirming) }} 合并到「{{
-              confirming.subject.displayName
-            }}」：这些账号的事实与私聊内容转到「{{
-              confirming.subject.displayName
-            }}」，原联系人随即删除。此后这些账号的私聊视为本人对话，用哪个账号私聊都能读取私聊内容。此操作不可撤销。
-          </p>
-          <p class="text-muted">
-            在群里记下的事实也归到这里，但可见范围不变，仍只在那个群可见。如无法辨认这些账号，或绑定码并非本人申请，请拒绝。
-          </p>
-        </div>
-      </template>
-      <template #footer>
-        <div class="flex w-full justify-end gap-2">
-          <UButton
-            color="neutral"
-            variant="ghost"
-            :disabled="busy !== null"
-            @click="confirming = null"
-            >取消</UButton
-          >
-          <UButton :loading="busy !== null" @click="confirming && decide(confirming, 'confirm')"
-            >确认合并</UButton
-          >
-        </div>
-      </template>
-    </UModal>
+      :consequences="confirmConsequences"
+      action="确认合并"
+      :busy="busy !== null"
+      :error="confirmError"
+      @close="confirming = null"
+      @confirm="confirming && decide(confirming, 'confirm')"
+    />
   </div>
 </template>
 

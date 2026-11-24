@@ -209,7 +209,7 @@ export function formProblem(input: CredentialFormInput): string | null {
   }
   const expires = expiresProblem(form.expires)
   if (expires) return expires
-  if (form.restrictClients && !form.clientIds.length) return '限定接入实例时至少选择一个'
+  if (form.restrictClients && !form.clientIds.length) return '限定客户端时至少选择一个'
   if (form.restrictRealms && !normalizedRealms(form.allowedRealms).length) {
     return '限定场域时至少选择一个'
   }
@@ -237,7 +237,7 @@ export function mergeReloaded(
   const pick = <K extends keyof typeof base>(k: K): (typeof base)[K] =>
     sameFields(mine[k], base[k]) ? theirs[k] : mine[k]
 
-  // 限定接入实例的开关与列表是一个整体：分别合并会把列表改坏
+  // 限定客户端的开关与列表是一个整体：分别合并会把列表改坏
   const clientScope = (s: { restrictClients: boolean; clientIds: string[] }) => ({
     restrict: s.restrictClients,
     ids: s.restrictClients ? [...s.clientIds].sort() : [],
@@ -250,7 +250,7 @@ export function mergeReloaded(
   let resolvedClients = mineClients
   if (sameFields(mineClients, baseClients)) resolvedClients = theirClients
   else if (!sameFields(theirClients, baseClients) && !sameFields(theirClients, mineClients)) {
-    conflicts.push('限定接入实例在别处也修改过，保存时以表单中的为准，请核对')
+    conflicts.push('限定客户端在别处也修改过，保存时以表单中的为准，请核对')
   }
 
   // 允许场域（静态场域锁）开关与列表同样按整体合并
