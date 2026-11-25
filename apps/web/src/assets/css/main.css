@@ -12,7 +12,7 @@
   --text-xs--line-height: 1.5;
   --text-sm--line-height: 1.6;
 
-  /* 不用阴影做层次，用线：整组去掉，组件和老页面写的 shadow-* 都不再生效 */
+  /* 不用阴影做层次，用线：整组去掉，组件与页面写的 shadow-* 都不再生效 */
   --shadow-*: initial;
 
   /*
@@ -59,7 +59,7 @@
   --color-brick-900: #451c11;
   --color-brick-950: #2a100a;
 
-  /* 赭：warning，和本人同一族 */
+  /* 赭：warning */
   --color-ochre-50: #faf5e6;
   --color-ochre-100: #f3e8c8;
   --color-ochre-200: #e8d59c;
@@ -72,7 +72,7 @@
   --color-ochre-900: #332507;
   --color-ochre-950: #1f1704;
 
-  /* 苔：success，和人格同一族 */
+  /* 苔：success */
   --color-moss-50: #eff6f1;
   --color-moss-100: #dcebe1;
   --color-moss-200: #bfdac8;
@@ -85,7 +85,7 @@
   --color-moss-900: #192b20;
   --color-moss-950: #0f1a13;
 
-  /* 湖：info，和通用同一族 */
+  /* 湖：info */
   --color-lake-50: #eef4f7;
   --color-lake-100: #dae7ee;
   --color-lake-200: #bdd3df;
@@ -99,64 +99,24 @@
   --color-lake-950: #0e191f;
 }
 
-/* 地层的编码也做成工具类：bg-layer-personal、border-rule 这样写，主题切换时跟着变 */
+/* 结构线、遮罩与选中态工具类：供 theme.ts 与页面统一引用，随浅色深色切换 */
 @theme inline {
-  --color-layer-primary: var(--layer-primary);
-  --color-layer-persona: var(--layer-persona);
-  --color-layer-shared-away: var(--layer-shared-away);
-  --color-layer-personal: var(--layer-personal);
-  --color-layer-fact: var(--layer-fact);
-  --color-layer-episode: var(--layer-episode);
-  --color-rule: var(--strata-rule);
-  --color-solid: var(--strata-solid);
-  --color-on-solid: var(--strata-on-solid);
-  --color-on-layer: var(--strata-on-layer);
-  --color-scrim: var(--strata-scrim);
-  --color-selected: var(--strata-selected);
-  --color-on-selected: var(--strata-on-selected);
-  --color-on-selected-muted: var(--strata-on-selected-muted);
+  --color-rule: var(--ui-rule);
+  --color-scrim: var(--ui-scrim);
+  --color-selected: var(--ui-selected);
+  --color-on-selected: var(--ui-on-selected);
+  --color-on-selected-muted: var(--ui-on-selected-muted);
 }
 
 :root,
 .light {
-  /* 6 个色带色：自下而上为主场、人格、共享客场、个人圈、联系人事实、会话摘要 */
-  --layer-primary: #94aebb;
-  --layer-persona: #8fb29a;
-  --layer-shared-away: #b3c183;
-  --layer-personal: #e0c37f;
-  --layer-fact: #afa3bd;
-  --layer-episode: #c8bfd0;
-
-  /* 结构线用墨；压在色带上的线和文字；机密的实心深色 */
-  --strata-rule: #2a2b26;
-  --strata-band-line: #2a2b26;
-  --strata-frame: #2a2b26;
-  --strata-on-layer: #2a2b26;
-  --strata-solid: #2e2a26;
-  --strata-on-solid: #f1efe4;
-  /* 权限格子里只能按短 ID 读取的实心块，和机密的实心块不是一回事 */
-  --strata-explicit: #2e2a26;
-  /* 纹理：内部圆点、私密斜线的颜色。公开无纹理，机密是实心 */
-  --strata-texture: rgba(42, 43, 38, 0.5);
-  /* 不带色带的图例底色；只读格子是色带色和纸按这个比例混出来的淡色 */
-  --strata-neutral: #dedbca;
-  --strata-tint: 52%;
-  /*
-   * 权限格子的满色。岩芯上没有文字，满色、淡色、空白三档只靠明度分开：
-   * 客场共享、个人圈、会话三类本来就淡，压暗到和别的色带差不多的明度，三档才拉得开
-   */
-  --access-primary: #94aebb;
-  --access-persona: #8fb29a;
-  --access-shared-away: #a4b179;
-  --access-personal: #c1a970;
-  --access-fact: #afa3bd;
-  --access-episode: #b0a8b6;
-  /* 选中行反白 */
-  --strata-selected: #2a2b26;
-  --strata-on-selected: #f1efe4;
-  --strata-on-selected-muted: #c9c7ba;
-  --strata-selected-frame: #f1efe4;
-  --strata-scrim: rgba(18, 20, 18, 0.45);
+  --ui-rule: #2a2b26;
+  --ui-selected: #2a2b26;
+  --ui-on-selected: #f1efe4;
+  --ui-on-selected-muted: #c9c7ba;
+  --ui-scrim: rgba(18, 20, 18, 0.45);
+  --ui-selection-bg: #e8d59c;
+  --ui-selection-fg: #2a2b26;
 
   /* 映射到 Nuxt UI */
   --ui-radius: 0rem;
@@ -179,39 +139,14 @@
   --ui-border-inverted: #2a2b26;
 }
 
-/* 夜间地图：色带整体提亮并降饱和，墨线变浅灰。选中不用反白，晚上太刺眼 */
 .dark {
-  --layer-primary: #9fb5c1;
-  --layer-persona: #9cbba8;
-  --layer-shared-away: #bac794;
-  --layer-personal: #d8c48f;
-  --layer-fact: #b4a9c5;
-  --layer-episode: #cac3d5;
-
-  --strata-rule: #7e8483;
-  --strata-band-line: #14181b;
-  --strata-frame: #7e8483;
-  --strata-on-layer: #14181b;
-  /* 真正的深色和页面底色分不开，机密用比底色亮的石板灰 */
-  --strata-solid: #3f464a;
-  --strata-on-solid: #e3e4dd;
-  /* 比机密暗一点，不然和只读的淡色混在一起 */
-  --strata-explicit: #343a3e;
-  --strata-texture: rgba(20, 24, 27, 0.55);
-  --strata-neutral: #aeb3b0;
-  --strata-tint: 46%;
-  /* 深色底上三档本来就拉得开，用色带色本身 */
-  --access-primary: #9fb5c1;
-  --access-persona: #9cbba8;
-  --access-shared-away: #bac794;
-  --access-personal: #d8c48f;
-  --access-fact: #b4a9c5;
-  --access-episode: #cac3d5;
-  --strata-selected: #333b40;
-  --strata-on-selected: #f0f1eb;
-  --strata-on-selected-muted: #bcc0bc;
-  --strata-selected-frame: #0e1113;
-  --strata-scrim: rgba(5, 7, 8, 0.62);
+  --ui-rule: #7e8483;
+  --ui-selected: #333b40;
+  --ui-on-selected: #f0f1eb;
+  --ui-on-selected-muted: #bcc0bc;
+  --ui-scrim: rgba(5, 7, 8, 0.62);
+  --ui-selection-bg: #563f0d;
+  --ui-selection-fg: #f0f1eb;
 
   --ui-primary: var(--ui-color-primary-100);
   --ui-bg: #14181b;
@@ -269,8 +204,8 @@
   }
 
   ::selection {
-    background: var(--layer-personal);
-    color: #2a2b26;
+    background: var(--ui-selection-bg);
+    color: var(--ui-selection-fg);
   }
 
   * {
@@ -281,7 +216,7 @@
 
 /*
  * 下面两条不进 layer，压过组件的工具类：
- * 焦点框全站一个样子，组件默认的半透明外发光不要；老页面零散写的 rounded 也归零
+ * 焦点框全站一个样子，组件默认的半透明外发光不要；页面零散写的 rounded 也归零
  */
 :where(
   a,

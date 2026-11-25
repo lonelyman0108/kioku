@@ -1,26 +1,56 @@
 import { z } from 'zod'
 
-import { FacetTermSlug, normalizeWhen, WhenCondition, whenSignature } from './facets'
-import { EntryLinkNeighbor, ShortId } from './links'
-import { EntryKind, Provenance, Sensitivity, SubjectKind } from './memory'
-import { StoredSensitiveFinding } from './sensitive'
+import { CREDENTIAL_PLACEHOLDER_PREFIX, EntryLinkDirection, ShortId } from './links'
+
+export const ENTRY_KINDS = ['entry', 'episode'] as const
+export const EntryKind = z.enum(ENTRY_KINDS).meta({ id: 'EntryKind' })
+export type EntryKind = z.infer<typeof EntryKind>
+
+export const BUILTIN_ENVS = ['mac', 'linux', 'win'] as const
+export const BuiltinEnv = z.enum(BUILTIN_ENVS)
+export type BuiltinEnv = z.infer<typeof BuiltinEnv>
+
+export const ENTRY_TABS = ['all', 'pinned', 'episodes', 'trash'] as const
+export const EntryTab = z.enum(ENTRY_TABS)
+export type EntryTab = z.infer<typeof EntryTab>
+
+export const BROWSE_GROUP_BY = ['topic', 'project', 'env', 'realm', 'runtime', 'kind'] as const
+export const BrowseGroupBy = z.enum(BROWSE_GROUP_BY).meta({ id: 'BrowseGroupBy' })
+export type BrowseGroupBy = z.infer<typeof BrowseGroupBy>
+
+export const ENTRY_EVENT_TYPES = ['create', 'update', 'delete', 'undelete', 'restore'] as const
+export const EntryEventType = z.enum(ENTRY_EVENT_TYPES)
+export type EntryEventType = z.infer<typeof EntryEventType>
 
 export const ENTRY_TITLE_MAX = 200
 export const DISCLOSURE_MAX = 500
 export const ENTRY_CONTENT_MAX = 100_000
-export const GLOSSARY_MAX = 50
 export const TOPICS_MAX = 32
-export const VARIANTS_MAX = 20
+export const SCENE_TAGS_MAX = 16
 
-export const CREDENTIAL_PLACEHOLDER_PREFIX = '{{cred:'
+export const SCENE_SLUG_PATTERN = /^[a-z0-9._\-\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]{1,64}$/
 
-export const EntryTitle = z
+export const SceneSlug = z
   .string()
   .trim()
-  .min(1, '标题不能为空')
-  .max(ENTRY_TITLE_MAX, `标题最多 ${ENTRY_TITLE_MAX} 个字符`)
-  .regex(/^\P{Cc}*$/u, '标题不能含控制字符')
-  .refine((v) => !v.includes(CREDENTIAL_PLACEHOLDER_PREFIX), '凭据占位符只能写在正文里')
+  .toLowerCase()
+  .regex(SCENE_SLUG_PATTERN, '标签只能包含小写字母、数字、中文、._-，长度 1 到 64 个字符')
+  .refine((v) => !v.includes(CREDENTIAL_PLACEHOLDER_PREFIX), '标签不能包含凭据占位符')
+
+export function normalizeSlugList(values: readonly string[] | null | undefined): string[] {
+  if (!values?.length) return []
+  const set = new Set<string>()
+  for (const raw of values) {
+    const clean = raw.trim().toLowerCase()
+    if (clean) set.add(clean)
+  }
+  return [...set].sort()
+}
+
+export const SceneSlugList = z
+  .array(SceneSlug)
+  .max(SCENE_TAGS_MAX, `最多填写 ${SCENE_TAGS_MAX} 项`)
+  .transform((list) => normalizeSlugList(list))
 
 export const TopicTag = z
   .string()
@@ -31,403 +61,72 @@ export const TopicTag = z
   .regex(/^[^\p{Cc}\p{Cf}\p{Zl}\p{Zp}\s]+$/u, '主题标签不能包含空白或控制字符')
   .refine((v) => !v.includes(CREDENTIAL_PLACEHOLDER_PREFIX), '凭据占位符只能写在正文里')
 
-// 关键词至少两个字符：召回按关键词边界匹配，单字容易大面积误命中
-export const Keyword = z
+export const TopicList = z
+  .array(TopicTag)
+  .max(TOPICS_MAX, `主题标签最多 ${TOPICS_MAX} 个`)
+  .transform((list) => normalizeSlugList(list))
+
+export const EntryTitle = z
   .string()
   .trim()
-  .min(2, '关键词至少两个字')
-  .max(64)
+  .min(1, '标题不能为空')
+  .max(ENTRY_TITLE_MAX, `标题最多 ${ENTRY_TITLE_MAX} 个字符`)
+  .regex(/^\P{Cc}*$/u, '标题不能含控制字符')
   .refine((v) => !v.includes(CREDENTIAL_PLACEHOLDER_PREFIX), '凭据占位符只能写在正文里')
-export const RemovableKeyword = z.string().trim().min(1).max(64)
+
+export const Disclosure = z
+  .string()
+  .trim()
+  .max(DISCLOSURE_MAX, `触发场景最多 ${DISCLOSURE_MAX} 个字符`)
+  .refine((v) => !v.includes(CREDENTIAL_PLACEHOLDER_PREFIX), '凭据占位符只能写在正文里')
 
 const VALID_TO_FORMAT =
-  'ISO 8601 的时间，要带时区（例如 2026-12-31T23:59:00+08:00 或 2026-12-31T15:59:00Z），不带时区的会被拒绝；要比现在晚至少一分钟'
+  'ISO 8601 时间，须带时区（例如 2026-12-31T23:59:00+08:00 或 2026-12-31T15:59:00Z）'
 export const ValidTo = z.iso.datetime({ offset: true }).describe(VALID_TO_FORMAT)
 
-const Disclosure = z
+export const EntryContent = z
   .string()
-  .trim()
-  .max(DISCLOSURE_MAX)
-  .refine((v) => !v.includes(CREDENTIAL_PLACEHOLDER_PREFIX), '凭据占位符只能写在正文里')
+  .min(1, '正文不能为空')
+  .max(ENTRY_CONTENT_MAX, `正文最多 ${ENTRY_CONTENT_MAX} 个字符`)
 
-export const VariantInput = z
-  .object({
-    when: WhenCondition.default({}),
-    content: z.string().min(1, '正文不能为空').max(ENTRY_CONTENT_MAX),
-    sortOrder: z.number().int().min(0).max(999).default(0),
-  })
-  .meta({ id: 'VariantInput' })
-export type VariantInput = z.infer<typeof VariantInput>
-
-export const EntryVariantView = z
-  .object({
-    id: z.uuid(),
-    when: WhenCondition,
-    whenSignature: z.string(),
-    sortOrder: z.number().int(),
-    // 机密切片仅显式读取或查看时解密返回，否则为 null
-    content: z.string().nullable(),
-    updatedAt: z.string(),
-  })
-  .meta({ id: 'EntryVariantView' })
-export type EntryVariantView = z.infer<typeof EntryVariantView>
-
-export const ConsoleVariantView = EntryVariantView.extend({
-  contentHidden: z.boolean(),
-  plaintextIgnored: z.boolean(),
-  sensitiveFindings: z.array(StoredSensitiveFinding).optional(),
-})
-export type ConsoleVariantView = z.infer<typeof ConsoleVariantView>
-
-export const OtherVariantHint = z.object({
-  when: WhenCondition,
-  whenSignature: z.string(),
-})
-export type OtherVariantHint = z.infer<typeof OtherVariantHint>
-
-export const EntryView = z
-  .object({
-    id: z.uuid(),
-    shortId: ShortId,
-    circleId: z.uuid(),
-    circleSlug: z.string().nullable(),
-    kind: EntryKind,
-    title: z.string(),
-    sensitivity: Sensitivity,
-    provenance: Provenance,
-    originScope: z.string(),
-    topics: z.array(z.string()),
-    realms: z.array(z.string()),
-    priority: z.number().int(),
-    disclosure: z.string().nullable(),
-    glossary: z.array(z.string()),
-    validFrom: z.string(),
-    validTo: z.string().nullable(),
-    version: z.number().int(),
-    variants: z.array(EntryVariantView),
-    otherVariants: z.array(OtherVariantHint).default([]),
-    links: z.array(EntryLinkNeighbor).default([]),
-    createdAt: z.string(),
-    updatedAt: z.string(),
-  })
-  .meta({ id: 'EntryView' })
-export type EntryView = z.infer<typeof EntryView>
-
-export const EntrySubjectRef = z.object({
-  id: z.uuid(),
-  kind: SubjectKind,
-  displayName: z.string(),
-})
-export type EntrySubjectRef = z.infer<typeof EntrySubjectRef>
-
-export const ConsoleEntryView = EntryView.extend({
-  contentHidden: z.boolean(),
-  plaintextIgnored: z.boolean(),
-  variants: z.array(ConsoleVariantView),
-  subject: EntrySubjectRef.nullable().default(null),
-  conversationId: z.uuid().nullable().default(null),
-  clientId: z.uuid().nullable().default(null),
-  expiresAt: z.string().nullable().default(null),
-})
-export type ConsoleEntryView = z.infer<typeof ConsoleEntryView>
-
-export const RevealEntryRequest = z.object({ entryId: z.uuid() })
-export type RevealEntryRequest = z.infer<typeof RevealEntryRequest>
-
-export const PlaintextIgnoreRequest = z.object({
-  entryId: z.uuid(),
-  variantId: z.uuid().optional(),
-  expectedVersion: z.number().int(),
-})
-export type PlaintextIgnoreRequest = z.infer<typeof PlaintextIgnoreRequest>
-
-// 判断多变体切片是否保持同质场域（供 secret 机密词条禁止异 realm 切片渗透使用）
-export function hasHomogeneousRealms(
-  variants: readonly { when?: Record<string, readonly string[]> | null }[],
-): boolean {
-  if (variants.length <= 1) return true
-  const baseline = JSON.stringify(normalizeWhen(variants[0]?.when).realm ?? [])
-  for (let i = 1; i < variants.length; i++) {
-    const current = JSON.stringify(normalizeWhen(variants[i]?.when).realm ?? [])
-    if (current !== baseline) return false
-  }
-  return true
+// 从项目信息或原始路径名归一化为项目标识
+export function normalizeProjectSlug(
+  input:
+    { repoName?: string | undefined; dirName?: string | undefined } | string | null | undefined,
+): string | null {
+  const raw = typeof input === 'string' ? input : (input?.repoName ?? input?.dirName)
+  if (!raw) return null
+  const tail = raw.trim().split(/[\\/]/).filter(Boolean).at(-1) ?? ''
+  const slug = tail
+    .toLowerCase()
+    .replace(/[^a-z0-9._\-\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64)
+  return slug || null
 }
 
-function hasDuplicateWhenSignatures(
-  variants: readonly { when?: Record<string, readonly string[]> | null }[],
-): boolean {
-  const seen = new Set<string>()
-  for (const variant of variants) {
-    const sig = whenSignature(variant.when)
-    if (seen.has(sig)) return true
-    seen.add(sig)
-  }
-  return false
-}
-
-const KeyPlaintextFlags = {
-  plaintextOk: z
-    .boolean()
-    .optional()
-    .describe(
-      '正文里新增的疑似明文确实不是凭据时设为 true：照常写入，这条词条进待处理。是凭据时先存成凭据，正文写占位符',
-    ),
-}
-
-const ConsolePlaintextFlags = {
-  ignorePlaintext: z.boolean().optional(),
-  allowPlaintext: z.boolean().optional(),
-}
-
-// 统一创建词条请求体（同时兼容单切片简写与显式多变体 variants 数组）
-const CreateEntryBase = z.object({
-  circle: z.string().trim().min(1).max(64).optional(),
-  title: EntryTitle.optional(),
-  content: z.string().min(1).max(ENTRY_CONTENT_MAX).optional(),
-  when: WhenCondition.optional(),
-  variants: z.array(VariantInput).min(1).max(VARIANTS_MAX).optional(),
-  topics: z.array(TopicTag).max(TOPICS_MAX).default([]),
-  sensitivity: Sensitivity.optional(),
-  priority: z.number().int().min(0).max(99).default(2),
-  disclosure: Disclosure.optional(),
-  glossary: z.array(Keyword).max(GLOSSARY_MAX).default([]),
-  validTo: ValidTo.optional().describe(
-    `有效到：${VALID_TO_FORMAT}。到期后不再召回、不进 boot；不填就一直有效`,
-  ),
-  ...KeyPlaintextFlags,
-})
-
-function validateCreateVariants(
-  input: z.infer<typeof CreateEntryBase>,
-  ctx: z.RefinementCtx,
-): void {
-  const hasContent = input.content !== undefined
-  const hasVariants = input.variants !== undefined
-  if (hasContent === hasVariants) {
-    ctx.addIssue({
-      code: 'custom',
-      message: '请提供单切片 content 或多变体 variants（二选一）',
-    })
-    return
-  }
-  if (input.when !== undefined && hasVariants) {
-    ctx.addIssue({
-      code: 'custom',
-      path: ['when'],
-      message: '传入 variants 数组时请将各切片的 when 写在对应切片内',
-    })
-  }
-  if (input.variants) {
-    if (hasDuplicateWhenSignatures(input.variants)) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['variants'],
-        message: '同一词条下不能存在相同的切面条件切片',
-      })
-    }
-    if (input.sensitivity === 'secret' && !hasHomogeneousRealms(input.variants)) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['variants'],
-        message: '机密词条下禁止挂载不同场域（realm）的变体切片',
-      })
+// 构造全文索引附加词串（供 entries.search_tags 写入，保持 generated fts 列纯不可变表达式）
+export function buildSearchTags(input: {
+  shortId?: string | undefined
+  topics?: readonly string[] | undefined
+  envs?: readonly string[] | undefined
+  realms?: readonly string[] | undefined
+  projects?: readonly string[] | undefined
+  runtimes?: readonly string[] | undefined
+}): string {
+  const tokens = new Set<string>()
+  if (input.shortId) tokens.add(input.shortId.trim().toLowerCase())
+  for (const list of [input.topics, input.envs, input.realms, input.projects, input.runtimes]) {
+    if (!list) continue
+    for (const item of list) {
+      const clean = item.trim().toLowerCase()
+      if (clean) tokens.add(clean)
     }
   }
+  return [...tokens].join(' ')
 }
 
-export const CreateEntryRequest = CreateEntryBase.superRefine(validateCreateVariants).meta({
-  id: 'CreateEntryRequest',
-})
-export type CreateEntryRequest = z.infer<typeof CreateEntryRequest>
-
-export const ConsoleCreateEntryRequest = CreateEntryBase.omit({ plaintextOk: true })
-  .extend({ circleId: z.uuid().optional(), ...ConsolePlaintextFlags })
-  .superRefine(validateCreateVariants)
-export type ConsoleCreateEntryRequest = z.infer<typeof ConsoleCreateEntryRequest>
-
-const UpdateEntryBase = z.object({
-  // 支持 m-xxxxxx 短 ID、旧版 legacy_uri 或精确标题
-  id: z.string().trim().min(1).max(2048),
-  circle: z.string().trim().min(1).max(64).optional(),
-  expectedVersion: z.number().int().optional(),
-  title: EntryTitle.optional(),
-  // 单切片更新默认切面或无条件切片 {}；与 variants / upsertVariants / removeVariantWhens 互斥规则见校验
-  content: z.string().min(1).max(ENTRY_CONTENT_MAX).optional(),
-  when: WhenCondition.optional(),
-  variants: z.array(VariantInput).min(1).max(VARIANTS_MAX).optional(),
-  upsertVariants: z.array(VariantInput).min(1).max(VARIANTS_MAX).optional(),
-  removeVariantWhens: z.array(WhenCondition).min(1).max(VARIANTS_MAX).optional(),
-  topics: z.array(TopicTag).max(TOPICS_MAX).optional(),
-  sensitivity: Sensitivity.optional(),
-  priority: z.number().int().min(0).max(99).optional(),
-  disclosure: Disclosure.nullable().optional(),
-  glossaryAdd: z.array(Keyword).max(GLOSSARY_MAX).optional(),
-  glossaryRemove: z.array(RemovableKeyword).max(GLOSSARY_MAX).optional(),
-  validTo: ValidTo.nullable()
-    .optional()
-    .describe(`有效到：${VALID_TO_FORMAT}。到期后不再召回、不进 boot；填 null 清掉，一直有效`),
-  ...KeyPlaintextFlags,
-})
-
-function validateUpdateVariants(
-  input: z.infer<typeof UpdateEntryBase>,
-  ctx: z.RefinementCtx,
-): void {
-  if (input.variants !== undefined) {
-    if (
-      input.content !== undefined ||
-      input.upsertVariants !== undefined ||
-      input.removeVariantWhens !== undefined
-    ) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['variants'],
-        message: '整组替换 variants 不能与 content、upsertVariants 或 removeVariantWhens 同时传入',
-      })
-    }
-    if (hasDuplicateWhenSignatures(input.variants)) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['variants'],
-        message: '同一词条下不能存在相同的切面条件切片',
-      })
-    }
-    if (input.sensitivity === 'secret' && !hasHomogeneousRealms(input.variants)) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['variants'],
-        message: '机密词条下禁止挂载不同场域（realm）的变体切片',
-      })
-    }
-  }
-  if (input.content !== undefined && input.upsertVariants !== undefined) {
-    ctx.addIssue({
-      code: 'custom',
-      path: ['upsertVariants'],
-      message: 'content 与 upsertVariants 不能同时传入',
-    })
-  }
-  if (input.upsertVariants && hasDuplicateWhenSignatures(input.upsertVariants)) {
-    ctx.addIssue({
-      code: 'custom',
-      path: ['upsertVariants'],
-      message: 'upsertVariants 中不能包含重复的切面条件',
-    })
-  }
-}
-
-export const UpdateEntryRequest = UpdateEntryBase.superRefine(validateUpdateVariants).meta({
-  id: 'UpdateEntryRequest',
-})
-export type UpdateEntryRequest = z.infer<typeof UpdateEntryRequest>
-
-export const ConsoleUpdateEntryRequest = UpdateEntryBase.omit({ plaintextOk: true })
-  .extend(ConsolePlaintextFlags)
-  .superRefine(validateUpdateVariants)
-export type ConsoleUpdateEntryRequest = z.infer<typeof ConsoleUpdateEntryRequest>
-
-export const GetEntryQuery = z.object({
-  id: z.string().trim().min(1).max(2048),
-  circle: z.string().trim().min(1).max(64).optional(),
-  allVariants: z.coerce.boolean().optional(),
-})
-export type GetEntryQuery = z.infer<typeof GetEntryQuery>
-
-export const DeleteEntryRequest = z
-  .object({
-    id: z.string().trim().min(1).max(2048),
-    circle: z.string().trim().min(1).max(64).optional(),
-    expectedVersion: z.number().int().optional(),
-  })
-  .meta({ id: 'DeleteEntryRequest' })
-export type DeleteEntryRequest = z.infer<typeof DeleteEntryRequest>
-
-// 跨圈迁移：访问密钥限在两个都有写权限的共享圈之间迁移；个人圈与共享圈互转仅限管理界面
-export const TransferEntryRequest = z
-  .object({
-    id: z.string().trim().min(1).max(2048),
-    fromCircle: z.string().trim().min(1).max(64).optional(),
-    toCircle: z.string().trim().min(1).max(64),
-    expectedVersion: z.number().int().optional(),
-  })
-  .meta({ id: 'TransferEntryRequest' })
-export type TransferEntryRequest = z.infer<typeof TransferEntryRequest>
-
-export const ConsoleTransferEntryRequest = z.object({
-  entryId: z.uuid(),
-  toCircleId: z.uuid(),
-  expectedVersion: z.number().int().optional(),
-})
-export type ConsoleTransferEntryRequest = z.infer<typeof ConsoleTransferEntryRequest>
-
-// 动态分组浏览（取代旧版按目录前缀列目录）
-export const BROWSE_GROUP_BYS = [
-  'circle',
-  'realm',
-  'env',
-  'runtime',
-  'project',
-  'topic',
-  'kind',
-] as const
-export const BrowseGroupBy = z.enum(BROWSE_GROUP_BYS)
-export type BrowseGroupBy = z.infer<typeof BrowseGroupBy>
-
-export const BrowseEntriesQuery = z
-  .object({
-    groupBy: BrowseGroupBy.default('topic'),
-    circle: z.string().trim().min(1).max(64).optional(),
-    kind: EntryKind.optional(),
-    topic: TopicTag.optional(),
-    facets: WhenCondition.optional(),
-    query: z.string().trim().max(200).optional(),
-    limit: z.coerce.number().int().min(1).max(500).default(100),
-  })
-  .meta({ id: 'BrowseEntriesQuery' })
-export type BrowseEntriesQuery = z.infer<typeof BrowseEntriesQuery>
-
-export const EntryBrowseItem = z
-  .object({
-    id: z.uuid(),
-    shortId: ShortId,
-    title: z.string(),
-    circleId: z.uuid(),
-    circleSlug: z.string().nullable(),
-    kind: EntryKind,
-    sensitivity: Sensitivity,
-    priority: z.number().int(),
-    topics: z.array(z.string()),
-    disclosure: z.string().nullable(),
-    variantCount: z.number().int(),
-    variantsSummary: z.array(WhenCondition),
-  })
-  .meta({ id: 'EntryBrowseItem' })
-export type EntryBrowseItem = z.infer<typeof EntryBrowseItem>
-
-export const EntryBrowseGroup = z
-  .object({
-    key: z.string(),
-    label: z.string(),
-    count: z.number().int(),
-    items: z.array(EntryBrowseItem),
-  })
-  .meta({ id: 'EntryBrowseGroup' })
-export type EntryBrowseGroup = z.infer<typeof EntryBrowseGroup>
-
-export const EntryBrowseResponse = z
-  .object({
-    groupBy: BrowseGroupBy,
-    groups: z.array(EntryBrowseGroup),
-    truncated: z.boolean(),
-  })
-  .meta({ id: 'EntryBrowseResponse' })
-export type EntryBrowseResponse = z.infer<typeof EntryBrowseResponse>
-
-// 供维度筛选校验复用
-export const FacetSlugList = z.array(FacetTermSlug).max(32)
-
-// ---- 标题与 Markdown 首行提取（纯函数，服务端与测试共用）----
+// ---- 标题与 Markdown 首行提取 ----
 
 const HEADING_RE = /^ {0,3}#{1,6}[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$/
 const FENCE_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/
@@ -464,36 +163,238 @@ export function firstMarkdownHeading(content: string): string | null {
   return null
 }
 
-export function markdownHeadingsOf(contents: Iterable<unknown>): Set<string> {
-  const headings = new Set<string>()
-  for (const content of contents) {
-    const heading = typeof content === 'string' ? firstMarkdownHeading(content) : null
-    if (heading) headings.add(heading)
-  }
-  return headings
-}
-
-// 计算词条最终标题：
-// - 非机密：优先显式标题，其次首个切片首个 # 标题，再无则返回 shortId
-// - 机密：禁止从正文取标题，若显式标题等于任一变体正文首个 # 标题则强制回退为 shortId
+// 计算词条标题：显式标题优先，其次正文首个 # 标题，均无则回退短 ID
 export function deriveEntryTitle(
   explicitTitle: string | null | undefined,
-  variants: readonly { content?: string | null }[],
+  content: string,
   shortId: string,
-  sensitivity: Sensitivity,
 ): string {
-  const trimmed = explicitTitle?.trim() || null
-  const contents = variants.map((v) => v.content)
-  if (sensitivity === 'secret') {
-    if (!trimmed) return shortId
-    const headings = markdownHeadingsOf(contents)
-    return headings.has(trimmed) ? shortId : trimmed
-  }
-  if (trimmed) return trimmed
-  for (const content of contents) {
-    if (typeof content !== 'string') continue
-    const heading = firstMarkdownHeading(content)
-    if (heading) return heading
-  }
-  return shortId
+  const trimmed = explicitTitle?.trim()
+  if (trimmed) return clipTitle(trimmed)
+  return firstMarkdownHeading(content) ?? shortId
 }
+
+// ---- 词条读写与列表契约 ----
+
+export const EntryLinkNeighbor = z
+  .object({
+    shortId: ShortId,
+    title: z.string(),
+    kind: EntryKind,
+    direction: EntryLinkDirection,
+  })
+  .meta({ id: 'EntryLinkNeighbor' })
+export type EntryLinkNeighbor = z.infer<typeof EntryLinkNeighbor>
+
+export const CredentialRefStatus = z.object({
+  slug: z.string(),
+  field: z.string().nullable(),
+  available: z.boolean(),
+  label: z.string().nullable(),
+})
+export type CredentialRefStatus = z.infer<typeof CredentialRefStatus>
+
+export const EntryView = z
+  .object({
+    id: z.uuid(),
+    shortId: ShortId,
+    kind: EntryKind,
+    title: z.string(),
+    content: z.string(),
+    disclosure: z.string().nullable(),
+    isPinned: z.boolean(),
+    envs: z.array(z.string()),
+    realms: z.array(z.string()),
+    projects: z.array(z.string()),
+    runtimes: z.array(z.string()),
+    topics: z.array(z.string()),
+    deviceKey: z.string().nullable(),
+    projectSlug: z.string().nullable(),
+    validTo: z.string().nullable(),
+    version: z.number().int(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+    deletedAt: z.string().nullable(),
+  })
+  .meta({ id: 'EntryView' })
+export type EntryView = z.infer<typeof EntryView>
+
+export const EntryListItem = z
+  .object({
+    id: z.uuid(),
+    shortId: ShortId,
+    kind: EntryKind,
+    title: z.string(),
+    disclosure: z.string().nullable(),
+    isPinned: z.boolean(),
+    envs: z.array(z.string()),
+    realms: z.array(z.string()),
+    projects: z.array(z.string()),
+    runtimes: z.array(z.string()),
+    topics: z.array(z.string()),
+    validTo: z.string().nullable(),
+    version: z.number().int(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+    deletedAt: z.string().nullable(),
+    snippet: z.string().optional(),
+    score: z.number().optional(),
+  })
+  .meta({ id: 'EntryListItem' })
+export type EntryListItem = z.infer<typeof EntryListItem>
+
+export const EntryListQuery = z.object({
+  tab: EntryTab.default('all'),
+  q: z.string().trim().max(2000).optional(),
+  env: SceneSlug.optional(),
+  realm: SceneSlug.optional(),
+  project: SceneSlug.optional(),
+  runtime: SceneSlug.optional(),
+  topic: TopicTag.optional(),
+  mode: z.enum(['list', 'lookup']).default('list'),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  cursor: z.string().max(256).optional(),
+})
+export type EntryListQuery = z.infer<typeof EntryListQuery>
+
+export const EntryFacetsSummary = z.object({
+  projects: z.array(z.string()),
+  envs: z.array(z.string()),
+  realms: z.array(z.string()),
+  topics: z.array(z.string()),
+})
+export type EntryFacetsSummary = z.infer<typeof EntryFacetsSummary>
+
+export const EntryTabCounts = z.object({
+  all: z.number().int(),
+  pinned: z.number().int(),
+  episodes: z.number().int(),
+  trash: z.number().int(),
+})
+export type EntryTabCounts = z.infer<typeof EntryTabCounts>
+
+export const EntryListResponse = z.object({
+  items: z.array(EntryListItem),
+  nextCursor: z.string().nullable(),
+  facets: EntryFacetsSummary,
+  counts: EntryTabCounts,
+})
+export type EntryListResponse = z.infer<typeof EntryListResponse>
+
+export const EntryDetailResponse = z.object({
+  entry: EntryView,
+  outboundLinks: z.array(EntryLinkNeighbor),
+  backlinks: z.array(EntryLinkNeighbor),
+  credentialRefs: z.array(CredentialRefStatus),
+})
+export type EntryDetailResponse = z.infer<typeof EntryDetailResponse>
+
+export const CreateEntryRequest = z.object({
+  title: EntryTitle.optional(),
+  content: EntryContent,
+  disclosure: Disclosure.nullable().optional(),
+  isPinned: z.boolean().default(false),
+  envs: SceneSlugList.default([]),
+  realms: SceneSlugList.default([]),
+  projects: SceneSlugList.default([]),
+  runtimes: SceneSlugList.default([]),
+  topics: TopicList.default([]),
+  validTo: ValidTo.nullable().optional(),
+})
+export type CreateEntryRequest = z.infer<typeof CreateEntryRequest>
+
+export const UpdateEntryRequest = z.object({
+  expectedVersion: z.number().int().min(1).optional(),
+  title: EntryTitle.optional(),
+  content: EntryContent.optional(),
+  disclosure: Disclosure.nullable().optional(),
+  isPinned: z.boolean().optional(),
+  envs: SceneSlugList.optional(),
+  realms: SceneSlugList.optional(),
+  projects: SceneSlugList.optional(),
+  runtimes: SceneSlugList.optional(),
+  topics: TopicList.optional(),
+  validTo: ValidTo.nullable().optional(),
+  promoteToEntry: z.boolean().optional(),
+})
+export type UpdateEntryRequest = z.infer<typeof UpdateEntryRequest>
+
+export const RestoreEntryRequest = z.object({
+  version: z.number().int().min(1).optional(),
+})
+export type RestoreEntryRequest = z.infer<typeof RestoreEntryRequest>
+
+export const EntrySnapshot = z.object({
+  kind: EntryKind,
+  title: z.string(),
+  content: z.string(),
+  disclosure: z.string().nullable(),
+  isPinned: z.boolean(),
+  envs: z.array(z.string()),
+  realms: z.array(z.string()),
+  projects: z.array(z.string()),
+  runtimes: z.array(z.string()),
+  topics: z.array(z.string()),
+  validTo: z.string().nullable(),
+  version: z.number().int(),
+})
+export type EntrySnapshot = z.infer<typeof EntrySnapshot>
+
+export const EntryHistoryItem = z.object({
+  id: z.number().int(),
+  eventType: EntryEventType,
+  actor: z.string(),
+  snapshot: EntrySnapshot,
+  createdAt: z.string(),
+})
+export type EntryHistoryItem = z.infer<typeof EntryHistoryItem>
+
+export const EntryHistoryResponse = z.object({
+  items: z.array(EntryHistoryItem),
+})
+export type EntryHistoryResponse = z.infer<typeof EntryHistoryResponse>
+
+// ---- 分组浏览契约（供 MCP kioku_browse 使用）----
+
+export const BrowseEntriesQuery = z.object({
+  groupBy: BrowseGroupBy.default('project'),
+  kind: EntryKind.optional(),
+  topic: TopicTag.optional(),
+  project: SceneSlug.optional(),
+  env: SceneSlug.optional(),
+  realm: SceneSlug.optional(),
+  runtime: SceneSlug.optional(),
+  pinnedOnly: z.boolean().optional(),
+  query: z.string().trim().max(200).optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(100),
+})
+export type BrowseEntriesQuery = z.infer<typeof BrowseEntriesQuery>
+
+export const EntryBrowseItem = z.object({
+  shortId: ShortId,
+  title: z.string(),
+  kind: EntryKind,
+  isPinned: z.boolean(),
+  topics: z.array(z.string()),
+  envs: z.array(z.string()),
+  realms: z.array(z.string()),
+  projects: z.array(z.string()),
+  runtimes: z.array(z.string()),
+  disclosure: z.string().nullable(),
+})
+export type EntryBrowseItem = z.infer<typeof EntryBrowseItem>
+
+export const EntryBrowseGroup = z.object({
+  key: z.string(),
+  label: z.string(),
+  count: z.number().int(),
+  items: z.array(EntryBrowseItem),
+})
+export type EntryBrowseGroup = z.infer<typeof EntryBrowseGroup>
+
+export const EntryBrowseResponse = z.object({
+  groupBy: BrowseGroupBy,
+  groups: z.array(EntryBrowseGroup),
+  truncated: z.boolean(),
+})
+export type EntryBrowseResponse = z.infer<typeof EntryBrowseResponse>

@@ -1,112 +1,100 @@
-import { eq, inArray, lte, sql } from 'drizzle-orm'
+// 内存登录与密码校验失败限流：单进程单人实例下避免数据库行锁死锁，同时保留按客户端与按用户名合计两级窗口。
+// 带有效设备 Cookie 的受信设备越过用户名合计上限，仍受本客户端上限约束。
+// 采用「校验前原子预扣、并发闸门繁忙时退还、校验通过时清零本客户端并退还合计」的顺序，避免并发请求绕过上限。
 
-import type { Db, Tx } from '../db/client'
-import { loginAttempts } from '../db/schema'
+const WINDOW_MS = 15 * 60 * 1000
+const CLIENT_LIMIT = 10
+const TOTAL_LIMIT = 30
+const MAX_BUCKETS = 10_000
 
-// 登录失败限流，计数在数据库里原子递增，并发请求也逐个计数。分两级：
-// - 同一用户名、同一客户端：15 分钟 5 次。攻击者只能锁住自己这一路，锁不住从别处登录的主人；
-// - 同一用户名、所有客户端合计：15 分钟 50 次，挡住换着地址的分布式尝试。
-//   带着这个账号有效设备 Cookie 的请求不受合计上限约束（见 deviceCookie.ts）。
-// 拿不到客户端地址时（没有底层连接，例如测试），这些请求共用一个「未知客户端」计数
-const WINDOW_SECONDS = 15 * 60
-const PER_CLIENT_LIMIT = 5
-const PER_USER_LIMIT = 50
-
-// 计数键用 JSON 数组编码，任何用户名都拼不出别的键。
-// 拼接字符串时，用户名里带上分隔符就能撞上别人按客户端的计数，把主人锁在自己的地址上
-function totalKey(username: string): string {
-  return JSON.stringify([username])
+interface Bucket {
+  count: number
+  resetAt: number
 }
 
-function perClientKey(username: string, client: string | null): string {
-  return JSON.stringify([username, client])
+const buckets = new Map<string, Bucket>()
+
+const clientKey = (username: string, client: string) => `c:${client}:${username}`
+const totalKey = (username: string) => `t:${username}`
+
+function pruneExpired(now: number): void {
+  if (buckets.size < MAX_BUCKETS) return
+  for (const [k, b] of buckets) {
+    if (b.resetAt <= now) buckets.delete(k)
+  }
+  while (buckets.size >= MAX_BUCKETS) {
+    const oldest = buckets.keys().next().value
+    if (oldest === undefined) break
+    buckets.delete(oldest)
+  }
 }
 
-function keysFor(username: string, client: string | null, trustedDevice: boolean) {
-  const own = { key: perClientKey(username, client), limit: PER_CLIENT_LIMIT }
-  if (trustedDevice) return [own]
-  return [own, { key: totalKey(username), limit: PER_USER_LIMIT }]
+function activeBucket(key: string, now: number): Bucket | null {
+  const b = buckets.get(key)
+  if (!b) return null
+  if (b.resetAt <= now) {
+    buckets.delete(key)
+    return null
+  }
+  return b
 }
 
-async function bump(db: Db | Tx, key: string, delta: number): Promise<number> {
-  const [row] = await db
-    .insert(loginAttempts)
-    .values({
-      username: key,
-      count: Math.max(delta, 0),
-      resetAt: sql`now() + make_interval(secs => ${WINDOW_SECONDS})`,
-    })
-    .onConflictDoUpdate({
-      target: loginAttempts.username,
-      set: {
-        count: sql`case when ${loginAttempts.resetAt} <= now() then ${Math.max(delta, 0)} else greatest(${loginAttempts.count} + ${delta}, 0) end`,
-        resetAt: sql`case when ${loginAttempts.resetAt} <= now() then now() + make_interval(secs => ${WINDOW_SECONDS}) else ${loginAttempts.resetAt} end`,
-      },
-    })
-    .returning({ count: loginAttempts.count })
-  return row?.count ?? Number.MAX_SAFE_INTEGER
+function bump(key: string, now: number): void {
+  const current = activeBucket(key, now)
+  if (current) {
+    current.count += 1
+    return
+  }
+  pruneExpired(now)
+  buckets.set(key, { count: 1, resetAt: now + WINDOW_MS })
 }
 
-// 在校验密码之前先占一次名额，返回 false 表示已经超限。
-// 逐级计数，某一级已经超限就停下、不再累加更大范围的计数：否则一个已经被锁住的客户端
-// 还能继续把「用户名合计」推到上限，连主人从别处登录也一起锁住。
-// 被后一级挡下时退回前面已经加上的：这次没有校验密码，不该占用本客户端的额度，
-// 否则主人在合计超限期间多试几次，同一网络里带设备 Cookie 的设备也会被本客户端的上限挡住。
-// 整个过程在一个事务里：upsert 锁住计数行，同一客户端的并发请求排队执行，看不到别人加了又退的中间值；
-// 各请求都按「本客户端 → 合计」的顺序加锁，不会互相等待成死锁
-export async function reserveAttempt(
-  db: Db,
+function decrement(key: string, now: number): void {
+  const current = activeBucket(key, now)
+  if (!current) return
+  current.count -= 1
+  if (current.count <= 0) buckets.delete(key)
+}
+
+export interface LoginLimitCheck {
+  limited: boolean
+  retryAfterSeconds: number
+}
+
+// 原子检查并预扣一次校验名额：超限时直接拒绝且不再递增；放行时同步递增，防止并发请求击穿窗口上限
+export function reserveLoginAttempt(
   username: string,
-  client: string | null,
-  trustedDevice: boolean,
-): Promise<boolean> {
-  return db.transaction(async (tx) => {
-    const bumped: string[] = []
-    for (const { key, limit } of keysFor(username, client, trustedDevice)) {
-      if ((await bump(tx, key, 1)) > limit) {
-        for (const earlier of bumped) await bump(tx, earlier, -1)
-        return false
-      }
-      bumped.push(key)
+  client: string,
+  options: { trustedDevice?: boolean; now?: number } = {},
+): LoginLimitCheck {
+  const now = options.now ?? Date.now()
+  const c = activeBucket(clientKey(username, client), now)
+  if (c && c.count >= CLIENT_LIMIT) {
+    return { limited: true, retryAfterSeconds: Math.max(1, Math.ceil((c.resetAt - now) / 1000)) }
+  }
+  if (!options.trustedDevice) {
+    const t = activeBucket(totalKey(username), now)
+    if (t && t.count >= TOTAL_LIMIT) {
+      return { limited: true, retryAfterSeconds: Math.max(1, Math.ceil((t.resetAt - now) / 1000)) }
     }
-    return true
-  })
+  }
+  bump(clientKey(username, client), now)
+  bump(totalKey(username), now)
+  return { limited: false, retryAfterSeconds: 0 }
 }
 
-// 占了名额却没有真正校验密码（校验闸门繁忙）时退回
-export async function refundAttempt(
-  db: Db,
-  username: string,
-  client: string | null,
-  trustedDevice: boolean,
-): Promise<void> {
-  for (const { key } of keysFor(username, client, trustedDevice)) await bump(db, key, -1)
+// 并发闸门拒绝（未真正执行密码校验）时退还预扣名额
+export function refundLoginAttempt(username: string, client: string, now = Date.now()): void {
+  decrement(clientKey(username, client), now)
+  decrement(totalKey(username), now)
 }
 
-// 登录成功：清掉本客户端的计数，并退回这次在「用户名合计」里占的名额，成功的登录不算失败。
-// 合计里别人的失败不清：否则主人每登录一次，分布式尝试的额度就重置一次
-export async function recordSuccess(
-  db: Db,
-  username: string,
-  client: string | null,
-  trustedDevice: boolean,
-): Promise<void> {
-  await db.delete(loginAttempts).where(eq(loginAttempts.username, perClientKey(username, client)))
-  if (!trustedDevice) await bump(db, totalKey(username), -1)
+// 校验成功：清零本客户端计数，并退还本次预扣到用户名合计窗口的 1 次计数
+export function clearLoginFailures(username: string, client: string, now = Date.now()): void {
+  buckets.delete(clientKey(username, client))
+  decrement(totalKey(username), now)
 }
 
-// 清掉已过期的计数（随机用户名刷出来的行过了窗口期就没有用了），返回清掉的行数。
-// 跳过正被登录请求锁住的行：登录的计数事务先锁本客户端、再锁合计，这里按别的顺序等锁会和它互相等待成死锁；
-// 跳过的行下次再清
-export async function pruneAttempts(db: Db): Promise<number> {
-  const expired = db
-    .select({ username: loginAttempts.username })
-    .from(loginAttempts)
-    .where(lte(loginAttempts.resetAt, sql`now()`))
-    .for('update', { skipLocked: true })
-  const gone = await db
-    .delete(loginAttempts)
-    .where(inArray(loginAttempts.username, expired))
-    .returning({ username: loginAttempts.username })
-  return gone.length
+export function resetLoginLimitsForTest(): void {
+  buckets.clear()
 }

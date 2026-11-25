@@ -2,11 +2,11 @@
 
 <h1 align="center">Kioku · 記憶</h1>
 
-<p align="center"><b>记忆有归属，也有深浅。</b></p>
+<p align="center"><b>给 Coding Agent 与个人助理的自托管长期记忆和托管凭据服务。</b></p>
 
 <p align="center">
-同一个人格，接进编码 agent、个人助理与群聊机器人。<br>
-每段记忆落在自己的地层里，换一个场合，想起的就不一样。
+跨终端、跨项目、跨客户端共享同一套扁平记忆库；<br>
+按当前设备与场域自动装配上下文，把秘密锁在上下文之外。
 </p>
 
 <p align="center">
@@ -23,60 +23,14 @@
 <a href="https://github.com/lonelyman0108/kioku-plugins">插件</a>
 </p>
 
-<p align="center">
-<picture>
-<source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/memories-dark.png">
-<img src="docs/screenshots/memories-light.png" alt="记忆目录与详情" width="820">
-</picture>
-</p>
+## 核心能力
 
-## 三个场合
-
-> **在 Claude Code 里定下的项目约定**，第二天换到 Codex，它照样记得。
->
-> **群里的机器人借用同一个人格说话**，口吻一致，却读不到你的私人记忆。
->
-> **群友在这个群聊过的事**，记在这个群友名下；换个群，不会串。
-
-靠的不是提示词里一句「请勿泄露」，而是检索之前服务端就已裁掉：访问密钥定上限，会话上下文再收一次，PostgreSQL 行级安全兜底。
-
-<p align="center">
-<picture>
-<source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/conversations-dark.png">
-<img src="docs/screenshots/conversations-light.png" alt="群聊的会话摘要与记在各个群友名下的事实" width="820">
-</picture>
-</p>
-
-## 地层与记忆圈
-
-```text
-  会话     这一段对话              ┐ 从对话里记下
-  联系人   群友、群                ┘
- ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
-  个人圈   每人唯一，跨圈随身      ┐
-  共享客场 关联的另一个记忆圈      │ 词条（m-xxxxxx）+ 多切面变体
-  人格     独立人格，按设定键覆盖  │ + 双链 [[m-xxxxxx]]
-  主场圈   当前接入的共享/个人圈   ┘
-```
-
-越往下越通用。所有词条统一分配不可变短 ID（`m-xxxxxx`）并支持按「场域、环境、客户端、项目及自定义维度」挂接多套变体切片；每条记忆另有一个敏感级：公开、内部、私密、机密，机密与凭据对客场及无权上下文硬拒绝，且机密只存密文。
-
-<p align="center">
-<picture>
-<source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/overview-dark.png">
-<img src="docs/screenshots/overview-light.png" alt="概览里的地层柱：六类归属与四级敏感" width="820">
-</picture>
-</p>
-
-## 为什么是 Kioku
-
-- **隔离在服务端，不在提示词。** 访问密钥绑定接入实例作为透镜（1 主场圈 + N 客场圈 + 静态场域锁），会话上下文再收一次，PostgreSQL 读写双变量行级安全兜底。
-- **短 ID 与多切面变体。** 同主题跨设备或跨环境约定落成同一词条下的多张 `when` 切片，按在场切面合并或互斥剥离；正文 `[[m-xxxxxx]]` 建立跨圈 1 跳共振双链。
-- **人格与群聊双模式。** 独立人格沿继承链按设定键覆盖，可按群覆写、配单群强隔离锁，并在「严格按群隔离」与「拟人跨群识人」之间即时切换。
-- **不会写记忆的模型也有记忆。** 从对话里自动抽取联系人事实与会话摘要，事实全量向量化、摘要近期注入，后台整理提出多变体合并与切面补标建议。
-- **事实会过期。** 新事实取代旧事实时标记失效，每一版都留着，可以恢复。
-- **密码不进记忆。** 正文只留 `{{cred:<标识>}}`，值在 Kioku 或连接的 Bitwarden；`kioku run` 经环境变量交给命令。
-- **数据不出门。** 两个容器，不向第三方请求字体与图标，加密备份到兼容S3的对象存储。
+- **扁平短 ID 与双向双链。** 每条记忆由服务端分配全局唯一、不可变的无歧义 Base30 短 ID（`m-xxxxxx`），无需先编造目录树；正文用 `[[m-xxxxxx]]` 建立双链，召回时沿双链做一跳语境扩散。
+- **四维在场引擎（Presence Engine）。** 记忆直接标记 `envs`、`realms`、`projects`、`runtimes` 四维场景标签：会话启动时按当前终端环境自动去冲突编译常驻记忆，并附带同设备同项目的近期会话摘要；每轮召回融合 1024 维 pgvector 向量语义、PostgreSQL `kioku_zh` 中文分词 BM25、场景亲和加减分与一跳双链（未配置嵌入模型时自动降级纯全文）。
+- **服务端静态硬边界。** 访问密钥（`api_keys`）独立限定 `allowed_realms`、读写与凭据权限，在检索前由服务端硬过滤，而不是靠提示词约束；限定场域的密钥访问凭据时严格执行失败即拒绝（fail-closed）。
+- **密码不进上下文（Muse 风格托管凭据）。** 密码与令牌以 AES-256-GCM 信封加密独立存放在 `credentials` 表，记忆正文只写 `{{cred:<slug>}}`；Agent 只见元数据，执行命令时经 `kioku run` 一次性原子注入子进程环境变量。
+- **自动摘要与审阅式整理。** 后台从 `turn.end` 提炼会话摘要，定期巡检提出「提炼摘要、合并重复、标记过时、更新内容」四类建议；不静默篡改记忆，在管理界面「待处理」页确认后才按版本校验落库。
+- **极简 3+1 管理界面与零外联自托管。** 纸墨零圆角控制台仅设「记忆 / 待处理 / 凭据 / 设置」四项主导航，支持版本历史回滚与 JSON / Markdown 导出；服务端与 PostgreSQL 两个容器，不向第三方请求字体与图标。
 
 ## 快速开始
 
@@ -86,7 +40,7 @@ curl -fsSL -o .env https://raw.githubusercontent.com/lonelyman0108/kioku/main/.e
 docker compose up -d
 ```
 
-打开 `http://127.0.0.1:18920`，输入日志里的初始化码（`docker compose logs kioku`），建第一个账号与记忆圈。用局域网的 `http://` 地址访问、要经 HTTPS 对外、从旧版 Kioku 迁移、或想从源码构建时，先看 [部署与运维](docs/deploy.md)。
+打开 `http://127.0.0.1:18920`，输入日志里的初始化码（`docker compose logs kioku`），创建实例账号即可开始使用。需要局域网 HTTP 访问、HTTPS 反向代理、从源码构建或主密钥轮换时，先看 [部署与运维](docs/deploy.md)。
 
 ## 接入
 
@@ -94,9 +48,9 @@ docker compose up -d
 npx @kioku-memory/cli
 ```
 
-不带参数就是交互式向导：扫出本机装了哪些客户端，选好要接的几个，去浏览器确认一次就写好配置，访问密钥全程不显示。手头没有服务器的，向导里也可以顺带用 Docker 在本机起一个。
+不带参数即可进入交互式向导：扫描本机已安装的 Coding Agent，选定后打开浏览器 `/authorize` 页面输入确认码批准，命令行为各工具写好配置，访问密钥明文全程不经过浏览器。
 
-| 平台 | 启动加载 | 每轮召回 | 会话摘要 | 记忆工具 |
+| 平台 | 启动加载 | 每轮召回 | 会话摘要 | MCP 记忆工具 |
 |---|:-:|:-:|:-:|:-:|
 | Claude Code | ● | ● | ● | ● |
 | Codex | ● | ● | ● | ● |
@@ -107,17 +61,9 @@ npx @kioku-memory/cli
 | Hermes | ● | ● | ● | ● |
 | OpenClaw | ● | ● | ● | ● |
 | DeepSeek Harness | ● | ● | ● | ● |
-| AstrBot（群聊机器人） | 人格 | ● | 对话抽取 | — |
 | 任意 MCP 客户端 | — | — | — | ● |
 
-<p align="center">
-<picture>
-<source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/recall-dark.png">
-<img src="docs/screenshots/recall-light.png" alt="召回调试：同一句话按访问密钥算出的候选与得分" width="820">
-</picture>
-</p>
-
-各平台的安装见 [kioku-plugins](https://github.com/lonelyman0108/kioku-plugins)；MCP 地址是 `/v1/mcp`，其余接口见 `/v1/openapi.json`。用过 Lore 的：[从 Lore 迁移](docs/migrate-from-lore.md)。
+各平台插件与 `kioku run` 命令行维护在 [kioku-plugins](https://github.com/lonelyman0108/kioku-plugins)；MCP 端点为 `/v1/mcp`（Streamable HTTP，提供 `kioku_boot`、`kioku_search`、`kioku_get`、`kioku_browse`、`kioku_create`、`kioku_update`、`kioku_delete`、`kioku_list_credentials` 八个工具），完整 HTTP 契约见 `/v1/openapi.json`。
 
 ## 开发
 
@@ -129,13 +75,12 @@ scripts/check.sh              # 门禁，与 CI 一致
 
 | 目录 | 内容 |
 |---|---|
-| `apps/server` | 后端：Hono + zod-openapi |
-| `apps/web` | 管理界面：Vue 3 + Nuxt UI 4 |
-| `packages/contracts` | 前后端与 SDK 共用的 zod 契约 |
-| `sdks/python` | 由 OpenAPI 生成的 Python 客户端 |
+| `apps/server` | 后端：Node 22 + Hono + zod-openapi + Drizzle + pg-boss（12 张扁平表） |
+| `apps/web` | 管理界面：Vue 3 + Nuxt UI 4（3+1 工作台，由后端托管） |
+| `packages/contracts` | 前后端共用的 zod 契约与纯工具函数 |
 
 规范见 [CONTRIBUTING.md](CONTRIBUTING.md)、[AGENTS.md](AGENTS.md)，文档索引见 [docs/README.md](docs/README.md)，版本变化见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 许可证
 
-[Apache-2.0](LICENSE)。部分算法源自 [Lore](https://github.com/FFatTiger/lore)（MIT），声明见 [NOTICE](NOTICE)。
+[Apache-2.0](LICENSE)。部分算法与设计灵感源自 [Lore](https://github.com/FFatTiger/lore)（MIT），声明见 [NOTICE](NOTICE)。

@@ -1,42 +1,23 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed } from 'vue'
 
-import type { KeywordIndex } from '../keywords'
 import { renderMarkdown, type CredentialLinks, type WikiLinkTargets } from '../markdown'
 
 const props = defineProps<{
   content: string
-  keywords?: KeywordIndex | null
-  self?: string
   credentials?: CredentialLinks | null
   wikiLinks?: WikiLinkTargets | null
-  // 疑似明文的值：在正文里标出来
-  plaintext?: readonly string[] | null
 }>()
-const emit = defineEmits<{ open: [shortId: string, circleId?: string]; credential: [id: string] }>()
+const emit = defineEmits<{ open: [shortId: string]; credential: [slug: string] }>()
 
 const html = computed(() =>
   renderMarkdown(props.content, {
-    keywords: props.keywords && props.self ? { index: props.keywords, self: props.self } : null,
     credentials: props.credentials ?? null,
     wikiLinks: props.wikiLinks ?? null,
-    plaintext: props.plaintext ?? null,
   }),
 )
 
-// 点了关键词：只有一条记忆有它就直接打开，有好几条就列出来选
-const choices = ref<{ keyword: string; shortIds: string[] } | null>(null)
 function onClick(event: MouseEvent) {
-  if (
-    event.defaultPrevented ||
-    event.button !== 0 ||
-    event.metaKey ||
-    event.ctrlKey ||
-    event.shiftKey ||
-    event.altKey
-  ) {
-    return
-  }
   const target = event.target as HTMLElement | null
   const credential = target?.closest<HTMLAnchorElement>('a.kioku-cred')
   if (credential?.dataset.credential) {
@@ -47,49 +28,19 @@ function onClick(event: MouseEvent) {
   const wikilink = target?.closest<HTMLAnchorElement>('a.kioku-wikilink')
   if (wikilink?.dataset.shortId) {
     event.preventDefault()
-    emit('open', wikilink.dataset.shortId, wikilink.dataset.circleId || undefined)
-    return
+    emit('open', wikilink.dataset.shortId)
   }
-  const link = target?.closest<HTMLAnchorElement>('a.kioku-keyword')
-  if (!link?.dataset.shortIds) return
-  event.preventDefault()
-  const shortIds = link.dataset.shortIds.split(' ').filter(Boolean)
-  if (shortIds.length === 1) emit('open', shortIds[0]!)
-  else choices.value = { keyword: link.textContent ?? '', shortIds }
-}
-function choose(shortId: string) {
-  choices.value = null
-  emit('open', shortId)
 }
 </script>
 
 <template>
   <!-- eslint-disable-next-line vue/no-v-html -- 已经过 DOMPurify 清洗，见 markdown.ts -->
   <div class="kioku-markdown" @click="onClick" v-html="html" />
-  <UModal
-    :open="choices !== null"
-    :title="`包含关键词「${choices?.keyword}」的记忆`"
-    @update:open="(v) => !v && (choices = null)"
-  >
-    <template #body>
-      <ul class="space-y-1">
-        <li v-for="shortId in choices?.shortIds ?? []" :key="shortId">
-          <UButton
-            variant="link"
-            color="neutral"
-            class="font-mono"
-            :label="shortId"
-            @click="choose(shortId)"
-          />
-        </li>
-      </ul>
-    </template>
-  </UModal>
 </template>
 
 <style scoped>
 .kioku-markdown {
-  max-width: 39em;
+  max-width: 42em;
   font-size: 15px;
   line-height: 1.85;
   overflow-wrap: anywhere;
@@ -127,7 +78,6 @@ function choose(shortId: string) {
 .kioku-markdown :deep(details) {
   margin: 0 0 12px;
 }
-/* 列表的记号：无序是一小段墨线，有序是等宽的序号 */
 .kioku-markdown :deep(li) {
   position: relative;
   padding-left: 20px;
@@ -143,12 +93,11 @@ function choose(shortId: string) {
   top: 0.93em;
   width: 10px;
   height: 1px;
-  background: var(--strata-rule);
+  background: var(--ui-rule);
 }
 .kioku-markdown :deep(ol) {
   counter-reset: item;
 }
-/* 从中间开始的有序列表（<ol start>）：计数器不知道起始的序号，交给浏览器画 */
 .kioku-markdown :deep(ol[start]) {
   list-style: decimal;
   padding-left: 1.5em;
@@ -176,7 +125,6 @@ function choose(shortId: string) {
 .kioku-markdown :deep(b) {
   font-weight: 600;
 }
-/* 中文没有斜体，强调用着重号 */
 .kioku-markdown :deep(em),
 .kioku-markdown :deep(i) {
   font-style: normal;
@@ -190,7 +138,6 @@ function choose(shortId: string) {
   border: 1px solid var(--ui-border);
   font-family: var(--font-mono);
   font-size: 14px;
-  /* 折行时每一行的框都是完整的 */
   -webkit-box-decoration-break: clone;
   box-decoration-break: clone;
 }
@@ -222,10 +169,9 @@ function choose(shortId: string) {
   text-align: left;
 }
 .kioku-markdown :deep(th) {
-  border-bottom-color: var(--strata-rule);
+  border-bottom-color: var(--ui-rule);
   font-weight: 600;
 }
-/* href 被清掉的链接（例如 javascript:）点了没有反应，不画成链接 */
 .kioku-markdown :deep(a[href]) {
   text-decoration: underline;
   text-decoration-color: var(--ui-text-muted);
@@ -239,20 +185,9 @@ function choose(shortId: string) {
   margin: 18px 0;
   border-color: var(--ui-border);
 }
-/* 别的记忆的关键词：虚线，点了跳过去 */
-.kioku-markdown :deep(a.kioku-keyword) {
-  color: inherit;
-  text-decoration: underline dotted var(--ui-text-muted);
-  text-underline-offset: 3px;
-  cursor: pointer;
-}
-.kioku-markdown :deep(a.kioku-keyword:hover) {
-  text-decoration-color: currentColor;
-}
-/* [[m-xxxxxx]] 双链 */
 .kioku-markdown :deep(a.kioku-wikilink) {
   color: inherit;
-  text-decoration: underline solid var(--strata-rule);
+  text-decoration: underline solid var(--ui-rule);
   text-underline-offset: 3px;
   cursor: pointer;
 }
@@ -263,25 +198,11 @@ function choose(shortId: string) {
   color: var(--ui-text-muted);
   text-decoration-style: dotted;
 }
-/* 这条记忆自己的关键词：只标出来，一条赭色的线，不铺灰底 */
-.kioku-markdown :deep(mark.kioku-own-keyword) {
-  background: none;
-  color: inherit;
-  text-decoration: underline 2px var(--layer-personal);
-  text-underline-offset: 3px;
-}
-/* 疑似明文的值：红色加下划线，红色是留给告警的 */
-.kioku-markdown :deep(mark.kioku-plain) {
-  background: none;
-  color: var(--ui-error);
-  border-bottom: 1px solid var(--ui-error);
-}
-/* 凭据占位符：一个黑底的「凭据」接着标识。值不在这里，点了去凭据页 */
 .kioku-markdown :deep(.kioku-cred) {
   display: inline-block;
   margin: 0 2px;
   padding-right: 6px;
-  border: 1px solid var(--strata-rule);
+  border: 1px solid var(--ui-rule);
   font-family: var(--font-mono);
   font-size: 14px;
   line-height: 1.55;
@@ -289,7 +210,6 @@ function choose(shortId: string) {
   text-decoration: none;
   overflow-wrap: anywhere;
 }
-/* 写在 a[href] 的规则后面、选择器更具体，盖过普通链接的下划线 */
 .kioku-markdown :deep(a.kioku-cred[href]) {
   text-decoration: none;
   cursor: pointer;
@@ -301,8 +221,8 @@ function choose(shortId: string) {
   content: '凭据';
   margin-right: 6px;
   padding: 0 5px;
-  background: var(--strata-solid);
-  color: var(--strata-on-solid);
+  background: var(--ui-bg-inverted);
+  color: var(--ui-text-inverted);
   font-family: var(--font-sans);
   font-size: 12px;
   font-weight: 500;

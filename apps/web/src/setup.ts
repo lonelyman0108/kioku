@@ -6,18 +6,16 @@ import {
   EXISTING_DATA_NAMES,
   EXTENSION_STATE_NAMES,
   type DatabaseCheck,
+  type DatabaseFailure,
   type DatabaseProblem,
   type DatabaseProblemCode,
-  type DatabaseFailure,
   type DatabaseSource,
   type DatabaseSslMode,
   type DatabaseSummary,
 } from '@kioku/contracts'
 
 import { ApiError } from './api/client'
-import type { Property } from './components/strata/PropertyList.vue'
-
-// 初始化页的数据库这一步：检查结果怎么列、连接信息怎么显示。用词只在这里与契约的 names.ts
+import type { Property } from './components/ui/PropertyList.vue'
 
 export const SSL_MODE_ITEMS: { value: DatabaseSslMode; label: string }[] = [
   { value: 'disable', label: 'disable（不加密）' },
@@ -52,48 +50,30 @@ export interface CheckRow {
   label: string
   value: string
   verdict: CheckVerdict
-  // 下一步怎么做，没有时不显示
   detail?: string
 }
 
-// 每类问题的下一步，和契约的 DATABASE_PROBLEM_NAMES 一一对应；连不上的按类别另见 FAILURE_HINTS
 const PROBLEM_HINTS: Record<
   Exclude<DatabaseProblemCode, 'connection'>,
   (p: DatabaseProblem) => string
 > = {
-  superuser: () =>
-    '会绕过行级安全，记忆圈之间的隔离不生效。改用 NOSUPERUSER NOBYPASSRLS 的普通角色。',
-  bypass_rls: () =>
-    '会绕过行级安全，记忆圈之间的隔离不生效。改用 NOSUPERUSER NOBYPASSRLS 的普通角色。',
   extension_not_installed: (p) =>
     `需要超级用户在这个库里执行 CREATE EXTENSION ${p.extension ?? ''}，或者改用「用超级用户创建」。`,
   extension_missing: () =>
     '需要 Kioku 的 PostgreSQL 镜像，或者在服务器上自行安装 pgvector 与 zhparser。',
-  pre_baseline: () =>
-    '库里是记忆圈重构之前的结构：通过环境变量 DATABASE_URL 指定此库并重启服务，即可在升级页一键就地迁移；也可先执行 kioku-ctl migrate-legacy --in-place --apply 升级后再接入。',
-  newer: () => '用做这个库的版本启动。',
+  pre_baseline: () => '当前版本不兼容旧架构的库结构，请清空或改用空库后再接入。',
+  newer: () => '请使用匹配该库迁移版本的服务端启动。',
   insufficient_privilege: () =>
     '库里已有别的角色建的表，当前角色无权读取。改用这些表的所有者连接，或者换一个专用的库。',
   inspect_failed: () => '原因见服务日志。',
 }
 
-// 检查结果逐项列出。哪一项拦住接入只看服务端给的 problems（规则只在服务端的 assess 里），这里只决定怎么列：
-// 连不上时只有连接一项
-// 「已有数据」一行：有账号时接入已有实例；有记忆圈、没有账号时这些记忆圈没有成员，照样能继续，但要写明后果
 function existingRow(check: DatabaseCheck): Pick<CheckRow, 'value' | 'verdict' | 'detail'> {
-  const { accounts, circles } = check
-  if (check.existing === 'kioku' && accounts) {
+  if (check.existing === 'kioku' && check.accounts) {
     return {
-      value: `${EXISTING_DATA_NAMES.kioku}（${accounts} 个账号）`,
+      value: `${EXISTING_DATA_NAMES.kioku}（${check.accounts} 个账号）`,
       verdict: 'notice',
       detail: '将接入已有实例，接入后用已有账号登录。',
-    }
-  }
-  if (check.existing === 'kioku' && circles) {
-    return {
-      value: `${EXISTING_DATA_NAMES.kioku}（${circles} 个记忆圈，没有账号）`,
-      verdict: 'notice',
-      detail: '这些记忆圈没有成员，新建的管理员无法查看；之后也无法把备份恢复到这个实例。',
     }
   }
   return { value: EXISTING_DATA_NAMES[check.existing!], verdict: 'passed' }
@@ -122,14 +102,11 @@ export function checkRows(check: DatabaseCheck): CheckRow[] {
 
   const rows: CheckRow[] = [{ key: 'connection', label: '连接', value: '成功', verdict: 'passed' }]
   if (check.role) {
-    const found = problem((p) => p.code === 'superuser' || p.code === 'bypass_rls')
     rows.push({
       key: 'role',
       label: '角色',
-      value: found
-        ? `${check.role.name}（${DATABASE_PROBLEM_NAMES[found.code]}）`
-        : check.role.name,
-      ...verdictOf(found),
+      value: check.role.name,
+      verdict: 'passed',
     })
   }
   for (const { name, state } of check.extensions) {
@@ -150,7 +127,6 @@ export function checkRows(check: DatabaseCheck): CheckRow[] {
         : existingRow(check)),
     })
   }
-  // 连上之后读库的结构失败（权限不足等）：其余各项都没读到，单独一行说明
   const access = problem((p) => p.code === 'insufficient_privilege' || p.code === 'inspect_failed')
   if (access) {
     rows.push({
@@ -172,7 +148,6 @@ export function checkRows(check: DatabaseCheck): CheckRow[] {
   return rows
 }
 
-// 当前连接的属性列表：密码只说填没填
 export function summaryFacts(
   summary: DatabaseSummary,
   source: DatabaseSource | null,
@@ -190,14 +165,12 @@ export function summaryFacts(
   ]
 }
 
-// 来自环境变量或 kioku.json 的连接改在哪里
 export function lockedHint(source: DatabaseSource): string {
   return source === 'env'
     ? '修改环境变量 DATABASE_URL 后重启服务。'
     : '修改数据目录里的 kioku.json 后重启服务。'
 }
 
-// 接口报错：检查没过时带着检查结果，其余只有说明
 export function setupFailure(
   err: unknown,
   fallback: string,

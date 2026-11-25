@@ -1,21 +1,17 @@
-import { createRoute, OpenAPIHono } from '@hono/zod-openapi'
+import { createRoute } from '@hono/zod-openapi'
 import { API_GENERATION, HealthResponse } from '@kioku/contracts'
 
+import { jsonResponse, router } from '../http/openapi'
 import { VERSION } from '../version'
 
 const route = createRoute({
   method: 'get',
   path: '/health',
   tags: ['system'],
-  summary: '存活检查',
-  responses: {
-    200: {
-      description: '服务可用',
-      content: { 'application/json': { schema: HealthResponse } },
-    },
-  },
+  summary: '服务健康检查',
+  responses: { 200: jsonResponse('正常', HealthResponse) },
 })
 
-export const health = new OpenAPIHono().openapi(route, (c) =>
+export const health = router().openapi(route, (c) =>
   c.json({ status: 'ok' as const, version: VERSION, api: API_GENERATION }, 200),
 )

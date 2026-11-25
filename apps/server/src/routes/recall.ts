@@ -1,79 +1,100 @@
-import { createRoute } from '@hono/zod-openapi'
+import { createRoute, z } from '@hono/zod-openapi'
 import {
   BootResponse,
   ErrorResponse,
-  LifecycleEvent,
-  LifecycleResponse,
+  LifecycleEventRequest,
+  LifecycleEventResponse,
+  normalizeProjectSlug,
   RecallRequest,
   RecallResponse,
 } from '@kioku/contracts'
 
+import { synthesizeFocus } from '../access/scope'
 import { requireKey } from '../auth/middleware'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
-import { lifecycleEvent, recallRequest } from '../lifecycle/handlers'
-import { recallScopeForKey } from '../memory/context'
+import { handleLifecycleEvent } from '../lifecycle/handlers'
+import { compileBoot } from '../recall/boot'
+import { recallEntries } from '../recall/recall'
 
-const security = [{ bearer: [] }]
 const errors = {
   400: jsonResponse('请求不合法', ErrorResponse),
-  401: jsonResponse('Key 无效', ErrorResponse),
+  401: jsonResponse('访问密钥无效', ErrorResponse),
 }
 
-const recallRoute = createRoute({
+const lifecycleRoute = createRoute({
   method: 'post',
-  path: '/recall',
-  tags: ['recall'],
-  summary:
-    '按一段文本召回候选词条（只返回短 ID 与线索，正文用 GET /entries 读）；带了会话上下文或切面时按它收紧权限并调制排序，并附上当前发言人与本群的事实',
-  security,
-  request: { body: jsonBody(RecallRequest) },
-  responses: { 200: jsonResponse('候选', RecallResponse), ...errors },
+  path: '/lifecycle/event',
+  tags: ['agent'],
+  security: [{ bearer: [] }],
+  summary: '处理插件生命周期事件（session.start / prompt.submit / turn.end）',
+  request: { body: jsonBody(LifecycleEventRequest) },
+  responses: { 200: jsonResponse('宿主输出', LifecycleEventResponse), ...errors },
 })
 
 const bootRoute = createRoute({
   method: 'get',
   path: '/boot',
-  tags: ['recall'],
-  summary: '会话开始时应注入的人格特质与启动词条',
-  security,
-  responses: { 200: jsonResponse('启动词条', BootResponse), ...errors },
+  tags: ['agent'],
+  security: [{ bearer: [] }],
+  summary: '加载当前终端透镜对应的常驻词条与近期会话摘要',
+  request: {
+    query: z.object({
+      project: z.string().max(128).optional(),
+      deviceKey: z.string().max(128).optional(),
+    }),
+  },
+  responses: { 200: jsonResponse('启动加载内容', BootResponse), ...errors },
 })
 
-const lifecycleRoute = createRoute({
+const recallRoute = createRoute({
   method: 'post',
-  path: '/lifecycle/event',
-  tags: ['lifecycle'],
-  summary:
-    '插件转发宿主的生命周期事件，返回宿主可直接使用的输出与短 ID 列表；turn.end 把这一轮对话放进会话缓冲，攒批后抽取',
-  security,
-  request: { body: jsonBody(LifecycleEvent) },
-  responses: { 200: jsonResponse('宿主输出', LifecycleResponse), ...errors },
+  path: '/recall',
+  tags: ['agent'],
+  security: [{ bearer: [] }],
+  summary: '按混合检索引擎召回记忆候选',
+  request: { body: jsonBody(RecallRequest) },
+  responses: { 200: jsonResponse('召回结果', RecallResponse), ...errors },
 })
 
 export function recallRoutes(deps: Deps) {
   const app = router()
-  for (const path of ['/recall', '/boot', '/lifecycle/event']) app.use(path, requireKey(deps))
+  app.use('/lifecycle/event', requireKey(deps))
+  app.use('/boot', requireKey(deps))
+  app.use('/recall', requireKey(deps))
+
+  app.openapi(lifecycleRoute, async (c) =>
+    c.json(await handleLifecycleEvent(deps, c.get('key'), c.req.valid('json')), 200),
+  )
+
+  app.openapi(bootRoute, async (c) => {
+    const key = c.get('key')
+    const query = c.req.valid('query')
+    const focus = synthesizeFocus(key, { project: query.project })
+    const projectSlug = normalizeProjectSlug(query.project) ?? ''
+    const result = await compileBoot(deps.db, key, {
+      focus,
+      projectSlug,
+      ...(query.deviceKey !== undefined ? { deviceKey: query.deviceKey } : {}),
+    })
+    return c.json(result, 200)
+  })
+
+  app.openapi(recallRoute, async (c) => {
+    const key = c.get('key')
+    const body = c.req.valid('json')
+    const focus = synthesizeFocus(key, {
+      env: body.env,
+      realm: body.realm,
+      project: body.project,
+      runtime: body.runtime,
+    })
+    const candidates = await recallEntries(deps.db, deps.masterKey, key, body.query, {
+      focus,
+      ...(body.limit !== undefined ? { limit: body.limit } : {}),
+    })
+    return c.json({ candidates }, 200)
+  })
+
   return app
-    .openapi(recallRoute, async (c) => {
-      const key = c.get('key')
-      const result = await recallRequest(deps, key, c.req.valid('json'), (session, options) =>
-        recallScopeForKey(deps, key, session, options),
-      )
-      return c.json(result, 200)
-    })
-    .openapi(bootRoute, async (c) =>
-      c.json(await recallScopeForKey(deps, c.get('key')).boot(), 200),
-    )
-    .openapi(lifecycleRoute, async (c) => {
-      const key = c.get('key')
-      // 响应只有 LifecycleResponse 的字段，内部辅助字段不发给接入方
-      const { hostOutput, shortIds } = await lifecycleEvent(
-        deps,
-        key,
-        c.req.valid('json'),
-        (session, options) => recallScopeForKey(deps, key, session, options),
-      )
-      return c.json({ hostOutput, shortIds }, 200)
-    })
 }

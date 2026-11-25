@@ -1,236 +1,219 @@
 <script setup lang="ts">
-import { useQueryClient } from '@tanstack/vue-query'
-import { computed, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import type { ApplySuggestionRequest } from '@kioku/contracts'
+import { useToast } from '@nuxt/ui/composables'
+import { useQuery, useQueryClient } from '@tanstack/vue-query'
+import { computed, ref } from 'vue'
 
-import DreamSuggestions from '../components/DreamSuggestions.vue'
-import InboxBindings from '../components/InboxBindings.vue'
-import InboxCredentials from '../components/InboxCredentials.vue'
-import InboxPlaintext from '../components/InboxPlaintext.vue'
-import InboxReview from '../components/InboxReview.vue'
-import { useInboxCounts } from '../composables/useInboxCounts'
-import { useInboxTab } from '../composables/useInboxTab'
+import { ApiError } from '../api/client'
+import { api } from '../api/endpoints'
+import DreamSuggestionCard from '../components/DreamSuggestionCard.vue'
+import EmptyState from '../components/ui/EmptyState.vue'
+import NoteLine from '../components/ui/NoteLine.vue'
+import PageHead from '../components/ui/PageHead.vue'
+import ReadFailureNote from '../components/ui/ReadFailureNote.vue'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
-import { canManageCredentials } from '../vault'
-import {
-  INBOX_TABS,
-  actionableInboxCount,
-  inboxTabActionable,
-  inboxTabCount,
-  inboxTabLabels,
-  refreshInbox,
-  type InboxTab,
-} from '../inbox'
+import { dreamOutcomeLabels } from '../labels'
+import { settingsRoute } from '../routes'
+import { formatRelative, formatTime } from '../time'
 
-const route = useRoute()
+const toast = useToast()
 const queryClient = useQueryClient()
-const { circle } = useSession()
-const circleId = computed(() => String(route.params.circleId))
-const canAct = computed(() => circle.value?.role === 'owner' || circle.value?.role === 'editor')
-const canManageCredential = computed(() => canManageCredentials(circle.value?.role))
+const { me } = useSession()
 
-const counts = useInboxCounts(circleId)
-// 标题的大数字和导航角标、概览同一个口径：当前账号能处理的。角色读到之前不知道口径，先写「–」
-const role = computed(() => circle.value?.role)
-const total = computed(() =>
-  counts.data.value && role.value ? actionableInboxCount(counts.data.value, role.value) : null,
-)
-// 各分类照常写各自的条数：0 不醒目；当前账号处理不了的那几类也一样，等角色读到再定
-const quiet = (tab: InboxTab) =>
-  !counts.data.value ||
-  !inboxTabCount(counts.data.value, tab) ||
-  (role.value !== undefined && !inboxTabActionable(tab, role.value))
-const tab = useInboxTab(counts)
-const refreshing = computed(() => counts.isFetching.value)
-// 换分类或切换记忆圈时回到顶上：各类共用一个滚动区
-const scroller = ref<HTMLElement | null>(null)
-watch([tab, circleId], () => {
-  if (scroller.value) scroller.value.scrollTop = 0
+const inboxQuery = useQuery({
+  queryKey: ['inbox'] as const,
+  queryFn: () => api.inbox(),
+  refetchInterval: (query) => (query.state.data?.dreamState.running ? 3000 : false),
 })
+
+const data = computed(() => inboxQuery.data.value ?? null)
+const items = computed(() => data.value?.items ?? [])
+const state = computed(() => data.value?.dreamState ?? null)
+
+const triggering = ref(false)
+async function triggerDream() {
+  if (triggering.value) return
+  triggering.value = true
+  try {
+    const res = await api.runDream()
+    if (res.started) {
+      toast.add({ title: '已发起整理任务', color: 'success' })
+    } else {
+      toast.add({ title: res.reason ?? '当前无需重复整理', color: 'neutral' })
+    }
+    void queryClient.invalidateQueries({ queryKey: ['inbox'] })
+  } catch (err) {
+    toast.add({ title: err instanceof ApiError ? err.message : '触发整理失败', color: 'error' })
+  } finally {
+    triggering.value = false
+  }
+}
+
+const busyId = ref<string | null>(null)
+async function onApply(id: string, body: ApplySuggestionRequest) {
+  if (busyId.value) return
+  busyId.value = id
+  try {
+    const res = await api.applySuggestion(id, body)
+    toast.add({
+      title: res.entry ? `已应用到「${res.entry.title}」` : '已应用整理建议',
+      color: 'success',
+    })
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['inbox'] }),
+      queryClient.invalidateQueries({ queryKey: ['entries'] }),
+    ])
+  } catch (err) {
+    toast.add({ title: err instanceof ApiError ? err.message : '应用失败', color: 'error' })
+    if (err instanceof ApiError && err.status === 409) {
+      void queryClient.invalidateQueries({ queryKey: ['inbox'] })
+    }
+  } finally {
+    busyId.value = null
+  }
+}
+
+async function onDismiss(id: string) {
+  if (busyId.value) return
+  busyId.value = id
+  try {
+    await api.dismissSuggestion(id)
+    toast.add({ title: '已忽略建议', color: 'neutral' })
+    void queryClient.invalidateQueries({ queryKey: ['inbox'] })
+  } catch (err) {
+    toast.add({ title: err instanceof ApiError ? err.message : '操作失败', color: 'error' })
+  } finally {
+    busyId.value = null
+  }
+}
 </script>
 
 <template>
-  <div ref="scroller" class="inbox">
-    <div class="inbox-grid">
-      <aside class="inbox-side">
-        <div class="inbox-title">
-          <h1>待处理</h1>
+  <div class="inbox-page">
+    <div class="inbox-shell">
+      <PageHead title="待处理">
+        <template #note>
+          整理任务提出的提炼摘要、合并重复、标记过时与更新建议，确认后才会写入记忆。
+        </template>
+        <template #actions>
           <UButton
             :icon="icons.refresh"
+            size="sm"
             color="neutral"
             variant="ghost"
-            size="sm"
             aria-label="刷新"
-            :loading="refreshing"
-            @click="refreshInbox(queryClient, circleId)"
+            :loading="inboxQuery.isFetching.value"
+            @click="inboxQuery.refetch()"
           />
-          <span class="inbox-total">{{ total ?? '–' }}</span>
-        </div>
-        <nav class="inbox-tabs" aria-label="待处理分类">
-          <RouterLink
-            v-for="t in INBOX_TABS"
-            :key="t"
-            :to="{ name: 'inbox', params: { circleId }, query: { tab: t } }"
-            replace
-            class="inbox-tab"
-            :aria-current="tab === t ? 'page' : undefined"
+          <UButton
+            :icon="icons.sparkles"
+            size="sm"
+            :loading="triggering || Boolean(state?.running)"
+            :disabled="!me.data.value?.hasChatModel"
+            @click="triggerDream"
           >
-            <span>{{ inboxTabLabels[t] }}</span>
-            <b :class="{ none: quiet(t) }">
-              {{ counts.data.value ? inboxTabCount(counts.data.value, t) : '–' }}
-            </b>
-          </RouterLink>
-        </nav>
-      </aside>
-      <section class="inbox-main" :aria-label="tab ? inboxTabLabels[tab] : '待处理'">
-        <div v-if="tab === null" class="space-y-3">
-          <USkeleton class="h-8 w-40" />
-          <USkeleton class="h-24 w-full" />
-          <USkeleton class="h-24 w-full" />
+            {{ state?.running ? '整理中' : '立即整理' }}
+          </UButton>
+        </template>
+      </PageHead>
+
+      <div class="inbox-body">
+        <ReadFailureNote v-if="inboxQuery.isError.value" :query="inboxQuery" />
+
+        <NoteLine v-if="me.data.value && !me.data.value.hasChatModel" tone="warning">
+          尚未配置对话与整理模型，自动摘要与整理功能未启用。
+          <template #actions>
+            <UButton size="sm" color="neutral" variant="outline" :to="settingsRoute('models')">
+              去配置模型
+            </UButton>
+          </template>
+        </NoteLine>
+
+        <div v-if="state" class="status-strip">
+          <span>定时整理：{{ state.enabled ? `每 ${state.intervalHours} 小时` : '已关闭' }}</span>
+          <span v-if="state.running" class="text-highlighted font-medium">正在整理…</span>
+          <span v-else-if="state.lastRunAt">
+            上次整理：
+            <time :datetime="state.lastRunAt" :title="formatTime(state.lastRunAt)">
+              {{ formatRelative(state.lastRunAt) }}
+            </time>
+            <template v-if="state.lastOutcome">
+              （{{ dreamOutcomeLabels[state.lastOutcome] }}）
+            </template>
+          </span>
+          <span v-else>尚未执行过整理</span>
+          <span v-if="state.lastError" class="text-error">错误：{{ state.lastError }}</span>
         </div>
-        <!-- 切到别的分类时不卸载：勾选的条目和改了一半的草稿都还在 -->
-        <KeepAlive>
-          <InboxBindings v-if="tab === 'binding'" :circle-id="circleId" />
-          <InboxReview v-else-if="tab === 'review'" :circle-id="circleId" :can-act="canAct" />
-          <DreamSuggestions v-else-if="tab === 'dream'" :circle-id="circleId" :can-act="canAct" />
-          <InboxPlaintext v-else-if="tab === 'plaintext'" :circle-id="circleId" />
-          <InboxCredentials
-            v-else-if="tab === 'credential'"
-            :circle-id="circleId"
-            :can-act="canManageCredential"
+
+        <div v-if="inboxQuery.isPending.value" class="space-y-4">
+          <USkeleton v-for="n in 3" :key="n" class="h-36 w-full" />
+        </div>
+
+        <div v-else-if="items.length" class="card-list">
+          <DreamSuggestionCard
+            v-for="item in items"
+            :key="item.id"
+            :suggestion="item"
+            :busy="busyId === item.id"
+            @apply="onApply"
+            @dismiss="onDismiss"
           />
-        </KeepAlive>
-      </section>
+        </div>
+
+        <EmptyState
+          v-else-if="!inboxQuery.isError.value"
+          title="暂无待处理建议"
+          description="会话摘要与记忆库变动累积后，定时整理或手动触发会在此生成建议。"
+        >
+          <template v-if="me.data.value?.hasChatModel" #actions>
+            <UButton
+              size="sm"
+              variant="outline"
+              :icon="icons.sparkles"
+              :loading="triggering || Boolean(state?.running)"
+              @click="triggerDream"
+            >
+              立即整理
+            </UButton>
+          </template>
+        </EmptyState>
+      </div>
     </div>
   </div>
 </template>
 
 <style scoped>
-.inbox {
+.inbox-page {
   flex: 1;
   min-width: 0;
-  min-height: 0;
   overflow-y: auto;
 }
-.inbox-grid {
-  display: grid;
-  grid-template-columns: 272px minmax(0, 1fr);
-  min-height: 100%;
+.inbox-shell {
+  max-width: 56rem;
 }
-/* 内容很长时分类还在屏幕里 */
-.inbox-side {
-  position: sticky;
-  top: 0;
-  align-self: start;
-  padding: 22px 0 24px;
+.inbox-body {
+  padding: 0 32px 48px;
 }
-.inbox-title {
+.status-strip {
   display: flex;
-  align-items: baseline;
-  gap: 8px;
-  margin-bottom: 17px;
-  padding: 0 24px 0 32px;
-}
-.inbox-title h1 {
-  font-size: 28px;
-  font-weight: 500;
-  line-height: 1.3;
-}
-.inbox-title :deep(button) {
-  align-self: center;
-}
-.inbox-total {
-  margin-left: auto;
-  font-size: 28px;
-  font-variant-numeric: tabular-nums;
-  font-weight: 300;
-  line-height: 1.3;
-}
-.inbox-tabs {
-  border-top: 1px solid var(--strata-rule);
-}
-.inbox-tab {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  height: 54px;
-  padding: 0 24px 0 32px;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin-bottom: 18px;
+  padding: 8px 0;
+  border-top: 1px solid var(--ui-rule);
   border-bottom: 1px solid var(--ui-border);
-  font-size: 15px;
-}
-.inbox-tab:hover {
-  background: var(--ui-bg-muted);
-}
-.inbox-tab b {
-  font-size: 22px;
-  font-variant-numeric: tabular-nums;
-  font-weight: 300;
-  line-height: 1;
-}
-.inbox-tab b.none {
+  font-size: 13px;
   color: var(--ui-text-muted);
 }
-.inbox-tab[aria-current='page'],
-.inbox-tab[aria-current='page']:hover {
-  border-bottom-color: var(--strata-selected);
-  background: var(--strata-selected);
-  color: var(--strata-on-selected);
-  font-weight: 600;
-}
-.inbox-tab[aria-current='page'] b {
-  color: var(--strata-on-selected);
-}
-/* 选中的那一类反白，不醒目的数字也要退一级 */
-.inbox-tab[aria-current='page'] b.none {
-  color: var(--strata-on-selected-muted);
-}
-.inbox-tab:focus-visible {
-  outline-offset: -2px;
-}
-.inbox-main {
-  min-width: 0;
-  padding: 24px 32px 56px;
-  border-left: 1px solid var(--strata-rule);
+.card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
 }
 @media (max-width: 1023.98px) {
-  .inbox-grid {
-    display: block;
-    min-height: 0;
-  }
-  .inbox-side {
-    position: static;
-    padding: 16px 0 0;
-  }
-  .inbox-title {
-    margin-bottom: 10px;
-    padding: 0 16px;
-  }
-  .inbox-tabs {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    border-bottom: 1px solid var(--strata-rule);
-  }
-  .inbox-tab {
-    height: 48px;
-    padding: 0 12px 0 16px;
-    border-bottom: 0;
-    font-size: 14px;
-  }
-  .inbox-tab:nth-child(odd) {
-    border-right: 1px solid var(--ui-border);
-  }
-  /* 两列排开，最后一行之外都有下边线 */
-  .inbox-tab:not(:nth-last-child(-n + 2):nth-child(odd), :last-child) {
-    border-bottom: 1px solid var(--ui-border);
-  }
-  .inbox-tab b {
-    font-size: 18px;
-  }
-  .inbox-main {
-    padding: 18px 16px 40px;
-    border-left: 0;
+  .inbox-body {
+    padding: 0 16px 36px;
   }
 }
 </style>

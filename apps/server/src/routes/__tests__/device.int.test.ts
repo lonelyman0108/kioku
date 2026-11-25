@@ -1,851 +1,212 @@
-import { randomBytes } from 'node:crypto'
-
 import {
-  DEVICE_KEY_DENIALS,
-  type DeviceAuthorization,
-  type DeviceGrantApproved,
-  type DeviceGrantInfo,
-  type DeviceGrantProblem,
-  type DeviceTokenResponse,
-  type LensKeyScopes,
-  type WhoAmI,
+  DeviceAuthorizeResponse,
+  DeviceGrantApproveResponse,
+  DeviceGrantLookupResponse,
+  DeviceTokenResponse,
+  WhoAmIResponse,
 } from '@kioku/contracts'
-import { and, eq, sql } from 'drizzle-orm'
+import { count } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
-import { createApp } from '../../app'
-import { withCircle, type Database } from '../../db/client'
-import { accounts, apiKeys, circleMembers, circles, clients, deviceGrants } from '../../db/schema'
-import { staticEmbedderSource } from '../../embedding/source'
-import type { Deps } from '../../http/env'
-import { cleanupExpired } from '../../jobs/cleanup'
-import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
-import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
+import type { Database } from '../../db/client'
+import { apiKeys } from '../../db/schema'
+import {
+  consoleHeaders,
+  createOwnerSession,
+  createTestApp,
+  openTestDatabase,
+  resetDatabase,
+  testDatabaseUrl,
+  testMasterKey,
+} from '../../testing/db'
 
-const SCOPES: LensKeyScopes = {
-  readKinds: ['entry', 'episode', 'fact'],
-  writeKinds: ['entry', 'episode', 'fact'],
-  maxSensitivity: 'private',
-  allowedRealms: null,
-  admin: false,
-  credentials: 'none',
-}
+describe.skipIf(!testDatabaseUrl)(
+  '设备授权流（延迟签发密钥、单/多平台、拒绝与 other 兼容）',
+  () => {
+    let database: Database
 
-describe.skipIf(!testDatabaseUrl)('浏览器授权', () => {
-  let database: Database
-  let deps: Deps
-  let app: ReturnType<typeof createApp>
-  let ws: Workspace
-
-  beforeAll(async () => {
-    database = await openTestDatabase()
-    deps = {
-      db: database.db,
-      cookieSecure: false,
-      masterKey: randomBytes(32),
-      embedder: staticEmbedderSource(null),
-      jobs: null,
-    }
-    app = createApp(deps)
-  })
-  afterAll(async () => {
-    await database?.close()
-  })
-  beforeEach(async () => {
-    await resetDatabase(database)
-    ws = await bootstrap(app)
-  })
-
-  // 命令行：不带 Cookie，也不带浏览器的同源标记
-  const cli = (path: string, body: unknown) =>
-    app.request(path, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-  const web = (path: string, cookie: string | null, body: unknown) =>
-    app.request(path, jsonRequest('POST', body, cookie ? { cookie } : {}))
-
-  // clientName 为 null 时不带名字
-  async function request(runtimeFamily = 'codex', clientName: string | null = 'laptop') {
-    const res = await cli('/v1/device/authorize', {
-      runtimeFamily,
-      ...(clientName === null ? {} : { clientName }),
-    })
-    expect(res.status).toBe(201)
-    return (await res.json()) as DeviceAuthorization
-  }
-  async function poll(deviceCode: string) {
-    const res = await cli('/v1/device/token', { deviceCode })
-    expect(res.status).toBe(200)
-    return (await res.json()) as DeviceTokenResponse
-  }
-  // 单个平台的申请：确认时只有一项，extra 改这一项（runtimeFamily 默认 codex）
-  const approve = (
-    userCode: string,
-    extra: Record<string, unknown> = {},
-    cookie: string = ws.cookie,
-    topExtra: Record<string, unknown> = {},
-  ) =>
-    web('/v1/device/grants/approve', cookie, {
-      userCode,
-      circleId: ws.circleId,
-      ...topExtra,
-      items: [
-        {
-          runtimeFamily: 'codex',
-          client: { slug: 'codex', name: 'Codex' },
-          keyName: 'laptop',
-          scopes: SCOPES,
-          ...extra,
-        },
-      ],
-    })
-  // 单个平台的申请取到的结果：只有 key 与 client
-  const single = (result: DeviceTokenResponse) => {
-    if (result.status !== 'approved' || !('key' in result)) {
-      throw new Error(`没有取到：${JSON.stringify(result)}`)
-    }
-    return result
-  }
-  // 轮询之间至少隔一秒，测试里把上次轮询的时间往回拨
-  const rewind = () => database.db.update(deviceGrants).set({ lastPolledAt: null })
-  const grants = () => database.db.select().from(deviceGrants)
-  const inCircle = <T>(fn: Parameters<typeof withCircle<T>>[2]) =>
-    withCircle(database.db, ws.circleId, fn)
-  const keys = () => inCircle((tx) => tx.select().from(apiKeys))
-  const circleClients = () => inCircle((tx) => tx.select().from(clients))
-
-  it('申请、确认、取走：访问密钥只给一次，能用，库里没有明文', async () => {
-    const grant = await request()
-    expect(grant).toMatchObject({ verificationPath: '/authorize', expiresIn: 600, interval: 3 })
-    expect(grant.userCode).toMatch(/^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$/)
-    // 两个码都只存哈希
-    const [stored] = await grants()
-    const dump = JSON.stringify(stored)
-    expect(dump).not.toContain(grant.deviceCode)
-    expect(dump).not.toContain(grant.userCode.replace('-', ''))
-
-    expect(await poll(grant.deviceCode)).toEqual({ status: 'pending' })
-
-    // 确认码输入时不计较大小写、空格与连字符
-    const seen = await web('/v1/device/grants/lookup', ws.cookie, {
-      userCode: ` ${grant.userCode.toLowerCase().replace('-', ' ')} `,
-    })
-    expect(seen.status).toBe(200)
-    // 单个平台的申请也规整成一项
-    expect((await seen.json()) as DeviceGrantInfo).toMatchObject({
-      platforms: [{ runtimeFamily: 'codex', clientName: null }],
-      clientName: 'laptop',
+    beforeAll(async () => {
+      database = await openTestDatabase()
     })
 
-    const approved = await approve(grant.userCode, {}, ws.cookie, {
-      linkedCircles: [{ circleId: ws.personalCircleId, mode: 'read_write' }],
-      contextFacets: { env: ['prod'] },
+    beforeEach(async () => {
+      await resetDatabase(database)
     })
-    expect(approved.status).toBe(200)
-    // 确认时还没有 Key
-    expect(await keys()).toHaveLength(0)
 
-    await rewind()
-    const result = single(await poll(grant.deviceCode))
-    expect(Object.keys(result).sort()).toEqual(['client', 'key', 'status'])
-    expect(result.client).toEqual({ slug: 'codex', name: 'Codex', runtimeFamily: 'codex' })
-    const who = await app.request('/v1/whoami', { headers: bearer(result.key) })
-    expect(who.status).toBe(200)
-    const whoBody = (await who.json()) as WhoAmI
-    expect(whoBody.scopes).toMatchObject({
-      maxSensitivity: 'private',
-      credentials: 'none',
+    afterAll(async () => {
+      await database.close()
     })
-    expect(whoBody.linkedCircles).toEqual([
-      expect.objectContaining({ id: ws.personalCircleId, mode: 'read_write', kind: 'personal' }),
-    ])
-    expect(whoBody.contextFacets).toEqual({ env: ['prod'] })
 
-    // 这条申请没有了，再取是过期；库里只有 Key 的哈希
-    expect(await grants()).toHaveLength(0)
-    expect(await poll(grant.deviceCode)).toEqual({ status: 'expired' })
-    const [key] = await keys()
-    expect(key).toMatchObject({ name: 'laptop', scopes: SCOPES })
-    expect(JSON.stringify(key)).not.toContain(result.key)
-    const [created] = await circleClients()
-    expect(created).toMatchObject({
-      slug: 'codex',
-      runtimeFamily: 'codex',
-      ownerAccountId: ws.accountId,
-    })
-  })
+    it('单平台授权采用延迟签发：approve 不落库 api_keys，首次 token 轮询才签发并销毁授权单', async () => {
+      const app = createTestApp(database, { masterKey: testMasterKey() })
+      const { cookie } = await createOwnerSession(database)
 
-  it('同时来的两次轮询只有一次取得到访问密钥', async () => {
-    const grant = await request()
-    await approve(grant.userCode)
-    const results = await Promise.all([poll(grant.deviceCode), poll(grant.deviceCode)])
-    expect(results.map((r) => r.status).sort()).toEqual(['approved', 'expired'])
-    expect(await keys()).toHaveLength(1)
-  })
-
-  it('用确认人自己已有的接入实例；别人的接入实例不行', async () => {
-    const mine = await ws.createClient('mine', { runtimeFamily: 'codex' })
-    const grant = await request()
-    expect((await approve(grant.userCode, { client: { id: mine.id } })).status).toBe(200)
-    const result = await poll(grant.deviceCode)
-    expect(result).toMatchObject({ status: 'approved', client: { slug: 'mine' } })
-
-    const bob = await addMember(database.db, ws.circleId, 'bob', 'editor')
-    const second = await request()
-    const refused = await approve(second.userCode, { client: { id: mine.id } }, bob.cookie)
-    expect(refused.status).toBe(403)
-    // 申请还在，换个接入实例可以接着确认
-    expect((await approve(second.userCode, {}, bob.cookie)).status).toBe(200)
-    expect(
-      (
-        await approve((await request()).userCode, {
-          client: { id: '00000000-0000-4000-8000-000000000000' },
-        })
-      ).status,
-    ).toBe(404)
-  })
-
-  it('接入实例的标识被占用时回 409，申请还在', async () => {
-    await ws.createClient('codex')
-    const grant = await request()
-    expect((await approve(grant.userCode)).status).toBe(409)
-    expect(
-      (await approve(grant.userCode, { client: { slug: 'codex-2', name: 'Codex' } })).status,
-    ).toBe(200)
-    // 确认过的不能再确认、再拒绝一次
-    expect(
-      (await approve(grant.userCode, { client: { slug: 'codex-3', name: 'Codex' } })).status,
-    ).toBe(404)
-    expect(
-      (await web('/v1/device/grants/deny', ws.cookie, { userCode: grant.userCode })).status,
-    ).toBe(404)
-  })
-
-  it('拒绝：命令行得到 denied，之后是过期，不签发', async () => {
-    const grant = await request()
-    const res = await web('/v1/device/grants/deny', ws.cookie, { userCode: grant.userCode })
-    expect(res.status).toBe(204)
-    expect(await poll(grant.deviceCode)).toEqual({ status: 'denied' })
-    expect(await poll(grant.deviceCode)).toEqual({ status: 'expired' })
-    expect(await keys()).toHaveLength(0)
-  })
-
-  it('过期的申请查不到、确认不了、取不到，由定时清理删掉', async () => {
-    const pending = await request()
-    const approved = await request()
-    await approve(approved.userCode)
-    await database.db.update(deviceGrants).set({ expiresAt: sql`now() - interval '1 second'` })
-    expect(
-      (await web('/v1/device/grants/lookup', ws.cookie, { userCode: pending.userCode })).status,
-    ).toBe(404)
-    expect((await approve(pending.userCode, { client: { slug: 'x', name: 'x' } })).status).toBe(404)
-    expect(await poll(approved.deviceCode)).toEqual({ status: 'expired' })
-    expect(await keys()).toHaveLength(0)
-    // 轮询到过期的顺手删了，剩下的一条归定时清理
-    expect(await grants()).toHaveLength(1)
-    expect((await cleanupExpired(database.db)).deviceGrants).toBe(1)
-    expect(await grants()).toHaveLength(0)
-  })
-
-  it('签发的规则照旧：查看者不能确认，编辑者给不了机密级与凭据能力，不是成员的进不了这个记忆圈', async () => {
-    const editor = await addMember(database.db, ws.circleId, 'bob', 'editor')
-    const viewer = await addMember(database.db, ws.circleId, 'carol', 'viewer')
-    // 登录着、但不是这个记忆圈的成员
-    const outsider = await addMember(database.db, ws.circleId, 'dave', 'owner')
-    await database.db
-      .delete(circleMembers)
-      .where(
-        and(
-          eq(circleMembers.circleId, ws.circleId),
-          eq(circleMembers.accountId, outsider.accountId),
-        ),
-      )
-    const grant = await request()
-    expect((await approve(grant.userCode, {}, viewer.cookie)).status).toBe(403)
-    expect((await approve(grant.userCode, {}, outsider.cookie)).status).toBe(403)
-    for (const scopes of [
-      { ...SCOPES, maxSensitivity: 'secret' },
-      { ...SCOPES, credentials: 'use' },
-      { ...SCOPES, admin: true },
-    ]) {
-      expect((await approve(grant.userCode, { scopes }, editor.cookie)).status).toBe(403)
-      expect(
-        (
-          await approve((await request()).userCode, {
-            client: { slug: `s${Math.random().toString(36).slice(2, 8)}`, name: 'x' },
-            scopes,
-          })
-        ).status,
-      ).toBe(200)
-    }
-    // 被拒的那几次没有动这条申请，也没有留下接入实例
-    expect((await approve(grant.userCode, {}, editor.cookie)).status).toBe(200)
-  })
-
-  it('确认之后、取走之前确认人被降级、停用、移出记忆圈，或关联客场圈失效，或接入实例转给了别人：取不到，不签发', async () => {
-    const bob = await addMember(database.db, ws.circleId, 'bob', 'owner')
-    const [extraShared] = await database.db
-      .insert(circles)
-      .values({ slug: 'extra-shared', name: '协作圈', kind: 'shared' })
-      .returning({ id: circles.id })
-    const changes: Array<{ fn: () => Promise<unknown>; extra?: Record<string, unknown> }> = [
-      {
-        fn: () =>
-          database.db
-            .update(circleMembers)
-            .set({ role: 'viewer' })
-            .where(
-              and(
-                eq(circleMembers.circleId, ws.circleId),
-                eq(circleMembers.accountId, bob.accountId),
-              ),
-            ),
-      },
-      {
-        fn: () =>
-          database.db
-            .update(accounts)
-            .set({ disabledAt: new Date() })
-            .where(eq(accounts.id, bob.accountId)),
-      },
-      {
-        fn: () =>
-          database.db
-            .delete(circleMembers)
-            .where(
-              and(
-                eq(circleMembers.circleId, ws.circleId),
-                eq(circleMembers.accountId, bob.accountId),
-              ),
-            ),
-      },
-      {
-        fn: () =>
-          inCircle((tx) =>
-            tx
-              .update(clients)
-              .set({ ownerAccountId: ws.accountId })
-              .where(eq(clients.ownerAccountId, bob.accountId)),
-          ),
-      },
-      {
-        extra: { linkedCircles: [{ circleId: extraShared!.id, mode: 'read' }] },
-        fn: () =>
-          database.db
-            .delete(circleMembers)
-            .where(
-              and(
-                eq(circleMembers.circleId, extraShared!.id),
-                eq(circleMembers.accountId, bob.accountId),
-              ),
-            ),
-      },
-    ]
-    for (const [index, { fn, extra }] of changes.entries()) {
-      // 每轮从头来：恢复成所有者、没停用
-      await database.db
-        .insert(circleMembers)
-        .values({ circleId: ws.circleId, accountId: bob.accountId, role: 'owner' })
-        .onConflictDoUpdate({
-          target: [circleMembers.circleId, circleMembers.accountId],
-          set: { role: 'owner' },
-        })
-      await database.db
-        .insert(circleMembers)
-        .values({ circleId: extraShared!.id, accountId: bob.accountId, role: 'editor' })
-        .onConflictDoUpdate({
-          target: [circleMembers.circleId, circleMembers.accountId],
-          set: { role: 'editor' },
-        })
-      await database.db.update(accounts).set({ disabledAt: null })
-      const grant = await request()
-      const res = await approve(
-        grant.userCode,
-        { client: { slug: `bob-${index}`, name: 'x' }, scopes: { ...SCOPES, credentials: 'use' } },
-        bob.cookie,
-        extra ?? {},
-      )
-      expect(res.status, `第 ${index} 种`).toBe(200)
-      await fn()
-      expect(await poll(grant.deviceCode), `第 ${index} 种`).toEqual({ status: 'denied' })
-      expect(await poll(grant.deviceCode)).toEqual({ status: 'expired' })
-    }
-    expect(await keys()).toHaveLength(0)
-  })
-
-  it('接入实例被删掉时，确认过还没取走的申请一起没了', async () => {
-    const grant = await request()
-    await approve(grant.userCode)
-    const [target] = await circleClients()
-    const res = await app.request(`/v1/circles/${ws.circleId}/clients/${target!.id}`, {
-      method: 'DELETE',
-      headers: { cookie: ws.cookie, 'sec-fetch-site': 'same-origin' },
-    })
-    expect(res.status).toBeLessThan(300)
-    expect(await poll(grant.deviceCode)).toEqual({ status: 'expired' })
-    expect(await keys()).toHaveLength(0)
-  })
-
-  it('确认页的接口要登录；确认码不对、格式不对分别是 404 与 400', async () => {
-    const grant = await request()
-    for (const path of ['lookup', 'approve', 'deny']) {
-      const res = await web(`/v1/device/grants/${path}`, null, { userCode: grant.userCode })
-      expect(res.status, path).toBe(401)
-    }
-    expect(
-      (await web('/v1/device/grants/lookup', ws.cookie, { userCode: 'BCDF-GHJK' })).status,
-    ).toBe(404)
-    expect((await web('/v1/device/grants/lookup', ws.cookie, { userCode: 'AEIOU' })).status).toBe(
-      400,
-    )
-    expect((await approve('BCDF-GHJK')).status).toBe(404)
-    // 命令行的两个接口不用登录；设备码不对和过期答得一样
-    expect(await poll('不存在的设备码')).toEqual({ status: 'expired' })
-    // 带着会话 Cookie 的跨站请求照样被拦
-    const forged = await app.request('/v1/device/grants/approve', {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        cookie: ws.cookie,
-        'sec-fetch-site': 'cross-site',
-      },
-      body: JSON.stringify({ userCode: grant.userCode }),
-    })
-    expect(forged.status).toBe(403)
-  })
-
-  it('申请的内容：运行时要认得，名字单行、不含控制字符，不给也行', async () => {
-    for (const body of [
-      { runtimeFamily: 'nope' },
-      { runtimeFamily: 'codex', clientName: 'a\nb' },
-      { runtimeFamily: 'codex', clientName: 'a\u202eb' },
-      { runtimeFamily: 'codex', clientName: 'x'.repeat(65) },
-      {},
-    ]) {
-      expect((await cli('/v1/device/authorize', body)).status).toBe(400)
-    }
-    const grant = await request('pi', null)
-    const seen = await web('/v1/device/grants/lookup', ws.cookie, { userCode: grant.userCode })
-    expect((await seen.json()) as DeviceGrantInfo).toMatchObject({
-      platforms: [{ runtimeFamily: 'pi', clientName: null }],
-      clientName: null,
-    })
-  })
-
-  it('同一个客户端待确认的申请有上限；取走、拒绝、过期的不占名额；认不出客户端时不按客户端数', async () => {
-    // 认得出客户端：经一层受信代理，地址取自转发头
-    const proxied = createApp({ ...deps, trustedProxies: 1 })
-    const from = (address: string) =>
-      proxied.request('/v1/device/authorize', {
+      // 1. CLI 发起单平台设备授权（验证 other 兼容归一到 generic）
+      const authRes = await app.request('/v1/device/authorize', {
         method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-forwarded-for': address },
-        body: JSON.stringify({ runtimeFamily: 'codex' }),
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ runtimeFamily: 'other', clientName: 'My CLI' }),
       })
-    const codes: DeviceAuthorization[] = []
-    for (let i = 0; i < 10; i++) {
-      const res = await from('203.0.113.7')
-      expect(res.status).toBe(201)
-      codes.push((await res.json()) as DeviceAuthorization)
-    }
-    expect((await from('203.0.113.7')).status).toBe(429)
-    // 别的客户端不受影响
-    expect((await from('203.0.113.8')).status).toBe(201)
-    // 拒绝、确认过的不占名额
-    await web('/v1/device/grants/deny', ws.cookie, { userCode: codes[0]!.userCode })
-    expect((await from('203.0.113.7')).status).toBe(201)
-    expect((await from('203.0.113.7')).status).toBe(429)
-    await approve(codes[1]!.userCode)
-    expect((await from('203.0.113.7')).status).toBe(201)
-    // 过期的不占名额
-    await database.db.update(deviceGrants).set({ expiresAt: sql`now() - interval '1 second'` })
-    expect((await from('203.0.113.7')).status).toBe(201)
+      expect(authRes.status).toBe(201)
+      const auth = DeviceAuthorizeResponse.parse(await authRes.json())
 
-    // 取不到地址的请求不按客户端数：否则所有人共用一个名额，几条申请就挤得别人都申请不了
-    for (let i = 0; i < 12; i++) await request()
-  })
+      // 轮询尚处于 pending
+      const pendingRes = await app.request('/v1/device/token', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ deviceCode: auth.deviceCode }),
+      })
+      expect(DeviceTokenResponse.parse(await pendingRes.json())).toEqual({ status: 'pending' })
 
-  it('确认之后离开过记忆圈的确认人，重新加入也取不到：离开前确认的申请不能留下一个访问密钥', async () => {
-    const bob = await addMember(database.db, ws.circleId, 'bob', 'owner')
-    const grant = await request()
-    expect((await approve(grant.userCode, {}, bob.cookie)).status).toBe(200)
-    await database.db
-      .delete(circleMembers)
-      .where(
-        and(eq(circleMembers.circleId, ws.circleId), eq(circleMembers.accountId, bob.accountId)),
-      )
-    await database.db
-      .insert(circleMembers)
-      .values({ circleId: ws.circleId, accountId: bob.accountId, role: 'owner' })
-    expect(await poll(grant.deviceCode)).toEqual({ status: 'denied' })
-    expect(await keys()).toHaveLength(0)
-  })
+      // 2. 控制台按确认码查询待审授权
+      const lookupRes = await app.request('/v1/device/grants/lookup', {
+        method: 'POST',
+        headers: consoleHeaders(cookie, true),
+        body: JSON.stringify({ userCode: auth.userCode }),
+      })
+      expect(lookupRes.status).toBe(200)
+      const lookup = DeviceGrantLookupResponse.parse(await lookupRes.json())
+      expect(lookup.platforms).toEqual([{ runtimeFamily: 'generic', clientName: 'My CLI' }])
 
-  it('已有的接入实例要和申请的运行时一致', async () => {
-    const bot = await ws.createClient('bot', { runtimeFamily: 'astrbot' })
-    const grant = await request('codex')
-    const res = await approve(grant.userCode, { client: { id: bot.id } })
-    expect(res.status).toBe(409)
-    expect(((await res.json()) as { error: string }).error).toContain('运行时')
-    // 申请还在
-    expect((await approve(grant.userCode)).status).toBe(200)
-  })
-
-  it('快到期时确认的留出取走的时间', async () => {
-    const grant = await request()
-    await database.db.update(deviceGrants).set({ expiresAt: sql`now() + interval '2 seconds'` })
-    expect((await approve(grant.userCode)).status).toBe(200)
-    const [row] = await database.db
-      .select({ left: sql<number>`extract(epoch from ${deviceGrants.expiresAt} - now())::float` })
-      .from(deviceGrants)
-    expect(row!.left).toBeGreaterThan(50)
-    expect((await poll(grant.deviceCode)).status).toBe('approved')
-  })
-
-  it('取走与删除接入实例同时进行不会互相卡死', async () => {
-    for (let round = 0; round < 5; round++) {
-      const grant = await request()
-      await approve(grant.userCode, { client: { slug: `race-${round}`, name: 'x' } })
-      const [target] = (await circleClients()).filter((a) => a.slug === `race-${round}`)
-      const [taken, removed] = await Promise.all([
-        cli('/v1/device/token', { deviceCode: grant.deviceCode }),
-        app.request(`/v1/circles/${ws.circleId}/clients/${target!.id}`, {
-          method: 'DELETE',
-          headers: { cookie: ws.cookie, 'sec-fetch-site': 'same-origin' },
+      // 3. 控制台批准授权并指定终端透镜
+      const approveRes = await app.request('/v1/device/grants/approve', {
+        method: 'POST',
+        headers: consoleHeaders(cookie, true),
+        body: JSON.stringify({
+          userCode: auth.userCode,
+          envs: ['mac'],
+          allowedRealms: ['work'],
+          canWrite: true,
+          canResolveCredentials: true,
+          items: [{ runtimeFamily: 'generic', keyName: 'Work CLI' }],
         }),
-      ])
-      // 谁先谁后都行，但都不能是 500
-      expect(taken.status, `第 ${round} 轮取走`).toBe(200)
-      expect(removed.status, `第 ${round} 轮删除`).toBeLessThan(500)
-    }
-  })
-
-  it('轮询得太勤回 429，不影响之后取走', async () => {
-    const grant = await request()
-    expect(await poll(grant.deviceCode)).toEqual({ status: 'pending' })
-    expect((await cli('/v1/device/token', { deviceCode: grant.deviceCode })).status).toBe(429)
-    await approve(grant.userCode)
-    // 确认之后不用等
-    expect((await poll(grant.deviceCode)).status).toBe('approved')
-  })
-
-  describe('一次申请几个平台', () => {
-    const PLATFORMS = [
-      { runtimeFamily: 'codex', clientName: 'work' },
-      { runtimeFamily: 'pi' },
-      { runtimeFamily: 'hermes' },
-    ]
-    async function requestMany(platforms: unknown[] = PLATFORMS, clientName = 'mac') {
-      const res = await cli('/v1/device/authorize', { platforms, clientName })
-      expect(res.status).toBe(201)
-      return (await res.json()) as DeviceAuthorization
-    }
-    const item = (runtimeFamily: string, extra: Record<string, unknown> = {}) => ({
-      runtimeFamily,
-      client: { slug: `${runtimeFamily}-mac`, name: `${runtimeFamily} · mac` },
-      keyName: 'mac',
-      scopes: SCOPES,
-      ...extra,
-    })
-    const approveMany = (userCode: string, items: unknown[], cookie: string = ws.cookie) =>
-      web('/v1/device/grants/approve', cookie, { userCode, circleId: ws.circleId, items })
-    const many = (result: DeviceTokenResponse) => {
-      if (result.status !== 'approved' || !('keys' in result)) {
-        throw new Error(`没有取到：${JSON.stringify(result)}`)
-      }
-      return result.keys
-    }
-
-    it('查看、确认一次、取走：每个平台一项，顺序和申请的一样，取消勾选的是 skipped', async () => {
-      const hermes = await ws.createClient('hermes-old', { runtimeFamily: 'hermes' })
-      const grant = await requestMany()
-      expect(await poll(grant.deviceCode)).toEqual({ status: 'pending' })
-      const seen = await web('/v1/device/grants/lookup', ws.cookie, { userCode: grant.userCode })
-      expect((await seen.json()) as DeviceGrantInfo).toMatchObject({
-        platforms: [
-          { runtimeFamily: 'codex', clientName: 'work' },
-          { runtimeFamily: 'pi', clientName: null },
-          { runtimeFamily: 'hermes', clientName: null },
-        ],
-        clientName: 'mac',
       })
-
-      // 顺序不必和申请一致：按运行时对上
-      const res = await approveMany(grant.userCode, [
-        item('hermes', { client: { id: hermes.id }, keyName: 'mac hermes' }),
-        { runtimeFamily: 'pi', skip: true },
-        item('codex'),
+      expect(approveRes.status).toBe(200)
+      expect(DeviceGrantApproveResponse.parse(await approveRes.json()).items).toEqual([
+        { runtimeFamily: 'generic', keyName: 'Work CLI' },
       ])
-      expect(res.status).toBe(200)
-      expect(
-        ((await res.json()) as DeviceGrantApproved).items.map((i) => [
-          i.runtimeFamily,
-          i.client.slug,
-        ]),
-      ).toEqual([
-        ['codex', 'codex-mac'],
-        ['hermes', 'hermes-old'],
-      ])
-      expect(await keys()).toHaveLength(0)
 
-      await rewind()
-      const result = await poll(grant.deviceCode)
-      const issued = many(result)
-      expect(issued.map((k) => [k.runtimeFamily, k.status])).toEqual([
-        ['codex', 'issued'],
-        ['pi', 'skipped'],
-        ['hermes', 'issued'],
-      ])
-      for (const k of issued) {
-        if (k.status !== 'issued') continue
-        const who = await app.request('/v1/whoami', { headers: bearer(k.key) })
-        expect(who.status).toBe(200)
-      }
-      expect(issued[0]).toMatchObject({ client: { slug: 'codex-mac', runtimeFamily: 'codex' } })
-      expect(issued[2]).toMatchObject({ client: { slug: 'hermes-old', runtimeFamily: 'hermes' } })
-      expect((await keys()).map((k) => k.name).sort()).toEqual(['mac', 'mac hermes'])
-      expect(JSON.stringify(await keys())).not.toContain((issued[0] as { key: string }).key)
-      expect(await grants()).toHaveLength(0)
-      expect(await poll(grant.deviceCode)).toEqual({ status: 'expired' })
-    })
+      // 延迟签发关键不变量：approve 之后、CLI 拉取之前，api_keys 表必须仍为 0 条
+      const [beforePoll] = await database.db.select({ n: count() }).from(apiKeys)
+      expect(beforePoll?.n).toBe(0)
 
-    it('申请：两种写法二选一，平台 1 到 8 个、运行时不重复', async () => {
-      for (const body of [
-        { runtimeFamily: 'codex', platforms: [{ runtimeFamily: 'pi' }] },
-        { clientName: 'mac' },
-        { platforms: [] },
-        { platforms: [{ runtimeFamily: 'pi' }, { runtimeFamily: 'pi', clientName: 'x' }] },
-        { platforms: [{ runtimeFamily: 'nope' }] },
-        { platforms: [{ runtimeFamily: 'pi', clientName: 'a\nb' }] },
-        {
-          platforms: [
-            'claudecode',
-            'codex',
-            'openclaw',
-            'hermes',
-            'opencode',
-            'pi',
-            'dsh',
-            'astrbot',
-            'mcp',
-          ].map((runtimeFamily) => ({ runtimeFamily })),
-        },
-      ]) {
-        expect((await cli('/v1/device/authorize', body)).status, JSON.stringify(body)).toBe(400)
-      }
-      await requestMany([{ runtimeFamily: 'pi' }])
-    })
-
-    it('确认：每个平台恰好一项、至少一项不跳过；不合规则时整体不确认，申请还在', async () => {
-      const grant = await requestMany()
-      const skip = (runtimeFamily: string) => ({ runtimeFamily, skip: true })
-      for (const items of [
-        // 少一项
-        [item('codex'), item('pi')],
-        // 多一项
-        [item('codex'), item('pi'), item('hermes'), item('mcp')],
-        // 同一个平台两项
-        [item('codex'), item('pi'), item('pi', { client: { slug: 'pi-2', name: 'x' } })],
-        // 全部跳过
-        [skip('codex'), skip('pi'), skip('hermes')],
-      ]) {
-        expect((await approveMany(grant.userCode, items)).status).toBe(400)
-      }
-      // 编辑者给不了机密级：指出是哪个平台，一个接入实例都不建
-      const bob = await addMember(database.db, ws.circleId, 'bob', 'editor')
-      const refused = await approveMany(
-        grant.userCode,
-        [
-          item('codex'),
-          item('pi', { scopes: { ...SCOPES, maxSensitivity: 'secret' } }),
-          skip('hermes'),
-        ],
-        bob.cookie,
-      )
-      expect(refused.status).toBe(403)
-      const problem = (await refused.json()) as DeviceGrantProblem
-      expect(problem.runtimeFamily).toBe('pi')
-      expect(problem.error).toMatch(/^Pi：/)
-      expect(await circleClients()).toHaveLength(0)
-      expect(
-        (await approveMany(grant.userCode, [item('codex'), skip('pi'), skip('hermes')])).status,
-      ).toBe(200)
-    })
-
-    it('新建接入实例的标识被占用时回 409 并指出是哪一项，前面新建的接入实例不留下', async () => {
-      await ws.createClient('pi-mac', { runtimeFamily: 'pi' })
-      const grant = await requestMany()
-      const res = await approveMany(grant.userCode, [item('codex'), item('pi'), item('hermes')])
-      expect(res.status).toBe(409)
-      const problem = (await res.json()) as DeviceGrantProblem
-      expect(problem).toMatchObject({ runtimeFamily: 'pi' })
-      expect(problem.error).toContain('pi-mac')
-      // codex 那一项先建了接入实例，跟着回滚
-      expect((await circleClients()).map((a) => a.slug)).toEqual(['pi-mac'])
-      // 同一个请求里两项用同一个标识也是 409
-      const twice = await approveMany(grant.userCode, [
-        item('codex', { client: { slug: 'same', name: 'x' } }),
-        item('pi', { client: { slug: 'same', name: 'x' } }),
-        item('hermes'),
-      ])
-      expect(twice.status).toBe(409)
-      expect(((await twice.json()) as DeviceGrantProblem).runtimeFamily).toBe('pi')
-      // 已有的接入实例运行时对不上也指出是哪一项
-      const [pi] = await circleClients()
-      const mismatch = await approveMany(grant.userCode, [
-        item('codex', { client: { id: pi!.id } }),
-        { runtimeFamily: 'pi', skip: true },
-        { runtimeFamily: 'hermes', skip: true },
-      ])
-      expect(mismatch.status).toBe(409)
-      expect(((await mismatch.json()) as DeviceGrantProblem).runtimeFamily).toBe('codex')
-      expect(
-        (
-          await approveMany(grant.userCode, [
-            item('codex'),
-            item('pi', { client: { slug: 'pi-mac-2', name: 'x' } }),
-            item('hermes'),
-          ])
-        ).status,
-      ).toBe(200)
-    })
-
-    it('取走时逐项再核对：降级后超出范围的那一项 denied，别的照常签发', async () => {
-      const bob = await addMember(database.db, ws.circleId, 'bob', 'owner')
-      const grant = await requestMany()
-      const res = await approveMany(
-        grant.userCode,
-        [
-          item('codex', { scopes: { ...SCOPES, credentials: 'use' } }),
-          item('pi'),
-          { runtimeFamily: 'hermes', skip: true },
-        ],
-        bob.cookie,
-      )
-      expect(res.status).toBe(200)
-      await database.db
-        .update(circleMembers)
-        .set({ role: 'editor' })
-        .where(
-          and(eq(circleMembers.circleId, ws.circleId), eq(circleMembers.accountId, bob.accountId)),
-        )
-      const result = many(await poll(grant.deviceCode))
-      expect(result).toEqual([
-        { runtimeFamily: 'codex', status: 'denied', reason: DEVICE_KEY_DENIALS.role },
-        expect.objectContaining({ runtimeFamily: 'pi', status: 'issued' }),
-        { runtimeFamily: 'hermes', status: 'skipped' },
-      ])
-      expect(await keys()).toHaveLength(1)
-    })
-
-    it('确认之后接入实例所有者被停用：每一项都是 denied，不签发', async () => {
-      const bob = await addMember(database.db, ws.circleId, 'bob', 'owner')
-      const grant = await requestMany()
-      await approveMany(grant.userCode, [item('codex'), item('pi'), item('hermes')], bob.cookie)
-      await database.db
-        .update(accounts)
-        .set({ disabledAt: new Date() })
-        .where(eq(accounts.id, bob.accountId))
-      const result = many(await poll(grant.deviceCode))
-      expect(result.map((k) => k.status)).toEqual(['denied', 'denied', 'denied'])
-      expect(
-        result.every((k) => k.status === 'denied' && k.reason === DEVICE_KEY_DENIALS.member),
-      ).toBe(true)
-      expect(await keys()).toHaveLength(0)
-      expect(await grants()).toHaveLength(0)
-    })
-
-    it('确认之后删掉其中一个接入实例：那一项 denied，别的平台不受连累', async () => {
-      const grant = await requestMany()
-      await approveMany(grant.userCode, [item('codex'), item('pi'), item('hermes')])
-      const [pi] = (await circleClients()).filter((a) => a.slug === 'pi-mac')
-      const removed = await app.request(`/v1/circles/${ws.circleId}/clients/${pi!.id}`, {
-        method: 'DELETE',
-        headers: { cookie: ws.cookie, 'sec-fetch-site': 'same-origin' },
+      // 4. CLI 首次轮询换取明文密钥并自动消费删除授权单
+      const tokenRes = await app.request('/v1/device/token', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ deviceCode: auth.deviceCode }),
       })
-      expect(removed.status).toBeLessThan(300)
-      const result = many(await poll(grant.deviceCode))
-      expect(result.map((k) => k.status)).toEqual(['issued', 'denied', 'issued'])
-      expect(result[1]).toMatchObject({ reason: DEVICE_KEY_DENIALS.client })
-    })
-
-    it('两个平台顺序相反的申请同时确认、用同样的已有接入实例：不会互相卡死', async () => {
-      const codex = await ws.createClient('codex-old', { runtimeFamily: 'codex' })
-      const hermes = await ws.createClient('hermes-old', { runtimeFamily: 'hermes' })
-      const existing = (runtimeFamily: string, id: string) =>
-        item(runtimeFamily, { client: { id } })
-      for (let round = 0; round < 5; round++) {
-        const forward = await requestMany([{ runtimeFamily: 'codex' }, { runtimeFamily: 'hermes' }])
-        const backward = await requestMany([
-          { runtimeFamily: 'hermes' },
-          { runtimeFamily: 'codex' },
-        ])
-        const results = await Promise.all([
-          approveMany(forward.userCode, [
-            existing('codex', codex.id),
-            existing('hermes', hermes.id),
-          ]),
-          approveMany(backward.userCode, [
-            existing('hermes', hermes.id),
-            existing('codex', codex.id),
-          ]),
-        ])
-        expect(
-          results.map((r) => r.status),
-          `第 ${round} 轮`,
-        ).toEqual([200, 200])
+      expect(tokenRes.status).toBe(200)
+      expect(tokenRes.headers.get('cache-control')).toContain('no-store')
+      const tokenBody = DeviceTokenResponse.parse(await tokenRes.json())
+      expect(tokenBody.status).toBe('approved')
+      if (tokenBody.status !== 'approved' || !('key' in tokenBody)) {
+        throw new Error('expected single-platform approved key')
       }
+      expect(tokenBody.key).toMatch(/^kioku_/)
+      expect(tokenBody.client.runtimeFamily).toBe('generic')
+
+      // 拿到的密钥可立刻通过 /v1/whoami 认证并带有配置好的透镜
+      const whoami = WhoAmIResponse.parse(
+        await (
+          await app.request('/v1/whoami', {
+            headers: { authorization: `Bearer ${tokenBody.key}` },
+          })
+        ).json(),
+      )
+      expect(whoami.key.envs).toEqual(['mac'])
+      expect(whoami.key.allowedRealms).toEqual(['work'])
+      expect(whoami.key.canResolveCredentials).toBe(true)
+
+      // 二次轮询同一个 deviceCode 必须返回 expired（一次性消费）
+      const secondPoll = await app.request('/v1/device/token', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ deviceCode: auth.deviceCode }),
+      })
+      expect(DeviceTokenResponse.parse(await secondPoll.json())).toEqual({ status: 'expired' })
     })
 
-    it('确认过、却没有能用的选择：答过期并删掉这一行', async () => {
-      const grant = await requestMany()
-      await approveMany(grant.userCode, [item('codex'), item('pi'), item('hermes')])
-      await database.db.update(deviceGrants).set({ selections: null })
-      expect(await poll(grant.deviceCode)).toEqual({ status: 'expired' })
-      expect(await grants()).toHaveLength(0)
-      expect(await keys()).toHaveLength(0)
-    })
+    it('多平台授权支持部分跳过与拒绝流', async () => {
+      const app = createTestApp(database, { masterKey: testMasterKey() })
+      const { cookie } = await createOwnerSession(database)
 
-    it('同时来的两次轮询只有一次取得到；取走与删除接入实例同时进行不会互相卡死', async () => {
-      const grant = await requestMany()
-      await approveMany(grant.userCode, [item('codex'), item('pi'), item('hermes')])
-      const results = await Promise.all([poll(grant.deviceCode), poll(grant.deviceCode)])
-      expect(results.map((r) => r.status).sort()).toEqual(['approved', 'expired'])
-      expect(await keys()).toHaveLength(3)
-
-      for (let round = 0; round < 5; round++) {
-        const next = await requestMany()
-        const items = ['codex', 'pi', 'hermes'].map((rf) =>
-          item(rf, { client: { slug: `${rf}-race-${round}`, name: 'x' } }),
-        )
-        expect((await approveMany(next.userCode, items)).status).toBe(200)
-        const targets = (await circleClients()).filter((a) => a.slug.endsWith(`-race-${round}`))
-        const [taken, ...removed] = await Promise.all([
-          cli('/v1/device/token', { deviceCode: next.deviceCode }),
-          ...targets.map((target) =>
-            app.request(`/v1/circles/${ws.circleId}/clients/${target.id}`, {
-              method: 'DELETE',
-              headers: { cookie: ws.cookie, 'sec-fetch-site': 'same-origin' },
+      const auth = DeviceAuthorizeResponse.parse(
+        await (
+          await app.request('/v1/device/authorize', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              platforms: [
+                { runtimeFamily: 'claudecode', clientName: 'Claude Code' },
+                { runtimeFamily: 'codex', clientName: 'Codex' },
+              ],
             }),
-          ),
-        ])
-        expect(taken!.status, `第 ${round} 轮取走`).toBe(200)
-        for (const res of removed) expect(res.status, `第 ${round} 轮删除`).toBeLessThan(500)
-      }
-    })
+          })
+        ).json(),
+      )
 
-    it('申请的上限照旧：几个平台的申请按一条算', async () => {
-      const proxied = createApp({ ...deps, trustedProxies: 1 })
-      const from = () =>
-        proxied.request('/v1/device/authorize', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', 'x-forwarded-for': '203.0.113.9' },
-          body: JSON.stringify({ platforms: PLATFORMS }),
-        })
-      for (let i = 0; i < 10; i++) expect((await from()).status).toBe(201)
-      expect((await from()).status).toBe(429)
-      expect(await grants()).toHaveLength(10)
+      const approveRes = await app.request('/v1/device/grants/approve', {
+        method: 'POST',
+        headers: consoleHeaders(cookie, true),
+        body: JSON.stringify({
+          userCode: auth.userCode,
+          envs: ['mac'],
+          allowedRealms: null,
+          canWrite: true,
+          canResolveCredentials: false,
+          items: [
+            { runtimeFamily: 'claudecode', keyName: 'Mac Claude' },
+            { runtimeFamily: 'codex', skip: true },
+          ],
+        }),
+      })
+      expect(approveRes.status).toBe(200)
+
+      const tokenBody = DeviceTokenResponse.parse(
+        await (
+          await app.request('/v1/device/token', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ deviceCode: auth.deviceCode }),
+          })
+        ).json(),
+      )
+      expect(tokenBody.status).toBe('approved')
+      if (tokenBody.status !== 'approved' || !('keys' in tokenBody)) {
+        throw new Error('expected multi-platform keys')
+      }
+      expect(tokenBody.keys).toHaveLength(2)
+      expect(tokenBody.keys[0]?.status).toBe('issued')
+      expect(tokenBody.keys[1]).toEqual({ runtimeFamily: 'codex', status: 'skipped' })
+
+      // 拒绝授权流
+      const deniedAuth = DeviceAuthorizeResponse.parse(
+        await (
+          await app.request('/v1/device/authorize', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ runtimeFamily: 'gemini' }),
+          })
+        ).json(),
+      )
+      const denyRes = await app.request('/v1/device/grants/deny', {
+        method: 'POST',
+        headers: consoleHeaders(cookie, true),
+        body: JSON.stringify({ userCode: deniedAuth.userCode }),
+      })
+      expect(denyRes.status).toBe(204)
+
+      const deniedToken = DeviceTokenResponse.parse(
+        await (
+          await app.request('/v1/device/token', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ deviceCode: deniedAuth.deviceCode }),
+          })
+        ).json(),
+      )
+      expect(deniedToken).toEqual({ status: 'denied' })
     })
-  })
-})
+  },
+)

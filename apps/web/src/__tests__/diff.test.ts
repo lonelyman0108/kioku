@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { collapseUnchanged, diffLines, diffVariantSnapshots, diffWithStatus } from '../diff'
+import { collapseUnchanged, diffLines, diffWithStatus } from '../diff'
 
 describe('按行对比', () => {
   it('找出删掉与加上的行，没变的行保留', () => {
@@ -60,35 +60,5 @@ describe('对比算没算完', () => {
     const { lines, complete } = diffWithStatus(before, after)
     expect(complete).toBe(false)
     expect(lines.filter((l) => l.kind === 'add')).toHaveLength(2000)
-  })
-})
-
-describe('多变体切片对比', () => {
-  it('按切面签名配对识别新增、移除、修改、未变与机密切片', () => {
-    const items = diffVariantSnapshots(
-      [
-        { when: {}, content: '甲\n乙' },
-        { when: { env: ['win'] }, content: 'Windows 步骤' },
-        { when: { realm: ['work'] }, content: null },
-      ],
-      [
-        { when: {}, content: '甲\n丙' },
-        { when: { env: ['macos'] }, content: 'Mac 步骤' },
-        { when: { realm: ['work'] }, content: null },
-      ],
-    )
-    expect(items.map((i) => [i.sig, i.status, i.secret])).toEqual([
-      ['{}', 'modified', false],
-      ['{"env":["macos"]}', 'added', false],
-      ['{"realm":["work"]}', 'unchanged', true],
-      ['{"env":["win"]}', 'removed', false],
-    ])
-    expect(items[0]!.rows).toEqual([
-      { kind: 'same', text: '甲' },
-      { kind: 'remove', text: '乙' },
-      { kind: 'add', text: '丙' },
-    ])
-    expect(items[1]!.rows).toEqual([{ kind: 'add', text: 'Mac 步骤' }])
-    expect(items[3]!.rows).toEqual([{ kind: 'remove', text: 'Windows 步骤' }])
   })
 })

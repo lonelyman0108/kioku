@@ -1,679 +1,207 @@
-import { randomBytes } from 'node:crypto'
-
-import type {
-  ConsoleCredential,
-  ConsoleCredentialList,
-  CredentialAccess,
-  CredentialEventList,
-  CredentialSummary,
-  CredentialValues,
-  KeyCredentialList,
-  LensKeyScopes,
-  VaultConnection,
+import {
+  CredentialListResponse,
+  CredentialMeta,
+  ResolveCredentialsResponse,
+  RevealCredentialResponse,
 } from '@kioku/contracts'
-import { ENTRY_KINDS } from '@kioku/contracts'
-import { eq } from 'drizzle-orm'
-import postgres from 'postgres'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
-import { createApp } from '../../app'
-import { withCircle, type Database } from '../../db/client'
-import { createSession } from '../../auth/session'
-import { accounts, circleMembers, credentialEvents, credentials } from '../../db/schema'
-import { staticEmbedderSource } from '../../embedding/source'
-import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
-import { fakeVault } from '../../testing/fakeVault'
+import type { Database } from '../../db/client'
 import {
-  addMember,
-  bearer,
-  bootstrap,
-  FULL_SCOPES,
-  jsonRequest,
-  type Workspace,
-} from '../../testing/fixtures'
+  consoleHeaders,
+  createOwnerSession,
+  createTestApp,
+  issueTestApiKey,
+  openTestDatabase,
+  resetDatabase,
+  testDatabaseUrl,
+  testMasterKey,
+} from '../../testing/db'
 
-const PASSWORD = 'pw-correct-horse-staple'
-const withoutEntry = ENTRY_KINDS.filter((k) => k !== 'entry')
-const PRIVATE_LEVEL: LensKeyScopes = { ...FULL_SCOPES, maxSensitivity: 'private' }
-const USE_ONLY: LensKeyScopes = { ...PRIVATE_LEVEL, credentials: 'use' }
-
-describe.skipIf(!testDatabaseUrl)('凭据', () => {
+describe.skipIf(!testDatabaseUrl)('托管加密凭据：控制台 CRUD、显式查看与原子解析', () => {
   let database: Database
-  let app: ReturnType<typeof createApp>
-  let ws: Workspace
-  const vault = fakeVault()
-  vault.addAccount('agent@example.com', 'master-pw')
-  const routerItem = vault.addItem({
-    name: '路由器',
-    values: { 'login.username': 'admin', 'login.password': 'router-pw' },
-  })
 
   beforeAll(async () => {
     database = await openTestDatabase()
-    app = createApp({
-      db: database.db,
-      cookieSecure: false,
-      masterKey: randomBytes(32),
-      embedder: staticEmbedderSource(null),
-      jobs: null,
-      vault: vault.client,
-    })
   })
-  afterAll(async () => {
-    await database?.close()
-  })
+
   beforeEach(async () => {
     await resetDatabase(database)
-    ws = await bootstrap(app)
   })
 
-  const circle = () => `/v1/circles/${ws.circleId}`
-  const send = (method: string, path: string, body?: unknown, headers?: Record<string, string>) =>
-    app.request(
-      path,
-      body === undefined
-        ? { method, headers: { 'sec-fetch-site': 'same-origin', ...(headers ?? {}) } }
-        : jsonRequest(method, body, headers ?? {}),
-    )
-  // 管理界面的请求，默认是记忆圈所有者（alice）
-  const asMember = (method: string, path: string, body?: unknown, cookie: string = ws.cookie) =>
-    send(method, `${circle()}${path}`, body, { cookie })
-  const asKey = (method: string, path: string, key: string, body?: unknown) =>
-    send(method, `/v1${path}`, body, bearer(key))
-  const ok = async <T>(res: Response, status = 200): Promise<T> => {
-    if (res.status !== status) throw new Error(`HTTP ${res.status}: ${await res.text()}`)
-    return (status === 204 ? undefined : await res.json()) as T
-  }
-  const errorOf = async (res: Response, status: number) => {
-    expect(res.status).toBe(status)
-    return ((await res.json()) as { error: string }).error
-  }
-
-  const hosted = (identifier = 'file-server', values: Record<string, string> = {}) => ({
-    identifier,
-    name: '文件服务器',
-    description: '管理后台的登录账号',
-    source: { kind: 'new', values: { username: 'alice', password: PASSWORD, ...values } },
+  afterAll(async () => {
+    await database.close()
   })
-  const createCredential = async (body: unknown, cookie = ws.cookie) =>
-    ok<ConsoleCredential>(await asMember('POST', '/credentials', body, cookie), 201)
-  const connect = async (cookie = ws.cookie) => {
-    const res = await asMember(
-      'POST',
-      '/vault-connections',
-      {
-        serverUrl: 'https://vault.example.com',
-        email: 'agent@example.com',
-        masterPassword: 'master-pw',
+
+  it('控制台支持创建/编辑/查看（no-store）/删除，且不暴露明文在列表接口', async () => {
+    const app = createTestApp(database, { masterKey: testMasterKey() })
+    const { cookie } = await createOwnerSession(database)
+
+    const createdRes = await app.request('/v1/console/credentials', {
+      method: 'POST',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({
+        slug: 'github-deploy',
+        label: 'GitHub Deploy',
+        description: '生产发布令牌',
+        value: 'ghp_main_secret_value',
+        fields: { token: 'ghp_sub_token', username: 'deploy-bot' },
+        allowedRealms: ['work'],
+      }),
+    })
+    expect(createdRes.status).toBe(201)
+    const meta = CredentialMeta.parse(await createdRes.json())
+    expect(meta.slug).toBe('github-deploy')
+    expect(meta.allowedRealms).toEqual(['work'])
+
+    // 列表接口只含元数据
+    const listRes = await app.request('/v1/console/credentials', { headers: { cookie } })
+    const rawList = await listRes.text()
+    expect(rawList).not.toContain('ghp_main_secret_value')
+    expect(CredentialListResponse.parse(JSON.parse(rawList)).items).toHaveLength(1)
+
+    // 显式查看返回明文并带 Cache-Control: no-store
+    const revealRes = await app.request(`/v1/console/credentials/${meta.id}/reveal`, {
+      method: 'POST',
+      headers: consoleHeaders(cookie),
+    })
+    expect(revealRes.status).toBe(200)
+    expect(revealRes.headers.get('cache-control')).toContain('no-store')
+    const revealed = RevealCredentialResponse.parse(await revealRes.json())
+    expect(revealed.value).toBe('ghp_main_secret_value')
+    expect(revealed.fields).toEqual({ token: 'ghp_sub_token', username: 'deploy-bot' })
+
+    // 更新描述与附加字段
+    const patchRes = await app.request(`/v1/console/credentials/${meta.id}`, {
+      method: 'PATCH',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({
+        label: 'GitHub Prod',
+        value: 'ghp_updated_value',
+      }),
+    })
+    expect(patchRes.status).toBe(200)
+    expect(CredentialMeta.parse(await patchRes.json()).label).toBe('GitHub Prod')
+
+    // 删除凭据
+    const delRes = await app.request(`/v1/console/credentials/${meta.id}`, {
+      method: 'DELETE',
+      headers: consoleHeaders(cookie),
+    })
+    expect(delRes.status).toBe(204)
+  })
+
+  it('POST /v1/credentials/resolve 支持裸 slug、field 桥接与复合 slug-field，并严格执行 fail-closed', async () => {
+    const app = createTestApp(database, { masterKey: testMasterKey() })
+    const { cookie } = await createOwnerSession(database)
+
+    // 1) work 场域凭据（含主值与附加字段）
+    await app.request('/v1/console/credentials', {
+      method: 'POST',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({
+        slug: 'stripe-api',
+        label: 'Stripe',
+        value: 'sk_live_main',
+        fields: { webhook: 'whsec_123' },
+        allowedRealms: ['work'],
+      }),
+    })
+    // 2) 未标场域的凭据（仅全权限密钥可用，受限密钥 fail-closed 不可用）
+    await app.request('/v1/console/credentials', {
+      method: 'POST',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({
+        slug: 'root-vault',
+        label: 'Root Vault',
+        value: 'root_secret_value',
+        allowedRealms: null,
+      }),
+    })
+
+    const noPermKey = await issueTestApiKey(database, {
+      allowedRealms: null,
+      canResolveCredentials: false,
+    })
+    const workKey = await issueTestApiKey(database, {
+      allowedRealms: ['work'],
+      canResolveCredentials: true,
+    })
+    const fullKey = await issueTestApiKey(database, {
+      allowedRealms: null,
+      canResolveCredentials: true,
+    })
+
+    // 未授权读取凭据的密钥直接 403
+    const deniedPerm = await app.request('/v1/credentials/resolve', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${noPermKey.key}`,
+        'content-type': 'application/json',
       },
-      cookie,
-    )
-    return (await ok<{ kind: 'connected'; connection: VaultConnection }>(res)).connection
-  }
-  const vaultCredential = (connectionId: string, identifier = 'router') => ({
-    identifier,
-    name: '路由器',
-    source: { kind: 'vault', connectionId, itemId: routerItem },
-  })
-  // Key 新建只收托管的值
-  const keyHosted = (identifier: string) => ({
-    identifier,
-    name: '文件服务器',
-    values: { username: 'alice', password: PASSWORD },
-  })
-  const keyFor = async (scopes: LensKeyScopes = FULL_SCOPES, slug = 'agent') =>
-    ws.issueKey((await ws.createClient(slug)).id, scopes)
-
-  it('管理界面新建托管的凭据：列表与详情不含值，查看要单独请求并记一条访问事件', async () => {
-    const created = await createCredential(hosted())
-    expect(created.fields).toEqual([
-      { name: 'password', itemField: null },
-      { name: 'username', itemField: null },
-    ])
-    expect(created.clientIds).toBeNull()
-    expect(created.vault).toBeNull()
-    expect(JSON.stringify(created)).not.toContain(PASSWORD)
-    const list = await ok<ConsoleCredentialList>(await asMember('GET', '/credentials'))
-    expect(list.items.map((c) => c.identifier)).toEqual(['file-server'])
-    expect(JSON.stringify(list)).not.toContain(PASSWORD)
-
-    const revealed = await asMember('POST', `/credentials/${created.id}/reveal`)
-    expect(revealed.headers.get('cache-control')).toBe('no-store')
-    expect((await ok<CredentialValues>(revealed)).values).toEqual({
-      username: 'alice',
-      password: PASSWORD,
+      body: JSON.stringify({ refs: [{ identifier: 'stripe-api' }] }),
     })
+    expect(deniedPerm.status).toBe(403)
 
-    const events = await ok<CredentialEventList>(
-      await asMember('GET', `/credentials/${created.id}/events`),
-    )
-    expect(events.items.map((e) => [e.type, e.via, e.fields, e.result])).toEqual([
-      ['access', 'console', ['password', 'username'], 'ok'],
-      ['create', null, [], null],
-    ])
-    expect(events.items[0]!.actor.accountName).toBe('alice')
-
-    // 库里只有密文，事件里也没有值
-    const [row] = await withCircle(database.db, ws.circleId, (tx) =>
-      tx.select().from(credentials).where(eq(credentials.id, created.id)),
-    )
-    expect(row!.ciphertext!.includes(Buffer.from(PASSWORD))).toBe(false)
-    const stored = await withCircle(database.db, ws.circleId, (tx) =>
-      tx.select().from(credentialEvents),
-    )
-    expect(JSON.stringify(stored)).not.toContain(PASSWORD)
-  })
-
-  it('修改托管的值：只给要改的字段，null 删掉字段；版本不对返回 409', async () => {
-    const created = await createCredential(hosted())
-    const updated = await ok<ConsoleCredential>(
-      await asMember('PATCH', `/credentials/${created.id}`, {
-        expectedVersion: created.version,
-        values: { password: 'changed-pw', token: 'tok', username: null },
+    // workKey 可以解析 stripe-api（裸 slug、显式 field 两种方式）
+    const okWork = await app.request('/v1/credentials/resolve', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${workKey.key}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        refs: [{ identifier: 'stripe-api' }, { identifier: 'stripe-api', field: 'webhook' }],
       }),
-    )
-    expect(updated.fields.map((f) => f.name)).toEqual(['password', 'token'])
-    expect(
-      (await ok<CredentialValues>(await asMember('POST', `/credentials/${created.id}/reveal`)))
-        .values,
-    ).toEqual({ password: 'changed-pw', token: 'tok' })
-    const events = await ok<CredentialEventList>(
-      await asMember('GET', `/credentials/${created.id}/events`),
-    )
-    const update = events.items.find((e) => e.type === 'update')!
-    expect(update.changes).toEqual(['values', 'fields'])
-    expect(update.fields).toEqual(['password', 'token', 'username'])
-
-    // 拿旧版本号再改
-    expect(
-      await errorOf(
-        await asMember('PATCH', `/credentials/${created.id}`, {
-          expectedVersion: created.version,
-          name: '别的名字',
-        }),
-        409,
-      ),
-    ).toContain('版本已变化')
-    // 字段全删掉
-    expect(
-      await errorOf(
-        await asMember('PATCH', `/credentials/${created.id}`, {
-          expectedVersion: updated.version,
-          values: { password: null, token: null },
-        }),
-        400,
-      ),
-    ).toContain('至少需要一个字段')
-    // 托管的凭据没有字段对应
-    expect(
-      await errorOf(
-        await asMember('PATCH', `/credentials/${created.id}`, {
-          expectedVersion: updated.version,
-          fields: [{ name: 'password', itemField: 'login.password' }],
-        }),
-        400,
-      ),
-    ).toContain('字段对应只用于密码库的凭据')
-  })
-
-  it('每个成员只看得到自己的凭据与密码库连接，记忆圈 owner 也看不到别人的', async () => {
-    const bob = await addMember(database.db, ws.circleId, 'bob', 'owner')
-    const mine = await createCredential(hosted())
-    // 标识按成员各占一份
-    const his = await createCredential(hosted(), bob.cookie)
-    const hisConnection = await connect(bob.cookie)
-
-    expect(
-      (await ok<ConsoleCredentialList>(await asMember('GET', '/credentials'))).items.map(
-        (c) => c.id,
-      ),
-    ).toEqual([mine.id])
-    for (const [method, path] of [
-      ['GET', `/credentials/${his.id}`],
-      ['POST', `/credentials/${his.id}/reveal`],
-      ['GET', `/credentials/${his.id}/events`],
-      ['DELETE', `/credentials/${his.id}`],
-    ] as const) {
-      expect((await asMember(method, path)).status).toBe(404)
-    }
-    expect(
-      (await asMember('PATCH', `/credentials/${his.id}`, { expectedVersion: 1, name: 'x' })).status,
-    ).toBe(404)
-    expect(
-      (await ok<{ items: unknown[] }>(await asMember('GET', '/vault-connections'))).items,
-    ).toEqual([])
-    expect(
-      (await asMember('POST', '/credentials', vaultCredential(hisConnection.id, 'borrowed')))
-        .status,
-    ).toBe(404)
-    for (const action of ['check', 'disconnect']) {
-      expect(
-        (await asMember('POST', `/vault-connections/${hisConnection.id}/${action}`)).status,
-      ).toBe(404)
-    }
-    expect((await asMember('GET', `/vault-connections/${hisConnection.id}/items`)).status).toBe(404)
-    // 不是空间成员
-    const [stranger] = await database.db
-      .insert(accounts)
-      .values({ username: 'mallory', displayName: 'mallory', passwordHash: 'x' })
-      .returning()
-    const cookie = `kioku_session=${await createSession(database.db, stranger!.id)}`
-    expect((await asMember('GET', '/credentials', undefined, cookie)).status).toBe(403)
-  })
-
-  it('editor 与 viewer 不能管理凭据，也看不到托管的值，只看得到自己凭据的说明', async () => {
-    const bob = await addMember(database.db, ws.circleId, 'bob', 'owner')
-    const his = await createCredential(hosted(), bob.cookie)
-    await database.db
-      .update(circleMembers)
-      .set({ role: 'editor' })
-      .where(eq(circleMembers.accountId, bob.accountId))
-    expect(
-      (
-        await ok<ConsoleCredentialList>(
-          await asMember('GET', '/credentials', undefined, bob.cookie),
-        )
-      ).items,
-    ).toHaveLength(1)
-    expect(
-      await errorOf(
-        await asMember('POST', `/credentials/${his.id}/reveal`, undefined, bob.cookie),
-        403,
-      ),
-    ).toContain('记忆圈所有者')
-    expect(
-      (
-        await asMember(
-          'PATCH',
-          `/credentials/${his.id}`,
-          { expectedVersion: his.version, name: '改名' },
-          bob.cookie,
-        )
-      ).status,
-    ).toBe(403)
-    expect((await asMember('DELETE', `/credentials/${his.id}`, undefined, bob.cookie)).status).toBe(
-      403,
-    )
-    const viewer = await addMember(database.db, ws.circleId, 'carol', 'viewer')
-    expect((await asMember('POST', '/credentials', hosted(), viewer.cookie)).status).toBe(403)
-    expect(
-      (
-        await asMember(
-          'POST',
-          '/vault-connections',
-          {
-            serverUrl: 'https://vault.example.com',
-            email: 'agent@example.com',
-            masterPassword: 'master-pw',
-          },
-          viewer.cookie,
-        )
-      ).status,
-    ).toBe(403)
-    expect(
-      (
-        await ok<{ items: unknown[] }>(
-          await asMember('GET', '/vault-connections', undefined, viewer.cookie),
-        )
-      ).items,
-    ).toEqual([])
-  })
-
-  it('Key：按凭据能力取用与管理，不再借用 secret 级；交出值、被拒都记访问事件', async () => {
-    const fileServer = await createCredential(hosted())
-
-    const full = await keyFor()
-    const all = await ok<CredentialAccess>(
-      await asKey('GET', '/credentials?identifier=file-server&purpose=%E5%A4%87%E4%BB%BD', full),
-    )
-    expect(all.values).toEqual({ username: 'alice', password: PASSWORD })
-    expect(all.notice).toContain('不要把值写进记忆')
-    expect(all.credential).toMatchObject({ identifier: 'file-server', source: 'hosted' })
-    const one = await ok<CredentialAccess>(
-      await asKey('GET', '/credentials?identifier=file-server&field=password', full),
-    )
-    expect(one.values).toEqual({ password: PASSWORD })
-    expect(
-      await errorOf(await asKey('GET', '/credentials?identifier=file-server&field=pin', full), 404),
-    ).toContain('没有字段 pin')
-    expect(
-      (await asKey('GET', `/credentials?identifier=file-server&purpose=${'x'.repeat(201)}`, full))
-        .status,
-    ).toBe(400)
-
-    const list = await ok<KeyCredentialList>(await asKey('GET', '/credentials/list', full))
-    expect(list.items.map((c) => [c.identifier, c.fields, c.source])).toEqual([
-      ['file-server', ['password', 'username'], 'hosted'],
+    })
+    expect(okWork.status).toBe(200)
+    expect(okWork.headers.get('cache-control')).toContain('no-store')
+    const parsedWork = ResolveCredentialsResponse.parse(await okWork.json())
+    expect(parsedWork.values).toEqual([
+      { identifier: 'stripe-api', field: 'value', value: 'sk_live_main' },
+      { identifier: 'stripe-api', field: 'webhook', value: 'whsec_123' },
     ])
-    expect(JSON.stringify(list)).not.toContain(PASSWORD)
+    expect(parsedWork.expired).toEqual([])
 
-    // 取用的 Key 能取值，管理不了；private 级就够，不要 secret 级
-    const user = await keyFor(USE_ONLY, 'user')
-    expect(
-      (await ok<CredentialAccess>(await asKey('GET', '/credentials?identifier=file-server', user)))
-        .values,
-    ).toEqual({ username: 'alice', password: PASSWORD })
-    expect(
-      await errorOf(
-        await asKey('POST', '/credentials', user, { ...hosted('new-one'), values: { a: 'b' } }),
-        403,
-      ),
-    ).toContain('凭据能力不足')
-
-    // 凭据能力是不可用的 Key：存不存在都是同一个 403，存在的记一条被拒
-    const none = await keyFor({ ...FULL_SCOPES, credentials: 'none' }, 'none')
-    const denied = await errorOf(
-      await asKey('GET', '/credentials?identifier=file-server', none),
-      403,
-    )
-    expect(await errorOf(await asKey('GET', '/credentials?identifier=missing', none), 403)).toBe(
-      denied,
-    )
-    expect((await asKey('GET', '/credentials/list', none)).status).toBe(403)
-
-    const blind = await keyFor({ ...FULL_SCOPES, readKinds: withoutEntry }, 'blind')
-    expect((await asKey('GET', '/credentials?identifier=file-server', blind)).status).toBe(403)
-    expect((await asKey('GET', '/credentials/list', blind)).status).toBe(403)
-
-    // 只读不写本人的管理 Key 能取值，不能管理凭据
-    const readOnly = await keyFor({ ...FULL_SCOPES, writeKinds: withoutEntry }, 'read-only')
-    expect(
-      (await asKey('POST', '/credentials', readOnly, { ...hosted('new-one'), values: { a: 'b' } }))
-        .status,
-    ).toBe(403)
-
-    const events = await ok<CredentialEventList>(
-      await asMember('GET', `/credentials/${fileServer.id}/events`),
-    )
-    expect(
-      events.items
-        .filter((e) => e.type === 'access')
-        .map((e) => [e.via, e.actor.clientName, e.result, e.reason]),
-    ).toEqual([
-      ['rest', 'blind', 'denied', 'scope'],
-      ['rest', 'none', 'denied', 'capability'],
-      ['rest', 'user', 'ok', null],
-      ['rest', 'agent', 'ok', null],
-      ['rest', 'agent', 'ok', null],
+    // 原型链属性名（如 constructor）不得命中 Object.prototype，应安全回退至主值
+    const protoField = await app.request('/v1/credentials/resolve', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${workKey.key}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        refs: [{ identifier: 'stripe-api', field: 'constructor' }],
+      }),
+    })
+    expect(protoField.status).toBe(200)
+    expect(ResolveCredentialsResponse.parse(await protoField.json()).values).toEqual([
+      { identifier: 'stripe-api', field: 'constructor', value: 'sk_live_main' },
     ])
-    const first = events.items.filter((e) => e.type === 'access').at(-1)!
-    expect(first).toMatchObject({ purpose: '备份', chatType: 'none' })
-  })
 
-  it('Key 新建的凭据只给这个接入实例用；限定给别的接入实例的，读、改、删一律 404，撞名返回同一个错误', async () => {
-    const appA = await ws.createClient('app-a')
-    const appB = await ws.createClient('app-b')
-    const keyA = await ws.issueKey(appA.id, FULL_SCOPES)
-    const keyB = await ws.issueKey(appB.id, { ...FULL_SCOPES, admin: true })
-
-    const created = await ok<CredentialSummary>(
-      await asKey('POST', '/credentials', keyA, keyHosted('api-token')),
-      201,
-    )
-    expect(created.fields).toEqual(['password', 'username'])
-    const [inConsole] = (await ok<ConsoleCredentialList>(await asMember('GET', '/credentials')))
-      .items
-    expect(inConsole!.clientIds).toEqual([appA.id])
-
-    // 跨切面写入的 Key 也不放宽；限定给别的接入实例的取用记一条被拒
-    expect((await asKey('GET', '/credentials?identifier=api-token', keyB)).status).toBe(404)
-    const restricted = await ok<CredentialEventList>(
-      await asMember('GET', `/credentials/${created.id}/events`),
-    )
-    expect(restricted.items[0]).toMatchObject({
-      type: 'access',
-      result: 'denied',
-      reason: 'client',
+    // workKey 请求未标场域的 root-vault：fail-closed 返回 404（不泄露存在性）
+    const failClosed = await app.request('/v1/credentials/resolve', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${workKey.key}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ refs: [{ identifier: 'root-vault' }] }),
     })
-    expect(
-      (await asKey('PATCH', '/credentials', keyB, { identifier: 'api-token', expectedVersion: 1 }))
-        .status,
-    ).toBe(404)
-    expect((await asKey('DELETE', '/credentials?identifier=api-token', keyB)).status).toBe(404)
-    expect(
-      (await ok<KeyCredentialList>(await asKey('GET', '/credentials/list', keyB))).items,
-    ).toEqual([])
-    // 撞名：看得到的与看不到的同一个错误
-    const hidden = await errorOf(
-      await asKey('POST', '/credentials', keyB, keyHosted('api-token')),
-      409,
-    )
-    const visible = await errorOf(
-      await asKey('POST', '/credentials', keyA, keyHosted('api-token')),
-      409,
-    )
-    expect(hidden).toBe('标识已被占用或不可用：api-token')
-    expect(visible).toBe(hidden)
+    expect(failClosed.status).toBe(404)
 
-    // Key 改不了限定的接入实例：请求里带上也不生效
-    await ok(
-      await asKey('PATCH', '/credentials', keyA, {
-        identifier: 'api-token',
-        expectedVersion: created.version,
-        clientIds: null,
-      }),
-    )
-    const after = await ok<ConsoleCredential>(await asMember('GET', `/credentials/${created.id}`))
-    expect(after.clientIds).toEqual([appA.id])
-    // 在管理界面放宽之后，别的接入实例就能用了
-    await ok(
-      await asMember('PATCH', `/credentials/${created.id}`, {
-        expectedVersion: after.version,
-        clientIds: [appA.id, appB.id],
-      }),
-    )
-    expect((await asKey('GET', '/credentials?identifier=api-token', keyB)).status).toBe(200)
-  })
-
-  it('删除后用同一个标识新建，有有效的同名凭据时旧的不能恢复', async () => {
-    const first = await createCredential(hosted())
-    await ok(await asMember('DELETE', `/credentials/${first.id}`), 204)
-    const deleted = await ok<ConsoleCredentialList>(await asMember('GET', '/credentials/deleted'))
-    expect(deleted.items.map((c) => c.id)).toEqual([first.id])
-    const second = await createCredential(hosted('file-server', { password: 'second-pw' }))
-    // 引用按标识解析，取到的是新的那条
-    const key = await keyFor()
-    const used = await ok<CredentialAccess>(
-      await asKey('GET', '/credentials?identifier=file-server', key),
-    )
-    expect(used.credential.id).toBe(second.id)
-    expect(
-      await errorOf(await asMember('POST', `/credentials/${first.id}/undelete`), 409),
-    ).toContain('同一标识已有有效凭据')
-    await ok(await asMember('DELETE', `/credentials/${second.id}`), 204)
-    const restored = await ok<ConsoleCredential>(
-      await asMember('POST', `/credentials/${first.id}/undelete`),
-    )
-    expect(restored.deletedAt).toBeNull()
-    expect(await errorOf(await asMember('POST', `/credentials/${first.id}/undelete`), 409)).toBe(
-      '这条凭据未被删除',
-    )
-  })
-
-  it('没有配置主密钥时，托管的凭据与连接密码库都报清楚的错误', async () => {
-    const plain = createApp({
-      db: database.db,
-      cookieSecure: false,
-      masterKey: null,
-      embedder: staticEmbedderSource(null),
-      jobs: null,
+    // fullKey（allowedRealms=null）可以同时解析全部凭据
+    const okFull = await app.request('/v1/credentials/resolve', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${fullKey.key}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ refs: [{ identifier: 'root-vault' }] }),
     })
-    const res = await plain.request(
-      `${circle()}/credentials`,
-      jsonRequest('POST', hosted(), { cookie: ws.cookie }),
-    )
-    expect(res.status).toBe(400)
-    expect(((await res.json()) as { error: string }).error).toContain('KIOKU_MASTER_KEY')
-    const connected = await plain.request(
-      `${circle()}/vault-connections`,
-      jsonRequest(
-        'POST',
-        { serverUrl: 'https://vault.example.com', email: 'agent@example.com', masterPassword: 'x' },
-        { cookie: ws.cookie },
-      ),
-    )
-    expect(connected.status).toBe(400)
-    expect(((await connected.json()) as { error: string }).error).toContain('KIOKU_MASTER_KEY')
-  })
-
-  describe('MCP 工具', () => {
-    let id = 0
-    async function callTool(key: string, name: string, args: Record<string, unknown>) {
-      const res = await app.request('/v1/mcp', {
-        method: 'POST',
-        headers: {
-          ...bearer(key),
-          'content-type': 'application/json',
-          accept: 'application/json, text/event-stream',
-        },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: ++id,
-          method: 'tools/call',
-          params: { name, arguments: args },
-        }),
-      })
-      const body = (await res.json()) as {
-        result: { content: { text: string }[]; isError?: boolean }
-      }
-      return { text: body.result.content[0]!.text, isError: body.result.isError === true }
-    }
-
-    it('新建、取用、列出、修改与删除', async () => {
-      const key = await keyFor()
-      const created = await callTool(key, 'kioku_credential_save', {
-        identifier: 'mail',
-        name: '邮箱',
-        values: { password: PASSWORD },
-      })
-      expect(created).toEqual({
-        text: '已新建凭据 mail（邮箱）：Kioku 托管，字段 password，版本 1',
-        isError: false,
-      })
-      // 不给版本号就是新建，已有的不会被覆盖
-      const again = await callTool(key, 'kioku_credential_save', {
-        identifier: 'mail',
-        name: '邮箱',
-        values: { password: 'other' },
-      })
-      expect(again).toEqual({ text: '标识已被占用或不可用：mail', isError: true })
-
-      const used = await callTool(key, 'kioku_credential', { identifier: 'mail', purpose: '发信' })
-      expect(used.text).toContain(`值：{"password":"${PASSWORD}"}`)
-      expect(used.text).toContain('不要把值写进记忆')
-      const listed = await callTool(key, 'kioku_credential', {})
-      expect(listed.text).toContain('- mail（邮箱）：Kioku 托管，字段 password，版本 1')
-      expect(listed.text).not.toContain(PASSWORD)
-
-      const missingName = await callTool(key, 'kioku_credential_save', {
-        identifier: 'other',
-        values: { password: 'x' },
-      })
-      expect(missingName.isError).toBe(true)
-
-      const updated = await callTool(key, 'kioku_credential_save', {
-        identifier: 'mail',
-        expected_version: 1,
-        values: { password: null, token: 'tok' },
-      })
-      expect(updated.text).toBe('已修改凭据 mail（邮箱）：Kioku 托管，字段 token，版本 2')
-      // 同样的值再存一次：什么都没改，如实说没有改动，版本号不变
-      const unchanged = await callTool(key, 'kioku_credential_save', {
-        identifier: 'mail',
-        expected_version: 2,
-        values: { token: 'tok' },
-      })
-      expect(unchanged).toEqual({
-        text: '凭据 mail（邮箱）没有改动：内容与现在的相同，版本 2',
-        isError: false,
-      })
-      expect((await callTool(key, 'kioku_credential_delete', { identifier: 'mail' })).text).toBe(
-        '已删除凭据 mail',
-      )
-      expect((await callTool(key, 'kioku_credential', { identifier: 'mail' })).text).toBe(
-        '凭据不存在：mail',
-      )
-
-      const [mail] = (
-        await ok<ConsoleCredentialList>(await asMember('GET', '/credentials/deleted'))
-      ).items
-      const events = await ok<CredentialEventList>(
-        await asMember('GET', `/credentials/${mail!.id}/events`),
-      )
-      expect(events.items.map((e) => [e.type, e.via])).toEqual([
-        ['delete', null],
-        ['update', null],
-        ['access', 'kioku_credential'],
-        ['create', null],
-      ])
-      expect(events.items[0]!.actor.keyName).toBe('test')
-    })
-  })
-
-  it('修改的检查之后、写入之前被别的请求改了，返回 409 并给出现在的版本号', async () => {
-    const created = await createCredential(hosted())
-    const side = postgres(testDatabaseUrl!, { max: 2, onnotice: () => {} })
-    try {
-      let pending!: Promise<Response>
-      await side.begin(async (tx) => {
-        await tx`select set_config('app.read_circles', ${ws.circleId}, true)`
-        await tx`select set_config('app.write_circles', ${ws.circleId}, true)`
-        await tx`select id from credentials where id = ${created.id} for update`
-        const [{ pid }] = (await tx`select pg_backend_pid() as pid`) as unknown as [{ pid: number }]
-        pending = Promise.resolve(
-          asMember('PATCH', `/credentials/${created.id}`, {
-            expectedVersion: created.version,
-            name: '别的名字',
-          }),
-        )
-        for (let i = 0; ; i++) {
-          const [row] = await side<{ n: number }[]>`
-            select count(*)::int as n from pg_stat_activity
-            where ${pid}::int = any(pg_blocking_pids(pid))`
-          if (row!.n > 0) break
-          if (i >= 80) throw new Error('请求没有等在凭据的行锁上')
-          await new Promise((r) => setTimeout(r, 25))
-        }
-        await tx`update credentials set version = version + 1 where id = ${created.id}`
-      })
-      expect(await errorOf(await pending, 409)).toBe('版本已变化：当前是 2，请先重新读取')
-    } finally {
-      await side.end()
-    }
-  })
-
-  it('撤销删除的检查之后被别的请求恢复了，409 说明已经恢复', async () => {
-    const created = await createCredential(hosted())
-    await ok(await asMember('DELETE', `/credentials/${created.id}`), 204)
-    const side = postgres(testDatabaseUrl!, { max: 2, onnotice: () => {} })
-    try {
-      let pending!: Promise<Response>
-      await side.begin(async (tx) => {
-        await tx`select set_config('app.read_circles', ${ws.circleId}, true)`
-        await tx`select set_config('app.write_circles', ${ws.circleId}, true)`
-        await tx`select id from credentials where id = ${created.id} for update`
-        const [{ pid }] = (await tx`select pg_backend_pid() as pid`) as unknown as [{ pid: number }]
-        pending = Promise.resolve(asMember('POST', `/credentials/${created.id}/undelete`))
-        for (let i = 0; ; i++) {
-          const [row] = await side<{ n: number }[]>`
-            select count(*)::int as n from pg_stat_activity
-            where ${pid}::int = any(pg_blocking_pids(pid))`
-          if (row!.n > 0) break
-          if (i >= 80) throw new Error('请求没有等在凭据的行锁上')
-          await new Promise((r) => setTimeout(r, 25))
-        }
-        await tx`update credentials set deleted_at = null, version = version + 1 where id = ${created.id}`
-      })
-      expect(await errorOf(await pending, 409)).toBe('这条凭据刚被其他请求恢复')
-    } finally {
-      await side.end()
-    }
-  })
-
-  it('凭据的事件不进空间的活动记录', async () => {
-    const created = await createCredential(hosted())
-    await ok(await asMember('POST', `/credentials/${created.id}/reveal`))
-    const activity = await ok<{ items: unknown[] }>(await asMember('GET', '/activity'))
-    expect(activity.items).toEqual([])
+    expect(okFull.status).toBe(200)
+    expect(ResolveCredentialsResponse.parse(await okFull.json()).values).toEqual([
+      { identifier: 'root-vault', field: 'value', value: 'root_secret_value' },
+    ])
   })
 })

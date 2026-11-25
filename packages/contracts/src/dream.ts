@@ -1,148 +1,135 @@
 import { z } from 'zod'
 
-import { OriginScope } from './conversations'
-import { EntryTitle, TopicTag, TOPICS_MAX, VariantInput, VARIANTS_MAX } from './entries'
-import { WhenCondition } from './facets'
+import {
+  Disclosure,
+  EntryContent,
+  EntryKind,
+  EntryTitle,
+  SceneSlugList,
+  TopicList,
+} from './entries'
 import { ShortId } from './links'
-import { EntryKind, Provenance, Sensitivity, SubjectKind } from './memory'
 
-// 后台整理任务（Dream）：按组审视词条、事实与到期摘要，生成建议进待处理确认，不直接改库。
-// 新增：facet_tag（漏标补标）、merge_variants（同主题独立卡合并为多变体词条）、
-// generalize（跨项目共性去标上浮）、distill_episode（到期会话摘要沉淀重要事实或词条）
-export const DREAM_SUGGESTION_KINDS = [
-  'merge',
-  'merge_variants',
-  'facet_tag',
-  'generalize',
-  'distill',
-  'distill_episode',
-  'stale',
-  'review',
-  'promote',
-] as const
-export const DreamSuggestionKind = z.enum(DREAM_SUGGESTION_KINDS)
+export const DREAM_KINDS = ['distill_episode', 'merge_duplicates', 'mark_stale', 'update'] as const
+export const DreamSuggestionKind = z.enum(DREAM_KINDS).meta({ id: 'DreamSuggestionKind' })
 export type DreamSuggestionKind = z.infer<typeof DreamSuggestionKind>
 
-export const DREAM_VERDICTS = ['confirm', 'delete'] as const
-export const DreamVerdict = z.enum(DREAM_VERDICTS)
-export type DreamVerdict = z.infer<typeof DreamVerdict>
+export const DREAM_KIND_NAMES: Record<DreamSuggestionKind, string> = {
+  distill_episode: '提炼会话摘要',
+  merge_duplicates: '合并重复记忆',
+  mark_stale: '标记过时记忆',
+  update: '更新记忆内容',
+}
 
-export const DREAM_SCOPE_KINDS = ['circle', 'personal', 'talk', 'local_session'] as const
-export const DreamScope = z.object({
-  kind: z.enum(DREAM_SCOPE_KINDS),
-  id: z.uuid().nullable(),
-  name: z.string().nullable(),
-  origin: OriginScope.nullable(),
-})
-export type DreamScope = z.infer<typeof DreamScope>
-
-export const DreamEntryRef = z.object({
-  id: z.uuid(),
-  shortId: ShortId,
-  title: z.string(),
-  kind: EntryKind,
-  sensitivity: Sensitivity,
-  provenance: Provenance,
-  topics: z.array(z.string()),
-  when: WhenCondition.default({}),
-  content: z.string(),
-  subject: z.object({ id: z.uuid(), kind: SubjectKind, displayName: z.string() }).nullable(),
-  updatedAt: z.iso.datetime(),
-})
-export type DreamEntryRef = z.infer<typeof DreamEntryRef>
-
-export const DreamSuggestion = z.object({
-  id: z.uuid(),
-  kind: DreamSuggestionKind,
-  scope: DreamScope,
-  reason: z.string(),
-  entries: z.array(DreamEntryRef),
-  keepId: z.uuid().nullable(),
-  // 建议写入的草稿：标题、正文、多变体切片、主题与切面、触发场景、审核结论、目标优先级
-  title: z.string().nullable(),
-  content: z.string().nullable(),
-  variants: z.array(VariantInput).nullable(),
-  when: WhenCondition.nullable(),
-  topics: z.array(TopicTag).nullable(),
-  disclosure: z.string().nullable(),
-  verdict: DreamVerdict.nullable(),
-  targetPriority: z.number().int().min(0).max(99).nullable().optional(),
-  actionable: z.boolean(),
-  createdAt: z.iso.datetime(),
-})
-export type DreamSuggestion = z.infer<typeof DreamSuggestion>
-
-export const DreamSuggestionQuery = z.object({
-  cursor: z.string().max(200).optional(),
-})
-export type DreamSuggestionQuery = z.infer<typeof DreamSuggestionQuery>
-
-export const DreamSuggestionList = z.object({
-  items: z.array(DreamSuggestion),
-  total: z.number().int().nullable(),
-  nextCursor: z.string().nullable(),
-})
-export type DreamSuggestionList = z.infer<typeof DreamSuggestionList>
-
-export const ApplyDreamSuggestion = z.object({
-  title: EntryTitle.optional(),
-  content: z.string().trim().min(1).max(20_000).optional(),
-  variants: z.array(VariantInput).min(1).max(VARIANTS_MAX).optional(),
-  when: WhenCondition.optional(),
-  topics: z.array(TopicTag).max(TOPICS_MAX).optional(),
-  disclosure: z.string().trim().max(500).nullable().optional(),
-  priority: z.number().int().min(0).max(99).optional(),
-})
-export type ApplyDreamSuggestion = z.infer<typeof ApplyDreamSuggestion>
-
-export const DreamApplied = z.object({
-  entry: z.object({ id: z.uuid(), shortId: ShortId, title: z.string() }).nullable(),
-})
-export type DreamApplied = z.infer<typeof DreamApplied>
+export const DREAM_STATUSES = ['pending', 'applied', 'rejected'] as const
+export const DreamSuggestionStatus = z.enum(DREAM_STATUSES)
+export type DreamSuggestionStatus = z.infer<typeof DreamSuggestionStatus>
 
 export const DREAM_TRIGGERS = ['scheduled', 'manual'] as const
 export const DreamTrigger = z.enum(DREAM_TRIGGERS)
 export type DreamTrigger = z.infer<typeof DreamTrigger>
 
-export const DREAM_SKIP_REASONS = ['no-model', 'budget', 'idle', 'opted-out'] as const
-export const DreamSkipReason = z.enum(DREAM_SKIP_REASONS)
-export type DreamSkipReason = z.infer<typeof DreamSkipReason>
+export const DREAM_OUTCOMES = ['ok', 'skipped', 'failed'] as const
+export const DreamOutcome = z.enum(DREAM_OUTCOMES)
+export type DreamOutcome = z.infer<typeof DreamOutcome>
 
-export const DreamRunEntry = z.object({
-  scope: DreamScope.nullable(),
-  model: z.string().nullable(),
-  tokens: z.number().int(),
-  changed: z.number().int(),
+export const DreamRunSummary = z.object({
+  id: z.string(),
+  trigger: DreamTrigger,
+  outcome: DreamOutcome,
   considered: z.number().int(),
   suggested: z.number().int(),
-  known: z.number().int(),
-  dropped: z.number().int(),
-  more: z.boolean(),
-  skipped: DreamSkipReason.nullable(),
   error: z.string().nullable(),
+  createdAt: z.string(),
 })
-export type DreamRunEntry = z.infer<typeof DreamRunEntry>
+export type DreamRunSummary = z.infer<typeof DreamRunSummary>
 
-export const DreamRunInfo = z.object({
-  runId: z.uuid(),
-  trigger: DreamTrigger,
-  at: z.iso.datetime(),
-  entries: z.array(DreamRunEntry),
+export const DreamState = z.object({
+  enabled: z.boolean(),
+  intervalHours: z.number().int(),
+  running: z.boolean(),
+  lastRunAt: z.string().nullable(),
+  lastOutcome: DreamOutcome.nullable(),
+  lastError: z.string().nullable(),
+  recentRuns: z.array(DreamRunSummary),
 })
-export type DreamRunInfo = z.infer<typeof DreamRunInfo>
+export type DreamState = z.infer<typeof DreamState>
 
-export const DreamRunList = z.object({ runs: z.array(DreamRunInfo) })
-export type DreamRunList = z.infer<typeof DreamRunList>
-
-export const DreamMemberSettings = z.object({ includePrivate: z.boolean() })
-export type DreamMemberSettings = z.infer<typeof DreamMemberSettings>
-
-export const DreamQueued = z.object({ runId: z.uuid() })
-export type DreamQueued = z.infer<typeof DreamQueued>
-
-export const DreamRunStatus = z.object({
-  state: z.enum(['queued', 'running', 'finished']),
-  outcome: z.enum(['done', 'skipped', 'failed']).nullable(),
-  reason: DreamSkipReason.nullable(),
+export const DreamEntrySnapshot = z.object({
+  id: z.uuid(),
+  shortId: ShortId,
+  kind: EntryKind,
+  title: z.string(),
+  content: z.string(),
+  disclosure: z.string().nullable(),
+  isPinned: z.boolean(),
+  envs: z.array(z.string()),
+  realms: z.array(z.string()),
+  projects: z.array(z.string()),
+  runtimes: z.array(z.string()),
+  topics: z.array(z.string()),
+  version: z.number().int(),
+  updatedAt: z.string(),
 })
-export type DreamRunStatus = z.infer<typeof DreamRunStatus>
+export type DreamEntrySnapshot = z.infer<typeof DreamEntrySnapshot>
+
+export const DreamSuggestionView = z.object({
+  id: z.uuid(),
+  kind: DreamSuggestionKind,
+  entryIds: z.array(z.uuid()),
+  entryVersions: z.array(z.number().int()),
+  keepId: z.uuid().nullable(),
+  entries: z.array(DreamEntrySnapshot),
+  proposedTitle: z.string().nullable(),
+  proposedContent: z.string().nullable(),
+  proposedDisclosure: z.string().nullable(),
+  proposedTopics: z.array(z.string()).nullable(),
+  proposedEnvs: z.array(z.string()).nullable(),
+  proposedRealms: z.array(z.string()).nullable(),
+  proposedProjects: z.array(z.string()).nullable(),
+  proposedRuntimes: z.array(z.string()).nullable(),
+  reason: z.string(),
+  status: DreamSuggestionStatus,
+  createdAt: z.string(),
+  decidedAt: z.string().nullable(),
+})
+export type DreamSuggestionView = z.infer<typeof DreamSuggestionView>
+
+export const InboxResponse = z.object({
+  items: z.array(DreamSuggestionView),
+  pendingCount: z.number().int(),
+  dreamState: DreamState,
+})
+export type InboxResponse = z.infer<typeof InboxResponse>
+
+// 应用建议时可选附带编辑后的草稿字段（编辑后应用）
+export const ApplySuggestionRequest = z.object({
+  title: EntryTitle.optional(),
+  content: EntryContent.optional(),
+  disclosure: Disclosure.nullable().optional(),
+  topics: TopicList.optional(),
+  envs: SceneSlugList.optional(),
+  realms: SceneSlugList.optional(),
+  projects: SceneSlugList.optional(),
+  runtimes: SceneSlugList.optional(),
+  isPinned: z.boolean().optional(),
+})
+export type ApplySuggestionRequest = z.infer<typeof ApplySuggestionRequest>
+
+export const ApplySuggestionResponse = z.object({
+  entry: z
+    .object({
+      id: z.uuid(),
+      shortId: ShortId,
+      title: z.string(),
+    })
+    .nullable(),
+})
+export type ApplySuggestionResponse = z.infer<typeof ApplySuggestionResponse>
+
+export const TriggerDreamResponse = z.object({
+  started: z.boolean(),
+  runId: z.string().nullable(),
+  reason: z.string().nullable().optional(),
+})
+export type TriggerDreamResponse = z.infer<typeof TriggerDreamResponse>

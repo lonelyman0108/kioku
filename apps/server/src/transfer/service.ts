@@ -1,0 +1,641 @@
+import { randomUUID } from 'node:crypto'
+
+import {
+  buildSearchTags,
+  deriveEntryTitle,
+  detectSecretPrefixes,
+  KIOKU_EXPORT_FORMAT,
+  KIOKU_EXPORT_SCHEMA_VERSION,
+  normalizeSlugList,
+  WIKI_LINK_REGEX,
+  type ExportDataRequest,
+  type ExportedCredentialRecord,
+  type ImportApplyRequest,
+  type ImportApplyResponse,
+  type ImportPreviewCredential,
+  type ImportPreviewItem,
+  type ImportPreviewResponse,
+  type ImportSource,
+  type KiokuExportBundle,
+} from '@kioku/contracts'
+import { asc, desc, eq, isNull } from 'drizzle-orm'
+
+import { decryptSecret, encryptSecret } from '../crypto/envelope'
+import { decryptionKey, encryptionKey, type MasterKey } from '../crypto/keyring'
+import { credentialAad } from '../crypto/rotation'
+import { withTx, type Db } from '../db/client'
+import { credentials, entries, entryEvents } from '../db/schema'
+import type { Jobs } from '../jobs/queue'
+import { MemoryError } from '../memory/errors'
+import { syncEntryLinks } from '../memory/links'
+import { insertWithAllocatedShortId } from '../memory/shortId'
+import { decryptExportCredentials, encryptExportCredentials } from './crypto'
+import { fetchLoreBackup } from './loreFetch'
+import { parseLoreToEntries } from './loreParse'
+
+interface ImportCandidate {
+  key: string
+  sourceRef: string
+  shortId: string | null
+  kind: 'entry' | 'episode'
+  title: string
+  content: string
+  disclosure: string | null
+  isPinned: boolean
+  envs: string[]
+  realms: string[]
+  projects: string[]
+  runtimes: string[]
+  topics: string[]
+  deviceKey: string
+  projectSlug: string
+  validTo: Date | null
+  createdAt: Date | null
+  updatedAt: Date | null
+  skippedReason: string | null
+}
+
+function previewText(content: string): string {
+  const flat = content.replace(/\s+/g, ' ').trim()
+  return flat.length > 160 ? `${flat.slice(0, 160)}…` : flat
+}
+
+function rewriteWikiLinks(content: string, remap: ReadonlyMap<string, string>): string {
+  if (!remap.size) return content
+  const re = new RegExp(WIKI_LINK_REGEX.source, 'gi')
+  return content.replace(re, (full, rawId: string, display?: string) => {
+    const next = remap.get(rawId.toLowerCase())
+    if (!next) return full
+    return display !== undefined ? `[[${next}|${display}]]` : `[[${next}]]`
+  })
+}
+
+function openCredentialForExport(
+  masterKey: MasterKey,
+  row: typeof credentials.$inferSelect,
+): ExportedCredentialRecord {
+  const key = decryptionKey(masterKey, row.keyId)
+  const raw = decryptSecret(
+    key,
+    { ciphertext: row.ciphertext, wrappedKey: row.wrappedKey },
+    credentialAad(row.id),
+  )
+  const parsed = JSON.parse(raw) as unknown
+  let value: string
+  let fields: Record<string, string> | undefined
+  if (typeof parsed === 'string') {
+    value = parsed
+  } else if (
+    parsed &&
+    typeof parsed === 'object' &&
+    typeof (parsed as { value?: unknown }).value === 'string'
+  ) {
+    const rec = parsed as { value: string; fields?: Record<string, string> }
+    value = rec.value
+    fields = rec.fields
+  } else {
+    throw new MemoryError(500, `凭据 ${row.slug} 密文格式无法识别`)
+  }
+  return {
+    slug: row.slug,
+    label: row.label,
+    description: row.description,
+    allowedRealms: row.allowedRealms,
+    value,
+    ...(fields && Object.keys(fields).length ? { fields } : {}),
+  }
+}
+
+export async function exportTransferBundle(
+  db: Db,
+  masterKey: MasterKey | null,
+  request: ExportDataRequest,
+): Promise<{ contentType: string; filename: string; body: string }> {
+  const rows = await db
+    .select()
+    .from(entries)
+    .where(isNull(entries.deletedAt))
+    .orderBy(asc(entries.kind), desc(entries.isPinned), asc(entries.createdAt))
+
+  const exportedAt = new Date().toISOString()
+  const stamp = exportedAt.slice(0, 10)
+
+  if (request.format === 'markdown') {
+    const sections: string[] = [`# Kioku 记忆导出（${stamp}）`, '', `共 ${rows.length} 条。`, '']
+    for (const row of rows) {
+      const meta: string[] = [
+        `短 ID：\`${row.shortId}\``,
+        `类型：${row.kind === 'episode' ? '会话摘要' : row.isPinned ? '常驻记忆' : '正式记忆'}`,
+      ]
+      if (row.projects.length) meta.push(`项目：${row.projects.join(', ')}`)
+      if (row.envs.length) meta.push(`环境：${row.envs.join(', ')}`)
+      if (row.realms.length) meta.push(`场域：${row.realms.join(', ')}`)
+      if (row.runtimes.length) meta.push(`客户端：${row.runtimes.join(', ')}`)
+      if (row.topics.length) meta.push(`主题：${row.topics.join(', ')}`)
+      if (row.disclosure) meta.push(`触发场景：${row.disclosure}`)
+      if (row.validTo) meta.push(`有效期至：${row.validTo.toISOString()}`)
+      sections.push(`## ${row.title} (${row.shortId})`)
+      sections.push('')
+      sections.push(`> ${meta.join(' · ')}`)
+      sections.push('')
+      sections.push(row.content)
+      sections.push('')
+      sections.push('---')
+      sections.push('')
+    }
+    return {
+      contentType: 'text/markdown; charset=utf-8',
+      filename: `kioku-export-${stamp}.md`,
+      body: sections.join('\n'),
+    }
+  }
+
+  let encryptedCredentials: KiokuExportBundle['encryptedCredentials'] = null
+  if (request.includeCredentials) {
+    if (!masterKey) {
+      throw new MemoryError(400, '尚未配置 KIOKU_MASTER_KEY，无法导出加密凭据')
+    }
+    if (!request.passphrase) {
+      throw new MemoryError(400, '导出加密凭据必须填写加密口令')
+    }
+    const credRows = await db.select().from(credentials).orderBy(asc(credentials.slug))
+    const records = credRows.map((row) => openCredentialForExport(masterKey, row))
+    encryptedCredentials = await encryptExportCredentials(records, request.passphrase)
+  }
+
+  const payload: KiokuExportBundle = {
+    format: KIOKU_EXPORT_FORMAT,
+    schemaVersion: KIOKU_EXPORT_SCHEMA_VERSION,
+    exportedAt,
+    count: rows.length,
+    entries: rows.map((row) => ({
+      shortId: row.shortId,
+      kind: row.kind,
+      title: row.title,
+      content: row.content,
+      disclosure: row.disclosure,
+      isPinned: row.isPinned,
+      envs: row.envs,
+      realms: row.realms,
+      projects: row.projects,
+      runtimes: row.runtimes,
+      topics: row.topics,
+      deviceKey: row.deviceKey,
+      projectSlug: row.projectSlug,
+      validTo: row.validTo ? row.validTo.toISOString() : null,
+      createdAt: row.createdAt.toISOString(),
+      updatedAt: row.updatedAt.toISOString(),
+    })),
+    ...(encryptedCredentials ? { encryptedCredentials } : {}),
+  }
+
+  return {
+    contentType: 'application/json; charset=utf-8',
+    filename: request.includeCredentials
+      ? `kioku-backup-${stamp}.json`
+      : `kioku-export-${stamp}.json`,
+    body: JSON.stringify(payload, null, 2),
+  }
+}
+
+async function resolveSource(
+  source: ImportSource,
+  signal?: AbortSignal,
+): Promise<{
+  sourceKind: 'kioku' | 'lore'
+  exportedAt: string | null
+  candidates: ImportCandidate[]
+  hasEncryptedCredentials: boolean
+  credentials: ExportedCredentialRecord[]
+  credentialsDecrypted: boolean
+}> {
+  if (source.kind === 'kioku') {
+    const { bundle } = source
+    const hasEncryptedCredentials = Boolean(bundle.encryptedCredentials)
+    let creds: ExportedCredentialRecord[] = []
+    let credentialsDecrypted = false
+
+    if (hasEncryptedCredentials && source.includeCredentials) {
+      if (!source.passphrase) {
+        throw new MemoryError(400, '请输入备份文件的解密口令以预览或导入托管凭据')
+      }
+      creds = await decryptExportCredentials(bundle.encryptedCredentials!, source.passphrase)
+      credentialsDecrypted = true
+    }
+
+    const seenKeys = new Set<string>()
+    const candidates: ImportCandidate[] = bundle.entries.map((item, idx) => {
+      const baseKey = item.shortId
+      const key = seenKeys.has(baseKey) ? `${baseKey}#${idx}` : baseKey
+      seenKeys.add(key)
+      return {
+        key,
+        sourceRef: item.shortId,
+        shortId: item.shortId,
+        kind: item.kind,
+        title: item.title,
+        content: item.content,
+        disclosure: item.disclosure ?? null,
+        isPinned: item.kind === 'episode' ? false : item.isPinned,
+        envs: normalizeSlugList(item.envs),
+        realms: normalizeSlugList(item.realms),
+        projects: normalizeSlugList(item.projects),
+        runtimes: normalizeSlugList(item.runtimes),
+        topics: normalizeSlugList(item.topics),
+        deviceKey: item.deviceKey ?? '',
+        projectSlug: item.projectSlug ?? '',
+        validTo: item.validTo ? new Date(item.validTo) : null,
+        createdAt: item.createdAt ? new Date(item.createdAt) : null,
+        updatedAt: item.updatedAt ? new Date(item.updatedAt) : null,
+        skippedReason: null,
+      }
+    })
+
+    return {
+      sourceKind: 'kioku',
+      exportedAt: bundle.exportedAt,
+      candidates,
+      hasEncryptedCredentials,
+      credentials: creds,
+      credentialsDecrypted,
+    }
+  }
+
+  const rawBackup =
+    source.kind === 'lore-file'
+      ? source.backup
+      : await fetchLoreBackup({ url: source.url, token: source.token }, signal)
+  const parsed = parseLoreToEntries(rawBackup)
+
+  return {
+    sourceKind: 'lore',
+    exportedAt: parsed.exportedAt,
+    candidates: parsed.entries.map((item) => ({
+      key: item.key,
+      sourceRef: item.uri,
+      shortId: null,
+      kind: 'entry',
+      title: item.title,
+      content: item.content,
+      disclosure: item.disclosure,
+      isPinned: item.isPinned,
+      envs: item.envs,
+      realms: item.realms,
+      projects: item.projects,
+      runtimes: item.runtimes,
+      topics: item.topics,
+      deviceKey: '',
+      projectSlug: '',
+      validTo: null,
+      createdAt: item.createdAt,
+      updatedAt: item.updatedAt,
+      skippedReason: item.skippedReason,
+    })),
+    hasEncryptedCredentials: false,
+    credentials: [],
+    credentialsDecrypted: false,
+  }
+}
+
+export async function previewTransferImport(
+  db: Db,
+  masterKey: MasterKey | null,
+  source: ImportSource,
+  signal?: AbortSignal,
+): Promise<ImportPreviewResponse> {
+  const resolved = await resolveSource(source, signal)
+
+  const [existingEntries, existingCreds] = await Promise.all([
+    db
+      .select({ shortId: entries.shortId, title: entries.title, deletedAt: entries.deletedAt })
+      .from(entries),
+    db.select({ slug: credentials.slug }).from(credentials),
+  ])
+
+  const existingShortIds = new Set(existingEntries.map((e) => e.shortId))
+  const existingActiveTitles = new Set(
+    existingEntries.filter((e) => e.deletedAt === null).map((e) => e.title.trim().toLowerCase()),
+  )
+  const existingCredSlugs = new Set(existingCreds.map((c) => c.slug))
+
+  const seenBatchShortIds = new Set<string>()
+  const items: ImportPreviewItem[] = resolved.candidates.map((c) => {
+    let conflict: ImportPreviewItem['conflict'] = 'none'
+    if (!c.skippedReason) {
+      if (c.shortId) {
+        if (existingShortIds.has(c.shortId) || seenBatchShortIds.has(c.shortId)) {
+          conflict = 'short_id_exists'
+        } else {
+          seenBatchShortIds.add(c.shortId)
+        }
+      } else if (existingActiveTitles.has(c.title.trim().toLowerCase())) {
+        conflict = 'same_title_exists'
+      }
+    }
+    const hints = c.skippedReason ? [] : detectSecretPrefixes(c.content).map((m) => m.label)
+    return {
+      key: c.key,
+      sourceRef: c.sourceRef,
+      shortId: c.shortId,
+      kind: c.kind,
+      title: c.title,
+      contentPreview: c.skippedReason ? '' : previewText(c.content),
+      secretHintLabels: hints,
+      isPinned: c.isPinned,
+      envs: c.envs,
+      realms: c.realms,
+      projects: c.projects,
+      runtimes: c.runtimes,
+      topics: c.topics,
+      disclosure: c.disclosure,
+      conflict,
+      skippedReason: c.skippedReason,
+    }
+  })
+
+  // 预览绝不返回凭据明文，仅返回元数据与冲突状态
+  const previewCredentials: ImportPreviewCredential[] = resolved.credentials.map((cred) => ({
+    slug: cred.slug,
+    label: cred.label,
+    description: cred.description ?? null,
+    allowedRealms: cred.allowedRealms ?? null,
+    exists: existingCredSlugs.has(cred.slug),
+  }))
+
+  const skipped = items.filter((i) => i.skippedReason !== null).length
+  const conflicts = items.filter((i) => i.skippedReason === null && i.conflict !== 'none').length
+  const ready = items.length - skipped - conflicts
+  const credentialConflicts = previewCredentials.filter((c) => c.exists).length
+
+  return {
+    sourceKind: resolved.sourceKind,
+    exportedAt: resolved.exportedAt,
+    items,
+    credentials: previewCredentials,
+    hasEncryptedCredentials: resolved.hasEncryptedCredentials,
+    credentialsDecrypted: resolved.credentialsDecrypted,
+    hasMasterKey: Boolean(masterKey),
+    summary: {
+      total: items.length,
+      ready,
+      conflicts,
+      skipped,
+      credentialTotal: previewCredentials.length,
+      credentialReady: previewCredentials.length - credentialConflicts,
+      credentialConflicts,
+    },
+  }
+}
+
+export async function applyTransferImport(
+  db: Db,
+  masterKey: MasterKey | null,
+  jobs: Jobs | null | undefined,
+  request: ImportApplyRequest,
+  signal?: AbortSignal,
+): Promise<ImportApplyResponse> {
+  const resolved = await resolveSource(request.source, signal)
+  const excludedKeys = new Set(request.excludeKeys)
+  const excludedCreds = new Set(request.excludeCredentialSlugs)
+
+  const wantsCredentials =
+    request.source.kind === 'kioku' &&
+    request.source.includeCredentials &&
+    resolved.credentials.length > 0
+
+  if (wantsCredentials && !masterKey) {
+    throw new MemoryError(400, '当前实例未配置 KIOKU_MASTER_KEY，无法写入导入的加密凭据')
+  }
+
+  const outcome = await withTx(db, async (tx, now) => {
+    const existingEntries = await tx.select({ shortId: entries.shortId }).from(entries)
+    const takenShortIds = new Set(existingEntries.map((r) => r.shortId))
+
+    let createdEntries = 0
+    let reallocatedEntries = 0
+    let skippedEntries = 0
+
+    const selected = resolved.candidates.filter((c) => {
+      if (c.skippedReason !== null || excludedKeys.has(c.key)) {
+        skippedEntries++
+        return false
+      }
+      return true
+    })
+
+    // 第一遍：分配短 ID 并记录旧短 ID -> 新短 ID 映射（供双链重写）
+    const remap = new Map<string, string>()
+    const planned: Array<{ candidate: ImportCandidate; assignedShortId: string | null }> = []
+
+    for (const candidate of selected) {
+      if (candidate.shortId) {
+        if (takenShortIds.has(candidate.shortId)) {
+          if (request.conflictStrategy === 'skip') {
+            skippedEntries++
+            continue
+          }
+          // 冲突且选择重新分配，延后由数据库分配器分配并在写入后重写双链
+          planned.push({ candidate, assignedShortId: null })
+          continue
+        }
+        takenShortIds.add(candidate.shortId)
+        planned.push({ candidate, assignedShortId: candidate.shortId })
+      } else {
+        planned.push({ candidate, assignedShortId: null })
+      }
+    }
+
+    const insertedRows: Array<{
+      id: string
+      shortId: string
+      content: string
+      needsRewrite: boolean
+    }> = []
+
+    const actor = resolved.sourceKind === 'lore' ? 'import:lore' : 'import:kioku'
+
+    for (const item of planned) {
+      const c = item.candidate
+      const createdAt = c.createdAt ?? now
+      const updatedAt = c.updatedAt ?? now
+
+      if (item.assignedShortId) {
+        const shortId = item.assignedShortId
+        const title = deriveEntryTitle(c.title, c.content, shortId)
+        const searchTags = buildSearchTags({
+          shortId,
+          topics: c.topics,
+          envs: c.envs,
+          realms: c.realms,
+          projects: c.projects,
+          runtimes: c.runtimes,
+        })
+        const [row] = await tx
+          .insert(entries)
+          .values({
+            shortId,
+            kind: c.kind,
+            title,
+            content: c.content,
+            disclosure: c.disclosure,
+            isPinned: c.kind === 'episode' ? false : c.isPinned,
+            envs: c.envs,
+            realms: c.realms,
+            projects: c.projects,
+            runtimes: c.runtimes,
+            topics: c.topics,
+            deviceKey: c.kind === 'episode' ? c.deviceKey : null,
+            projectSlug: c.kind === 'episode' ? c.projectSlug : null,
+            searchTags,
+            validTo: c.validTo,
+            version: 1,
+            createdAt,
+            updatedAt,
+          })
+          .returning()
+        insertedRows.push({
+          id: row!.id,
+          shortId: row!.shortId,
+          content: row!.content,
+          needsRewrite: resolved.sourceKind === 'kioku',
+        })
+        createdEntries++
+      } else {
+        const { shortId, value: row } = await insertWithAllocatedShortId(tx, async (sp, sid) => {
+          const title = deriveEntryTitle(c.title, c.content, sid)
+          const searchTags = buildSearchTags({
+            shortId: sid,
+            topics: c.topics,
+            envs: c.envs,
+            realms: c.realms,
+            projects: c.projects,
+            runtimes: c.runtimes,
+          })
+          const [created] = await sp
+            .insert(entries)
+            .values({
+              shortId: sid,
+              kind: c.kind,
+              title,
+              content: c.content,
+              disclosure: c.disclosure,
+              isPinned: c.kind === 'episode' ? false : c.isPinned,
+              envs: c.envs,
+              realms: c.realms,
+              projects: c.projects,
+              runtimes: c.runtimes,
+              topics: c.topics,
+              deviceKey: c.kind === 'episode' ? c.deviceKey : null,
+              projectSlug: c.kind === 'episode' ? c.projectSlug : null,
+              searchTags,
+              validTo: c.validTo,
+              version: 1,
+              createdAt,
+              updatedAt,
+            })
+            .returning()
+          return created!
+        })
+        takenShortIds.add(shortId)
+        if (c.shortId) {
+          remap.set(c.shortId, shortId)
+          reallocatedEntries++
+        }
+        insertedRows.push({
+          id: row.id,
+          shortId,
+          content: row.content,
+          needsRewrite: resolved.sourceKind === 'kioku',
+        })
+        createdEntries++
+      }
+    }
+
+    // 第二遍：如有重分配短 ID，统一重写本批所有词条正文的双链，再写入出链与版本历史
+    for (const inserted of insertedRows) {
+      let finalContent = inserted.content
+      if (inserted.needsRewrite && remap.size) {
+        const rewritten = rewriteWikiLinks(finalContent, remap)
+        if (rewritten !== finalContent) {
+          finalContent = rewritten
+          await tx.update(entries).set({ content: finalContent }).where(eq(entries.id, inserted.id))
+        }
+      }
+      await syncEntryLinks(tx, inserted.id, inserted.shortId, finalContent)
+      const [fresh] = await tx.select().from(entries).where(eq(entries.id, inserted.id)).limit(1)
+      if (fresh) {
+        await tx.insert(entryEvents).values({
+          entryId: fresh.id,
+          eventType: 'create',
+          actor,
+          snapshot: {
+            kind: fresh.kind,
+            title: fresh.title,
+            content: fresh.content,
+            disclosure: fresh.disclosure,
+            isPinned: fresh.isPinned,
+            envs: fresh.envs,
+            realms: fresh.realms,
+            projects: fresh.projects,
+            runtimes: fresh.runtimes,
+            topics: fresh.topics,
+            validTo: fresh.validTo ? fresh.validTo.toISOString() : null,
+            version: fresh.version,
+          },
+          createdAt: now,
+        })
+      }
+    }
+
+    // 写入加密凭据（遇到已存在 slug 仅跳过、不覆盖）
+    let createdCredentials = 0
+    let skippedCredentials = 0
+
+    if (wantsCredentials && masterKey) {
+      const existingCreds = await tx.select({ slug: credentials.slug }).from(credentials)
+      const takenSlugs = new Set(existingCreds.map((c) => c.slug))
+      const { key, id: keyId } = encryptionKey(masterKey)
+
+      for (const cred of resolved.credentials) {
+        if (excludedCreds.has(cred.slug) || takenSlugs.has(cred.slug)) {
+          skippedCredentials++
+          continue
+        }
+        const id = randomUUID()
+        const payload =
+          cred.fields && Object.keys(cred.fields).length
+            ? { value: cred.value, fields: cred.fields }
+            : { value: cred.value }
+        const sealed = encryptSecret(key, JSON.stringify(payload), credentialAad(id))
+        await tx.insert(credentials).values({
+          id,
+          slug: cred.slug,
+          label: cred.label,
+          description: cred.description ?? null,
+          allowedRealms: cred.allowedRealms ?? null,
+          ciphertext: sealed.ciphertext,
+          wrappedKey: sealed.wrappedKey,
+          keyId,
+          createdAt: now,
+          updatedAt: now,
+        })
+        takenSlugs.add(cred.slug)
+        createdCredentials++
+      }
+    }
+
+    return {
+      createdEntries,
+      reallocatedEntries,
+      skippedEntries,
+      createdCredentials,
+      skippedCredentials,
+    }
+  })
+
+  if (outcome.createdEntries > 0) {
+    void jobs?.enqueueBackfill()
+  }
+
+  return outcome
+}

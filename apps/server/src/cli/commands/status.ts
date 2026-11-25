@@ -10,13 +10,11 @@ import {
   EXISTING_DATA_NAMES,
   EXTENSION_STATE_NAMES,
   versionLabel,
-  WEB_UI_NAMES,
-  type WebUiState,
 } from '@kioku/contracts'
 
 import { loadConfig, type Config } from '../../config'
 import { keyIdOf } from '../../crypto/keyring'
-import { checkMasterKey, masterKeyStatus, remainingTotal } from '../../crypto/rotation'
+import { checkMasterKey } from '../../crypto/rotation'
 import { connect } from '../../db/client'
 import { pendingMigrations } from '../../db/migrate'
 import { probeDatabase, summarize } from '../../db/probe'
@@ -24,7 +22,15 @@ import { BUILD } from '../../version'
 import { DATABASE_ENV_HELP, runCli, UsageError } from '../common'
 import { dim, formatRows, green, red, renderStrataBox, yellow } from '../format'
 
-export const STATUS_HELP = `检查服务端配置、数据库连接、角色权限、扩展、迁移与主密钥状态（只读，不修改数据库）。
+type WebUiState = 'served' | 'missing' | 'off'
+
+const WEB_UI_NAMES: Record<WebUiState, string> = {
+  served: '已托管',
+  missing: '未找到构建产物',
+  off: '未配置目录',
+}
+
+export const STATUS_HELP = `检查服务端配置、数据库连接、扩展、迁移与主密钥状态（只读，不修改数据库）。
 
 用法：kioku-ctl status [--json]
 
@@ -64,12 +70,11 @@ export interface StatusReport {
     ready: boolean
     failure: string | null
     existing: string | null
-    role: { name: string; superuser: boolean; bypassRls: boolean } | null
+    role: { name: string; superuser: boolean } | null
     extensions: { name: string; state: string }[]
     problems: string[]
     pendingMigrations: number | null
     accounts: number | null
-    circles: number | null
     unrelatedTables: number
   } | null
   masterKey: {
@@ -78,7 +83,6 @@ export interface StatusReport {
     previousId: string | null
     matched: boolean | null
     error: string | null
-    rotationRemaining: number | null
   } | null
   webUi: WebUiState | null
 }
@@ -126,7 +130,6 @@ export async function collectStatus(): Promise<StatusReport> {
         problems: [],
         pendingMigrations: null,
         accounts: null,
-        circles: null,
         unrelatedTables: 0,
       },
       masterKey: {
@@ -135,7 +138,6 @@ export async function collectStatus(): Promise<StatusReport> {
         previousId,
         matched: null,
         error: null,
-        rotationRemaining: null,
       },
       webUi,
     }
@@ -148,7 +150,6 @@ export async function collectStatus(): Promise<StatusReport> {
   let pending: number | null = null
   let matched: boolean | null = null
   let masterKeyError: string | null = null
-  let rotationRemaining: number | null = null
 
   const canInspectTables =
     probe.failure === null &&
@@ -159,26 +160,19 @@ export async function collectStatus(): Promise<StatusReport> {
     const database = connect(config.database.url, { max: 1 })
     try {
       pending = await pendingMigrations(database.db, config.migrationsFolder)
-      if (pending === 0) {
-        try {
-          await checkMasterKey(database.db, config.masterKey)
-          matched = true
-        } catch (err) {
-          matched = false
-          masterKeyError = err instanceof Error ? err.message : String(err)
-        }
-        const mk = await masterKeyStatus(database.db, config.masterKey)
-        if (mk.previousId) rotationRemaining = remainingTotal(mk.remaining)
+      try {
+        await checkMasterKey(database.db, config.masterKey)
+        matched = true
+      } catch (err) {
+        matched = false
+        masterKeyError = err instanceof Error ? err.message : String(err)
       }
     } finally {
-      await database.close()
+      await database.close().catch(() => {})
     }
   }
 
-  const migrationsOk =
-    probe.existing === 'kioku' || probe.existing === 'migrated' ? pending === 0 : true
-  const masterKeyOk = matched !== false
-  const ready = probe.ready && migrationsOk && masterKeyOk
+  const ready = probe.ready && (pending === null || pending === 0) && matched !== false
 
   return {
     ready,
@@ -197,7 +191,6 @@ export async function collectStatus(): Promise<StatusReport> {
       problems,
       pendingMigrations: pending,
       accounts: probe.accounts,
-      circles: probe.circles,
       unrelatedTables: probe.unrelatedTables,
     },
     masterKey: {
@@ -206,154 +199,114 @@ export async function collectStatus(): Promise<StatusReport> {
       previousId,
       matched,
       error: masterKeyError,
-      rotationRemaining,
     },
     webUi,
   }
 }
 
-function renderStatusBox(report: StatusReport): string {
-  const stream = process.stdout
-  const ver = versionLabel(report.version)
-  const shortCommit =
-    report.commit && COMMIT_SHA.test(report.commit) ? report.commit.slice(0, 7) : null
-  const rows: [string, string][] = [['版本', shortCommit ? `${ver} (${shortCommit})` : ver]]
-
+function renderReport(report: StatusReport): string {
+  const out = process.stdout
+  const badge = versionLabel(report.version)
   if (report.configError) {
-    rows.push(['配置', red(`✕ ${report.configError}`, stream)])
-    return renderStrataBox('Kioku · 服务端诊断', formatRows(rows, { stream }), {
-      stream,
-      badge: ver,
+    return renderStrataBox('Kioku · 状态检查', [red(`配置错误：${report.configError}`, out)], {
+      stream: out,
+      badge,
     })
   }
 
   const db = report.database!
+  const mk = report.masterKey!
+  const rows: [string, string][] = []
+
+  const commitText =
+    report.commit && COMMIT_SHA.test(report.commit) ? ` (${report.commit.slice(0, 7)})` : ''
+  rows.push(['版本', `${badge}${commitText}`])
+  if (report.webUi) rows.push(['管理界面', WEB_UI_NAMES[report.webUi]])
+
   if (!db.configured) {
-    rows.push(['数据库', red('✕ 未配置（未设置 DATABASE_URL 且数据目录暂无 kioku.json）', stream)])
+    rows.push(['数据库', yellow('尚未配置（将启动初始化页）', out)])
   } else {
-    const sourceText =
+    const sourceLabel =
       db.source === 'env' || db.source === 'file'
         ? DATABASE_SOURCE_NAMES[db.source]
-        : String(db.source)
-    rows.push(['来源', sourceText])
-    rows.push([
-      '连接',
-      db.summary
-        ? `${db.summary.username}@${db.summary.host}:${db.summary.port}/${db.summary.database} (ssl: ${db.summary.ssl})`
-        : '无法解析连接串',
-    ])
-
+        : (db.source ?? '')
+    const host = db.summary
+      ? `${db.summary.host}:${db.summary.port}/${db.summary.database}`
+      : '未知'
+    rows.push(['数据库', `${host} ${dim(`(${sourceLabel})`, out)}`])
     if (db.failure) {
-      const failName =
+      const text =
         DATABASE_FAILURE_NAMES[db.failure as keyof typeof DATABASE_FAILURE_NAMES] ?? db.failure
-      rows.push(['数据库', red(`✕ ${failName}`, stream)])
+      rows.push(['连接状态', red(text, out)])
     } else {
-      const existingName =
-        (db.existing && EXISTING_DATA_NAMES[db.existing as keyof typeof EXISTING_DATA_NAMES]) ??
-        '未知'
-      if (!db.ready) {
-        rows.push(['数据库', red(`✕ 不可用（${db.problems.join('；')}）`, stream)])
-      } else if (db.pendingMigrations !== null && db.pendingMigrations !== 0) {
-        rows.push([
-          '数据库',
-          yellow(`! ${existingName}（待执行 ${db.pendingMigrations} 个迁移）`, stream),
-        ])
-      } else {
-        rows.push(['数据库', green(`● 已就绪 · ${existingName}`, stream)])
-      }
-
-      if (db.role) {
-        if (db.role.superuser || db.role.bypassRls) {
-          const why = db.role.superuser ? '超级用户' : '带 BYPASSRLS'
-          rows.push(['角色', red(`✕ ${db.role.name}（${why}，会绕过行级安全）`, stream)])
-        } else {
-          rows.push(['角色', green(`✓ ${db.role.name}（行级安全生效）`, stream)])
-        }
-      }
-
-      if (db.extensions.length) {
-        const extText = db.extensions
-          .map((e) => {
-            const stateName =
-              EXTENSION_STATE_NAMES[e.state as keyof typeof EXTENSION_STATE_NAMES] ?? e.state
-            return e.state === 'installed'
-              ? green(`✓ ${e.name}`, stream)
-              : red(`✕ ${e.name}（${stateName}）`, stream)
-          })
-          .join('  ')
-        rows.push(['扩展', extText])
-      }
-
-      if (db.existing === 'kioku' || db.existing === 'migrated') {
-        if (db.pendingMigrations === 0) {
-          rows.push(['迁移', green('✓ 已是最新', stream)])
-        } else if (db.pendingMigrations === null) {
-          rows.push(['迁移', red('✕ 含有当前版本不认识的迁移', stream)])
-        } else {
-          rows.push([
-            '迁移',
-            yellow(`! 待执行 ${db.pendingMigrations} 个迁移（启动服务后自动完成）`, stream),
-          ])
-        }
-      }
-
-      if (db.accounts !== null && db.circles !== null) {
-        const extra = db.unrelatedTables > 0 ? `（另有 ${db.unrelatedTables} 张非 Kioku 表）` : ''
-        rows.push(['数据', `${db.accounts} 个账号 · ${db.circles} 个记忆圈${extra}`])
-      }
+      rows.push(['连接状态', db.ready ? green('正常', out) : red('存在阻断问题', out)])
     }
+    if (db.role) {
+      rows.push(['角色', `${db.role.name}${db.role.superuser ? '（超级用户）' : ''}`])
+    }
+    if (db.extensions.length) {
+      const extText = db.extensions
+        .map((e) => {
+          const stateText =
+            EXTENSION_STATE_NAMES[e.state as keyof typeof EXTENSION_STATE_NAMES] ?? e.state
+          return `${e.name}: ${stateText}`
+        })
+        .join('，')
+      rows.push(['扩展', extText])
+    }
+    if (db.existing) {
+      const text =
+        EXISTING_DATA_NAMES[db.existing as keyof typeof EXISTING_DATA_NAMES] ?? db.existing
+      rows.push(['库结构', text])
+    }
+    if (db.pendingMigrations !== null) {
+      rows.push([
+        '待执行迁移',
+        db.pendingMigrations === 0
+          ? green('0（已是最新）', out)
+          : yellow(`${db.pendingMigrations} 个`, out),
+      ])
+    }
+    if (db.accounts !== null) rows.push(['账号数', String(db.accounts)])
   }
 
-  const mk = report.masterKey!
-  if (mk.error) {
-    rows.push(['主密钥', red(`✕ ${mk.error}`, stream)])
-  } else if (!mk.configured) {
-    rows.push(['主密钥', yellow('! 未配置（机密记忆、托管凭据与加密设置不可用）', stream)])
-  } else if (mk.rotationRemaining !== null && mk.rotationRemaining > 0) {
-    rows.push([
-      '主密钥',
-      yellow(`! 已匹配（标识 ${mk.currentId}，轮换剩余 ${mk.rotationRemaining} 条）`, stream),
-    ])
-  } else if (mk.previousId) {
-    rows.push([
-      '主密钥',
-      green(`✓ 已匹配（标识 ${mk.currentId}，轮换完成，可移除旧主密钥）`, stream),
-    ])
-  } else if (mk.matched === true) {
-    rows.push(['主密钥', green(`✓ 已匹配（标识 ${mk.currentId}）`, stream)])
+  if (!mk.configured) {
+    rows.push(['主密钥', yellow('未配置（无法保存加密凭据或模型 API Key）', out)])
   } else {
-    rows.push(['主密钥', green(`✓ 已配置（标识 ${mk.currentId}）`, stream)])
+    const state =
+      mk.matched === true
+        ? green('已匹配', out)
+        : mk.matched === false
+          ? red('不匹配', out)
+          : '已配置'
+    rows.push(['主密钥', `${state} ${dim(`(${mk.currentId})`, out)}`])
   }
 
-  if (report.webUi) {
-    const uiName = WEB_UI_NAMES[report.webUi]
-    rows.push([
-      '管理界面',
-      report.webUi === 'served' ? green(`✓ ${uiName}`, stream) : dim(uiName, stream),
-    ])
+  const lines: (string | { divider: true })[] = [...formatRows(rows, { stream: out })]
+  if (db.problems.length || mk.error) {
+    lines.push({ divider: true })
+    for (const p of db.problems) lines.push(red(`× ${p}`, out))
+    if (mk.error) lines.push(red(`× ${mk.error}`, out))
   }
+  lines.push({ divider: true })
+  lines.push(report.ready ? green('状态就绪', out) : red('尚未就绪', out))
 
-  return renderStrataBox('Kioku · 服务端诊断', formatRows(rows, { stream }), {
-    stream,
-    badge: ver,
-  })
-}
-
-async function statusMain(argv: string[]): Promise<number> {
-  const values = parseStatusOptions(argv)
-  if (values.help) {
-    console.log(STATUS_HELP)
-    return 0
-  }
-  const report = await collectStatus()
-  if (values.json) {
-    console.log(JSON.stringify(report, null, 2))
-  } else {
-    console.log(renderStatusBox(report))
-  }
-  return report.ready ? 0 : 1
+  return renderStrataBox('Kioku · 状态检查', lines, { stream: out, badge })
 }
 
 export function runStatus(argv: string[]): Promise<number> {
-  return runCli(STATUS_HELP, statusMain, argv)
+  return runCli('status', async () => {
+    const opts = parseStatusOptions(argv)
+    if (opts.help) {
+      console.log(STATUS_HELP)
+      return 0
+    }
+    const report = await collectStatus()
+    if (opts.json) {
+      console.log(JSON.stringify(report, null, 2))
+    } else {
+      console.log(renderReport(report))
+    }
+    return report.ready ? 0 : 1
+  })
 }
