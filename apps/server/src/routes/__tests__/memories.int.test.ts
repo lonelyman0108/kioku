@@ -1,8 +1,10 @@
 import { EntryDetailResponse, EntryHistoryResponse, EntryListResponse } from '@kioku/contracts'
+import { eq, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { CredentialService } from '../../credential/service'
 import type { Database } from '../../db/client'
+import { entries } from '../../db/schema'
 import { EntryService } from '../../memory/service'
 import {
   consoleHeaders,
@@ -275,5 +277,63 @@ describe.skipIf(!testDatabaseUrl)('扁平记忆 CRUD、双链、筛选、回收�
     const fetched = await entrySvc.get(workScope, '重名发布清单')
     expect(fetched.entry.shortId).toBe(workEntry.entry.shortId)
     expect(fetched.entry.content).toBe('工作区发布步骤')
+  })
+
+  it('并发更新或删除遭遇版本号已递增时，原子 WHERE 拦截并返回 409 version_conflict', async () => {
+    const masterKey = testMasterKey()
+    const credSvc = new CredentialService(database.db, masterKey)
+    const entrySvc = new EntryService(database.db, masterKey, credSvc, null)
+    const consoleScope = { kind: 'console' as const, accountId: 'acc', sessionId: 'sess' }
+
+    const created = await entrySvc.create(
+      consoleScope,
+      entryInput({ title: '并发更新词条', content: '初始内容' }),
+    )
+
+    // 持行锁等待并发操作完成前置读取并阻塞在写语句，再推进版本并提交，确定性触发原子条件拦截
+    const runWhileVersionBumped = async (op: () => Promise<unknown>) => {
+      let pending!: Promise<unknown>
+      await database.db.transaction(async (tx) => {
+        await tx
+          .select({ id: entries.id })
+          .from(entries)
+          .where(eq(entries.id, created.entry.id))
+          .for('update')
+        pending = op().catch((err: unknown) => err)
+        const deadline = Date.now() + 3_000
+        while (Date.now() < deadline) {
+          const [waiter] = await tx.execute<{ n: number }>(sql`
+            select count(*)::int as n
+            from pg_locks l
+            join pg_stat_activity a on a.pid = l.pid
+            where a.datname = current_database()
+              and not l.granted
+          `)
+          if ((waiter?.n ?? 0) > 0) break
+          await new Promise((r) => setTimeout(r, 10))
+        }
+        await tx
+          .update(entries)
+          .set({ version: sql`${entries.version} + 1` })
+          .where(eq(entries.id, created.entry.id))
+      })
+      return pending
+    }
+
+    const updateErr = await runWhileVersionBumped(() =>
+      entrySvc.update(consoleScope, created.entry.shortId, { content: '并发写入' }),
+    )
+    expect(updateErr).toMatchObject({ status: 409, code: 'version_conflict' })
+
+    const deleteErr = await runWhileVersionBumped(() =>
+      entrySvc.remove(consoleScope, created.entry.shortId),
+    )
+    expect(deleteErr).toMatchObject({ status: 409, code: 'version_conflict' })
+
+    // 验证词条未被上述冲突的写入或删除改动
+    const latest = await entrySvc.get(consoleScope, created.entry.shortId)
+    expect(latest.entry.content).toBe('初始内容')
+    expect(latest.entry.deletedAt).toBeNull()
+    expect(latest.entry.version).toBe(3)
   })
 })

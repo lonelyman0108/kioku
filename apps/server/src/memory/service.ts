@@ -279,7 +279,11 @@ export class EntryService {
       assertEntryWriteAllowed(scope, nextRealms)
 
       if (input.expectedVersion !== undefined && existing.version !== input.expectedVersion) {
-        throw new MemoryError(409, `版本冲突：当前版本为 ${existing.version}，请刷新后再保存`)
+        throw new MemoryError(
+          409,
+          `版本冲突：当前版本为 ${existing.version}，请刷新后再保存`,
+          'version_conflict',
+        )
       }
 
       const promoting = input.promoteToEntry === true && existing.kind === 'episode'
@@ -336,18 +340,21 @@ export class EntryService {
           version: nextVersion,
           updatedAt: now,
         })
-        .where(eq(entries.id, existing.id))
+        .where(and(eq(entries.id, existing.id), eq(entries.version, existing.version)))
         .returning()
+      if (!updated) {
+        throw new MemoryError(409, '版本冲突：词条已被并发修改，请刷新后再保存', 'version_conflict')
+      }
 
-      await syncEntryLinks(tx, updated!.id, updated!.shortId, updated!.content)
+      await syncEntryLinks(tx, updated.id, updated.shortId, updated.content)
       await tx.insert(entryEvents).values({
-        entryId: updated!.id,
+        entryId: updated.id,
         eventType: 'update',
         actor: actorLabel(scope),
-        snapshot: toSnapshot(updated!),
+        snapshot: toSnapshot(updated),
         createdAt: now,
       })
-      return this.hydrateDetail(tx, scope, updated!)
+      return this.hydrateDetail(tx, scope, updated)
     })
 
     if (detail.entry.kind === 'entry') {
@@ -371,11 +378,17 @@ export class EntryService {
       if (!existing) throw new MemoryError(404, '词条不存在或不可见')
       assertEntryWriteAllowed(scope, existing.realms)
       if (options.expectedVersion !== undefined && existing.version !== options.expectedVersion) {
-        throw new MemoryError(409, `版本冲突：当前版本为 ${existing.version}`)
+        throw new MemoryError(409, `版本冲突：当前版本为 ${existing.version}`, 'version_conflict')
       }
 
       if (options.permanent) {
-        await tx.delete(entries).where(eq(entries.id, existing.id))
+        const removed = await tx
+          .delete(entries)
+          .where(and(eq(entries.id, existing.id), eq(entries.version, existing.version)))
+          .returning({ id: entries.id })
+        if (!removed.length) {
+          throw new MemoryError(409, '版本冲突：词条已被并发修改或删除', 'version_conflict')
+        }
         return
       }
 
@@ -386,15 +399,18 @@ export class EntryService {
           updatedAt: now,
           version: existing.version + 1,
         })
-        .where(eq(entries.id, existing.id))
+        .where(and(eq(entries.id, existing.id), eq(entries.version, existing.version)))
         .returning()
+      if (!deleted) {
+        throw new MemoryError(409, '版本冲突：词条已被并发修改，请刷新后再试', 'version_conflict')
+      }
 
       await tx.delete(entryEmbeddings).where(eq(entryEmbeddings.entryId, existing.id))
       await tx.insert(entryEvents).values({
-        entryId: deleted!.id,
+        entryId: deleted.id,
         eventType: 'delete',
         actor: actorLabel(scope),
-        snapshot: toSnapshot(deleted!),
+        snapshot: toSnapshot(deleted),
         createdAt: now,
       })
     })
