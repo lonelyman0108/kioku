@@ -1,4 +1,5 @@
-# main 上的 CI 通过之后，构建并推送服务端与数据库镜像的 edge 与 sha-<短提交> 标签（images.yml），版本写 edge。
+# main 上的 CI 通过之后，构建并推送服务端与数据库镜像的 edge 与 sha-<短提交> 标签（images.yml），版本写 edge；
+# 镜像推送成功后，再将滚动预发布页（edge）的 tag 与说明更新到同一提交。
 # 用 workflow_run 等 CI：CI 失败的提交不出镜像，构建的是 CI 测过的那个提交（head_sha），不是 main 的最新提交。
 name: Edge
 on:
@@ -13,6 +14,10 @@ concurrency:
   cancel-in-progress: false
 permissions:
   contents: read
+# run 一律用 bash（-eo pipefail），不依赖 runner 镜像的默认 shell
+defaults:
+  run:
+    shell: bash
 jobs:
   images:
     # 只接 main 上 push 触发、跑成功的 CI；fork 里没有推这些镜像仓库的权限，不跑
@@ -30,3 +35,24 @@ jobs:
     secrets:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+
+  release:
+    needs: images
+    # 镜像全部推送成功后才更新 edge 预发布页；只声明 contents: write，不接触镜像密钥
+    if: github.repository == 'lonelyman0108/kioku'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: 更新 edge 预发布页
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT: ${{ github.event.workflow_run.head_sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: scripts/ci/edge-release.sh
