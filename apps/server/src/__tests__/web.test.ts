@@ -2,12 +2,18 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { ErrorResponse } from '@kioku/contracts'
+import {
+  API_GENERATION,
+  ErrorResponse,
+  HealthResponse,
+  UnavailableHealthResponse,
+} from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
-import { createApp } from '../app'
+import { createApp, createSetupApp } from '../app'
+import { SetupGate } from '../auth/setupCode'
 import type { Db } from '../db/client'
-import { staticEmbedderSource } from '../embedding/source'
+import type { SetupHost } from '../http/env'
 
 // 模拟一份管理界面的构建产物；这些路由都不访问数据库
 const webDir = mkdtempSync(join(tmpdir(), 'kioku-web-'))
@@ -20,7 +26,6 @@ const deps = {
   db: {} as Db,
   cookieSecure: true,
   masterKey: null,
-  embedder: staticEmbedderSource(null),
   jobs: null,
 }
 const app = createApp({ ...deps, webDir })
@@ -98,6 +103,32 @@ describe('托管管理界面', () => {
       expect(res.status).toBe(404)
       expect(await res.text()).not.toContain('<div id="app">')
     }
+  })
+
+  it('健康检查接口在正常、未配置数据库与数据库不可用时均携带接口代际 api=3', async () => {
+    const okRes = await app.request('/v1/health')
+    expect(okRes.status).toBe(200)
+    expect(HealthResponse.parse(await okRes.json()).api).toBe(API_GENERATION)
+
+    let dbState: 'missing' | 'unavailable' = 'missing'
+    const host: SetupHost = {
+      gate: new SetupGate('test-setup-code-123456'),
+      migrationsFolder: '.',
+      masterKey: false,
+      database: () => ({ state: dbState, source: null, url: null, check: null }),
+      exclusive: async (fn) => fn(),
+      activate: async () => 'switched',
+    }
+    const setupApp = createSetupApp({ host, trustedProxies: 0 })
+
+    const missingRes = await setupApp.request('/v1/health')
+    expect(missingRes.status).toBe(200)
+    expect(HealthResponse.parse(await missingRes.json()).api).toBe(API_GENERATION)
+
+    dbState = 'unavailable'
+    const unavailRes = await setupApp.request('/v1/health')
+    expect(unavailRes.status).toBe(503)
+    expect(UnavailableHealthResponse.parse(await unavailRes.json()).api).toBe(API_GENERATION)
   })
 
   it('响应带安全头，禁止被嵌入别的页面；HSTS 留给前面的 HTTPS 代理决定', async () => {

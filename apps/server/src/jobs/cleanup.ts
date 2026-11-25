@@ -1,54 +1,62 @@
-import { isNotNull, lte, or, sql } from 'drizzle-orm'
+import { and, isNotNull, lt, lte, ne, sql } from 'drizzle-orm'
 
-import { pruneBindingData } from '../access/binding'
-import { pruneAttempts } from '../auth/rateLimit'
 import type { Db } from '../db/client'
-import { accountLinks, deviceGrants, sessions } from '../db/schema'
-import { dropIneligibleEmbeddings } from '../embedding/worker'
-import { pruneConversationTurns } from '../extraction/buffer'
-import { loadRecallSettings, pruneRecallEvents } from '../recall/retention'
+import { deviceGrants, dreamSuggestions, entries, sessions } from '../db/schema'
+import { pruneIdleTurnBuffers } from '../extraction/buffer'
 
-// 定时清理已经过期的数据，由后台任务每小时执行一次，不再在登录时顺带清理：会话、过期与用过的一次性链接、过期的浏览器授权申请、登录失败计数、
-// 超过保留天数的召回事件明细、空闲超过一天的会话缓冲、过期的绑定码与过了窗口的输错绑定码计数，
-// 以及过期记忆（时间到了，没有写入，不会触发向量任务）留下的向量
-export async function cleanupExpired(db: Db): Promise<{
+const TRASH_RETENTION_DAYS = 30
+const SUGGESTION_RETENTION_DAYS = 30
+
+export interface CleanupCounts {
   sessions: number
-  links: number
   deviceGrants: number
-  attempts: number
-  recallEvents: number
-  turns: number
-  bindCodes: number
-  bindAttempts: number
-  embeddings: number
-}> {
-  const gone = await db
-    .delete(sessions)
-    .where(lte(sessions.expiresAt, sql`now()`))
-    .returning({ id: sessions.id })
-  const links = await db
-    .delete(accountLinks)
-    .where(or(lte(accountLinks.expiresAt, sql`now()`), isNotNull(accountLinks.usedAt)))
-    .returning({ id: accountLinks.id })
-  const grants = await db
-    .delete(deviceGrants)
-    .where(lte(deviceGrants.expiresAt, sql`now()`))
-    .returning({ id: deviceGrants.id })
-  const { retentionDays } = await loadRecallSettings(db)
-  const attempts = await pruneAttempts(db)
-  const recallEvents = await pruneRecallEvents(db, retentionDays)
-  const turns = await pruneConversationTurns(db)
-  const binding = await pruneBindingData(db)
-  const embeddings = await dropIneligibleEmbeddings(db)
+  turnBuffer: number
+  entries: number
+  suggestions: number
+}
+
+// 定期清理过期会话、过期设备授权、超时对话缓冲、回收站超期词条及已处理历史建议
+export async function cleanupExpired(db: Db): Promise<CleanupCounts> {
+  const [expiredSessions, expiredGrants, prunedTurns, purgedEntries, purgedSuggestions] =
+    await Promise.all([
+      db
+        .delete(sessions)
+        .where(lte(sessions.expiresAt, sql`now()`))
+        .returning({ id: sessions.id }),
+      db
+        .delete(deviceGrants)
+        .where(lte(deviceGrants.expiresAt, sql`now()`))
+        .returning({ id: deviceGrants.id }),
+      pruneIdleTurnBuffers(db),
+      db
+        .delete(entries)
+        .where(
+          and(
+            isNotNull(entries.deletedAt),
+            lt(entries.deletedAt, sql`now() - make_interval(days => ${TRASH_RETENTION_DAYS}::int)`),
+          ),
+        )
+        .returning({ id: entries.id }),
+      db
+        .delete(dreamSuggestions)
+        .where(
+          and(
+            ne(dreamSuggestions.status, 'pending'),
+            isNotNull(dreamSuggestions.decidedAt),
+            lt(
+              dreamSuggestions.decidedAt,
+              sql`now() - make_interval(days => ${SUGGESTION_RETENTION_DAYS}::int)`,
+            ),
+          ),
+        )
+        .returning({ id: dreamSuggestions.id }),
+    ])
+
   return {
-    sessions: gone.length,
-    links: links.length,
-    deviceGrants: grants.length,
-    attempts,
-    recallEvents,
-    turns,
-    bindCodes: binding.codes,
-    bindAttempts: binding.attempts,
-    embeddings,
+    sessions: expiredSessions.length,
+    deviceGrants: expiredGrants.length,
+    turnBuffer: prunedTurns,
+    entries: purgedEntries.length,
+    suggestions: purgedSuggestions.length,
   }
 }

@@ -3,7 +3,6 @@ import {
   DATABASE_SOURCE_NAMES,
   SetupRequest,
   type DatabaseCheck,
-  type DatabaseInspection,
   type DatabaseSslMode,
   type SetupStatus,
 } from '@kioku/contracts'
@@ -14,39 +13,25 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import Hint from '../components/Hint.vue'
 import SegmentedChoice from '../components/SegmentedChoice.vue'
-import EntryFrame from '../components/strata/EntryFrame.vue'
-import NoteLine from '../components/strata/NoteLine.vue'
-import PropertyList from '../components/strata/PropertyList.vue'
-import SectionHeading from '../components/strata/SectionHeading.vue'
+import EntryFrame from '../components/ui/EntryFrame.vue'
+import NoteLine from '../components/ui/NoteLine.vue'
+import PropertyList from '../components/ui/PropertyList.vue'
+import SectionHeading from '../components/ui/SectionHeading.vue'
 import { ME_KEY } from '../composables/useSession'
 import { queryClient } from '../query'
-import {
-  checkRows,
-  lockedHint,
-  setupFailure,
-  SSL_MODE_ITEMS,
-  summaryFacts,
-  VERDICT_NAMES,
-} from '../setup'
+import { checkRows, setupFailure, SSL_MODE_ITEMS, summaryFacts, VERDICT_NAMES } from '../setup'
 
-// 首次初始化：第一步接上数据库，第二步建第一个管理员与记忆圈。两步都要服务启动日志里的初始化码。
-// 数据库来自环境变量或 kioku.json 时，第一步只显示连接与检查结果，不能修改；
-// 都没有时在这里填连接（或者用超级用户代建），检查通过后保存并当场接上
+// 首次初始化：数据库尚未配置时先填写或代建连接，已就绪时直接创建唯一管理员账号
 const router = useRouter()
 
 const status = ref<SetupStatus | null>(null)
 const loadError = ref<string | null>(null)
 const step = ref<'database' | 'admin'>('database')
-const circleNameText = ref('')
 const admin = reactive({
   setupCode: '',
   username: '',
   displayName: '',
   password: '',
-  circleName: undefined as string | undefined,
-})
-watch(circleNameText, (v) => {
-  admin.circleName = v.trim() || undefined
 })
 
 type Mode = 'fill' | 'provision'
@@ -75,15 +60,18 @@ const provision = reactive({
 })
 
 const check = ref<DatabaseCheck | null>(null)
-const inspection = ref<DatabaseInspection | null>(null)
 const error = ref<string | null>(null)
-const busy = ref<'inspect' | 'check' | 'connect' | 'provision' | 'admin' | null>(null)
+const busy = ref<'check' | 'connect' | 'provision' | 'admin' | null>(null)
 const connected = ref<string | null>(null)
 
 const editable = computed(() => status.value?.database.state === 'missing')
 const rows = computed(() => (check.value ? checkRows(check.value) : []))
+const readySummary = computed(() =>
+  status.value?.database.summary
+    ? summaryFacts(status.value.database.summary, status.value.database.source)
+    : [],
+)
 
-// 改了连接就要重新检查
 watch(connection, () => {
   check.value = null
 })
@@ -96,23 +84,15 @@ async function loadStatus() {
     loadError.value = err instanceof ApiError ? err.message : '读取初始化状态失败'
     return
   }
-  // 配了的库暂时连不上：不是初始化，到数据库不可用页等着
   if (status.value.database.state === 'unavailable') {
     await router.replace({ name: 'database-unavailable' })
     return
   }
-  // 库是重构之前的结构：到旧版升级页就地迁移
-  if (status.value.database.state === 'legacy') {
-    await router.replace({ name: 'legacy-upgrade' })
-    return
-  }
   if (!status.value.needsSetup) {
-    // 接入的是已有实例：用已有账号登录
     await router.replace({ name: 'login' })
     return
   }
-  // 测试用的服务没有数据库这一步的状态来源，直接建管理员
-  if (status.value.database.state === 'ready' && !status.value.database.source) step.value = 'admin'
+  if (status.value.database.state === 'ready') step.value = 'admin'
 }
 
 onMounted(loadStatus)
@@ -142,17 +122,6 @@ async function run(
   }
 }
 
-const inspect = () =>
-  run(
-    'inspect',
-    async () => {
-      inspection.value = await api.inspectDatabase(admin.setupCode)
-      check.value = inspection.value.check
-      await loadStatus()
-    },
-    '读取数据库状态失败',
-  )
-
 const runCheck = () =>
   run(
     'check',
@@ -167,7 +136,6 @@ const runCheck = () =>
 
 async function afterConnected(database: string) {
   connected.value = database
-  inspection.value = null
   await loadStatus()
   if (status.value?.needsSetup) step.value = 'admin'
 }
@@ -209,7 +177,7 @@ async function submitAdmin() {
     const me = await api.setup({ ...admin })
     queryClient.clear()
     queryClient.setQueryData(ME_KEY, me)
-    await router.replace({ name: 'home' })
+    await router.replace({ name: 'memories' })
   } catch (err) {
     error.value = err instanceof ApiError ? err.message : '初始化失败'
   } finally {
@@ -224,7 +192,7 @@ async function submitAdmin() {
       <template #actions>
         <ol class="steps">
           <li :class="{ on: step === 'database' }">1 数据库</li>
-          <li :class="{ on: step === 'admin' }">2 管理员</li>
+          <li :class="{ on: step === 'admin' }">2 账号</li>
         </ol>
       </template>
     </SectionHeading>
@@ -235,7 +203,7 @@ async function submitAdmin() {
       <NoteLine v-if="!status.masterKey" class="mt-4" tone="warning">
         未配置主密钥
         <template #detail>
-          机密记忆、托管的凭据等功能不可用；配置 KIOKU_MASTER_KEY 后重启服务。
+          托管凭据与模型接口密钥加密不可用；配置 KIOKU_MASTER_KEY 后重启服务。
         </template>
       </NoteLine>
 
@@ -255,22 +223,7 @@ async function submitAdmin() {
           />
         </UFormField>
 
-        <!-- 来自环境变量或 kioku.json：只显示，不能改 -->
-        <template v-if="!editable">
-          <p v-if="status.database.source" class="text-sm text-muted">
-            连接来自{{ DATABASE_SOURCE_NAMES[status.database.source] }}，此处无法修改。
-          </p>
-          <UButton color="neutral" variant="outline" :loading="busy === 'inspect'" @click="inspect">
-            {{ inspection ? '重新检查' : '查看连接' }}
-          </UButton>
-          <PropertyList
-            v-if="inspection?.summary"
-            :groups="summaryFacts(inspection.summary, inspection.source)"
-          />
-        </template>
-
-        <!-- 都没有：在这里填，或者用超级用户代建 -->
-        <template v-else>
+        <template v-if="editable">
           <div><SegmentedChoice v-model="mode" :items="MODES" label="连接方式" /></div>
 
           <form v-if="mode === 'fill'" class="space-y-4" @submit.prevent="runCheck">
@@ -303,7 +256,6 @@ async function submitAdmin() {
               <UButton type="submit" color="neutral" variant="outline" :loading="busy === 'check'">
                 检查
               </UButton>
-              <!-- 保存不放在表单里提交：回车只做检查 -->
               <UButton
                 type="button"
                 :disabled="!check?.ready || busy !== null"
@@ -319,9 +271,8 @@ async function submitAdmin() {
             <p class="text-sm text-muted">
               新建应用角色与库，只保存应用角色的连接。
               <Hint label="代建规则">
-                应用角色使用随机密码，不是超级用户、不带
-                BYPASSRLS，也不能建库、建角色；库的所有者是应用角色， 并在库里装好 vector 与
-                zhparser 扩展。超级用户的密码只用于这一次，不保存、不写入日志。
+                应用角色使用随机密码并拥有新建库，并在库里安装 vector 与 zhparser
+                扩展。超级用户密码只用于本次创建，不保存、不写入日志。
               </Hint>
             </p>
             <div class="fields">
@@ -382,26 +333,19 @@ async function submitAdmin() {
             </li>
           </ul>
         </section>
-
-        <template v-if="!editable && inspection">
-          <NoteLine v-if="status.database.source && !check?.ready" tone="error">
-            连接无法在此修改
-            <template #detail>{{ lockedHint(status.database.source) }}</template>
-          </NoteLine>
-          <UButton
-            v-else-if="status.database.state === 'ready'"
-            type="button"
-            @click="step = 'admin'"
-          >
-            下一步
-          </UButton>
-        </template>
       </div>
 
-      <!-- 第二步：管理员 -->
+      <!-- 第二步：创建管理员账号 -->
       <template v-else>
-        <p class="mt-2 text-muted">创建首个账号及其个人记忆圈，该账号为实例管理员。</p>
+        <p class="mt-2 text-muted">创建本实例的所有者账号。</p>
         <p v-if="connected" class="mt-1 text-sm text-muted">已接入数据库 {{ connected }}。</p>
+        <div v-else-if="readySummary.length" class="mt-3">
+          <p v-if="status.database.source" class="mb-2 text-xs text-muted">
+            连接来自{{ DATABASE_SOURCE_NAMES[status.database.source] }}
+          </p>
+          <PropertyList :groups="readySummary" />
+        </div>
+
         <UForm
           :schema="SetupRequest"
           :state="admin"
@@ -434,13 +378,6 @@ async function submitAdmin() {
               autocomplete="new-password"
               class="w-full"
             />
-          </UFormField>
-          <UFormField
-            label="独立圈名称（可选）"
-            name="circleName"
-            help="留空仅创建个人记忆圈；填写时同步创建一个独立圈"
-          >
-            <UInput v-model="circleNameText" size="lg" class="w-full" />
           </UFormField>
           <p v-if="error" class="text-error" role="alert">{{ error }}</p>
           <UButton type="submit" size="lg" block :loading="busy === 'admin'">创建并登录</UButton>

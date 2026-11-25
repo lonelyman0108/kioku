@@ -1,5 +1,3 @@
-import { AsyncLocalStorage } from 'node:async_hooks'
-
 import { DrizzleQueryError, sql } from 'drizzle-orm'
 import type { PgTransactionConfig } from 'drizzle-orm/pg-core'
 import { drizzle, type PostgresJsDatabase } from 'drizzle-orm/postgres-js'
@@ -18,8 +16,7 @@ export interface Database {
   close: () => Promise<void>
 }
 
-// postgres.js 的连接选项只在这里定：服务的连接池、迁移用的单条连接、初始化页的检查都从这里取，
-// 连得上检查就连得上服务（例如经 PgBouncer 时不发额外的启动参数）
+// postgres.js 连接选项统一在此定义：不发额外启动参数，兼容 PgBouncer 等连接池
 export function postgresOptions(
   overrides: postgres.Options<Record<string, postgres.PostgresType>> = {},
 ): postgres.Options<Record<string, postgres.PostgresType>> {
@@ -32,93 +29,26 @@ export function connect(url: string, options: { max?: number } = {}): Database {
   return { db, url, close: () => client.end() }
 }
 
-// 每个 withCircles 事务开头取的数据库时间，见 withCircles 与 nowOf
 const moments = new WeakMap<object, Date>()
 const STATEMENT_MICROS = microsOf(sql`statement_timestamp()`)
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-
-export interface CircleScope {
-  read: readonly string[]
-  write?: readonly string[]
-}
-
-interface ActiveCircleScope {
-  readonly read: string
-  readonly write: string
-  hasWrites: boolean
-}
-
-const activeCircleScope = new AsyncLocalStorage<ActiveCircleScope>()
-
-function normalizeCircleIds(ids: readonly string[] | undefined): string[] {
-  if (!ids || ids.length === 0) return []
-  const seen = new Set<string>()
-  for (const id of ids) {
-    if (!UUID_RE.test(id)) throw new Error(`无效的记忆圈标识：${id}`)
-    seen.add(id.toLowerCase())
-  }
-  return [...seen]
-}
-
-// 内容表只能在这里面访问：事务内声明当前可读与可写的记忆圈，RLS 据此过滤；事务结束后设置自动失效，不会串到连接池里的下一个请求。
-// config 是事务的选项，例如导出时要一个可重复读的只读事务。
-// 有效期与更新时间只用数据库的钟：声明记忆圈的那条语句顺带取一次数据库的时间（不多一次往返），作为这个事务里唯一的
-// 「现在」，交给 fn，也能用 nowOf(tx) 取；fn 里没有显式传时刻的有效期判断默认也用它（见 db/moment.ts）。取 statement_timestamp()（这条语句开始的时刻），不取 now()（事务开始的时刻）：
-// 测试台的回滚模式整个运行是一个根事务，now() 一直停在开始的时候，每个 withCircles 是其中的一个 savepoint，
-// 这样各自取到当时的时刻；也不取 clock_timestamp()，同一条语句里它每次求值都不同。截到毫秒：JS 的 Date 只到毫秒，
-// SQL 条件与 JS 判断拿同一个值比才一致。
-// 可写集自动并入可读集；最外层写作用域结束前立即校验一次 entry_variants_state_fk，确保 savepoint 内也当场暴露不一致
-export async function withCircles<T>(
+// 开启事务并同步取一次数据库时间（截到毫秒），作为事务内有效期与更新时间判断的唯一时钟
+export async function withTx<T>(
   db: Db | Tx,
-  scope: CircleScope,
   fn: (tx: Tx, now: Date) => Promise<T>,
   config?: PgTransactionConfig,
 ): Promise<T> {
-  const effectiveWrite = normalizeCircleIds(scope.write)
-  const effectiveRead = normalizeCircleIds([...scope.read, ...effectiveWrite])
-  const readStr = effectiveRead.join(',')
-  const writeStr = effectiveWrite.join(',')
-  const parent = activeCircleScope.getStore()
-  if (parent && effectiveWrite.length > 0) parent.hasWrites = true
-  const current: ActiveCircleScope = {
-    read: readStr,
-    write: writeStr,
-    hasWrites: effectiveWrite.length > 0,
-  }
   return db.transaction(async (tx) => {
     const [row] = await tx.execute<{ micros: string }>(
-      sql`select set_config('app.read_circles', ${readStr}, true), set_config('app.write_circles', ${writeStr}, true), ${STATEMENT_MICROS}::text as micros`,
+      sql`select ${STATEMENT_MICROS}::text as micros`,
     )
     const now = new Date(Number(BigInt(row!.micros) / 1000n))
     moments.set(tx, now)
-    const result = await activeCircleScope.run(current, () =>
-      transactionMoment.run(now, () => fn(tx, now)),
-    )
-    if (!parent && current.hasWrites) {
-      await tx.execute(sql`set constraints entry_variants_state_fk immediate`)
-      await tx.execute(sql`set constraints entry_variants_state_fk deferred`)
-    }
-    if (parent) {
-      await tx.execute(
-        sql`select set_config('app.read_circles', ${parent.read}, true), set_config('app.write_circles', ${parent.write}, true)`,
-      )
-    }
-    return result
+    return transactionMoment.run(now, () => fn(tx, now))
   }, config)
 }
 
-export function withCircle<T>(
-  db: Db | Tx,
-  circleId: string,
-  fn: (tx: Tx, now: Date) => Promise<T>,
-  config?: PgTransactionConfig,
-): Promise<T> {
-  return withCircles(db, { read: [circleId], write: [circleId] }, fn, config)
-}
-
-// 数据库现在的时间（截到毫秒），给不在 withCircles 里的地方用：保留期的清理这类后台任务默认按它算，
-// 测试里要算「现在之后多久」也用它
+// 获取当前数据库时间（截到毫秒），用于事务外的过期与清理判断
 export async function databaseNow(db: Db | Tx): Promise<Date> {
   const [row] = await db.execute<{ micros: string }>(
     sql`select ${STATEMENT_MICROS}::text as micros`,
@@ -126,93 +56,42 @@ export async function databaseNow(db: Db | Tx): Promise<Date> {
   return new Date(Number(BigInt(row!.micros) / 1000n))
 }
 
-// 这个事务开头取的数据库时间（见 withCircles）。判断或写入有效期、更新时间都用它，不用应用的 new Date()
 export function nowOf(tx: Tx): Date {
   const now = moments.get(tx)
-  if (!now) throw new Error('nowOf 只能用在 withCircles 开的事务里')
+  if (!now) throw new Error('nowOf 只能用在 withTx 开的事务里')
   return now
 }
 
-// 跨记忆圈统计（实例的向量覆盖率、主密钥卡片的计数）整个进程里最多同时开几个记忆圈的事务（服务只有一个连接池）：
-// 每个事务占一条连接，几处统计、几个页面同时数也合起来算。某个记忆圈等锁卡住时最多卡住这几条，别的请求照常有连接用
-export const CIRCLE_SCAN_PARALLEL = 4
-const scanSlots = { free: CIRCLE_SCAN_PARALLEL, waiting: [] as (() => void)[] }
-// 正在 eachCircle 的 fn 里
-const scanning = new AsyncLocalStorage<true>()
-
-// 对每个记忆圈在它自己的事务里调用 fn（内容表开了 RLS），几个记忆圈同时数，不逐个排队。
-// 每数一个记忆圈取一次名额、数完还回去，几处同时数时轮流用，谁也不用等别人整个数完。
-// 有一个记忆圈出错就不再开始别的，等已经开始的都结束再抛出这个错误：返回或抛出之后不会还有记忆圈的事务没结束。
-// 连接断开是例外：withCircle 立刻 reject，那个事务已经没了，fn 还在跑，到它的下一条语句报错才停（时间很短），
-// 所以这时返回或抛出之后 fn 可能还没跑完。
-// fn 里再调 eachCircle 直接报错：外层占着名额等里层，名额会被占满、互相等住
-export async function eachCircle(db: Db, fn: (tx: Tx) => Promise<void>): Promise<void> {
-  if (scanning.getStore()) throw new Error('eachCircle 不能嵌套调用')
-  const all = await db.select({ id: schema.circles.id }).from(schema.circles)
-  let next = 0
-  let failure: { error: unknown } | undefined
-  const worker = async () => {
-    while (!failure && next < all.length) {
-      const { id } = all[next++]!
-      if (scanSlots.free) scanSlots.free--
-      else await new Promise<void>((resolve) => scanSlots.waiting.push(resolve))
-      try {
-        if (!failure) await scanning.run(true, () => withCircle(db, id, fn))
-      } catch (error) {
-        failure ??= { error }
-      } finally {
-        // 名额直接交给排着队的下一个
-        const waiter = scanSlots.waiting.shift()
-        if (waiter) waiter()
-        else scanSlots.free++
-      }
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(CIRCLE_SCAN_PARALLEL, all.length) }, worker))
-  if (failure) throw failure.error
-}
-
-// 数据库报的错：drizzle 把驱动的错误包在 cause 里，只解开这一种。驱动直接抛的错误不解开：
-// 连接错误（CONNECTION_CLOSED）自带 cause（57P01、ECONNRESET 这些），解开就成了另一个错误，连接本身的错误会记成不同的 code。
-// （正在执行的语句另有自己的错误，同一次断连里它报 57P01。）
-// drizzle 的错误没有 cause 时什么也不给：它的 message 带着 SQL 与全部参数
 function pgError(err: unknown): { code?: unknown; constraint_name?: string; message?: string } {
   const pg = err instanceof DrizzleQueryError ? err.cause : err
   return (pg ?? {}) as { code?: unknown }
 }
 
-// 数据库给的错误说明（例如哪个值超出了范围），没有时为 undefined
 export function pgMessage(err: unknown): string | undefined {
   return pgError(err).message
 }
 
-// 错误的 code：数据库报的是 SQLSTATE，驱动自己的连接错误是 CONNECTION_CLOSED 这类。不是字符串的不算
 export function pgErrorCode(err: unknown): string | undefined {
   const { code } = pgError(err)
   return typeof code === 'string' ? code : undefined
 }
 
-// 连接错误的原因：它自带的 cause（57P01、ECONNRESET 这些）。不是连接错误时为 undefined
 function connectionCause(err: unknown): { code?: unknown; message?: string } | undefined {
   if (!pgErrorCode(err)?.startsWith('CONNECTION_')) return undefined
   const pg = pgError(err) as { cause?: unknown }
   return (pg.cause ?? {}) as { code?: unknown; message?: string }
 }
 
-// 连接错误的原因的 code，日志里和 code 一起记：57P01 是数据库重启或被杀，ECONNRESET 是网络断了
 export function pgCauseCode(err: unknown): string | undefined {
   const code = connectionCause(err)?.code
   return typeof code === 'string' ? code : undefined
 }
 
-// 违反的是哪一条约束（唯一、外键、检查约束），数据库没给出时为 undefined
 export function pgConstraint(err: unknown): string | undefined {
   return pgError(err).constraint_name
 }
 
-// 能写进日志的错误：drizzle 错误的 message 带着 SQL 与全部参数（正文、提示语、密文都可能在里面），不能整个打出来；
-// 驱动的 PostgresError 也一样，它的 detail 带着数据的值（Key (username)=(...)、Failing row contains (...)）。
-// 都只留 SQLSTATE、约束名与说明。别的错误原样，堆栈和 cause 都还在，否则查不出是哪里
+// 过滤 SQL 与参数避免在日志中泄露记忆正文或凭据，仅保留 SQLSTATE、约束名与说明
 export function loggableError(err: unknown): unknown {
   if (!(err instanceof DrizzleQueryError || err instanceof postgres.PostgresError)) return err
   const pg = pgError(err)
@@ -223,9 +102,6 @@ export function logInternalError(where: string, err: unknown): void {
   console.error(where, loggableError(err))
 }
 
-// 能记进「最近的错误」、给人看的文字：drizzle 错误的 message 带着 SQL 与全部参数（正文、密文都可能在里面），
-// 只给数据库报的说明，没有说明时也不退回 message。连接错误给断开的原因：它的 message 是数据库的地址
-// （write CONNECTION_CLOSED <主机>:<端口>），这段文字会存进设置，跟着进全实例备份。别的错误给它自己的 message
 export function errorText(err: unknown): string {
   const lost = connectionCause(err)
   if (lost) return lost.message ? `数据库连接断开：${lost.message}` : '数据库连接断开'
@@ -233,22 +109,8 @@ export function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
-// 违反了指定的唯一约束
-export function isUniqueViolation(err: unknown, constraint: string): boolean {
+export function isUniqueViolation(err: unknown, constraint?: string): boolean {
   const pg = pgError(err)
-  return pg.code === '23505' && pg.constraint_name === constraint
-}
-
-// 超级用户和 BYPASSRLS 角色会绕过行级安全，记忆圈隔离就形同虚设，所以直接拒绝启动
-export async function assertRuntimeRole(db: Db): Promise<void> {
-  const rows = await db.execute<{ rolsuper: boolean; rolbypassrls: boolean; rolname: string }>(
-    sql`select rolname, rolsuper, rolbypassrls from pg_roles where rolname = current_user`,
-  )
-  const role = rows[0]
-  if (!role) throw new Error('无法读取当前数据库角色')
-  if (role.rolsuper || role.rolbypassrls) {
-    throw new Error(
-      `数据库角色 ${role.rolname} 是超级用户或带 BYPASSRLS，会绕过记忆圈隔离；请改用普通角色连接（见 docker/postgres/init）`,
-    )
-  }
+  if (pg.code !== '23505') return false
+  return constraint ? pg.constraint_name === constraint : true
 }

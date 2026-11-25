@@ -1,111 +1,45 @@
 <script setup lang="ts">
-import type { CircleKind, EntryLinkNeighbor } from '@kioku/contracts'
-import { computed } from 'vue'
+import type { EntryLinkNeighbor } from '@kioku/contracts'
 
-import { useSession } from '../composables/useSession'
-import MemoryRow from './strata/MemoryRow.vue'
-import SectionHeading from './strata/SectionHeading.vue'
-import { entryBand } from './strata/strata'
+import { entryKindLabels } from '../labels'
+import SectionHeading from './ui/SectionHeading.vue'
 
-const props = defineProps<{
-  circleId: string
-  circleKind: CircleKind
-  links: readonly EntryLinkNeighbor[]
+defineProps<{
+  outboundLinks: readonly EntryLinkNeighbor[]
+  backlinks: readonly EntryLinkNeighbor[]
 }>()
 
-const emit = defineEmits<{ open: [shortId: string, targetCircleId: string] }>()
-const { me } = useSession()
-
-function uniqueByShortId(items: readonly EntryLinkNeighbor[]): EntryLinkNeighbor[] {
-  const seen = new Set<string>()
-  const out: EntryLinkNeighbor[] = []
-  for (const item of items) {
-    if (seen.has(item.shortId)) continue
-    seen.add(item.shortId)
-    out.push(item)
-  }
-  return out
-}
-
-const outgoing = computed(() =>
-  uniqueByShortId(props.links.filter((l) => l.direction === 'outgoing')),
-)
-const incoming = computed(() =>
-  uniqueByShortId(props.links.filter((l) => l.direction === 'incoming')),
-)
-
-function kindOf(item: Pick<EntryLinkNeighbor, 'circleId' | 'circleSlug'>): CircleKind {
-  if (item.circleId === props.circleId) return props.circleKind
-  return (
-    me.data.value?.circles.find((c) => c.id === item.circleId)?.kind ??
-    (item.circleSlug === 'personal' ? 'personal' : 'shared')
-  )
-}
-
-function bandOf(item: EntryLinkNeighbor) {
-  return entryBand(
-    {
-      kind: item.kind,
-      circleId: item.circleId,
-      circleKind: kindOf(item),
-    },
-    { id: props.circleId, kind: props.circleKind },
-  )
-}
-
-function circleLabel(item: EntryLinkNeighbor): string {
-  const found = me.data.value?.circles.find((c) => c.id === item.circleId)
-  if (found) return found.kind === 'personal' ? '个人圈' : found.name
-  return kindOf(item) === 'personal' ? '个人圈' : item.circleSlug
-}
+const emit = defineEmits<{ open: [shortId: string] }>()
 </script>
 
 <template>
-  <div v-if="outgoing.length || incoming.length" class="links-panel">
-    <section v-if="outgoing.length" class="links-section">
+  <div v-if="outboundLinks.length || backlinks.length" class="links-panel">
+    <section v-if="outboundLinks.length" class="links-section">
       <SectionHeading title="出链" :level="3" />
       <ul class="links-list">
-        <li v-for="item in outgoing" :key="`out-${item.shortId}`">
-          <MemoryRow
-            as="button"
-            type="button"
-            flush
-            :short-id="item.shortId"
-            :title="item.title"
-            :band="bandOf(item)"
-            :kind="item.kind"
-            :sensitivity="item.sensitivity"
-            :local="item.circleId === circleId"
-            @click="emit('open', item.shortId, item.circleId)"
-          >
-            <span v-if="item.circleId !== circleId" class="text-xs text-muted">
-              {{ circleLabel(item) }}
+        <li v-for="item in outboundLinks" :key="`out-${item.shortId}`">
+          <button type="button" class="link-row" @click="emit('open', item.shortId)">
+            <span class="link-title">{{ item.title }}</span>
+            <span class="link-meta">
+              <span class="font-mono">{{ item.shortId }}</span>
+              <span>{{ entryKindLabels[item.kind] }}</span>
             </span>
-          </MemoryRow>
+          </button>
         </li>
       </ul>
     </section>
 
-    <section v-if="incoming.length" class="links-section">
+    <section v-if="backlinks.length" class="links-section">
       <SectionHeading title="反向链接" :level="3" />
       <ul class="links-list">
-        <li v-for="item in incoming" :key="`in-${item.shortId}`">
-          <MemoryRow
-            as="button"
-            type="button"
-            flush
-            :short-id="item.shortId"
-            :title="item.title"
-            :band="bandOf(item)"
-            :kind="item.kind"
-            :sensitivity="item.sensitivity"
-            :local="item.circleId === circleId"
-            @click="emit('open', item.shortId, item.circleId)"
-          >
-            <span v-if="item.circleId !== circleId" class="text-xs text-muted">
-              {{ circleLabel(item) }}
+        <li v-for="item in backlinks" :key="`in-${item.shortId}`">
+          <button type="button" class="link-row" @click="emit('open', item.shortId)">
+            <span class="link-title">{{ item.title }}</span>
+            <span class="link-meta">
+              <span class="font-mono">{{ item.shortId }}</span>
+              <span>{{ entryKindLabels[item.kind] }}</span>
             </span>
-          </MemoryRow>
+          </button>
         </li>
       </ul>
     </section>
@@ -128,5 +62,34 @@ function circleLabel(item: EntryLinkNeighbor): string {
 }
 .links-list {
   border-top: 1px solid var(--ui-border);
+}
+.link-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 7px 4px;
+  border-bottom: 1px solid var(--ui-border);
+  text-align: left;
+  font-size: 14px;
+  cursor: pointer;
+}
+.link-row:hover {
+  background: var(--ui-bg-elevated);
+}
+.link-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.link-meta {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--ui-text-muted);
 }
 </style>

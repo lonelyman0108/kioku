@@ -4,9 +4,9 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { api } from '../api/endpoints'
-import EntryFrame from '../components/strata/EntryFrame.vue'
-import PropertyList from '../components/strata/PropertyList.vue'
-import SectionHeading from '../components/strata/SectionHeading.vue'
+import EntryFrame from '../components/ui/EntryFrame.vue'
+import PropertyList from '../components/ui/PropertyList.vue'
+import SectionHeading from '../components/ui/SectionHeading.vue'
 import { setupLost } from '../routes'
 import { lockedHint } from '../setup'
 import { formatTime } from '../time'
@@ -24,7 +24,6 @@ const status = ref<SetupStatus | null>(null)
 const checkedAt = ref<string | null>(null)
 const checking = ref(false)
 let timer: ReturnType<typeof setTimeout> | null = null
-let disposed = false
 
 const facts = computed(() => {
   const db = status.value?.database
@@ -44,15 +43,12 @@ const facts = computed(() => {
 })
 
 async function check() {
-  if (disposed) return
   if (timer) clearTimeout(timer)
   checking.value = true
   try {
-    const next = await api.setupStatus()
-    if (disposed) return
-    status.value = next
+    status.value = await api.setupStatus()
     checkedAt.value = new Date().toISOString()
-    if (next.database.state !== 'unavailable') {
+    if (status.value.database.state !== 'unavailable') {
       // 接上了（或者变成了要初始化）：让守卫重新判断
       setupLost()
       await router.replace(target.value)
@@ -61,14 +57,13 @@ async function check() {
   } catch {
     // 服务本身也连不上：下一轮再问，守卫会带到连接失败页
   } finally {
-    if (!disposed) checking.value = false
+    checking.value = false
   }
-  if (!disposed) timer = setTimeout(() => void check(), POLL_MS)
+  timer = setTimeout(() => void check(), POLL_MS)
 }
 
 onMounted(check)
 onBeforeUnmount(() => {
-  disposed = true
   if (timer) clearTimeout(timer)
 })
 </script>

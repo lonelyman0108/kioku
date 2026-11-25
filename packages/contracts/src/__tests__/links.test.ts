@@ -1,42 +1,50 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  CREDENTIAL_SLUG_RE,
+  extractCredentialPlaceholders,
+  extractCredentialSlugs,
   extractTargetShortIds,
   extractWikiLinks,
   isShortId,
+  normalizeShortId,
+  SHORT_ID_RE,
   ShortId,
-  SHORT_ID_ALPHABET,
 } from '../links'
 
-describe('无歧义 Base30 短 ID', () => {
-  it('字符集排除 0/o/1/i/l/u 且共 30 个字符', () => {
-    expect(SHORT_ID_ALPHABET).toHaveLength(30)
-    for (const ch of ['0', 'o', '1', 'i', 'l', 'u']) {
-      expect(SHORT_ID_ALPHABET).not.toContain(ch)
-    }
+describe('links & placeholders', () => {
+  it('validates and normalizes short IDs', () => {
+    const upper = 'm-234abc'.toUpperCase()
+    expect(SHORT_ID_RE.test('m-234567')).toBe(true)
+    expect(SHORT_ID_RE.test('m-0oil1u')).toBe(false)
+    expect(isShortId(`  ${'m-abcdef'.toUpperCase()}  `)).toBe(true)
+    expect(normalizeShortId(` ${upper} `)).toBe('m-234abc')
+    expect(ShortId.parse(` ${upper} `)).toBe('m-234abc')
+    expect(ShortId.safeParse('m-123456').success).toBe(false)
   })
 
-  it('输入不区分大小写并归一为小写，拒绝含混淆字符或长度不符的写法', () => {
-    const upper = 'm-8f3k2p'.toUpperCase()
-    expect(ShortId.parse(`  ${upper}  `)).toBe('m-8f3k2p')
-    expect(ShortId.safeParse('m-23456789').success).toBe(true)
-    expect(isShortId('m-23456')).toBe(false)
-    for (const bad of ['m-012345', 'm-oabcde', 'm-123456', 'm-iabcde', 'm-labcde', 'm-uabcde']) {
-      expect(ShortId.safeParse(bad).success, bad).toBe(false)
-    }
-  })
-})
-
-describe('双链线性提取', () => {
-  it('提取 [[m-xxxxxx]] 与带显示文字的 [[m-xxxxxx|别名]] 并去重目标短 ID', () => {
-    const upper = 'm-234567'.toUpperCase()
-    const md = `参考 [[${upper}]]、[[m-8f3k2p|家里 NAS]]，再次提到 [[m-234567|重复]]，忽略 [[无效]]。`
-    const parsed = extractWikiLinks(md)
-    expect(parsed.map((p) => ({ target: p.targetShortId, alias: p.alias }))).toEqual([
-      { target: 'm-234567', alias: null },
-      { target: 'm-8f3k2p', alias: '家里 NAS' },
-      { target: 'm-234567', alias: '重复' },
+  it('extracts wiki links with optional aliases in order', () => {
+    const upper = 'm-234abc'.toUpperCase()
+    const content = `参考 [[${upper}]] 以及 [[m-999xyz|部署说明]]，重复 [[m-234abc]] 忽略 [[m-000000]]`
+    const parsed = extractWikiLinks(content)
+    expect(parsed.map((item) => ({ id: item.targetShortId, alias: item.alias }))).toEqual([
+      { id: 'm-234abc', alias: null },
+      { id: 'm-999xyz', alias: '部署说明' },
+      { id: 'm-234abc', alias: null },
     ])
-    expect(extractTargetShortIds(md)).toEqual(['m-234567', 'm-8f3k2p'])
+    expect(extractTargetShortIds(content)).toEqual(['m-234abc', 'm-999xyz'])
+  })
+
+  it('extracts both bare and field credential placeholders', () => {
+    expect(CREDENTIAL_SLUG_RE.test('pg.main_1-prod')).toBe(true)
+    expect(CREDENTIAL_SLUG_RE.test('-bad')).toBe(false)
+    const content = '用 {{cred:pg-main}} 与 {{cred:github_pat#token}} 以及重复 {{cred:PG-MAIN}}'
+    const refs = extractCredentialPlaceholders(content)
+    expect(refs.map((r) => ({ slug: r.slug, field: r.field }))).toEqual([
+      { slug: 'pg-main', field: null },
+      { slug: 'github_pat', field: 'token' },
+      { slug: 'pg-main', field: null },
+    ])
+    expect(extractCredentialSlugs(content)).toEqual(['pg-main', 'github_pat'])
   })
 })

@@ -1,24 +1,16 @@
 import { Hono } from 'hono'
 
 import { requireKey } from '../auth/middleware'
-import { credentialServiceForKey } from '../credential/context'
+import type { CredentialService } from '../credential/service'
 import type { AppEnv, Deps } from '../http/env'
 import { handleMcpRequest } from '../mcp/server'
-import { entryServiceForKey, recallScopeForKey } from '../memory/context'
+import type { EntryService } from '../memory/service'
 
-// MCP 走 Streamable HTTP：POST 发 JSON-RPC。无状态模式下不支持 GET 订阅，回 405：
-// 客户端把它当作服务端不提供事件流，返回一个马上结束的事件流的话，SDK 的客户端会每秒重连一次
-export function mcpRoutes(deps: Deps) {
+// MCP 走 Streamable HTTP：POST 发 JSON-RPC；无状态模式拒绝 GET 订阅回 405，避免客户端高频重连
+export function mcpRoutes(deps: Deps, entries: EntryService, credentials: CredentialService) {
   const app = new Hono<AppEnv>()
   app.use('/mcp', requireKey(deps))
   app.get('/mcp', (c) => c.json({ error: '不支持 GET 订阅' }, 405, { allow: 'POST' }))
-  app.all('/mcp', (c) =>
-    handleMcpRequest(
-      entryServiceForKey(deps, c.get('key')),
-      recallScopeForKey(deps, c.get('key')),
-      credentialServiceForKey(deps, c.get('key')),
-      c.req.raw,
-    ),
-  )
+  app.all('/mcp', (c) => handleMcpRequest(deps, c.get('key'), entries, credentials, c.req.raw))
   return app
 }

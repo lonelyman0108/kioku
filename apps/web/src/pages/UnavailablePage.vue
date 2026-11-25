@@ -2,8 +2,8 @@
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import EntryFrame from '../components/strata/EntryFrame.vue'
-import SectionHeading from '../components/strata/SectionHeading.vue'
+import EntryFrame from '../components/ui/EntryFrame.vue'
+import SectionHeading from '../components/ui/SectionHeading.vue'
 import { formatTime } from '../time'
 import { retryNavigation, retryTarget } from '../unavailable'
 

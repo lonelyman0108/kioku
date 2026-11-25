@@ -22,7 +22,7 @@ describe('文字标', () => {
   })
 
   it('登录页、初始化页、连接失败页的标题用文字标，不写产品名', () => {
-    expect(read('../components/strata/EntryFrame.vue')).toContain('<KiokuMark')
+    expect(read('../components/ui/EntryFrame.vue')).toContain('<KiokuMark')
     for (const page of ['LoginPage', 'SetupPage', 'UnavailablePage']) {
       const source = read(`../pages/${page}.vue`)
       expect(source).toContain('<EntryFrame')

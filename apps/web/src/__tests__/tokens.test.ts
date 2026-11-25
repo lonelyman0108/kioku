@@ -3,11 +3,9 @@ import { readFileSync } from 'node:fs'
 import colorsPlugin from '@nuxt/ui/runtime/plugins/colors.js?raw'
 import { describe, expect, it } from 'vitest'
 
-import { STACK } from '../components/strata/strata'
 import { theme } from '../theme'
 
-// 令牌写在 CSS 里，这里直接读文件核对对比度：改颜色时不用开浏览器就知道过没过线。
-// 不能 import ?raw：vitest 默认把 CSS 文件换成空字符串
+// 令牌写在 CSS 里，直接读文件核对对比度、色阶与零圆角约束
 const css = readFileSync(new URL('../assets/css/main.css', import.meta.url), 'utf8')
 
 function block(selector: string): Record<string, string> {
@@ -35,8 +33,6 @@ const contrast = (a: string | undefined, b: string | undefined) => {
   const [x, y] = [luminance(hex(a)), luminance(hex(b))]
   return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05)
 }
-
-// fg 按 share 的比例盖在 bg 上之后看到的颜色
 const over = (fg: string | undefined, share: number, bg: string | undefined) => {
   const under = hex(bg)
   const mixed = hex(fg).map((v, i) => Math.round(v * share + under[i]! * (1 - share)))
@@ -60,14 +56,14 @@ describe('Nuxt UI 的语义色', () => {
     }
   })
 
-  it('中性色写的是自定义色阶：插件运行时还要按名字拼变量，否则断言成 stone 的那一处就不成立了', () => {
+  it('中性色使用自定义 paper 色阶且运行时按名称拼变量', () => {
     expect(theme.colors.neutral).toBe('paper')
     expect(colorsPlugin).toMatch(/color-\$\{[^}]*value[^}]*\}-\$\{shade\}/)
   })
 })
 
 describe('文字链接', () => {
-  it('两种写法的下划线同一个透明度：text-primary 的规则和 UButton 的 link 变体', () => {
+  it('两种写法的下划线保持同一透明度', () => {
     expect(linkLine).toBeGreaterThan(0)
     expect(JSON.stringify(theme.button.compoundVariants)).toContain(
       `decoration-current/${linkLine * 100}`,
@@ -76,30 +72,15 @@ describe('文字链接', () => {
 })
 
 describe('两套主题的令牌', () => {
-  it('六个色带各一种颜色，原来的层色不留', () => {
-    expect(STACK).toHaveLength(6)
-    for (const name of ['base', 'owner', 'private', 'core', 'app', 'user', 'subject']) {
-      expect(css).not.toContain(`--layer-${name}`)
-      expect(css).not.toContain(`--access-${name}`)
-    }
-    for (const layer of STACK) {
-      expect(light[`--access-${layer}`]).toBeDefined()
-      expect(dark[`--access-${layer}`]).toBeDefined()
-    }
+  it('已移除旧版色带与权限格子令牌', () => {
+    expect(css).not.toMatch(/--layer-/)
+    expect(css).not.toMatch(/--access-/)
+    expect(css).not.toMatch(/--strata-/)
   })
 
-  it('编码用到的令牌两边都有', () => {
-    const names = (t: Record<string, string>) =>
-      Object.keys(t).filter((k) => k.startsWith('--strata-') || k.startsWith('--layer-'))
-    expect(names(dark).sort()).toEqual(names(light).sort())
-    for (const layer of STACK) {
-      expect(light[`--layer-${layer}`]).toBeDefined()
-      expect(dark[`--layer-${layer}`]).toBeDefined()
-    }
-  })
-
-  it('圆角归零', () => {
+  it('圆角归零且阴影清空', () => {
     expect(light['--ui-radius']).toMatch(/^0(rem|px)?$/)
+    expect(css).toContain('--shadow-*: initial;')
   })
 
   for (const [name, t] of Object.entries(themes)) {
@@ -116,45 +97,19 @@ describe('两套主题的令牌', () => {
         }
       })
 
-      it('次级文字在悬停的底色上也过线', () => {
+      it('次级文字在悬停底色上过 4.5:1', () => {
         expect(contrast(t['--ui-text-muted'], t['--ui-bg-elevated'])).toBeGreaterThanOrEqual(4.5)
       })
 
-      it('压在层色上的文字过线', () => {
-        for (const layer of STACK) {
-          expect(
-            contrast(t['--strata-on-layer'], t[`--layer-${layer}`]),
-            layer,
-          ).toBeGreaterThanOrEqual(4.5)
-        }
-      })
-
-      it('选中行与机密实心块上的文字过线', () => {
-        expect(contrast(t['--strata-on-selected'], t['--strata-selected'])).toBeGreaterThanOrEqual(
+      it('选中行与反色按钮上的文字过 4.5:1', () => {
+        expect(contrast(t['--ui-on-selected'], t['--ui-selected'])).toBeGreaterThanOrEqual(4.5)
+        expect(contrast(t['--ui-on-selected-muted'], t['--ui-selected'])).toBeGreaterThanOrEqual(
           4.5,
         )
-        expect(
-          contrast(t['--strata-on-selected-muted'], t['--strata-selected']),
-        ).toBeGreaterThanOrEqual(4.5)
-        expect(contrast(t['--strata-on-solid'], t['--strata-solid'])).toBeGreaterThanOrEqual(4.5)
+        expect(contrast(t['--ui-text-inverted'], t['--ui-bg-inverted'])).toBeGreaterThanOrEqual(4.5)
       })
 
-      it('只读的淡色和只能按坐标读取的实心块分得开，上面的文字过线', () => {
-        const share = parseInt(t['--strata-tint']!) / 100
-        for (const layer of STACK) {
-          const tint = over(t[`--layer-${layer}`], share, t['--ui-bg'])
-          expect(contrast(tint, t['--strata-explicit']), layer).toBeGreaterThanOrEqual(1.7)
-          expect(contrast(t['--ui-text-highlighted'], tint), layer).toBeGreaterThanOrEqual(4.5)
-        }
-        expect(contrast(t['--strata-on-solid'], t['--strata-explicit'])).toBeGreaterThanOrEqual(4.5)
-        expect(contrast(t['--strata-explicit'], t['--ui-bg'])).toBeGreaterThanOrEqual(1.5)
-      })
-
-      it('机密的实心块在页面底色上看得见', () => {
-        expect(contrast(t['--strata-solid'], t['--ui-bg'])).toBeGreaterThanOrEqual(1.85)
-      })
-
-      it('文字链接的下划线不低于 3:1：它是认出链接的唯一线索', () => {
+      it('文字链接的下划线不低于 3:1', () => {
         for (const text of [t['--ui-text'], t['--ui-text-muted']]) {
           const line = over(text, linkLine, t['--ui-bg'])
           expect(contrast(line, t['--ui-bg']), text).toBeGreaterThanOrEqual(3)
@@ -162,59 +117,20 @@ describe('两套主题的令牌', () => {
         const hovered = over(t['--ui-text'], linkLine, t['--ui-bg-elevated'])
         expect(contrast(hovered, t['--ui-bg-elevated'])).toBeGreaterThanOrEqual(3)
       })
-
-      it('反色按钮的文字过线', () => {
-        expect(contrast(t['--ui-text-inverted'], t['--ui-bg-inverted'])).toBeGreaterThanOrEqual(4.5)
-      })
     })
   }
 
-  // Nuxt UI 的语义色：浅色主题取 500，深色主题取 400，都会被当成文字用
   for (const color of ['brick', 'ochre', 'moss', 'lake']) {
-    it(`${color} 当文字用时过线`, () => {
+    it(`${color} 当文字用时过 4.5:1`, () => {
       expect(contrast(scale(color, 500), light['--ui-bg'])).toBeGreaterThanOrEqual(4.5)
       expect(contrast(scale(color, 400), dark['--ui-bg'])).toBeGreaterThanOrEqual(4.5)
     })
   }
 
-  it('主色是墨：浅色主题的 900、深色主题的 100，和正文同色', () => {
+  it('主色是墨：浅色主题 900、深色主题 100，和正文同色', () => {
     expect(light['--ui-primary']).toBe('var(--ui-color-primary-900)')
     expect(dark['--ui-primary']).toBe('var(--ui-color-primary-100)')
     expect(scale('ink', 900)!.toLowerCase()).toBe(light['--ui-text'])
     expect(scale('ink', 100)!.toLowerCase()).toBe(dark['--ui-text'])
-  })
-})
-
-describe('权限格子', () => {
-  // 明度（CIE L*）：色觉差异的人靠它分开满色、淡色、空白
-  const lightness = (color: string | undefined) => {
-    const y = luminance(hex(color))
-    return 116 * Math.cbrt(y) - 16
-  }
-  const share = (t: Record<string, string>) => Number(/(\d+)%/.exec(t['--strata-tint']!)![1]) / 100
-
-  it('每一层的满色、淡色、空白两两拉开：岩芯上没有文字', () => {
-    for (const [name, t] of Object.entries(themes)) {
-      for (const layer of STACK) {
-        const full = t[`--access-${layer}`]
-        const tint = over(full, share(t), t['--ui-bg'])
-        const label = `${name} ${layer}`
-        expect(Math.abs(lightness(full) - lightness(tint)), label).toBeGreaterThanOrEqual(11)
-        expect(Math.abs(lightness(tint) - lightness(t['--ui-bg'])), label).toBeGreaterThanOrEqual(
-          11,
-        )
-      }
-    }
-  })
-
-  it('读写格子上的文字过 4.5:1', () => {
-    for (const [name, t] of Object.entries(themes)) {
-      for (const layer of STACK) {
-        expect(
-          contrast(t['--strata-on-layer'], t[`--access-${layer}`]),
-          `${name} ${layer}`,
-        ).toBeGreaterThanOrEqual(4.5)
-      }
-    }
   })
 })

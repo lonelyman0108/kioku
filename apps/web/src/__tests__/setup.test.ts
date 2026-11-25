@@ -6,14 +6,13 @@ import { checkRows, lockedHint, setupFailure, summaryFacts } from '../setup'
 
 const ok: DatabaseCheck = {
   failure: null,
-  role: { name: 'kioku', superuser: false, bypassRls: false },
+  role: { name: 'kioku', superuser: false },
   extensions: [
     { name: 'vector', state: 'installed' },
     { name: 'zhparser', state: 'installed' },
   ],
   existing: 'empty',
   accounts: null,
-  circles: null,
   unrelatedTables: 0,
   problems: [],
   ready: true,
@@ -41,7 +40,7 @@ describe('初始化的数据库检查', () => {
     ])
   })
 
-  it('全部通过时逐项写「通过」', () => {
+  it('全部通过时逐项写通过', () => {
     const rows = checkRows(ok)
     expect(rows.map((r) => [r.label, r.value, r.verdict])).toEqual([
       ['连接', '成功', 'passed'],
@@ -52,10 +51,10 @@ describe('初始化的数据库检查', () => {
     ])
   })
 
-  it('超级用户、缺扩展、旧结构拦住；已有账号与其他表只提醒', () => {
+  it('缺扩展与旧架构结构拦住，已有账号与其他表提醒', () => {
     const rows = checkRows({
       ...ok,
-      role: { name: 'postgres', superuser: true, bypassRls: true },
+      role: { name: 'postgres', superuser: true },
       extensions: [
         { name: 'vector', state: 'available' },
         { name: 'zhparser', state: 'missing' },
@@ -63,7 +62,6 @@ describe('初始化的数据库检查', () => {
       existing: 'pre_baseline',
       unrelatedTables: 2,
       problems: [
-        { code: 'superuser' },
         { code: 'extension_not_installed', extension: 'vector' },
         { code: 'extension_missing', extension: 'zhparser' },
         { code: 'pre_baseline' },
@@ -71,49 +69,17 @@ describe('初始化的数据库检查', () => {
       ready: false,
     })
     const byKey = Object.fromEntries(rows.map((r) => [r.key, r]))
-    expect(byKey.role).toMatchObject({
-      value: 'postgres（角色是超级用户，会绕过行级安全）',
-      verdict: 'blocked',
-    })
-    expect(byKey.role!.detail).toContain('行级安全')
+    expect(byKey.role).toMatchObject({ value: 'postgres', verdict: 'passed' })
     expect(byKey['extension-vector']!.detail).toContain('CREATE EXTENSION vector')
     expect(byKey['extension-zhparser']!.detail).toContain('pgvector 与 zhparser')
     expect(byKey.existing).toMatchObject({ verdict: 'blocked' })
-    expect(byKey.existing!.detail).toContain('migrate-legacy --in-place')
     expect(byKey.unrelated).toMatchObject({ value: '2 张', verdict: 'notice' })
 
-    const existing = checkRows({ ...ok, existing: 'kioku', accounts: 3 }).find(
+    const existing = checkRows({ ...ok, existing: 'kioku', accounts: 1 }).find(
       (r) => r.key === 'existing',
     )
-    expect(existing).toMatchObject({ value: '已有 Kioku 的数据（3 个账号）', verdict: 'notice' })
+    expect(existing).toMatchObject({ value: '已有 Kioku 的数据（1 个账号）', verdict: 'notice' })
     expect(existing!.detail).toContain('将接入已有实例')
-  })
-
-  it('只执行过迁移、没有账号的库是空的 Kioku 库，照常初始化，不提醒接入已有实例', () => {
-    const existing = checkRows({ ...ok, existing: 'migrated', accounts: 0, circles: 0 }).find(
-      (r) => r.key === 'existing',
-    )
-    expect(existing).toEqual({
-      key: 'existing',
-      label: '已有数据',
-      value: '空的 Kioku 库',
-      verdict: 'passed',
-    })
-    // 有记忆圈、没有账号：不静默通过，写明数量与后果，但不拦
-    const orphan = checkRows({ ...ok, existing: 'kioku', accounts: 0, circles: 2 }).find(
-      (r) => r.key === 'existing',
-    )
-    expect(orphan).toMatchObject({
-      value: '已有 Kioku 的数据（2 个记忆圈，没有账号）',
-      verdict: 'notice',
-    })
-    expect(orphan!.detail).toContain('新建的管理员无法查看')
-    expect(orphan!.detail).toContain('无法把备份恢复到这个实例')
-    // 账号与记忆圈都有：按账号写，接入已有实例
-    const both = checkRows({ ...ok, existing: 'kioku', accounts: 1, circles: 3 }).find(
-      (r) => r.key === 'existing',
-    )
-    expect(both).toMatchObject({ value: '已有 Kioku 的数据（1 个账号）', verdict: 'notice' })
   })
 
   it('连接信息只说密码填没填，来源写在最前', () => {
@@ -153,21 +119,7 @@ describe('初始化的数据库检查', () => {
     ).toEqual({ message: '无法连接数据库：连接超时', check })
     expect(setupFailure(new Error('x'), '失败')).toEqual({ message: '失败', check: null })
   })
-})
 
-describe('哪一项拦住只看服务端给的问题', () => {
-  it('同样的事实，没有对应的问题就写通过', () => {
-    // 规则在服务端：这里不按扩展状态自己推断
-    const rows = checkRows({
-      ...ok,
-      extensions: [{ name: 'vector', state: 'available' }],
-      problems: [],
-    })
-    expect(rows.find((r) => r.key === 'extension-vector')).toMatchObject({ verdict: 'passed' })
-  })
-})
-
-describe('连上之后读库的结构失败', () => {
   it('权限不足单独一行，不说成连不上', () => {
     const rows = checkRows({
       ...ok,

@@ -63,8 +63,8 @@ const name = useId()
   background: var(--ui-bg-muted);
 }
 .segment.on {
-  background: var(--strata-selected);
-  color: var(--strata-on-selected);
+  background: var(--ui-selected);
+  color: var(--ui-on-selected);
   font-weight: 500;
 }
 .segment.disabled {
