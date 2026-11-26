@@ -434,7 +434,7 @@ function applyEdited() {
         :before="baseEntry?.content ?? ''"
         :after="effectiveProposedContent"
         :context="3"
-        :expand-step="12"
+        :expand-step="10"
         max-height="24rem"
       />
       <pre

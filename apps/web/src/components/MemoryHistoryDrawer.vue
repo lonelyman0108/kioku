@@ -348,11 +348,16 @@ watch(
   { immediate: true },
 )
 
+watch([activeItemId, baseItemId, () => props.shortId], () => {
+  diffContext.value = 'folded'
+})
+
 watch(open, (visible) => {
   if (!visible) {
     baseItemId.value = null
     activeItemId.value = null
     inspectTab.value = 'diff'
+    diffContext.value = 'folded'
     mobileDetailOpen.value = false
     searchInput.value = ''
     sourceFilter.value = 'all'
@@ -665,11 +670,22 @@ async function confirmRestore() {
                     class="split-toggle"
                   />
                   <SegmentedChoice
+                    v-if="diffViewerRef?.canToggleContext"
                     v-model="diffContext"
                     :items="DIFF_CONTEXT_OPTIONS"
                     label="上下文显示模式"
                     compact
                   />
+                  <UButton
+                    v-if="diffContext === 'folded' && diffViewerRef?.manualExpanded"
+                    size="xs"
+                    color="neutral"
+                    variant="ghost"
+                    :icon="icons.foldVertical"
+                    @click="diffViewerRef?.resetExpansion()"
+                  >
+                    重新折叠
+                  </UButton>
                 </template>
               </div>
 
@@ -763,7 +779,7 @@ async function confirmRestore() {
                   :after="inspectorAfter"
                   :show-toolbar="false"
                   :context="3"
-                  :expand-step="15"
+                  :expand-step="10"
                 />
                 <p v-else-if="inspectorFieldChanges.length" class="diff-empty-note">
                   本次仅调整属性，正文未改动。

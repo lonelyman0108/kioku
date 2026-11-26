@@ -211,6 +211,53 @@ export function findNearestMarkdownHeading(
   return null
 }
 
+// 计算默认折叠态可见行掩码：仅展开每处改动及其上下 context 行；无改动时全部可见
+export function buildDiffVisibilityMask(
+  lines: readonly NumberedDiffLine[],
+  hunkStarts: readonly number[],
+  context = 3,
+): boolean[] {
+  const total = lines.length
+  const mask = new Array<boolean>(total).fill(false)
+  if (!hunkStarts.length) {
+    mask.fill(true)
+    return mask
+  }
+  const safeContext = Math.max(0, Math.floor(context))
+  for (let i = 0; i < total; i++) {
+    if (lines[i]!.kind !== 'same') {
+      const from = Math.max(0, i - safeContext)
+      const to = Math.min(total - 1, i + safeContext)
+      for (let k = from; k <= to; k++) mask[k] = true
+    }
+  }
+  return mask
+}
+
+// 对指定省略区间按方向展开上下文（up 从底部向上、down 从顶部向下、all 全部展开）
+export function expandDiffGap(
+  visibleMask: readonly boolean[],
+  start: number,
+  end: number,
+  direction: 'up' | 'down' | 'all',
+  expandStep: number,
+): boolean[] {
+  const next = [...visibleMask]
+  const clampedStart = Math.max(0, start)
+  const clampedEnd = Math.min(next.length, end)
+  const safeStep = Math.max(1, Math.floor(expandStep))
+  if (direction === 'all') {
+    for (let i = clampedStart; i < clampedEnd; i++) next[i] = true
+  } else if (direction === 'up') {
+    const from = Math.max(clampedStart, clampedEnd - safeStep)
+    for (let i = from; i < clampedEnd; i++) next[i] = true
+  } else {
+    const to = Math.min(clampedEnd, clampedStart + safeStep)
+    for (let i = clampedStart; i < to; i++) next[i] = true
+  }
+  return next
+}
+
 // 按可见行掩码计算可交互折叠分段，支持在任意省略段向上/向下按需展开上下文
 export function buildDiffDisplayChunks(
   lines: readonly NumberedDiffLine[],
