@@ -11,29 +11,37 @@ const copy = useCopy()
 
 <template>
   <footer class="short-id-line">
-    <span class="short-id-label">{{ label }}</span>
-    <code class="short-id-value">{{ value }}</code>
-    <UButton
-      :icon="icons.copy"
-      size="xs"
-      color="neutral"
-      variant="ghost"
-      :aria-label="`复制${label}`"
-      @click="copy(value)"
-    />
+    <div class="short-id-inner">
+      <span class="short-id-label">{{ label }}</span>
+      <code class="short-id-value">{{ value }}</code>
+      <UButton
+        :icon="icons.copy"
+        size="xs"
+        color="neutral"
+        variant="ghost"
+        :aria-label="`复制${label}`"
+        @click="copy(value)"
+      />
+    </div>
   </footer>
 </template>
 
 <style scoped>
 .short-id-line {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 2px 10px;
+  flex: none;
   padding: 10px 28px 12px;
   border-top: 1px solid var(--ui-border);
   font-size: 14px;
   line-height: 1.5;
+}
+.short-id-inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 10px;
+  width: 100%;
+  max-width: var(--canvas-max, none);
+  margin-inline: auto;
 }
 .short-id-label {
   font-size: 12px;

@@ -628,7 +628,9 @@ onBeforeUnmount(() => {
     description="自动匹配并归并至既有记忆"
     :dismissible="!applyBusy && step !== 'loading'"
     :close="!applyBusy"
-    :ui="{ content: 'max-w-3xl sm:max-w-3xl' }"
+    :ui="{
+      content: step === 'preview' ? 'w-[92vw] max-w-5xl sm:max-w-5xl' : 'max-w-2xl sm:max-w-2xl',
+    }"
     @update:open="onModalOpenChange"
     @close:prevent="onClosePrevent"
   >
@@ -815,7 +817,7 @@ onBeforeUnmount(() => {
               }}</span>
             </div>
             <div class="noop-preview-scroll">
-              <MemoryContent :content="beforeContent" />
+              <MemoryContent width="full" :content="beforeContent" />
             </div>
           </div>
           <p v-if="error" class="text-sm text-error" role="alert">{{ error }}</p>
@@ -905,7 +907,7 @@ onBeforeUnmount(() => {
               :after="draftContent"
               :context="3"
               :expand-step="12"
-              max-height="20rem"
+              max-height="26rem"
               empty-text="正文无变更"
             />
           </div>

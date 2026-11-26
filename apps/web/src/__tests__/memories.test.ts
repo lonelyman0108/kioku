@@ -13,8 +13,10 @@ import diffViewer from '../components/ui/DiffViewer.vue?raw'
 import consoleSearch from '../composables/useConsoleSearch.ts?raw'
 import { icons } from '../icons'
 import consoleLayout from '../layouts/ConsoleLayout.vue?raw'
+import credentialsPage from '../pages/CredentialsPage.vue?raw'
 import inboxPage from '../pages/InboxPage.vue?raw'
 import memoriesPage from '../pages/MemoriesPage.vue?raw'
+import settingsPage from '../pages/SettingsPage.vue?raw'
 import themeSource from '../theme.ts?raw'
 
 const vueSources = import.meta.glob<string>('../**/*.{vue,ts}', {
@@ -38,9 +40,12 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(themeSource).toContain('focus-visible:ring-2')
   })
 
-  it('记忆页采用默认全宽清单、按需抽屉与一键全屏展开，并支持编辑态键盘保护与筛选互斥', () => {
+  it('记忆页采用默认居中清单、可拖动分隔栏与平滑展开抽屉，并支持编辑态键盘保护与筛选互斥', () => {
     expect(memoriesPage).not.toContain('grid-template-columns: 360px minmax(0, 1fr)')
-    expect(memoriesPage).toContain('clamp(360px, 40%, 520px) minmax(0, 1fr)')
+    expect(memoriesPage).toContain('var(--list-width, 380px) minmax(0, 1fr)')
+    expect(memoriesPage).toContain('role="separator"')
+    expect(memoriesPage).toContain('pane-splitter')
+    expect(memoriesPage).toContain('detail-reveal')
     expect(memoriesPage).toContain('is-peek')
     expect(memoriesPage).toContain('is-fullscreen')
     expect(memoriesPage).toContain('全屏展开')
@@ -115,20 +120,42 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(memoryEditor).toContain('拆出至变更说明')
     expect(memoryEditor).toContain('<SaveBar')
     expect(memoryContent).toContain(':deep(details)')
+    expect(memoryContent).toContain('width-full')
+    expect(memoryEditor).not.toContain('宽幅阅读')
+    expect(memoryEditor).toContain('--canvas-max')
+    expect(memoryEditor).toContain('edit-meta-grid')
     expect(entryLinksPanel).toContain('contextSnippet')
   })
 
-  it('列表保留近改副行与常驻水位，历史工作台与通用 DiffViewer 支持单双栏、词级高亮与按需展开上下文', () => {
+  it('宽屏采用居中画布对齐，待处理与设置采用双栏侧边导航结构，弹窗与抽屉幅面匹配内容密度', () => {
+    expect(consoleLayout).toContain('console-header-inner')
+    expect(memoriesPage).toContain('margin-inline: auto')
+    expect(credentialsPage).toContain('credentials-shell')
+    expect(credentialsPage).toContain('margin-inline: auto')
+    expect(inboxPage).toContain('inbox-workspace')
+    expect(inboxPage).toContain('inbox-rail')
+    expect(inboxPage).toContain('margin-inline: auto')
+    expect(settingsPage).toContain('settings-workspace')
+    expect(settingsPage).toContain('settings-vnav')
+    expect(settingsPage).toContain('margin-inline: auto')
+    expect(quickCaptureModal).toContain('max-w-5xl')
+    expect(hygieneSweepDrawer).toContain('max-w-[960px]')
+    expect(createMemoryModal).toContain('attrs-collapse')
+  })
+
+  it('列表保留近改副行与常驻水位，历史工作台与通用 DiffViewer 支持基准对比、词级高亮与按需展开上下文', () => {
     expect(memoryList).toContain('近改：')
     expect(memoryList).toContain('PINNED_CHAR_BUDGET')
     expect(memoryList).toContain('pinned-budget')
     expect(memoryList).not.toContain('.list-pane.is-compact .row-disclosure')
 
-    expect(memoryHistoryDrawer).toContain('max-w-6xl')
+    expect(memoryHistoryDrawer).toContain('max-w-[1640px]')
     expect(memoryHistoryDrawer).toContain('ring-2 ring-rule')
     expect(memoryHistoryDrawer).toContain('diffEntrySnapshots')
     expect(memoryHistoryDrawer).toContain('formatActorLabel')
-    expect(memoryHistoryDrawer).toContain('对比两版')
+    expect(memoryHistoryDrawer).toContain('对比基准')
+    expect(memoryHistoryDrawer).toContain('设为基准')
+    expect(memoryHistoryDrawer).not.toContain('选入对比')
     expect(memoryHistoryDrawer).toContain('属性变动')
     expect(memoryHistoryDrawer).toContain('<DiffViewer')
 

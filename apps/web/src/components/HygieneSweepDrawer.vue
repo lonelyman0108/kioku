@@ -47,6 +47,13 @@ const expandedPreviewIds = ref<string[]>([])
 const previewLoading = ref<Record<string, boolean>>({})
 const previewDiffs = ref<Record<string, { before: string; after: string }>>({})
 const previewErrors = ref<Record<string, string>>({})
+const candidatesSectionRef = ref<HTMLElement | null>(null)
+const truncatedSectionRef = ref<HTMLElement | null>(null)
+const obsoleteSectionRef = ref<HTMLElement | null>(null)
+
+function jumpToSection(el: HTMLElement | null) {
+  el?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
 
 // 按候选清洗项在本地推演改动后文本，供抽屉内就地展示行级预览
 function computeCandidatePreview(
@@ -225,7 +232,7 @@ async function applySelected() {
     title="结构体检与预清洗"
     description="无需对话模型，零误差检查重复标题、旧版关键词行、断链引用与异常记忆"
     :dismissible="!applying"
-    :ui="{ content: 'max-w-3xl sm:max-w-3xl ring-2 ring-rule' }"
+    :ui="{ content: 'w-[min(92vw,960px)] max-w-[960px] sm:max-w-[960px] ring-2 ring-rule' }"
   >
     <template #body>
       <ReadFailureNote v-if="previewQuery.isError.value" :query="previewQuery" />
@@ -235,15 +242,24 @@ async function applySelected() {
       </div>
 
       <div v-else-if="report" class="sweep-body">
-        <!-- 扫描概览 -->
+        <!-- 扫描概览（有结果项支持点击直达对应分组） -->
         <div class="sweep-stats tabular-nums">
           <div class="stat-cell">
             <span class="stat-label">已扫描记忆</span>
             <span class="stat-val">{{ report.totalScanned }} 条</span>
           </div>
-          <div class="stat-cell">
+          <button
+            v-if="candidates.length"
+            type="button"
+            class="stat-cell is-clickable"
+            @click="jumpToSection(candidatesSectionRef)"
+          >
             <span class="stat-label">可确定性预清洗</span>
             <span class="stat-val">{{ candidates.length }} 条</span>
+          </button>
+          <div v-else class="stat-cell">
+            <span class="stat-label">可确定性预清洗</span>
+            <span class="stat-val">0 条</span>
           </div>
           <div class="stat-cell">
             <span class="stat-label">待规范标题</span>
@@ -251,7 +267,12 @@ async function applySelected() {
               {{ report.dirtyTitleCount }} 条
             </span>
           </div>
-          <div class="stat-cell">
+          <button
+            v-if="suspectTruncated.length + suspectObsolete.length > 0"
+            type="button"
+            class="stat-cell is-clickable"
+            @click="jumpToSection(truncatedSectionRef ?? obsoleteSectionRef)"
+          >
             <span class="stat-label">异常标注</span>
             <span
               class="stat-val"
@@ -262,6 +283,10 @@ async function applySelected() {
             >
               {{ suspectTruncated.length + suspectObsolete.length }} 条
             </span>
+          </button>
+          <div v-else class="stat-cell">
+            <span class="stat-label">异常标注</span>
+            <span class="stat-val">0 条</span>
           </div>
         </div>
 
@@ -293,7 +318,7 @@ async function applySelected() {
         />
 
         <!-- 确定性预清洗项 -->
-        <section v-if="candidates.length" class="sweep-section">
+        <section v-if="candidates.length" ref="candidatesSectionRef" class="sweep-section">
           <SectionHeading title="确定性预清洗项" :level="3">
             <template #actions>
               <UButton
@@ -375,8 +400,7 @@ async function applySelected() {
                   :after="previewDiffs[item.shortId]!.after"
                   :context="2"
                   :expand-step="10"
-                  :allow-split="false"
-                  max-height="16rem"
+                  max-height="18rem"
                 />
               </div>
 
@@ -397,7 +421,7 @@ async function applySelected() {
         </section>
 
         <!-- 疑似残缺记忆 -->
-        <section v-if="suspectTruncated.length" class="sweep-section">
+        <section v-if="suspectTruncated.length" ref="truncatedSectionRef" class="sweep-section">
           <SectionHeading title="疑似残缺记忆" :level="3" />
           <p class="text-xs text-muted">
             正文篇幅异常偏短或可能被局部片段覆盖，建议打开记忆查看版本历史确认。
@@ -424,7 +448,7 @@ async function applySelected() {
         </section>
 
         <!-- 疑似过时记忆 -->
-        <section v-if="suspectObsolete.length" class="sweep-section">
+        <section v-if="suspectObsolete.length" ref="obsoleteSectionRef" class="sweep-section">
           <SectionHeading title="疑似过时记忆" :level="3" />
           <p class="text-xs text-muted">
             疑似阶段性记录或已停用记忆，建议核实后决定保留、更新或移入回收站。
@@ -473,6 +497,13 @@ async function applySelected() {
   gap: 2px;
   padding: 10px 12px;
   background: var(--ui-bg-muted);
+  text-align: left;
+}
+.stat-cell.is-clickable {
+  cursor: pointer;
+}
+.stat-cell.is-clickable:hover {
+  background: var(--ui-bg-elevated);
 }
 .stat-label {
   font-size: 12px;

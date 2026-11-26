@@ -113,8 +113,9 @@ function onFilterTabKeydown(event: KeyboardEvent, index: number) {
   const tabs = filterTabs.value
   if (!tabs.length) return
   let nextIdx = -1
-  if (event.key === 'ArrowRight') nextIdx = (index + 1) % tabs.length
-  else if (event.key === 'ArrowLeft') nextIdx = (index - 1 + tabs.length) % tabs.length
+  if (event.key === 'ArrowRight' || event.key === 'ArrowDown') nextIdx = (index + 1) % tabs.length
+  else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp')
+    nextIdx = (index - 1 + tabs.length) % tabs.length
   else if (event.key === 'Home') nextIdx = 0
   else if (event.key === 'End') nextIdx = tabs.length - 1
   if (nextIdx < 0) return
@@ -426,220 +427,275 @@ async function applyQuickTableSelected() {
           </template>
         </NoteLine>
 
-        <div v-if="state" class="status-strip">
-          <span>定时整理：{{ state.enabled ? `每 ${state.intervalHours} 小时` : '已关闭' }}</span>
-          <span v-if="state.running" class="text-highlighted font-medium">正在整理…</span>
-          <span v-else-if="state.lastRunAt">
-            上次整理：
-            <time :datetime="state.lastRunAt" :title="formatTime(state.lastRunAt)">
-              {{ formatRelative(state.lastRunAt) }}
-            </time>
-            <template v-if="state.lastOutcome">
-              （{{ dreamOutcomeLabels[state.lastOutcome] }}）
-            </template>
-          </span>
-          <span v-else>尚未执行过整理</span>
-          <span v-if="state.lastError" class="text-error">错误：{{ state.lastError }}</span>
-        </div>
+        <div class="inbox-workspace">
+          <!-- 左侧整理状态与分类筛选轨（宽屏固定侧栏，窄屏收敛至主区上方） -->
+          <aside class="inbox-rail" aria-label="整理状态与建议筛选">
+            <section class="rail-card">
+              <div class="rail-card-head">
+                <span class="rail-card-title">整理状态</span>
+                <span
+                  v-if="state"
+                  class="rail-state-tag"
+                  :class="{ 'is-active': state.running || state.enabled }"
+                >
+                  {{ state.running ? '整理中' : state.enabled ? '定时开启' : '定时关闭' }}
+                </span>
+              </div>
 
-        <!-- 建议类型分段筛选与纯标题速审表切换 -->
-        <div v-if="items.length" class="filter-bar">
-          <div class="kind-tabs" role="tablist" aria-label="按建议类型筛选">
-            <button
-              v-for="(tab, idx) in filterTabs"
-              :key="tab.value"
-              type="button"
-              role="tab"
-              class="kind-tab"
-              :class="{ active: !quickTableMode && kindFilter === tab.value }"
-              :aria-selected="!quickTableMode && kindFilter === tab.value"
-              :tabindex="
-                (!quickTableMode && kindFilter === tab.value) || (quickTableMode && idx === 0)
-                  ? 0
-                  : -1
-              "
-              @click="((quickTableMode = false), (kindFilter = tab.value))"
-              @keydown="onFilterTabKeydown($event, idx)"
-            >
-              <span>{{ tab.label }}</span>
-              <span class="kind-tab-num tabular-nums">{{ tab.count }}</span>
-            </button>
-          </div>
+              <dl class="rail-stats">
+                <div class="rail-stat-row">
+                  <dt>待处理建议</dt>
+                  <dd class="tabular-nums" :class="{ 'is-count-hot': items.length > 0 }">
+                    {{ items.length }} 条
+                  </dd>
+                </div>
+                <div v-if="state" class="rail-stat-row">
+                  <dt>定时整理</dt>
+                  <dd>{{ state.enabled ? `每 ${state.intervalHours} 小时` : '已关闭' }}</dd>
+                </div>
+                <div v-if="state" class="rail-stat-row">
+                  <dt>上次整理</dt>
+                  <dd>
+                    <span v-if="state.running" class="text-highlighted font-medium">正在整理…</span>
+                    <template v-else-if="state.lastRunAt">
+                      <time :datetime="state.lastRunAt" :title="formatTime(state.lastRunAt)">
+                        {{ formatRelative(state.lastRunAt) }}
+                      </time>
+                      <span v-if="state.lastOutcome" class="rail-outcome">
+                        （{{ dreamOutcomeLabels[state.lastOutcome] }}）
+                      </span>
+                    </template>
+                    <span v-else>尚未执行过</span>
+                  </dd>
+                </div>
+                <div v-if="me.data.value" class="rail-stat-row">
+                  <dt>对话模型</dt>
+                  <dd>
+                    <span v-if="me.data.value.hasChatModel">已启用</span>
+                    <RouterLink v-else :to="settingsRoute('models')" class="text-primary">
+                      未配置
+                    </RouterLink>
+                  </dd>
+                </div>
+              </dl>
 
-          <UButton
-            v-if="canUseQuickTable"
-            size="xs"
-            :color="quickTableMode ? 'primary' : 'neutral'"
-            :variant="quickTableMode ? 'solid' : 'outline'"
-            :icon="icons.table"
-            @click="quickTableMode = !quickTableMode"
-          >
-            {{ quickTableMode ? '返回卡片视图' : `纯标题速审表（${titleOnlyItems.length} 条）` }}
-          </UButton>
-        </div>
+              <p v-if="state?.lastError" class="rail-error">错误：{{ state.lastError }}</p>
+            </section>
 
-        <div v-if="inboxQuery.isPending.value" class="space-y-4">
-          <USkeleton v-for="n in 3" :key="n" class="h-36 w-full" />
-        </div>
+            <!-- 建议类型分段筛选与纯标题速审表切换 -->
+            <section v-if="items.length" class="rail-filter-card">
+              <div class="rail-card-head">
+                <span class="rail-card-title">建议分类</span>
+              </div>
+              <div class="kind-tabs" role="tablist" aria-label="按建议类型筛选">
+                <button
+                  v-for="(tab, idx) in filterTabs"
+                  :key="tab.value"
+                  type="button"
+                  role="tab"
+                  class="kind-tab"
+                  :class="{ active: !quickTableMode && kindFilter === tab.value }"
+                  :aria-selected="!quickTableMode && kindFilter === tab.value"
+                  :tabindex="
+                    (!quickTableMode && kindFilter === tab.value) || (quickTableMode && idx === 0)
+                      ? 0
+                      : -1
+                  "
+                  @click="((quickTableMode = false), (kindFilter = tab.value))"
+                  @keydown="onFilterTabKeydown($event, idx)"
+                >
+                  <span>{{ tab.label }}</span>
+                  <span class="kind-tab-num tabular-nums">{{ tab.count }}</span>
+                </button>
+              </div>
 
-        <!-- 纯标题速审表 -->
-        <section v-else-if="quickTableMode && canUseQuickTable" class="quick-table-panel">
-          <div class="quick-table-head">
-            <span class="text-xs text-muted">
-              以下建议仅调整标题或现行概要，不改动正文主体；原有内容保留在版本历史中，可随时恢复。
-            </span>
-            <div class="quick-table-actions">
-              <UButton
-                size="xs"
-                color="neutral"
-                variant="ghost"
-                :disabled="batchBusy"
-                @click="toggleTableAll"
+              <div v-if="canUseQuickTable" class="rail-quick-switch">
+                <UButton
+                  size="xs"
+                  :color="quickTableMode ? 'primary' : 'neutral'"
+                  :variant="quickTableMode ? 'solid' : 'outline'"
+                  :icon="icons.table"
+                  block
+                  @click="quickTableMode = !quickTableMode"
+                >
+                  {{
+                    quickTableMode ? '返回卡片视图' : `纯标题速审表（${titleOnlyItems.length} 条）`
+                  }}
+                </UButton>
+              </div>
+            </section>
+          </aside>
+
+          <!-- 右侧主审阅流 -->
+          <div class="inbox-main">
+            <div v-if="inboxQuery.isPending.value" class="space-y-4">
+              <USkeleton v-for="n in 3" :key="n" class="h-36 w-full" />
+            </div>
+
+            <!-- 纯标题速审表 -->
+            <section v-else-if="quickTableMode && canUseQuickTable" class="quick-table-panel">
+              <div class="quick-table-head">
+                <span class="text-xs text-muted">
+                  以下建议仅调整标题或现行概要，不改动正文主体；原有内容保留在版本历史中，可随时恢复。
+                </span>
+                <div class="quick-table-actions">
+                  <UButton
+                    size="xs"
+                    color="neutral"
+                    variant="ghost"
+                    :disabled="batchBusy"
+                    @click="toggleTableAll"
+                  >
+                    {{ allTableSelected ? '取消全选' : '全选' }}
+                  </UButton>
+                  <UButton
+                    size="xs"
+                    :icon="icons.listChecks"
+                    :loading="batchBusy"
+                    :disabled="!selectedTableIds.length || busyId !== null"
+                    @click="applyQuickTableSelected"
+                  >
+                    批量应用所选（{{ selectedTableIds.length }} 条）
+                  </UButton>
+                </div>
+              </div>
+
+              <div class="quick-table-scroll">
+                <table class="quick-table">
+                  <thead>
+                    <tr>
+                      <th class="col-check">
+                        <input
+                          type="checkbox"
+                          aria-label="全选纯标题规范建议"
+                          :checked="allTableSelected"
+                          :disabled="batchBusy"
+                          @change="toggleTableAll"
+                        />
+                      </th>
+                      <th>记忆</th>
+                      <th>旧标题 → 新短标题与现行概要</th>
+                      <th class="col-ops">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="s in titleOnlyItems" :key="s.id">
+                      <td class="col-check">
+                        <input
+                          type="checkbox"
+                          :aria-label="`选择 ${baseEntryOf(s)?.title ?? s.id}`"
+                          :checked="selectedTableIds.includes(s.id)"
+                          :disabled="batchBusy"
+                          @change="toggleTableRow(s.id)"
+                        />
+                      </td>
+                      <td class="col-entry">
+                        <RouterLink
+                          v-if="baseEntryOf(s)"
+                          :to="entryRoute(baseEntryOf(s)!.shortId)"
+                          class="text-primary font-mono text-xs"
+                        >
+                          {{ baseEntryOf(s)!.shortId }}
+                        </RouterLink>
+                        <span v-if="baseEntryOf(s)?.isPinned" class="mini-pill">常驻</span>
+                      </td>
+                      <td class="col-diff">
+                        <div class="table-title-diff">
+                          <span class="table-old">{{ baseEntryOf(s)?.title }}</span>
+                          <UIcon :name="icons.inherits" class="table-arrow" aria-hidden="true" />
+                          <span class="table-new">{{
+                            s.proposedTitle ?? baseEntryOf(s)?.title
+                          }}</span>
+                        </div>
+                        <p v-if="s.proposedSummary?.trim()" class="table-summary">
+                          概要：{{ s.proposedSummary }}
+                        </p>
+                      </td>
+                      <td class="col-ops">
+                        <UButton
+                          size="xs"
+                          color="neutral"
+                          variant="ghost"
+                          :disabled="batchBusy || busyId !== null"
+                          @click="onDismiss(s.id)"
+                        >
+                          忽略
+                        </UButton>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <!-- 常规卡片列表 -->
+            <div v-else-if="filteredItems.length" class="card-list">
+              <DreamSuggestionCard
+                v-for="item in filteredItems"
+                :key="item.id"
+                :suggestion="item"
+                :busy="busyId === item.id"
+                :disabled="batchBusy || (busyId !== null && busyId !== item.id)"
+                @apply="onApply"
+                @dismiss="onDismiss"
+              />
+            </div>
+
+            <div v-else-if="items.length && !filteredItems.length" class="empty-frame">
+              <EmptyState
+                title="该分类暂无待处理建议"
+                description="可切换其他建议分类，或查看全部待处理建议。"
               >
-                {{ allTableSelected ? '取消全选' : '全选' }}
-              </UButton>
-              <UButton
-                size="xs"
-                :icon="icons.listChecks"
-                :loading="batchBusy"
-                :disabled="!selectedTableIds.length || busyId !== null"
-                @click="applyQuickTableSelected"
+                <template #actions>
+                  <UButton size="sm" color="neutral" variant="outline" @click="kindFilter = 'all'">
+                    查看全部
+                  </UButton>
+                </template>
+              </EmptyState>
+            </div>
+
+            <div v-else-if="!inboxQuery.isError.value" class="empty-frame">
+              <EmptyState
+                title="暂无待处理建议"
+                description="会话摘要与记忆库变动累积后，定时整理或手动触发会在此生成建议。"
               >
-                批量应用所选（{{ selectedTableIds.length }} 条）
-              </UButton>
+                <template #actions>
+                  <UButton
+                    size="sm"
+                    color="neutral"
+                    variant="outline"
+                    :icon="icons.shieldCheck"
+                    @click="sweepOpen = true"
+                  >
+                    结构体检与预清洗
+                  </UButton>
+                  <UButton
+                    v-if="me.data.value?.hasChatModel"
+                    size="sm"
+                    variant="outline"
+                    :icon="icons.tidy"
+                    :loading="triggeringMode === 'tidy' || Boolean(state?.running)"
+                    :disabled="Boolean(triggeringMode)"
+                    @click="triggerDream('tidy')"
+                  >
+                    存量规范整理
+                  </UButton>
+                  <UButton
+                    v-if="me.data.value?.hasChatModel"
+                    size="sm"
+                    variant="outline"
+                    :icon="icons.sparkles"
+                    :loading="triggeringMode === 'standard' || Boolean(state?.running)"
+                    :disabled="Boolean(triggeringMode)"
+                    @click="triggerDream('standard')"
+                  >
+                    立即整理
+                  </UButton>
+                </template>
+              </EmptyState>
             </div>
           </div>
-
-          <div class="quick-table-scroll">
-            <table class="quick-table">
-              <thead>
-                <tr>
-                  <th class="col-check">
-                    <input
-                      type="checkbox"
-                      aria-label="全选纯标题规范建议"
-                      :checked="allTableSelected"
-                      :disabled="batchBusy"
-                      @change="toggleTableAll"
-                    />
-                  </th>
-                  <th>记忆</th>
-                  <th>旧标题 → 新短标题与现行概要</th>
-                  <th class="col-ops">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="s in titleOnlyItems" :key="s.id">
-                  <td class="col-check">
-                    <input
-                      type="checkbox"
-                      :aria-label="`选择 ${baseEntryOf(s)?.title ?? s.id}`"
-                      :checked="selectedTableIds.includes(s.id)"
-                      :disabled="batchBusy"
-                      @change="toggleTableRow(s.id)"
-                    />
-                  </td>
-                  <td class="col-entry">
-                    <RouterLink
-                      v-if="baseEntryOf(s)"
-                      :to="entryRoute(baseEntryOf(s)!.shortId)"
-                      class="text-primary font-mono text-xs"
-                    >
-                      {{ baseEntryOf(s)!.shortId }}
-                    </RouterLink>
-                    <span v-if="baseEntryOf(s)?.isPinned" class="mini-pill">常驻</span>
-                  </td>
-                  <td class="col-diff">
-                    <div class="table-title-diff">
-                      <span class="table-old">{{ baseEntryOf(s)?.title }}</span>
-                      <UIcon :name="icons.inherits" class="table-arrow" aria-hidden="true" />
-                      <span class="table-new">{{ s.proposedTitle ?? baseEntryOf(s)?.title }}</span>
-                    </div>
-                    <p v-if="s.proposedSummary?.trim()" class="table-summary">
-                      概要：{{ s.proposedSummary }}
-                    </p>
-                  </td>
-                  <td class="col-ops">
-                    <UButton
-                      size="xs"
-                      color="neutral"
-                      variant="ghost"
-                      :disabled="batchBusy || busyId !== null"
-                      @click="onDismiss(s.id)"
-                    >
-                      忽略
-                    </UButton>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
-
-        <!-- 常规卡片列表 -->
-        <div v-else-if="filteredItems.length" class="card-list">
-          <DreamSuggestionCard
-            v-for="item in filteredItems"
-            :key="item.id"
-            :suggestion="item"
-            :busy="busyId === item.id"
-            :disabled="batchBusy || (busyId !== null && busyId !== item.id)"
-            @apply="onApply"
-            @dismiss="onDismiss"
-          />
         </div>
-
-        <EmptyState
-          v-else-if="items.length && !filteredItems.length"
-          title="该分类暂无待处理建议"
-          description="可切换其他建议分类，或查看全部待处理建议。"
-        >
-          <template #actions>
-            <UButton size="sm" color="neutral" variant="outline" @click="kindFilter = 'all'">
-              查看全部
-            </UButton>
-          </template>
-        </EmptyState>
-
-        <EmptyState
-          v-else-if="!inboxQuery.isError.value"
-          title="暂无待处理建议"
-          description="会话摘要与记忆库变动累积后，定时整理或手动触发会在此生成建议。"
-        >
-          <template #actions>
-            <UButton
-              size="sm"
-              color="neutral"
-              variant="outline"
-              :icon="icons.shieldCheck"
-              @click="sweepOpen = true"
-            >
-              结构体检与预清洗
-            </UButton>
-            <UButton
-              v-if="me.data.value?.hasChatModel"
-              size="sm"
-              variant="outline"
-              :icon="icons.tidy"
-              :loading="triggeringMode === 'tidy' || Boolean(state?.running)"
-              :disabled="Boolean(triggeringMode)"
-              @click="triggerDream('tidy')"
-            >
-              存量规范整理
-            </UButton>
-            <UButton
-              v-if="me.data.value?.hasChatModel"
-              size="sm"
-              variant="outline"
-              :icon="icons.sparkles"
-              :loading="triggeringMode === 'standard' || Boolean(state?.running)"
-              :disabled="Boolean(triggeringMode)"
-              @click="triggerDream('standard')"
-            >
-              立即整理
-            </UButton>
-          </template>
-        </EmptyState>
       </div>
     </div>
 
@@ -654,51 +710,131 @@ async function applyQuickTableSelected() {
   overflow-y: auto;
 }
 .inbox-shell {
-  max-width: 58rem;
+  width: 100%;
+  max-width: 80rem;
+  margin-inline: auto;
 }
 .inbox-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
   padding: 0 32px 48px;
 }
-.status-strip {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 18px;
-  margin-bottom: 14px;
-  padding: 8px 0;
-  border-top: 1px solid var(--ui-rule);
-  border-bottom: 1px solid var(--ui-border);
-  font-size: 13px;
-  color: var(--ui-text-muted);
+.inbox-workspace {
+  display: grid;
+  grid-template-columns: 248px minmax(0, 1fr);
+  gap: 28px;
+  align-items: start;
 }
-.filter-bar {
+.inbox-rail {
+  position: sticky;
+  top: 20px;
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 14px;
+}
+.rail-card,
+.rail-filter-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--ui-border-accented);
+  background: var(--ui-bg-muted);
+}
+.rail-card-head {
+  display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 16px;
+  gap: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--ui-rule);
+}
+.rail-card-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ui-text-highlighted);
+}
+.rail-state-tag {
+  padding: 0 5px;
+  border: 1px solid var(--ui-border-accented);
+  background: var(--ui-bg);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ui-text-muted);
+}
+.rail-state-tag.is-active {
+  border-color: var(--ui-rule);
+  color: var(--ui-text-highlighted);
+}
+.rail-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  font-size: 13px;
+}
+.rail-stat-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.rail-stat-row dt {
+  flex: none;
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.rail-stat-row dd {
+  min-width: 0;
+  text-align: right;
+  color: var(--ui-text);
+  overflow-wrap: anywhere;
+}
+.rail-stat-row dd.is-count-hot {
+  font-weight: 600;
+  color: var(--ui-error);
+}
+.rail-outcome {
+  color: var(--ui-text-muted);
+}
+.rail-error {
+  padding: 6px 8px;
+  border: 1px solid var(--ui-error);
+  background: var(--ui-bg);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ui-error);
+  overflow-wrap: anywhere;
+}
+.rail-quick-switch {
+  padding-top: 8px;
+  border-top: 1px solid var(--ui-border);
+}
+.inbox-main {
+  min-width: 0;
+}
+.empty-frame {
+  border: 1px dashed var(--ui-border-accented);
+  background: var(--ui-bg-bright);
+  padding: 12px 16px;
 }
 .kind-tabs {
-  display: inline-flex;
-  align-items: stretch;
-  max-width: 100%;
-  overflow-x: auto;
-  border: 1px solid var(--ui-border-accented);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 .kind-tab {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 6px;
-  height: 28px;
-  padding: 0 10px;
-  border-right: 1px solid var(--ui-border);
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border-left: 2px solid transparent;
   font-size: 13px;
   color: var(--ui-text-muted);
   white-space: nowrap;
   cursor: pointer;
-}
-.kind-tab:last-child {
-  border-right: 0;
 }
 .kind-tab:hover {
   background: var(--ui-bg-elevated);
@@ -708,6 +844,7 @@ async function applyQuickTableSelected() {
   color: var(--ui-text-muted);
 }
 .kind-tab.active {
+  border-left-color: var(--ui-rule);
   background: var(--ui-selected);
   color: var(--ui-on-selected);
   font-weight: 500;
@@ -823,6 +960,29 @@ async function applyQuickTableSelected() {
 @media (max-width: 1023.98px) {
   .inbox-body {
     padding: 0 16px 36px;
+  }
+  .inbox-workspace {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
+  .inbox-rail {
+    position: static;
+  }
+  .kind-tabs {
+    flex-direction: row;
+    overflow-x: auto;
+    gap: 0;
+    border: 1px solid var(--ui-border-accented);
+  }
+  .kind-tab {
+    width: auto;
+    height: 28px;
+    padding: 0 10px;
+    border-left: 0;
+    border-right: 1px solid var(--ui-border);
+  }
+  .kind-tab:last-child {
+    border-right: 0;
   }
 }
 </style>

@@ -3,11 +3,19 @@ import { computed, ref } from 'vue'
 
 import { renderMarkdown, type CredentialLinks, type WikiLinkTargets } from '../markdown'
 
-const props = defineProps<{
-  content: string
-  credentials?: CredentialLinks | null
-  wikiLinks?: WikiLinkTargets | null
-}>()
+const props = withDefaults(
+  defineProps<{
+    content: string
+    credentials?: CredentialLinks | null
+    wikiLinks?: WikiLinkTargets | null
+    width?: 'reading' | 'full'
+  }>(),
+  {
+    credentials: null,
+    wikiLinks: null,
+    width: 'reading',
+  },
+)
 const emit = defineEmits<{ open: [shortId: string]; credential: [slug: string] }>()
 
 const rootRef = ref<HTMLElement | null>(null)
@@ -62,16 +70,26 @@ function onClick(event: MouseEvent) {
 </script>
 
 <template>
-  <!-- eslint-disable-next-line vue/no-v-html -- 已经过 DOMPurify 清洗，见 markdown.ts -->
-  <div ref="rootRef" class="kioku-markdown" @click="onClick" v-html="html" />
+  <!-- eslint-disable vue/no-v-html -- 已经过 DOMPurify 清洗，见 markdown.ts -->
+  <div
+    ref="rootRef"
+    class="kioku-markdown"
+    :class="`width-${width}`"
+    @click="onClick"
+    v-html="html"
+  />
+  <!-- eslint-enable vue/no-v-html -->
 </template>
 
 <style scoped>
 .kioku-markdown {
-  max-width: 42em;
+  max-width: 58em;
   font-size: 15px;
   line-height: 1.85;
   overflow-wrap: anywhere;
+}
+.kioku-markdown.width-full {
+  max-width: none;
 }
 .kioku-markdown :deep(> :first-child) {
   margin-top: 0;

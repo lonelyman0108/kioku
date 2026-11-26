@@ -163,120 +163,122 @@ provide(LOGOUT, logout)
 
 <template>
   <UDashboardGroup class="flex-col">
-    <header
-      class="flex h-13 shrink-0 items-stretch gap-4 border-b border-rule px-4 min-[1121px]:gap-6 min-[1121px]:px-8"
-    >
-      <RouterLink :to="{ name: 'memories' }" class="flex shrink-0 items-center">
-        <KiokuMark />
-      </RouterLink>
-
-      <nav class="flex shrink-0 items-stretch max-[1024px]:hidden" aria-label="主导航">
-        <RouterLink
-          v-for="item in navItems"
-          :key="item.routeName"
-          :to="item.to"
-          :aria-current="isCurrent(item) ? 'page' : undefined"
-          class="nav-link flex items-center gap-1.5 px-2.5 whitespace-nowrap"
-        >
-          <UIcon :name="item.icon" class="nav-icon" />
-          {{ item.label }}
-          <span v-if="item.count" class="nav-count">
-            {{ item.count }}<span class="sr-only"> 项</span>
-          </span>
+    <header class="shrink-0 border-b border-rule">
+      <div
+        class="console-header-inner flex h-13 items-stretch gap-4 px-4 min-[1121px]:gap-6 min-[1121px]:px-8"
+      >
+        <RouterLink :to="{ name: 'memories' }" class="flex shrink-0 items-center">
+          <KiokuMark />
         </RouterLink>
-      </nav>
 
-      <div class="flex min-w-0 flex-1 items-center justify-end gap-1.5">
-        <UDashboardSearchButton
-          label="搜索"
-          aria-label="搜索"
-          color="neutral"
-          class="shrink-0"
-          :ui="{
-            label: 'max-[1120px]:hidden',
-            trailing: 'hidden min-[1024px]:flex items-center gap-0.5 ms-1',
-          }"
-        />
-        <div class="flex min-w-0 items-center max-[1024px]:hidden">
-          <UDropdownMenu
-            :items="userMenu"
-            :content="{ align: 'end' }"
-            :ui="{ content: 'min-w-56 max-w-80' }"
+        <nav class="flex shrink-0 items-stretch max-[1024px]:hidden" aria-label="主导航">
+          <RouterLink
+            v-for="item in navItems"
+            :key="item.routeName"
+            :to="item.to"
+            :aria-current="isCurrent(item) ? 'page' : undefined"
+            class="nav-link flex items-center gap-1.5 px-2.5 whitespace-nowrap"
+          >
+            <UIcon :name="item.icon" class="nav-icon" />
+            {{ item.label }}
+            <span v-if="item.count" class="nav-count">
+              {{ item.count }}<span class="sr-only"> 项</span>
+            </span>
+          </RouterLink>
+        </nav>
+
+        <div class="flex min-w-0 flex-1 items-center justify-end gap-1.5">
+          <UDashboardSearchButton
+            label="搜索"
+            aria-label="搜索"
+            color="neutral"
+            class="shrink-0"
+            :ui="{
+              label: 'max-[1120px]:hidden',
+              trailing: 'hidden min-[1024px]:flex items-center gap-0.5 ms-1',
+            }"
+          />
+          <div class="flex min-w-0 items-center max-[1024px]:hidden">
+            <UDropdownMenu
+              :items="userMenu"
+              :content="{ align: 'end' }"
+              :ui="{ content: 'min-w-56 max-w-80' }"
+            >
+              <UButton
+                ref="accountButton"
+                :label="displayName"
+                :title="displayName"
+                :trailing-icon="icons.chevronDown"
+                color="neutral"
+                variant="ghost"
+                class="max-w-48 min-w-0"
+                aria-label="账号菜单"
+              />
+            </UDropdownMenu>
+          </div>
+
+          <USlideover
+            v-model:open="navOpen"
+            side="left"
+            title="导航"
+            :content="{ onCloseAutoFocus: focusAfterNavClosed }"
+            :ui="{ content: 'max-w-72 sm:max-w-72', body: 'p-0 sm:p-0' }"
           >
             <UButton
-              ref="accountButton"
-              :label="displayName"
-              :title="displayName"
-              :trailing-icon="icons.chevronDown"
+              :icon="icons.menu"
               color="neutral"
               variant="ghost"
-              class="max-w-48 min-w-0"
-              aria-label="账号菜单"
+              class="shrink-0 min-[1024px]:hidden"
+              aria-label="打开导航"
             />
-          </UDropdownMenu>
-        </div>
-
-        <USlideover
-          v-model:open="navOpen"
-          side="left"
-          title="导航"
-          :content="{ onCloseAutoFocus: focusAfterNavClosed }"
-          :ui="{ content: 'max-w-72 sm:max-w-72', body: 'p-0 sm:p-0' }"
-        >
-          <UButton
-            :icon="icons.menu"
-            color="neutral"
-            variant="ghost"
-            class="shrink-0 min-[1024px]:hidden"
-            aria-label="打开导航"
-          />
-          <template #body>
-            <nav class="border-b border-default px-5 py-2" aria-label="主导航">
-              <RouterLink
-                v-for="item in navItems"
-                :key="item.routeName"
-                :to="item.to"
-                :aria-current="isCurrent(item) ? 'page' : undefined"
-                class="drawer-link flex items-center gap-2 py-2 text-[15px]/6 aria-[current=page]:font-semibold"
-                @click="navOpen = false"
-              >
-                <UIcon :name="item.icon" class="nav-icon" />
-                {{ item.label }}
-                <span v-if="item.count" class="nav-count">
-                  {{ item.count }}<span class="sr-only"> 项</span>
-                </span>
-              </RouterLink>
-            </nav>
-            <div class="space-y-4 px-5 py-4">
-              <div>
-                <p class="pb-1.5 text-xs text-muted">主题</p>
-                <div class="flex gap-1">
-                  <UButton
-                    v-for="option in COLOR_PREFERENCES"
-                    :key="option.value"
-                    :label="option.label"
-                    :variant="colorPreference.current() === option.value ? 'solid' : 'subtle'"
-                    :color="colorPreference.current() === option.value ? 'primary' : 'neutral'"
-                    size="sm"
-                    :aria-pressed="colorPreference.current() === option.value"
-                    @click="colorPreference.set(option.value)"
-                  />
+            <template #body>
+              <nav class="border-b border-default px-5 py-2" aria-label="主导航">
+                <RouterLink
+                  v-for="item in navItems"
+                  :key="item.routeName"
+                  :to="item.to"
+                  :aria-current="isCurrent(item) ? 'page' : undefined"
+                  class="drawer-link flex items-center gap-2 py-2 text-[15px]/6 aria-[current=page]:font-semibold"
+                  @click="navOpen = false"
+                >
+                  <UIcon :name="item.icon" class="nav-icon" />
+                  {{ item.label }}
+                  <span v-if="item.count" class="nav-count">
+                    {{ item.count }}<span class="sr-only"> 项</span>
+                  </span>
+                </RouterLink>
+              </nav>
+              <div class="space-y-4 px-5 py-4">
+                <div>
+                  <p class="pb-1.5 text-xs text-muted">主题</p>
+                  <div class="flex gap-1">
+                    <UButton
+                      v-for="option in COLOR_PREFERENCES"
+                      :key="option.value"
+                      :label="option.label"
+                      :variant="colorPreference.current() === option.value ? 'solid' : 'subtle'"
+                      :color="colorPreference.current() === option.value ? 'primary' : 'neutral'"
+                      size="sm"
+                      :aria-pressed="colorPreference.current() === option.value"
+                      @click="colorPreference.set(option.value)"
+                    />
+                  </div>
+                </div>
+                <div class="border-t border-default pt-3">
+                  <p class="truncate pb-1 text-sm" :title="displayName">{{ displayName }}</p>
+                  <button
+                    type="button"
+                    class="block w-full py-1.5 text-left text-sm/6"
+                    @click="logout"
+                  >
+                    退出登录
+                  </button>
+                  <p v-if="versionText" class="pt-2 text-xs text-muted">{{ versionText }}</p>
                 </div>
               </div>
-              <div class="border-t border-default pt-3">
-                <p class="truncate pb-1 text-sm" :title="displayName">{{ displayName }}</p>
-                <button
-                  type="button"
-                  class="block w-full py-1.5 text-left text-sm/6"
-                  @click="logout"
-                >
-                  退出登录
-                </button>
-                <p v-if="versionText" class="pt-2 text-xs text-muted">{{ versionText }}</p>
-              </div>
-            </div>
-          </template>
-        </USlideover>
+            </template>
+          </USlideover>
+        </div>
       </div>
     </header>
 
@@ -296,6 +298,11 @@ provide(LOGOUT, logout)
 </template>
 
 <style scoped>
+.console-header-inner {
+  width: 100%;
+  max-width: 1840px;
+  margin-inline: auto;
+}
 .nav-link:hover {
   box-shadow: inset 0 -1px 0 var(--ui-text-highlighted);
 }

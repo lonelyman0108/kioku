@@ -83,8 +83,7 @@ const items = computed(() => history.data.value?.items ?? [])
 const searchInput = ref('')
 const sourceFilter = ref<SourceFilter>('all')
 const activeItemId = ref<number | null>(null)
-const selectedCompareIds = ref<number[]>([])
-const compareMode = ref(false)
+const baseItemId = ref<number | null>(null)
 const inspectTab = ref<InspectTab>('diff')
 const diffLayout = ref<DiffLayoutMode>('unified')
 const diffContext = ref<DiffContextMode>('folded')
@@ -192,70 +191,10 @@ const filteredItems = computed(() => {
   })
 })
 
-function selectItem(item: EntryHistoryItem) {
-  compareMode.value = false
-  activeItemId.value = item.id
-  mobileDetailOpen.value = true
-  if (!item.snapshot) inspectTab.value = 'diff'
-}
-
-function toggleCompare(itemId: number) {
-  const list = selectedCompareIds.value
-  const idx = list.indexOf(itemId)
-  if (idx >= 0) {
-    selectedCompareIds.value = list.filter((id) => id !== itemId)
-    if (selectedCompareIds.value.length < 2) compareMode.value = false
-    return
-  }
-  if (list.length >= 2) {
-    selectedCompareIds.value = [list[1]!, itemId]
-  } else {
-    selectedCompareIds.value = [...list, itemId]
-  }
-}
-
-function openCompareMode() {
-  if (!comparePair.value) return
-  compareMode.value = true
-  inspectTab.value = 'diff'
-  mobileDetailOpen.value = true
-}
-
-function clearCompare() {
-  selectedCompareIds.value = []
-  compareMode.value = false
-}
-
-const comparePair = computed<{
-  older: EntryHistoryItem & { snapshot: EntrySnapshot }
-  newer: EntryHistoryItem & { snapshot: EntrySnapshot }
-  fieldChanges: SnapshotFieldChange[]
-} | null>(() => {
-  if (selectedCompareIds.value.length !== 2) return null
-  const [idA, idB] = selectedCompareIds.value
-  const foundA = items.value.find((x) => x.id === idA && x.snapshot)
-  const foundB = items.value.find((x) => x.id === idB && x.snapshot)
-  if (!foundA?.snapshot || !foundB?.snapshot) return null
-  const a = foundA as EntryHistoryItem & { snapshot: EntrySnapshot }
-  const b = foundB as EntryHistoryItem & { snapshot: EntrySnapshot }
-  const older =
-    a.snapshot.version < b.snapshot.version ||
-    (a.snapshot.version === b.snapshot.version && a.id < b.id)
-      ? a
-      : b
-  const newer = older === a ? b : a
-  const fieldChanges = diffEntrySnapshots(older.snapshot, newer.snapshot)
-  return { older, newer, fieldChanges }
-})
-
-const selectedCompareLabels = computed(() =>
-  selectedCompareIds.value
-    .map((id) => items.value.find((x) => x.id === id))
-    .filter((x): x is EntryHistoryItem => Boolean(x))
-    .map((x) => {
-      const ver = itemVersion(x)
-      return ver !== null ? `版本 ${ver}` : eventTypeLabels[x.eventType]
-    }),
+const snapshotItems = computed(() =>
+  items.value.filter(
+    (item): item is EntryHistoryItem & { snapshot: EntrySnapshot } => item.snapshot !== null,
+  ),
 )
 
 const activeItem = computed<EntryHistoryItem | null>(() => {
@@ -270,18 +209,89 @@ const activeMeta = computed(() =>
   activeItem.value ? metaMap.value.get(activeItem.value.id) : null,
 )
 
-const inspectorBefore = computed<string | null>(() => {
-  if (compareMode.value && comparePair.value) return comparePair.value.older.snapshot.content
-  return activeMeta.value?.previousSnapshot?.content ?? null
+const customBaseItem = computed<(EntryHistoryItem & { snapshot: EntrySnapshot }) | null>(() => {
+  if (baseItemId.value === null || !activeItem.value?.snapshot) return null
+  if (baseItemId.value === activeItem.value.id) return null
+  return snapshotItems.value.find((item) => item.id === baseItemId.value) ?? null
 })
 
-const inspectorAfter = computed<string | null>(() => {
-  if (compareMode.value && comparePair.value) return comparePair.value.newer.snapshot.content
-  return activeItem.value?.snapshot?.content ?? null
+function selectItem(item: EntryHistoryItem) {
+  if (baseItemId.value === item.id) baseItemId.value = null
+  activeItemId.value = item.id
+  mobileDetailOpen.value = true
+  if (!item.snapshot) {
+    baseItemId.value = null
+    inspectTab.value = 'diff'
+  }
+}
+
+function togglePinBase(item: EntryHistoryItem) {
+  if (!item.snapshot) return
+  if (baseItemId.value === item.id) {
+    baseItemId.value = null
+    return
+  }
+  if (activeItem.value?.id === item.id) return
+  baseItemId.value = item.id
+  inspectTab.value = 'diff'
+  mobileDetailOpen.value = true
+}
+
+const compareBaseOptions = computed<{ value: string; label: string }[]>(() => {
+  const curr = activeItem.value
+  if (!curr?.snapshot) return []
+  const prev = activeMeta.value?.previousSnapshot ?? null
+  const opts: { value: string; label: string }[] = [
+    {
+      value: 'prev',
+      label: prev ? `上一版（版本 ${prev.version}）` : '初始创建（无上一版）',
+    },
+  ]
+  for (const cand of snapshotItems.value) {
+    if (cand.id === curr.id) continue
+    if (prev && cand.snapshot.version === prev.version) continue
+    const summary = summaryTextOf(cand)
+    const shortSummary = summary.length > 16 ? `${summary.slice(0, 16)}…` : summary
+    opts.push({
+      value: String(cand.id),
+      label: `版本 ${cand.snapshot.version} · ${formatRelative(itemTimestamp(cand))}（${shortSummary}）`,
+    })
+  }
+  return opts
 })
+
+const selectedBaseValue = computed(() =>
+  customBaseItem.value ? String(customBaseItem.value.id) : 'prev',
+)
+
+function onSelectCompareBase(raw: string | number | null | undefined) {
+  const val = String(raw ?? 'prev')
+  if (val === 'prev') {
+    baseItemId.value = null
+    return
+  }
+  const num = Number(val)
+  if (Number.isFinite(num)) {
+    baseItemId.value = num
+    inspectTab.value = 'diff'
+  }
+}
+
+const inspectorBeforeSnapshot = computed<EntrySnapshot | null>(() => {
+  if (customBaseItem.value) return customBaseItem.value.snapshot
+  return activeMeta.value?.previousSnapshot ?? null
+})
+
+const inspectorBefore = computed<string | null>(
+  () => inspectorBeforeSnapshot.value?.content ?? null,
+)
+
+const inspectorAfter = computed<string | null>(() => activeItem.value?.snapshot?.content ?? null)
 
 const inspectorFieldChanges = computed<SnapshotFieldChange[]>(() => {
-  if (compareMode.value && comparePair.value) return comparePair.value.fieldChanges
+  if (customBaseItem.value && activeItem.value?.snapshot) {
+    return diffEntrySnapshots(customBaseItem.value.snapshot, activeItem.value.snapshot)
+  }
   return activeMeta.value?.fieldChanges ?? []
 })
 
@@ -290,16 +300,13 @@ const inspectorCanShowDiff = computed(
 )
 
 const inspectorHasContentDiff = computed(() => {
-  if (compareMode.value && comparePair.value) {
-    return comparePair.value.older.snapshot.content !== comparePair.value.newer.snapshot.content
+  if (customBaseItem.value && activeItem.value?.snapshot) {
+    return customBaseItem.value.snapshot.content !== activeItem.value.snapshot.content
   }
   return Boolean(activeMeta.value?.hasContentDiff)
 })
 
-const inspectorSnapshot = computed<EntrySnapshot | null>(() => {
-  if (compareMode.value && comparePair.value) return comparePair.value.newer.snapshot
-  return activeItem.value?.snapshot ?? null
-})
+const inspectorSnapshot = computed<EntrySnapshot | null>(() => activeItem.value?.snapshot ?? null)
 
 const appliedFocusId = ref<number | null>(null)
 
@@ -313,7 +320,7 @@ watch(
         appliedFocusId.value = targetId
         searchInput.value = ''
         sourceFilter.value = 'all'
-        compareMode.value = false
+        baseItemId.value = null
         activeItemId.value = target.id
         mobileDetailOpen.value = true
         await nextTick()
@@ -331,8 +338,7 @@ watch(
 
 watch(open, (visible) => {
   if (!visible) {
-    compareMode.value = false
-    selectedCompareIds.value = []
+    baseItemId.value = null
     activeItemId.value = null
     inspectTab.value = 'diff'
     mobileDetailOpen.value = false
@@ -374,9 +380,9 @@ async function confirmRestore() {
   <UModal
     v-model:open="open"
     :title="`版本历史 · ${shortId}`"
-    description="左侧选择版本或勾选两版对比，右侧独立审查属性与正文变更"
+    description="左侧切换版本，右侧审查属性与正文变更，可随时切换任意历史版本作为对比基准"
     :ui="{
-      content: 'w-[94vw] max-w-6xl sm:max-w-6xl h-[86vh] max-h-[86vh] ring-2 ring-rule',
+      content: 'w-[95vw] max-w-[1640px] sm:max-w-[1640px] h-[90vh] max-h-[90vh] ring-2 ring-rule',
       body: 'p-0 sm:p-0 flex-1 min-h-0 overflow-hidden flex flex-col',
     }"
   >
@@ -443,7 +449,8 @@ async function confirmRestore() {
               :data-history-id="item.id"
               class="timeline-item"
               :class="{
-                active: !compareMode && activeItem?.id === item.id,
+                active: activeItem?.id === item.id,
+                'is-base': customBaseItem?.id === item.id,
                 'is-archive': item.eventType === 'archive_note',
                 'is-focused': focusEventId === item.id,
               }"
@@ -458,6 +465,7 @@ async function confirmRestore() {
                     <span v-if="itemVersion(item) === currentVersion && !isDeleted" class="tl-curr">
                       当前
                     </span>
+                    <span v-if="customBaseItem?.id === item.id" class="tl-base-badge">基准</span>
                   </span>
                   <time
                     class="tl-time"
@@ -489,47 +497,29 @@ async function confirmRestore() {
                 </div>
               </button>
 
-              <div v-if="item.snapshot" class="tl-compare-row">
-                <label class="compare-check">
-                  <input
-                    type="checkbox"
-                    :checked="selectedCompareIds.includes(item.id)"
-                    @change="toggleCompare(item.id)"
-                  />
-                  <span>选入对比</span>
-                </label>
-              </div>
+              <!-- 悬停浮现快捷设为对比基准按钮，平时零噪音 -->
+              <button
+                v-if="item.snapshot && activeItem?.snapshot && item.id !== activeItem.id"
+                type="button"
+                class="tl-pin-base"
+                :class="{ 'is-pinned': customBaseItem?.id === item.id }"
+                :aria-label="
+                  customBaseItem?.id === item.id
+                    ? `取消版本 ${item.snapshot.version} 作为对比基准`
+                    : `将版本 ${item.snapshot.version} 设为对比基准`
+                "
+                @click.stop="togglePinBase(item)"
+              >
+                <UIcon :name="icons.compare" class="tl-pin-icon" aria-hidden="true" />
+                <span>{{ customBaseItem?.id === item.id ? '取消基准' : '设为基准' }}</span>
+              </button>
             </li>
           </ol>
-
-          <!-- 跨版本对比操作栏 -->
-          <div v-if="selectedCompareIds.length" class="rail-compare-bar">
-            <span class="compare-status">
-              <template v-if="selectedCompareIds.length === 1">
-                已选 {{ selectedCompareLabels[0] }}，再选 1 个版本
-              </template>
-              <template v-else>{{ selectedCompareLabels.join(' → ') }}</template>
-            </span>
-            <div class="compare-btns">
-              <UButton
-                v-if="comparePair"
-                size="xs"
-                :icon="icons.compare"
-                :variant="compareMode ? 'solid' : 'outline'"
-                @click="openCompareMode"
-              >
-                对比两版
-              </UButton>
-              <UButton size="xs" color="neutral" variant="ghost" @click="clearCompare">
-                清除
-              </UButton>
-            </div>
-          </div>
         </aside>
 
         <!-- 右侧主区：宽屏 Git 风格变更审查器 -->
         <section class="ws-main" aria-label="变更详情">
-          <div v-if="!activeItem && !comparePair" class="p-6">
+          <div v-if="!activeItem" class="p-6">
             <EmptyState title="请选择左侧历史记录" />
           </div>
 
@@ -548,30 +538,46 @@ async function confirmRestore() {
                     时间线
                   </UButton>
                   <h3 class="commit-title">
-                    <template v-if="compareMode && comparePair">
-                      版本 {{ comparePair.older.snapshot.version }} → 版本
-                      {{ comparePair.newer.snapshot.version }}
+                    <template v-if="customBaseItem && activeItem.snapshot">
+                      版本 {{ customBaseItem.snapshot.version }} → 版本
+                      {{ activeItem.snapshot.version }}
                     </template>
-                    <template v-else-if="activeItem">
+                    <template v-else>
                       {{ summaryTextOf(activeItem) }}
                     </template>
                   </h3>
                 </div>
 
                 <div class="commit-actions">
-                  <UButton
-                    v-if="compareMode"
-                    size="xs"
-                    color="neutral"
-                    variant="outline"
-                    :icon="icons.cancel"
-                    @click="compareMode = false"
+                  <div
+                    v-if="activeItem.snapshot && compareBaseOptions.length > 1"
+                    class="compare-picker"
                   >
-                    退出两版对比
-                  </UButton>
+                    <span class="compare-picker-label">对比基准</span>
+                    <USelect
+                      :model-value="selectedBaseValue"
+                      :items="compareBaseOptions"
+                      value-key="value"
+                      size="xs"
+                      aria-label="选择对比基准版本"
+                      class="compare-select"
+                      @update:model-value="onSelectCompareBase"
+                    />
+                    <UButton
+                      v-if="customBaseItem"
+                      size="xs"
+                      color="neutral"
+                      variant="ghost"
+                      :icon="icons.cancel"
+                      @click="baseItemId = null"
+                    >
+                      切回上一版
+                    </UButton>
+                  </div>
+
                   <UButton
-                    v-else-if="
-                      activeItem?.snapshot &&
+                    v-if="
+                      activeItem.snapshot &&
                       !isDeleted &&
                       activeItem.snapshot.version !== currentVersion
                     "
@@ -585,13 +591,15 @@ async function confirmRestore() {
               </div>
 
               <div class="commit-meta">
-                <template v-if="compareMode && comparePair">
-                  <span class="font-mono">
-                    跨版本累计变动（版本 {{ comparePair.older.snapshot.version }} →
-                    {{ comparePair.newer.snapshot.version }}）
+                <template v-if="customBaseItem && activeItem.snapshot">
+                  <span class="font-mono font-medium">
+                    跨版本累计变动（版本 {{ customBaseItem.snapshot.version }} → 版本
+                    {{ activeItem.snapshot.version }}）
                   </span>
+                  <span>·</span>
+                  <span>目标变更：{{ summaryTextOf(activeItem) }}</span>
                 </template>
-                <template v-else-if="activeItem">
+                <template v-else>
                   <span v-if="itemVersion(activeItem) !== null" class="font-mono font-medium">
                     版本 {{ itemVersion(activeItem) }}
                   </span>
@@ -761,6 +769,7 @@ async function confirmRestore() {
                 </div>
                 <div class="snapshot-body">
                   <MemoryContent
+                    width="full"
                     :content="
                       stripDuplicateLeadingHeading(
                         inspectorSnapshot.title,
@@ -795,7 +804,7 @@ async function confirmRestore() {
 <style scoped>
 .history-workspace {
   display: grid;
-  grid-template-columns: 290px minmax(0, 1fr);
+  grid-template-columns: 300px minmax(0, 1fr);
   flex: 1;
   min-height: 0;
   overflow: hidden;
@@ -838,6 +847,7 @@ async function confirmRestore() {
   overflow-y: auto;
 }
 .timeline-item {
+  position: relative;
   border-bottom: 1px solid var(--ui-border);
   border-left: 3px solid transparent;
 }
@@ -846,6 +856,10 @@ async function confirmRestore() {
 }
 .timeline-item.is-focused {
   border-left-color: var(--ui-warning);
+}
+.timeline-item.is-base {
+  border-left-color: var(--ui-info);
+  background: color-mix(in srgb, var(--ui-info) 6%, var(--ui-bg-muted));
 }
 .timeline-item.active {
   background: var(--ui-bg);
@@ -856,7 +870,7 @@ async function confirmRestore() {
   flex-direction: column;
   gap: 4px;
   width: 100%;
-  padding: 10px 12px 6px;
+  padding: 10px 12px;
   text-align: left;
   cursor: pointer;
 }
@@ -891,6 +905,13 @@ async function confirmRestore() {
 .tl-curr {
   padding: 0 5px;
   border: 1px solid var(--ui-rule);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.tl-base-badge {
+  padding: 0 5px;
+  border: 1px solid var(--ui-info);
+  color: var(--ui-info);
   font-size: 11px;
   line-height: 1.4;
 }
@@ -942,43 +963,58 @@ async function confirmRestore() {
   color: var(--ui-error);
   font-weight: 600;
 }
-.tl-compare-row {
-  padding: 0 12px 8px;
-}
-.compare-check {
+.tl-pin-base {
+  position: absolute;
+  right: 8px;
+  bottom: 7px;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  font-size: 12px;
-  color: var(--ui-text-muted);
+  gap: 3px;
+  padding: 1px 6px;
+  border: 1px solid var(--ui-border-accented);
+  background: var(--ui-bg-bright);
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--ui-text-toned);
+  opacity: 0;
+  pointer-events: none;
   cursor: pointer;
+  transition: opacity 120ms ease;
 }
-.compare-check input[type='checkbox'] {
-  accent-color: var(--ui-primary);
+.timeline-item:hover .tl-pin-base,
+.timeline-item:focus-within .tl-pin-base,
+.tl-pin-base.is-pinned {
+  opacity: 1;
+  pointer-events: auto;
 }
-.compare-check:hover {
+.tl-pin-base:hover {
+  border-color: var(--ui-rule);
   color: var(--ui-text-highlighted);
 }
-.rail-compare-bar {
+.tl-pin-base.is-pinned {
+  border-color: var(--ui-info);
+  color: var(--ui-info);
+}
+.tl-pin-icon {
+  display: inline-block;
   flex: none;
-  display: flex;
+  width: 11px;
+  height: 11px;
+}
+.compare-picker {
+  display: inline-flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
   gap: 6px;
-  padding: 8px 12px;
-  border-top: 1px solid var(--ui-rule);
-  background: var(--ui-bg-elevated);
+}
+.compare-picker-label {
   font-size: 12px;
+  color: var(--ui-text-muted);
+  white-space: nowrap;
 }
-.compare-status {
-  color: var(--ui-text-highlighted);
-  font-weight: 500;
-}
-.compare-btns {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
+.compare-select {
+  min-width: 13rem;
+  max-width: 22rem;
 }
 
 /* 右侧主审查区 */

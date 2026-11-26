@@ -665,9 +665,17 @@ defineExpose({
 </script>
 
 <template>
-  <article class="editor-pane">
+  <article
+    class="editor-pane"
+    :class="{
+      'is-editing': mode === 'edit',
+      'is-split': mode === 'edit' && editView === 'split',
+    }"
+  >
     <div v-if="$slots.nav" class="drawer-nav">
-      <slot name="nav" />
+      <div class="drawer-nav-inner">
+        <slot name="nav" />
+      </div>
     </div>
     <div v-if="detailQuery.isPending.value && !entry" class="p-6 space-y-4">
       <USkeleton class="h-7 w-1/2" />
@@ -810,37 +818,42 @@ defineExpose({
         <!-- 编辑模式 -->
         <template v-if="mode === 'edit'">
           <div class="edit-stack">
-            <UFormField label="标题">
-              <UInput v-model="form.title" :maxlength="ENTRY_TITLE_MAX" class="w-full" />
-              <template v-if="titleHint.message" #help>
-                <div class="title-hint-row">
-                  <span class="title-hint-text">{{ titleHint.message }}</span>
-                  <UButton
-                    v-if="titleHint.splittable"
-                    type="button"
-                    size="xs"
-                    color="warning"
-                    variant="outline"
-                    :icon="icons.split"
-                    @click="splitTitleToChangeSummary"
-                  >
-                    拆出至变更说明
-                  </UButton>
-                </div>
-              </template>
-            </UFormField>
+            <div class="edit-meta-grid">
+              <UFormField label="标题">
+                <UInput v-model="form.title" :maxlength="ENTRY_TITLE_MAX" class="w-full" />
+                <template v-if="titleHint.message" #help>
+                  <div class="title-hint-row">
+                    <span class="title-hint-text">{{ titleHint.message }}</span>
+                    <UButton
+                      v-if="titleHint.splittable"
+                      type="button"
+                      size="xs"
+                      color="warning"
+                      variant="outline"
+                      :icon="icons.split"
+                      @click="splitTitleToChangeSummary"
+                    >
+                      拆出至变更说明
+                    </UButton>
+                  </div>
+                </template>
+              </UFormField>
 
-            <UFormField label="现行概要（可选）" help="1–2 句概括当前结论，用于启动加载与列表预览">
-              <UTextarea
-                v-model="form.summary"
-                :rows="1"
-                autoresize
-                :maxrows="3"
-                :maxlength="ENTRY_SUMMARY_MAX"
-                placeholder="简明概括现行结论，避免写入逐日流水账"
-                class="w-full"
-              />
-            </UFormField>
+              <UFormField
+                label="现行概要（可选）"
+                help="1–2 句概括当前结论，用于启动加载与列表预览"
+              >
+                <UTextarea
+                  v-model="form.summary"
+                  :rows="1"
+                  autoresize
+                  :maxrows="3"
+                  :maxlength="ENTRY_SUMMARY_MAX"
+                  placeholder="简明概括现行结论，避免写入逐日流水账"
+                  class="w-full"
+                />
+              </UFormField>
+            </div>
 
             <!-- 可折叠属性与场景区：默认收起以释放首屏正文空间 -->
             <div class="attrs-collapse">
@@ -1057,6 +1070,8 @@ defineExpose({
                 <div ref="previewScrollRef" class="preview-scroll">
                   <MemoryContent
                     :content="previewContent"
+                    :width="editView === 'split' ? 'full' : 'reading'"
+                    :class="{ 'preview-centered': editView === 'preview' }"
                     :wiki-links="wikiLinks"
                     :credentials="credentialLinks"
                     @open="(sid) => emit('open', sid)"
@@ -1295,23 +1310,37 @@ defineExpose({
 
 <style scoped>
 .editor-pane {
+  --canvas-max: 1320px;
   display: flex;
   flex-direction: column;
   min-width: 0;
   min-height: 0;
   flex: 1;
 }
+.editor-pane.is-editing {
+  --canvas-max: 1120px;
+}
+.editor-pane.is-editing.is-split {
+  --canvas-max: 1560px;
+}
 .drawer-nav {
   flex: none;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
   height: 36px;
   min-height: 36px;
   padding: 0 28px;
   border-bottom: 1px solid var(--ui-border);
   background: var(--ui-bg-muted);
+}
+.drawer-nav-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  max-width: var(--canvas-max);
+  margin-inline: auto;
 }
 .editor-head {
   flex: none;
@@ -1324,6 +1353,9 @@ defineExpose({
   align-items: flex-start;
   justify-content: space-between;
   gap: 10px 16px;
+  width: 100%;
+  max-width: var(--canvas-max);
+  margin-inline: auto;
 }
 .head-identity {
   display: flex;
@@ -1427,6 +1459,21 @@ defineExpose({
   display: flex;
   flex-direction: column;
   gap: 10px;
+  width: 100%;
+  max-width: var(--canvas-max);
+  margin-inline: auto;
+}
+.edit-meta-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+}
+@container (min-width: 820px) {
+  .edit-meta-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr);
+    gap: 14px;
+    align-items: start;
+  }
 }
 .title-hint-row {
   display: flex;
@@ -1592,6 +1639,9 @@ defineExpose({
   padding: 14px 20px;
   background: var(--ui-bg);
 }
+.preview-centered {
+  margin-inline: auto;
+}
 @container (min-width: 680px) {
   .editor-workbench.mode-split {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1606,11 +1656,14 @@ defineExpose({
     height: 100%;
   }
 }
-/* 阅读态主栏与宽屏右侧 240px 静态辅助轨 */
+/* 阅读态主栏与宽屏右侧 248px 静态辅助轨，整体居中收束在画布宽度内 */
 .read-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 24px;
+  width: 100%;
+  max-width: var(--canvas-max);
+  margin-inline: auto;
 }
 .read-main {
   min-width: 0;
@@ -1620,8 +1673,8 @@ defineExpose({
 }
 @container (min-width: 960px) {
   .read-layout.has-rail {
-    grid-template-columns: minmax(0, 1fr) 240px;
-    gap: 28px;
+    grid-template-columns: minmax(0, 1fr) 248px;
+    gap: 36px;
     align-items: start;
   }
   .read-layout.has-rail .read-rail {
@@ -1765,7 +1818,7 @@ defineExpose({
   line-height: 1.5;
 }
 .summary-block {
-  max-width: 42em;
+  max-width: 58em;
   margin-bottom: 18px;
   padding: 10px 14px;
   border-left: 3px solid var(--ui-rule);

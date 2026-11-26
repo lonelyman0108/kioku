@@ -94,13 +94,108 @@ const createOpen = ref(false)
 const captureOpen = ref(false)
 const captureDraft = ref('')
 const fullscreen = ref(false)
+const layoutRef = ref<HTMLElement | null>(null)
 const listRef = ref<InstanceType<typeof MemoryList> | null>(null)
 const editorRef = ref<InstanceType<typeof MemoryEditor> | null>(null)
 const viewport = useViewport()
 const narrow = computed(() => viewport.value.width < 1024)
 
+const LIST_WIDTH_STORAGE_KEY = 'kioku:memories-list-width'
+const LIST_WIDTH_DEFAULT = 380
+const LIST_WIDTH_MIN = 280
+const LIST_WIDTH_MAX = 640
+const DETAIL_MIN_WIDTH = 560
+
+function readStoredListWidth(): number {
+  try {
+    const raw = Number(window.localStorage.getItem(LIST_WIDTH_STORAGE_KEY))
+    if (Number.isFinite(raw) && raw >= LIST_WIDTH_MIN && raw <= LIST_WIDTH_MAX) {
+      return Math.round(raw)
+    }
+  } catch {
+    // 隐私模式或存储受限时退回默认宽度
+  }
+  return LIST_WIDTH_DEFAULT
+}
+
+function saveListWidth(width: number) {
+  try {
+    window.localStorage.setItem(LIST_WIDTH_STORAGE_KEY, String(Math.round(width)))
+  } catch {
+    // 忽略存储写入异常
+  }
+}
+
+const storedListWidth = ref<number>(readStoredListWidth())
+const resizing = ref(false)
+
+function maxAllowedListWidth(): number {
+  const containerW = layoutRef.value?.clientWidth || Math.min(viewport.value.width, 1840)
+  return Math.max(LIST_WIDTH_MIN, Math.min(LIST_WIDTH_MAX, containerW - DETAIL_MIN_WIDTH))
+}
+
+const effectiveListWidth = computed(() =>
+  Math.max(LIST_WIDTH_MIN, Math.min(storedListWidth.value, maxAllowedListWidth())),
+)
+
 const isPeek = computed(() => Boolean(selectedId.value) && !fullscreen.value)
 const isFullscreen = computed(() => Boolean(selectedId.value) && fullscreen.value)
+
+let dragStartX = 0
+let dragStartWidth = LIST_WIDTH_DEFAULT
+
+function onPointerMove(event: PointerEvent) {
+  if (!resizing.value) return
+  const next = Math.round(
+    Math.max(
+      LIST_WIDTH_MIN,
+      Math.min(maxAllowedListWidth(), dragStartWidth + (event.clientX - dragStartX)),
+    ),
+  )
+  storedListWidth.value = next
+}
+
+function stopResize() {
+  if (!resizing.value) return
+  resizing.value = false
+  window.removeEventListener('pointermove', onPointerMove)
+  window.removeEventListener('pointerup', stopResize)
+  window.removeEventListener('pointercancel', stopResize)
+  saveListWidth(storedListWidth.value)
+}
+
+function startResize(event: PointerEvent) {
+  if (narrow.value || !isPeek.value || event.button !== 0) return
+  event.preventDefault()
+  dragStartX = event.clientX
+  dragStartWidth = effectiveListWidth.value
+  resizing.value = true
+  window.addEventListener('pointermove', onPointerMove)
+  window.addEventListener('pointerup', stopResize)
+  window.addEventListener('pointercancel', stopResize)
+}
+
+function resetListWidth() {
+  storedListWidth.value = LIST_WIDTH_DEFAULT
+  saveListWidth(LIST_WIDTH_DEFAULT)
+}
+
+function onSplitterKeydown(event: KeyboardEvent) {
+  if (narrow.value || !isPeek.value) return
+  const step = event.shiftKey ? 40 : 16
+  if (event.key === 'ArrowLeft') {
+    event.preventDefault()
+    storedListWidth.value = Math.max(LIST_WIDTH_MIN, effectiveListWidth.value - step)
+    saveListWidth(storedListWidth.value)
+  } else if (event.key === 'ArrowRight') {
+    event.preventDefault()
+    storedListWidth.value = Math.min(maxAllowedListWidth(), effectiveListWidth.value + step)
+    saveListWidth(storedListWidth.value)
+  } else if (event.key === 'Home') {
+    event.preventDefault()
+    resetListWidth()
+  }
+}
 
 watch(selectedId, async (id) => {
   if (!id) {
@@ -273,17 +368,23 @@ function onKeydown(event: KeyboardEvent) {
 }
 
 onMounted(() => window.addEventListener('keydown', onKeydown))
-onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
+onBeforeUnmount(() => {
+  stopResize()
+  window.removeEventListener('keydown', onKeydown)
+})
 </script>
 
 <template>
   <div
+    ref="layoutRef"
     class="memories-layout"
     :class="{
       'has-selection': Boolean(selectedId),
       'is-peek': isPeek,
       'is-fullscreen': isFullscreen,
+      'is-resizing': resizing,
     }"
+    :style="isPeek && !narrow ? { '--list-width': `${effectiveListWidth}px` } : undefined"
   >
     <MemoryList
       ref="listRef"
@@ -317,56 +418,73 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
       @clear-filters="clearFilters"
     />
 
-    <section v-if="selectedId" class="detail-col" aria-label="记忆详情">
-      <MemoryEditor
-        :key="selectedId"
-        ref="editorRef"
-        :short-id="selectedId"
-        :facets="facets"
-        @changed="onChanged"
-        @deleted="onDeleted"
-        @restored="onRestored"
-        @open="select"
-      >
-        <template #nav>
-          <div class="nav-group">
-            <UButton
-              size="xs"
-              color="neutral"
-              variant="ghost"
-              :icon="icons.back"
-              class="mobile-back-btn"
-              @click="select(null)"
-            >
-              返回列表
-            </UButton>
-            <UButton
-              size="xs"
-              color="neutral"
-              variant="ghost"
-              :icon="fullscreen ? icons.minimize : icons.maximize"
-              class="desktop-only-btn"
-              @click="toggleFullscreen"
-            >
-              {{ fullscreen ? '退出全屏' : '全屏展开' }}
-            </UButton>
-          </div>
-          <div class="nav-group">
-            <UButton
-              size="xs"
-              color="neutral"
-              variant="ghost"
-              :icon="icons.cancel"
-              class="desktop-only-btn"
-              title="关闭详情（Esc）"
-              @click="select(null)"
-            >
-              关闭
-            </UButton>
-          </div>
-        </template>
-      </MemoryEditor>
-    </section>
+    <Transition name="detail-reveal">
+      <section v-if="selectedId" class="detail-col" aria-label="记忆详情">
+        <div
+          v-if="isPeek"
+          class="pane-splitter"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="拖动调节列表与详情宽度"
+          :aria-valuenow="effectiveListWidth"
+          :aria-valuemin="LIST_WIDTH_MIN"
+          :aria-valuemax="LIST_WIDTH_MAX"
+          tabindex="0"
+          title="拖动调节宽度，双击恢复默认"
+          @pointerdown="startResize"
+          @dblclick="resetListWidth"
+          @keydown="onSplitterKeydown"
+        />
+        <MemoryEditor
+          :key="selectedId"
+          ref="editorRef"
+          :short-id="selectedId"
+          :facets="facets"
+          @changed="onChanged"
+          @deleted="onDeleted"
+          @restored="onRestored"
+          @open="select"
+        >
+          <template #nav>
+            <div class="nav-group">
+              <UButton
+                size="xs"
+                color="neutral"
+                variant="ghost"
+                :icon="icons.back"
+                class="mobile-back-btn"
+                @click="select(null)"
+              >
+                返回列表
+              </UButton>
+              <UButton
+                size="xs"
+                color="neutral"
+                variant="ghost"
+                :icon="fullscreen ? icons.minimize : icons.maximize"
+                class="desktop-only-btn"
+                @click="toggleFullscreen"
+              >
+                {{ fullscreen ? '退出全屏' : '全屏展开' }}
+              </UButton>
+            </div>
+            <div class="nav-group">
+              <UButton
+                size="xs"
+                color="neutral"
+                variant="ghost"
+                :icon="icons.cancel"
+                class="desktop-only-btn"
+                title="关闭详情（Esc）"
+                @click="select(null)"
+              >
+                关闭
+              </UButton>
+            </div>
+          </template>
+        </MemoryEditor>
+      </section>
+    </Transition>
 
     <CreateMemoryModal v-model:open="createOpen" :facets="facets" @created="onCreated" />
     <QuickCaptureModal
@@ -382,14 +500,36 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 <style scoped>
 .memories-layout {
   display: grid;
-  flex: 1;
+  flex: 1 1 auto;
   grid-template-rows: auto minmax(0, 1fr);
   grid-template-columns: minmax(0, 1fr);
+  width: 100%;
+  max-width: 76rem;
+  margin-inline: auto;
   min-width: 0;
   min-height: 0;
+  transition: max-width 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.memories-layout.has-selection {
+  max-width: 1840px;
+}
+.memories-layout.is-resizing {
+  transition: none;
+  user-select: none;
+  cursor: col-resize;
+}
+@media (min-width: 1217px) {
+  .memories-layout:not(.has-selection) {
+    border-inline: 1px solid var(--ui-border-muted);
+  }
+}
+@media (min-width: 1841px) {
+  .memories-layout.has-selection {
+    border-inline: 1px solid var(--ui-border-muted);
+  }
 }
 .memories-layout.is-peek {
-  grid-template-columns: clamp(360px, 40%, 520px) minmax(0, 1fr);
+  grid-template-columns: var(--list-width, 380px) minmax(0, 1fr);
 }
 .memories-layout.is-peek :deep(.list-pane) {
   border-right: 1px solid var(--ui-rule);
@@ -398,6 +538,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   display: none;
 }
 .detail-col {
+  position: relative;
   grid-column: 2;
   grid-row: 2;
   display: flex;
@@ -405,6 +546,50 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   min-width: 0;
   min-height: 0;
   background: var(--ui-bg);
+}
+.pane-splitter {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -5px;
+  z-index: 15;
+  width: 9px;
+  cursor: col-resize;
+  touch-action: none;
+}
+.pane-splitter::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 2px;
+  background: var(--ui-rule);
+  opacity: 0;
+  transition: opacity 140ms ease;
+}
+.pane-splitter:hover::after,
+.pane-splitter:focus-visible::after,
+.memories-layout.is-resizing .pane-splitter::after {
+  opacity: 1;
+}
+.pane-splitter:focus-visible {
+  outline: 0;
+}
+.detail-reveal-enter-active {
+  transition:
+    opacity 200ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.detail-reveal-leave-active {
+  transition: opacity 140ms ease;
+}
+.detail-reveal-enter-from {
+  opacity: 0;
+  transform: translateX(18px);
+}
+.detail-reveal-leave-to {
+  opacity: 0;
 }
 .memories-layout.is-fullscreen .detail-col {
   grid-column: 1;
@@ -418,10 +603,21 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 .mobile-back-btn {
   display: none;
 }
+@media (prefers-reduced-motion: reduce) {
+  .memories-layout,
+  .detail-reveal-enter-active,
+  .detail-reveal-leave-active {
+    transition: none;
+  }
+}
 @media (max-width: 1023.98px) {
   .memories-layout,
   .memories-layout.is-peek {
     grid-template-columns: minmax(0, 1fr);
+    max-width: none;
+  }
+  .pane-splitter {
+    display: none;
   }
   .memories-layout.is-peek :deep(.list-pane) {
     border-right: 0;

@@ -133,23 +133,25 @@ const versionText = computed(() =>
     <!-- 修改密码 -->
     <section class="space-y-3">
       <SectionHeading title="修改密码" :level="2" />
-      <form class="max-w-sm space-y-3" @submit.prevent="changePassword">
-        <UFormField label="当前密码">
-          <UInput
-            v-model="passwordForm.currentPassword"
-            type="password"
-            autocomplete="current-password"
-            class="w-full"
-          />
-        </UFormField>
-        <UFormField label="新密码" help="至少 10 位">
-          <UInput
-            v-model="passwordForm.newPassword"
-            type="password"
-            autocomplete="new-password"
-            class="w-full"
-          />
-        </UFormField>
+      <form class="max-w-xl space-y-3" @submit.prevent="changePassword">
+        <div class="grid gap-3 sm:grid-cols-2">
+          <UFormField label="当前密码">
+            <UInput
+              v-model="passwordForm.currentPassword"
+              type="password"
+              autocomplete="current-password"
+              class="w-full"
+            />
+          </UFormField>
+          <UFormField label="新密码" help="至少 10 位">
+            <UInput
+              v-model="passwordForm.newPassword"
+              type="password"
+              autocomplete="new-password"
+              class="w-full"
+            />
+          </UFormField>
+        </div>
         <p v-if="passwordError" class="text-sm text-error" role="alert">{{ passwordError }}</p>
         <UButton
           type="submit"

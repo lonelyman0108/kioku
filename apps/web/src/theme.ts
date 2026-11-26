@@ -599,6 +599,6 @@ export const theme = {
     },
   },
   dashboardSearch: {
-    variants: { fullscreen: { false: { modal: 'sm:max-w-2xl sm:h-[26rem]' } } },
+    variants: { fullscreen: { false: { modal: 'sm:max-w-2xl sm:h-[30rem]' } } },
   },
 } satisfies NonNullable<NuxtUIOptions['ui']>

@@ -445,13 +445,16 @@ async function rebuildEmbeddings() {
       <!-- 定时整理 -->
       <section class="space-y-4">
         <SectionHeading title="定时整理" :level="2" />
-        <div class="flex flex-wrap items-center gap-6">
-          <USwitch v-model="form.dreamEnabled" label="启用后台定时整理" />
+        <div class="flex flex-wrap items-end gap-6">
+          <div class="pb-1.5">
+            <USwitch v-model="form.dreamEnabled" label="启用后台定时整理" />
+          </div>
           <UFormField label="整理间隔（小时）" class="w-40">
             <UInputNumber
               v-model="form.dreamIntervalHours"
               :min="DREAM_INTERVAL_HOURS_MIN"
               :max="DREAM_INTERVAL_HOURS_MAX"
+              :disabled="!form.dreamEnabled"
               class="w-full"
             />
           </UFormField>
