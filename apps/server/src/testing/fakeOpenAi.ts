@@ -3,6 +3,17 @@ import type { AddressInfo } from 'node:net'
 
 import { EMBEDDING_DIMENSIONS } from '../db/schema'
 
+export class FakeHttpError extends Error {
+  readonly status: number
+  readonly headers: Record<string, string>
+
+  constructor(status: number, message: string, headers: Record<string, string> = {}) {
+    super(message)
+    this.status = status
+    this.headers = headers
+  }
+}
+
 export type FakeChatHandler = (
   messages: { role: string; content: string }[],
   body: Record<string, unknown>,
@@ -112,8 +123,13 @@ export async function startFakeOpenAi(options: FakeOpenAiOptions = {}): Promise<
             )
           })
           .catch((err: unknown) => {
+            const status = err instanceof FakeHttpError ? err.status : 500
+            const headers =
+              err instanceof FakeHttpError
+                ? { 'content-type': 'application/json', ...err.headers }
+                : { 'content-type': 'application/json' }
             const message = err instanceof Error ? err.message : String(err)
-            res.writeHead(500, { 'content-type': 'application/json' })
+            res.writeHead(status, headers)
             res.end(JSON.stringify({ error: { message } }))
           })
         return

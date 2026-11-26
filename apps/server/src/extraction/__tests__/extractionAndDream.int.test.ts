@@ -19,7 +19,7 @@ import {
   testDatabaseUrl,
   testMasterKey,
 } from '../../testing/db'
-import { startFakeOpenAi, type FakeOpenAiServer } from '../../testing/fakeOpenAi'
+import { FakeHttpError, startFakeOpenAi, type FakeOpenAiServer } from '../../testing/fakeOpenAi'
 import { bufferTurn } from '../buffer'
 import { loadInbox, runDream } from '../dream'
 import { extractEpisodeBatch } from '../extract'
@@ -637,6 +637,7 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
       trigger: 'manual',
       mode: 'tidy',
       all: true,
+      retryBaseMs: 5,
       onProgress: (p) => progressEvents.push({ ...p }),
     })
 
@@ -649,6 +650,9 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
     expect(run.considered).toBe(6)
     expect(run.suggested).toBe(4)
     expect(run.error).toContain(failShortId)
+    expect(run.failedItems).toHaveLength(1)
+    expect(run.failedItems[0]?.shortId).toBe(failShortId)
+    expect(run.retriedCount).toBe(2)
     expect(progressEvents.at(-1)).toEqual({
       mode: 'tidy',
       processed: 6,
@@ -662,5 +666,278 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
     expect(inboxAfter.pendingCount).toBe(4)
     expect(inboxAfter.tidyPendingCount).toBe(1)
     expect(inboxAfter.dreamState.lastOutcome).toBe('partial')
+    expect(inboxAfter.dreamState.recentRuns[0]?.failedItems?.[0]?.shortId).toBe(failShortId)
+
+    // 使用 targetShortIds 仅重试失败项，成功后失败列表清空
+    fakeAi.setChatHandler(() =>
+      JSON.stringify({
+        needed: true,
+        title: '重试修复后标题',
+        summary: '重试成功概要。',
+        content: '重试成功正文。',
+        change_summary: '规范标题',
+        archived_notes: [],
+        reason: '重试规范',
+      }),
+    )
+    const retryRun = await runDream(database.db, masterKey, {
+      runId: 'tidy-retry-failed',
+      trigger: 'manual',
+      mode: 'tidy',
+      targetShortIds: [failShortId],
+    })
+    expect(retryRun.outcome).toBe('ok')
+    expect(retryRun.considered).toBe(1)
+    expect(retryRun.suggested).toBe(1)
+    expect(retryRun.failedItems).toHaveLength(0)
+  })
+
+  it('修复静默吞错：standard 坏 JSON 不推进水位、extract 坏 JSON 不删 turn_buffer，且支持 1 次语义纠错', async () => {
+    const masterKey = testMasterKey()
+    await saveModelEndpoint(database.db, masterKey, CHAT_LLM_SETTING_KEY, {
+      baseUrl: fakeAi.baseUrl,
+      model: 'fake-chat',
+      apiKey: 'sk-chat',
+      enabled: true,
+      reasoningEffort: 'low',
+      taskReasoningEffort: { fast: 'off', organize: 'high' },
+    })
+
+    const credSvc = new CredentialService(database.db, masterKey)
+    const entrySvc = new EntryService(database.db, masterKey, credSvc, null)
+    const consoleScope = { kind: 'console' as const, accountId: 'acc', sessionId: 'sess' }
+
+    // 1. extract 持续输出坏 JSON 时抛错且绝对保留 turn_buffer，同时使用 fast 思考等级覆盖
+    const key = await issueTestApiKey(database, { canWrite: true })
+    await database.db.insert(turnBuffer).values({
+      keyId: key.id,
+      sessionId: 's-bad',
+      deviceKey: 'dev-bad',
+      projectSlug: 'proj-bad',
+      userText: '关键结论待抽取',
+      replyText: '已记录关键配置',
+    })
+    const seenEfforts: unknown[] = []
+    fakeAi.setChatHandler((_msgs, body) => {
+      seenEfforts.push(body.reasoning_effort)
+      return 'not a json at all'
+    })
+
+    await expect(
+      extractEpisodeBatch(database.db, masterKey, entrySvc, {
+        deviceKey: 'dev-bad',
+        projectSlug: 'proj-bad',
+      }),
+    ).rejects.toThrow('会话摘要模型输出无效')
+    // 初次 + 1 次纠错均用 fast=off（none），且 turn_buffer 完好保留
+    expect(seenEfforts).toEqual(['none', 'none'])
+    expect(await database.db.select().from(turnBuffer)).toHaveLength(1)
+
+    // 2. standard 模式坏 JSON 不推进 dreamCheckedVersion，并记录 failedItems；随后修复响应再次运行可正常审阅
+    const created = await entrySvc.create(
+      consoleScope,
+      entryInput({ title: '待常规整理词条', content: '原始正文内容。' }),
+    )
+    const orgEfforts: unknown[] = []
+    fakeAi.setChatHandler((_msgs, body) => {
+      orgEfforts.push(body.reasoning_effort)
+      return '{broken json'
+    })
+
+    const badRun = await runDream(database.db, masterKey, {
+      runId: 'std-bad-json',
+      trigger: 'manual',
+      mode: 'standard',
+      retryBaseMs: 5,
+    })
+    expect(orgEfforts).toEqual(['high', 'high'])
+    expect(badRun.outcome).toBe('failed')
+    expect(badRun.failedItems).toHaveLength(1)
+    expect(badRun.failedItems[0]?.shortId).toBe(created.entry.shortId)
+    expect(badRun.retriedCount).toBe(1)
+
+    const [rowAfterBad] = await database.db
+      .select({ dreamCheckedVersion: entries.dreamCheckedVersion, version: entries.version })
+      .from(entries)
+      .where(eq(entries.id, created.entry.id))
+    expect(rowAfterBad?.dreamCheckedVersion).toBe(0)
+
+    // 下次模型恢复合法 JSON 时，未推进水位的词条会自动被重新审阅并推进水位
+    fakeAi.setChatHandler(() => JSON.stringify({ suggestions: [] }))
+    const okRun = await runDream(database.db, masterKey, {
+      runId: 'std-recovered',
+      trigger: 'manual',
+      mode: 'standard',
+    })
+    expect(okRun.outcome).toBe('ok')
+    expect(okRun.considered).toBe(1)
+    const [rowAfterOk] = await database.db
+      .select({ dreamCheckedVersion: entries.dreamCheckedVersion, version: entries.version })
+      .from(entries)
+      .where(eq(entries.id, created.entry.id))
+    expect(rowAfterOk?.dreamCheckedVersion).toBe(rowAfterOk?.version)
+  })
+
+  it('tidy 支持完整性丢链 1 次定向纠错、429 降并发共享退避，以及 401 鉴权错整批熔断', async () => {
+    const masterKey = testMasterKey()
+    await saveModelEndpoint(database.db, masterKey, CHAT_LLM_SETTING_KEY, {
+      baseUrl: fakeAi.baseUrl,
+      model: 'fake-chat',
+      apiKey: 'sk-chat',
+      enabled: true,
+    })
+
+    const credSvc = new CredentialService(database.db, masterKey)
+    const entrySvc = new EntryService(database.db, masterKey, credSvc, null)
+    const consoleScope = { kind: 'console' as const, accountId: 'acc', sessionId: 'sess' }
+
+    // 1. 首次草案丢凭据占位符，纠错提示列出具体占位符后第 2 次补回并成功入队
+    const repairEntry = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '需要纠错的词条（2026-10-01）',
+        content: '生产使用 {{cred:prod-secret}} 访问接口。',
+      }),
+    )
+    let repairCalls = 0
+    let sawMissingHint = false
+    fakeAi.setChatHandler((messages) => {
+      repairCalls++
+      if (repairCalls === 1) {
+        return JSON.stringify({
+          needed: true,
+          title: '接口访问配置',
+          summary: '使用凭据访问接口。',
+          content: '生产使用托管凭据访问接口。',
+          change_summary: '规范标题',
+          archived_notes: [],
+          reason: '去日期',
+        })
+      }
+      if (
+        messages.some(
+          (m) => m.content.includes('{{cred:prod-secret}}') && m.content.includes('遗漏'),
+        )
+      ) {
+        sawMissingHint = true
+      }
+      return JSON.stringify({
+        needed: true,
+        title: '接口访问配置',
+        summary: '使用凭据访问接口。',
+        content: '生产使用 {{cred:prod-secret}} 访问接口。',
+        change_summary: '规范标题',
+        archived_notes: [],
+        reason: '去日期',
+      })
+    })
+    const repairRun = await runDream(database.db, masterKey, {
+      runId: 'tidy-semantic-repair',
+      trigger: 'manual',
+      mode: 'tidy',
+      targetShortIds: [repairEntry.entry.shortId],
+    })
+    expect(repairRun.outcome).toBe('ok')
+    expect(repairRun.suggested).toBe(1)
+    expect(repairRun.retriedCount).toBe(1)
+    expect(sawMissingHint).toBe(true)
+
+    // 2. 401 鉴权错触发整批熔断，剩余词条不再继续发送请求
+    const authTargets: string[] = []
+    for (let i = 0; i < 6; i++) {
+      const e = await entrySvc.create(
+        consoleScope,
+        entryInput({
+          title: `熔断测试 ${i + 1}（2026-10-0${i + 1}）`,
+          content: '测试正文。',
+        }),
+      )
+      authTargets.push(e.entry.shortId)
+    }
+    let authCalls = 0
+    fakeAi.setChatHandler(() => {
+      authCalls++
+      throw new FakeHttpError(401, 'invalid api key')
+    })
+    const authRun = await runDream(database.db, masterKey, {
+      runId: 'tidy-auth-abort',
+      trigger: 'manual',
+      mode: 'tidy',
+      targetShortIds: authTargets,
+      concurrency: 1,
+      retryBaseMs: 5,
+    })
+    expect(authCalls).toBe(1)
+    expect(authRun.outcome).toBe('failed')
+    expect(authRun.abortedReason).toContain('401')
+    expect(authRun.considered).toBe(1)
+
+    // 3. tidy 遇到缺 needed 字段的空 JSON `{}` 应触发纠错而非误判 not_needed 跳过
+    const schemaEntry = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '缺字段校验词条（2026-10-09）',
+        content: '保留核心配置。',
+      }),
+    )
+    let schemaCalls = 0
+    fakeAi.setChatHandler(() => {
+      schemaCalls++
+      return schemaCalls === 1
+        ? '{}'
+        : JSON.stringify({
+            needed: true,
+            title: '核心配置说明',
+            summary: '保留核心配置。',
+            content: '保留核心配置。',
+            change_summary: '去除标题日期',
+            archived_notes: [],
+            reason: '去除标题日期',
+          })
+    })
+    const schemaRun = await runDream(database.db, masterKey, {
+      runId: 'tidy-schema-repair',
+      trigger: 'manual',
+      mode: 'tidy',
+      targetShortIds: [schemaEntry.entry.shortId],
+    })
+    expect(schemaCalls).toBe(2)
+    expect(schemaRun.outcome).toBe('ok')
+    expect(schemaRun.suggested).toBe(1)
+
+    // 4. 429 触发共享冷却并真正将后续并发降至 1
+    let rlCalls = 0
+    let inFlightPostCooldown = 0
+    let maxInFlightPostCooldown = 0
+    let rlTriggeredAt = 0
+    fakeAi.setChatHandler(async () => {
+      rlCalls++
+      if (rlCalls === 1) {
+        rlTriggeredAt = Date.now()
+        throw new FakeHttpError(429, 'rate limit', { 'retry-after': '0.06' })
+      }
+      const afterCooldown = rlTriggeredAt > 0 && Date.now() - rlTriggeredAt >= 55
+      if (afterCooldown) {
+        inFlightPostCooldown++
+        if (inFlightPostCooldown > maxInFlightPostCooldown) {
+          maxInFlightPostCooldown = inFlightPostCooldown
+        }
+      }
+      await new Promise((r) => setTimeout(r, 25))
+      if (afterCooldown) inFlightPostCooldown--
+      return JSON.stringify({ needed: false })
+    })
+    const rlRun = await runDream(database.db, masterKey, {
+      runId: 'tidy-429-throttle',
+      trigger: 'manual',
+      mode: 'tidy',
+      targetShortIds: authTargets,
+      concurrency: 3,
+      retryBaseMs: 5,
+      cooldownFallbackMs: 60,
+    })
+    expect(rlRun.outcome).toBe('ok')
+    expect(rlRun.retriedCount).toBeGreaterThanOrEqual(1)
+    expect(maxInFlightPostCooldown).toBe(1)
   })
 })

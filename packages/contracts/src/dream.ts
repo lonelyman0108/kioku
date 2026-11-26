@@ -52,13 +52,25 @@ export const DreamProgress = z.object({
 })
 export type DreamProgress = z.infer<typeof DreamProgress>
 
+export const DreamFailedItem = z.object({
+  shortId: ShortId,
+  title: z.string(),
+  kind: z.string(),
+  reason: z.string(),
+})
+export type DreamFailedItem = z.infer<typeof DreamFailedItem>
+
 export const DreamRunSummary = z.object({
   id: z.string(),
   trigger: DreamTrigger,
+  mode: z.enum(['standard', 'tidy']).optional(),
   outcome: DreamOutcome,
   considered: z.number().int(),
   suggested: z.number().int(),
   error: z.string().nullable(),
+  failedItems: z.array(DreamFailedItem).optional(),
+  retriedCount: z.number().int().min(0).optional(),
+  abortedReason: z.string().nullable().optional(),
   createdAt: z.string(),
 })
 export type DreamRunSummary = z.infer<typeof DreamRunSummary>
@@ -164,6 +176,7 @@ export const TriggerDreamRequest = z.object({
   limit: z.number().int().min(1).max(200).optional(),
   all: z.boolean().optional(),
   pinnedFirst: z.boolean().optional(),
+  targetShortIds: z.array(ShortId).min(1).max(200).optional(),
 })
 export type TriggerDreamRequest = z.infer<typeof TriggerDreamRequest>
 

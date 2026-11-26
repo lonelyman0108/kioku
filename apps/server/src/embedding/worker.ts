@@ -91,7 +91,10 @@ export async function embedEntryIds(
     const vectors = await embedTexts(
       conn,
       chunk.map((c) => c.text),
-      signal ? { signal } : {},
+      {
+        maxRetries: 1,
+        ...(signal ? { signal } : {}),
+      },
     )
     for (let j = 0; j < chunk.length; j++) {
       const item = chunk[j]!

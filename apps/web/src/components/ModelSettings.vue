@@ -3,8 +3,10 @@ import {
   DEFAULT_DREAM_INTERVAL_HOURS,
   DREAM_INTERVAL_HOURS_MAX,
   DREAM_INTERVAL_HOURS_MIN,
+  REASONING_EFFORTS,
   type ModelKind,
   type ModelsSettingsResponse,
+  type ReasoningEffort,
   type TestModelResponse,
 } from '@kioku/contracts'
 import { useToast } from '@nuxt/ui/composables'
@@ -14,11 +16,15 @@ import { computed, reactive, ref, watch } from 'vue'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { icons } from '../icons'
+import { reasoningEffortLabels } from '../labels'
 import { ME_KEY } from '../query'
+import SegmentedChoice from './SegmentedChoice.vue'
 import NoteLine from './ui/NoteLine.vue'
 import ReadFailureNote from './ui/ReadFailureNote.vue'
 import SaveBar from './ui/SaveBar.vue'
 import SectionHeading from './ui/SectionHeading.vue'
+
+type TaskEffortChoice = 'inherit' | Exclude<ReasoningEffort, 'default'>
 
 const dirtyModel = defineModel<boolean>('dirty', { default: false })
 const toast = useToast()
@@ -29,6 +35,19 @@ const settingsQuery = useQuery({
   queryFn: () => api.modelsSettings(),
 })
 
+const reasoningOptions = REASONING_EFFORTS.map((value) => ({
+  value,
+  label: reasoningEffortLabels[value],
+}))
+
+const taskOverrideOptions: readonly { value: TaskEffortChoice; label: string }[] = [
+  { value: 'inherit', label: '跟随全局' },
+  { value: 'off', label: reasoningEffortLabels.off },
+  { value: 'low', label: reasoningEffortLabels.low },
+  { value: 'medium', label: reasoningEffortLabels.medium },
+  { value: 'high', label: reasoningEffortLabels.high },
+]
+
 interface EndpointDraft {
   enabled: boolean
   baseUrl: string
@@ -38,9 +57,15 @@ interface EndpointDraft {
   hasApiKey: boolean
 }
 
+interface ChatEndpointDraft extends EndpointDraft {
+  reasoningEffort: ReasoningEffort
+  fastEffort: TaskEffortChoice
+  organizeEffort: TaskEffortChoice
+}
+
 const form = reactive<{
   embedding: EndpointDraft
-  chatLlm: EndpointDraft
+  chatLlm: ChatEndpointDraft
   dreamEnabled: boolean
   dreamIntervalHours: number
 }>({
@@ -59,10 +84,19 @@ const form = reactive<{
     apiKey: '',
     clearKey: false,
     hasApiKey: false,
+    reasoningEffort: 'default',
+    fastEffort: 'inherit',
+    organizeEffort: 'inherit',
   },
   dreamEnabled: true,
   dreamIntervalHours: DEFAULT_DREAM_INTERVAL_HOURS,
 })
+
+const taskOverridesOpen = ref(false)
+
+function toTaskChoice(value: ReasoningEffort | undefined): TaskEffortChoice {
+  return value && value !== 'default' ? value : 'inherit'
+}
 
 function syncFromSaved(data: ModelsSettingsResponse) {
   form.embedding = {
@@ -73,6 +107,8 @@ function syncFromSaved(data: ModelsSettingsResponse) {
     clearKey: false,
     hasApiKey: data.embedding?.hasApiKey ?? false,
   }
+  const fastEffort = toTaskChoice(data.chatLlm?.taskReasoningEffort?.fast)
+  const organizeEffort = toTaskChoice(data.chatLlm?.taskReasoningEffort?.organize)
   form.chatLlm = {
     enabled: data.chatLlm?.enabled ?? false,
     baseUrl: data.chatLlm?.baseUrl ?? '',
@@ -80,6 +116,12 @@ function syncFromSaved(data: ModelsSettingsResponse) {
     apiKey: '',
     clearKey: false,
     hasApiKey: data.chatLlm?.hasApiKey ?? false,
+    reasoningEffort: data.chatLlm?.reasoningEffort ?? 'default',
+    fastEffort,
+    organizeEffort,
+  }
+  if (fastEffort !== 'inherit' || organizeEffort !== 'inherit') {
+    taskOverridesOpen.value = true
   }
   form.dreamEnabled = data.dream.enabled
   form.dreamIntervalHours = data.dream.intervalHours
@@ -101,6 +143,31 @@ const coveragePercent = computed(() => {
   return Math.round((c.embedded / c.total) * 100)
 })
 
+const activeOverrideCount = computed(
+  () =>
+    (form.chatLlm.fastEffort !== 'inherit' ? 1 : 0) +
+    (form.chatLlm.organizeEffort !== 'inherit' ? 1 : 0),
+)
+
+interface ChatProbeTarget {
+  effort: ReasoningEffort
+  sourceLabel: string | null
+}
+
+// 优先探测显式设置的按任务覆盖（整理任务优先于快速任务），否则探测全局思考等级
+const chatProbeTarget = computed<ChatProbeTarget>(() => {
+  if (form.chatLlm.organizeEffort !== 'inherit') {
+    return { effort: form.chatLlm.organizeEffort, sourceLabel: '整理任务覆盖' }
+  }
+  if (form.chatLlm.fastEffort !== 'inherit') {
+    return { effort: form.chatLlm.fastEffort, sourceLabel: '快速任务覆盖' }
+  }
+  return {
+    effort: form.chatLlm.reasoningEffort,
+    sourceLabel: form.chatLlm.reasoningEffort !== 'default' ? '全局设置' : null,
+  }
+})
+
 function endpointChanged(
   draft: EndpointDraft,
   saved: ModelsSettingsResponse['embedding'],
@@ -117,12 +184,27 @@ function endpointChanged(
   )
 }
 
+function chatEndpointChanged(
+  draft: ChatEndpointDraft,
+  saved: ModelsSettingsResponse['chatLlm'],
+): boolean {
+  if (endpointChanged(draft, saved)) return true
+  const savedEffort = saved?.reasoningEffort ?? 'default'
+  const savedFast = toTaskChoice(saved?.taskReasoningEffort?.fast)
+  const savedOrganize = toTaskChoice(saved?.taskReasoningEffort?.organize)
+  return (
+    draft.reasoningEffort !== savedEffort ||
+    draft.fastEffort !== savedFast ||
+    draft.organizeEffort !== savedOrganize
+  )
+}
+
 const dirtyCount = computed(() => {
   const saved = settingsQuery.data.value
   if (!saved) return 0
   let count = 0
   if (endpointChanged(form.embedding, saved.embedding)) count++
-  if (endpointChanged(form.chatLlm, saved.chatLlm)) count++
+  if (chatEndpointChanged(form.chatLlm, saved.chatLlm)) count++
   if (form.dreamEnabled !== saved.dream.enabled) count++
   if (form.dreamIntervalHours !== saved.dream.intervalHours) count++
   return count
@@ -142,6 +224,11 @@ const validationProblem = computed(() => {
   }
   if (form.chatLlm.enabled && (!form.chatLlm.baseUrl.trim() || !form.chatLlm.model.trim())) {
     return '启用对话与整理模型时须填写接口地址与模型名称'
+  }
+  const hasExplicitThinking =
+    form.chatLlm.reasoningEffort !== 'default' || activeOverrideCount.value > 0
+  if (hasExplicitThinking && (!form.chatLlm.baseUrl.trim() || !form.chatLlm.model.trim())) {
+    return '配置思考等级时须同时填写对话模型的接口地址与模型名称'
   }
   if (
     form.dreamIntervalHours < DREAM_INTERVAL_HOURS_MIN ||
@@ -167,6 +254,22 @@ function buildEndpointPayload(draft: EndpointDraft) {
   }
 }
 
+function buildChatPayload(draft: ChatEndpointDraft) {
+  const base = buildEndpointPayload(draft)
+  if (!base) return null
+  const hasOverride = draft.fastEffort !== 'inherit' || draft.organizeEffort !== 'inherit'
+  return {
+    ...base,
+    reasoningEffort: draft.reasoningEffort,
+    taskReasoningEffort: hasOverride
+      ? {
+          ...(draft.fastEffort !== 'inherit' ? { fast: draft.fastEffort } : {}),
+          ...(draft.organizeEffort !== 'inherit' ? { organize: draft.organizeEffort } : {}),
+        }
+      : null,
+  }
+}
+
 const saving = ref(false)
 async function save() {
   if (saving.value || !dirtyCount.value || validationProblem.value) return
@@ -174,7 +277,7 @@ async function save() {
   try {
     const saved = await api.saveModelsSettings({
       embedding: buildEndpointPayload(form.embedding),
-      chatLlm: buildEndpointPayload(form.chatLlm),
+      chatLlm: buildChatPayload(form.chatLlm),
       dream: {
         enabled: form.dreamEnabled,
         intervalHours: Number(form.dreamIntervalHours),
@@ -196,27 +299,46 @@ function discard() {
   if (settingsQuery.data.value) syncFromSaved(settingsQuery.data.value)
 }
 
+interface ModelTestDisplay extends TestModelResponse {
+  probedEffort?: ReasoningEffort
+  probedSource?: string | null
+}
+
 const testing = ref<ModelKind | null>(null)
-const testResults = reactive<Partial<Record<ModelKind, TestModelResponse>>>({})
+const testResults = reactive<Partial<Record<ModelKind, ModelTestDisplay>>>({})
+
+function formatChatProbeSuffix(res: ModelTestDisplay): string {
+  if (!res.probedEffort || res.probedEffort === 'default') return ''
+  const level = reasoningEffortLabels[res.probedEffort]
+  const src = res.probedSource ? `（${res.probedSource}）` : ''
+  return ` · 探测思考等级：${level}${src}`
+}
 
 async function runTest(kind: ModelKind) {
   const draft = kind === 'embedding' ? form.embedding : form.chatLlm
   if (!draft.baseUrl.trim() || !draft.model.trim() || testing.value) return
   testing.value = kind
+  delete testResults[kind]
+  const probe = kind === 'chat_llm' ? chatProbeTarget.value : null
   try {
-    testResults[kind] = await api.testModel({
+    const res = await api.testModel({
       kind,
       baseUrl: draft.baseUrl.trim(),
       model: draft.model.trim(),
       ...(draft.apiKey.trim()
         ? { apiKey: draft.apiKey.trim(), useSavedKey: false }
         : { useSavedKey: draft.hasApiKey && !draft.clearKey }),
+      ...(probe ? { reasoningEffort: probe.effort } : {}),
     })
+    testResults[kind] = probe
+      ? { ...res, probedEffort: probe.effort, probedSource: probe.sourceLabel }
+      : res
   } catch (err) {
     testResults[kind] = {
       ok: false,
       latencyMs: 0,
       error: err instanceof ApiError ? err.message : '测试失败',
+      ...(probe ? { probedEffort: probe.effort, probedSource: probe.sourceLabel } : {}),
     }
   } finally {
     testing.value = null
@@ -414,6 +536,66 @@ async function rebuildEmbeddings() {
               </UButton>
             </div>
           </UFormField>
+
+          <UFormField
+            label="思考等级"
+            help="选「跟随默认」时不附加思考参数，兼容非推理模型；开启后会按档位自动放宽输出上限。"
+            class="sm:col-span-2"
+          >
+            <div class="effort-row">
+              <SegmentedChoice
+                v-model="form.chatLlm.reasoningEffort"
+                :items="reasoningOptions"
+                label="对话模型默认思考等级"
+              />
+              <button
+                type="button"
+                class="override-toggle"
+                :aria-expanded="taskOverridesOpen"
+                @click="taskOverridesOpen = !taskOverridesOpen"
+              >
+                <UIcon
+                  :name="taskOverridesOpen ? icons.chevronDown : icons.chevronRight"
+                  class="override-chevron"
+                  aria-hidden="true"
+                />
+                <span>
+                  {{
+                    activeOverrideCount > 0
+                      ? `按任务覆盖（已设 ${activeOverrideCount} 项）`
+                      : '按任务覆盖'
+                  }}
+                </span>
+              </button>
+            </div>
+
+            <div v-if="taskOverridesOpen" class="override-box">
+              <div class="override-item">
+                <div class="override-meta">
+                  <span class="override-title">快速任务</span>
+                  <span class="override-desc">随手记归并与会话摘要，建议关闭或设低以防超时</span>
+                </div>
+                <SegmentedChoice
+                  v-model="form.chatLlm.fastEffort"
+                  :items="taskOverrideOptions"
+                  label="快速任务思考等级"
+                  compact
+                />
+              </div>
+              <div class="override-item">
+                <div class="override-meta">
+                  <span class="override-title">整理任务</span>
+                  <span class="override-desc">后台整理与存量规范整理，可按需提高推理深度</span>
+                </div>
+                <SegmentedChoice
+                  v-model="form.chatLlm.organizeEffort"
+                  :items="taskOverrideOptions"
+                  label="整理任务思考等级"
+                  compact
+                />
+              </div>
+            </div>
+          </UFormField>
         </div>
 
         <div class="flex flex-wrap items-center gap-3">
@@ -435,8 +617,8 @@ async function rebuildEmbeddings() {
           >
             {{
               testResults.chat_llm.ok
-                ? `连接正常（${testResults.chat_llm.latencyMs} ms）`
-                : `连接失败：${testResults.chat_llm.error ?? '未知原因'}`
+                ? `连接正常（${testResults.chat_llm.latencyMs} ms${formatChatProbeSuffix(testResults.chat_llm)}）`
+                : `连接失败：${testResults.chat_llm.error ?? '未知原因'}${formatChatProbeSuffix(testResults.chat_llm)}`
             }}
           </span>
         </div>
@@ -489,5 +671,67 @@ async function rebuildEmbeddings() {
   position: absolute;
   inset: 0 auto 0 0;
   background: var(--ui-text-highlighted);
+}
+.effort-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+}
+.override-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border: 1px solid transparent;
+  font-size: 12px;
+  color: var(--ui-text-muted);
+  cursor: pointer;
+}
+.override-toggle:hover {
+  border-color: var(--ui-border-accented);
+  background: var(--ui-bg-muted);
+  color: var(--ui-text-highlighted);
+}
+.override-chevron {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 14px;
+}
+.override-box {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--ui-border);
+  background: var(--ui-bg-muted);
+}
+.override-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 14px;
+}
+.override-item + .override-item {
+  padding-top: 10px;
+  border-top: 1px solid var(--ui-border);
+}
+.override-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.override-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ui-text-highlighted);
+}
+.override-desc {
+  font-size: 12px;
+  color: var(--ui-text-muted);
 }
 </style>
