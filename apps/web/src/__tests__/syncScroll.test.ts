@@ -62,4 +62,14 @@ describe('分栏编辑锚点同步滚动算法', () => {
     expect(interpolateScroll(anchors, 170, 'pre')).toBeCloseTo(260, 5)
     expect(interpolateScroll(anchors, 700, 'pre')).toBe(1000)
   })
+
+  it('单侧无可滚动空间时保持 (0, 0) 首锚点不被尾端覆写', () => {
+    const srcZero = buildMonotonicAnchors([], 0, 480)
+    expect(srcZero).toEqual([{ src: 0, pre: 0 }])
+    expect(interpolateScroll(srcZero, 0, 'src')).toBe(0)
+
+    const preZero = buildMonotonicAnchors([], 480, 0)
+    expect(preZero).toEqual([{ src: 0, pre: 0 }])
+    expect(interpolateScroll(preZero, 0, 'pre')).toBe(0)
+  })
 })

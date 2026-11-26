@@ -50,6 +50,21 @@ const previewErrors = ref<Record<string, string>>({})
 const candidatesSectionRef = ref<HTMLElement | null>(null)
 const truncatedSectionRef = ref<HTMLElement | null>(null)
 const obsoleteSectionRef = ref<HTMLElement | null>(null)
+let previewEpoch = 0
+
+function resetPreviewCache() {
+  previewEpoch++
+  expandedPreviewIds.value = []
+  previewLoading.value = {}
+  previewDiffs.value = {}
+  previewErrors.value = {}
+}
+
+function refreshScan() {
+  if (applying.value) return
+  resetPreviewCache()
+  void previewQuery.refetch()
+}
 
 function jumpToSection(el: HTMLElement | null) {
   el?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -69,6 +84,7 @@ function computeCandidatePreview(
     after = stripLegacyGlossaryLines(after).content
   }
   if (item.rewrites.length) {
+    const orderedRewrites = [...item.rewrites].sort((a, b) => b.raw.length - a.raw.length)
     const lines = after.replace(/\r\n/g, '\n').split('\n')
     let fence: string | null = null
     const rewritten = lines.map((line) => {
@@ -94,7 +110,7 @@ function computeCandidatePreview(
         .map((seg, idx) => {
           if (idx % 2 === 1) return seg
           let out = seg
-          for (const rw of item.rewrites) {
+          for (const rw of orderedRewrites) {
             if (rw.raw && out.includes(rw.raw)) out = out.replaceAll(rw.raw, rw.replacement)
           }
           return out
@@ -114,22 +130,27 @@ async function togglePreviewDiff(item: HygieneSweepCandidate) {
   }
   expandedPreviewIds.value = [...expandedPreviewIds.value, sid]
   if (previewDiffs.value[sid] || previewLoading.value[sid]) return
+  const epoch = previewEpoch
   previewLoading.value = { ...previewLoading.value, [sid]: true }
   const nextErrors = { ...previewErrors.value }
   delete nextErrors[sid]
   previewErrors.value = nextErrors
   try {
     const detail = await api.entry(sid)
+    if (epoch !== previewEpoch || !open.value) return
     const before = detail.entry.content
     const after = computeCandidatePreview(detail.entry.title, before, item)
     previewDiffs.value = { ...previewDiffs.value, [sid]: { before, after } }
   } catch (err) {
+    if (epoch !== previewEpoch || !open.value) return
     previewErrors.value = {
       ...previewErrors.value,
       [sid]: err instanceof ApiError ? err.message : '加载对比预览失败',
     }
   } finally {
-    previewLoading.value = { ...previewLoading.value, [sid]: false }
+    if (epoch === previewEpoch) {
+      previewLoading.value = { ...previewLoading.value, [sid]: false }
+    }
   }
 }
 
@@ -154,9 +175,7 @@ watch(open, (visible) => {
     applyError.value = null
   } else {
     selectionInitialized.value = false
-    expandedPreviewIds.value = []
-    previewDiffs.value = {}
-    previewErrors.value = {}
+    resetPreviewCache()
   }
 })
 
@@ -204,9 +223,7 @@ async function applySelected() {
         : `已预清洗 ${res.applied} 条记忆`
     toast.add({ title: summary, color: res.applied > 0 ? 'success' : 'neutral' })
     selectionInitialized.value = false
-    expandedPreviewIds.value = []
-    previewDiffs.value = {}
-    previewErrors.value = {}
+    resetPreviewCache()
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ['entries'] }),
       queryClient.invalidateQueries({ queryKey: ['inbox'] }),
@@ -227,12 +244,14 @@ async function applySelected() {
 
 <template>
   <USlideover
-    v-model:open="open"
+    :open="open"
     side="right"
     title="结构体检与预清洗"
     description="无需对话模型，零误差检查重复标题、旧版关键词行、断链引用与异常记忆"
     :dismissible="!applying"
+    :close="!applying"
     :ui="{ content: 'w-[min(92vw,960px)] max-w-[960px] sm:max-w-[960px] ring-2 ring-rule' }"
+    @update:open="(v) => !applying && (open = v)"
   >
     <template #body>
       <ReadFailureNote v-if="previewQuery.isError.value" :query="previewQuery" />
@@ -301,7 +320,7 @@ async function applySelected() {
             :icon="icons.refresh"
             :loading="previewQuery.isFetching.value"
             :disabled="applying"
-            @click="previewQuery.refetch()"
+            @click="refreshScan"
           >
             重新扫描
           </UButton>

@@ -109,10 +109,12 @@ async function save() {
 
 <template>
   <UModal
-    v-model:open="open"
+    :open="open"
     :title="editing ? `编辑凭据 ${editing.slug}` : '新建凭据'"
     :dismissible="!saving"
+    :close="!saving"
     :ui="{ content: 'max-w-lg sm:max-w-lg' }"
+    @update:open="(v) => !saving && (open = v)"
   >
     <template #body>
       <div class="space-y-4">

@@ -127,15 +127,18 @@ function saveListWidth(width: number) {
 }
 
 const storedListWidth = ref<number>(readStoredListWidth())
+const containerWidth = ref<number>(0)
 const resizing = ref(false)
+let layoutObserver: ResizeObserver | null = null
 
-function maxAllowedListWidth(): number {
-  const containerW = layoutRef.value?.clientWidth || Math.min(viewport.value.width, 1840)
-  return Math.max(LIST_WIDTH_MIN, Math.min(LIST_WIDTH_MAX, containerW - DETAIL_MIN_WIDTH))
-}
+const maxAllowedWidth = computed(() => {
+  const viewportFallback = Math.min(viewport.value.width, 1840)
+  const effectiveContainer = containerWidth.value > 0 ? containerWidth.value : viewportFallback
+  return Math.max(LIST_WIDTH_MIN, Math.min(LIST_WIDTH_MAX, effectiveContainer - DETAIL_MIN_WIDTH))
+})
 
 const effectiveListWidth = computed(() =>
-  Math.max(LIST_WIDTH_MIN, Math.min(storedListWidth.value, maxAllowedListWidth())),
+  Math.max(LIST_WIDTH_MIN, Math.min(storedListWidth.value, maxAllowedWidth.value)),
 )
 
 const isPeek = computed(() => Boolean(selectedId.value) && !fullscreen.value)
@@ -149,7 +152,7 @@ function onPointerMove(event: PointerEvent) {
   const next = Math.round(
     Math.max(
       LIST_WIDTH_MIN,
-      Math.min(maxAllowedListWidth(), dragStartWidth + (event.clientX - dragStartX)),
+      Math.min(maxAllowedWidth.value, dragStartWidth + (event.clientX - dragStartX)),
     ),
   )
   storedListWidth.value = next
@@ -161,6 +164,7 @@ function stopResize() {
   window.removeEventListener('pointermove', onPointerMove)
   window.removeEventListener('pointerup', stopResize)
   window.removeEventListener('pointercancel', stopResize)
+  window.removeEventListener('blur', stopResize)
   saveListWidth(storedListWidth.value)
 }
 
@@ -173,6 +177,7 @@ function startResize(event: PointerEvent) {
   window.addEventListener('pointermove', onPointerMove)
   window.addEventListener('pointerup', stopResize)
   window.addEventListener('pointercancel', stopResize)
+  window.addEventListener('blur', stopResize)
 }
 
 function resetListWidth() {
@@ -189,13 +194,17 @@ function onSplitterKeydown(event: KeyboardEvent) {
     saveListWidth(storedListWidth.value)
   } else if (event.key === 'ArrowRight') {
     event.preventDefault()
-    storedListWidth.value = Math.min(maxAllowedListWidth(), effectiveListWidth.value + step)
+    storedListWidth.value = Math.min(maxAllowedWidth.value, effectiveListWidth.value + step)
     saveListWidth(storedListWidth.value)
   } else if (event.key === 'Home') {
     event.preventDefault()
     resetListWidth()
   }
 }
+
+watch([narrow, isPeek], ([isNarrow, peek]) => {
+  if (isNarrow || !peek) stopResize()
+})
 
 watch(selectedId, async (id) => {
   if (!id) {
@@ -367,9 +376,21 @@ function onKeydown(event: KeyboardEvent) {
   }
 }
 
-onMounted(() => window.addEventListener('keydown', onKeydown))
+onMounted(() => {
+  window.addEventListener('keydown', onKeydown)
+  if (layoutRef.value && typeof ResizeObserver !== 'undefined') {
+    containerWidth.value = layoutRef.value.clientWidth
+    layoutObserver = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width
+      if (w !== undefined) containerWidth.value = Math.round(w)
+    })
+    layoutObserver.observe(layoutRef.value)
+  }
+})
 onBeforeUnmount(() => {
   stopResize()
+  layoutObserver?.disconnect()
+  layoutObserver = null
   window.removeEventListener('keydown', onKeydown)
 })
 </script>
@@ -421,14 +442,14 @@ onBeforeUnmount(() => {
     <Transition name="detail-reveal">
       <section v-if="selectedId" class="detail-col" aria-label="记忆详情">
         <div
-          v-if="isPeek"
+          v-if="isPeek && !narrow"
           class="pane-splitter"
           role="separator"
           aria-orientation="vertical"
           aria-label="拖动调节列表与详情宽度"
           :aria-valuenow="effectiveListWidth"
           :aria-valuemin="LIST_WIDTH_MIN"
-          :aria-valuemax="LIST_WIDTH_MAX"
+          :aria-valuemax="maxAllowedWidth"
           tabindex="0"
           title="拖动调节宽度，双击恢复默认"
           @pointerdown="startResize"

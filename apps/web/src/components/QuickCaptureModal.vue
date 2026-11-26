@@ -590,9 +590,12 @@ function openOriginalEntry() {
 
 function onModalKeydown(event: KeyboardEvent) {
   if (
+    event.defaultPrevented ||
     event.isComposing ||
     !open.value ||
     !(event.metaKey || event.ctrlKey) ||
+    event.shiftKey ||
+    event.altKey ||
     event.key !== 'Enter'
   ) {
     return

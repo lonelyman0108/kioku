@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import {
+  Disclosure,
   DISCLOSURE_MAX,
+  ENTRY_CONTENT_MAX,
   ENTRY_SUMMARY_MAX,
   ENTRY_TITLE_NEW_MAX,
   EntrySummary,
@@ -107,6 +109,13 @@ const validationProblem = computed(() => {
     const parsed = EntrySummary.safeParse(form.summary)
     if (!parsed.success) return parsed.error.issues[0]?.message ?? '现行概要格式有误'
   }
+  if (form.disclosure.trim()) {
+    const parsed = Disclosure.safeParse(form.disclosure)
+    if (!parsed.success) return parsed.error.issues[0]?.message ?? '触发场景格式有误'
+  }
+  if (form.content.length > ENTRY_CONTENT_MAX) {
+    return `正文最多 ${ENTRY_CONTENT_MAX.toLocaleString()} 字`
+  }
   if (form.topics.length > TOPICS_MAX) return `主题标签最多 ${TOPICS_MAX} 个`
   for (const tag of form.topics) {
     const parsed = TopicTag.safeParse(tag)
@@ -150,9 +159,12 @@ async function submit() {
 
 function onModalKeydown(event: KeyboardEvent) {
   if (
+    event.defaultPrevented ||
     event.isComposing ||
     !open.value ||
     !(event.metaKey || event.ctrlKey) ||
+    event.shiftKey ||
+    event.altKey ||
     event.key !== 'Enter'
   ) {
     return
@@ -168,10 +180,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onModalKeydown))
 
 <template>
   <UModal
-    v-model:open="open"
+    :open="open"
     title="新建记忆"
     :dismissible="!saving"
+    :close="!saving"
     :ui="{ content: 'max-w-3xl sm:max-w-3xl' }"
+    @update:open="(v) => !saving && (open = v)"
   >
     <template #body>
       <div class="space-y-4">

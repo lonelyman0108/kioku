@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import {
   buildDiffDisplayChunks,
@@ -83,6 +83,36 @@ const hasChanges = computed(
 const visibleMask = ref<boolean[]>([])
 const focusedHunk = ref(0)
 const rootRef = ref<HTMLElement | null>(null)
+const containerWidth = ref<number>(1024)
+let rootObserver: ResizeObserver | null = null
+
+const isSplit = computed(
+  () => props.allowSplit && activeLayout.value === 'split' && containerWidth.value >= 640,
+)
+
+onMounted(() => {
+  if (rootRef.value && typeof ResizeObserver !== 'undefined') {
+    containerWidth.value = rootRef.value.clientWidth || 1024
+    rootObserver = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width
+      if (w !== undefined && w > 0) containerWidth.value = w
+    })
+    rootObserver.observe(rootRef.value)
+  }
+})
+
+onBeforeUnmount(() => {
+  rootObserver?.disconnect()
+  rootObserver = null
+})
+
+function gapRangeText(start: number, end: number): string {
+  const first = structured.value.lines[start]
+  const last = structured.value.lines[end - 1]
+  const from = first?.newLine ?? first?.oldLine ?? start + 1
+  const to = last?.newLine ?? last?.oldLine ?? end
+  return from === to ? `第 ${from} 行未改动` : `第 ${from}–${to} 行未改动`
+}
 
 function resetVisibility() {
   const { lines, hunkStarts } = structured.value
@@ -221,11 +251,11 @@ defineExpose({
     <div
       v-else
       class="diff-scroll"
-      :class="{ 'is-split': allowSplit && activeLayout === 'split' }"
+      :class="{ 'is-split': isSplit }"
       :style="maxHeight ? { maxHeight } : undefined"
     >
       <table class="diff-table">
-        <colgroup v-if="allowSplit && activeLayout === 'split'">
+        <colgroup v-if="isSplit">
           <col class="col-w-ln" />
           <col class="col-w-sign" />
           <col />
@@ -247,7 +277,7 @@ defineExpose({
           >
             <!-- 可交互折叠区间：支持向上/向下按需多看上下文，无需离开对比视图 -->
             <tr v-if="chunk.kind === 'gap'" class="row-gap">
-              <td :colspan="allowSplit && activeLayout === 'split' ? 6 : 4">
+              <td :colspan="isSplit ? 6 : 4">
                 <div class="gap-bar">
                   <div class="gap-actions">
                     <button
@@ -281,14 +311,14 @@ defineExpose({
                     <template v-if="chunk.sectionHeading">
                       <span class="gap-anchor">{{ chunk.sectionHeading }}</span>
                     </template>
-                    <template v-else> 第 {{ chunk.start + 1 }}–{{ chunk.end }} 行未改动 </template>
+                    <template v-else>{{ gapRangeText(chunk.start, chunk.end) }}</template>
                   </span>
                 </div>
               </td>
             </tr>
 
             <!-- 左右双栏 Split -->
-            <template v-else-if="allowSplit && activeLayout === 'split'">
+            <template v-else-if="isSplit">
               <tr
                 v-for="pair in splitPairsOf(chunk.start, chunk.end)"
                 :key="`${pair.index}-${pair.left?.oldLine ?? 'n'}-${pair.right?.newLine ?? 'n'}`"
@@ -444,7 +474,7 @@ defineExpose({
   background: var(--ui-bg-muted);
   text-align: right;
   vertical-align: top;
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--ui-text-dimmed);
   user-select: none;
 }

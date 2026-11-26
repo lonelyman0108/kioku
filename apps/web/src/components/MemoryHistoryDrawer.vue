@@ -106,6 +106,7 @@ function itemTimestamp(item: EntryHistoryItem): string {
 }
 
 interface ComputedItemMeta {
+  previousItemId: number | null
   previousSnapshot: EntrySnapshot | null
   fieldChanges: SnapshotFieldChange[]
   diff: StructuredDiff
@@ -119,9 +120,11 @@ const metaMap = computed(() => {
   for (let i = 0; i < list.length; i++) {
     const curr = list[i]!
     if (!curr.snapshot) continue
+    let prevItemId: number | null = null
     let prevSnap: EntrySnapshot | null = null
     for (let j = i + 1; j < list.length; j++) {
       if (list[j]?.snapshot) {
+        prevItemId = list[j]!.id
         prevSnap = list[j]!.snapshot!
         break
       }
@@ -129,6 +132,7 @@ const metaMap = computed(() => {
     const fieldChanges = diffEntrySnapshots(prevSnap, curr.snapshot)
     const diff = computeStructuredDiff(prevSnap ? prevSnap.content : null, curr.snapshot.content)
     map.set(curr.id, {
+      previousItemId: prevItemId,
       previousSnapshot: prevSnap,
       fieldChanges,
       diff,
@@ -193,7 +197,7 @@ const filteredItems = computed(() => {
 
 const snapshotItems = computed(() =>
   items.value.filter(
-    (item): item is EntryHistoryItem & { snapshot: EntrySnapshot } => item.snapshot !== null,
+    (item): item is EntryHistoryItem & { snapshot: EntrySnapshot } => item.snapshot != null,
   ),
 )
 
@@ -212,11 +216,15 @@ const activeMeta = computed(() =>
 const customBaseItem = computed<(EntryHistoryItem & { snapshot: EntrySnapshot }) | null>(() => {
   if (baseItemId.value === null || !activeItem.value?.snapshot) return null
   if (baseItemId.value === activeItem.value.id) return null
+  if (activeMeta.value?.previousItemId === baseItemId.value) return null
   return snapshotItems.value.find((item) => item.id === baseItemId.value) ?? null
 })
 
 function selectItem(item: EntryHistoryItem) {
-  if (baseItemId.value === item.id) baseItemId.value = null
+  const nextPrevId = metaMap.value.get(item.id)?.previousItemId ?? null
+  if (baseItemId.value === item.id || (nextPrevId !== null && baseItemId.value === nextPrevId)) {
+    baseItemId.value = null
+  }
   activeItemId.value = item.id
   mobileDetailOpen.value = true
   if (!item.snapshot) {
@@ -227,7 +235,7 @@ function selectItem(item: EntryHistoryItem) {
 
 function togglePinBase(item: EntryHistoryItem) {
   if (!item.snapshot) return
-  if (baseItemId.value === item.id) {
+  if (baseItemId.value === item.id || activeMeta.value?.previousItemId === item.id) {
     baseItemId.value = null
     return
   }
@@ -241,6 +249,7 @@ const compareBaseOptions = computed<{ value: string; label: string }[]>(() => {
   const curr = activeItem.value
   if (!curr?.snapshot) return []
   const prev = activeMeta.value?.previousSnapshot ?? null
+  const prevItemId = activeMeta.value?.previousItemId ?? null
   const opts: { value: string; label: string }[] = [
     {
       value: 'prev',
@@ -249,7 +258,7 @@ const compareBaseOptions = computed<{ value: string; label: string }[]>(() => {
   ]
   for (const cand of snapshotItems.value) {
     if (cand.id === curr.id) continue
-    if (prev && cand.snapshot.version === prev.version) continue
+    if (prevItemId !== null && cand.id === prevItemId) continue
     const summary = summaryTextOf(cand)
     const shortSummary = summary.length > 16 ? `${summary.slice(0, 16)}…` : summary
     opts.push({
@@ -272,7 +281,7 @@ function onSelectCompareBase(raw: string | number | null | undefined) {
   }
   const num = Number(val)
   if (Number.isFinite(num)) {
-    baseItemId.value = num
+    baseItemId.value = num === activeMeta.value?.previousItemId ? null : num
     inspectTab.value = 'diff'
   }
 }
@@ -301,7 +310,10 @@ const inspectorCanShowDiff = computed(
 
 const inspectorHasContentDiff = computed(() => {
   if (customBaseItem.value && activeItem.value?.snapshot) {
-    return customBaseItem.value.snapshot.content !== activeItem.value.snapshot.content
+    return (
+      customBaseItem.value.snapshot.content.replace(/\r\n/g, '\n') !==
+      activeItem.value.snapshot.content.replace(/\r\n/g, '\n')
+    )
   }
   return Boolean(activeMeta.value?.hasContentDiff)
 })
@@ -497,9 +509,14 @@ async function confirmRestore() {
                 </div>
               </button>
 
-              <!-- 悬停浮现快捷设为对比基准按钮，平时零噪音 -->
+              <!-- 悬停浮现快捷设为对比基准按钮，默认上一版无需重复固定 -->
               <button
-                v-if="item.snapshot && activeItem?.snapshot && item.id !== activeItem.id"
+                v-if="
+                  item.snapshot &&
+                  activeItem?.snapshot &&
+                  item.id !== activeItem.id &&
+                  item.id !== activeMeta?.previousItemId
+                "
                 type="button"
                 class="tl-pin-base"
                 :class="{ 'is-pinned': customBaseItem?.id === item.id }"
@@ -899,24 +916,24 @@ async function confirmRestore() {
 .tl-archive-tag {
   padding: 0 5px;
   border: 1px solid var(--ui-border-accented);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ui-text-muted);
 }
 .tl-curr {
   padding: 0 5px;
   border: 1px solid var(--ui-rule);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.4;
 }
 .tl-base-badge {
   padding: 0 5px;
   border: 1px solid var(--ui-info);
   color: var(--ui-info);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.4;
 }
 .tl-time {
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--ui-text-muted);
   white-space: nowrap;
 }
@@ -948,11 +965,11 @@ async function confirmRestore() {
   gap: 4px;
   flex: none;
   font-family: var(--font-mono);
-  font-size: 11.5px;
+  font-size: 12px;
 }
 .tl-meta-only {
   flex: none;
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--ui-text-dimmed);
 }
 .stat-add {
@@ -973,7 +990,7 @@ async function confirmRestore() {
   padding: 1px 6px;
   border: 1px solid var(--ui-border-accented);
   background: var(--ui-bg-bright);
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 1.45;
   color: var(--ui-text-toned);
   opacity: 0;

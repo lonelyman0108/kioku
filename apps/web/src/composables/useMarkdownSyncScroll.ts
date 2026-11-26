@@ -71,6 +71,7 @@ export function buildMonotonicAnchors(
 ): ScrollAnchorPair[] {
   const maxS = Math.max(0, srcMax)
   const maxP = Math.max(0, preMax)
+  if (maxS === 0 || maxP === 0) return [{ src: 0, pre: 0 }]
   const clamped = pairs.map((p) => ({
     src: Math.min(maxS, Math.max(0, p.src)),
     pre: Math.min(maxP, Math.max(0, p.pre)),
@@ -90,7 +91,7 @@ export function buildMonotonicAnchors(
 
   const tail = out.at(-1)!
   if (tail.src < maxS || tail.pre < maxP) {
-    if (tail.src === maxS) {
+    if (out.length > 1 && tail.src === maxS) {
       out[out.length - 1] = { src: maxS, pre: maxP }
     } else {
       out.push({ src: maxS, pre: maxP })
@@ -331,6 +332,7 @@ export function useMarkdownSyncScroll(options: {
     const srcEl = boundSrc
     const preEl = boundPre
     if (!srcEl || !preEl) return
+    if (srcEl.scrollHeight <= srcEl.clientHeight || preEl.scrollHeight <= preEl.clientHeight) return
     if (expectedSrc !== null && Math.abs(srcEl.scrollTop - expectedSrc) <= 2) {
       expectedSrc = null
       return
@@ -348,6 +350,7 @@ export function useMarkdownSyncScroll(options: {
     const srcEl = boundSrc
     const preEl = boundPre
     if (!srcEl || !preEl) return
+    if (srcEl.scrollHeight <= srcEl.clientHeight || preEl.scrollHeight <= preEl.clientHeight) return
     if (expectedPre !== null && Math.abs(preEl.scrollTop - expectedPre) <= 2) {
       expectedPre = null
       return
@@ -379,6 +382,13 @@ export function useMarkdownSyncScroll(options: {
       boundPre.removeEventListener('touchstart', onPreviewIntent)
       boundPre = null
     }
+    if (driverTimer) {
+      clearTimeout(driverTimer)
+      driverTimer = null
+    }
+    activeDriver = null
+    expectedSrc = null
+    expectedPre = null
     resizeObserver?.disconnect()
     resizeObserver = null
   }
@@ -408,6 +418,8 @@ export function useMarkdownSyncScroll(options: {
       resizeObserver = new ResizeObserver(() => markDirty())
       resizeObserver.observe(srcEl)
       resizeObserver.observe(preEl)
+      const mdRoot = preEl.querySelector<HTMLElement>('.kioku-markdown')
+      if (mdRoot) resizeObserver.observe(mdRoot)
     }
   }
 
