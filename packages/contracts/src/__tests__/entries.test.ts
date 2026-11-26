@@ -1,13 +1,20 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  applyCapturePatch,
+  applyMarkdownAppend,
   buildSearchTags,
+  CapturePlanRequest,
+  checkCaptureIntegrity,
   CreateEntryRequest,
   deriveEntryTitle,
+  ENTRY_CONTENT_MAX,
   EntryListQuery,
+  extractMarkdownHeadings,
   firstMarkdownHeading,
   normalizeProjectSlug,
   normalizeSlugList,
+  RestoreEntryRequest,
   UpdateEntryRequest,
 } from '../entries'
 
@@ -62,12 +69,154 @@ describe('entries contracts', () => {
     })
     expect(updated.promoteToEntry).toBe(true)
 
-    const query = EntryListQuery.parse({ q: 'docker', mode: 'lookup', limit: '20' })
+    const query = EntryListQuery.parse({
+      q: 'docker',
+      mode: 'lookup',
+      projectScope: 'unassigned',
+      limit: '20',
+    })
     expect(query).toEqual({
       tab: 'all',
       q: 'docker',
       mode: 'lookup',
+      projectScope: 'unassigned',
       limit: 20,
     })
+
+    const captureReq = CapturePlanRequest.parse({
+      text: '  方案对比优先用表格呈现  ',
+    })
+    expect(captureReq).toEqual({
+      text: '方案对比优先用表格呈现',
+      mode: 'auto',
+    })
+  })
+
+  it('extracts H2 headings and applies deterministic markdown append and local patches', () => {
+    const doc = [
+      '## 提交规范',
+      '- 使用中文提交说明',
+      '',
+      '```markdown',
+      '## 围栏内标题应忽略',
+      '```',
+      '',
+      '## 调试方式',
+      '- 使用 chrome-devtools，参考 [[m-234abc]] 与 {{cred:dev-token}}',
+    ].join('\n')
+
+    expect(extractMarkdownHeadings(doc)).toEqual(['提交规范', '调试方式'])
+
+    const inserted = applyMarkdownAppend(doc, '评审文档优先表格呈现', '提交规范')
+    expect(inserted.matchedHeading).toBe('提交规范')
+    expect(inserted.content).toContain('```\n- 评审文档优先表格呈现\n\n## 调试方式')
+    expect(inserted.content.indexOf('评审文档优先表格呈现')).toBeLessThan(
+      inserted.content.indexOf('## 调试方式'),
+    )
+
+    const replaced = applyCapturePatch(doc, {
+      kind: 'replace',
+      oldText: '- 使用中文提交说明',
+      newText: '- 提交说明使用中文并附 gitmoji',
+    })
+    expect(replaced.ok).toBe(true)
+    if (replaced.ok) {
+      expect(replaced.content).toContain('- 提交说明使用中文并附 gitmoji')
+      expect(replaced.content).toContain('[[m-234abc]]')
+      expect(replaced.content).toContain('{{cred:dev-token}}')
+    }
+
+    const missingOld = applyCapturePatch(doc, {
+      kind: 'replace',
+      oldText: '不存在的旧段落',
+      newText: '新段落',
+    })
+    expect(missingOld.ok).toBe(false)
+
+    const okIntegrity = checkCaptureIntegrity(doc, inserted.content)
+    expect(okIntegrity).toEqual({
+      intact: true,
+      linksBefore: 1,
+      linksAfter: 1,
+      missingLinks: [],
+      credsBefore: 1,
+      credsAfter: 1,
+      missingCreds: [],
+      severeShrink: false,
+    })
+
+    const brokenIntegrity = checkCaptureIntegrity(doc, '## 提交规范\n- 只剩一行')
+    expect(brokenIntegrity.intact).toBe(false)
+    expect(brokenIntegrity.missingLinks).toEqual(['m-234abc'])
+    expect(brokenIntegrity.missingCreds).toEqual(['dev-token'])
+  })
+
+  it('handles CRLF, duplicate headings, zero-diff replace, overflow, aliased links, field creds and shrink checks', () => {
+    expect(RestoreEntryRequest.parse({ version: 2, expectedVersion: 3 })).toEqual({
+      version: 2,
+      expectedVersion: 3,
+    })
+
+    const crlfDoc = [
+      '## Deploy',
+      '### 子步骤',
+      '- 第一步',
+      '',
+      '## Deploy',
+      '- 重复标题应去重',
+    ].join('\r\n')
+    expect(extractMarkdownHeadings(crlfDoc)).toEqual(['Deploy'])
+
+    const appendedCrlf = applyMarkdownAppend(crlfDoc, '第一行\r\n第二行', 'deploy')
+    expect(appendedCrlf.matchedHeading).toBe('Deploy')
+    expect(appendedCrlf.content).not.toContain('\r')
+    expect(appendedCrlf.content).toContain('- 第一步\n第一行\n第二行\n\n## Deploy')
+
+    expect(applyMarkdownAppend('', '首条记录').content).toBe('- 首条记录')
+
+    const noopReplace = applyCapturePatch('## 规则\n- 保持一致', {
+      kind: 'replace',
+      oldText: '- 保持一致',
+      newText: '- 保持一致',
+    })
+    expect(noopReplace).toMatchObject({ ok: false, unchanged: true })
+
+    const emptyNew = applyCapturePatch('## 规则\n- 旧行', {
+      kind: 'replace',
+      oldText: '- 旧行',
+      newText: '   ',
+    })
+    expect(emptyNew.ok).toBe(false)
+
+    const fallbackTrim = applyCapturePatch('## 规则\n- 目标行\n- 尾行', {
+      kind: 'replace',
+      oldText: '\n\n  - 目标行  \n\n',
+      newText: '\n\n- 更新行\n\n',
+    })
+    expect(fallbackTrim).toEqual({
+      ok: true,
+      content: '## 规则\n- 更新行\n- 尾行',
+      matchedHeading: null,
+    })
+
+    const overflow = applyCapturePatch('a'.repeat(ENTRY_CONTENT_MAX), {
+      kind: 'append',
+      text: '超出上限',
+    })
+    expect(overflow).toMatchObject({ ok: false, overflow: true })
+
+    const richBefore = `${'说明文字'.repeat(60)}\n参考 [[m-234abc|部署文档]] 与 {{cred:db-main#password}}`
+    const droppedField = `${'说明文字'.repeat(60)}\n参考 [[m-234abc|部署文档]] 与 {{cred:db-main}}`
+    const fieldCheck = checkCaptureIntegrity(richBefore, droppedField)
+    expect(fieldCheck.intact).toBe(false)
+    expect(fieldCheck.missingCreds).toEqual(['db-main#password'])
+
+    const shrunk = checkCaptureIntegrity(richBefore, '参考 [[m-234abc]] {{cred:db-main#password}}')
+    expect(shrunk.severeShrink).toBe(true)
+    expect(shrunk.intact).toBe(false)
+
+    const shortBefore = '短文本 [[m-234abc]]'
+    const shortAfter = '[[m-234abc]]'
+    expect(checkCaptureIntegrity(shortBefore, shortAfter).severeShrink).toBe(false)
   })
 })

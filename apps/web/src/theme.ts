@@ -99,7 +99,7 @@ const fieldAffixes = [
   { leading: true, size: 'xl', class: 'ps-10' },
   { trailing: true, size: 'xs', class: 'pe-6' },
   { trailing: true, size: 'sm', class: 'pe-7' },
-  { trailing: true, size: 'md', class: 'pe-7' },
+  { trailing: true, size: 'md', class: 'pe-8' },
   { trailing: true, size: 'lg', class: 'pe-8' },
   { trailing: true, size: 'xl', class: 'pe-10' },
 ] as const
@@ -108,7 +108,7 @@ const fieldAffixes = [
 const fieldFocus = fieldColors.map((color) => ({
   color,
   variant: ['outline', 'subtle'] as ('outline' | 'subtle')[],
-  class: 'focus-visible:outline-0 focus:outline-0',
+  class: 'focus-visible:outline-0 focus:outline-0 focus-visible:ring-2',
 }))
 
 // 弹出层（下拉、弹窗、抽屉）用一圈墨线和页面分开
@@ -243,6 +243,7 @@ export const theme = {
   input: {
     variants: { size: fieldSizes, variant: fieldVariants },
     compoundVariants: [...fieldAffixes, ...fieldFocus],
+    defaultVariants: { fixed: true },
   },
   textarea: {
     variants: {
@@ -286,6 +287,7 @@ export const theme = {
     slots: { item: 'ring ring-inset ring-accented bg-transparent' },
     variants: { size: fieldSizes, variant: fieldVariants },
     compoundVariants: [...fieldAffixes, ...fieldFocus],
+    defaultVariants: { fixed: true },
   },
   select: {
     slots: { content: 'ring-rule', item: popupItem },
@@ -303,6 +305,7 @@ export const theme = {
       },
     },
     compoundVariants: [...fieldAffixes, ...fieldFocus],
+    defaultVariants: { fixed: true },
   },
   selectMenu: {
     slots: { content: 'ring-rule', item: popupItem },
@@ -320,6 +323,7 @@ export const theme = {
       },
     },
     compoundVariants: [...fieldAffixes, ...fieldFocus],
+    defaultVariants: { fixed: true },
   },
   dropdownMenu: {
     slots: {

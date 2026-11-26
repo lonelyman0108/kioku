@@ -1,4 +1,4 @@
-import type { RouteRecordRaw, Router } from 'vue-router'
+import type { LocationQuery, LocationQueryRaw, RouteRecordRaw, Router } from 'vue-router'
 
 import { api } from './api/endpoints'
 import { loadMe } from './composables/useSession'
@@ -52,6 +52,15 @@ export const entryRoute = (shortId: string) => ({
   name: 'memories' as const,
   query: { id: shortId },
 })
+
+export const captureRoute = (draft?: string, baseQuery?: LocationQuery) => {
+  const query: LocationQueryRaw = baseQuery ? { ...baseQuery } : {}
+  query.capture = '1'
+  const clean = draft?.trim()
+  if (clean) query.draft = clean
+  else delete query.draft
+  return { name: 'memories' as const, query }
+}
 
 export const credentialRoute = (slug: string) => ({
   name: 'credentials' as const,

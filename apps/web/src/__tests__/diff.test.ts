@@ -21,6 +21,15 @@ describe('按行对比', () => {
     ])
   })
 
+  it('归一化 CRLF 换行符，不因行尾差异把整段标成改动', () => {
+    expect(diffLines('甲\r\n乙\r\n丙', '甲\n乙\n丙\n丁')).toEqual([
+      { kind: 'same', text: '甲' },
+      { kind: 'same', text: '乙' },
+      { kind: 'same', text: '丙' },
+      { kind: 'add', text: '丁' },
+    ])
+  })
+
   it('中间插入时对齐到最长公共子序列', () => {
     const kinds = diffLines('a\nb\nc\nd', 'a\nx\nb\nc\ny\nd').map((l) => `${l.kind[0]}${l.text}`)
     expect(kinds).toEqual(['sa', 'ax', 'sb', 'sc', 'ay', 'sd'])

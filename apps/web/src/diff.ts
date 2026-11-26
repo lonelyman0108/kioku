@@ -8,12 +8,14 @@ export function diffLines(before: string, after: string): DiffLine[] {
   return diffWithStatus(before, after).lines
 }
 
+const splitLines = (text: string) => text.replace(/\r\n/g, '\n').split('\n')
+
 export function diffWithStatus(
   before: string,
   after: string,
 ): { lines: DiffLine[]; complete: boolean } {
-  const a = before.split('\n')
-  const b = after.split('\n')
+  const a = splitLines(before)
+  const b = splitLines(after)
   let start = 0
   while (start < a.length && start < b.length && a[start] === b[start]) start++
   let endA = a.length
