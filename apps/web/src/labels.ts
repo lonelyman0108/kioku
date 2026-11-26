@@ -167,6 +167,7 @@ export const dreamTriggerLabels: Record<DreamTrigger, string> = {
 
 export const dreamOutcomeLabels: Record<DreamOutcome, string> = {
   ok: '完成',
+  partial: '部分完成',
   skipped: '跳过',
   failed: '失败',
 }

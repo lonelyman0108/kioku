@@ -39,9 +39,18 @@ export const DREAM_TRIGGERS = ['scheduled', 'manual'] as const
 export const DreamTrigger = z.enum(DREAM_TRIGGERS)
 export type DreamTrigger = z.infer<typeof DreamTrigger>
 
-export const DREAM_OUTCOMES = ['ok', 'skipped', 'failed'] as const
+export const DREAM_OUTCOMES = ['ok', 'partial', 'skipped', 'failed'] as const
 export const DreamOutcome = z.enum(DREAM_OUTCOMES)
 export type DreamOutcome = z.infer<typeof DreamOutcome>
+
+export const DreamProgress = z.object({
+  mode: z.enum(['standard', 'tidy']),
+  processed: z.number().int().min(0),
+  total: z.number().int().min(0),
+  suggested: z.number().int().min(0),
+  failed: z.number().int().min(0),
+})
+export type DreamProgress = z.infer<typeof DreamProgress>
 
 export const DreamRunSummary = z.object({
   id: z.string(),
@@ -58,6 +67,7 @@ export const DreamState = z.object({
   enabled: z.boolean(),
   intervalHours: z.number().int(),
   running: z.boolean(),
+  progress: DreamProgress.nullable().optional(),
   lastRunAt: z.string().nullable(),
   lastOutcome: DreamOutcome.nullable(),
   lastError: z.string().nullable(),
@@ -114,6 +124,7 @@ export type DreamSuggestionView = z.infer<typeof DreamSuggestionView>
 export const InboxResponse = z.object({
   items: z.array(DreamSuggestionView),
   pendingCount: z.number().int(),
+  tidyPendingCount: z.number().int().min(0),
   dreamState: DreamState,
 })
 export type InboxResponse = z.infer<typeof InboxResponse>
@@ -150,7 +161,8 @@ export type ApplySuggestionResponse = z.infer<typeof ApplySuggestionResponse>
 
 export const TriggerDreamRequest = z.object({
   mode: z.enum(['standard', 'tidy']).default('standard'),
-  limit: z.number().int().min(1).max(20).optional(),
+  limit: z.number().int().min(1).max(200).optional(),
+  all: z.boolean().optional(),
   pinnedFirst: z.boolean().optional(),
 })
 export type TriggerDreamRequest = z.infer<typeof TriggerDreamRequest>

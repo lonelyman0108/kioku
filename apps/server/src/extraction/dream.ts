@@ -4,6 +4,7 @@ import {
   lintEntryHygiene,
   type DreamEntrySnapshot,
   type DreamOutcome,
+  type DreamProgress,
   type DreamRunSummary,
   type DreamSuggestionKind,
   type DreamSuggestionView,
@@ -41,11 +42,35 @@ const NEIGHBORS_PER_ITEM = 5
 const INPUT_CHAR_BUDGET = 16_000
 const ITEM_CONTENT_LIMIT = 1_500
 const TIDY_CONTENT_LIMIT = 16_000
-const DEFAULT_TIDY_BATCH_LIMIT = 8
+const DEFAULT_TIDY_BATCH_LIMIT = 10
+const MAX_TIDY_BATCH_LIMIT = 200
+const TIDY_CONCURRENCY = 3
+const TIDY_CHAT_TIMEOUT_MS = 240_000
+const STANDARD_DREAM_TIMEOUT_MS = 180_000
+const INBOX_ITEMS_LIMIT = 200
 
 type EntryRow = typeof entries.$inferSelect
 
-function toPromptItem(row: EntryRow, contentLimit = ITEM_CONTENT_LIMIT): DreamPromptItem {
+function toPromptItem(
+  row: Pick<
+    EntryRow,
+    | 'id'
+    | 'shortId'
+    | 'kind'
+    | 'title'
+    | 'summary'
+    | 'content'
+    | 'disclosure'
+    | 'envs'
+    | 'realms'
+    | 'projects'
+    | 'runtimes'
+    | 'topics'
+    | 'version'
+    | 'updatedAt'
+  >,
+  contentLimit = ITEM_CONTENT_LIMIT,
+): DreamPromptItem {
   const truncated = row.content.length > contentLimit
   return {
     id: row.id,
@@ -183,10 +208,174 @@ export interface RunDreamOptions {
   trigger: DreamTrigger
   mode?: 'standard' | 'tidy' | undefined
   limit?: number | undefined
+  all?: boolean | undefined
   pinnedFirst?: boolean | undefined
+  concurrency?: number | undefined
+  signal?: AbortSignal | undefined
+  onProgress?: ((progress: DreamProgress) => void) | undefined
 }
 
-// 统一后台整理：standard 扫描增量变动并查重/核对双链矛盾；tidy 按完整正文分批规范标题、概要与历史流水
+interface TidyCandidateRow {
+  id: string
+  shortId: string
+  kind: EntryRow['kind']
+  title: string
+  summary: string | null
+  content: string
+  disclosure: string | null
+  isPinned: boolean
+  envs: string[]
+  realms: string[]
+  projects: string[]
+  runtimes: string[]
+  topics: string[]
+  version: number
+  updatedAt: Date
+}
+
+interface TidyCandidateSelection {
+  activeIds: Set<string>
+  candidates: TidyCandidateRow[]
+  tidyChecked: Record<string, number>
+}
+
+function isTidyCandidate(
+  row: {
+    id: string
+    title: string
+    summary: string | null
+    content: string
+    isPinned: boolean
+    version: number
+  },
+  tidyChecked: Readonly<Record<string, number>>,
+  seenFingerprints: ReadonlySet<string>,
+): boolean {
+  if (row.content.length > TIDY_CONTENT_LIMIT) return false
+  if (tidyChecked[row.id] === row.version) return false
+  const fp = suggestionFingerprint('tidy', [row.id], [row.version])
+  if (seenFingerprints.has(fp)) return false
+  const warnings = lintEntryHygiene({
+    title: row.title,
+    content: row.content,
+    summary: row.summary,
+    isPinned: row.isPinned,
+    isUpdate: false,
+  })
+  return (
+    warnings.length > 0 || (!row.summary?.trim() && (row.isPinned || row.content.length >= 400))
+  )
+}
+
+// 统一计算待规范存量候选：SQL 侧过滤超长正文且剔除 fts 列，与待处理页计数共享判定口径
+async function selectTidyCandidates(db: Db, pinnedFirst = true): Promise<TidyCandidateSelection> {
+  const [activeEntries, existingTidy, tidyChecked] = await Promise.all([
+    db
+      .select({
+        id: entries.id,
+        shortId: entries.shortId,
+        kind: entries.kind,
+        title: entries.title,
+        summary: entries.summary,
+        content: entries.content,
+        disclosure: entries.disclosure,
+        isPinned: entries.isPinned,
+        envs: entries.envs,
+        realms: entries.realms,
+        projects: entries.projects,
+        runtimes: entries.runtimes,
+        topics: entries.topics,
+        version: entries.version,
+        updatedAt: entries.updatedAt,
+      })
+      .from(entries)
+      .where(
+        and(
+          isNull(entries.deletedAt),
+          stillValidSql(),
+          eq(entries.kind, 'entry'),
+          sql`char_length(${entries.content}) <= ${TIDY_CONTENT_LIMIT}`,
+        ),
+      )
+      .orderBy(
+        ...(pinnedFirst ? [desc(entries.isPinned)] : []),
+        desc(entries.updatedAt),
+        asc(entries.shortId),
+      ),
+    db
+      .select({ fingerprint: dreamSuggestions.fingerprint })
+      .from(dreamSuggestions)
+      .where(eq(dreamSuggestions.kind, 'tidy')),
+    loadTidyCheckedVersions(db),
+  ])
+
+  const seenFingerprints = new Set(existingTidy.map((r) => r.fingerprint))
+  const candidates = activeEntries.filter((row) =>
+    isTidyCandidate(row, tidyChecked, seenFingerprints),
+  )
+
+  return {
+    activeIds: new Set(activeEntries.map((r) => r.id)),
+    candidates,
+    tidyChecked,
+  }
+}
+
+// 待处理页轮询专用轻量计数：仅取判定卫生提醒与指纹所需的最小字段集合
+async function countTidyPending(db: Db): Promise<number> {
+  const [rows, existingTidy, tidyChecked] = await Promise.all([
+    db
+      .select({
+        id: entries.id,
+        title: entries.title,
+        summary: entries.summary,
+        content: entries.content,
+        isPinned: entries.isPinned,
+        version: entries.version,
+      })
+      .from(entries)
+      .where(
+        and(
+          isNull(entries.deletedAt),
+          stillValidSql(),
+          eq(entries.kind, 'entry'),
+          sql`char_length(${entries.content}) <= ${TIDY_CONTENT_LIMIT}`,
+        ),
+      ),
+    db
+      .select({ fingerprint: dreamSuggestions.fingerprint })
+      .from(dreamSuggestions)
+      .where(eq(dreamSuggestions.kind, 'tidy')),
+    loadTidyCheckedVersions(db),
+  ])
+  const seenFingerprints = new Set(existingTidy.map((r) => r.fingerprint))
+  let count = 0
+  for (const row of rows) {
+    if (isTidyCandidate(row, tidyChecked, seenFingerprints)) count++
+  }
+  return count
+}
+
+function formatTidyFailures(
+  total: number,
+  failures: readonly { shortId: string; reason: string }[],
+  partial: boolean,
+): string {
+  const preview = failures
+    .slice(0, 3)
+    .map((f) => `${f.shortId}（${f.reason.slice(0, 60)}）`)
+    .join('、')
+  const suffix = failures.length > 3 ? ` 等 ${failures.length} 条` : ''
+  if (partial) {
+    return `本批 ${total} 条中 ${failures.length} 条失败：${preview}${suffix}`.slice(0, 400)
+  }
+  if (failures.length === 1) {
+    return `${failures[0]!.shortId}：${failures[0]!.reason}`.slice(0, 400)
+  }
+  return `本批 ${failures.length} 条均失败：${preview}${suffix}`.slice(0, 400)
+}
+
+// 统一后台整理：standard 扫描增量变动并查重/核对双链矛盾；tidy 按完整正文并发规范标题、概要与历史流水
 export async function runDream(
   db: Db,
   masterKey: MasterKey | null,
@@ -221,110 +410,156 @@ export async function runDream(
 
   try {
     if (options.mode === 'tidy') {
-      const batchLimit = Math.min(Math.max(options.limit ?? DEFAULT_TIDY_BATCH_LIMIT, 1), 20)
+      const batchLimit = Math.min(
+        Math.max(options.limit ?? DEFAULT_TIDY_BATCH_LIMIT, 1),
+        MAX_TIDY_BATCH_LIMIT,
+      )
       const pinnedFirst = options.pinnedFirst !== false
+      const selection = await selectTidyCandidates(db, pinnedFirst)
+      const selected = options.all
+        ? selection.candidates
+        : selection.candidates.slice(0, batchLimit)
 
-      const activeEntries = await db
-        .select()
-        .from(entries)
-        .where(and(isNull(entries.deletedAt), stillValidSql(), eq(entries.kind, 'entry')))
-        .orderBy(
-          ...(pinnedFirst ? [desc(entries.isPinned)] : []),
-          desc(entries.updatedAt),
-          asc(entries.shortId),
-        )
+      if (!selected.length) {
+        return finish({
+          outcome: 'skipped',
+          considered: 0,
+          suggested: 0,
+          error: null,
+        })
+      }
 
-      const existingTidy = await db
-        .select({ fingerprint: dreamSuggestions.fingerprint })
-        .from(dreamSuggestions)
-        .where(eq(dreamSuggestions.kind, 'tidy'))
-      const seenFingerprints = new Set(existingTidy.map((r) => r.fingerprint))
-      const tidyChecked = await loadTidyCheckedVersions(db)
+      const tidyChecked = selection.tidyChecked
       let tidyCheckedDirty = false
+      let processed = 0
+      let succeededCount = 0
+      const failures: { shortId: string; reason: string }[] = []
 
-      const candidates = activeEntries
-        .filter((row) => {
-          if (row.content.length > TIDY_CONTENT_LIMIT) return false
-          if (tidyChecked[row.id] === row.version) return false
-          const fp = suggestionFingerprint('tidy', [row.id], [row.version])
-          if (seenFingerprints.has(fp)) return false
-          const warnings = lintEntryHygiene({
-            title: row.title,
-            content: row.content,
-            summary: row.summary,
-            isPinned: row.isPinned,
-            isUpdate: false,
-          })
-          return (
-            warnings.length > 0 ||
-            (!row.summary?.trim() && (row.isPinned || row.content.length >= 400))
-          )
+      const emitProgress = () => {
+        options.onProgress?.({
+          mode: 'tidy',
+          processed,
+          total: selected.length,
+          suggested: totalSuggested,
+          failed: failures.length,
         })
-        .slice(0, batchLimit)
+      }
+      emitProgress()
 
-      for (const row of candidates) {
-        totalConsidered++
-        const promptItem = toPromptItem(row, TIDY_CONTENT_LIMIT)
-        const res = await chatComplete(conn, buildTidyMessages(promptItem), {
-          temperature: 0.1,
-          jsonMode: true,
-          maxTokens: 4_000,
-        })
-        const evaluated = evaluateTidyResponse(res.content, promptItem)
-        if (evaluated.status === 'not_needed') {
-          tidyChecked[row.id] = row.version
-          tidyCheckedDirty = true
-          continue
+      const concurrency = Math.min(
+        Math.max(options.concurrency ?? TIDY_CONCURRENCY, 1),
+        selected.length,
+      )
+      let cursor = 0
+
+      try {
+        const worker = async () => {
+          while (cursor < selected.length && !options.signal?.aborted) {
+            const row = selected[cursor++]!
+            totalConsidered++
+            try {
+              const promptItem = toPromptItem(row, TIDY_CONTENT_LIMIT)
+              const res = await chatComplete(conn, buildTidyMessages(promptItem), {
+                temperature: 0.1,
+                jsonMode: true,
+                maxTokens: 4_000,
+                timeoutMs: TIDY_CHAT_TIMEOUT_MS,
+                stream: true,
+                ...(options.signal ? { signal: options.signal } : {}),
+              })
+              const evaluated = evaluateTidyResponse(res.content, promptItem)
+              if (evaluated.status === 'not_needed') {
+                tidyChecked[row.id] = row.version
+                tidyCheckedDirty = true
+                succeededCount++
+              } else if (evaluated.status === 'invalid') {
+                failures.push({ shortId: row.shortId, reason: evaluated.reason })
+              } else {
+                const prop = evaluated.proposal
+                const versions = [row.version]
+                const fingerprint = suggestionFingerprint('tidy', [row.id], versions)
+                const inserted = await db
+                  .insert(dreamSuggestions)
+                  .values({
+                    kind: 'tidy',
+                    entryIds: prop.entryIds,
+                    entryVersions: versions,
+                    keepId: null,
+                    proposedTitle: prop.proposedTitle,
+                    proposedSummary: prop.proposedSummary,
+                    proposedContent: prop.proposedContent,
+                    proposedDisclosure: prop.proposedDisclosure,
+                    proposedChangeSummary: prop.proposedChangeSummary,
+                    archivedNotes: prop.archivedNotes,
+                    proposedTopics: prop.proposedTopics,
+                    proposedEnvs: prop.proposedEnvs,
+                    proposedRealms: prop.proposedRealms,
+                    proposedProjects: prop.proposedProjects,
+                    proposedRuntimes: prop.proposedRuntimes,
+                    reason: prop.reason,
+                    fingerprint,
+                    status: 'pending',
+                  })
+                  .onConflictDoNothing()
+                  .returning({ id: dreamSuggestions.id })
+                if (inserted.length) totalSuggested++
+                succeededCount++
+              }
+            } catch (err) {
+              const reason = err instanceof Error ? err.message : String(err)
+              failures.push({ shortId: row.shortId, reason })
+            } finally {
+              processed++
+              emitProgress()
+            }
+          }
         }
-        if (evaluated.status !== 'proposal') continue
-        const prop = evaluated.proposal
-        const versions = [row.version]
-        const fingerprint = suggestionFingerprint('tidy', [row.id], versions)
-        const inserted = await db
-          .insert(dreamSuggestions)
-          .values({
-            kind: 'tidy',
-            entryIds: prop.entryIds,
-            entryVersions: versions,
-            keepId: null,
-            proposedTitle: prop.proposedTitle,
-            proposedSummary: prop.proposedSummary,
-            proposedContent: prop.proposedContent,
-            proposedDisclosure: prop.proposedDisclosure,
-            proposedChangeSummary: prop.proposedChangeSummary,
-            archivedNotes: prop.archivedNotes,
-            proposedTopics: prop.proposedTopics,
-            proposedEnvs: prop.proposedEnvs,
-            proposedRealms: prop.proposedRealms,
-            proposedProjects: prop.proposedProjects,
-            proposedRuntimes: prop.proposedRuntimes,
-            reason: prop.reason,
-            fingerprint,
-            status: 'pending',
-          })
-          .onConflictDoNothing()
-          .returning({ id: dreamSuggestions.id })
-        if (inserted.length) totalSuggested++
+
+        await Promise.all(Array.from({ length: concurrency }, () => worker()))
+      } finally {
+        if (tidyCheckedDirty) {
+          const pruned: Record<string, number> = {}
+          for (const [id, ver] of Object.entries(tidyChecked)) {
+            if (selection.activeIds.has(id)) pruned[id] = ver
+          }
+          await saveTidyCheckedVersions(db, pruned)
+        }
       }
 
-      if (tidyCheckedDirty) {
-        const activeIds = new Set(activeEntries.map((r) => r.id))
-        const pruned: Record<string, number> = {}
-        for (const [id, ver] of Object.entries(tidyChecked)) {
-          if (activeIds.has(id)) pruned[id] = ver
-        }
-        await saveTidyCheckedVersions(db, pruned)
+      if (failures.length === 0) {
+        return finish({
+          outcome: 'ok',
+          considered: totalConsidered,
+          suggested: totalSuggested,
+          error: null,
+        })
       }
 
+      const partial = succeededCount > 0
       return finish({
-        outcome: totalConsidered === 0 ? 'skipped' : 'ok',
+        outcome: partial ? 'partial' : 'failed',
         considered: totalConsidered,
         suggested: totalSuggested,
-        error: null,
+        error: formatTidyFailures(totalConsidered, failures, partial),
       })
     }
 
-    for (let call = 0; call < MAX_CALLS_PER_RUN; call++) {
+    const [uncheckedMeta] = await db
+      .select({ total: sql<number>`count(*)::int` })
+      .from(entries)
+      .where(
+        and(
+          isNull(entries.deletedAt),
+          stillValidSql(),
+          gt(entries.version, entries.dreamCheckedVersion),
+        ),
+      )
+    const plannedStandardTotal = Math.min(
+      uncheckedMeta?.total ?? 0,
+      MAX_CALLS_PER_RUN * CHANGED_PER_CALL,
+    )
+
+    for (let call = 0; call < MAX_CALLS_PER_RUN && !options.signal?.aborted; call++) {
       const unchecked = await db
         .select()
         .from(entries)
@@ -349,6 +584,14 @@ export async function runDream(
         usedChars += size
       }
 
+      options.onProgress?.({
+        mode: 'standard',
+        processed: totalConsidered,
+        total: Math.max(plannedStandardTotal, totalConsidered + batch.length),
+        suggested: totalSuggested,
+        failed: 0,
+      })
+
       const neighbors = await findFtsNeighbors(
         db,
         batch,
@@ -366,6 +609,9 @@ export async function runDream(
         temperature: 0.2,
         jsonMode: true,
         maxTokens: 2_000,
+        timeoutMs: STANDARD_DREAM_TIMEOUT_MS,
+        stream: true,
+        ...(options.signal ? { signal: options.signal } : {}),
       })
       const proposals = parseDreamProposals(res.content, catalog)
 
@@ -407,6 +653,14 @@ export async function runDream(
       }
       totalConsidered += batch.length
 
+      options.onProgress?.({
+        mode: 'standard',
+        processed: totalConsidered,
+        total: Math.max(plannedStandardTotal, totalConsidered),
+        suggested: totalSuggested,
+        failed: 0,
+      })
+
       if (unchecked.length < CHANGED_PER_CALL) break
     }
 
@@ -419,7 +673,7 @@ export async function runDream(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     return finish({
-      outcome: 'failed',
+      outcome: totalConsidered > 0 ? 'partial' : 'failed',
       considered: totalConsidered,
       suggested: totalSuggested,
       error: message.slice(0, 400),
@@ -449,15 +703,20 @@ function toDreamEntrySnapshot(row: EntryRow): DreamEntrySnapshot {
   }
 }
 
-export async function loadInbox(db: Db, running = false): Promise<InboxResponse> {
-  const [rows, dreamState] = await Promise.all([
+export async function loadInbox(
+  db: Db,
+  running = false,
+  progress: DreamProgress | null = null,
+): Promise<InboxResponse> {
+  const [rows, dreamState, tidyPendingCount] = await Promise.all([
     db
       .select()
       .from(dreamSuggestions)
       .where(eq(dreamSuggestions.status, 'pending'))
       .orderBy(desc(dreamSuggestions.createdAt))
-      .limit(100),
-    loadDreamState(db, running),
+      .limit(INBOX_ITEMS_LIMIT),
+    loadDreamState(db, running, progress),
+    countTidyPending(db),
   ])
 
   const allEntryIds = [...new Set(rows.flatMap((r) => r.entryIds))]
@@ -495,6 +754,7 @@ export async function loadInbox(db: Db, running = false): Promise<InboxResponse>
   return {
     items,
     pendingCount: items.length,
+    tidyPendingCount,
     dreamState,
   }
 }

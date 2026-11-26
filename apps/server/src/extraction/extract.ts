@@ -68,6 +68,7 @@ export async function extractEpisodeBatch(
     temperature: 0.2,
     jsonMode: true,
     maxTokens: 600,
+    timeoutMs: 90_000,
   })
   const parsed = parseEpisodeSummary(result.content)
 

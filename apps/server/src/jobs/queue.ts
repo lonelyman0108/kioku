@@ -1,4 +1,4 @@
-import type { DreamTrigger } from '@kioku/contracts'
+import type { DreamProgress, DreamTrigger } from '@kioku/contracts'
 import { PgBoss } from 'pg-boss'
 import postgres from 'postgres'
 
@@ -73,6 +73,7 @@ export async function pgBossConnection(url: string): Promise<PgBossConnection> {
 export interface DreamEnqueueOptions {
   mode?: 'standard' | 'tidy' | undefined
   limit?: number | undefined
+  all?: boolean | undefined
   pinnedFirst?: boolean | undefined
 }
 
@@ -82,6 +83,7 @@ export interface Jobs {
   enqueueExtraction(target: BufferedBucket, delaySeconds: number): Promise<void>
   enqueueDream(options?: DreamEnqueueOptions): Promise<string | null>
   isDreamRunning(): Promise<boolean>
+  getDreamProgress?(): Promise<DreamProgress | null>
   enqueueCleanup(): Promise<boolean>
 }
 
@@ -89,6 +91,7 @@ interface DreamJobData {
   trigger: DreamTrigger
   mode?: 'standard' | 'tidy' | undefined
   limit?: number | undefined
+  all?: boolean | undefined
   pinnedFirst?: boolean | undefined
 }
 
@@ -126,6 +129,12 @@ export async function startJobs(options: {
       )
 
   let dreamRunning = false
+  let enqueuingDream = false
+  let dreamPendingId: string | null = null
+  let dreamPendingUntil = 0
+  let dreamProgress: DreamProgress | null = null
+  const handledDreamIds = new Set<string>()
+  const stopController = new AbortController()
 
   const credentialService = new CredentialService(options.db, options.masterKey)
   const jobsApi: Jobs = {
@@ -144,23 +153,34 @@ export async function startJobs(options: {
       }
     },
     enqueueDream: async (opts) => {
+      if (dreamRunning || enqueuingDream || dreamPendingUntil > Date.now()) return null
+      enqueuingDream = true
       try {
         const data: DreamJobData = {
           trigger: 'manual',
           ...(opts?.mode ? { mode: opts.mode } : {}),
           ...(opts?.limit !== undefined ? { limit: opts.limit } : {}),
+          ...(opts?.all !== undefined ? { all: opts.all } : {}),
           ...(opts?.pinnedFirst !== undefined ? { pinnedFirst: opts.pinnedFirst } : {}),
         }
         const id = await boss.send(DREAM, data, {
           singletonKey: 'dream',
         })
+        if (id !== null && !handledDreamIds.has(id)) {
+          // 刚入队到 pg-boss 拉起之间存在短暂轮询窗口，提前标记运行中以便前端持续轮询进度
+          dreamPendingId = id
+          dreamPendingUntil = Date.now() + 15_000
+        }
         return id
       } catch (err) {
         console.error('整理任务入队失败', loggableError(err))
         return null
+      } finally {
+        enqueuingDream = false
       }
     },
-    isDreamRunning: async () => dreamRunning,
+    isDreamRunning: async () => dreamRunning || dreamPendingUntil > Date.now(),
+    getDreamProgress: async () => (dreamRunning ? dreamProgress : null),
     enqueueCleanup: () => send(CLEANUP_EXPIRED, {}).then((id) => id !== null),
   }
 
@@ -191,22 +211,40 @@ export async function startJobs(options: {
 
   await boss.work<DreamJobData>(DREAM, async ([job]) => {
     if (!job) return
+    handledDreamIds.add(job.id)
+    if (handledDreamIds.size > 32) {
+      const oldest = handledDreamIds.values().next().value
+      if (oldest) handledDreamIds.delete(oldest)
+    }
     const trigger: DreamTrigger = job.data?.trigger === 'manual' ? 'manual' : 'scheduled'
     if (trigger === 'scheduled' && !(await isDreamDue(options.db))) return
+    if (dreamPendingId === job.id || dreamPendingId === null) {
+      dreamPendingId = null
+      dreamPendingUntil = 0
+    }
     dreamRunning = true
+    dreamProgress = null
     try {
       const result = await runDream(options.db, options.masterKey, {
         runId: job.id,
         trigger,
         mode: job.data?.mode,
         limit: job.data?.limit,
+        all: job.data?.all,
         pinnedFirst: job.data?.pinnedFirst,
+        signal: stopController.signal,
+        onProgress: (progress) => {
+          dreamProgress = progress
+        },
       })
-      if (result.outcome === 'failed') {
+      if (result.outcome === 'failed' || result.outcome === 'partial') {
         console.error('记忆整理出错', result.error)
       }
     } finally {
       dreamRunning = false
+      dreamProgress = null
+      dreamPendingId = null
+      dreamPendingUntil = 0
     }
   })
 
@@ -226,6 +264,9 @@ export async function startJobs(options: {
 
   return {
     ...jobsApi,
-    stop: () => boss.stop({ graceful: true }),
+    stop: async () => {
+      stopController.abort()
+      await boss.stop({ graceful: true })
+    },
   }
 }
