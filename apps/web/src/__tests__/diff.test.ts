@@ -2,7 +2,11 @@ import type { DreamSuggestionView, EntrySnapshot } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
 import {
+  buildDiffDisplayChunks,
+  buildSplitDiffPairs,
   collapseUnchanged,
+  computeInlineDiffParts,
+  computeStructuredDiff,
   diffEntrySnapshots,
   diffLines,
   diffWithStatus,
@@ -263,5 +267,54 @@ describe('纯标题速审表判定', () => {
       ),
     ).toBe(false)
     expect(isTitleOnlyTidy(makeTidySuggestion({ kind: 'update' }))).toBe(false)
+  })
+})
+
+describe('结构化行号、词级行内高亮与可交互折叠块', () => {
+  it('为长行局部变动计算精确词级高亮而不误伤未改动正文', () => {
+    const res = computeInlineDiffParts(
+      '- WiFi 详细规划见 [[wireless_ap]] 说明。',
+      '- WiFi 详细规划见 [[m-b6tyap|无线 AP 部署]] 说明。',
+    )
+    expect(res.removed.some((p) => p.kind === 'remove' && p.text.includes('wireless_ap'))).toBe(
+      true,
+    )
+    expect(res.added.some((p) => p.kind === 'add' && p.text.includes('m-b6tyap'))).toBe(true)
+    expect(res.added.some((p) => p.kind === 'same' && p.text.includes('WiFi'))).toBe(true)
+  })
+
+  it('生成双列行号、改动块索引、章节锚点与双栏配对行', () => {
+    const before = [
+      '## 拓扑结构',
+      ...Array.from({ length: 12 }, (_, i) => `- 常规节点 ${i + 1}`),
+      '- 固件版本 7.23',
+      '- 保留条目',
+    ].join('\n')
+    const after = [
+      '## 拓扑结构',
+      ...Array.from({ length: 12 }, (_, i) => `- 常规节点 ${i + 1}`),
+      '- 固件版本 7.24 稳定版',
+      '- 新增光口说明',
+      '- 保留条目',
+    ].join('\n')
+    const diff = computeStructuredDiff(before, after)
+    expect(diff.addedCount).toBe(2)
+    expect(diff.removedCount).toBe(1)
+    expect(diff.hunkStarts).toHaveLength(1)
+
+    const mask = diff.lines.map((_, idx) => idx >= 11)
+    const chunks = buildDiffDisplayChunks(diff.lines, mask, false)
+    expect(chunks[0]).toMatchObject({
+      kind: 'gap',
+      start: 0,
+      end: 11,
+      count: 11,
+      sectionHeading: '## 拓扑结构',
+    })
+    expect(chunks[1]).toMatchObject({ kind: 'visible', start: 11 })
+
+    const pairs = buildSplitDiffPairs(diff.lines, chunks[1]!.start, chunks[1]!.end)
+    expect(pairs.some((p) => p.left?.kind === 'remove' && p.right?.kind === 'add')).toBe(true)
+    expect(pairs.some((p) => p.left === null && p.right?.kind === 'add')).toBe(true)
   })
 })

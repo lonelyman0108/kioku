@@ -4,22 +4,24 @@ import { useId } from 'vue'
 // 分段按钮：几个互斥的选项排成一条。底下是原生的单选框，方向键切换、Tab 进出整组，读屏读得出是单选组；
 // 选中的反白，焦点框画在整段外面。禁用的项方向键跳过
 defineProps<{
-  items: readonly { value: T; label: string; disabled?: boolean }[]
+  items: readonly { value: T; label: string; icon?: string; title?: string; disabled?: boolean }[]
   // 整组的名字，读屏读这一句
   label: string
+  compact?: boolean
 }>()
 const model = defineModel<T>({ required: true })
 const name = useId()
 </script>
 
 <template>
-  <fieldset class="segmented">
+  <fieldset class="segmented" :class="{ compact }">
     <legend class="sr-only">{{ label }}</legend>
     <label
       v-for="item in items"
       :key="item.value"
       class="segment"
       :class="{ on: model === item.value, disabled: item.disabled }"
+      :title="item.title"
     >
       <input
         type="radio"
@@ -30,6 +32,7 @@ const name = useId()
         :disabled="item.disabled"
         @change="model = item.value"
       />
+      <UIcon v-if="item.icon" :name="item.icon" class="seg-icon" aria-hidden="true" />
       <span>{{ item.label }}</span>
     </label>
   </fieldset>
@@ -48,6 +51,7 @@ const name = useId()
   position: relative;
   display: inline-flex;
   align-items: center;
+  gap: 5px;
   height: 28px;
   padding: 0 10px;
   font-size: 13px;
@@ -55,6 +59,18 @@ const name = useId()
   white-space: nowrap;
   color: var(--ui-text-toned);
   cursor: pointer;
+}
+.segmented.compact .segment {
+  height: 26px;
+  padding: 0 8px;
+  font-size: 12px;
+  gap: 4px;
+}
+.seg-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
 }
 .segment + .segment {
   border-left: 1px solid var(--ui-border-accented);

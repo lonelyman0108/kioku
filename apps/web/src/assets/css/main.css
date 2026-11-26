@@ -114,7 +114,7 @@
   --ui-selected: #2a2b26;
   --ui-on-selected: #f1efe4;
   --ui-on-selected-muted: #c9c7ba;
-  --ui-scrim: rgba(18, 20, 18, 0.45);
+  --ui-scrim: rgba(18, 20, 18, 0.56);
   --ui-selection-bg: #e8d59c;
   --ui-selection-fg: #2a2b26;
 
@@ -123,6 +123,7 @@
   --ui-header-height: 2.75rem;
   --ui-primary: var(--ui-color-primary-900);
   --ui-bg: #f1efe4;
+  --ui-bg-bright: #f8f7f0;
   --ui-bg-muted: #ebe9dc;
   --ui-bg-elevated: #e6e3d4;
   --ui-bg-accented: #dedbca;
@@ -137,6 +138,16 @@
   --ui-border-muted: #e0ddcd;
   --ui-border-accented: #b9b6a4;
   --ui-border-inverted: #2a2b26;
+
+  /* 变更对比纸墨底色与词级高亮 */
+  --ui-diff-add-bg: #e1ede5;
+  --ui-diff-add-gutter: #d3e5d9;
+  --ui-diff-add-mark: #bad8c4;
+  --ui-diff-del-bg: #f3e2dc;
+  --ui-diff-del-gutter: #ebd1c8;
+  --ui-diff-del-mark: #e5b7a7;
+  --ui-diff-hunk-bg: #e4e9ec;
+  --ui-diff-hunk-fg: #2f5364;
 }
 
 .dark {
@@ -144,12 +155,13 @@
   --ui-selected: #333b40;
   --ui-on-selected: #f0f1eb;
   --ui-on-selected-muted: #bcc0bc;
-  --ui-scrim: rgba(5, 7, 8, 0.62);
+  --ui-scrim: rgba(5, 7, 8, 0.72);
   --ui-selection-bg: #563f0d;
   --ui-selection-fg: #f0f1eb;
 
   --ui-primary: var(--ui-color-primary-100);
   --ui-bg: #14181b;
+  --ui-bg-bright: #181d21;
   --ui-bg-muted: #191e21;
   --ui-bg-elevated: #20262a;
   --ui-bg-accented: #2b3135;
@@ -164,6 +176,16 @@
   --ui-border-muted: #252b2e;
   --ui-border-accented: #4a5054;
   --ui-border-inverted: #e3e4dd;
+
+  /* 变更对比深色墨面底色与词级高亮 */
+  --ui-diff-add-bg: #182a20;
+  --ui-diff-add-gutter: #1e3528;
+  --ui-diff-add-mark: #2a4c39;
+  --ui-diff-del-bg: #2e1c18;
+  --ui-diff-del-gutter: #3c231e;
+  --ui-diff-del-mark: #5a2c22;
+  --ui-diff-hunk-bg: #1a262d;
+  --ui-diff-hunk-fg: #94bacd;
 }
 
 @layer base {

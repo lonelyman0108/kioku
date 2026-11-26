@@ -12,12 +12,10 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import {
-  collapseUnchanged,
+  computeStructuredDiff,
   diffEntrySnapshots,
-  diffLines,
-  type DiffLine,
-  type DiffRow,
   type SnapshotFieldChange,
+  type StructuredDiff,
 } from '../diff'
 import { icons } from '../icons'
 import {
@@ -31,16 +29,33 @@ import { formatRelative, formatShort, formatTime } from '../time'
 import ConsequenceModal from './ConsequenceModal.vue'
 import MemoryContent from './MemoryContent.vue'
 import SegmentedChoice from './SegmentedChoice.vue'
+import DiffViewer, { type DiffContextMode, type DiffLayoutMode } from './ui/DiffViewer.vue'
 import EmptyState from './ui/EmptyState.vue'
 import ReadFailureNote from './ui/ReadFailureNote.vue'
 
 type SourceFilter = 'all' | ActorFilterGroup
+type InspectTab = 'diff' | 'snapshot'
 
 const SOURCE_FILTER_OPTIONS: { value: SourceFilter; label: string }[] = [
   { value: 'all', label: '全部' },
   { value: 'self', label: '本人' },
   { value: 'agent', label: 'Agent' },
-  { value: 'dream', label: '后台整理' },
+  { value: 'dream', label: '整理' },
+]
+
+const INSPECT_TAB_OPTIONS: { value: InspectTab; label: string; icon: string }[] = [
+  { value: 'diff', label: '对比', icon: icons.compare },
+  { value: 'snapshot', label: '快照', icon: icons.file },
+]
+
+const DIFF_LAYOUT_OPTIONS: { value: DiffLayoutMode; label: string; icon: string }[] = [
+  { value: 'unified', label: '单栏', icon: icons.unifiedDiff },
+  { value: 'split', label: '双栏', icon: icons.splitPane },
+]
+
+const DIFF_CONTEXT_OPTIONS: { value: DiffContextMode; label: string; icon: string }[] = [
+  { value: 'folded', label: '折叠', icon: icons.foldVertical },
+  { value: 'full', label: '全文', icon: icons.unfoldVertical },
 ]
 
 const props = withDefaults(
@@ -67,11 +82,16 @@ const history = useQuery({
 const items = computed(() => history.data.value?.items ?? [])
 const searchInput = ref('')
 const sourceFilter = ref<SourceFilter>('all')
-const expandedId = ref<number | null>(null)
-const previewId = ref<number | null>(null)
+const activeItemId = ref<number | null>(null)
 const selectedCompareIds = ref<number[]>([])
-const compareOpen = ref(false)
+const compareMode = ref(false)
+const inspectTab = ref<InspectTab>('diff')
+const diffLayout = ref<DiffLayoutMode>('unified')
+const diffContext = ref<DiffContextMode>('folded')
+const mobileDetailOpen = ref(false)
+
 const listRef = ref<HTMLElement | null>(null)
+const diffViewerRef = ref<InstanceType<typeof DiffViewer> | null>(null)
 
 const restoringItem = ref<EntryHistoryItem | null>(null)
 const restoring = ref(false)
@@ -86,17 +106,16 @@ function itemTimestamp(item: EntryHistoryItem): string {
   return item.occurredAt ?? item.createdAt
 }
 
-interface ComputedItemDiff {
+interface ComputedItemMeta {
   previousSnapshot: EntrySnapshot | null
   fieldChanges: SnapshotFieldChange[]
-  rawLines: DiffLine[]
-  rows: DiffRow[]
+  diff: StructuredDiff
   hasContentDiff: boolean
 }
 
-// 预计算每条带快照记录与前一个快照的差异（跳过无快照的归档记录）
-const diffMap = computed(() => {
-  const map = new Map<number, ComputedItemDiff>()
+// 预计算每条带快照记录与前一个快照的结构化差异，供搜索过滤、时间线增删计数与右侧展示共用
+const metaMap = computed(() => {
+  const map = new Map<number, ComputedItemMeta>()
   const list = items.value
   for (let i = 0; i < list.length; i++) {
     const curr = list[i]!
@@ -109,20 +128,12 @@ const diffMap = computed(() => {
       }
     }
     const fieldChanges = diffEntrySnapshots(prevSnap, curr.snapshot)
-    const rawLines: DiffLine[] = prevSnap
-      ? diffLines(prevSnap.content, curr.snapshot.content)
-      : curr.snapshot.content
-          .replace(/\r\n/g, '\n')
-          .split('\n')
-          .map((text): DiffLine => ({ kind: 'add', text }))
-    const hasContentDiff = rawLines.some((line) => line.kind === 'add' || line.kind === 'remove')
-    const rows = hasContentDiff ? collapseUnchanged(rawLines) : []
+    const diff = computeStructuredDiff(prevSnap ? prevSnap.content : null, curr.snapshot.content)
     map.set(curr.id, {
       previousSnapshot: prevSnap,
       fieldChanges,
-      rawLines,
-      rows,
-      hasContentDiff,
+      diff,
+      hasContentDiff: diff.addedCount > 0 || diff.removedCount > 0,
     })
   }
   return map
@@ -157,10 +168,10 @@ const filteredItems = computed(() => {
     if (item.snapshot?.title.toLowerCase().includes(q)) return true
     if (actor.label.toLowerCase().includes(q)) return true
     if (eventTypeLabels[item.eventType].toLowerCase().includes(q)) return true
-    const computedDiff = diffMap.value.get(item.id)
-    if (computedDiff) {
+    const computedMeta = metaMap.value.get(item.id)
+    if (computedMeta) {
       if (
-        computedDiff.fieldChanges.some(
+        computedMeta.fieldChanges.some(
           (fc) =>
             fc.label.toLowerCase().includes(q) ||
             fc.before.toLowerCase().includes(q) ||
@@ -170,7 +181,7 @@ const filteredItems = computed(() => {
         return true
       }
       if (
-        computedDiff.rawLines.some(
+        computedMeta.diff.lines.some(
           (line) => line.kind !== 'same' && line.text.toLowerCase().includes(q),
         )
       ) {
@@ -181,12 +192,19 @@ const filteredItems = computed(() => {
   })
 })
 
+function selectItem(item: EntryHistoryItem) {
+  compareMode.value = false
+  activeItemId.value = item.id
+  mobileDetailOpen.value = true
+  if (!item.snapshot) inspectTab.value = 'diff'
+}
+
 function toggleCompare(itemId: number) {
   const list = selectedCompareIds.value
   const idx = list.indexOf(itemId)
   if (idx >= 0) {
     selectedCompareIds.value = list.filter((id) => id !== itemId)
-    if (selectedCompareIds.value.length < 2) compareOpen.value = false
+    if (selectedCompareIds.value.length < 2) compareMode.value = false
     return
   }
   if (list.length >= 2) {
@@ -196,17 +214,22 @@ function toggleCompare(itemId: number) {
   }
 }
 
+function openCompareMode() {
+  if (!comparePair.value) return
+  compareMode.value = true
+  inspectTab.value = 'diff'
+  mobileDetailOpen.value = true
+}
+
 function clearCompare() {
   selectedCompareIds.value = []
-  compareOpen.value = false
+  compareMode.value = false
 }
 
 const comparePair = computed<{
   older: EntryHistoryItem & { snapshot: EntrySnapshot }
   newer: EntryHistoryItem & { snapshot: EntrySnapshot }
   fieldChanges: SnapshotFieldChange[]
-  rows: DiffRow[]
-  hasContentDiff: boolean
 } | null>(() => {
   if (selectedCompareIds.value.length !== 2) return null
   const [idA, idB] = selectedCompareIds.value
@@ -222,10 +245,7 @@ const comparePair = computed<{
       : b
   const newer = older === a ? b : a
   const fieldChanges = diffEntrySnapshots(older.snapshot, newer.snapshot)
-  const rawLines = diffLines(older.snapshot.content, newer.snapshot.content)
-  const hasContentDiff = rawLines.some((line) => line.kind === 'add' || line.kind === 'remove')
-  const rows = hasContentDiff ? collapseUnchanged(rawLines) : []
-  return { older, newer, fieldChanges, rows, hasContentDiff }
+  return { older, newer, fieldChanges }
 })
 
 const selectedCompareLabels = computed(() =>
@@ -238,32 +258,84 @@ const selectedCompareLabels = computed(() =>
     }),
 )
 
+const activeItem = computed<EntryHistoryItem | null>(() => {
+  if (activeItemId.value !== null) {
+    const found = items.value.find((x) => x.id === activeItemId.value)
+    if (found) return found
+  }
+  return filteredItems.value[0] ?? items.value[0] ?? null
+})
+
+const activeMeta = computed(() =>
+  activeItem.value ? metaMap.value.get(activeItem.value.id) : null,
+)
+
+const inspectorBefore = computed<string | null>(() => {
+  if (compareMode.value && comparePair.value) return comparePair.value.older.snapshot.content
+  return activeMeta.value?.previousSnapshot?.content ?? null
+})
+
+const inspectorAfter = computed<string | null>(() => {
+  if (compareMode.value && comparePair.value) return comparePair.value.newer.snapshot.content
+  return activeItem.value?.snapshot?.content ?? null
+})
+
+const inspectorFieldChanges = computed<SnapshotFieldChange[]>(() => {
+  if (compareMode.value && comparePair.value) return comparePair.value.fieldChanges
+  return activeMeta.value?.fieldChanges ?? []
+})
+
+const inspectorCanShowDiff = computed(
+  () => inspectTab.value === 'diff' && inspectorAfter.value !== null,
+)
+
+const inspectorHasContentDiff = computed(() => {
+  if (compareMode.value && comparePair.value) {
+    return comparePair.value.older.snapshot.content !== comparePair.value.newer.snapshot.content
+  }
+  return Boolean(activeMeta.value?.hasContentDiff)
+})
+
+const inspectorSnapshot = computed<EntrySnapshot | null>(() => {
+  if (compareMode.value && comparePair.value) return comparePair.value.newer.snapshot
+  return activeItem.value?.snapshot ?? null
+})
+
 const appliedFocusId = ref<number | null>(null)
 
 watch(
   [open, () => props.focusEventId, items],
   async ([isOpen, targetId, list]) => {
-    if (!isOpen) return
-    if (!targetId || !list.length || appliedFocusId.value === targetId) return
-    const target = list.find((item) => item.id === targetId)
-    if (!target) return
-    appliedFocusId.value = targetId
-    searchInput.value = ''
-    sourceFilter.value = 'all'
-    if (target.snapshot) expandedId.value = target.id
-    await nextTick()
-    const rowEl = listRef.value?.querySelector<HTMLElement>(`[data-history-id="${target.id}"]`)
-    rowEl?.scrollIntoView({ block: 'nearest' })
+    if (!isOpen || !list.length) return
+    if (targetId && appliedFocusId.value !== targetId) {
+      const target = list.find((item) => item.id === targetId)
+      if (target) {
+        appliedFocusId.value = targetId
+        searchInput.value = ''
+        sourceFilter.value = 'all'
+        compareMode.value = false
+        activeItemId.value = target.id
+        mobileDetailOpen.value = true
+        await nextTick()
+        const rowEl = listRef.value?.querySelector<HTMLElement>(`[data-history-id="${target.id}"]`)
+        rowEl?.scrollIntoView({ block: 'nearest' })
+        return
+      }
+    }
+    if (activeItemId.value === null && list[0]) {
+      activeItemId.value = list[0].id
+    }
   },
   { immediate: true },
 )
 
 watch(open, (visible) => {
   if (!visible) {
-    compareOpen.value = false
+    compareMode.value = false
     selectedCompareIds.value = []
-    previewId.value = null
-    expandedId.value = null
+    activeItemId.value = null
+    inspectTab.value = 'diff'
+    mobileDetailOpen.value = false
     searchInput.value = ''
     sourceFilter.value = 'all'
     appliedFocusId.value = null
@@ -299,27 +371,36 @@ async function confirmRestore() {
 </script>
 
 <template>
-  <USlideover
+  <UModal
     v-model:open="open"
-    side="right"
-    title="版本历史"
-    :ui="{ content: 'max-w-2xl sm:max-w-2xl' }"
+    :title="`版本历史 · ${shortId}`"
+    description="左侧选择版本或勾选两版对比，右侧独立审查属性与正文变更"
+    :ui="{
+      content: 'w-[94vw] max-w-6xl sm:max-w-6xl h-[86vh] max-h-[86vh] ring-2 ring-rule',
+      body: 'p-0 sm:p-0 flex-1 min-h-0 overflow-hidden flex flex-col',
+    }"
   >
     <template #body>
-      <ReadFailureNote v-if="history.isError.value" :query="history" />
-      <div v-else-if="history.isPending.value" class="space-y-3">
-        <USkeleton v-for="n in 4" :key="n" class="h-16 w-full" />
+      <div v-if="history.isError.value" class="p-6">
+        <ReadFailureNote :query="history" />
       </div>
-      <EmptyState v-else-if="!items.length" title="暂无历史记录" />
-      <div v-else class="history-shell">
-        <!-- 顶部关键词搜索与来源筛选 -->
-        <div class="history-controls">
-          <div class="history-search">
+      <div v-else-if="history.isPending.value" class="p-6 space-y-3">
+        <USkeleton v-for="n in 4" :key="n" class="h-14 w-full" />
+      </div>
+      <div v-else-if="!items.length" class="p-6">
+        <EmptyState title="暂无历史记录" />
+      </div>
+
+      <!-- 独立 Master-Detail 变更审查工作台：彻底与底层阅读器隔离开 -->
+      <div v-else class="history-workspace" :class="{ 'mobile-detail': mobileDetailOpen }">
+        <!-- 左轨：紧凑版本时间线与筛选 -->
+        <aside class="ws-rail" aria-label="版本时间线">
+          <div class="rail-controls">
             <UInput
               v-model="searchInput"
               size="sm"
               :icon="icons.search"
-              placeholder="搜索变更说明、标题或改动行"
+              placeholder="搜索说明、标题或改动行"
               aria-label="搜索历史记录"
               class="w-full"
             >
@@ -334,85 +415,17 @@ async function confirmRestore() {
                 />
               </template>
             </UInput>
-          </div>
-          <SegmentedChoice
-            v-model="sourceFilter"
-            :items="SOURCE_FILTER_OPTIONS"
-            label="按操作来源筛选"
-          />
-        </div>
-
-        <!-- 两版对比操作条 -->
-        <div v-if="selectedCompareIds.length" class="compare-bar">
-          <span class="compare-status">
-            <template v-if="selectedCompareIds.length === 1">
-              已选 {{ selectedCompareLabels[0] }}，再勾选 1 个版本即可对比
-            </template>
-            <template v-else> 已选 {{ selectedCompareLabels.join(' 与 ') }} </template>
-          </span>
-          <div class="compare-actions">
-            <UButton
-              v-if="comparePair"
-              size="xs"
-              :icon="icons.compare"
-              :aria-expanded="compareOpen"
-              @click="compareOpen = !compareOpen"
-            >
-              {{ compareOpen ? '收起两版对比' : '对比两版' }}
-            </UButton>
-            <UButton size="xs" color="neutral" variant="ghost" @click="clearCompare">
-              清除选择
-            </UButton>
-          </div>
-        </div>
-
-        <!-- 两版对比详情 -->
-        <section v-if="compareOpen && comparePair" class="compare-panel" aria-label="两版对比">
-          <header class="compare-panel-head">
-            <span class="font-mono text-xs font-semibold">
-              版本 {{ comparePair.older.snapshot.version }} → 版本
-              {{ comparePair.newer.snapshot.version }}
-            </span>
-            <UButton size="xs" color="neutral" variant="ghost" @click="compareOpen = false">
-              关闭对比
-            </UButton>
-          </header>
-
-          <div v-if="comparePair.fieldChanges.length" class="attr-diff-wrap">
-            <div class="subpanel-label">属性变动</div>
-            <table class="attr-table">
-              <thead>
-                <tr>
-                  <th>属性</th>
-                  <th>改前</th>
-                  <th>改后</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="fc in comparePair.fieldChanges" :key="fc.field">
-                  <td class="attr-name">{{ fc.label }}</td>
-                  <td class="attr-before">{{ fc.before }}</td>
-                  <td class="attr-after">{{ fc.after }}</td>
-                </tr>
-              </tbody>
-            </table>
+            <SegmentedChoice
+              v-model="sourceFilter"
+              :items="SOURCE_FILTER_OPTIONS"
+              label="按操作来源筛选"
+              compact
+              class="rail-source-filter"
+            />
           </div>
 
-          <pre v-if="comparePair.hasContentDiff" class="history-diff"><template
-            v-for="(row, rowIdx) in comparePair.rows"
-            :key="rowIdx"
-          ><span v-if="row.kind === 'skip'" class="diff-skip">… 省略未改动的 {{ row.count }} 行</span><span v-else class="diff-line" :class="row.kind">{{ row.text }}</span></template></pre>
-          <p v-else-if="comparePair.fieldChanges.length" class="diff-empty-note">正文未改动</p>
-          <p v-else class="diff-empty-note">两版本属性与正文完全一致</p>
-        </section>
-
-        <!-- 历史时间线 -->
-        <EmptyState
-          v-if="!filteredItems.length"
-          title="暂无匹配的历史记录"
-          description="尝试调整关键词或切换操作来源筛选。"
-        >
-          <template #actions>
+          <div v-if="!filteredItems.length" class="rail-empty">
+            <p class="text-xs text-muted">暂无匹配的历史记录</p>
             <UButton
               size="xs"
               color="neutral"
@@ -421,164 +434,348 @@ async function confirmRestore() {
             >
               重置筛选
             </UButton>
+          </div>
+
+          <ol v-else ref="listRef" class="timeline-list">
+            <li
+              v-for="item in filteredItems"
+              :key="item.id"
+              :data-history-id="item.id"
+              class="timeline-item"
+              :class="{
+                active: !compareMode && activeItem?.id === item.id,
+                'is-archive': item.eventType === 'archive_note',
+                'is-focused': focusEventId === item.id,
+              }"
+            >
+              <button type="button" class="timeline-select" @click="selectItem(item)">
+                <div class="tl-top">
+                  <span class="tl-badges">
+                    <span v-if="itemVersion(item) !== null" class="tl-ver font-mono">
+                      版本 {{ itemVersion(item) }}
+                    </span>
+                    <span v-else class="tl-archive-tag">历史归档</span>
+                    <span v-if="itemVersion(item) === currentVersion && !isDeleted" class="tl-curr">
+                      当前
+                    </span>
+                  </span>
+                  <time
+                    class="tl-time"
+                    :datetime="itemTimestamp(item)"
+                    :title="formatTime(itemTimestamp(item))"
+                  >
+                    {{ formatRelative(itemTimestamp(item)) }}
+                  </time>
+                </div>
+
+                <p class="tl-summary">{{ summaryTextOf(item) }}</p>
+
+                <div class="tl-foot">
+                  <span class="tl-actor">{{ formatActorLabel(item.actor, item.actorMeta) }}</span>
+                  <span
+                    v-if="metaMap.get(item.id)?.hasContentDiff"
+                    class="tl-diff-stat tabular-nums"
+                  >
+                    <span v-if="metaMap.get(item.id)!.diff.addedCount" class="stat-add">
+                      +{{ metaMap.get(item.id)!.diff.addedCount }}
+                    </span>
+                    <span v-if="metaMap.get(item.id)!.diff.removedCount" class="stat-del">
+                      −{{ metaMap.get(item.id)!.diff.removedCount }}
+                    </span>
+                  </span>
+                  <span v-else-if="metaMap.get(item.id)?.fieldChanges.length" class="tl-meta-only">
+                    属性 {{ metaMap.get(item.id)!.fieldChanges.length }} 项
+                  </span>
+                </div>
+              </button>
+
+              <div v-if="item.snapshot" class="tl-compare-row">
+                <label class="compare-check">
+                  <input
+                    type="checkbox"
+                    :checked="selectedCompareIds.includes(item.id)"
+                    @change="toggleCompare(item.id)"
+                  />
+                  <span>选入对比</span>
+                </label>
+              </div>
+            </li>
+          </ol>
+
+          <!-- 跨版本对比操作栏 -->
+          <div v-if="selectedCompareIds.length" class="rail-compare-bar">
+            <span class="compare-status">
+              <template v-if="selectedCompareIds.length === 1">
+                已选 {{ selectedCompareLabels[0] }}，再选 1 个版本
+              </template>
+              <template v-else>{{ selectedCompareLabels.join(' → ') }}</template>
+            </span>
+            <div class="compare-btns">
+              <UButton
+                v-if="comparePair"
+                size="xs"
+                :icon="icons.compare"
+                :variant="compareMode ? 'solid' : 'outline'"
+                @click="openCompareMode"
+              >
+                对比两版
+              </UButton>
+              <UButton size="xs" color="neutral" variant="ghost" @click="clearCompare">
+                清除
+              </UButton>
+            </div>
+          </div>
+        </aside>
+
+        <!-- 右侧主区：宽屏 Git 风格变更审查器 -->
+        <section class="ws-main" aria-label="变更详情">
+          <div v-if="!activeItem && !comparePair" class="p-6">
+            <EmptyState title="请选择左侧历史记录" />
+          </div>
+
+          <template v-else>
+            <header class="ws-commit-bar">
+              <div class="commit-top">
+                <div class="commit-title-wrap">
+                  <UButton
+                    size="xs"
+                    color="neutral"
+                    variant="ghost"
+                    :icon="icons.back"
+                    class="mobile-back"
+                    @click="mobileDetailOpen = false"
+                  >
+                    时间线
+                  </UButton>
+                  <h3 class="commit-title">
+                    <template v-if="compareMode && comparePair">
+                      版本 {{ comparePair.older.snapshot.version }} → 版本
+                      {{ comparePair.newer.snapshot.version }}
+                    </template>
+                    <template v-else-if="activeItem">
+                      {{ summaryTextOf(activeItem) }}
+                    </template>
+                  </h3>
+                </div>
+
+                <div class="commit-actions">
+                  <UButton
+                    v-if="compareMode"
+                    size="xs"
+                    color="neutral"
+                    variant="outline"
+                    :icon="icons.cancel"
+                    @click="compareMode = false"
+                  >
+                    退出两版对比
+                  </UButton>
+                  <UButton
+                    v-else-if="
+                      activeItem?.snapshot &&
+                      !isDeleted &&
+                      activeItem.snapshot.version !== currentVersion
+                    "
+                    size="xs"
+                    :icon="icons.restore"
+                    @click="((restoringItem = activeItem), (restoreError = null))"
+                  >
+                    恢复此版本
+                  </UButton>
+                </div>
+              </div>
+
+              <div class="commit-meta">
+                <template v-if="compareMode && comparePair">
+                  <span class="font-mono">
+                    跨版本累计变动（版本 {{ comparePair.older.snapshot.version }} →
+                    {{ comparePair.newer.snapshot.version }}）
+                  </span>
+                </template>
+                <template v-else-if="activeItem">
+                  <span v-if="itemVersion(activeItem) !== null" class="font-mono font-medium">
+                    版本 {{ itemVersion(activeItem) }}
+                  </span>
+                  <span v-else class="tl-archive-tag">历史归档</span>
+                  <span v-if="activeItem.eventType !== 'archive_note'">
+                    {{ eventTypeLabels[activeItem.eventType] }}
+                  </span>
+                  <span>·</span>
+                  <span>{{ formatActorLabel(activeItem.actor, activeItem.actorMeta) }}</span>
+                  <span>·</span>
+                  <time
+                    :datetime="itemTimestamp(activeItem)"
+                    :title="formatTime(itemTimestamp(activeItem))"
+                  >
+                    {{ formatTime(itemTimestamp(activeItem)) }}
+                  </time>
+                  <template v-if="charDeltaText(activeItem)">
+                    <span>·</span>
+                    <span class="tabular-nums">{{ charDeltaText(activeItem) }}</span>
+                  </template>
+                  <template
+                    v-if="activeItem.occurredAt && activeItem.occurredAt !== activeItem.createdAt"
+                  >
+                    <span>·</span>
+                    <span>原记录时间 {{ formatShort(activeItem.occurredAt) }}</span>
+                  </template>
+                </template>
+              </div>
+            </header>
+
+            <!-- 审查工具栏（图标 + 精简短词） -->
+            <div v-if="inspectorAfter !== null" class="ws-toolbar">
+              <div class="toolbar-group">
+                <SegmentedChoice
+                  v-model="inspectTab"
+                  :items="INSPECT_TAB_OPTIONS"
+                  label="审查视图"
+                  compact
+                />
+                <template v-if="inspectorCanShowDiff && inspectorHasContentDiff">
+                  <SegmentedChoice
+                    v-model="diffLayout"
+                    :items="DIFF_LAYOUT_OPTIONS"
+                    label="对比排版方式"
+                    compact
+                    class="split-toggle"
+                  />
+                  <SegmentedChoice
+                    v-model="diffContext"
+                    :items="DIFF_CONTEXT_OPTIONS"
+                    label="上下文显示模式"
+                    compact
+                  />
+                </template>
+              </div>
+
+              <div
+                v-if="
+                  inspectorCanShowDiff &&
+                  inspectorHasContentDiff &&
+                  (diffViewerRef?.hunkCount ?? 0) > 0
+                "
+                class="toolbar-group"
+              >
+                <span class="toolbar-stat tabular-nums">
+                  <span class="stat-add">+{{ diffViewerRef?.addedCount ?? 0 }}</span>
+                  <span class="stat-del">−{{ diffViewerRef?.removedCount ?? 0 }}</span>
+                  <span class="text-muted">
+                    · {{ (diffViewerRef?.focusedHunk ?? 0) + 1 }}/{{
+                      diffViewerRef?.hunkCount ?? 0
+                    }}
+                    处
+                  </span>
+                </span>
+                <template v-if="(diffViewerRef?.hunkCount ?? 0) > 1">
+                  <UButton
+                    size="xs"
+                    color="neutral"
+                    variant="outline"
+                    :icon="icons.up"
+                    @click="diffViewerRef?.jumpHunk(-1)"
+                  >
+                    上一处
+                  </UButton>
+                  <UButton
+                    size="xs"
+                    color="neutral"
+                    variant="outline"
+                    :icon="icons.down"
+                    @click="diffViewerRef?.jumpHunk(1)"
+                  >
+                    下一处
+                  </UButton>
+                </template>
+              </div>
+            </div>
+
+            <!-- 右侧滚动内容区 -->
+            <div class="ws-body">
+              <!-- 纯历史归档说明（无快照） -->
+              <div v-if="inspectorAfter === null && activeItem" class="archive-note-card">
+                <div class="archive-note-title">
+                  <UIcon :name="icons.history" class="archive-note-icon" aria-hidden="true" />
+                  <span>历史归档记录</span>
+                </div>
+                <p class="archive-note-text">{{ summaryTextOf(activeItem) }}</p>
+                <p class="text-xs text-muted">该记录由历史流水账沉淀而来，不含独立正文快照。</p>
+              </div>
+
+              <!-- 变更对比模式 -->
+              <template v-else-if="inspectTab === 'diff' && inspectorAfter !== null">
+                <div v-if="inspectorFieldChanges.length" class="attr-card">
+                  <div class="attr-card-head">
+                    属性变动（{{ inspectorFieldChanges.length }} 项）
+                  </div>
+                  <table class="attr-table">
+                    <thead>
+                      <tr>
+                        <th class="attr-col-name">属性</th>
+                        <th>改前</th>
+                        <th>改后</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="fc in inspectorFieldChanges" :key="fc.field">
+                        <td class="attr-name">{{ fc.label }}</td>
+                        <td>
+                          <span class="attr-del">{{ fc.before }}</span>
+                        </td>
+                        <td>
+                          <span class="attr-add">{{ fc.after }}</span>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                <DiffViewer
+                  v-if="inspectorHasContentDiff"
+                  ref="diffViewerRef"
+                  v-model:layout="diffLayout"
+                  v-model:context-mode="diffContext"
+                  :before="inspectorBefore"
+                  :after="inspectorAfter"
+                  :show-toolbar="false"
+                  :context="3"
+                  :expand-step="15"
+                />
+                <p v-else-if="inspectorFieldChanges.length" class="diff-empty-note">
+                  本次仅调整属性，正文未改动。
+                </p>
+                <p v-else class="diff-empty-note">两版本属性与正文完全一致。</p>
+              </template>
+
+              <!-- 完整快照预览模式 -->
+              <div v-else-if="inspectorSnapshot" class="snapshot-card">
+                <div class="snapshot-head">
+                  <span class="font-medium">{{ inspectorSnapshot.title }}</span>
+                  <span class="font-mono text-xs text-muted">
+                    版本 {{ inspectorSnapshot.version }} ·
+                    {{ inspectorSnapshot.isPinned ? '常驻' : '按需' }}
+                  </span>
+                </div>
+                <div v-if="inspectorSnapshot.summary?.trim()" class="snapshot-summary">
+                  <span class="snapshot-summary-label">现行概要</span>
+                  <p>{{ inspectorSnapshot.summary }}</p>
+                </div>
+                <div class="snapshot-body">
+                  <MemoryContent
+                    :content="
+                      stripDuplicateLeadingHeading(
+                        inspectorSnapshot.title,
+                        inspectorSnapshot.content,
+                      )
+                    "
+                  />
+                </div>
+              </div>
+            </div>
           </template>
-        </EmptyState>
-
-        <ol v-else ref="listRef" class="history-list">
-          <li
-            v-for="item in filteredItems"
-            :key="item.id"
-            :data-history-id="item.id"
-            class="history-row"
-            :class="{
-              'is-archive': item.eventType === 'archive_note',
-              'is-focused': focusEventId === item.id,
-            }"
-          >
-            <div class="history-head">
-              <div class="head-badges">
-                <span v-if="itemVersion(item) !== null" class="version-tag font-mono">
-                  版本 {{ itemVersion(item) }}
-                </span>
-                <span v-else class="archive-tag">历史归档</span>
-                <span v-if="item.eventType !== 'archive_note'" class="event-kind">{{
-                  eventTypeLabels[item.eventType]
-                }}</span>
-                <span v-if="itemVersion(item) === currentVersion && !isDeleted" class="current-tag">
-                  当前
-                </span>
-                <span v-if="charDeltaText(item)" class="char-delta tabular-nums">
-                  {{ charDeltaText(item) }}
-                </span>
-              </div>
-              <time
-                class="text-xs text-muted"
-                :datetime="itemTimestamp(item)"
-                :title="formatTime(itemTimestamp(item))"
-              >
-                {{ formatRelative(itemTimestamp(item)) }}
-              </time>
-            </div>
-
-            <p class="change-summary">{{ summaryTextOf(item) }}</p>
-
-            <p class="actor-line">
-              <span class="actor-badge">{{ formatActorLabel(item.actor, item.actorMeta) }}</span>
-              <template v-if="item.snapshot?.title">
-                <span class="meta-sep" aria-hidden="true">·</span>
-                <span class="snapshot-title">{{ item.snapshot.title }}</span>
-              </template>
-              <template v-if="item.occurredAt && item.occurredAt !== item.createdAt">
-                <span class="meta-sep" aria-hidden="true">·</span>
-                <span>原记录时间 {{ formatShort(item.occurredAt) }}</span>
-              </template>
-            </p>
-
-            <div v-if="item.snapshot" class="history-actions">
-              <label class="compare-check">
-                <input
-                  type="checkbox"
-                  :checked="selectedCompareIds.includes(item.id)"
-                  @change="toggleCompare(item.id)"
-                />
-                <span>选入对比</span>
-              </label>
-              <UButton
-                size="xs"
-                color="neutral"
-                variant="outline"
-                :icon="expandedId === item.id ? icons.up : icons.down"
-                :aria-expanded="expandedId === item.id"
-                @click="
-                  ((expandedId = expandedId === item.id ? null : item.id),
-                  previewId === item.id && expandedId === item.id ? (previewId = null) : null)
-                "
-              >
-                {{ expandedId === item.id ? '收起对比' : '查看改动' }}
-              </UButton>
-              <UButton
-                size="xs"
-                color="neutral"
-                variant="outline"
-                :icon="icons.bookOpen"
-                :aria-expanded="previewId === item.id"
-                @click="
-                  ((previewId = previewId === item.id ? null : item.id),
-                  expandedId === item.id && previewId === item.id ? (expandedId = null) : null)
-                "
-              >
-                {{ previewId === item.id ? '收起快照' : '预览快照' }}
-              </UButton>
-              <UButton
-                v-if="!isDeleted && item.snapshot.version !== currentVersion"
-                size="xs"
-                color="neutral"
-                variant="outline"
-                :icon="icons.restore"
-                @click="((restoringItem = item), (restoreError = null))"
-              >
-                恢复此版本
-              </UButton>
-            </div>
-
-            <!-- 展开：属性变动表 + 正文行级对比 -->
-            <div v-if="item.snapshot && expandedId === item.id" class="diff-section">
-              <div v-if="diffMap.get(item.id)?.fieldChanges.length" class="attr-diff-wrap">
-                <div class="subpanel-label">属性变动</div>
-                <table class="attr-table">
-                  <thead>
-                    <tr>
-                      <th>属性</th>
-                      <th>改前</th>
-                      <th>改后</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="fc in diffMap.get(item.id)!.fieldChanges" :key="fc.field">
-                      <td class="attr-name">{{ fc.label }}</td>
-                      <td class="attr-before">{{ fc.before }}</td>
-                      <td class="attr-after">{{ fc.after }}</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-
-              <pre v-if="diffMap.get(item.id)?.hasContentDiff" class="history-diff"><template
-                v-for="(row, rowIdx) in diffMap.get(item.id)!.rows"
-                :key="rowIdx"
-              ><span v-if="row.kind === 'skip'" class="diff-skip">… 省略未改动的 {{ row.count }} 行</span><span v-else class="diff-line" :class="row.kind">{{ row.text }}</span></template></pre>
-              <p v-else-if="diffMap.get(item.id)?.fieldChanges.length" class="diff-empty-note">
-                正文未改动
-              </p>
-              <p v-else class="diff-empty-note">本次操作未产生属性或正文差异</p>
-            </div>
-
-            <!-- 展开：快照 Markdown 预览 -->
-            <div v-if="item.snapshot && previewId === item.id" class="snapshot-preview">
-              <div class="snapshot-preview-head">
-                <span class="font-medium">{{ item.snapshot.title }}</span>
-                <span class="font-mono text-xs text-muted">
-                  版本 {{ item.snapshot.version }} ·
-                  {{ item.snapshot.isPinned ? '常驻' : '按需' }}
-                </span>
-              </div>
-              <div v-if="item.snapshot.summary?.trim()" class="snapshot-summary">
-                <span class="snapshot-summary-label">现行概要</span>
-                <p>{{ item.snapshot.summary }}</p>
-              </div>
-              <div class="snapshot-body">
-                <MemoryContent
-                  :content="
-                    stripDuplicateLeadingHeading(item.snapshot.title, item.snapshot.content)
-                  "
-                />
-              </div>
-            </div>
-          </li>
-        </ol>
+        </section>
       </div>
     </template>
-  </USlideover>
+  </UModal>
 
   <ConsequenceModal
     :open="restoringItem !== null"
@@ -596,190 +793,301 @@ async function confirmRestore() {
 </template>
 
 <style scoped>
-.history-shell {
+.history-workspace {
+  display: grid;
+  grid-template-columns: 290px minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--ui-bg);
+}
+.ws-rail {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-}
-.history-controls {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 10px;
-  padding-bottom: 10px;
-  border-bottom: 1px solid var(--ui-border);
-}
-.history-search {
-  flex: 1 1 13rem;
-  min-width: 11rem;
-}
-.compare-bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 8px 12px;
-  border: 1px solid var(--ui-rule);
-  background: var(--ui-bg-muted);
-  font-size: 12px;
-}
-.compare-status {
-  color: var(--ui-text-highlighted);
-  font-weight: 500;
-}
-.compare-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.compare-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 12px 14px;
-  border: 1px solid var(--ui-rule);
+  min-height: 0;
+  overflow: hidden;
+  border-right: 1px solid var(--ui-rule);
   background: var(--ui-bg-muted);
 }
-.compare-panel-head {
+.rail-controls {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px 10px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.rail-source-filter {
+  width: 100%;
+}
+.rail-source-filter :deep(.segment) {
+  flex: 1;
+  justify-content: center;
+  padding: 0 6px;
+}
+.rail-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 24px 14px;
+}
+.timeline-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.timeline-item {
+  border-bottom: 1px solid var(--ui-border);
+  border-left: 3px solid transparent;
+}
+.timeline-item.is-archive {
+  border-left-color: var(--ui-border-accented);
+}
+.timeline-item.is-focused {
+  border-left-color: var(--ui-warning);
+}
+.timeline-item.active {
+  background: var(--ui-bg);
+  border-left-color: var(--ui-rule);
+}
+.timeline-select {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  padding: 10px 12px 6px;
+  text-align: left;
+  cursor: pointer;
+}
+.timeline-select:hover {
+  background: var(--ui-bg-elevated);
+}
+.timeline-item.active .timeline-select:hover {
+  background: var(--ui-bg);
+}
+.tl-top {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding-bottom: 6px;
-  border-bottom: 1px solid var(--ui-border);
-}
-.history-list {
-  display: flex;
-  flex-direction: column;
-}
-.history-row {
-  display: flex;
-  flex-direction: column;
   gap: 6px;
-  padding: 12px 0;
-  border-bottom: 1px solid var(--ui-border);
-}
-.history-row.is-archive {
-  padding-left: 10px;
-  border-left: 2px solid var(--ui-border-accented);
-}
-.history-row.is-focused {
-  padding-left: 10px;
-  border-left: 3px solid var(--ui-rule);
-}
-.history-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-}
-.head-badges {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-}
-.version-tag {
   font-size: 12px;
+}
+.tl-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.tl-ver {
   font-weight: 600;
   color: var(--ui-text-highlighted);
 }
-.archive-tag {
+.tl-archive-tag {
   padding: 0 5px;
   border: 1px solid var(--ui-border-accented);
-  font-size: 12px;
+  font-size: 11px;
   color: var(--ui-text-muted);
 }
-.event-kind {
-  font-size: 12px;
-  color: var(--ui-text-muted);
-}
-.current-tag {
+.tl-curr {
   padding: 0 5px;
   border: 1px solid var(--ui-rule);
-  font-size: 12px;
+  font-size: 11px;
   line-height: 1.4;
 }
-.char-delta {
-  font-size: 12px;
-  color: var(--ui-text-dimmed);
+.tl-time {
+  font-size: 11.5px;
+  color: var(--ui-text-muted);
+  white-space: nowrap;
 }
-.change-summary {
-  font-size: 14px;
-  font-weight: 500;
-  line-height: 1.55;
+.tl-summary {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 13px;
+  line-height: 1.45;
   color: var(--ui-text-highlighted);
-  overflow-wrap: anywhere;
 }
-.actor-line {
+.tl-foot {
   display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
+  align-items: center;
+  justify-content: space-between;
   gap: 6px;
   font-size: 12px;
   color: var(--ui-text-muted);
 }
-.actor-badge {
-  color: var(--ui-text-toned);
-}
-.meta-sep {
-  color: var(--ui-border-accented);
-}
-.snapshot-title {
+.tl-actor {
   min-width: 0;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.history-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 8px;
-  padding-top: 2px;
+.tl-diff-stat {
+  display: inline-flex;
+  gap: 4px;
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+.tl-meta-only {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--ui-text-dimmed);
+}
+.stat-add {
+  color: var(--ui-success);
+  font-weight: 600;
+}
+.stat-del {
+  color: var(--ui-error);
+  font-weight: 600;
+}
+.tl-compare-row {
+  padding: 0 12px 8px;
 }
 .compare-check {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 2px 6px;
-  border: 1px solid var(--ui-border-accented);
   font-size: 12px;
-  color: var(--ui-text-toned);
+  color: var(--ui-text-muted);
   cursor: pointer;
 }
 .compare-check input[type='checkbox'] {
   accent-color: var(--ui-primary);
 }
 .compare-check:hover {
-  border-color: var(--ui-rule);
   color: var(--ui-text-highlighted);
 }
-.diff-section {
+.rail-compare-bar {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--ui-rule);
+  background: var(--ui-bg-elevated);
+  font-size: 12px;
+}
+.compare-status {
+  color: var(--ui-text-highlighted);
+  font-weight: 500;
+}
+.compare-btns {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 右侧主审查区 */
+.ws-main {
+  container-type: inline-size;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin-top: 4px;
-}
-.subpanel-label {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--ui-text-muted);
-  margin-bottom: 4px;
-}
-.attr-diff-wrap {
-  padding: 8px 10px;
-  border: 1px solid var(--ui-border);
+  min-width: 0;
+  min-height: 0;
   background: var(--ui-bg);
+}
+.ws-commit-bar {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-bg-bright);
+}
+.commit-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+}
+.commit-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+.commit-title {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.45;
+  color: var(--ui-text-highlighted);
+  overflow-wrap: anywhere;
+}
+.commit-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+.commit-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.ws-toolbar {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  padding: 8px 18px;
+  border-bottom: 1px solid var(--ui-rule);
+  background: var(--ui-bg-muted);
+}
+.toolbar-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.toolbar-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.ws-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 18px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.attr-card {
+  border: 1px solid var(--ui-border-accented);
+  background: var(--ui-bg-bright);
+}
+.attr-card-head {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-bg-muted);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ui-text-toned);
 }
 .attr-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: 12.5px;
+  line-height: 1.55;
 }
 .attr-table th,
 .attr-table td {
-  padding: 4px 8px 4px 0;
+  padding: 6px 12px;
   border-bottom: 1px solid var(--ui-border-muted);
   text-align: left;
   vertical-align: top;
@@ -787,6 +1095,8 @@ async function confirmRestore() {
 }
 .attr-table th {
   border-bottom-color: var(--ui-border);
+  background: var(--ui-bg);
+  font-size: 12px;
   font-weight: 500;
   color: var(--ui-text-muted);
   white-space: nowrap;
@@ -794,95 +1104,76 @@ async function confirmRestore() {
 .attr-table tr:last-child td {
   border-bottom: 0;
 }
+.attr-col-name,
 .attr-name {
+  width: 5.5rem;
   white-space: nowrap;
   color: var(--ui-text-muted);
-  width: 5.5rem;
 }
-.attr-before {
+.attr-del {
+  padding: 1px 4px;
+  background: var(--ui-diff-del-bg);
   color: var(--ui-error);
-  text-decoration: line-through;
 }
-.attr-after {
+.attr-add {
+  padding: 1px 4px;
+  background: var(--ui-diff-add-bg);
   color: var(--ui-success);
   font-weight: 500;
 }
 .diff-empty-note {
-  font-size: 12px;
-  color: var(--ui-text-muted);
-}
-.history-diff {
-  max-height: 22rem;
-  overflow: auto;
-  padding: 8px 10px;
-  border: 1px solid var(--ui-border-accented);
+  padding: 12px 14px;
+  border: 1px solid var(--ui-border);
   background: var(--ui-bg-muted);
-  font-family: var(--font-mono);
   font-size: 13px;
-  line-height: 1.65;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-.diff-skip {
-  display: block;
-  margin: 4px 0;
-  padding: 2px 0 2px 18px;
-  border-top: 1px dashed var(--ui-border);
-  border-bottom: 1px dashed var(--ui-border);
-  font-size: 12px;
   color: var(--ui-text-muted);
 }
-.diff-line {
-  position: relative;
-  display: block;
-  min-height: 1.65em;
-  padding: 0 6px 0 18px;
-  border-left: 2px solid transparent;
-}
-.diff-line::before {
-  content: '';
-  position: absolute;
-  left: 4px;
-}
-.diff-line.add {
-  border-left-color: var(--ui-success);
-  background: color-mix(in srgb, var(--ui-success) 6%, transparent);
-  color: var(--ui-text-highlighted);
-  font-weight: 600;
-}
-.diff-line.add::before {
-  content: '+';
-  color: var(--ui-success);
-}
-.diff-line.remove {
-  border-left-color: var(--ui-error);
-  background: color-mix(in srgb, var(--ui-error) 6%, transparent);
-  color: var(--ui-error);
-  text-decoration: line-through;
-}
-.diff-line.remove::before {
-  content: '−';
-  color: var(--ui-error);
-}
-.snapshot-preview {
-  margin-top: 4px;
+.archive-note-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
   border: 1px solid var(--ui-border-accented);
-  background: var(--ui-bg);
+  border-left: 3px solid var(--ui-rule);
+  background: var(--ui-bg-muted);
 }
-.snapshot-preview-head {
+.archive-note-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ui-text-highlighted);
+}
+.archive-note-icon {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 14px;
+}
+.archive-note-text {
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--ui-text-highlighted);
+}
+.snapshot-card {
+  border: 1px solid var(--ui-border-accented);
+  background: var(--ui-bg-bright);
+}
+.snapshot-head {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
   justify-content: space-between;
   gap: 8px;
-  padding: 8px 12px;
+  padding: 10px 14px;
   border-bottom: 1px solid var(--ui-border);
   background: var(--ui-bg-muted);
-  font-size: 13px;
+  font-size: 14px;
 }
 .snapshot-summary {
-  margin: 10px 12px 0;
-  padding: 6px 10px;
+  margin: 12px 14px 0;
+  padding: 8px 12px;
   border-left: 3px solid var(--ui-rule);
   background: var(--ui-bg-muted);
   font-size: 13px;
@@ -891,13 +1182,36 @@ async function confirmRestore() {
 }
 .snapshot-summary-label {
   display: block;
+  margin-bottom: 2px;
   font-size: 12px;
   color: var(--ui-text-muted);
-  margin-bottom: 2px;
 }
 .snapshot-body {
-  max-height: 24rem;
-  overflow-y: auto;
-  padding: 12px 14px;
+  padding: 14px 18px;
+}
+.mobile-back {
+  display: none;
+}
+@container (max-width: 639.98px) {
+  .split-toggle {
+    display: none;
+  }
+}
+@media (max-width: 839.98px) {
+  .history-workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .ws-main {
+    display: none;
+  }
+  .history-workspace.mobile-detail .ws-rail {
+    display: none;
+  }
+  .history-workspace.mobile-detail .ws-main {
+    display: flex;
+  }
+  .mobile-back {
+    display: inline-flex;
+  }
 }
 </style>

@@ -24,10 +24,10 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { useSession } from '../composables/useSession'
-import { collapseUnchanged, diffLines, type DiffRow } from '../diff'
 import { icons } from '../icons'
 import { detectSecretPrefixes } from '../secretHint'
 import MemoryContent from './MemoryContent.vue'
+import DiffViewer from './ui/DiffViewer.vue'
 import NoteLine from './ui/NoteLine.vue'
 
 const END_SECTION = '__end__'
@@ -230,13 +230,11 @@ const integrityWarning = computed(() => {
   return parts.join('；') || '检测到引用完整性异常，建议核对或改为文末追加'
 })
 
-const diffRows = computed<DiffRow[]>(() => {
-  if (step.value !== 'preview' || viewAction.value !== 'update') return []
-  return collapseUnchanged(diffLines(beforeContent.value, draftContent.value))
-})
-
-const hasDiffChanges = computed(() =>
-  diffRows.value.some((row) => row.kind === 'add' || row.kind === 'remove'),
+const hasDiffChanges = computed(
+  () =>
+    step.value === 'preview' &&
+    viewAction.value === 'update' &&
+    beforeContent.value.replace(/\r\n/g, '\n') !== draftContent.value.replace(/\r\n/g, '\n'),
 )
 
 const mergeValidationProblem = computed(() => {
@@ -901,10 +899,15 @@ onBeforeUnmount(() => {
               class="w-full font-mono"
               aria-label="归并后正文"
             />
-            <pre v-else class="diff-box"><template v-if="hasDiffChanges"><template
-              v-for="(row, idx) in diffRows"
-              :key="idx"
-            ><span v-if="row.kind === 'skip'" class="diff-skip">… 省略未改动的 {{ row.count }} 行</span><span v-else class="diff-line" :class="row.kind">{{ row.text }}</span></template></template><span v-else class="diff-skip">正文无变更</span></pre>
+            <DiffViewer
+              v-else
+              :before="beforeContent"
+              :after="draftContent"
+              :context="3"
+              :expand-step="12"
+              max-height="20rem"
+              empty-text="正文无变更"
+            />
           </div>
 
           <div v-if="error || mergeValidationProblem" class="error-row" role="alert">
@@ -1253,59 +1256,6 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-}
-.diff-box {
-  max-height: 18rem;
-  overflow: auto;
-  padding: 10px 12px;
-  border: 1px solid var(--ui-border-accented);
-  background: var(--ui-bg-muted);
-  font-family: var(--font-mono);
-  font-size: 13px;
-  line-height: 1.65;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-.diff-skip {
-  display: block;
-  margin: 4px 0;
-  padding: 2px 0 2px 18px;
-  border-top: 1px dashed var(--ui-border);
-  border-bottom: 1px dashed var(--ui-border);
-  font-size: 12px;
-  color: var(--ui-text-muted);
-}
-.diff-line {
-  position: relative;
-  display: block;
-  min-height: 1.65em;
-  padding: 0 6px 0 18px;
-  border-left: 2px solid transparent;
-}
-.diff-line::before {
-  content: '';
-  position: absolute;
-  left: 4px;
-}
-.diff-line.add {
-  border-left-color: var(--ui-success);
-  background: color-mix(in srgb, var(--ui-success) 6%, transparent);
-  color: var(--ui-text-highlighted);
-  font-weight: 600;
-}
-.diff-line.add::before {
-  content: '+';
-  color: var(--ui-success);
-}
-.diff-line.remove {
-  border-left-color: var(--ui-error);
-  background: color-mix(in srgb, var(--ui-error) 6%, transparent);
-  color: var(--ui-error);
-  text-decoration: line-through;
-}
-.diff-line.remove::before {
-  content: '−';
-  color: var(--ui-error);
 }
 .error-row {
   display: flex;

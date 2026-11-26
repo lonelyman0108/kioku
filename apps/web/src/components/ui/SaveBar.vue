@@ -91,16 +91,21 @@ watch(
         }}</span>
       </UButton>
     </div>
-    <ul v-if="showDiff && props.changes?.length" class="save-diff">
-      <li v-for="c in props.changes" :key="c.label" class="diff-item">
-        <span class="diff-label">{{ c.label }}</span>
-        <span class="diff-values tabular-nums"
-          ><span class="diff-before">{{ c.before }}</span>
-          <UIcon :name="icons.inherits" class="diff-arrow" aria-hidden="true" />
-          <span class="diff-after">{{ c.after }}</span></span
-        >
-      </li>
-    </ul>
+    <div v-if="showDiff && (props.changes?.length || $slots.diff)" class="save-diff-wrap">
+      <ul v-if="props.changes?.length" class="save-diff">
+        <li v-for="c in props.changes" :key="c.label" class="diff-item">
+          <span class="diff-label">{{ c.label }}</span>
+          <span class="diff-values tabular-nums"
+            ><span class="diff-before">{{ c.before }}</span>
+            <UIcon :name="icons.inherits" class="diff-arrow" aria-hidden="true" />
+            <span class="diff-after">{{ c.after }}</span></span
+          >
+        </li>
+      </ul>
+      <div v-if="$slots.diff" class="save-diff-body">
+        <slot name="diff" />
+      </div>
+    </div>
   </div>
 </template>
 
@@ -154,14 +159,22 @@ watch(
   font-family: var(--font-mono);
   font-size: 12px;
 }
+.save-diff-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--ui-border);
+  background: var(--ui-bg);
+}
 .save-diff {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 10px 16px;
-  border-top: 1px solid var(--ui-border);
-  background: var(--ui-bg);
   font-size: 12px;
+}
+.save-diff-body {
+  min-width: 0;
 }
 .diff-item {
   display: flex;

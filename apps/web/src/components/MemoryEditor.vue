@@ -8,6 +8,7 @@ import {
   EntrySummary,
   EntryTitle,
   extractMarkdownOutline,
+  hasDuplicateLeadingHeading,
   normalizeSlugList,
   stripDuplicateLeadingHeading,
   TOPICS_MAX,
@@ -28,6 +29,7 @@ import {
   useUnsavedChangesGuard,
 } from '../composables/unsavedChanges'
 import { useDebounced } from '../composables/useDebounced'
+import { useMarkdownSyncScroll } from '../composables/useMarkdownSyncScroll'
 import { useNow } from '../composables/useNow'
 import { icons } from '../icons'
 import { entryKindLabels, envDisplayName, eventTypeLabels, formatActorLabel } from '../labels'
@@ -52,6 +54,8 @@ import EntryLinksPanel from './EntryLinksPanel.vue'
 import MemoryContent from './MemoryContent.vue'
 import MemoryHistoryDrawer from './MemoryHistoryDrawer.vue'
 import SceneScopePicker, { type SceneScopeValue } from './SceneScopePicker.vue'
+import SegmentedChoice from './SegmentedChoice.vue'
+import DiffViewer from './ui/DiffViewer.vue'
 import NoteLine from './ui/NoteLine.vue'
 import ReadFailureNote from './ui/ReadFailureNote.vue'
 import SaveBar, { type SaveBarChange } from './ui/SaveBar.vue'
@@ -88,15 +92,33 @@ const detailQuery = useQuery({
   queryFn: ({ queryKey: [, sid] }) => api.entry(sid),
 })
 
+type EditViewMode = 'edit' | 'split' | 'preview'
+
+const EDIT_VIEW_OPTIONS: { value: EditViewMode; label: string; icon: string; title: string }[] = [
+  { value: 'edit', label: '编辑', icon: icons.edit, title: '源码编辑' },
+  { value: 'split', label: '分栏', icon: icons.splitPane, title: '源码与预览左右分栏' },
+  { value: 'preview', label: '预览', icon: icons.reveal, title: '渲染预览' },
+]
+
 const detail = ref<EntryDetailResponse | null>(null)
 const entry = computed(() => detail.value?.entry ?? null)
 const mode = ref<'read' | 'edit'>('read')
-const preview = ref(false)
+const editView = ref<EditViewMode>('edit')
+const syncScroll = ref(true)
 const attrsOpen = ref(false)
 const historyOpen = ref(false)
 const focusedHistoryEventId = ref<number | null>(null)
 const minValidTo = ref('')
 const readContentRef = ref<InstanceType<typeof MemoryContent> | null>(null)
+const previewScrollRef = ref<HTMLElement | null>(null)
+const workbenchRef = ref<HTMLElement | null>(null)
+
+watch(editView, async (next) => {
+  if (next === 'split' && mode.value === 'edit') {
+    await nextTick()
+    workbenchRef.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  }
+})
 
 const form = reactive({
   title: '',
@@ -292,7 +314,7 @@ function startEditing() {
 function cancelEditing() {
   if (detail.value) loadDetail(detail.value)
   mode.value = 'read'
-  preview.value = false
+  editView.value = 'edit'
   attrsOpen.value = false
 }
 
@@ -326,7 +348,7 @@ async function save() {
     queryClient.setQueryData(queryKey.value, updated)
     loadDetail(updated)
     mode.value = 'read'
-    preview.value = false
+    editView.value = 'edit'
     attrsOpen.value = false
     toast.add({ title: '已保存', color: 'success' })
     void queryClient.invalidateQueries({ queryKey: ['entry-history', current.shortId] })
@@ -442,7 +464,7 @@ function onHistoryRestored(updated: EntryDetailResponse) {
   queryClient.setQueryData(queryKey.value, updated)
   loadDetail(updated)
   mode.value = 'read'
-  preview.value = false
+  editView.value = 'edit'
   attrsOpen.value = false
   emit('changed', updated)
 }
@@ -497,6 +519,20 @@ const displayContent = computed(() =>
   entry.value ? stripDuplicateLeadingHeading(entry.value.title, entry.value.content) : '',
 )
 const previewContent = computed(() => stripDuplicateLeadingHeading(form.title, form.content))
+const sourceLineCount = computed(() => form.content.replace(/\r\n/g, '\n').split('\n').length)
+const duplicateLeadingHeadingHidden = computed(() =>
+  hasDuplicateLeadingHeading(form.title, form.content),
+)
+const contentChanged = computed(() => Boolean(entry.value && form.content !== entry.value.content))
+
+useMarkdownSyncScroll({
+  enabled: syncScroll,
+  active: computed(() => mode.value === 'edit' && editView.value === 'split'),
+  content: computed(() => form.content),
+  title: computed(() => form.title),
+  getSourceEl: () => contentRef.value?.textareaRef ?? null,
+  getPreviewEl: () => previewScrollRef.value,
+})
 function stripInlineMarkdown(text: string): string {
   return text
     .replace(/`([^`]+)`/g, '$1')
@@ -751,20 +787,13 @@ defineExpose({
             <template v-else>
               <UButton
                 size="sm"
-                :loading="saving"
-                :disabled="!dirty || Boolean(validationProblem)"
-                @click="save"
-              >
-                保存
-              </UButton>
-              <UButton
-                size="sm"
                 color="neutral"
                 variant="outline"
+                :icon="icons.cancel"
                 :disabled="saving"
                 @click="requestCancelEditing"
               >
-                取消
+                退出编辑
               </UButton>
             </template>
           </div>
@@ -804,9 +833,9 @@ defineExpose({
             <UFormField label="现行概要（可选）" help="1–2 句概括当前结论，用于启动加载与列表预览">
               <UTextarea
                 v-model="form.summary"
-                :rows="2"
+                :rows="1"
                 autoresize
-                :maxrows="4"
+                :maxrows="3"
                 :maxlength="ENTRY_SUMMARY_MAX"
                 placeholder="简明概括现行结论，避免写入逐日流水账"
                 class="w-full"
@@ -970,29 +999,70 @@ defineExpose({
                 </template>
               </UPopover>
 
-              <div class="ml-auto">
-                <USwitch v-model="preview" size="sm" label="分栏预览" />
+              <div class="toolbar-right">
+                <UButton
+                  v-if="editView === 'split'"
+                  type="button"
+                  size="xs"
+                  :color="syncScroll ? 'primary' : 'neutral'"
+                  :variant="syncScroll ? 'solid' : 'outline'"
+                  :icon="syncScroll ? icons.syncScroll : icons.unsyncScroll"
+                  :aria-pressed="syncScroll"
+                  @click="syncScroll = !syncScroll"
+                >
+                  同步滚动
+                </UButton>
+                <SegmentedChoice
+                  v-model="editView"
+                  :items="EDIT_VIEW_OPTIONS"
+                  label="编辑区视图模式"
+                  compact
+                />
               </div>
             </div>
 
-            <div class="editor-split" :class="{ 'is-preview': preview }">
-              <UTextarea
-                ref="contentRef"
-                v-model="form.content"
-                :rows="18"
-                autoresize
-                :maxrows="36"
-                class="w-full font-mono"
-                aria-label="正文"
-              />
-              <div v-if="preview" class="preview-box">
-                <MemoryContent
-                  :content="previewContent"
-                  :wiki-links="wikiLinks"
-                  :credentials="credentialLinks"
-                  @open="(sid) => emit('open', sid)"
-                  @credential="openCredential"
+            <div ref="workbenchRef" class="editor-workbench" :class="`mode-${editView}`">
+              <div v-show="editView !== 'preview'" class="workbench-pane pane-source">
+                <div class="pane-head">
+                  <span class="pane-head-lead">
+                    <UIcon :name="icons.code" class="pane-head-icon" aria-hidden="true" />
+                    <span>Markdown 源码</span>
+                  </span>
+                  <span class="pane-head-meta tabular-nums">
+                    {{ sourceLineCount }} 行 · {{ form.content.length.toLocaleString() }} 字
+                  </span>
+                </div>
+                <UTextarea
+                  ref="contentRef"
+                  v-model="form.content"
+                  variant="none"
+                  :rows="editView === 'split' ? undefined : 18"
+                  :autoresize="editView === 'edit'"
+                  :maxrows="editView === 'edit' ? 36 : undefined"
+                  class="source-input w-full font-mono"
+                  aria-label="正文"
                 />
+              </div>
+
+              <div v-if="editView !== 'edit'" class="workbench-pane pane-preview">
+                <div class="pane-head">
+                  <span class="pane-head-lead">
+                    <UIcon :name="icons.reveal" class="pane-head-icon" aria-hidden="true" />
+                    <span>渲染预览</span>
+                  </span>
+                  <span v-if="duplicateLeadingHeadingHidden" class="pane-h1-hint">
+                    已隐藏与标题重复的首行一级标题
+                  </span>
+                </div>
+                <div ref="previewScrollRef" class="preview-scroll">
+                  <MemoryContent
+                    :content="previewContent"
+                    :wiki-links="wikiLinks"
+                    :credentials="credentialLinks"
+                    @open="(sid) => emit('open', sid)"
+                    @credential="openCredential"
+                  />
+                </div>
               </div>
             </div>
 
@@ -1020,6 +1090,15 @@ defineExpose({
                     class="flex-1"
                   />
                 </div>
+              </template>
+              <template v-if="contentChanged && entry" #diff>
+                <DiffViewer
+                  :before="entry.content"
+                  :after="form.content"
+                  :context="2"
+                  :expand-step="10"
+                  max-height="16rem"
+                />
               </template>
             </SaveBar>
           </div>
@@ -1347,7 +1426,7 @@ defineExpose({
 .edit-stack {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 10px;
 }
 .title-hint-row {
   display: flex;
@@ -1414,14 +1493,117 @@ defineExpose({
   color: var(--ui-text-muted);
   white-space: nowrap;
 }
-.editor-split {
+.toolbar-right {
+  margin-left: auto;
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.editor-workbench {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 16px;
+  border: 1px solid var(--ui-border-accented);
+  background: var(--ui-bg);
 }
-@container (min-width: 820px) {
-  .editor-split.is-preview {
+.workbench-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.pane-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 32px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-bg-muted);
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.pane-head-lead {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 500;
+  color: var(--ui-text-toned);
+}
+.pane-head-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+}
+.pane-head-meta {
+  font-size: 12px;
+  color: var(--ui-text-dimmed);
+}
+.pane-h1-hint {
+  font-size: 12px;
+  color: var(--ui-warning);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.source-input {
+  display: flex;
+  flex: 1;
+  align-items: stretch;
+  width: 100%;
+  min-height: 0;
+}
+.source-input :deep(textarea) {
+  width: 100%;
+  padding: 14px 16px;
+  border: 0;
+  background: var(--ui-bg-bright);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.75;
+}
+.source-input :deep(textarea:focus),
+.source-input :deep(textarea:focus-visible) {
+  outline: 0;
+}
+.editor-workbench.mode-split .pane-source {
+  height: 280px;
+  border-bottom: 1px solid var(--ui-border-accented);
+}
+.editor-workbench.mode-split .pane-preview {
+  height: 300px;
+}
+.editor-workbench.mode-split .source-input :deep(textarea) {
+  height: 100%;
+  min-height: 0;
+  resize: none;
+  overflow-y: auto;
+}
+.editor-workbench.mode-preview .preview-scroll {
+  min-height: 24rem;
+}
+.preview-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 20px;
+  background: var(--ui-bg);
+}
+@container (min-width: 680px) {
+  .editor-workbench.mode-split {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    height: clamp(420px, calc(100vh - 20rem), 760px);
+  }
+  .editor-workbench.mode-split .pane-source {
+    height: 100%;
+    border-bottom: 0;
+    border-right: 1px solid var(--ui-border-accented);
+  }
+  .editor-workbench.mode-split .pane-preview {
+    height: 100%;
   }
 }
 /* 阅读态主栏与宽屏右侧 240px 静态辅助轨 */
@@ -1680,12 +1862,6 @@ defineExpose({
   align-items: center;
   gap: 8px;
   padding-bottom: 4px;
-}
-.preview-box {
-  padding: 12px 16px;
-  border: 1px solid var(--ui-border);
-  background: var(--ui-bg-muted);
-  overflow-y: auto;
 }
 @media (max-width: 1023.98px) {
   .drawer-nav {

@@ -17,13 +17,13 @@ import {
 } from '@kioku/contracts'
 import { computed, reactive, ref, watch } from 'vue'
 
-import { collapseUnchanged, diffLines, type DiffRow } from '../diff'
 import { icons } from '../icons'
 import { dreamKindLabels, entryKindLabels } from '../labels'
 import { entryRoute } from '../routes'
 import { detectSecretPrefixes } from '../secretHint'
 import { formatRelative, formatShort, formatTime } from '../time'
 import SceneScopePicker, { type SceneScopeValue } from './SceneScopePicker.vue'
+import DiffViewer from './ui/DiffViewer.vue'
 import NoteLine from './ui/NoteLine.vue'
 
 const props = withDefaults(
@@ -256,16 +256,12 @@ const integrityMessage = computed(() => {
   return '双链与凭据引用完整'
 })
 
-const diffRows = computed<DiffRow[] | null>(() => {
+const hasDiffChanges = computed(() => {
   const next = effectiveProposedContent.value
-  if (next === null) return null
+  if (next === null) return false
   const before = baseEntry.value?.content ?? ''
-  return collapseUnchanged(diffLines(before, next))
+  return before.replace(/\r\n/g, '\n') !== next.replace(/\r\n/g, '\n')
 })
-
-const hasDiffChanges = computed(() =>
-  Boolean(diffRows.value?.some((row) => row.kind === 'add' || row.kind === 'remove')),
-)
 
 function applyDirect() {
   const s = props.suggestion
@@ -428,15 +424,19 @@ function applyEdited() {
       </span>
     </div>
 
-    <!-- 预览：过时标记以外展示苔绿/砖红左轨对比或建议正文 -->
+    <!-- 预览：统一 Git 风格对比器（单双栏、词级高亮、按需展开上下文） -->
     <template v-if="!editing">
       <p v-if="isTidy && hasContentChange && !parts.content" class="skip-content-note">
         已取消勾选正文改动，应用时将保留原正文与历史记录不变。
       </p>
-      <pre v-else-if="diffRows && hasDiffChanges" class="diff-box"><template
-        v-for="(row, idx) in diffRows"
-        :key="idx"
-      ><span v-if="row.kind === 'skip'" class="diff-skip">… 省略未改动的 {{ row.count }} 行</span><span v-else class="diff-line" :class="row.kind">{{ row.text }}</span></template></pre>
+      <DiffViewer
+        v-else-if="effectiveProposedContent !== null && hasDiffChanges"
+        :before="baseEntry?.content ?? ''"
+        :after="effectiveProposedContent"
+        :context="3"
+        :expand-step="12"
+        max-height="24rem"
+      />
       <pre
         v-else-if="suggestion.kind === 'distill_episode' && suggestion.proposedContent"
         class="preview-box"
@@ -757,7 +757,6 @@ function applyEdited() {
   font-size: 12px;
   color: var(--ui-text-muted);
 }
-.diff-box,
 .preview-box {
   max-height: 22rem;
   overflow: auto;
@@ -769,47 +768,6 @@ function applyEdited() {
   line-height: 1.65;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-}
-.diff-skip {
-  display: block;
-  margin: 4px 0;
-  padding: 2px 0 2px 18px;
-  border-top: 1px dashed var(--ui-border);
-  border-bottom: 1px dashed var(--ui-border);
-  font-size: 12px;
-  color: var(--ui-text-muted);
-}
-.diff-line {
-  position: relative;
-  display: block;
-  min-height: 1.65em;
-  padding: 0 6px 0 18px;
-  border-left: 2px solid transparent;
-}
-.diff-line::before {
-  content: '';
-  position: absolute;
-  left: 4px;
-}
-.diff-line.add {
-  border-left-color: var(--ui-success);
-  background: color-mix(in srgb, var(--ui-success) 6%, transparent);
-  color: var(--ui-text-highlighted);
-  font-weight: 600;
-}
-.diff-line.add::before {
-  content: '+';
-  color: var(--ui-success);
-}
-.diff-line.remove {
-  border-left-color: var(--ui-error);
-  background: color-mix(in srgb, var(--ui-error) 6%, transparent);
-  color: var(--ui-error);
-  text-decoration: line-through;
-}
-.diff-line.remove::before {
-  content: '−';
-  color: var(--ui-error);
 }
 .edit-box {
   display: flex;

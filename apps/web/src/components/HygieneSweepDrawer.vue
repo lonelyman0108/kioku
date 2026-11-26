@@ -1,5 +1,10 @@
 <script setup lang="ts">
-import type { HygieneSweepCandidate, HygieneSweepPreviewResponse } from '@kioku/contracts'
+import {
+  stripDuplicateLeadingHeading,
+  stripLegacyGlossaryLines,
+  type HygieneSweepCandidate,
+  type HygieneSweepPreviewResponse,
+} from '@kioku/contracts'
 import { useToast } from '@nuxt/ui/composables'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
@@ -9,6 +14,7 @@ import { api } from '../api/endpoints'
 import { icons } from '../icons'
 import { hygieneFixLabels } from '../labels'
 import { entryRoute } from '../routes'
+import DiffViewer from './ui/DiffViewer.vue'
 import EmptyState from './ui/EmptyState.vue'
 import ReadFailureNote from './ui/ReadFailureNote.vue'
 import SectionHeading from './ui/SectionHeading.vue'
@@ -37,6 +43,88 @@ const selectedShortIds = ref<string[]>([])
 const selectionInitialized = ref(false)
 const applying = ref(false)
 const applyError = ref<string | null>(null)
+const expandedPreviewIds = ref<string[]>([])
+const previewLoading = ref<Record<string, boolean>>({})
+const previewDiffs = ref<Record<string, { before: string; after: string }>>({})
+const previewErrors = ref<Record<string, string>>({})
+
+// 按候选清洗项在本地推演改动后文本，供抽屉内就地展示行级预览
+function computeCandidatePreview(
+  title: string,
+  before: string,
+  item: HygieneSweepCandidate,
+): string {
+  let after = before
+  if (item.fixes.includes('strip_duplicate_heading')) {
+    after = stripDuplicateLeadingHeading(title, after)
+  }
+  if (item.fixes.includes('strip_legacy_glossary')) {
+    after = stripLegacyGlossaryLines(after).content
+  }
+  if (item.rewrites.length) {
+    const lines = after.replace(/\r\n/g, '\n').split('\n')
+    let fence: string | null = null
+    const rewritten = lines.map((line) => {
+      const m = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line)
+      if (fence !== null) {
+        if (
+          m &&
+          m[1]![0] === fence[0] &&
+          m[1]!.length >= fence.length &&
+          /^[ \t]*$/.test(m[2] ?? '')
+        ) {
+          fence = null
+        }
+        return line
+      }
+      if (m && !(m[1]![0] === '`' && (m[2] ?? '').includes('`'))) {
+        fence = m[1]!
+        return line
+      }
+      // 跳过行内反引号代码片段
+      return line
+        .split(/(`+[^`]*`+)/g)
+        .map((seg, idx) => {
+          if (idx % 2 === 1) return seg
+          let out = seg
+          for (const rw of item.rewrites) {
+            if (rw.raw && out.includes(rw.raw)) out = out.replaceAll(rw.raw, rw.replacement)
+          }
+          return out
+        })
+        .join('')
+    })
+    after = rewritten.join('\n')
+  }
+  return after
+}
+
+async function togglePreviewDiff(item: HygieneSweepCandidate) {
+  const sid = item.shortId
+  if (expandedPreviewIds.value.includes(sid)) {
+    expandedPreviewIds.value = expandedPreviewIds.value.filter((id) => id !== sid)
+    return
+  }
+  expandedPreviewIds.value = [...expandedPreviewIds.value, sid]
+  if (previewDiffs.value[sid] || previewLoading.value[sid]) return
+  previewLoading.value = { ...previewLoading.value, [sid]: true }
+  const nextErrors = { ...previewErrors.value }
+  delete nextErrors[sid]
+  previewErrors.value = nextErrors
+  try {
+    const detail = await api.entry(sid)
+    const before = detail.entry.content
+    const after = computeCandidatePreview(detail.entry.title, before, item)
+    previewDiffs.value = { ...previewDiffs.value, [sid]: { before, after } }
+  } catch (err) {
+    previewErrors.value = {
+      ...previewErrors.value,
+      [sid]: err instanceof ApiError ? err.message : '加载对比预览失败',
+    }
+  } finally {
+    previewLoading.value = { ...previewLoading.value, [sid]: false }
+  }
+}
 
 watch(
   candidates,
@@ -59,6 +147,9 @@ watch(open, (visible) => {
     applyError.value = null
   } else {
     selectionInitialized.value = false
+    expandedPreviewIds.value = []
+    previewDiffs.value = {}
+    previewErrors.value = {}
   }
 })
 
@@ -106,6 +197,9 @@ async function applySelected() {
         : `已预清洗 ${res.applied} 条记忆`
     toast.add({ title: summary, color: res.applied > 0 ? 'success' : 'neutral' })
     selectionInitialized.value = false
+    expandedPreviewIds.value = []
+    previewDiffs.value = {}
+    previewErrors.value = {}
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ['entries'] }),
       queryClient.invalidateQueries({ queryKey: ['inbox'] }),
@@ -131,7 +225,7 @@ async function applySelected() {
     title="结构体检与预清洗"
     description="无需对话模型，零误差检查重复标题、旧版关键词行、断链引用与异常记忆"
     :dismissible="!applying"
-    :ui="{ content: 'max-w-2xl sm:max-w-2xl' }"
+    :ui="{ content: 'max-w-3xl sm:max-w-3xl ring-2 ring-rule' }"
   >
     <template #body>
       <ReadFailureNote v-if="previewQuery.isError.value" :query="previewQuery" />
@@ -255,6 +349,35 @@ async function applySelected() {
                 <span v-for="fix in item.fixes" :key="fix" class="fix-tag">
                   {{ hygieneFixLabels[fix] }}
                 </span>
+                <UButton
+                  type="button"
+                  size="xs"
+                  color="neutral"
+                  variant="ghost"
+                  :icon="icons.compare"
+                  :loading="Boolean(previewLoading[item.shortId])"
+                  :aria-expanded="expandedPreviewIds.includes(item.shortId)"
+                  class="ml-auto"
+                  @click="togglePreviewDiff(item)"
+                >
+                  {{ expandedPreviewIds.includes(item.shortId) ? '收起改动' : '预览改动' }}
+                </UButton>
+              </div>
+
+              <div v-if="expandedPreviewIds.includes(item.shortId)" class="mt-1">
+                <p v-if="previewErrors[item.shortId]" class="text-xs text-error">
+                  {{ previewErrors[item.shortId] }}
+                </p>
+                <USkeleton v-else-if="previewLoading[item.shortId]" class="h-20 w-full" />
+                <DiffViewer
+                  v-else-if="previewDiffs[item.shortId]"
+                  :before="previewDiffs[item.shortId]!.before"
+                  :after="previewDiffs[item.shortId]!.after"
+                  :context="2"
+                  :expand-step="10"
+                  :allow-split="false"
+                  max-height="16rem"
+                />
               </div>
 
               <ul v-if="item.rewrites.length" class="rewrite-list">

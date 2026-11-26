@@ -9,6 +9,7 @@ import memoryEditor from '../components/MemoryEditor.vue?raw'
 import memoryHistoryDrawer from '../components/MemoryHistoryDrawer.vue?raw'
 import memoryList from '../components/MemoryList.vue?raw'
 import quickCaptureModal from '../components/QuickCaptureModal.vue?raw'
+import diffViewer from '../components/ui/DiffViewer.vue?raw'
 import consoleSearch from '../composables/useConsoleSearch.ts?raw'
 import { icons } from '../icons'
 import consoleLayout from '../layouts/ConsoleLayout.vue?raw'
@@ -77,7 +78,7 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(quickCaptureModal).toContain('api.capturePlan')
     expect(quickCaptureModal).toContain('applyMarkdownAppend')
     expect(quickCaptureModal).toContain('checkCaptureIntegrity')
-    expect(quickCaptureModal).toContain('collapseUnchanged')
+    expect(quickCaptureModal).toContain('<DiffViewer')
     expect(quickCaptureModal).toContain('AbortController')
     expect(quickCaptureModal).toContain('api.restoreEntry')
     expect(quickCaptureModal).toContain('expectedVersion: mergedVersion')
@@ -90,9 +91,12 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(consoleSearch).toContain("route.name === 'memories'")
   })
 
-  it('编辑器支持容器查询分栏、状态线轨图例、编辑态暴露、双链与会话摘要一键提炼', () => {
+  it('编辑器支持三态分栏同步滚动、状态线轨图例、编辑态暴露、双链与会话摘要一键提炼', () => {
     expect(memoryEditor).toContain('container-type: inline-size')
-    expect(memoryEditor).toContain('@container (min-width: 820px)')
+    expect(memoryEditor).toContain('@container (min-width: 680px)')
+    expect(memoryEditor).toContain('useMarkdownSyncScroll')
+    expect(memoryEditor).toContain('EDIT_VIEW_OPTIONS')
+    expect(memoryEditor).toContain('<DiffViewer')
     expect(memoryEditor).toContain('height: 36px')
     expect(memoryEditor).toContain('rail-swatch solid')
     expect(memoryEditor).toContain('rail-swatch dashed')
@@ -114,18 +118,27 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(entryLinksPanel).toContain('contextSnippet')
   })
 
-  it('列表保留近改副行与常驻水位，历史抽屉支持筛选、属性变动表、两版对比与快照预览', () => {
+  it('列表保留近改副行与常驻水位，历史工作台与通用 DiffViewer 支持单双栏、词级高亮与按需展开上下文', () => {
     expect(memoryList).toContain('近改：')
     expect(memoryList).toContain('PINNED_CHAR_BUDGET')
     expect(memoryList).toContain('pinned-budget')
     expect(memoryList).not.toContain('.list-pane.is-compact .row-disclosure')
 
-    expect(memoryHistoryDrawer).toContain('max-w-2xl')
+    expect(memoryHistoryDrawer).toContain('max-w-6xl')
+    expect(memoryHistoryDrawer).toContain('ring-2 ring-rule')
     expect(memoryHistoryDrawer).toContain('diffEntrySnapshots')
     expect(memoryHistoryDrawer).toContain('formatActorLabel')
     expect(memoryHistoryDrawer).toContain('对比两版')
-    expect(memoryHistoryDrawer).toContain('预览快照')
     expect(memoryHistoryDrawer).toContain('属性变动')
+    expect(memoryHistoryDrawer).toContain('<DiffViewer')
+
+    expect(diffViewer).toContain('computeStructuredDiff')
+    expect(diffViewer).toContain('buildDiffDisplayChunks')
+    expect(diffViewer).toContain('buildSplitDiffPairs')
+    expect(diffViewer).toContain('expandGap')
+    expect(diffViewer).toContain('jumpHunk')
+    expect(dreamSuggestionCard).toContain('<DiffViewer')
+    expect(hygieneSweepDrawer).toContain('<DiffViewer')
   })
 
   it('待处理页与建议卡片具备分类筛选、五重护栏、分项应用、纯标题速审表、预清洗抽屉与 8 秒撤销', () => {
