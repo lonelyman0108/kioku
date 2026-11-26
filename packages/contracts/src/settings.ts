@@ -8,6 +8,16 @@ export const MODEL_KINDS = ['embedding', 'chat_llm'] as const
 export const ModelKind = z.enum(MODEL_KINDS)
 export type ModelKind = z.infer<typeof ModelKind>
 
+export const REASONING_EFFORTS = ['default', 'off', 'low', 'medium', 'high'] as const
+export const ReasoningEffort = z.enum(REASONING_EFFORTS)
+export type ReasoningEffort = z.infer<typeof ReasoningEffort>
+
+export const TaskReasoningEffort = z.object({
+  fast: ReasoningEffort.optional(),
+  organize: ReasoningEffort.optional(),
+})
+export type TaskReasoningEffort = z.infer<typeof TaskReasoningEffort>
+
 const ModelBaseUrl = z
   .string()
   .trim()
@@ -33,6 +43,8 @@ export const ModelEndpointConfig = z.object({
   model: z.string(),
   hasApiKey: z.boolean(),
   enabled: z.boolean(),
+  reasoningEffort: ReasoningEffort.optional(),
+  taskReasoningEffort: TaskReasoningEffort.optional(),
 })
 export type ModelEndpointConfig = z.infer<typeof ModelEndpointConfig>
 
@@ -42,6 +54,8 @@ export const ModelEndpointInput = z.object({
   // undefined 表示保留原密钥，null 或空字符串表示清除密钥，非空字符串表示覆盖
   apiKey: ModelApiKey.nullable().optional(),
   enabled: z.boolean().default(true),
+  reasoningEffort: ReasoningEffort.optional(),
+  taskReasoningEffort: TaskReasoningEffort.nullable().optional(),
 })
 export type ModelEndpointInput = z.infer<typeof ModelEndpointInput>
 
@@ -84,6 +98,7 @@ export const TestModelRequest = z.object({
   model: ModelName,
   apiKey: ModelApiKey.optional(),
   useSavedKey: z.boolean().default(false),
+  reasoningEffort: ReasoningEffort.optional(),
 })
 export type TestModelRequest = z.infer<typeof TestModelRequest>
 

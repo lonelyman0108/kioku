@@ -75,6 +75,7 @@ export interface DreamEnqueueOptions {
   limit?: number | undefined
   all?: boolean | undefined
   pinnedFirst?: boolean | undefined
+  targetShortIds?: string[] | undefined
 }
 
 export interface Jobs {
@@ -93,6 +94,7 @@ interface DreamJobData {
   limit?: number | undefined
   all?: boolean | undefined
   pinnedFirst?: boolean | undefined
+  targetShortIds?: string[] | undefined
 }
 
 export async function startJobs(options: {
@@ -162,6 +164,7 @@ export async function startJobs(options: {
           ...(opts?.limit !== undefined ? { limit: opts.limit } : {}),
           ...(opts?.all !== undefined ? { all: opts.all } : {}),
           ...(opts?.pinnedFirst !== undefined ? { pinnedFirst: opts.pinnedFirst } : {}),
+          ...(opts?.targetShortIds?.length ? { targetShortIds: opts.targetShortIds } : {}),
         }
         const id = await boss.send(DREAM, data, {
           singletonKey: 'dream',
@@ -205,7 +208,14 @@ export async function startJobs(options: {
 
   await boss.work<BufferedBucket>(EXTRACT_EPISODE, async (batch) => {
     for (const job of batch) {
-      await extractEpisodeBatch(options.db, options.masterKey, entryService, job.data)
+      if (stopController.signal.aborted) break
+      await extractEpisodeBatch(
+        options.db,
+        options.masterKey,
+        entryService,
+        job.data,
+        stopController.signal,
+      )
     }
   })
 
@@ -232,6 +242,7 @@ export async function startJobs(options: {
         limit: job.data?.limit,
         all: job.data?.all,
         pinnedFirst: job.data?.pinnedFirst,
+        targetShortIds: job.data?.targetShortIds,
         signal: stopController.signal,
         onProgress: (progress) => {
           dreamProgress = progress

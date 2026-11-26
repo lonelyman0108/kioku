@@ -7,7 +7,8 @@ import type { EntryService } from '../memory/service'
 import { chatComplete } from '../models/client'
 import { CHAT_LLM_SETTING_KEY, loadResolvedModel } from '../models/store'
 import type { BufferedBucket } from './buffer'
-import { buildEpisodeMessages, parseEpisodeSummary } from './prompt'
+import { buildEpisodeMessages, evaluateEpisodeResponse } from './prompt'
+import { buildSemanticRepairMessages } from './dreamPrompt'
 
 export interface ExtractionOutcome {
   turns: number
@@ -21,6 +22,7 @@ export async function extractEpisodeBatch(
   masterKey: MasterKey | null,
   entryService: EntryService,
   bucket: BufferedBucket,
+  signal?: AbortSignal,
 ): Promise<ExtractionOutcome> {
   const conn = await loadResolvedModel(db, masterKey, CHAT_LLM_SETTING_KEY)
   if (!conn) return { turns: 0, createdShortId: null, skippedReason: 'no_chat_model' }
@@ -69,8 +71,32 @@ export async function extractEpisodeBatch(
     jsonMode: true,
     maxTokens: 600,
     timeoutMs: 90_000,
+    taskKind: 'fast',
+    maxRetries: 1,
+    ...(signal ? { signal } : {}),
   })
-  const parsed = parseEpisodeSummary(result.content)
+  let evaluated = evaluateEpisodeResponse(result.content)
+  if (evaluated.status === 'invalid' && !signal?.aborted) {
+    const repairMessages = buildSemanticRepairMessages(
+      messages,
+      `上次输出解析失败（${evaluated.reason}）。请严格只输出单个合法 JSON 对象：{"title":"简短标题","summary":"摘要"}；若无可记录结论则输出 {"title":"","summary":""}。`,
+    )
+    const retryResult = await chatComplete(conn, repairMessages, {
+      temperature: 0,
+      jsonMode: true,
+      maxTokens: 600,
+      timeoutMs: 90_000,
+      taskKind: 'fast',
+      maxRetries: 0,
+      ...(signal ? { signal } : {}),
+    })
+    evaluated = evaluateEpisodeResponse(retryResult.content)
+  }
+
+  // 解析仍失败时保留 turn_buffer 并抛错交由队列重试，避免丢弃未消费对话轮次
+  if (evaluated.status === 'invalid') {
+    throw new Error(`会话摘要模型输出无效：${evaluated.reason}`)
+  }
 
   await db
     .delete(turnBuffer)
@@ -82,13 +108,13 @@ export async function extractEpisodeBatch(
       ),
     )
 
-  if (!parsed) {
+  if (evaluated.status === 'empty') {
     return { turns: rows.length, createdShortId: null, skippedReason: 'no_summary' }
   }
 
   const created = await entryService.writeEpisode({
-    title: parsed.title,
-    content: parsed.summary,
+    title: evaluated.data.title,
+    content: evaluated.data.summary,
     deviceKey: bucket.deviceKey,
     projectSlug: bucket.projectSlug,
     envs: keyRow.envs,

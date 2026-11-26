@@ -97,6 +97,8 @@ describe.skipIf(!testDatabaseUrl)('模型设置、向量回填、数据导出与
           model: 'chat-model-a',
           apiKey: 'sk-chat-secret',
           enabled: true,
+          reasoningEffort: 'medium',
+          taskReasoningEffort: { fast: 'off', organize: 'high' },
         },
         dream: { enabled: true, intervalHours: 12 },
       }),
@@ -105,6 +107,8 @@ describe.skipIf(!testDatabaseUrl)('模型设置、向量回填、数据导出与
     const body1 = ModelsSettingsResponse.parse(await put1.json())
     expect(body1.embedding?.hasApiKey).toBe(true)
     expect(body1.chatLlm?.hasApiKey).toBe(true)
+    expect(body1.chatLlm?.reasoningEffort).toBe('medium')
+    expect(body1.chatLlm?.taskReasoningEffort).toEqual({ fast: 'off', organize: 'high' })
     expect(body1.dream).toEqual({ enabled: true, intervalHours: 12 })
     expect(backfillCalls).toBe(1)
 
@@ -143,10 +147,32 @@ describe.skipIf(!testDatabaseUrl)('模型设置、向量回填、数据导出与
         baseUrl: fakeAi.baseUrl,
         model: 'chat-model-a',
         useSavedKey: true,
+        reasoningEffort: 'high',
       }),
     })
     expect(testChat.status).toBe(200)
     expect(TestModelResponse.parse(await testChat.json()).ok).toBe(true)
+    const lastChatReq = fakeAi.requests.filter((r) => r.path.endsWith('/chat/completions')).at(-1)
+    expect((lastChatReq?.body as Record<string, unknown>)?.reasoning_effort).toBe('high')
+
+    // 清除按任务覆盖
+    const clearOverride = await app.request('/v1/console/settings/models', {
+      method: 'PUT',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({
+        chatLlm: {
+          baseUrl: fakeAi.baseUrl,
+          model: 'chat-model-a',
+          enabled: true,
+          reasoningEffort: 'default',
+          taskReasoningEffort: null,
+        },
+      }),
+    })
+    expect(clearOverride.status).toBe(200)
+    const clearedBody = ModelsSettingsResponse.parse(await clearOverride.json())
+    expect(clearedBody.chatLlm?.reasoningEffort).toBe('default')
+    expect(clearedBody.chatLlm?.taskReasoningEffort).toBeUndefined()
 
     // 3. 切换嵌入模型名：必须清空旧向量并再次触发回填
     const put2 = await app.request('/v1/console/settings/models', {

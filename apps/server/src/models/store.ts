@@ -1,5 +1,7 @@
 import {
   DEFAULT_DREAM_INTERVAL_HOURS,
+  REASONING_EFFORTS,
+  type DreamFailedItem,
   type DreamOutcome,
   type DreamProgress,
   type DreamRunSummary,
@@ -7,6 +9,8 @@ import {
   type DreamState,
   type ModelEndpointConfig,
   type ModelEndpointInput,
+  type ReasoningEffort,
+  type TaskReasoningEffort,
 } from '@kioku/contracts'
 import { eq, inArray, sql } from 'drizzle-orm'
 
@@ -15,6 +19,7 @@ import { decryptionKey, encryptionKey, type MasterKey } from '../crypto/keyring'
 import type { Db, Tx } from '../db/client'
 import { settings } from '../db/schema'
 import { MemoryError } from '../memory/errors'
+import { clearReasoningFallbackCache } from './client'
 
 export const EMBEDDING_SETTING_KEY = 'embedding'
 export const CHAT_LLM_SETTING_KEY = 'chat_llm'
@@ -29,11 +34,15 @@ export interface SealedJson {
   keyId?: string | null
 }
 
+const REASONING_EFFORT_SET: ReadonlySet<string> = new Set(REASONING_EFFORTS)
+
 export interface StoredModelEndpoint {
   baseUrl: string
   model: string
   enabled: boolean
   apiKey?: SealedJson | null
+  reasoningEffort?: ReasoningEffort | undefined
+  taskReasoningEffort?: TaskReasoningEffort | undefined
 }
 
 export interface ResolvedModelEndpoint {
@@ -41,6 +50,8 @@ export interface ResolvedModelEndpoint {
   model: string
   enabled: boolean
   apiKey: string | null
+  reasoningEffort?: ReasoningEffort | undefined
+  taskReasoningEffort?: TaskReasoningEffort | undefined
 }
 
 export interface StoredDreamState {
@@ -107,15 +118,37 @@ function openApiKey(masterKey: MasterKey | null, sealed: SealedJson, aad: string
   return decryptSecret(key, toSealedBuffer(sealed), aad)
 }
 
+function parseReasoningEffort(raw: unknown): ReasoningEffort | undefined {
+  return typeof raw === 'string' && REASONING_EFFORT_SET.has(raw)
+    ? (raw as ReasoningEffort)
+    : undefined
+}
+
+function parseTaskReasoningEffort(raw: unknown): TaskReasoningEffort | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const rec = raw as Record<string, unknown>
+  const fast = parseReasoningEffort(rec.fast)
+  const organize = parseReasoningEffort(rec.organize)
+  if (fast === undefined && organize === undefined) return undefined
+  return {
+    ...(fast !== undefined ? { fast } : {}),
+    ...(organize !== undefined ? { organize } : {}),
+  }
+}
+
 function parseStoredEndpoint(raw: unknown): StoredModelEndpoint | null {
   if (!raw || typeof raw !== 'object') return null
   const r = raw as Record<string, unknown>
   if (typeof r.baseUrl !== 'string' || typeof r.model !== 'string') return null
+  const reasoningEffort = parseReasoningEffort(r.reasoningEffort)
+  const taskReasoningEffort = parseTaskReasoningEffort(r.taskReasoningEffort)
   return {
     baseUrl: r.baseUrl,
     model: r.model,
     enabled: typeof r.enabled === 'boolean' ? r.enabled : true,
     apiKey: isSealedJson(r.apiKey) ? r.apiKey : null,
+    ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
+    ...(taskReasoningEffort !== undefined ? { taskReasoningEffort } : {}),
   }
 }
 
@@ -128,6 +161,10 @@ export function toPublicModelEndpoint(
     model: stored.model,
     hasApiKey: Boolean(stored.apiKey),
     enabled: stored.enabled,
+    ...(stored.reasoningEffort !== undefined ? { reasoningEffort: stored.reasoningEffort } : {}),
+    ...(stored.taskReasoningEffort !== undefined
+      ? { taskReasoningEffort: stored.taskReasoningEffort }
+      : {}),
   }
 }
 
@@ -152,6 +189,10 @@ export async function loadResolvedModel(
     model: stored.model,
     enabled: stored.enabled,
     apiKey,
+    ...(stored.reasoningEffort !== undefined ? { reasoningEffort: stored.reasoningEffort } : {}),
+    ...(stored.taskReasoningEffort !== undefined
+      ? { taskReasoningEffort: stored.taskReasoningEffort }
+      : {}),
   }
 }
 
@@ -174,6 +215,7 @@ export async function saveModelEndpoint(
   const previous = await loadStoredModel(db, key)
   if (input === null) {
     await db.delete(settings).where(eq(settings.key, key))
+    if (key === CHAT_LLM_SETTING_KEY) clearReasoningFallbackCache()
     return { previous, next: null }
   }
 
@@ -186,11 +228,29 @@ export async function saveModelEndpoint(
     }
   }
 
+  let nextReasoningEffort: ReasoningEffort | undefined
+  let nextTaskReasoningEffort: TaskReasoningEffort | undefined
+  if (key === CHAT_LLM_SETTING_KEY) {
+    nextReasoningEffort =
+      input.reasoningEffort !== undefined ? input.reasoningEffort : previous?.reasoningEffort
+    if (input.taskReasoningEffort === null) {
+      nextTaskReasoningEffort = undefined
+    } else if (input.taskReasoningEffort !== undefined) {
+      nextTaskReasoningEffort = parseTaskReasoningEffort(input.taskReasoningEffort)
+    } else {
+      nextTaskReasoningEffort = previous?.taskReasoningEffort
+    }
+  }
+
   const next: StoredModelEndpoint = {
     baseUrl: input.baseUrl,
     model: input.model,
     enabled: input.enabled,
     apiKey: nextApiKey,
+    ...(nextReasoningEffort !== undefined ? { reasoningEffort: nextReasoningEffort } : {}),
+    ...(nextTaskReasoningEffort !== undefined
+      ? { taskReasoningEffort: nextTaskReasoningEffort }
+      : {}),
   }
 
   await db
@@ -200,6 +260,8 @@ export async function saveModelEndpoint(
       target: settings.key,
       set: { value: next, updatedAt: sql`now()` },
     })
+
+  if (key === CHAT_LLM_SETTING_KEY) clearReasoningFallbackCache()
 
   return { previous, next }
 }
@@ -221,6 +283,73 @@ export async function loadModelFlags(
 
 // ---- Dream 配置与近期运行状态（统一保存在 settings.dream_state）----
 
+function parseFailedItems(raw: unknown): DreamFailedItem[] | undefined {
+  if (!Array.isArray(raw)) return undefined
+  const out: DreamFailedItem[] = []
+  for (const item of raw) {
+    if (out.length >= 50) break
+    if (!item || typeof item !== 'object') continue
+    const rec = item as Record<string, unknown>
+    if (
+      typeof rec.shortId === 'string' &&
+      typeof rec.title === 'string' &&
+      typeof rec.kind === 'string' &&
+      typeof rec.reason === 'string'
+    ) {
+      out.push({
+        shortId: rec.shortId,
+        title: rec.title,
+        kind: rec.kind,
+        reason: rec.reason,
+      })
+    }
+  }
+  return out
+}
+
+function parseDreamRunSummary(raw: unknown): DreamRunSummary | null {
+  if (!raw || typeof raw !== 'object') return null
+  const r = raw as Record<string, unknown>
+  if (
+    typeof r.id !== 'string' ||
+    (r.trigger !== 'scheduled' && r.trigger !== 'manual') ||
+    (r.outcome !== 'ok' &&
+      r.outcome !== 'partial' &&
+      r.outcome !== 'skipped' &&
+      r.outcome !== 'failed') ||
+    typeof r.considered !== 'number' ||
+    typeof r.suggested !== 'number' ||
+    typeof r.createdAt !== 'string'
+  ) {
+    return null
+  }
+  const failedItems = parseFailedItems(r.failedItems)
+  const mode = r.mode === 'standard' || r.mode === 'tidy' ? r.mode : undefined
+  const retriedCount =
+    typeof r.retriedCount === 'number' && Number.isInteger(r.retriedCount) && r.retriedCount >= 0
+      ? r.retriedCount
+      : undefined
+  const abortedReason =
+    typeof r.abortedReason === 'string'
+      ? r.abortedReason
+      : r.abortedReason === null
+        ? null
+        : undefined
+  return {
+    id: r.id,
+    trigger: r.trigger,
+    ...(mode !== undefined ? { mode } : {}),
+    outcome: r.outcome,
+    considered: r.considered,
+    suggested: r.suggested,
+    error: typeof r.error === 'string' ? r.error : null,
+    ...(failedItems !== undefined ? { failedItems } : {}),
+    ...(retriedCount !== undefined ? { retriedCount } : {}),
+    ...(abortedReason !== undefined ? { abortedReason } : {}),
+    createdAt: r.createdAt,
+  }
+}
+
 function parseStoredDreamState(raw: unknown): StoredDreamState {
   if (!raw || typeof raw !== 'object') return { ...DEFAULT_DREAM_STATE, recentRuns: [] }
   const r = raw as Record<string, unknown>
@@ -229,7 +358,10 @@ function parseStoredDreamState(raw: unknown): StoredDreamState {
       ? Math.min(168, r.intervalHours)
       : DEFAULT_DREAM_INTERVAL_HOURS
   const recentRuns = Array.isArray(r.recentRuns)
-    ? (r.recentRuns as DreamRunSummary[]).slice(0, RECENT_RUNS_LIMIT)
+    ? r.recentRuns
+        .map(parseDreamRunSummary)
+        .filter((x): x is DreamRunSummary => x !== null)
+        .slice(0, RECENT_RUNS_LIMIT)
     : []
   return {
     enabled: typeof r.enabled === 'boolean' ? r.enabled : false,

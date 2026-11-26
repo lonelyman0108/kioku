@@ -9,6 +9,7 @@ import {
   type EntryKind,
   type EntryTab,
   type HygieneSweepFixKind,
+  type ReasoningEffort,
 } from '@kioku/contracts'
 
 import { runtimeName } from './runtimes'
@@ -170,4 +171,12 @@ export const dreamOutcomeLabels: Record<DreamOutcome, string> = {
   partial: '部分完成',
   skipped: '跳过',
   failed: '失败',
+}
+
+export const reasoningEffortLabels: Record<ReasoningEffort, string> = {
+  default: '跟随默认',
+  off: '关闭',
+  low: '低',
+  medium: '中',
+  high: '高',
 }

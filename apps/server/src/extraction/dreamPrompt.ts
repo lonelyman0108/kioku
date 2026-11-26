@@ -14,7 +14,7 @@ import {
   type EntryKind,
 } from '@kioku/contracts'
 
-import type { ChatMessage } from '../models/client'
+import { stripThinkTags, type ChatMessage } from '../models/client'
 import { clipChars, inlineText } from '../recall/text'
 
 export interface DreamPromptItem {
@@ -141,12 +141,29 @@ function sameRealms(a: readonly string[], b: readonly string[]): boolean {
   return left.length === right.length && left.every((v, i) => v === right[i])
 }
 
+// 组装单轮干净修复提示词，避免多轮透传缺失 reasoning_content 导致部分推理模型网关报 400
+export function buildSemanticRepairMessages(
+  originalMessages: readonly ChatMessage[],
+  errorFeedback: string,
+): ChatMessage[] {
+  const systemMsg = originalMessages.find((m) => m.role === 'system')
+  const userParts = originalMessages.filter((m) => m.role === 'user').map((m) => m.content)
+  const combinedUser = [
+    ...userParts,
+    '',
+    '## 纠错要求（请重新生成完整合法的 JSON）',
+    errorFeedback,
+  ].join('\n')
+  return [...(systemMsg ? [systemMsg] : []), { role: 'user', content: combinedUser }]
+}
+
 function parseJsonObject(raw: string): Record<string, unknown> | null {
-  const first = raw.indexOf('{')
-  const last = raw.lastIndexOf('}')
+  const cleaned = stripThinkTags(raw)
+  const first = cleaned.indexOf('{')
+  const last = cleaned.lastIndexOf('}')
   if (first < 0 || last <= first) return null
   try {
-    const parsed = JSON.parse(raw.slice(first, last + 1)) as unknown
+    const parsed = JSON.parse(cleaned.slice(first, last + 1)) as unknown
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
       ? (parsed as Record<string, unknown>)
       : null
@@ -202,12 +219,19 @@ function parseArchivedNotes(raw: unknown): ArchivedHistoryNote[] {
   return notes
 }
 
-export function parseDreamProposals(
+export type DreamStandardParseResult =
+  { status: 'ok'; proposals: ParsedDreamProposal[] } | { status: 'invalid'; reason: string }
+
+export function evaluateDreamResponse(
   raw: string,
   catalog: ReadonlyMap<string, DreamPromptItem>,
-): ParsedDreamProposal[] {
+): DreamStandardParseResult {
   const parsed = parseJsonObject(raw)
-  const list = parsed && Array.isArray(parsed.suggestions) ? parsed.suggestions : []
+  if (!parsed) return { status: 'invalid', reason: '模型输出非合法 JSON' }
+  if (!Array.isArray(parsed.suggestions)) {
+    return { status: 'invalid', reason: '模型输出缺少 suggestions 数组' }
+  }
+  const list = parsed.suggestions
 
   const proposals: ParsedDreamProposal[] = []
   for (const item of list) {
@@ -287,18 +311,38 @@ export function parseDreamProposals(
       reason,
     })
   }
-  return proposals
+  return { status: 'ok', proposals }
+}
+
+export function parseDreamProposals(
+  raw: string,
+  catalog: ReadonlyMap<string, DreamPromptItem>,
+): ParsedDreamProposal[] {
+  const evaluated = evaluateDreamResponse(raw, catalog)
+  return evaluated.status === 'ok' ? evaluated.proposals : []
 }
 
 export type TidyParseResult =
   | { status: 'proposal'; proposal: ParsedDreamProposal }
   | { status: 'not_needed' }
-  | { status: 'invalid'; reason: string }
+  | {
+      status: 'invalid'
+      reason: string
+      missingLinks?: string[] | undefined
+      missingCreds?: string[] | undefined
+    }
 
 export function evaluateTidyResponse(raw: string, target: DreamPromptItem): TidyParseResult {
   const rec = parseJsonObject(raw)
   if (!rec) return { status: 'invalid', reason: '模型输出非合法 JSON' }
   if (rec.needed === false) return { status: 'not_needed' }
+  const hasPayloadFields =
+    (typeof rec.title === 'string' && rec.title.trim().length > 0) ||
+    (typeof rec.summary === 'string' && rec.summary.trim().length > 0) ||
+    (typeof rec.content === 'string' && rec.content.trim().length > 0)
+  if (typeof rec.needed !== 'boolean' && !hasPayloadFields) {
+    return { status: 'invalid', reason: '模型输出缺少 needed 布尔字段' }
+  }
 
   const proposedTitle = sanitizeDreamPlainField(rec.title, ENTRY_TITLE_NEW_MAX) || target.title
   const proposedSummary = sanitizeDreamPlainField(rec.summary, ENTRY_SUMMARY_MAX) || null
@@ -323,7 +367,12 @@ export function evaluateTidyResponse(raw: string, target: DreamPromptItem): Tidy
   // 严格完整性守卫：规范精简允许安全压缩历史篇幅，但绝不允许丢失任一既有双链或凭据占位符
   const integrity = checkCaptureIntegrity(target.content, proposedContent)
   if (integrity.missingLinks.length > 0 || integrity.missingCreds.length > 0) {
-    return { status: 'invalid', reason: '草案丢失原有双链或凭据占位符，已拦截' }
+    return {
+      status: 'invalid',
+      reason: '草案丢失原有双链或凭据占位符，已拦截',
+      ...(integrity.missingLinks.length ? { missingLinks: integrity.missingLinks } : {}),
+      ...(integrity.missingCreds.length ? { missingCreds: integrity.missingCreds } : {}),
+    }
   }
 
   return {

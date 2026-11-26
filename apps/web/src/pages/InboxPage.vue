@@ -55,6 +55,16 @@ const items = computed(() => data.value?.items ?? [])
 const tidyPendingCount = computed(() => data.value?.tidyPendingCount ?? 0)
 const state = computed(() => data.value?.dreamState ?? null)
 const progress = computed(() => state.value?.progress ?? null)
+const latestRun = computed(() => state.value?.recentRuns[0] ?? null)
+const latestFailedItems = computed(() => latestRun.value?.failedItems ?? [])
+const latestRetryableShortIds = computed(() => [
+  ...new Set(latestFailedItems.value.map((item) => item.shortId)),
+])
+const latestRunMode = computed<'standard' | 'tidy'>(
+  () =>
+    latestRun.value?.mode ?? (latestFailedItems.value[0]?.kind === 'tidy' ? 'tidy' : 'standard'),
+)
+const failedDetailsOpen = ref(false)
 const progressPercent = computed(() =>
   progress.value && progress.value.total > 0
     ? Math.min(100, Math.round((progress.value.processed / progress.value.total) * 100))
@@ -166,7 +176,7 @@ function baseEntryOf(suggestion: DreamSuggestionView) {
   return suggestion.entries[0] ?? null
 }
 
-const triggeringMode = ref<'standard' | 'tidy' | null>(null)
+const triggeringMode = ref<'standard' | 'tidy' | 'retry' | null>(null)
 const tidyBusy = computed(
   () =>
     triggeringMode.value === 'tidy' ||
@@ -177,6 +187,7 @@ const standardBusy = computed(
     triggeringMode.value === 'standard' ||
     (Boolean(state.value?.running) && progress.value?.mode !== 'tidy'),
 )
+const retryFailedBusy = computed(() => triggeringMode.value === 'retry')
 const tidyDisabled = computed(
   () =>
     !data.value ||
@@ -188,12 +199,14 @@ const tidyDisabled = computed(
 async function triggerDream(req: Partial<TriggerDreamRequest>) {
   if (triggeringMode.value || state.value?.running) return
   const mode = req.mode === 'tidy' ? 'tidy' : 'standard'
-  triggeringMode.value = mode
+  const isRetry = Boolean(req.targetShortIds?.length)
+  triggeringMode.value = isRetry ? 'retry' : mode
   try {
     const res = await api.runDream(req)
     if (res.started) {
-      const title =
-        mode === 'tidy'
+      const title = isRetry
+        ? `已发起失败项重试（${req.targetShortIds!.length} 条）`
+        : mode === 'tidy'
           ? req.all
             ? '已发起全部存量规范整理任务'
             : `已发起存量规范整理（本批 ${req.limit ?? 10} 条）`
@@ -581,6 +594,70 @@ async function applyQuickTableSelected() {
               >
                 {{ state.lastOutcome === 'partial' ? state.lastError : `错误：${state.lastError}` }}
               </p>
+
+              <p
+                v-if="!state?.running && latestRun?.retriedCount"
+                class="rail-retry-note tabular-nums"
+              >
+                上次运行期间已自动重试 {{ latestRun.retriedCount }} 次
+              </p>
+
+              <div v-if="!state?.running && latestFailedItems.length > 0" class="rail-failures">
+                <div class="rail-failures-head">
+                  <span class="tabular-nums">失败明细（{{ latestFailedItems.length }} 条）</span>
+                  <button
+                    type="button"
+                    class="rail-failures-toggle"
+                    :aria-expanded="failedDetailsOpen"
+                    @click="failedDetailsOpen = !failedDetailsOpen"
+                  >
+                    <UIcon
+                      :name="failedDetailsOpen ? icons.chevronDown : icons.chevronRight"
+                      class="rail-failures-chevron"
+                      aria-hidden="true"
+                    />
+                    <span>{{ failedDetailsOpen ? '收起' : '展开' }}</span>
+                  </button>
+                </div>
+
+                <ul v-if="failedDetailsOpen" class="rail-failures-list">
+                  <li
+                    v-for="item in latestFailedItems"
+                    :key="item.shortId"
+                    class="rail-failure-row"
+                  >
+                    <div class="rail-failure-top">
+                      <RouterLink
+                        :to="entryRoute(item.shortId)"
+                        class="rail-failure-id text-primary font-mono text-xs"
+                      >
+                        {{ item.shortId }}
+                      </RouterLink>
+                      <span class="rail-failure-title">{{ item.title }}</span>
+                    </div>
+                    <p class="rail-failure-reason">{{ item.reason }}</p>
+                  </li>
+                </ul>
+
+                <UButton
+                  v-if="me.data.value?.hasChatModel"
+                  size="xs"
+                  color="neutral"
+                  variant="outline"
+                  :icon="icons.refresh"
+                  :loading="retryFailedBusy"
+                  :disabled="tidyDisabled"
+                  block
+                  @click="
+                    triggerDream({
+                      mode: latestRunMode,
+                      targetShortIds: latestRetryableShortIds,
+                    })
+                  "
+                >
+                  仅重试失败项（{{ latestRetryableShortIds.length }} 条）
+                </UButton>
+              </div>
             </section>
 
             <!-- 建议类型分段筛选与纯标题速审表切换 -->
@@ -954,6 +1031,87 @@ async function applyQuickTableSelected() {
 .rail-error.is-partial {
   border-color: var(--ui-warning);
   color: var(--ui-warning);
+}
+.rail-retry-note {
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.rail-failures {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--ui-border);
+}
+.rail-failures-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.rail-failures-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 12px;
+  color: var(--ui-text-highlighted);
+  cursor: pointer;
+}
+.rail-failures-toggle:hover {
+  text-decoration: underline;
+}
+.rail-failures-chevron {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+}
+.rail-failures-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 200px;
+  overflow-y: auto;
+  padding: 6px 8px;
+  border: 1px solid var(--ui-border);
+  background: var(--ui-bg);
+}
+.rail-failure-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.rail-failure-row:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+.rail-failure-top {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.rail-failure-id {
+  flex: none;
+  white-space: nowrap;
+}
+.rail-failure-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--ui-text-highlighted);
+}
+.rail-failure-reason {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ui-text-muted);
+  overflow-wrap: anywhere;
 }
 .rail-quick-switch {
   padding-top: 8px;

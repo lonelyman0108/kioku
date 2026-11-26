@@ -30,7 +30,7 @@ import type { Db } from '../db/client'
 import { entries } from '../db/schema'
 import { MemoryError } from '../memory/errors'
 import { parseShortId } from '../memory/shortId'
-import { chatComplete, type ChatMessage } from '../models/client'
+import { chatComplete, stripThinkTags, type ChatMessage } from '../models/client'
 import {
   CHAT_LLM_SETTING_KEY,
   loadResolvedModel,
@@ -389,7 +389,7 @@ function scanFirstJsonObject(text: string): Record<string, unknown> | null {
 }
 
 function extractDecisionObject(raw: string): Record<string, unknown> | null {
-  const normalized = normalizeLineEndings(raw)
+  const normalized = normalizeLineEndings(stripThinkTags(raw))
   const trimmed = normalized.trim()
   if (trimmed.startsWith('{')) {
     const direct = scanFirstJsonObject(trimmed)
@@ -1044,6 +1044,8 @@ export async function planCapture(
       maxTokens: CAPTURE_CHAT_MAX_TOKENS,
       jsonMode: true,
       timeoutMs: CAPTURE_CHAT_TIMEOUT_MS,
+      taskKind: 'fast',
+      maxRetries: 0,
       ...(options.signal ? { signal: options.signal } : {}),
     })
     rawContent = result.content

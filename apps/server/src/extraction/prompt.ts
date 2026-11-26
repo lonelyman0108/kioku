@@ -1,6 +1,6 @@
 import { ENTRY_TITLE_MAX } from '@kioku/contracts'
 
-import type { ChatMessage } from '../models/client'
+import { stripThinkTags, type ChatMessage } from '../models/client'
 import { clipChars, inlineText } from '../recall/text'
 
 const MAX_TRANSCRIPT_CHARS = 12_000
@@ -55,24 +55,41 @@ export function buildEpisodeMessages(
   ]
 }
 
-export function parseEpisodeSummary(raw: string): ParsedEpisodeSummary | null {
-  const first = raw.indexOf('{')
-  const last = raw.lastIndexOf('}')
-  if (first < 0 || last <= first) return null
+export type EpisodeParseResult =
+  | { status: 'summary'; data: ParsedEpisodeSummary }
+  | { status: 'empty' }
+  | { status: 'invalid'; reason: string }
+
+export function evaluateEpisodeResponse(raw: string): EpisodeParseResult {
+  const cleaned = stripThinkTags(raw)
+  const first = cleaned.indexOf('{')
+  const last = cleaned.lastIndexOf('}')
+  if (first < 0 || last <= first) {
+    return { status: 'invalid', reason: '模型输出非合法 JSON' }
+  }
   let parsed: unknown
   try {
-    parsed = JSON.parse(raw.slice(first, last + 1))
+    parsed = JSON.parse(cleaned.slice(first, last + 1))
   } catch {
-    return null
+    return { status: 'invalid', reason: '模型输出 JSON 解析失败' }
   }
-  if (!parsed || typeof parsed !== 'object') return null
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { status: 'invalid', reason: '模型输出非 JSON 对象' }
+  }
   const rec = parsed as Record<string, unknown>
-  const summary =
-    typeof rec.summary === 'string' ? clipChars(rec.summary.trim(), MAX_SUMMARY_CHARS) : ''
-  if (!summary) return null
+  if (typeof rec.summary !== 'string') {
+    return { status: 'invalid', reason: '模型输出缺少 summary 字符串字段' }
+  }
+  const summary = clipChars(rec.summary.trim(), MAX_SUMMARY_CHARS)
+  if (!summary) return { status: 'empty' }
   const title =
     typeof rec.title === 'string' && rec.title.trim()
       ? clipChars(inlineText(rec.title), ENTRY_TITLE_MAX)
       : clipChars(inlineText(summary), 48)
-  return { title, summary }
+  return { status: 'summary', data: { title, summary } }
+}
+
+export function parseEpisodeSummary(raw: string): ParsedEpisodeSummary | null {
+  const evaluated = evaluateEpisodeResponse(raw)
+  return evaluated.status === 'summary' ? evaluated.data : null
 }

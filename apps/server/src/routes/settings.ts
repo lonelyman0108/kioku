@@ -144,6 +144,9 @@ export function settingsRoutes(deps: Deps) {
         baseUrl: body.baseUrl,
         model: body.model,
         apiKey,
+        ...(body.kind === 'chat_llm' && body.reasoningEffort !== undefined
+          ? { reasoningEffort: body.reasoningEffort }
+          : {}),
       })
       return c.json(result, 200)
     })
