@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import {
   buildDiffDisplayChunks,
+  buildDiffVisibilityMask,
   buildSplitDiffPairs,
   computeStructuredDiff,
+  expandDiffGap,
   type InlineDiffPart,
   type NumberedDiffLine,
 } from '../../diff'
@@ -28,7 +30,7 @@ const props = withDefaults(
   }>(),
   {
     context: 3,
-    expandStep: 15,
+    expandStep: 10,
     defaultLayout: 'unified',
     showToolbar: true,
     allowSplit: true,
@@ -69,28 +71,87 @@ const CONTEXT_OPTIONS = [
     value: 'folded' as const,
     label: '折叠',
     icon: icons.foldVertical,
-    title: '仅显示改动与上下文',
+    title: '折叠未改动上下文并保持紧凑高度',
   },
-  { value: 'full' as const, label: '全文', icon: icons.unfoldVertical, title: '展开完整全文' },
+  {
+    value: 'full' as const,
+    label: '全文',
+    icon: icons.unfoldVertical,
+    title: '展开全部未改动行与完整高度',
+  },
 ]
 
 const structured = computed(() => computeStructuredDiff(props.before, props.after))
 const hasChanges = computed(
   () => structured.value.addedCount > 0 || structured.value.removedCount > 0,
 )
+const defaultMask = computed(() =>
+  buildDiffVisibilityMask(structured.value.lines, structured.value.hunkStarts, props.context),
+)
+const hasFoldableGaps = computed(() => defaultMask.value.some((visible) => !visible))
 
 // 每行是否处于已展开可见态（支持就地向上/向下按需加载上下文）
 const visibleMask = ref<boolean[]>([])
+const manualExpanded = ref(false)
 const focusedHunk = ref(0)
 const rootRef = ref<HTMLElement | null>(null)
+const scrollRef = ref<HTMLElement | null>(null)
+const tableRef = ref<HTMLElement | null>(null)
 const containerWidth = ref<number>(1024)
+const tableHeight = ref<number>(0)
+const resolvedMaxHeightPx = ref<number | null>(null)
 let rootObserver: ResizeObserver | null = null
+let tableObserver: ResizeObserver | null = null
 
 const isSplit = computed(
   () => props.allowSplit && activeLayout.value === 'split' && containerWidth.value >= 640,
 )
 
+const isHeightClamped = computed(() => activeContext.value === 'folded' && Boolean(props.maxHeight))
+
+function measureMaxHeightPx() {
+  if (!props.maxHeight) {
+    resolvedMaxHeightPx.value = null
+    return
+  }
+  const el = scrollRef.value
+  if (!el || typeof window === 'undefined') return
+  if (isHeightClamped.value) {
+    const computedPx = Number.parseFloat(getComputedStyle(el).maxHeight)
+    if (Number.isFinite(computedPx) && computedPx > 0) {
+      resolvedMaxHeightPx.value = computedPx
+    }
+  }
+}
+
+const overflowsMaxHeight = computed(
+  () =>
+    Boolean(props.maxHeight) &&
+    resolvedMaxHeightPx.value !== null &&
+    tableHeight.value > resolvedMaxHeightPx.value + 4,
+)
+
+// 处于全文态且启用了 maxHeight 时保留收起入口，避免宽屏/双栏或滚动条消失引起按钮瞬隐而卡在全文态
+const canToggleContext = computed(
+  () =>
+    hasFoldableGaps.value ||
+    overflowsMaxHeight.value ||
+    (activeContext.value === 'full' && Boolean(props.maxHeight)),
+)
+const showBottomToggle = computed(
+  () =>
+    Boolean(props.maxHeight) &&
+    (overflowsMaxHeight.value || hasFoldableGaps.value || activeContext.value === 'full'),
+)
+
+function onWindowResize() {
+  measureMaxHeightPx()
+}
+
 onMounted(() => {
+  if (typeof window !== 'undefined') {
+    window.addEventListener('resize', onWindowResize)
+  }
   if (rootRef.value && typeof ResizeObserver !== 'undefined') {
     containerWidth.value = rootRef.value.clientWidth || 1024
     rootObserver = new ResizeObserver((entries) => {
@@ -99,11 +160,46 @@ onMounted(() => {
     })
     rootObserver.observe(rootRef.value)
   }
+  measureMaxHeightPx()
 })
 
+watch(
+  [scrollRef, () => props.maxHeight, isHeightClamped],
+  () => {
+    measureMaxHeightPx()
+  },
+  { flush: 'post' },
+)
+
+watch(
+  tableRef,
+  (el) => {
+    tableObserver?.disconnect()
+    tableObserver = null
+    if (!el) {
+      tableHeight.value = 0
+      return
+    }
+    tableHeight.value = el.scrollHeight || el.getBoundingClientRect().height
+    if (typeof ResizeObserver !== 'undefined') {
+      tableObserver = new ResizeObserver((entries) => {
+        const h = entries[0]?.contentRect.height
+        if (h !== undefined) tableHeight.value = h
+      })
+      tableObserver.observe(el)
+    }
+  },
+  { flush: 'post' },
+)
+
 onBeforeUnmount(() => {
+  if (typeof window !== 'undefined') {
+    window.removeEventListener('resize', onWindowResize)
+  }
   rootObserver?.disconnect()
   rootObserver = null
+  tableObserver?.disconnect()
+  tableObserver = null
 })
 
 function gapRangeText(start: number, end: number): string {
@@ -114,27 +210,20 @@ function gapRangeText(start: number, end: number): string {
   return from === to ? `第 ${from} 行未改动` : `第 ${from}–${to} 行未改动`
 }
 
-function resetVisibility() {
-  const { lines, hunkStarts } = structured.value
-  const total = lines.length
-  const mask = new Array<boolean>(total).fill(false)
-  if (!hunkStarts.length) {
-    mask.fill(true)
-  } else {
-    for (let i = 0; i < total; i++) {
-      if (lines[i]!.kind !== 'same') {
-        const from = Math.max(0, i - props.context)
-        const to = Math.min(total - 1, i + props.context)
-        for (let k = from; k <= to; k++) mask[k] = true
-      }
-    }
-  }
-  visibleMask.value = mask
-  focusedHunk.value = 0
+function resetVisibility(resetFocus = true) {
+  visibleMask.value = [...defaultMask.value]
+  manualExpanded.value = false
+  if (resetFocus) focusedHunk.value = 0
 }
 
-watch([() => props.before, () => props.after, () => props.context], () => resetVisibility(), {
+watch([() => props.before, () => props.after, () => props.context], () => resetVisibility(true), {
   immediate: true,
+})
+
+watch(activeContext, (mode) => {
+  if (mode === 'folded') {
+    resetVisibility(false)
+  }
 })
 
 const chunks = computed(() =>
@@ -143,20 +232,27 @@ const chunks = computed(() =>
 
 const focusedLineIndex = computed(() => structured.value.hunkStarts[focusedHunk.value] ?? -1)
 
-function expandGap(start: number, end: number, direction: 'up' | 'down' | 'all') {
-  const next = [...visibleMask.value]
-  if (direction === 'all') {
-    for (let i = start; i < end; i++) next[i] = true
-  } else if (direction === 'up') {
-    // 从省略区间底部向上揭示，查看下方改动点前面的上下文
-    const from = Math.max(start, end - props.expandStep)
-    for (let i = from; i < end; i++) next[i] = true
-  } else {
-    // 从省略区间顶部向下揭示，查看上方改动点后面的上下文
-    const to = Math.min(end, start + props.expandStep)
-    for (let i = start; i < to; i++) next[i] = true
-  }
+async function expandGap(start: number, end: number, direction: 'up' | 'down' | 'all') {
+  const next = expandDiffGap(visibleMask.value, start, end, direction, props.expandStep)
   visibleMask.value = next
+  manualExpanded.value = true
+  if (!next.every(Boolean)) return
+  if (!props.maxHeight) {
+    activeContext.value = 'full'
+    return
+  }
+  // 带高度上限的卡片手工展开完所有省略段后，若此时并未超出高度，则同步到「全文」态避免出现无效点击
+  await nextTick()
+  measureMaxHeightPx()
+  const actualHeight = tableRef.value?.scrollHeight ?? tableHeight.value
+  const limit = resolvedMaxHeightPx.value
+  if (visibleMask.value.every(Boolean) && (limit === null || actualHeight <= limit + 4)) {
+    activeContext.value = 'full'
+  }
+}
+
+function resetExpansion() {
+  resetVisibility(false)
 }
 
 function jumpHunk(delta: number) {
@@ -184,10 +280,14 @@ function partClass(part: InlineDiffPart): string | undefined {
 
 defineExpose({
   jumpHunk,
+  resetExpansion,
   hunkCount: computed(() => structured.value.hunkStarts.length),
   addedCount: computed(() => structured.value.addedCount),
   removedCount: computed(() => structured.value.removedCount),
   focusedHunk: computed(() => focusedHunk.value),
+  hasFoldableGaps,
+  canToggleContext,
+  manualExpanded: computed(() => manualExpanded.value),
 })
 </script>
 
@@ -204,11 +304,23 @@ defineExpose({
           class="layout-switch"
         />
         <SegmentedChoice
+          v-if="canToggleContext"
           v-model="activeContext"
           :items="CONTEXT_OPTIONS"
           label="上下文折叠模式"
           compact
         />
+        <UButton
+          v-if="activeContext === 'folded' && manualExpanded"
+          type="button"
+          size="xs"
+          color="neutral"
+          variant="ghost"
+          :icon="icons.foldVertical"
+          @click="resetExpansion"
+        >
+          重新折叠
+        </UButton>
       </div>
 
       <div class="toolbar-group">
@@ -250,11 +362,12 @@ defineExpose({
 
     <div
       v-else
+      ref="scrollRef"
       class="diff-scroll"
       :class="{ 'is-split': isSplit }"
-      :style="maxHeight ? { maxHeight } : undefined"
+      :style="isHeightClamped ? { maxHeight } : undefined"
     >
-      <table class="diff-table">
+      <table ref="tableRef" class="diff-table">
         <colgroup v-if="isSplit">
           <col class="col-w-ln" />
           <col class="col-w-sign" />
@@ -393,6 +506,24 @@ defineExpose({
         </tbody>
       </table>
     </div>
+
+    <button
+      v-if="hasChanges && showBottomToggle"
+      type="button"
+      class="diff-expand-footer"
+      :aria-expanded="activeContext === 'full'"
+      @click="activeContext = activeContext === 'folded' ? 'full' : 'folded'"
+    >
+      <UIcon
+        :name="activeContext === 'folded' ? icons.unfoldVertical : icons.foldVertical"
+        class="gap-icon"
+        aria-hidden="true"
+      />
+      <span v-if="activeContext === 'folded'" class="tabular-nums">
+        展开完整对比（共 {{ structured.lines.length }} 行）
+      </span>
+      <span v-else>收起对比视图</span>
+    </button>
   </div>
 </template>
 
@@ -633,6 +764,24 @@ defineExpose({
 .gap-anchor {
   font-weight: 600;
   color: var(--ui-diff-hunk-fg);
+}
+.diff-expand-footer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 12px;
+  border-top: 1px solid var(--ui-border);
+  background: var(--ui-bg-muted);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ui-text-toned);
+  cursor: pointer;
+}
+.diff-expand-footer:hover {
+  background: var(--ui-bg-elevated);
+  color: var(--ui-text-highlighted);
 }
 
 /* 窄容器下隐藏双栏切换，避免过窄断行 */

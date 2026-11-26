@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   buildDiffDisplayChunks,
+  buildDiffVisibilityMask,
   buildSplitDiffPairs,
   collapseUnchanged,
   computeInlineDiffParts,
@@ -10,6 +11,7 @@ import {
   diffEntrySnapshots,
   diffLines,
   diffWithStatus,
+  expandDiffGap,
   isTitleOnlyTidy,
 } from '../diff'
 
@@ -316,5 +318,57 @@ describe('结构化行号、词级行内高亮与可交互折叠块', () => {
     const pairs = buildSplitDiffPairs(diff.lines, chunks[1]!.start, chunks[1]!.end)
     expect(pairs.some((p) => p.left?.kind === 'remove' && p.right?.kind === 'add')).toBe(true)
     expect(pairs.some((p) => p.left === null && p.right?.kind === 'add')).toBe(true)
+  })
+
+  it('默认掩码与按方向增量展开上下文（向上/向下/全部）及重折叠行为正确', () => {
+    const lines = Array.from({ length: 30 }, (_, i) => `第 ${i + 1} 行`)
+    const before = lines.join('\n')
+    const afterLines = [...lines]
+    afterLines[0] = '第 1 行（已改）'
+    afterLines[29] = '第 30 行（已改）'
+    const diff = computeStructuredDiff(before, afterLines.join('\n'))
+
+    const initialMask = buildDiffVisibilityMask(diff.lines, diff.hunkStarts, 3)
+    const initialChunks = buildDiffDisplayChunks(diff.lines, initialMask, false)
+    const gap = initialChunks.find((c) => c.kind === 'gap')
+    expect(gap).toBeDefined()
+    expect(gap!.count).toBeGreaterThan(10)
+
+    // 向下展开 10 行：从省略段顶部展开
+    const afterDown = expandDiffGap(initialMask, gap!.start, gap!.end, 'down', 10)
+    expect(afterDown[gap!.start]).toBe(true)
+    expect(afterDown[gap!.start + 9]).toBe(true)
+    expect(afterDown[gap!.end - 1]).toBe(false)
+
+    // 向上展开 10 行：从省略段底部展开
+    const afterUp = expandDiffGap(initialMask, gap!.start, gap!.end, 'up', 10)
+    expect(afterUp[gap!.end - 1]).toBe(true)
+    expect(afterUp[gap!.end - 10]).toBe(true)
+    expect(afterUp[gap!.start]).toBe(false)
+
+    // 全部展开后无省略段，且不修改原掩码数组；步长大于区间长度时安全钳位
+    const snapshotBefore = [...initialMask]
+    const afterAll = expandDiffGap(initialMask, gap!.start, gap!.end, 'all', 10)
+    expect(initialMask).toEqual(snapshotBefore)
+    expect(buildDiffDisplayChunks(diff.lines, afterAll, false).some((c) => c.kind === 'gap')).toBe(
+      false,
+    )
+    const afterOversizedStep = expandDiffGap(initialMask, gap!.start, gap!.end, 'down', 999)
+    expect(afterOversizedStep).toEqual(afterAll)
+
+    // 无改动（hunkStarts 为空）与整篇改写均无折叠行；负 context 安全钳位为 0
+    const unchanged = computeStructuredDiff('甲\n乙\n丙', '甲\n乙\n丙')
+    expect(buildDiffVisibilityMask(unchanged.lines, unchanged.hunkStarts, 3)).toEqual([
+      true,
+      true,
+      true,
+    ])
+    const fullRewrite = computeStructuredDiff('甲\n乙\n丙', '一\n二\n三')
+    expect(
+      buildDiffVisibilityMask(fullRewrite.lines, fullRewrite.hunkStarts, 3).every(Boolean),
+    ).toBe(true)
+    expect(
+      buildDiffVisibilityMask(fullRewrite.lines, fullRewrite.hunkStarts, -5).every(Boolean),
+    ).toBe(true)
   })
 })

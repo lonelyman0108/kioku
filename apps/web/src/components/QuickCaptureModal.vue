@@ -909,7 +909,7 @@ onBeforeUnmount(() => {
               :before="beforeContent"
               :after="draftContent"
               :context="3"
-              :expand-step="12"
+              :expand-step="10"
               max-height="26rem"
               empty-text="正文无变更"
             />
