@@ -4,6 +4,7 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import { api } from '../api/endpoints'
 import { ME_KEY, queryClient } from '../query'
 import {
+  captureRoute,
   credentialRoute,
   entryRoute,
   installGuards,
@@ -47,6 +48,15 @@ describe('路由表与地址辅助函数', () => {
     expect(paths.some((p) => p.includes('circle') || p.includes('space'))).toBe(false)
     expect(SETTINGS_TABS).toEqual(['keys', 'models', 'account'])
     expect(entryRoute('m-ab2345')).toEqual({ name: 'memories', query: { id: 'm-ab2345' } })
+    expect(captureRoute()).toEqual({ name: 'memories', query: { capture: '1' } })
+    expect(captureRoute('  偏好表格  ')).toEqual({
+      name: 'memories',
+      query: { capture: '1', draft: '偏好表格' },
+    })
+    expect(captureRoute('偏好表格', { id: 'm-ab2345', project: 'kioku' })).toEqual({
+      name: 'memories',
+      query: { id: 'm-ab2345', project: 'kioku', capture: '1', draft: '偏好表格' },
+    })
     expect(credentialRoute('prod-db')).toEqual({ name: 'credentials', query: { id: 'prod-db' } })
     expect(settingsRoute('models')).toEqual({ name: 'settings', params: { tab: 'models' } })
   })

@@ -2,6 +2,7 @@ import {
   ApiKeyListResponse,
   ApiKeyView,
   ApplySuggestionResponse,
+  CapturePlanResponse,
   CredentialListResponse,
   CredentialMeta,
   DatabaseCheck,
@@ -25,6 +26,7 @@ import {
   TestModelResponse,
   TriggerDreamResponse,
   type ApplySuggestionRequest,
+  type CapturePlanRequest,
   type ChangePasswordRequest,
   type CreateApiKeyRequest,
   type CreateCredentialRequest,
@@ -81,6 +83,10 @@ export const api = {
     }),
   createEntry: (body: Partial<CreateEntryRequest> & Pick<CreateEntryRequest, 'content'>) =>
     request('POST', '/console/entries', { body, schema: EntryDetailResponse }),
+  capturePlan: (
+    body: Partial<CapturePlanRequest> & Pick<CapturePlanRequest, 'text'>,
+    signal?: AbortSignal,
+  ) => request('POST', '/console/entries/capture', { body, schema: CapturePlanResponse, signal }),
   entry: (shortId: string) =>
     request('GET', `/console/entries/${encodeURIComponent(shortId)}`, {
       schema: EntryDetailResponse,

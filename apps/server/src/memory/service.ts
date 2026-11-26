@@ -5,6 +5,8 @@ import {
   type ApplySuggestionRequest,
   type ApplySuggestionResponse,
   type BrowseEntriesQuery,
+  type CapturePlanRequest,
+  type CapturePlanResponse,
   type CreateEntryRequest,
   type EntryBrowseGroup,
   type EntryBrowseItem,
@@ -58,6 +60,7 @@ import {
   UUID,
 } from '../db/paging'
 import { dreamSuggestions, entries, entryEmbeddings, entryEvents } from '../db/schema'
+import { planCapture as planQuickCapture, type PlanCaptureOptions } from '../extraction/capture'
 import type { Jobs } from '../jobs/queue'
 import { recallEntries } from '../recall/recall'
 import { MemoryError } from './errors'
@@ -425,6 +428,14 @@ export class EntryService {
       const existing = await this.findByIdOrTitle(tx, scope, shortId, { includeDeleted: true })
       if (!existing) throw new MemoryError(404, '词条不存在')
 
+      if (input.expectedVersion !== undefined && existing.version !== input.expectedVersion) {
+        throw new MemoryError(
+          409,
+          `版本冲突：当前版本为 ${existing.version}，请刷新后再试`,
+          'version_conflict',
+        )
+      }
+
       if (input.version === undefined) {
         if (!existing.deletedAt) throw new MemoryError(409, '该词条未在回收站中')
         const [restored] = await tx
@@ -434,16 +445,19 @@ export class EntryService {
             updatedAt: now,
             version: existing.version + 1,
           })
-          .where(eq(entries.id, existing.id))
+          .where(and(eq(entries.id, existing.id), eq(entries.version, existing.version)))
           .returning()
+        if (!restored) {
+          throw new MemoryError(409, '版本冲突：词条已被并发修改，请刷新后再试', 'version_conflict')
+        }
         await tx.insert(entryEvents).values({
-          entryId: restored!.id,
+          entryId: restored.id,
           eventType: 'undelete',
           actor: actorLabel(scope),
-          snapshot: toSnapshot(restored!),
+          snapshot: toSnapshot(restored),
           createdAt: now,
         })
-        return this.hydrateDetail(tx, scope, restored!)
+        return this.hydrateDetail(tx, scope, restored)
       }
 
       const historyRows = await tx
@@ -484,18 +498,21 @@ export class EntryService {
           version: existing.version + 1,
           updatedAt: now,
         })
-        .where(eq(entries.id, existing.id))
+        .where(and(eq(entries.id, existing.id), eq(entries.version, existing.version)))
         .returning()
+      if (!restored) {
+        throw new MemoryError(409, '版本冲突：词条已被并发修改，请刷新后再试', 'version_conflict')
+      }
 
-      await syncEntryLinks(tx, restored!.id, restored!.shortId, restored!.content)
+      await syncEntryLinks(tx, restored.id, restored.shortId, restored.content)
       await tx.insert(entryEvents).values({
-        entryId: restored!.id,
+        entryId: restored.id,
         eventType: 'restore',
         actor: actorLabel(scope),
-        snapshot: toSnapshot(restored!),
+        snapshot: toSnapshot(restored),
         createdAt: now,
       })
-      return this.hydrateDetail(tx, scope, restored!)
+      return this.hydrateDetail(tx, scope, restored)
     })
 
     if (detail.entry.kind === 'entry') {
@@ -539,6 +556,7 @@ export class EntryService {
       .select({
         all: sql<number>`count(*) filter (where ${entries.kind} = 'entry' and ${entries.deletedAt} is null)::int`,
         pinned: sql<number>`count(*) filter (where ${entries.kind} = 'entry' and ${entries.isPinned} = true and ${entries.deletedAt} is null)::int`,
+        regular: sql<number>`count(*) filter (where ${entries.kind} = 'entry' and ${entries.isPinned} = false and ${entries.deletedAt} is null)::int`,
         episodes: sql<number>`count(*) filter (where ${entries.kind} = 'episode' and ${entries.deletedAt} is null)::int`,
         trash: sql<number>`count(*) filter (where ${entries.deletedAt} is not null)::int`,
       })
@@ -554,13 +572,24 @@ export class EntryService {
         (select array_agg(distinct v order by v) from entries, unnest(projects) v where deleted_at is null) as projects,
         (select array_agg(distinct v order by v) from entries, unnest(envs) v where deleted_at is null) as envs,
         (select array_agg(distinct v order by v) from entries, unnest(realms) v where deleted_at is null) as realms,
-        (select array_agg(distinct v order by v) from entries, unnest(topics) v where deleted_at is null) as topics
+        (
+          select array_agg(t.v order by t.cnt desc, t.v asc)
+          from (
+            select v, count(distinct id)::int as cnt
+            from entries, unnest(topics) v
+            where deleted_at is null
+            group by v
+            order by count(distinct id) desc, v asc
+            limit 48
+          ) t
+        ) as topics
     `)
 
     return {
       counts: {
         all: countRow?.all ?? 0,
         pinned: countRow?.pinned ?? 0,
+        regular: countRow?.regular ?? 0,
         episodes: countRow?.episodes ?? 0,
         trash: countRow?.trash ?? 0,
       },
@@ -580,6 +609,11 @@ export class EntryService {
     if (query.env) filters.push(sql`${entries.envs} && ${textArraySql([query.env])}`)
     if (query.realm) filters.push(sql`${entries.realms} && ${textArraySql([query.realm])}`)
     if (query.project) filters.push(sql`${entries.projects} && ${textArraySql([query.project])}`)
+    if (query.projectScope === 'unassigned') {
+      filters.push(sql`cardinality(${entries.projects}) = 0`)
+    } else if (query.projectScope === 'assigned') {
+      filters.push(sql`cardinality(${entries.projects}) > 0`)
+    }
     if (query.runtime) filters.push(sql`${entries.runtimes} && ${textArraySql([query.runtime])}`)
     if (query.topic) filters.push(sql`${entries.topics} && ${textArraySql([query.topic])}`)
 
@@ -615,11 +649,30 @@ export class EntryService {
         project: query.project,
         runtime: query.runtime,
       })
+      const hasNarrowFilter =
+        query.tab !== 'all' ||
+        Boolean(
+          query.env ||
+          query.realm ||
+          query.project ||
+          query.projectScope ||
+          query.runtime ||
+          query.topic,
+        )
+      const recallLimit = hasNarrowFilter
+        ? Math.min(100, Math.max(query.limit * 2, 40))
+        : query.limit
       const recalled = await recallEntries(this.db, this.masterKey, scope, q, {
         focus,
-        limit: query.limit,
+        limit: recallLimit,
         minScore: 0.1,
       })
+      const pinnedFilter =
+        query.tab === 'pinned'
+          ? eq(entries.isPinned, true)
+          : query.tab === 'regular'
+            ? eq(entries.isPinned, false)
+            : undefined
       const like = `%${escapeLike(q)}%`
       const directRows = await this.db
         .select()
@@ -628,11 +681,12 @@ export class EntryService {
           and(
             isNull(entries.deletedAt),
             eq(entries.kind, 'entry'),
-            query.tab === 'pinned' ? eq(entries.isPinned, true) : undefined,
+            pinnedFilter,
             ...filters,
             or(
               ilike(entries.shortId, like),
               ilike(entries.title, like),
+              ilike(entries.disclosure, like),
               ilike(entries.content, like),
             ),
           ),
@@ -649,7 +703,7 @@ export class EntryService {
               and(
                 inArray(entries.id, recalledIds),
                 isNull(entries.deletedAt),
-                query.tab === 'pinned' ? eq(entries.isPinned, true) : undefined,
+                pinnedFilter,
                 ...filters,
               ),
             )
@@ -692,6 +746,12 @@ export class EntryService {
       filters.push(isNull(entries.deletedAt), eq(entries.kind, 'episode'))
     } else if (query.tab === 'pinned') {
       filters.push(isNull(entries.deletedAt), eq(entries.kind, 'entry'), eq(entries.isPinned, true))
+    } else if (query.tab === 'regular') {
+      filters.push(
+        isNull(entries.deletedAt),
+        eq(entries.kind, 'entry'),
+        eq(entries.isPinned, false),
+      )
     } else {
       filters.push(isNull(entries.deletedAt), eq(entries.kind, 'entry'))
     }
@@ -699,7 +759,12 @@ export class EntryService {
     if (q) {
       const like = `%${escapeLike(q)}%`
       filters.push(
-        or(ilike(entries.shortId, like), ilike(entries.title, like), ilike(entries.content, like))!,
+        or(
+          ilike(entries.shortId, like),
+          ilike(entries.title, like),
+          ilike(entries.disclosure, like),
+          ilike(entries.content, like),
+        )!,
       )
     }
 
@@ -1161,5 +1226,13 @@ export class EntryService {
       if (!exists) throw new MemoryError(404, '整理建议不存在')
       throw new MemoryError(409, '该整理建议已处理过')
     }
+  }
+
+  async planCapture(
+    scope: AccessScope,
+    input: CapturePlanRequest,
+    options?: PlanCaptureOptions,
+  ): Promise<CapturePlanResponse> {
+    return planQuickCapture(this.db, this.masterKey, scope, input, options)
   }
 }

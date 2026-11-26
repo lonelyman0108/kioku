@@ -1,17 +1,19 @@
 import type { EntryListItem } from '@kioku/contracts'
 import type { CommandPaletteGroup, CommandPaletteItem } from '@nuxt/ui'
 import { computed, onBeforeUnmount, ref, watch, type Ref } from 'vue'
+import { useRoute } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { icons } from '../icons'
 import { entryKindLabels } from '../labels'
-import { entryRoute } from '../routes'
+import { captureRoute, entryRoute } from '../routes'
 
 const SEARCH_DELAY_MS = 250
 
 // ⌘K 搜索：页面跳转由搜索框本地过滤，词条经服务端混合检索返回
 export function useConsoleSearch(pages: Ref<CommandPaletteItem[]>) {
+  const route = useRoute()
   const term = ref('')
   const loading = ref(false)
   const items = ref<EntryListItem[] | null>(null)
@@ -46,7 +48,21 @@ export function useConsoleSearch(pages: Ref<CommandPaletteItem[]>) {
   onBeforeUnmount(() => clearTimeout(timer))
 
   const groups = computed<CommandPaletteGroup<CommandPaletteItem>[]>(() => {
+    const query = term.value.trim()
     const list: CommandPaletteGroup<CommandPaletteItem>[] = [
+      {
+        id: 'capture',
+        label: '快捷操作',
+        ignoreFilter: true,
+        items: [
+          {
+            label: query ? `随手记：${query}` : '随手记',
+            suffix: query ? '归并至对应记忆' : '记录习惯、约定或事实更新',
+            icon: icons.capture,
+            to: captureRoute(query, route.name === 'memories' ? route.query : undefined),
+          },
+        ],
+      },
       { id: 'pages', label: '页面', items: pages.value },
     ]
     if (failure.value) {

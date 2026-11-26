@@ -16,6 +16,7 @@ export const entryKindLabels: Record<EntryKind, string> = {
 export const entryTabLabels: Record<EntryTab, string> = {
   all: '全部',
   pinned: '常驻',
+  regular: '按需',
   episodes: '近期摘要',
   trash: '回收站',
 }

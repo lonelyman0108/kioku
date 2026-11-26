@@ -1,5 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi'
 import {
+  CapturePlanRequest,
+  CapturePlanResponse,
   CreateEntryRequest,
   EntryDetailResponse,
   EntryHistoryResponse,
@@ -46,6 +48,15 @@ const createRouteDef = createRoute({
   summary: '新建记忆词条',
   request: { body: jsonBody(CreateEntryRequest) },
   responses: { 201: jsonResponse('已创建', EntryDetailResponse), ...errors },
+})
+
+const captureRoute = createRoute({
+  method: 'post',
+  path: '/console/entries/capture',
+  tags: ['console'],
+  summary: '为随手记规划局部补丁归并或新建草案',
+  request: { body: jsonBody(CapturePlanRequest) },
+  responses: { 200: jsonResponse('归并方案', CapturePlanResponse), ...errors },
 })
 
 const detailRoute = createRoute({
@@ -100,6 +111,14 @@ export function memoryRoutes(entries: EntryService) {
     )
     .openapi(createRouteDef, async (c) =>
       c.json(await entries.create(c.get('console'), c.req.valid('json')), 201),
+    )
+    .openapi(captureRoute, async (c) =>
+      c.json(
+        await entries.planCapture(c.get('console'), c.req.valid('json'), {
+          signal: c.req.raw.signal,
+        }),
+        200,
+      ),
     )
     .openapi(detailRoute, async (c) =>
       c.json(

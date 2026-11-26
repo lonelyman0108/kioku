@@ -7,6 +7,7 @@ import { sameOriginForCookies } from './auth/csrf'
 import { requireConsole } from './auth/middleware'
 import { CredentialService } from './credential/service'
 import { logInternalError } from './db/client'
+import { CaptureAbortedError } from './extraction/capture'
 import type { Deps, SetupHost } from './http/env'
 import { router } from './http/openapi'
 import { isApiPath, mountWeb } from './http/web'
@@ -69,6 +70,9 @@ function shell(): App {
 
 function finish(app: App, webDir: string | undefined): void {
   app.onError((err, c) => {
+    if (err instanceof CaptureAbortedError) {
+      return new Response(null, { status: 499 })
+    }
     if (err instanceof MemoryError) {
       return c.json(
         {

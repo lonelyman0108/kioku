@@ -16,7 +16,11 @@ import { useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
-import { hasUnsavedChanges, useUnsavedChangesGuard } from '../composables/unsavedChanges'
+import {
+  confirmDiscard,
+  hasUnsavedChanges,
+  useUnsavedChangesGuard,
+} from '../composables/unsavedChanges'
 import { useDebounced } from '../composables/useDebounced'
 import { useNow } from '../composables/useNow'
 import { icons } from '../icons'
@@ -392,11 +396,23 @@ const scopeTags = computed(() => {
 })
 
 const titleEl = ref<HTMLElement | null>(null)
-defineExpose({ focusTitle: () => titleEl.value?.focus() })
+defineExpose({
+  focusTitle: () => titleEl.value?.focus(),
+  isEditing: () => mode.value === 'edit',
+  exitEditing: () => {
+    if (mode.value !== 'edit') return false
+    if (dirty.value && !confirmDiscard()) return false
+    cancelEditing()
+    return true
+  },
+})
 </script>
 
 <template>
   <article class="editor-pane">
+    <div v-if="$slots.nav" class="drawer-nav">
+      <slot name="nav" />
+    </div>
     <div v-if="detailQuery.isPending.value && !entry" class="p-6 space-y-4">
       <USkeleton class="h-7 w-1/2" />
       <USkeleton class="h-48 w-full" />
@@ -406,12 +422,17 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
     </div>
     <template v-else>
       <header class="editor-head">
-        <div class="head-nav"><slot name="nav" /></div>
         <div class="head-main">
           <div class="head-title-row">
             <h1 ref="titleEl" tabindex="-1">{{ entry.title }}</h1>
-            <span v-if="entry.kind === 'episode'" class="pill">会话摘要</span>
-            <span v-if="entry.isPinned" class="pill solid">启动加载</span>
+            <span v-if="entry.isPinned" class="pill status-pinned">
+              <span class="rail-swatch solid" aria-hidden="true" />
+              常驻
+            </span>
+            <span v-if="entry.kind === 'episode'" class="pill status-episode">
+              <span class="rail-swatch dashed" aria-hidden="true" />
+              会话摘要
+            </span>
             <span v-if="isDeleted" class="pill danger">已在回收站</span>
           </div>
           <div class="head-actions">
@@ -653,7 +674,7 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
               {{ validationProblem }}
             </p>
 
-            <div class="grid gap-4" :class="preview ? 'xl:grid-cols-2' : ''">
+            <div class="editor-split" :class="{ 'is-preview': preview }">
               <UTextarea
                 ref="contentRef"
                 v-model="form.content"
@@ -768,6 +789,18 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
   min-height: 0;
   flex: 1;
 }
+.drawer-nav {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 36px;
+  min-height: 36px;
+  padding: 0 28px;
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-bg-muted);
+}
 .editor-head {
   flex: none;
   padding: 16px 28px 14px;
@@ -797,19 +830,40 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
   outline: 0;
 }
 .pill {
-  padding: 1px 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 7px;
   border: 1px solid var(--ui-border-accented);
+  background: var(--ui-bg);
   font-size: 12px;
-  line-height: 1.4;
+  font-weight: 500;
+  line-height: 1.45;
+  white-space: nowrap;
 }
-.pill.solid {
-  border-color: var(--ui-bg-inverted);
-  background: var(--ui-bg-inverted);
-  color: var(--ui-text-inverted);
+.pill.status-pinned {
+  color: var(--ui-text-highlighted);
+}
+.pill.status-episode {
+  border-color: var(--ui-info);
+  background: var(--ui-bg);
+  color: var(--ui-info);
 }
 .pill.danger {
   border-color: var(--ui-error);
   color: var(--ui-error);
+}
+.rail-swatch {
+  display: inline-block;
+  flex: none;
+  width: 3px;
+  height: 10px;
+}
+.rail-swatch.solid {
+  background: var(--ui-rule);
+}
+.rail-swatch.dashed {
+  background: repeating-linear-gradient(to bottom, var(--ui-info) 0 3px, transparent 3px 6px);
 }
 .head-actions {
   display: flex;
@@ -818,10 +872,21 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
   gap: 6px;
 }
 .editor-scroll {
+  container-type: inline-size;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
   padding: 18px 28px 28px;
+}
+.editor-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+}
+@container (min-width: 820px) {
+  .editor-split.is-preview {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 .meta-strip {
   display: flex;
@@ -867,6 +932,9 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
   overflow-y: auto;
 }
 @media (max-width: 1023.98px) {
+  .drawer-nav {
+    padding: 0 16px;
+  }
   .editor-head {
     padding: 12px 16px;
   }

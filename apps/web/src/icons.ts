@@ -25,6 +25,10 @@ export const icons = {
   inherits: 'i-lucide-arrow-right',
   // 词条与编辑
   add: 'i-lucide-plus',
+  capture: 'i-lucide-pen-line',
+  filter: 'i-lucide-list-filter',
+  maximize: 'i-lucide-maximize-2',
+  minimize: 'i-lucide-minimize-2',
   edit: 'i-lucide-pencil',
   remove: 'i-lucide-trash-2',
   restore: 'i-lucide-rotate-ccw',
