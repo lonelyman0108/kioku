@@ -1,13 +1,22 @@
 import { describe, expect, it } from 'vitest'
 
 import createMemoryModal from '../components/CreateMemoryModal.vue?raw'
+import dreamSuggestionCard from '../components/DreamSuggestionCard.vue?raw'
+import entryLinksPanel from '../components/EntryLinksPanel.vue?raw'
+import hygieneSweepDrawer from '../components/HygieneSweepDrawer.vue?raw'
+import memoryContent from '../components/MemoryContent.vue?raw'
 import memoryEditor from '../components/MemoryEditor.vue?raw'
+import memoryHistoryDrawer from '../components/MemoryHistoryDrawer.vue?raw'
 import memoryList from '../components/MemoryList.vue?raw'
 import quickCaptureModal from '../components/QuickCaptureModal.vue?raw'
+import diffViewer from '../components/ui/DiffViewer.vue?raw'
 import consoleSearch from '../composables/useConsoleSearch.ts?raw'
 import { icons } from '../icons'
 import consoleLayout from '../layouts/ConsoleLayout.vue?raw'
+import credentialsPage from '../pages/CredentialsPage.vue?raw'
+import inboxPage from '../pages/InboxPage.vue?raw'
 import memoriesPage from '../pages/MemoriesPage.vue?raw'
+import settingsPage from '../pages/SettingsPage.vue?raw'
 import themeSource from '../theme.ts?raw'
 
 const vueSources = import.meta.glob<string>('../**/*.{vue,ts}', {
@@ -31,9 +40,12 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(themeSource).toContain('focus-visible:ring-2')
   })
 
-  it('记忆页采用默认全宽清单、按需抽屉与一键全屏展开，并支持编辑态键盘保护与筛选互斥', () => {
+  it('记忆页采用默认居中清单、可拖动分隔栏与平滑展开抽屉，并支持编辑态键盘保护与筛选互斥', () => {
     expect(memoriesPage).not.toContain('grid-template-columns: 360px minmax(0, 1fr)')
-    expect(memoriesPage).toContain('clamp(360px, 40%, 520px) minmax(0, 1fr)')
+    expect(memoriesPage).toContain('var(--list-width, 380px) minmax(0, 1fr)')
+    expect(memoriesPage).toContain('role="separator"')
+    expect(memoriesPage).toContain('pane-splitter')
+    expect(memoriesPage).toContain('detail-reveal')
     expect(memoriesPage).toContain('is-peek')
     expect(memoriesPage).toContain('is-fullscreen')
     expect(memoriesPage).toContain('全屏展开')
@@ -71,7 +83,7 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(quickCaptureModal).toContain('api.capturePlan')
     expect(quickCaptureModal).toContain('applyMarkdownAppend')
     expect(quickCaptureModal).toContain('checkCaptureIntegrity')
-    expect(quickCaptureModal).toContain('collapseUnchanged')
+    expect(quickCaptureModal).toContain('<DiffViewer')
     expect(quickCaptureModal).toContain('AbortController')
     expect(quickCaptureModal).toContain('api.restoreEntry')
     expect(quickCaptureModal).toContain('expectedVersion: mergedVersion')
@@ -84,9 +96,12 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(consoleSearch).toContain("route.name === 'memories'")
   })
 
-  it('编辑器支持容器查询分栏、状态线轨图例、编辑态暴露、双链与会话摘要一键提炼', () => {
+  it('编辑器支持三态分栏同步滚动、状态线轨图例、编辑态暴露、双链与会话摘要一键提炼', () => {
     expect(memoryEditor).toContain('container-type: inline-size')
-    expect(memoryEditor).toContain('@container (min-width: 820px)')
+    expect(memoryEditor).toContain('@container (min-width: 680px)')
+    expect(memoryEditor).toContain('useMarkdownSyncScroll')
+    expect(memoryEditor).toContain('EDIT_VIEW_OPTIONS')
+    expect(memoryEditor).toContain('<DiffViewer')
     expect(memoryEditor).toContain('height: 36px')
     expect(memoryEditor).toContain('rail-swatch solid')
     expect(memoryEditor).toContain('rail-swatch dashed')
@@ -98,6 +113,86 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(memoryEditor).toContain('insertCredential')
     expect(memoryEditor).toContain('<MemoryHistoryDrawer')
     expect(memoryEditor).toContain('<EntryLinksPanel')
+    expect(memoryEditor).toContain('@container (min-width: 960px)')
+    expect(memoryEditor).toContain('stripDuplicateLeadingHeading')
+    expect(memoryEditor).toContain('extractMarkdownOutline')
+    expect(memoryEditor).toContain('analyzeTitleHint')
+    expect(memoryEditor).toContain('拆出至变更说明')
+    expect(memoryEditor).toContain('<SaveBar')
+    expect(memoryContent).toContain(':deep(details)')
+    expect(memoryContent).toContain('width-full')
+    expect(memoryEditor).not.toContain('宽幅阅读')
+    expect(memoryEditor).toContain('--canvas-max')
+    expect(memoryEditor).toContain('edit-meta-grid')
+    expect(entryLinksPanel).toContain('contextSnippet')
+  })
+
+  it('宽屏采用居中画布对齐，待处理与设置采用双栏侧边导航结构，弹窗与抽屉幅面匹配内容密度', () => {
+    expect(consoleLayout).toContain('console-header-inner')
+    expect(memoriesPage).toContain('margin-inline: auto')
+    expect(credentialsPage).toContain('credentials-shell')
+    expect(credentialsPage).toContain('margin-inline: auto')
+    expect(inboxPage).toContain('inbox-workspace')
+    expect(inboxPage).toContain('inbox-rail')
+    expect(inboxPage).toContain('margin-inline: auto')
+    expect(settingsPage).toContain('settings-workspace')
+    expect(settingsPage).toContain('settings-vnav')
+    expect(settingsPage).toContain('margin-inline: auto')
+    expect(quickCaptureModal).toContain('max-w-5xl')
+    expect(hygieneSweepDrawer).toContain('max-w-[960px]')
+    expect(createMemoryModal).toContain('attrs-collapse')
+  })
+
+  it('列表保留近改副行与常驻水位，历史工作台与通用 DiffViewer 支持基准对比、词级高亮与按需展开上下文', () => {
+    expect(memoryList).toContain('近改：')
+    expect(memoryList).toContain('PINNED_CHAR_BUDGET')
+    expect(memoryList).toContain('pinned-budget')
+    expect(memoryList).not.toContain('.list-pane.is-compact .row-disclosure')
+
+    expect(memoryHistoryDrawer).toContain('max-w-[1640px]')
+    expect(memoryHistoryDrawer).toContain('ring-2 ring-rule')
+    expect(memoryHistoryDrawer).toContain('diffEntrySnapshots')
+    expect(memoryHistoryDrawer).toContain('formatActorLabel')
+    expect(memoryHistoryDrawer).toContain('item.snapshot != null')
+    expect(memoryHistoryDrawer).toContain('previousItemId')
+    expect(memoryHistoryDrawer).toContain('对比基准')
+    expect(memoryHistoryDrawer).toContain('设为基准')
+    expect(memoryHistoryDrawer).not.toContain('选入对比')
+    expect(memoryHistoryDrawer).not.toMatch(/font-size:\s*1[01](?:\.\d+)?px/)
+    expect(memoryHistoryDrawer).toContain('属性变动')
+    expect(memoryHistoryDrawer).toContain('<DiffViewer')
+
+    expect(diffViewer).toContain('computeStructuredDiff')
+    expect(diffViewer).toContain('buildDiffDisplayChunks')
+    expect(diffViewer).toContain('buildSplitDiffPairs')
+    expect(diffViewer).toContain('expandGap')
+    expect(diffViewer).toContain('jumpHunk')
+    expect(diffViewer).toContain('gapRangeText')
+    expect(diffViewer).toContain('ResizeObserver')
+    expect(diffViewer).not.toMatch(/font-size:\s*1[01](?:\.\d+)?px/)
+    expect(dreamSuggestionCard).toContain('<DiffViewer')
+    expect(hygieneSweepDrawer).toContain('<DiffViewer')
+  })
+
+  it('待处理页与建议卡片具备分类筛选、五重护栏、分项应用、纯标题速审表、预清洗抽屉与 8 秒撤销', () => {
+    expect(inboxPage).toContain('结构体检与预清洗')
+    expect(inboxPage).toContain('存量规范整理')
+    expect(inboxPage).toContain('纯标题速审表')
+    expect(inboxPage).toContain('duration: 8000')
+    expect(inboxPage).toContain('api.restoreEntry')
+    expect(inboxPage).toContain('<HygieneSweepDrawer')
+
+    expect(dreamSuggestionCard).toContain('checkCaptureIntegrity')
+    expect(dreamSuggestionCard).toContain('title-compare')
+    expect(dreamSuggestionCard).toContain('guard-strip')
+    expect(dreamSuggestionCard).toContain('规范标题')
+    expect(dreamSuggestionCard).toContain('原有完整内容保留在版本历史中，可随时恢复')
+    expect(dreamSuggestionCard).toContain('archivedNotes')
+
+    expect(hygieneSweepDrawer).toContain('api.previewHygieneSweep')
+    expect(hygieneSweepDrawer).toContain('api.applyHygieneSweep')
+    expect(hygieneSweepDrawer).toContain('疑似残缺记忆')
+    expect(hygieneSweepDrawer).toContain('疑似过时记忆')
   })
 
   it('界面中引用的全部 icons.* 均已在 icons.ts 注册，且没有直接写死未打包的 i-lucide-*', () => {

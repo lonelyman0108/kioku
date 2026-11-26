@@ -134,132 +134,134 @@ watch(highlightSlug, (slug) => {
 
 <template>
   <div class="credentials-page">
-    <PageHead title="凭据">
-      <template #note>
-        密码与令牌加密托管在 Kioku，记忆正文只写占位符，例如
-        <code v-pre class="font-mono text-[13px]">{{cred:prod-db}}</code
-        >。
-        <Hint> Agent 无法读取明文值；执行命令时通过 kioku run 在本地进程中注入环境变量。 </Hint>
-      </template>
-      <template #actions>
-        <UButton :icon="icons.add" size="sm" :disabled="!hasMasterKey" @click="openCreate">
-          新建凭据
-        </UButton>
-      </template>
-    </PageHead>
-
-    <div class="credentials-body">
-      <NoteLine v-if="!hasMasterKey" tone="warning">
-        未配置主密钥 KIOKU_MASTER_KEY，无法创建或读取加密凭据。
-      </NoteLine>
-
-      <ReadFailureNote v-if="credentialsQuery.isError.value" :query="credentialsQuery" />
-
-      <div v-if="credentialsQuery.isPending.value" class="space-y-2">
-        <USkeleton v-for="n in 4" :key="n" class="h-14 w-full" />
-      </div>
-
-      <div v-else-if="items.length" class="table-wrap">
-        <table class="cred-table">
-          <thead>
-            <tr>
-              <th scope="col">标识与占位符</th>
-              <th scope="col">名称与说明</th>
-              <th scope="col">允许场域</th>
-              <th scope="col">更新时间</th>
-              <th scope="col" class="actions-col">操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="item in items"
-              :key="item.id"
-              :class="{ highlighted: item.slug === highlightSlug }"
-            >
-              <td>
-                <div class="slug-cell">
-                  <code class="font-mono text-sm font-medium">{{ item.slug }}</code>
-                  <UButton
-                    :icon="icons.copy"
-                    size="xs"
-                    color="neutral"
-                    variant="ghost"
-                    :aria-label="`复制占位符 ${item.slug}`"
-                    @click="copy(placeholderOf(item.slug), '已复制占位符')"
-                  >
-                    占位符
-                  </UButton>
-                </div>
-              </td>
-              <td>
-                <p class="font-medium">{{ item.label }}</p>
-                <p v-if="item.description" class="text-xs text-muted">{{ item.description }}</p>
-              </td>
-              <td>
-                <span v-if="item.allowedRealms === null" class="text-xs text-muted">不限</span>
-                <span v-else-if="!item.allowedRealms.length" class="text-xs text-muted">
-                  仅无场域
-                </span>
-                <div v-else class="flex flex-wrap gap-1">
-                  <span v-for="r in item.allowedRealms" :key="r" class="realm-tag">{{ r }}</span>
-                </div>
-              </td>
-              <td>
-                <time
-                  class="text-xs text-muted whitespace-nowrap"
-                  :datetime="item.updatedAt"
-                  :title="formatTime(item.updatedAt)"
-                >
-                  {{ formatRelative(item.updatedAt) }}
-                </time>
-              </td>
-              <td>
-                <div class="row-actions">
-                  <UButton
-                    size="xs"
-                    color="neutral"
-                    variant="outline"
-                    :icon="icons.reveal"
-                    :disabled="!hasMasterKey"
-                    @click="openReveal(item)"
-                  >
-                    查看与更新值
-                  </UButton>
-                  <UButton
-                    size="xs"
-                    color="neutral"
-                    variant="outline"
-                    :icon="icons.edit"
-                    :disabled="!hasMasterKey"
-                    @click="openEdit(item)"
-                  >
-                    编辑
-                  </UButton>
-                  <UButton
-                    size="xs"
-                    color="error"
-                    variant="ghost"
-                    :icon="icons.remove"
-                    @click="((deleting = item), (deleteError = null))"
-                  >
-                    删除
-                  </UButton>
-                </div>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <EmptyState
-        v-else-if="!credentialsQuery.isError.value"
-        title="暂无凭据"
-        description="新建凭据后，可在记忆正文里插入占位符，避免明文密码进入上下文。"
-      >
-        <template v-if="hasMasterKey" #actions>
-          <UButton size="sm" @click="openCreate">新建凭据</UButton>
+    <div class="credentials-shell">
+      <PageHead title="凭据">
+        <template #note>
+          密码与令牌加密托管在 Kioku，记忆正文只写占位符，例如
+          <code v-pre class="font-mono text-[13px]">{{cred:prod-db}}</code
+          >。
+          <Hint> Agent 无法读取明文值；执行命令时通过 kioku run 在本地进程中注入环境变量。 </Hint>
         </template>
-      </EmptyState>
+        <template #actions>
+          <UButton :icon="icons.add" size="sm" :disabled="!hasMasterKey" @click="openCreate">
+            新建凭据
+          </UButton>
+        </template>
+      </PageHead>
+
+      <div class="credentials-body">
+        <NoteLine v-if="!hasMasterKey" tone="warning">
+          未配置主密钥 KIOKU_MASTER_KEY，无法创建或读取加密凭据。
+        </NoteLine>
+
+        <ReadFailureNote v-if="credentialsQuery.isError.value" :query="credentialsQuery" />
+
+        <div v-if="credentialsQuery.isPending.value" class="space-y-2">
+          <USkeleton v-for="n in 4" :key="n" class="h-14 w-full" />
+        </div>
+
+        <div v-else-if="items.length" class="table-wrap">
+          <table class="cred-table">
+            <thead>
+              <tr>
+                <th scope="col">标识与占位符</th>
+                <th scope="col">名称与说明</th>
+                <th scope="col">允许场域</th>
+                <th scope="col">更新时间</th>
+                <th scope="col" class="actions-col">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="item in items"
+                :key="item.id"
+                :class="{ highlighted: item.slug === highlightSlug }"
+              >
+                <td>
+                  <div class="slug-cell">
+                    <code class="font-mono text-sm font-medium">{{ item.slug }}</code>
+                    <UButton
+                      :icon="icons.copy"
+                      size="xs"
+                      color="neutral"
+                      variant="ghost"
+                      :aria-label="`复制占位符 ${item.slug}`"
+                      @click="copy(placeholderOf(item.slug), '已复制占位符')"
+                    >
+                      占位符
+                    </UButton>
+                  </div>
+                </td>
+                <td>
+                  <p class="font-medium">{{ item.label }}</p>
+                  <p v-if="item.description" class="text-xs text-muted">{{ item.description }}</p>
+                </td>
+                <td>
+                  <span v-if="item.allowedRealms === null" class="text-xs text-muted">不限</span>
+                  <span v-else-if="!item.allowedRealms.length" class="text-xs text-muted">
+                    仅无场域
+                  </span>
+                  <div v-else class="flex flex-wrap gap-1">
+                    <span v-for="r in item.allowedRealms" :key="r" class="realm-tag">{{ r }}</span>
+                  </div>
+                </td>
+                <td>
+                  <time
+                    class="text-xs text-muted whitespace-nowrap"
+                    :datetime="item.updatedAt"
+                    :title="formatTime(item.updatedAt)"
+                  >
+                    {{ formatRelative(item.updatedAt) }}
+                  </time>
+                </td>
+                <td>
+                  <div class="row-actions">
+                    <UButton
+                      size="xs"
+                      color="neutral"
+                      variant="outline"
+                      :icon="icons.reveal"
+                      :disabled="!hasMasterKey"
+                      @click="openReveal(item)"
+                    >
+                      查看与更新值
+                    </UButton>
+                    <UButton
+                      size="xs"
+                      color="neutral"
+                      variant="outline"
+                      :icon="icons.edit"
+                      :disabled="!hasMasterKey"
+                      @click="openEdit(item)"
+                    >
+                      编辑
+                    </UButton>
+                    <UButton
+                      size="xs"
+                      color="error"
+                      variant="ghost"
+                      :icon="icons.remove"
+                      @click="((deleting = item), (deleteError = null))"
+                    >
+                      删除
+                    </UButton>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <EmptyState
+          v-else-if="!credentialsQuery.isError.value"
+          title="暂无凭据"
+          description="新建凭据后，可在记忆正文里插入占位符，避免明文密码进入上下文。"
+        >
+          <template v-if="hasMasterKey" #actions>
+            <UButton size="sm" @click="openCreate">新建凭据</UButton>
+          </template>
+        </EmptyState>
+      </div>
     </div>
 
     <CredentialModal v-model:open="formOpen" :editing="editing" @saved="onSaved" />
@@ -268,7 +270,7 @@ watch(highlightSlug, (slug) => {
       :open="revealTarget !== null"
       :title="revealTarget ? `凭据 ${revealTarget.slug}` : '凭据值'"
       :dismissible="!rotating"
-      :ui="{ content: 'max-w-lg sm:max-w-lg' }"
+      :ui="{ content: 'max-w-xl sm:max-w-xl' }"
       @update:open="(v) => !v && closeReveal()"
     >
       <template #body>
@@ -341,6 +343,11 @@ watch(highlightSlug, (slug) => {
   min-width: 0;
   overflow-y: auto;
 }
+.credentials-shell {
+  width: 100%;
+  max-width: 76rem;
+  margin-inline: auto;
+}
 .credentials-body {
   padding: 0 32px 48px;
 }
@@ -407,6 +414,8 @@ watch(highlightSlug, (slug) => {
 .secret-text {
   min-width: 0;
   flex: 1;
+  max-height: 14rem;
+  overflow-y: auto;
   font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.5;

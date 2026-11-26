@@ -125,6 +125,7 @@ interface EntryHitRow {
   entryId: string
   shortId: string
   title: string
+  summary: string | null
   kind: EntryKind
   isPinned: boolean
   envs: string[]
@@ -132,6 +133,8 @@ interface EntryHitRow {
   projects: string[]
   runtimes: string[]
   disclosure: string | null
+  updatedAt: string
+  lastChangeSummary: string | null
 }
 
 interface HitAccumulator {
@@ -181,6 +184,7 @@ export async function recallEntries(
           entryId: entries.id,
           shortId: entries.shortId,
           title: entries.title,
+          summary: entries.summary,
           kind: entries.kind,
           isPinned: entries.isPinned,
           envs: entries.envs,
@@ -188,6 +192,8 @@ export async function recallEntries(
           projects: entries.projects,
           runtimes: entries.runtimes,
           disclosure: entries.disclosure,
+          updatedAt: entries.updatedAt,
+          lastChangeSummary: entries.lastChangeSummary,
           similarity: sql<number>`1 - (${entryEmbeddings.embedding} <=> ${literal}::vector)`,
         })
         .from(entryEmbeddings)
@@ -202,6 +208,7 @@ export async function recallEntries(
           entryId: r.entryId,
           shortId: r.shortId,
           title: r.title,
+          summary: r.summary,
           kind: r.kind,
           isPinned: r.isPinned,
           envs: r.envs,
@@ -209,6 +216,8 @@ export async function recallEntries(
           projects: r.projects,
           runtimes: r.runtimes,
           disclosure: r.disclosure,
+          updatedAt: r.updatedAt.toISOString(),
+          lastChangeSummary: r.lastChangeSummary,
         })
         acc.semantic = Math.max(0, Number(r.similarity))
         acc.via.add('semantic')
@@ -226,6 +235,7 @@ export async function recallEntries(
         entry_id: string
         short_id: string
         title: string
+        summary: string | null
         kind: EntryKind
         is_pinned: boolean
         envs: string[]
@@ -233,21 +243,38 @@ export async function recallEntries(
         projects: string[]
         runtimes: string[]
         disclosure: string | null
+        updated_at: Date | string
+        last_change_summary: string | null
         score: string
         scale: string
       }>(sql`
         with cand as (
           select ${entries.id} as entry_id, ${entries.shortId} as short_id,
-            ${entries.title} as title, ${entries.kind} as kind,
+            ${entries.title} as title, ${entries.summary} as summary, ${entries.kind} as kind,
             ${entries.isPinned} as is_pinned, ${entries.envs} as envs,
             ${entries.realms} as realms, ${entries.projects} as projects,
             ${entries.runtimes} as runtimes, ${entries.disclosure} as disclosure,
+            ${entries.updatedAt} as updated_at, ${entries.lastChangeSummary} as last_change_summary,
             ${entries.fts} as fts, length(${entries.fts}) as dl
           from ${entries}
           where ${readable} and ${entries.fts} @@ ${anyTermQuery(terms)}::tsquery
         ),
         tf as (
-          select c.entry_id, u.lexeme, coalesce(array_length(u.positions, 1), 1) as n
+          select c.entry_id, u.lexeme,
+            coalesce(
+              (
+                select sum(
+                  case w
+                    when 'A' then 3.0
+                    when 'B' then 2.0
+                    when 'C' then 1.0
+                    else 0.5
+                  end
+                )
+                from unnest(u.weights) as w
+              ),
+              coalesce(array_length(u.positions, 1), 1)::float8
+            ) as n
           from cand c, unnest(c.fts) u
           where u.lexeme in (select json_array_elements_text(${JSON.stringify(terms)}::json))
         ),
@@ -256,21 +283,26 @@ export async function recallEntries(
             ln(1 + (greatest((select count(*) from ${entries} where ${readable}), ${BM25.minDocs}::int) - count(*) + 0.5) / (count(*) + 0.5)) as w
           from tf group by lexeme
         )
-        select c.entry_id, c.short_id, c.title, c.kind, c.is_pinned,
-          c.envs, c.realms, c.projects, c.runtimes, c.disclosure,
+        select c.entry_id, c.short_id, c.title, c.summary, c.kind, c.is_pinned,
+          c.envs, c.realms, c.projects, c.runtimes, c.disclosure, c.updated_at, c.last_change_summary,
           sum(idf.w * tf.n * (${k1} + 1) / (tf.n + ${k1} * (1 - ${b} + ${b} * c.dl / greatest(nullif((select avg(dl) from cand), 0), 1)))) as score,
           (select max(w) from idf) as scale
         from cand c join tf on tf.entry_id = c.entry_id join idf on idf.lexeme = tf.lexeme
-        group by c.entry_id, c.short_id, c.title, c.kind, c.is_pinned,
-          c.envs, c.realms, c.projects, c.runtimes, c.disclosure
+        group by c.entry_id, c.short_id, c.title, c.summary, c.kind, c.is_pinned,
+          c.envs, c.realms, c.projects, c.runtimes, c.disclosure, c.updated_at, c.last_change_summary
         order by score desc, c.is_pinned desc, c.short_id asc
         limit ${PER_PATH_LIMIT}`)
 
       for (const r of ftsRows) {
+        const updatedIso =
+          r.updated_at instanceof Date
+            ? r.updated_at.toISOString()
+            : new Date(r.updated_at).toISOString()
         const acc = upsert({
           entryId: r.entry_id,
           shortId: r.short_id,
           title: r.title,
+          summary: r.summary,
           kind: r.kind,
           isPinned: r.is_pinned,
           envs: r.envs ?? [],
@@ -278,6 +310,8 @@ export async function recallEntries(
           projects: r.projects ?? [],
           runtimes: r.runtimes ?? [],
           disclosure: r.disclosure,
+          updatedAt: updatedIso,
+          lastChangeSummary: r.last_change_summary,
         })
         const raw = Number(r.score)
         acc.fulltext = raw / (raw + 0.7 * Math.max(Math.LN10, Number(r.scale)))
@@ -298,12 +332,17 @@ export async function recallEntries(
       const score = Number(Math.max(0, sBase + pinBoost + scenePart).toFixed(4))
 
       const cues: string[] = [...scene.matchedCues]
-      if (h.row.disclosure) cues.push(clipChars(inlineText(h.row.disclosure), 120))
+      if (h.row.summary) {
+        cues.push(clipChars(inlineText(h.row.summary), 100))
+      } else if (h.row.disclosure) {
+        cues.push(clipChars(inlineText(h.row.disclosure), 120))
+      }
 
       scored.set(h.row.entryId, {
         entryId: h.row.entryId,
         shortId: h.row.shortId,
         title: h.row.title,
+        summary: h.row.summary,
         kind: h.row.kind,
         isPinned: h.row.isPinned,
         envs: h.row.envs,
@@ -311,6 +350,8 @@ export async function recallEntries(
         projects: h.row.projects,
         runtimes: h.row.runtimes,
         disclosure: h.row.disclosure,
+        updatedAt: h.row.updatedAt,
+        lastChangeSummary: h.row.lastChangeSummary,
         score,
         via: [...h.via],
         cues,
@@ -338,14 +379,21 @@ export async function recallEntries(
           const existing = scored.get(n.entryId)
           if (existing) {
             if (!existing.via.includes('link')) existing.via.push('link')
+            if (!existing.linkRelation && n.linkRelation) existing.linkRelation = n.linkRelation
             if (linkScore > existing.score) existing.score = linkScore
           } else {
-            const cues = [`关联自 [[${n.viaSeedShortId}]]`]
-            if (n.disclosure) cues.push(clipChars(inlineText(n.disclosure), 120))
+            const relSuffix = n.linkRelation ? `（${inlineText(n.linkRelation)}）` : ''
+            const cues = [`关联自 [[${n.viaSeedShortId}]]${relSuffix}`]
+            if (n.summary) {
+              cues.push(clipChars(inlineText(n.summary), 100))
+            } else if (n.disclosure) {
+              cues.push(clipChars(inlineText(n.disclosure), 120))
+            }
             scored.set(n.entryId, {
               entryId: n.entryId,
               shortId: n.shortId,
               title: n.title,
+              summary: n.summary,
               kind: n.kind,
               isPinned: n.isPinned,
               envs: n.envs,
@@ -353,6 +401,9 @@ export async function recallEntries(
               projects: n.projects,
               runtimes: n.runtimes,
               disclosure: n.disclosure,
+              updatedAt: n.updatedAt,
+              lastChangeSummary: n.lastChangeSummary,
+              linkRelation: n.linkRelation,
               score: linkScore,
               via: ['link'],
               cues,
@@ -384,8 +435,9 @@ export function formatRecallBlock(
     const label = `${c.shortId}${titleSuffix(c.shortId, c.title)}`
     const tags = [...c.projects, ...c.envs, ...c.realms]
     const scopeHint = tags.length ? ` [${tags.join(', ')}]` : ''
-    const cue = c.cues.length ? ` — ${clipChars(c.cues.join('；'), 140)}` : ''
-    return `- (${score}) ${label}${scopeHint}${cue}`
+    const updated = c.updatedAt ? ` · 更新 ${c.updatedAt.slice(0, 10)}` : ''
+    const cue = c.cues.length ? ` — ${clipChars(c.cues.join('；'), 160)}` : ''
+    return `- (${score}) ${label}${scopeHint}${updated}${cue}`
   })
   const attr = sessionId ? ` session_id="${inlineText(sessionId).replace(/"/g, '')}"` : ''
   return `<recall${attr}>\n${lines.join('\n')}\n</recall>`

@@ -125,7 +125,13 @@ describe('wire-compatible contracts', () => {
       }).username,
     ).toBe('smoke')
 
-    expect(DREAM_KINDS).toEqual(['distill_episode', 'merge_duplicates', 'mark_stale', 'update'])
+    expect(DREAM_KINDS).toEqual([
+      'distill_episode',
+      'merge_duplicates',
+      'mark_stale',
+      'update',
+      'tidy',
+    ])
 
     expect(
       CreateApiKeyRequest.parse({

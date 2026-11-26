@@ -120,11 +120,36 @@ function rowTags(item: EntryListItem): RowTag[] {
   return item.topics.slice(0, 2).map((t) => ({ key: `t:${t}`, label: t, kind: 'topic' as const }))
 }
 
+const PINNED_CHAR_BUDGET = 16_000
+
+function rowSubtitle(item: EntryListItem): { isChange: boolean; text: string } | null {
+  const lastChange = item.lastChangeSummary?.trim()
+  if (lastChange) return { isChange: true, text: lastChange }
+  const fallback = item.snippet?.trim() || item.summary?.trim() || item.disclosure?.trim()
+  if (fallback) return { isChange: false, text: fallback }
+  return null
+}
+
+const pinnedChars = computed<number | null>(() => {
+  if (props.tab !== 'pinned') return null
+  if (props.counts?.pinnedChars !== undefined) return props.counts.pinnedChars
+  if (!props.hasNextPage && props.items.every((item) => item.charCount !== undefined)) {
+    return props.items.reduce((sum, item) => sum + (item.charCount ?? 0), 0)
+  }
+  return null
+})
+
+const pinnedOverBudget = computed(
+  () => pinnedChars.value !== null && pinnedChars.value > PINNED_CHAR_BUDGET,
+)
+
+const isFiltered = computed(() => Boolean(props.search.trim()) || hasFilters.value)
+
 const summaryText = computed(() => {
   const loaded = props.items.length
   const total = props.counts?.[props.tab]
-  if (!props.search.trim() && !hasFilters.value && total !== undefined) {
-    return `共 ${total} 条记忆`
+  if (!isFiltered.value && total !== undefined) {
+    return props.tab === 'pinned' ? `共 ${total} 条常驻` : `共 ${total} 条记忆`
   }
   return `当前列表 ${loaded}${props.hasNextPage ? '+' : ''} 条记忆`
 })
@@ -359,7 +384,24 @@ defineExpose({ filterOpen })
     <!-- 列表滚动主体 -->
     <section class="list-pane" :class="{ 'is-compact': compact }" aria-label="记忆列表">
       <div class="list-meta-bar">
-        <span>{{ summaryText }}</span>
+        <div class="meta-summary tabular-nums">
+          <span>{{ summaryText }}</span>
+          <template v-if="pinnedChars !== null">
+            <span class="meta-sep" aria-hidden="true">·</span>
+            <span
+              class="pinned-budget"
+              :class="{ 'is-over': pinnedOverBudget }"
+              :title="
+                pinnedOverBudget
+                  ? '超过默认 16,000 字启动加载上限，部分较长常驻记忆将以目录摘要呈现'
+                  : '默认启动加载字数上限为 16,000 字'
+              "
+            >
+              {{ isFiltered ? '全部常驻约' : '约' }} {{ pinnedChars.toLocaleString() }} /
+              {{ PINNED_CHAR_BUDGET.toLocaleString() }} 字
+            </span>
+          </template>
+        </div>
         <div v-if="!compact" class="list-hint" aria-hidden="true">
           <span>↑ ↓ 切换</span>
           <span>Esc 关闭详情</span>
@@ -408,9 +450,20 @@ defineExpose({ filterOpen })
                       <span class="sub-dot" aria-hidden="true">·</span>
                       <span class="sub-status is-warn">已过期</span>
                     </template>
-                    <template v-if="item.snippet || item.disclosure">
+                    <template v-if="rowSubtitle(item)">
                       <span class="sub-dot sub-disclosure-sep" aria-hidden="true">·</span>
-                      <span class="row-disclosure">{{ item.snippet ?? item.disclosure }}</span>
+                      <span
+                        class="row-disclosure"
+                        :title="
+                          rowSubtitle(item)!.isChange
+                            ? `近改：${rowSubtitle(item)!.text}`
+                            : rowSubtitle(item)!.text
+                        "
+                      >
+                        <span v-if="rowSubtitle(item)!.isChange" class="sub-change-prefix"
+                          >近改：</span
+                        >{{ rowSubtitle(item)!.text }}
+                      </span>
                     </template>
                   </span>
                 </span>
@@ -717,6 +770,25 @@ defineExpose({ filterOpen })
   font-size: 12px;
   color: var(--ui-text-muted);
 }
+.meta-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.meta-sep {
+  color: var(--ui-border-accented);
+}
+.pinned-budget {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pinned-budget.is-over {
+  color: var(--ui-warning);
+  font-weight: 500;
+}
 .list-hint {
   display: flex;
   align-items: center;
@@ -801,6 +873,8 @@ defineExpose({ filterOpen })
   align-items: baseline;
   gap: 6px;
   min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
   font-size: 13px;
   line-height: 1.5;
   color: var(--ui-text-muted);
@@ -842,10 +916,18 @@ defineExpose({ filterOpen })
   color: var(--ui-on-selected);
 }
 .row-disclosure {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.sub-change-prefix {
+  color: var(--ui-text-toned);
+  font-weight: 500;
+}
+.entry-row.selected .sub-change-prefix {
+  color: var(--ui-on-selected);
 }
 .row-aside {
   display: flex;
@@ -893,7 +975,7 @@ defineExpose({ filterOpen })
   background: transparent;
   color: var(--ui-on-selected-muted);
 }
-/* 抽屉收窄（compact）态：标题保持完整 2 行可读，召回说明隐藏，时间与标签转至底部一行 */
+/* 抽屉收窄（compact）态：标题与单行副行均保持可读，时间与标签转至底部一行 */
 .list-pane.is-compact .list-meta-bar {
   padding: 0 16px;
 }
@@ -905,9 +987,8 @@ defineExpose({ filterOpen })
 .list-pane.is-compact .row-title {
   font-size: 14px;
 }
-.list-pane.is-compact .row-disclosure,
-.list-pane.is-compact .sub-disclosure-sep {
-  display: none;
+.list-pane.is-compact .row-sub {
+  font-size: 12px;
 }
 .list-pane.is-compact .row-aside {
   flex-direction: row-reverse;
@@ -943,9 +1024,8 @@ defineExpose({ filterOpen })
   .row-title {
     font-size: 14px;
   }
-  .row-disclosure,
-  .sub-disclosure-sep {
-    display: none;
+  .row-sub {
+    font-size: 12px;
   }
   .row-aside {
     flex-direction: row-reverse;

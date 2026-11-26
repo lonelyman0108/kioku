@@ -13,6 +13,8 @@ import {
   EntryHistoryResponse,
   EntryListResponse,
   HealthResponse,
+  HygieneSweepApplyResponse,
+  HygieneSweepPreviewResponse,
   ImportApplyResponse,
   ImportPreviewResponse,
   InboxResponse,
@@ -34,15 +36,18 @@ import {
   type DatabaseCheckRequest,
   type DatabaseProvisionRequest,
   type DeviceGrantApproveRequest,
+  type EntryHistoryQuery,
   type EntryListQuery,
   type ExportDataRequest,
   type ExportFormat,
+  type HygieneSweepApplyRequest,
   type ImportApplyRequest,
   type ImportPreviewRequest,
   type RestoreEntryRequest,
   type RotateApiKeyRequest,
   type SetupRequest,
   type TestModelRequest,
+  type TriggerDreamRequest,
   type UpdateApiKeyRequest,
   type UpdateCredentialRequest,
   type UpdateEntryRequest,
@@ -105,9 +110,30 @@ export const api = {
       body,
       schema: EntryDetailResponse,
     }),
-  entryHistory: (shortId: string) =>
+  entryHistory: (shortId: string, query?: Partial<EntryHistoryQuery>) =>
     request('GET', `/console/entries/${encodeURIComponent(shortId)}/history`, {
+      query: query
+        ? {
+            limit: query.limit,
+            version: query.version,
+            includeSnapshots:
+              query.includeSnapshots === undefined
+                ? undefined
+                : query.includeSnapshots
+                  ? 'true'
+                  : 'false',
+          }
+        : { includeSnapshots: 'true' },
       schema: EntryHistoryResponse,
+    }),
+  previewHygieneSweep: () =>
+    request('POST', '/console/entries/hygiene/preview', {
+      schema: HygieneSweepPreviewResponse,
+    }),
+  applyHygieneSweep: (body: HygieneSweepApplyRequest = {}) =>
+    request('POST', '/console/entries/hygiene/apply', {
+      body,
+      schema: HygieneSweepApplyResponse,
     }),
 
   // 待处理整理建议
@@ -119,7 +145,11 @@ export const api = {
     }),
   dismissSuggestion: (id: string) =>
     request('POST', `/console/inbox/${encodeURIComponent(id)}/dismiss`),
-  runDream: () => request('POST', '/console/dream/run', { schema: TriggerDreamResponse }),
+  runDream: (body?: Partial<TriggerDreamRequest>) =>
+    request('POST', '/console/dream/run', {
+      ...(body ? { body } : {}),
+      schema: TriggerDreamResponse,
+    }),
 
   // 托管凭据（明文值只在显式查看时返回，不进 TanStack Query 缓存）
   credentials: () => request('GET', '/console/credentials', { schema: CredentialListResponse }),

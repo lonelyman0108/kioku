@@ -18,6 +18,7 @@ import { MemoryError } from '../memory/errors'
 export const EMBEDDING_SETTING_KEY = 'embedding'
 export const CHAT_LLM_SETTING_KEY = 'chat_llm'
 export const DREAM_STATE_SETTING_KEY = 'dream_state'
+export const TIDY_CHECKED_SETTING_KEY = 'tidy_checked_versions'
 
 const RECENT_RUNS_LIMIT = 20
 
@@ -295,6 +296,34 @@ export async function recordDreamRun(db: Db | Tx, summary: DreamRunSummary): Pro
     .onConflictDoUpdate({
       target: settings.key,
       set: { value: next, updatedAt: sql`now()` },
+    })
+}
+
+export async function loadTidyCheckedVersions(db: Db | Tx): Promise<Record<string, number>> {
+  const [row] = await db
+    .select()
+    .from(settings)
+    .where(eq(settings.key, TIDY_CHECKED_SETTING_KEY))
+    .limit(1)
+  const raw = row?.value
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
+  const out: Record<string, number> = {}
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof v === 'number' && Number.isInteger(v) && v >= 1) out[k] = v
+  }
+  return out
+}
+
+export async function saveTidyCheckedVersions(
+  db: Db | Tx,
+  versions: Record<string, number>,
+): Promise<void> {
+  await db
+    .insert(settings)
+    .values({ key: TIDY_CHECKED_SETTING_KEY, value: versions, updatedAt: sql`now()` })
+    .onConflictDoUpdate({
+      target: settings.key,
+      set: { value: versions, updatedAt: sql`now()` },
     })
 }
 

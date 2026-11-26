@@ -4,10 +4,14 @@ import {
   CapturePlanResponse,
   CreateEntryRequest,
   EntryDetailResponse,
+  EntryHistoryQuery,
   EntryHistoryResponse,
   EntryListQuery,
   EntryListResponse,
   ErrorResponse,
+  HygieneSweepApplyRequest,
+  HygieneSweepApplyResponse,
+  HygieneSweepPreviewResponse,
   RestoreEntryRequest,
   ShortId,
   UpdateEntryRequest,
@@ -59,6 +63,23 @@ const captureRoute = createRoute({
   responses: { 200: jsonResponse('归并方案', CapturePlanResponse), ...errors },
 })
 
+const hygienePreviewRoute = createRoute({
+  method: 'post',
+  path: '/console/entries/hygiene/preview',
+  tags: ['console'],
+  summary: '扫描全库记忆结构与旧路径断链，返回确定性预清洗预览与异常标注清单',
+  responses: { 200: jsonResponse('体检预览', HygieneSweepPreviewResponse), ...errors },
+})
+
+const hygieneApplyRoute = createRoute({
+  method: 'post',
+  path: '/console/entries/hygiene/apply',
+  tags: ['console'],
+  summary: '应用选中的确定性结构预清洗项（保留完整版本历史快照）',
+  request: { body: jsonBody(HygieneSweepApplyRequest) },
+  responses: { 200: jsonResponse('预清洗结果', HygieneSweepApplyResponse), ...errors },
+})
+
 const detailRoute = createRoute({
   method: 'get',
   path: '/console/entries/{shortId}',
@@ -99,8 +120,8 @@ const historyRoute = createRoute({
   method: 'get',
   path: '/console/entries/{shortId}/history',
   tags: ['console'],
-  summary: '读取单条记忆的历史版本快照列表',
-  request: { params: ShortIdParams },
+  summary: '读取单条记忆的语义化变更历史与版本快照',
+  request: { params: ShortIdParams, query: EntryHistoryQuery },
   responses: { 200: jsonResponse('历史记录', EntryHistoryResponse), ...errors },
 })
 
@@ -119,6 +140,10 @@ export function memoryRoutes(entries: EntryService) {
         }),
         200,
       ),
+    )
+    .openapi(hygienePreviewRoute, async (c) => c.json(await entries.previewHygieneSweep(), 200))
+    .openapi(hygieneApplyRoute, async (c) =>
+      c.json(await entries.applyHygieneSweep(c.req.valid('json')), 200),
     )
     .openapi(detailRoute, async (c) =>
       c.json(
@@ -147,6 +172,9 @@ export function memoryRoutes(entries: EntryService) {
       ),
     )
     .openapi(historyRoute, async (c) =>
-      c.json(await entries.history(c.req.valid('param').shortId), 200),
+      c.json(
+        await entries.history(c.get('console'), c.req.valid('param').shortId, c.req.valid('query')),
+        200,
+      ),
     )
 }

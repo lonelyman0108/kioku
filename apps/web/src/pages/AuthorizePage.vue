@@ -340,6 +340,7 @@ async function deny() {
                   placeholder="自定义环境"
                   class="w-28"
                   @keydown.enter.prevent="addCustomEnv"
+                  @blur="addCustomEnv"
                 />
                 <UButton
                   type="button"
@@ -391,6 +392,7 @@ async function deny() {
                     placeholder="添加场域"
                     class="w-28"
                     @keydown.enter.prevent="addCustomRealm"
+                    @blur="addCustomRealm"
                   />
                   <UButton
                     type="button"

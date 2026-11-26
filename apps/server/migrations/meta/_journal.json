@@ -8,6 +8,13 @@
       "when": 1796000000000,
       "tag": "0000_baseline",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1796100000000,
+      "tag": "0001_entry_structure_and_history",
+      "breakpoints": true
     }
   ]
 }

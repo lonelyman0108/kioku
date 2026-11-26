@@ -6,6 +6,8 @@ import {
   EntryDetailResponse,
   EntryHistoryResponse,
   EntryListResponse,
+  HygieneSweepApplyResponse,
+  HygieneSweepPreviewResponse,
 } from '@kioku/contracts'
 import { eq, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -125,7 +127,8 @@ describe.skipIf(!testDatabaseUrl)('扁平记忆 CRUD、双链、筛选、回收�
         })
       ).json(),
     )
-    expect(listAll.counts).toEqual({ all: 2, pinned: 1, regular: 1, episodes: 1, trash: 0 })
+    expect(listAll.counts).toMatchObject({ all: 2, pinned: 1, regular: 1, episodes: 1, trash: 0 })
+    expect(listAll.counts.pinnedChars).toBeGreaterThan(0)
 
     const listRegular = EntryListResponse.parse(
       await (
@@ -496,6 +499,88 @@ describe.skipIf(!testDatabaseUrl)('扁平记忆 CRUD、双链、筛选、回收�
       ).json(),
     )
     expect(trashDisclosureSearch.items.map((i) => i.shortId)).toEqual([trashed.entry.shortId])
+  })
+
+  it('记录语义变更历史、语境双链、verifiedAt 核实语义并支持存量确定性预清洗与历史恢复', async () => {
+    const masterKey = testMasterKey()
+    const app = createTestApp(database, { masterKey })
+    const { cookie } = await createOwnerSession(database)
+    const credSvc = new CredentialService(database.db, masterKey)
+    const entrySvc = new EntryService(database.db, masterKey, credSvc, null)
+    const consoleScope = { kind: 'console' as const, accountId: 'acc', sessionId: 'sess' }
+
+    const dbGuide = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '统一数据层指南',
+        summary: '统一数据库部署在 127.0.0.1，禁止新建重复副本。',
+        content: '数据库连接统一走内网实例。',
+        topics: ['databases', 'postgres'],
+      }),
+    )
+
+    const messy = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '主机分工与部署规范',
+        content: [
+          '# 主机分工与部署规范',
+          '',
+          '数据层详见 infra://docker_hosts/databases 以及 [[databases]]。',
+          '',
+          'Glossary keywords: docker, databases',
+        ].join('\n'),
+        isPinned: true,
+        topics: ['docker'],
+      }),
+    )
+
+    // 仅改主题标签不刷新 verifiedAt；修改正文并填 changeSummary 刷新 verifiedAt 与 lastChangeSummary
+    const initialVerifiedAt = messy.entry.verifiedAt
+    const tagOnly = await entrySvc.update(consoleScope, messy.entry.shortId, {
+      topics: ['docker', 'ops'],
+    })
+    expect(tagOnly.entry.verifiedAt).toBe(initialVerifiedAt)
+
+    const previewRes = await app.request('/v1/console/entries/hygiene/preview', {
+      method: 'POST',
+      headers: consoleHeaders(cookie),
+    })
+    expect(previewRes.status).toBe(200)
+    const preview = HygieneSweepPreviewResponse.parse(await previewRes.json())
+    const cand = preview.deterministicCandidates.find((c) => c.shortId === messy.entry.shortId)
+    expect(cand).toBeTruthy()
+    expect(cand?.fixes).toEqual(
+      expect.arrayContaining([
+        'strip_duplicate_heading',
+        'strip_legacy_glossary',
+        'rewrite_legacy_links',
+      ]),
+    )
+
+    const applyRes = await app.request('/v1/console/entries/hygiene/apply', {
+      method: 'POST',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({ shortIds: [messy.entry.shortId] }),
+    })
+    expect(applyRes.status).toBe(200)
+    const applied = HygieneSweepApplyResponse.parse(await applyRes.json())
+    expect(applied.applied).toBe(1)
+
+    const cleanedDetail = EntryDetailResponse.parse(
+      await (
+        await app.request(`/v1/console/entries/${messy.entry.shortId}`, { headers: { cookie } })
+      ).json(),
+    )
+    expect(cleanedDetail.entry.content).not.toContain('# 主机分工与部署规范')
+    expect(cleanedDetail.entry.content).not.toContain('Glossary keywords:')
+    expect(cleanedDetail.entry.content).toContain(`[[${dbGuide.entry.shortId}|统一数据层指南]]`)
+    expect(cleanedDetail.outboundLinks[0]?.shortId).toBe(dbGuide.entry.shortId)
+    expect(cleanedDetail.outboundLinks[0]?.relation).toBe('统一数据层指南')
+    expect(cleanedDetail.recentHistory?.length).toBeGreaterThanOrEqual(2)
+    expect(cleanedDetail.recentHistory?.[0]?.actorMeta?.label).toBe('结构预清洗')
+    // 结构预清洗不伪造新的核实时间
+    expect(cleanedDetail.entry.verifiedAt).toBe(initialVerifiedAt)
   })
 })
 
@@ -1043,5 +1128,16 @@ describe.skipIf(!testDatabaseUrl)('随手记局部补丁归并（POST /v1/consol
         slowServer.close((err) => (err ? reject(err) : resolve())),
       )
     }
+  })
+
+  it('OpenAPI 文档可正常生成并包含结构预清洗与历史查询路由', async () => {
+    const masterKey = testMasterKey()
+    const app = createTestApp(database, { masterKey })
+    const res = await app.request('/v1/openapi.json')
+    expect(res.status).toBe(200)
+    const doc = (await res.json()) as { paths?: Record<string, unknown> }
+    expect(doc.paths?.['/v1/console/entries/hygiene/preview']).toBeDefined()
+    expect(doc.paths?.['/v1/console/entries/hygiene/apply']).toBeDefined()
+    expect(doc.paths?.['/v1/console/entries/{shortId}/history']).toBeDefined()
   })
 })

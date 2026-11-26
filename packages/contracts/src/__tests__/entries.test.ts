@@ -9,8 +9,11 @@ import {
   CreateEntryRequest,
   deriveEntryTitle,
   ENTRY_CONTENT_MAX,
+  ENTRY_TITLE_NEW_MAX,
   EntryListQuery,
   extractMarkdownHeadings,
+  extractMarkdownOutline,
+  extractMarkdownSection,
   firstMarkdownHeading,
   normalizeProjectSlug,
   normalizeSlugList,
@@ -218,5 +221,75 @@ describe('entries contracts', () => {
     const shortBefore = '短文本 [[m-234abc]]'
     const shortAfter = '[[m-234abc]]'
     expect(checkCaptureIntegrity(shortBefore, shortAfter).severeShrink).toBe(false)
+  })
+
+  it('extracts markdown outline and sections and validates patch mutual exclusion and new title limit', () => {
+    const doc = [
+      '导语段落',
+      '',
+      '## 当前拓扑',
+      '- 主路由负责拨号与路由',
+      '- 核心交换负责万兆汇聚',
+      '',
+      '## 关键禁令',
+      '```markdown',
+      '## 围栏里的标题应跳过',
+      '```',
+      '- 严禁破坏既有端口规划',
+    ].join('\n')
+
+    const outline = extractMarkdownOutline(doc)
+    expect(outline).toHaveLength(2)
+    expect(outline[0]?.heading).toBe('当前拓扑')
+    expect(outline[0]?.preview).toContain('主路由负责拨号与路由')
+    expect(outline[1]?.heading).toBe('关键禁令')
+    expect(outline[1]?.preview).toContain('严禁破坏既有端口规划')
+
+    expect(extractMarkdownSection(doc, '关键禁令')?.content).toContain('严禁破坏既有端口规划')
+    expect(extractMarkdownSection(doc, '## 关键禁令')?.heading).toBe('关键禁令')
+    expect(extractMarkdownSection(doc, '禁令')?.heading).toBe('关键禁令')
+    expect(extractMarkdownSection(doc, '不存在的小节')).toBeNull()
+
+    // 多个 H1 紧随 H2 时不得吞入后续一级标题段落
+    const multiH1Doc = '## 小节甲\n内容甲\n# 分节一\n不应被吞入\n# 分节二\n尾部'
+    expect(extractMarkdownSection(multiH1Doc, '小节甲')?.content).toBe('## 小节甲\n内容甲')
+
+    // insert_under_heading 兼容带 ## 前缀的标题
+    const patchedWithHashes = applyCapturePatch(doc, {
+      kind: 'insert_under_heading',
+      heading: '## 当前拓扑',
+      text: '- 补充链路说明',
+    })
+    expect(patchedWithHashes.ok).toBe(true)
+
+    // EntrySummary 允许从多行输入框粘贴换行并自动折叠为空格，仍拦截控制字符与凭据占位符
+    const multiLineCreated = CreateEntryRequest.parse({
+      title: '概要换行测试',
+      summary: '第一行结论\n第二行补充',
+      content: '正文',
+    })
+    expect(multiLineCreated.summary).toBe('第一行结论 第二行补充')
+
+    expect(
+      CreateEntryRequest.safeParse({
+        title: '长'.repeat(ENTRY_TITLE_NEW_MAX + 1),
+        content: '正文',
+      }).success,
+    ).toBe(false)
+
+    expect(
+      UpdateEntryRequest.safeParse({
+        content: '全量正文',
+        patch: { kind: 'append', text: '追加内容' },
+      }).success,
+    ).toBe(false)
+
+    expect(
+      UpdateEntryRequest.safeParse({
+        patch: { kind: 'replace', oldText: '旧', newText: '新' },
+        changeSummary: '更新配置项',
+        verified: true,
+      }).success,
+    ).toBe(true)
   })
 })

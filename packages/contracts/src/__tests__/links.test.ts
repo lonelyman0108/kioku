@@ -4,6 +4,7 @@ import {
   CREDENTIAL_SLUG_RE,
   extractCredentialPlaceholders,
   extractCredentialSlugs,
+  extractEntryLinksWithContext,
   extractTargetShortIds,
   extractWikiLinks,
   isShortId,
@@ -33,6 +34,26 @@ describe('links & placeholders', () => {
       { id: 'm-234abc', alias: null },
     ])
     expect(extractTargetShortIds(content)).toEqual(['m-234abc', 'm-999xyz'])
+
+    const withContext = extractEntryLinksWithContext(
+      [
+        '- 数据库配置见 [[m-234abc|依赖：统一数据层]]，务必核对连接串',
+        '[[m-999xyz]]',
+        '- 再次提及 [[m-999xyz|排障教训]]，参见历史事故',
+      ].join('\n'),
+    )
+    expect(withContext).toEqual([
+      {
+        targetShortId: 'm-234abc',
+        relation: '依赖：统一数据层',
+        contextSnippet: '数据库配置见 [[m-234abc|依赖：统一数据层]]，务必核对连接串',
+      },
+      {
+        targetShortId: 'm-999xyz',
+        relation: '排障教训',
+        contextSnippet: '再次提及 [[m-999xyz|排障教训]]，参见历史事故',
+      },
+    ])
   })
 
   it('extracts both bare and field credential placeholders', () => {

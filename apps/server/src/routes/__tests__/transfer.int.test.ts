@@ -53,7 +53,7 @@ function sampleLoreBackup() {
           node_uuid: 'n1',
           deprecated: false,
           content:
-            '# Claude Code 习惯\n\n使用 pnpm 跑测试，不要写明文密钥 sk-test12345678901234567890。',
+            '# Claude Code 习惯\n\n使用 pnpm 跑测试，参考 projects://kioku/arch，不要写明文密钥 sk-test12345678901234567890。\n\nGlossary keywords: claude, pnpm',
           created_at: now,
         },
         {
@@ -392,5 +392,23 @@ describe.skipIf(!testDatabaseUrl)('数据导入导出与外部 Lore 导入', () 
     expect(previewAgain.items.find((i) => i.sourceRef === 'projects://kioku/arch')?.conflict).toBe(
       'same_title_exists',
     )
+
+    // 5. 导入全部 Lore 节点时自动去重首行 H1、清理关键词汇总行，并重写内部 URI 为 [[m-xxxxxx|...]] 双链
+    await resetDatabase(database)
+    const { cookie: cookie2 } = await createOwnerSession(database)
+    const fullImport = await app.request('/v1/console/import/apply', {
+      method: 'POST',
+      headers: consoleHeaders(cookie2, true),
+      body: JSON.stringify({
+        source: { kind: 'lore-file', backup: sampleLoreBackup() },
+      }),
+    })
+    expect(fullImport.status).toBe(200)
+    const importedRows = await database.db.select().from(entries)
+    const claudeRow = importedRows.find((r) => r.title === 'Claude Code 习惯')!
+    const archRow = importedRows.find((r) => r.title === 'Kioku 架构笔记')!
+    expect(claudeRow.content).not.toContain('# Claude Code 习惯')
+    expect(claudeRow.content).not.toContain('Glossary keywords:')
+    expect(claudeRow.content).toContain(`[[${archRow.shortId}|Kioku 架构笔记]]`)
   })
 })

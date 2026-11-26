@@ -11,6 +11,7 @@ import { computed, reactive, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import { icons } from '../icons'
 
 const props = defineProps<{
   editing: CredentialMeta | null
@@ -108,10 +109,12 @@ async function save() {
 
 <template>
   <UModal
-    v-model:open="open"
+    :open="open"
     :title="editing ? `编辑凭据 ${editing.slug}` : '新建凭据'"
     :dismissible="!saving"
+    :close="!saving"
     :ui="{ content: 'max-w-lg sm:max-w-lg' }"
+    @update:open="(v) => !saving && (open = v)"
   >
     <template #body>
       <div class="space-y-4">
@@ -195,13 +198,23 @@ async function save() {
       </div>
     </template>
     <template #footer>
-      <div class="flex w-full justify-end gap-2">
-        <UButton color="neutral" variant="ghost" :disabled="saving" @click="open = false">
-          取消
-        </UButton>
-        <UButton :loading="saving" :disabled="Boolean(validationProblem)" @click="save">
-          {{ editing ? '保存' : '创建' }}
-        </UButton>
+      <div class="flex w-full flex-wrap items-center justify-between gap-2">
+        <span class="text-xs text-muted">{{
+          !error && validationProblem ? validationProblem : ''
+        }}</span>
+        <div class="flex items-center gap-2">
+          <UButton color="neutral" variant="ghost" :disabled="saving" @click="open = false">
+            取消
+          </UButton>
+          <UButton
+            :icon="icons.check"
+            :loading="saving"
+            :disabled="Boolean(validationProblem)"
+            @click="save"
+          >
+            {{ editing ? '保存' : '创建' }}
+          </UButton>
+        </div>
       </div>
     </template>
   </UModal>

@@ -3,13 +3,20 @@ import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/
 import {
   BROWSE_GROUP_BY,
   BrowseEntriesQuery,
+  CHANGE_SUMMARY_MAX,
+  ChangeSummary,
   CreateEntryRequest,
   DISCLOSURE_MAX,
   ENTRY_CONTENT_MAX,
   ENTRY_KINDS,
+  ENTRY_SUMMARY_MAX,
   ENTRY_TITLE_MAX,
+  ENTRY_TITLE_NEW_MAX,
+  extractMarkdownOutline,
+  extractMarkdownSection,
   normalizeProjectSlug,
   SCENE_TAGS_MAX,
+  stripDuplicateLeadingHeading,
   TOPICS_MAX,
   UpdateEntryRequest,
 } from '@kioku/contracts'
@@ -29,6 +36,7 @@ import {
   formatBrowseResponse,
   formatCredentialMetadataList,
   formatEntryDetail,
+  formatEntryHistory,
   TOOL_INTERNAL_ERROR,
 } from './format'
 
@@ -80,6 +88,17 @@ const McpTagList = z.array(z.string().min(1).max(64)).max(SCENE_TAGS_MAX)
 const McpTopicList = z.array(z.string().min(1).max(64)).max(TOPICS_MAX)
 const McpEntryKind = z.enum(ENTRY_KINDS)
 const McpGroupBy = z.enum(BROWSE_GROUP_BY)
+const McpPatchSchema = z.object({
+  kind: z
+    .enum(['replace', 'insert_under_heading', 'append'])
+    .describe(
+      '局部补丁方式：replace（精确替换片段）、insert_under_heading（插入到二级小节末）、append（文末追加）',
+    ),
+  old_text: z.string().optional().describe('kind=replace 时待替换的原正文片段（须唯一匹配）'),
+  new_text: z.string().optional().describe('kind=replace 时的替换后片段'),
+  heading: z.string().max(200).optional().describe('kind=insert_under_heading 时的二级小节标题'),
+  text: z.string().optional().describe('kind=insert_under_heading 或 append 时要写入的文本'),
+})
 
 export function createKiokuMcpServer(
   deps: Deps,
@@ -117,7 +136,7 @@ export function createKiokuMcpServer(
   server.registerTool(
     'kioku_search',
     {
-      description: '按混合检索（向量 + 中文全文 + 场景亲和 + 一跳双链）召回记忆线索',
+      description: '按混合检索（向量 + 加权中文全文 + 场景亲和 + 一跳双链）召回记忆线索',
       annotations: { readOnlyHint: true },
       inputSchema: {
         query: z.string().min(1).max(2000).describe('查询语句或关键词'),
@@ -152,23 +171,100 @@ export function createKiokuMcpServer(
   server.registerTool(
     'kioku_get',
     {
-      description: '按短 ID（m-xxxxxx）或精确标题读取记忆正文、元数据、双链邻居与凭据引用状态',
+      description:
+        '按短 ID（m-xxxxxx）或精确标题读取记忆正文、现行概要、更新时间、双链邻居与凭据状态；支持先看大纲或按二级小节直取',
       annotations: { readOnlyHint: true },
       inputSchema: {
         id: z.string().min(1).max(200).describe('记忆短 ID（如 m-234abc）或精确标题'),
+        view: z
+          .enum(['full', 'outline'])
+          .optional()
+          .describe('视图模式：full（默认返回全文）或 outline（仅返回概要与二级小节目录）'),
+        section: z
+          .string()
+          .max(200)
+          .optional()
+          .describe('仅读取指定的二级小节（## 标题），适合超长手册按需提取'),
       },
     },
     (args) =>
       runTool(async () => {
         const detail = await entries.get(key, args.id)
-        return { text: formatEntryDetail(detail), structuredContent: detail }
+        const text = formatEntryDetail(detail, { view: args.view, section: args.section })
+        if (args.section || args.view === 'outline') {
+          const cleanBody = stripDuplicateLeadingHeading(detail.entry.title, detail.entry.content)
+          const entryMeta = Object.fromEntries(
+            Object.entries(detail.entry).filter(([field]) => field !== 'content'),
+          )
+          if (args.section) {
+            const matched = extractMarkdownSection(cleanBody, args.section)
+            return {
+              text,
+              structuredContent: {
+                entry: entryMeta,
+                section: matched,
+                outboundLinks: detail.outboundLinks,
+                backlinks: detail.backlinks,
+                credentialRefs: detail.credentialRefs,
+                ...(detail.recentHistory ? { recentHistory: detail.recentHistory } : {}),
+              },
+            }
+          }
+          return {
+            text,
+            structuredContent: {
+              entry: entryMeta,
+              outline: extractMarkdownOutline(cleanBody),
+              contentLength: cleanBody.length,
+              outboundLinks: detail.outboundLinks,
+              backlinks: detail.backlinks,
+              credentialRefs: detail.credentialRefs,
+              ...(detail.recentHistory ? { recentHistory: detail.recentHistory } : {}),
+            },
+          }
+        }
+        return {
+          text,
+          structuredContent: detail,
+        }
+      }),
+  )
+
+  server.registerTool(
+    'kioku_history',
+    {
+      description:
+        '读取单条记忆的语义化变更时间线，或按 version 查阅特定历史版本快照（默认不返回大快照，节省上下文）',
+      annotations: { readOnlyHint: true },
+      inputSchema: {
+        id: z.string().min(1).max(200).describe('记忆短 ID（如 m-234abc）或精确标题'),
+        limit: z.number().int().min(1).max(50).optional().describe('返回最近条数，默认 10'),
+        version: z
+          .number()
+          .int()
+          .min(1)
+          .optional()
+          .describe('指定版本号时返回该版本的完整快照正文'),
+      },
+    },
+    (args) =>
+      runTool(async () => {
+        const res = await entries.history(key, args.id, {
+          limit: args.limit ?? 10,
+          ...(args.version !== undefined ? { version: args.version } : {}),
+          includeSnapshots: args.version !== undefined,
+        })
+        return {
+          text: formatEntryHistory(args.id, res, args.version),
+          structuredContent: res,
+        }
       }),
   )
 
   server.registerTool(
     'kioku_browse',
     {
-      description: '按项目、环境、场域、客户端、主题或类型分组浏览可见记忆目录',
+      description: '按项目、环境、场域、客户端、主题或类型分组浏览可见记忆目录（含更新时间与体量）',
       annotations: { readOnlyHint: true },
       inputSchema: {
         group_by: McpGroupBy.optional().describe('分组维度，默认 project'),
@@ -206,15 +302,29 @@ export function createKiokuMcpServer(
     'kioku_create',
     {
       description:
-        '新建一条扁平长期记忆，正文支持 Markdown、[[m-xxxxxx]] 双链与 {{cred:<slug>}} 占位符',
+        '新建一条扁平长期记忆；标题应简短稳定且不含日期/更新日志，正文只写现行状态与长期原因，支持 [[m-xxxxxx|语境]] 双链与 {{cred:<slug>}} 占位符',
       inputSchema: {
         title: z
           .string()
           .min(1)
-          .max(ENTRY_TITLE_MAX)
+          .max(ENTRY_TITLE_NEW_MAX)
           .optional()
-          .describe('标题；省略时取正文首个 # 标题或短 ID'),
-        content: z.string().min(1).max(ENTRY_CONTENT_MAX).describe('Markdown 正文'),
+          .describe('简短稳定的主题名（建议 ≤24 字，上限 80 字），严禁写入日期或变更日志'),
+        summary: z
+          .string()
+          .max(ENTRY_SUMMARY_MAX)
+          .optional()
+          .describe('1–2 句现行结论摘要（≤300 字），供启动加载目录与检索速览'),
+        content: z
+          .string()
+          .min(1)
+          .max(ENTRY_CONTENT_MAX)
+          .describe('Markdown 正文（维护现行状态与长期原因，无需在首行重复标题）'),
+        change_summary: z
+          .string()
+          .max(CHANGE_SUMMARY_MAX)
+          .optional()
+          .describe('初始建立背景说明（单行，写入版本历史）'),
         topics: McpTopicList.optional().describe('主题标签列表'),
         envs: McpTagList.optional().describe('适用环境/系统，如 ["mac", "linux"]'),
         realms: McpTagList.optional().describe('适用场域，如 ["work"]；留空表示通用'),
@@ -233,7 +343,9 @@ export function createKiokuMcpServer(
       runTool(async () => {
         const parsed = parseInput(CreateEntryRequest, {
           ...(args.title !== undefined ? { title: args.title } : {}),
+          ...(args.summary !== undefined ? { summary: args.summary } : {}),
           content: args.content,
+          ...(args.change_summary !== undefined ? { changeSummary: args.change_summary } : {}),
           ...(args.topics !== undefined ? { topics: args.topics } : {}),
           ...(args.envs !== undefined ? { envs: args.envs } : {}),
           ...(args.realms !== undefined ? { realms: args.realms } : {}),
@@ -251,30 +363,90 @@ export function createKiokuMcpServer(
   server.registerTool(
     'kioku_update',
     {
-      description: '修改已有记忆的标题、正文、场景标签、常驻状态或有效期',
+      description:
+        '修改已有记忆的现行状态、概要或元数据；修改长文档时优先使用 patch 局部补丁以免误覆盖主体，并填写 change_summary 记录变更原因',
       inputSchema: {
         id: z.string().min(1).max(200).describe('记忆短 ID（如 m-234abc）或精确标题'),
         expected_version: z.number().int().min(1).optional().describe('期望版本号（乐观锁）'),
-        title: z.string().min(1).max(ENTRY_TITLE_MAX).optional(),
-        content: z.string().min(1).max(ENTRY_CONTENT_MAX).optional(),
-        topics: McpTopicList.optional(),
-        envs: McpTagList.optional(),
-        realms: McpTagList.optional(),
-        projects: McpTagList.optional(),
-        runtimes: McpTagList.optional(),
-        is_pinned: z.boolean().optional(),
-        disclosure: z.string().max(DISCLOSURE_MAX).nullable().optional(),
-        valid_to: z.string().nullable().optional(),
+        title: z
+          .string()
+          .min(1)
+          .max(ENTRY_TITLE_MAX)
+          .optional()
+          .describe('稳定短主题名（建议 ≤24 字），严禁写入日期或变更日志'),
+        summary: z
+          .string()
+          .max(ENTRY_SUMMARY_MAX)
+          .nullable()
+          .optional()
+          .describe('1–2 句现行结论摘要（传入 null 清空）'),
+        content: z
+          .string()
+          .min(1)
+          .max(ENTRY_CONTENT_MAX)
+          .optional()
+          .describe('整篇替换正文（与 patch 互斥）；维护现行状态与原因，不堆砌历史流水账'),
+        patch: McpPatchSchema.optional().describe(
+          '局部补丁更新（与 content 互斥），修改长文档优先使用以避免误删无关段落',
+        ),
+        change_summary: z
+          .string()
+          .max(CHANGE_SUMMARY_MAX)
+          .optional()
+          .describe('本次改了什么及原因（单行），写入版本历史并在召回/列表中展示'),
+        verified: z.boolean().optional().describe('设为 true 刷新事实最近核实时间'),
+        topics: McpTopicList.optional().describe('覆盖主题标签列表'),
+        envs: McpTagList.optional().describe('覆盖适用环境列表'),
+        realms: McpTagList.optional().describe('覆盖适用场域列表'),
+        projects: McpTagList.optional().describe('覆盖适用项目列表'),
+        runtimes: McpTagList.optional().describe('覆盖适用客户端列表'),
+        is_pinned: z.boolean().optional().describe('是否设为常驻启动加载'),
+        disclosure: z
+          .string()
+          .max(DISCLOSURE_MAX)
+          .nullable()
+          .optional()
+          .describe('触发场景说明（传入 null 清空）'),
+        valid_to: z
+          .string()
+          .nullable()
+          .optional()
+          .describe('过期时间（ISO 8601 带时区，传入 null 改为长期有效）'),
       },
     },
     (args) =>
       runTool(async () => {
+        let patchPayload: Record<string, unknown> | undefined
+        if (args.patch) {
+          if (args.patch.kind === 'replace') {
+            patchPayload = {
+              kind: 'replace',
+              oldText: args.patch.old_text ?? '',
+              newText: args.patch.new_text ?? args.patch.text ?? '',
+            }
+          } else if (args.patch.kind === 'insert_under_heading') {
+            patchPayload = {
+              kind: 'insert_under_heading',
+              heading: args.patch.heading ?? '',
+              text: args.patch.text ?? '',
+            }
+          } else {
+            patchPayload = {
+              kind: 'append',
+              text: args.patch.text ?? '',
+            }
+          }
+        }
         const parsed = parseInput(UpdateEntryRequest, {
           ...(args.expected_version !== undefined
             ? { expectedVersion: args.expected_version }
             : {}),
           ...(args.title !== undefined ? { title: args.title } : {}),
+          ...(args.summary !== undefined ? { summary: args.summary } : {}),
           ...(args.content !== undefined ? { content: args.content } : {}),
+          ...(patchPayload !== undefined ? { patch: patchPayload } : {}),
+          ...(args.change_summary !== undefined ? { changeSummary: args.change_summary } : {}),
+          ...(args.verified !== undefined ? { verified: args.verified } : {}),
           ...(args.topics !== undefined ? { topics: args.topics } : {}),
           ...(args.envs !== undefined ? { envs: args.envs } : {}),
           ...(args.realms !== undefined ? { realms: args.realms } : {}),
@@ -297,14 +469,24 @@ export function createKiokuMcpServer(
       inputSchema: {
         id: z.string().min(1).max(200).describe('记忆短 ID（如 m-234abc）或精确标题'),
         expected_version: z.number().int().min(1).optional().describe('期望版本号'),
+        change_summary: z
+          .string()
+          .max(CHANGE_SUMMARY_MAX)
+          .optional()
+          .describe('删除或退场原因（写入版本历史）'),
       },
     },
     (args) =>
       runTool(async () => {
+        const changeSummary =
+          args.change_summary !== undefined
+            ? parseInput(ChangeSummary, args.change_summary)
+            : undefined
         await entries.remove(key, args.id, {
           ...(args.expected_version !== undefined
             ? { expectedVersion: args.expected_version }
             : {}),
+          ...(changeSummary !== undefined ? { changeSummary } : {}),
         })
         return {
           text: `已将 ${args.id} 移入回收站。`,

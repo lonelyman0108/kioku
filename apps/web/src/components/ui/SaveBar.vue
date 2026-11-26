@@ -9,16 +9,32 @@ export interface SaveBarChange {
   after: string
 }
 
-// 整页保存条：同一页的几项数值设置共用它，贴在滚动区底部。放在表单里：保存是提交按钮，回车也能保存。
-// 没有改动时不显示；保存中两个按钮都不能点，失败由页面用 toast 说明，改动留着。
-// 传入 changes 时可展开查看改动明细（改前 → 改后）；有填得不对的项时传 problem
-const props = defineProps<{
-  count: number
-  saving?: boolean
-  problem?: string | null
-  changes?: readonly SaveBarChange[]
-}>()
-const emit = defineEmits<{ discard: [] }>()
+// 整页或编辑器底部粘性保存条：放在表单内时 submitType='submit'，独立操作时可设为 'button' 并监听 save。
+// 传入 changes 时可展开查看改动明细（改前 → 改后）；传入 #extra 可内嵌单行补充输入（例如变更说明）
+const props = withDefaults(
+  defineProps<{
+    count: number
+    saving?: boolean
+    problem?: string | null
+    changes?: readonly SaveBarChange[]
+    alwaysShow?: boolean
+    submitType?: 'submit' | 'button'
+    discardLabel?: string
+    saveLabel?: string
+    saveShortcut?: string | null
+  }>(),
+  {
+    saving: false,
+    problem: null,
+    changes: undefined,
+    alwaysShow: false,
+    submitType: 'submit',
+    discardLabel: '放弃',
+    saveLabel: '保存',
+    saveShortcut: null,
+  },
+)
+const emit = defineEmits<{ discard: []; save: [] }>()
 const showDiff = ref(false)
 watch(
   () => props.count,
@@ -29,10 +45,18 @@ watch(
 </script>
 
 <template>
-  <div v-if="props.count > 0 || props.saving" class="save-bar" role="status">
+  <div v-if="props.alwaysShow || props.count > 0 || props.saving" class="save-bar">
+    <div v-if="$slots.extra" class="save-extra">
+      <slot name="extra" />
+    </div>
     <div class="save-main">
-      <UIcon :name="icons.unsaved" class="save-icon" />
-      <span class="save-count tabular-nums">{{ props.count }} 项未保存</span>
+      <span class="save-status" role="status">
+        <template v-if="props.count > 0">
+          <UIcon :name="icons.unsaved" class="save-icon" />
+          <span class="save-count tabular-nums">{{ props.count }} 项未保存</span>
+        </template>
+        <span v-else class="save-idle">暂无未保存改动</span>
+      </span>
       <UButton
         v-if="props.changes?.length"
         type="button"
@@ -52,26 +76,36 @@ watch(
         variant="ghost"
         :disabled="props.saving"
         @click="emit('discard')"
-        >放弃</UButton
+        >{{ props.discardLabel }}</UButton
       >
       <UButton
-        type="submit"
+        :type="props.submitType"
         color="primary"
         :loading="props.saving"
-        :disabled="props.saving || Boolean(props.problem)"
-        >保存</UButton
+        :disabled="props.saving || props.count === 0 || Boolean(props.problem)"
+        @click="props.submitType === 'button' ? emit('save') : undefined"
       >
+        {{ props.saveLabel }}
+        <span v-if="props.saveShortcut" class="save-kbd" aria-hidden="true">{{
+          props.saveShortcut
+        }}</span>
+      </UButton>
     </div>
-    <ul v-if="showDiff && props.changes?.length" class="save-diff">
-      <li v-for="c in props.changes" :key="c.label" class="diff-item">
-        <span class="diff-label">{{ c.label }}</span>
-        <span class="diff-values tabular-nums"
-          ><span class="diff-before">{{ c.before }}</span>
-          <UIcon :name="icons.inherits" class="diff-arrow" aria-hidden="true" />
-          <span class="diff-after">{{ c.after }}</span></span
-        >
-      </li>
-    </ul>
+    <div v-if="showDiff && (props.changes?.length || $slots.diff)" class="save-diff-wrap">
+      <ul v-if="props.changes?.length" class="save-diff">
+        <li v-for="c in props.changes" :key="c.label" class="diff-item">
+          <span class="diff-label">{{ c.label }}</span>
+          <span class="diff-values tabular-nums"
+            ><span class="diff-before">{{ c.before }}</span>
+            <UIcon :name="icons.inherits" class="diff-arrow" aria-hidden="true" />
+            <span class="diff-after">{{ c.after }}</span></span
+          >
+        </li>
+      </ul>
+      <div v-if="$slots.diff" class="save-diff-body">
+        <slot name="diff" />
+      </div>
+    </div>
   </div>
 </template>
 
@@ -80,10 +114,15 @@ watch(
   position: sticky;
   bottom: 0;
   z-index: 2;
-  margin-top: 28px;
+  margin-top: 24px;
   border: 1px solid var(--ui-rule);
   background: var(--ui-bg-muted);
   font-size: 13px;
+}
+.save-extra {
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-bg);
 }
 .save-main {
   display: flex;
@@ -92,10 +131,19 @@ watch(
   gap: 10px;
   padding: 10px 16px;
 }
+.save-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
 .save-count {
   font-weight: 500;
 }
+.save-idle {
+  color: var(--ui-text-muted);
+}
 .save-icon {
+  display: inline-block;
   flex: none;
   width: 16px;
   height: 16px;
@@ -107,14 +155,26 @@ watch(
 .save-gap {
   flex: 1;
 }
+.save-kbd {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.save-diff-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--ui-border);
+  background: var(--ui-bg);
+}
 .save-diff {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 10px 16px;
-  border-top: 1px solid var(--ui-border);
-  background: var(--ui-bg);
   font-size: 12px;
+}
+.save-diff-body {
+  min-width: 0;
 }
 .diff-item {
   display: flex;
@@ -136,6 +196,7 @@ watch(
   text-decoration: line-through;
 }
 .diff-arrow {
+  display: inline-block;
   width: 12px;
   height: 12px;
   color: var(--ui-text-dimmed);

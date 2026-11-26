@@ -9,9 +9,11 @@ import {
   CredentialSlug,
 } from './credentials'
 import {
+  ChangeSummary,
   Disclosure,
   EntryContent,
   EntryKind,
+  EntrySummary,
   EntryTitle,
   SceneSlugList,
   TopicList,
@@ -107,6 +109,7 @@ export const KiokuExportEntry = z.object({
   shortId: ShortId,
   kind: EntryKind.default('entry'),
   title: EntryTitle,
+  summary: EntrySummary.nullable().optional(),
   content: EntryContent,
   disclosure: Disclosure.nullable().optional(),
   isPinned: z.boolean().default(false),
@@ -118,6 +121,8 @@ export const KiokuExportEntry = z.object({
   deviceKey: z.string().max(128).nullable().optional(),
   projectSlug: z.string().max(128).nullable().optional(),
   validTo: ValidTo.nullable().optional(),
+  verifiedAt: z.iso.datetime({ offset: true }).nullable().optional(),
+  lastChangeSummary: ChangeSummary.nullable().optional(),
   createdAt: z.iso.datetime({ offset: true }).optional(),
   updatedAt: z.iso.datetime({ offset: true }).optional(),
 })

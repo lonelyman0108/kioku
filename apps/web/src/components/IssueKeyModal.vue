@@ -254,16 +254,26 @@ function closeOnce() {
     </template>
 
     <template #footer>
-      <div class="flex w-full justify-end gap-2">
-        <UButton v-if="issued" @click="closeOnce">我已保存</UButton>
-        <template v-else>
-          <UButton color="neutral" variant="ghost" :disabled="saving" @click="open = false">
-            取消
-          </UButton>
-          <UButton :loading="saving" :disabled="Boolean(validationProblem)" @click="submit">
-            {{ editing ? '保存' : '签发' }}
-          </UButton>
-        </template>
+      <div class="flex w-full flex-wrap items-center justify-between gap-2">
+        <span class="text-xs text-muted">
+          {{ !issued && !error && validationProblem ? validationProblem : '' }}
+        </span>
+        <div class="flex items-center gap-2">
+          <UButton v-if="issued" :icon="icons.check" @click="closeOnce">我已保存</UButton>
+          <template v-else>
+            <UButton color="neutral" variant="ghost" :disabled="saving" @click="open = false">
+              取消
+            </UButton>
+            <UButton
+              :icon="icons.check"
+              :loading="saving"
+              :disabled="Boolean(validationProblem)"
+              @click="submit"
+            >
+              {{ editing ? '保存' : '签发' }}
+            </UButton>
+          </template>
+        </div>
       </div>
     </template>
   </UModal>

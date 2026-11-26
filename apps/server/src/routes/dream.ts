@@ -4,12 +4,14 @@ import {
   ApplySuggestionResponse,
   ErrorResponse,
   InboxResponse,
+  TriggerDreamRequest,
   TriggerDreamResponse,
 } from '@kioku/contracts'
 
 import { loadInbox } from '../extraction/dream'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
+import { MemoryError } from '../memory/errors'
 import type { EntryService } from '../memory/service'
 import { CHAT_LLM_SETTING_KEY, loadStoredModel } from '../models/store'
 
@@ -34,7 +36,7 @@ const applyRoute = createRoute({
   method: 'post',
   path: '/console/inbox/{id}/apply',
   tags: ['dream'],
-  summary: '应用一条整理建议（可选提交编辑后的草稿字段）',
+  summary: '应用一条整理建议（可选提交编辑后的草稿字段或分项覆盖）',
   request: { params: SuggestionParams, body: jsonBody(ApplySuggestionRequest) },
   responses: { 200: jsonResponse('已应用', ApplySuggestionResponse), ...errors },
 })
@@ -52,7 +54,13 @@ const triggerRoute = createRoute({
   method: 'post',
   path: '/console/dream/run',
   tags: ['dream'],
-  summary: '立即触发一次后台记忆整理',
+  summary: '立即触发一次后台记忆整理（支持常规整理或规范与精简批次）',
+  request: {
+    body: {
+      required: false,
+      content: { 'application/json': { schema: TriggerDreamRequest } },
+    },
+  },
   responses: { 200: jsonResponse('触发结果', TriggerDreamResponse), ...errors },
 })
 
@@ -72,6 +80,22 @@ export function dreamRoutes(deps: Deps, entries: EntryService) {
       return c.body(null, 204)
     })
     .openapi(triggerRoute, async (c) => {
+      let options: TriggerDreamRequest = { mode: 'standard' }
+      const rawText = await c.req.text()
+      if (rawText.trim()) {
+        let json: unknown
+        try {
+          json = JSON.parse(rawText)
+        } catch {
+          throw new MemoryError(400, '请求体不是合法的 JSON')
+        }
+        const parsed = TriggerDreamRequest.safeParse(json)
+        if (!parsed.success) {
+          throw new MemoryError(400, parsed.error.issues[0]?.message ?? '请求参数不合法')
+        }
+        options = parsed.data
+      }
+
       const chat = await loadStoredModel(deps.db, CHAT_LLM_SETTING_KEY)
       if (!chat?.enabled) {
         return c.json({ started: false, runId: null, reason: '尚未配置或启用对话模型' }, 200)
@@ -79,7 +103,7 @@ export function dreamRoutes(deps: Deps, entries: EntryService) {
       if (!deps.jobs) {
         return c.json({ started: false, runId: null, reason: '后台任务队列未启用' }, 200)
       }
-      const runId = await deps.jobs.enqueueDream()
+      const runId = await deps.jobs.enqueueDream(options)
       return c.json(
         {
           started: runId !== null,

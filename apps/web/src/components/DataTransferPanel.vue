@@ -121,6 +121,7 @@ const preview = ref<ImportPreviewResponse | null>(null)
 const activeSource = ref<ImportSource | null>(null)
 
 const conflictStrategy = ref<ImportConflictStrategy>('skip')
+const previewFilter = ref<'all' | 'importable' | 'issues'>('all')
 const excludedKeys = ref<Set<string>>(new Set())
 const excludedCreds = ref<Set<string>>(new Set())
 const applyBusy = ref(false)
@@ -138,6 +139,7 @@ function clearPreview() {
   excludedKeys.value = new Set()
   excludedCreds.value = new Set()
   conflictStrategy.value = 'skip'
+  previewFilter.value = 'all'
 }
 
 watch([importTab, loreMode], () => {
@@ -372,6 +374,30 @@ const conflictOptions = computed(() => {
     { value: 'skip' as const, label: '跳过已存在', disabled },
     { value: 'reallocate' as const, label: '分配新短 ID（自动改写双链）', disabled },
   ]
+})
+
+const previewIssueCount = computed(
+  () =>
+    preview.value?.items.filter((i) => i.skippedReason !== null || i.conflict !== null).length ?? 0,
+)
+
+const previewFilterOptions = computed(() => [
+  { value: 'all' as const, label: `全部（${preview.value?.items.length ?? 0}）` },
+  { value: 'importable' as const, label: `可导入（${willImportEntriesCount.value}）` },
+  { value: 'issues' as const, label: `冲突或跳过（${previewIssueCount.value}）` },
+])
+
+const filteredPreviewItems = computed(() => {
+  const list = preview.value?.items ?? []
+  if (previewFilter.value === 'all') return list
+  if (previewFilter.value === 'issues') {
+    return list.filter((i) => i.skippedReason !== null || i.conflict !== null)
+  }
+  return list.filter((i) => {
+    if (i.skippedReason !== null || excludedKeys.value.has(i.key)) return false
+    if (i.conflict === 'short_id_exists' && conflictStrategy.value === 'skip') return false
+    return true
+  })
 })
 </script>
 
@@ -634,7 +660,16 @@ const conflictOptions = computed(() => {
         <!-- 记忆预览列表 -->
         <div v-if="preview.items.length" class="space-y-2">
           <div class="flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
-            <span>勾选要导入的记忆（已选 {{ willImportEntriesCount }} 条）</span>
+            <div class="flex flex-wrap items-center gap-2">
+              <span>勾选要导入的记忆（已选 {{ willImportEntriesCount }} 条）</span>
+              <SegmentedChoice
+                v-if="previewIssueCount > 0"
+                v-model="previewFilter"
+                :items="previewFilterOptions"
+                label="筛选导入预览项"
+                compact
+              />
+            </div>
             <div class="flex gap-2">
               <UButton
                 size="xs"
@@ -657,9 +692,9 @@ const conflictOptions = computed(() => {
             </div>
           </div>
 
-          <ul class="preview-list">
+          <ul v-if="filteredPreviewItems.length" class="preview-list">
             <li
-              v-for="item in preview.items"
+              v-for="item in filteredPreviewItems"
               :key="item.key"
               class="preview-row"
               :class="{ muted: item.skippedReason !== null }"
@@ -727,6 +762,7 @@ const conflictOptions = computed(() => {
               </label>
             </li>
           </ul>
+          <p v-else class="preview-empty">暂无符合当前筛选条件的记录。</p>
         </div>
 
         <!-- 凭据元数据预览（绝不显示明文） -->
@@ -812,10 +848,18 @@ const conflictOptions = computed(() => {
   color: var(--ui-text-muted);
 }
 .preview-list {
-  max-height: 360px;
+  max-height: 460px;
   overflow-y: auto;
   border: 1px solid var(--ui-border);
   background: var(--ui-bg);
+}
+.preview-empty {
+  padding: 16px 12px;
+  border: 1px solid var(--ui-border);
+  background: var(--ui-bg);
+  font-size: 12px;
+  color: var(--ui-text-muted);
+  text-align: center;
 }
 .preview-row {
   border-bottom: 1px solid var(--ui-border);

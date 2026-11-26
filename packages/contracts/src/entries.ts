@@ -1,5 +1,6 @@
 import { z } from 'zod'
 
+import { HygieneWarning } from './hygiene'
 import {
   CREDENTIAL_PLACEHOLDER_PREFIX,
   EntryLinkDirection,
@@ -24,11 +25,21 @@ export const BROWSE_GROUP_BY = ['topic', 'project', 'env', 'realm', 'runtime', '
 export const BrowseGroupBy = z.enum(BROWSE_GROUP_BY).meta({ id: 'BrowseGroupBy' })
 export type BrowseGroupBy = z.infer<typeof BrowseGroupBy>
 
-export const ENTRY_EVENT_TYPES = ['create', 'update', 'delete', 'undelete', 'restore'] as const
+export const ENTRY_EVENT_TYPES = [
+  'create',
+  'update',
+  'delete',
+  'undelete',
+  'restore',
+  'archive_note',
+] as const
 export const EntryEventType = z.enum(ENTRY_EVENT_TYPES)
 export type EntryEventType = z.infer<typeof EntryEventType>
 
 export const ENTRY_TITLE_MAX = 200
+export const ENTRY_TITLE_NEW_MAX = 80
+export const ENTRY_SUMMARY_MAX = 300
+export const CHANGE_SUMMARY_MAX = 300
 export const DISCLOSURE_MAX = 500
 export const ENTRY_CONTENT_MAX = 100_000
 export const TOPICS_MAX = 32
@@ -78,6 +89,29 @@ export const EntryTitle = z
   .min(1, '标题不能为空')
   .max(ENTRY_TITLE_MAX, `标题最多 ${ENTRY_TITLE_MAX} 个字符`)
   .regex(/^\P{Cc}*$/u, '标题不能含控制字符')
+  .refine((v) => !v.includes(CREDENTIAL_PLACEHOLDER_PREFIX), '凭据占位符只能写在正文里')
+
+export const NewEntryTitle = z
+  .string()
+  .trim()
+  .min(1, '标题不能为空')
+  .max(ENTRY_TITLE_NEW_MAX, `新建标题最多 ${ENTRY_TITLE_NEW_MAX} 个字符`)
+  .regex(/^\P{Cc}*$/u, '标题不能含控制字符')
+  .refine((v) => !v.includes(CREDENTIAL_PLACEHOLDER_PREFIX), '凭据占位符只能写在正文里')
+
+export const EntrySummary = z
+  .string()
+  .trim()
+  .max(ENTRY_SUMMARY_MAX, `现行概要最多 ${ENTRY_SUMMARY_MAX} 个字符`)
+  .regex(/^(?:[\r\n]|\P{Cc})*$/u, '现行概要不能含控制字符')
+  .refine((v) => !v.includes(CREDENTIAL_PLACEHOLDER_PREFIX), '凭据占位符只能写在正文里')
+  .transform((v) => v.replace(/[\r\n]+/g, ' ').trim())
+
+export const ChangeSummary = z
+  .string()
+  .trim()
+  .max(CHANGE_SUMMARY_MAX, `变更说明最多 ${CHANGE_SUMMARY_MAX} 个字符`)
+  .regex(/^\P{Cc}*$/u, '变更说明不能含控制字符')
   .refine((v) => !v.includes(CREDENTIAL_PLACEHOLDER_PREFIX), '凭据占位符只能写在正文里')
 
 export const Disclosure = z
@@ -188,6 +222,8 @@ export const EntryLinkNeighbor = z
     title: z.string(),
     kind: EntryKind,
     direction: EntryLinkDirection,
+    relation: z.string().nullable().optional(),
+    contextSnippet: z.string().nullable().optional(),
   })
   .meta({ id: 'EntryLinkNeighbor' })
 export type EntryLinkNeighbor = z.infer<typeof EntryLinkNeighbor>
@@ -200,12 +236,57 @@ export const CredentialRefStatus = z.object({
 })
 export type CredentialRefStatus = z.infer<typeof CredentialRefStatus>
 
+export const EntryDiffMeta = z.object({
+  changedFields: z.array(z.string()),
+  contentCharsBefore: z.number().int(),
+  contentCharsAfter: z.number().int(),
+})
+export type EntryDiffMeta = z.infer<typeof EntryDiffMeta>
+
+export const ENTRY_ACTOR_KINDS = [
+  'console',
+  'agent',
+  'dream',
+  'extraction',
+  'capture',
+  'system',
+] as const
+export const EntryActorKind = z.enum(ENTRY_ACTOR_KINDS)
+export type EntryActorKind = z.infer<typeof EntryActorKind>
+
+export const EntryActorMeta = z.object({
+  kind: EntryActorKind,
+  label: z.string(),
+  runtimeFamily: z.string().nullable().optional(),
+})
+export type EntryActorMeta = z.infer<typeof EntryActorMeta>
+
+export const ArchivedHistoryNote = z.object({
+  occurredAt: z.iso.datetime({ offset: true }).nullable().optional(),
+  note: ChangeSummary.min(1, '历史说明不能为空'),
+})
+export type ArchivedHistoryNote = z.infer<typeof ArchivedHistoryNote>
+
+export const EntryRecentHistoryItem = z.object({
+  id: z.number().int(),
+  version: z.number().int().nullable(),
+  eventType: EntryEventType,
+  actor: z.string(),
+  actorMeta: EntryActorMeta.optional(),
+  changeSummary: z.string().nullable(),
+  diffMeta: EntryDiffMeta.nullable().optional(),
+  occurredAt: z.string().nullable().optional(),
+  createdAt: z.string(),
+})
+export type EntryRecentHistoryItem = z.infer<typeof EntryRecentHistoryItem>
+
 export const EntryView = z
   .object({
     id: z.uuid(),
     shortId: ShortId,
     kind: EntryKind,
     title: z.string(),
+    summary: z.string().nullable().optional(),
     content: z.string(),
     disclosure: z.string().nullable(),
     isPinned: z.boolean(),
@@ -217,6 +298,8 @@ export const EntryView = z
     deviceKey: z.string().nullable(),
     projectSlug: z.string().nullable(),
     validTo: z.string().nullable(),
+    verifiedAt: z.string().nullable().optional(),
+    lastChangeSummary: z.string().nullable().optional(),
     version: z.number().int(),
     createdAt: z.string(),
     updatedAt: z.string(),
@@ -231,6 +314,7 @@ export const EntryListItem = z
     shortId: ShortId,
     kind: EntryKind,
     title: z.string(),
+    summary: z.string().nullable().optional(),
     disclosure: z.string().nullable(),
     isPinned: z.boolean(),
     envs: z.array(z.string()),
@@ -239,6 +323,9 @@ export const EntryListItem = z
     runtimes: z.array(z.string()),
     topics: z.array(z.string()),
     validTo: z.string().nullable(),
+    verifiedAt: z.string().nullable().optional(),
+    lastChangeSummary: z.string().nullable().optional(),
+    charCount: z.number().int().optional(),
     version: z.number().int(),
     createdAt: z.string(),
     updatedAt: z.string(),
@@ -282,6 +369,7 @@ export const EntryTabCounts = z.object({
   regular: z.number().int(),
   episodes: z.number().int(),
   trash: z.number().int(),
+  pinnedChars: z.number().int().optional(),
 })
 export type EntryTabCounts = z.infer<typeof EntryTabCounts>
 
@@ -298,13 +386,35 @@ export const EntryDetailResponse = z.object({
   outboundLinks: z.array(EntryLinkNeighbor),
   backlinks: z.array(EntryLinkNeighbor),
   credentialRefs: z.array(CredentialRefStatus),
+  recentHistory: z.array(EntryRecentHistoryItem).optional(),
+  warnings: z.array(HygieneWarning).optional(),
 })
 export type EntryDetailResponse = z.infer<typeof EntryDetailResponse>
 
+export const EntryPatchInput = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('replace'),
+    oldText: z.string().min(1, '待替换片段不能为空'),
+    newText: z.string().min(1, '替换内容不能为空'),
+  }),
+  z.object({
+    kind: z.literal('insert_under_heading'),
+    heading: z.string().trim().min(1, '目标小节不能为空').max(200),
+    text: z.string().min(1, '插入内容不能为空'),
+  }),
+  z.object({
+    kind: z.literal('append'),
+    text: z.string().min(1, '追加内容不能为空'),
+  }),
+])
+export type EntryPatchInput = z.infer<typeof EntryPatchInput>
+
 export const CreateEntryRequest = z.object({
-  title: EntryTitle.optional(),
+  title: NewEntryTitle.optional(),
+  summary: EntrySummary.nullable().optional(),
   content: EntryContent,
   disclosure: Disclosure.nullable().optional(),
+  changeSummary: ChangeSummary.nullable().optional(),
   isPinned: z.boolean().default(false),
   envs: SceneSlugList.default([]),
   realms: SceneSlugList.default([]),
@@ -315,20 +425,34 @@ export const CreateEntryRequest = z.object({
 })
 export type CreateEntryRequest = z.infer<typeof CreateEntryRequest>
 
-export const UpdateEntryRequest = z.object({
-  expectedVersion: z.number().int().min(1).optional(),
-  title: EntryTitle.optional(),
-  content: EntryContent.optional(),
-  disclosure: Disclosure.nullable().optional(),
-  isPinned: z.boolean().optional(),
-  envs: SceneSlugList.optional(),
-  realms: SceneSlugList.optional(),
-  projects: SceneSlugList.optional(),
-  runtimes: SceneSlugList.optional(),
-  topics: TopicList.optional(),
-  validTo: ValidTo.nullable().optional(),
-  promoteToEntry: z.boolean().optional(),
-})
+export const UpdateEntryRequest = z
+  .object({
+    expectedVersion: z.number().int().min(1).optional(),
+    title: EntryTitle.optional(),
+    summary: EntrySummary.nullable().optional(),
+    content: EntryContent.optional(),
+    patch: EntryPatchInput.optional(),
+    disclosure: Disclosure.nullable().optional(),
+    changeSummary: ChangeSummary.nullable().optional(),
+    verified: z.boolean().optional(),
+    isPinned: z.boolean().optional(),
+    envs: SceneSlugList.optional(),
+    realms: SceneSlugList.optional(),
+    projects: SceneSlugList.optional(),
+    runtimes: SceneSlugList.optional(),
+    topics: TopicList.optional(),
+    validTo: ValidTo.nullable().optional(),
+    promoteToEntry: z.boolean().optional(),
+  })
+  .superRefine((val, ctx) => {
+    if (val.content !== undefined && val.patch !== undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['patch'],
+        message: '正文整体替换与局部补丁不能同时传入',
+      })
+    }
+  })
 export type UpdateEntryRequest = z.infer<typeof UpdateEntryRequest>
 
 export const RestoreEntryRequest = z.object({
@@ -340,6 +464,7 @@ export type RestoreEntryRequest = z.infer<typeof RestoreEntryRequest>
 export const EntrySnapshot = z.object({
   kind: EntryKind,
   title: z.string(),
+  summary: z.string().nullable().optional(),
   content: z.string(),
   disclosure: z.string().nullable(),
   isPinned: z.boolean(),
@@ -349,6 +474,7 @@ export const EntrySnapshot = z.object({
   runtimes: z.array(z.string()),
   topics: z.array(z.string()),
   validTo: z.string().nullable(),
+  verifiedAt: z.string().nullable().optional(),
   version: z.number().int(),
 })
 export type EntrySnapshot = z.infer<typeof EntrySnapshot>
@@ -357,7 +483,12 @@ export const EntryHistoryItem = z.object({
   id: z.number().int(),
   eventType: EntryEventType,
   actor: z.string(),
-  snapshot: EntrySnapshot,
+  actorMeta: EntryActorMeta.optional(),
+  changeSummary: z.string().nullable().optional(),
+  diffMeta: EntryDiffMeta.nullable().optional(),
+  occurredAt: z.string().nullable().optional(),
+  snapshot: EntrySnapshot.optional(),
+  version: z.number().int().nullable().optional(),
   createdAt: z.string(),
 })
 export type EntryHistoryItem = z.infer<typeof EntryHistoryItem>
@@ -366,6 +497,15 @@ export const EntryHistoryResponse = z.object({
   items: z.array(EntryHistoryItem),
 })
 export type EntryHistoryResponse = z.infer<typeof EntryHistoryResponse>
+
+export const EntryHistoryQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  version: z.coerce.number().int().min(1).optional(),
+  includeSnapshots: z
+    .preprocess((v) => (v === 'true' ? true : v === 'false' ? false : v), z.boolean().optional())
+    .optional(),
+})
+export type EntryHistoryQuery = z.infer<typeof EntryHistoryQuery>
 
 // ---- 分组浏览契约（供 MCP kioku_browse 使用）----
 
@@ -386,6 +526,7 @@ export type BrowseEntriesQuery = z.infer<typeof BrowseEntriesQuery>
 export const EntryBrowseItem = z.object({
   shortId: ShortId,
   title: z.string(),
+  summary: z.string().nullable().optional(),
   kind: EntryKind,
   isPinned: z.boolean(),
   topics: z.array(z.string()),
@@ -394,6 +535,9 @@ export const EntryBrowseItem = z.object({
   projects: z.array(z.string()),
   runtimes: z.array(z.string()),
   disclosure: z.string().nullable(),
+  updatedAt: z.string().optional(),
+  lastChangeSummary: z.string().nullable().optional(),
+  contentLength: z.number().int().optional(),
 })
 export type EntryBrowseItem = z.infer<typeof EntryBrowseItem>
 
@@ -553,7 +697,10 @@ export function applyMarkdownAppend(
   if (!snippet) return { content, matchedHeading: null }
 
   const normalizedContent = content.replace(/\r\n/g, '\n')
-  const want = heading?.trim()
+  const want = heading
+    ?.trim()
+    .replace(/^#{1,6}[ \t]+/, '')
+    .trim()
   if (!want) {
     const base = normalizedContent.trimEnd()
     return {
@@ -745,3 +892,171 @@ export function checkCaptureIntegrity(before: string, after: string): CaptureInt
     severeShrink,
   }
 }
+
+// ---- Markdown 二级小节直取与大纲提取 ----
+
+export interface MarkdownOutlineSection {
+  heading: string
+  charCount: number
+  preview: string
+}
+
+interface SectionSpan {
+  heading: string
+  startLine: number
+  endLine: number
+}
+
+function scanH2Sections(lines: readonly string[]): SectionSpan[] {
+  const spans: SectionSpan[] = []
+  let fence: string | null = null
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!
+    const [, marker, info = ''] = FENCE_RE.exec(line) ?? []
+    if (fence !== null) {
+      const closes = marker !== undefined && marker[0] === fence[0] && marker.length >= fence.length
+      if (closes && /^[ \t]*$/.test(info)) fence = null
+      continue
+    }
+    if (marker && !(marker[0] === '`' && info.includes('`'))) {
+      fence = marker
+      continue
+    }
+    const h2 = H2_HEADING_RE.exec(line)?.[1]?.trim()
+    if (h2) {
+      if (spans.length && spans[spans.length - 1]!.endLine === lines.length) {
+        spans[spans.length - 1]!.endLine = i
+      }
+      spans.push({ heading: h2, startLine: i, endLine: lines.length })
+    } else if (/^ {0,3}#[ \t]+/.test(line) && spans.length) {
+      if (spans[spans.length - 1]!.endLine === lines.length) {
+        spans[spans.length - 1]!.endLine = i
+      }
+    }
+  }
+  return spans
+}
+
+export function extractMarkdownOutline(content: string): MarkdownOutlineSection[] {
+  const lines = content.replace(/\r\n/g, '\n').split('\n')
+  const spans = scanH2Sections(lines)
+  return spans.map((span) => {
+    const bodyLines = lines.slice(span.startLine + 1, span.endLine)
+    const bodyText = bodyLines.join('\n').trim()
+    let firstNonEmpty = ''
+    let fence: string | null = null
+    for (const raw of bodyLines) {
+      const [, marker, info = ''] = FENCE_RE.exec(raw) ?? []
+      if (fence !== null) {
+        const closes =
+          marker !== undefined && marker[0] === fence[0] && marker.length >= fence.length
+        if (closes && /^[ \t]*$/.test(info)) fence = null
+        continue
+      }
+      if (marker && !(marker[0] === '`' && info.includes('`'))) {
+        fence = marker
+        continue
+      }
+      const trimmed = raw.trim()
+      if (trimmed) {
+        firstNonEmpty = trimmed
+        break
+      }
+    }
+    const preview = firstNonEmpty.replace(/^(?:[-*+]|\d+\.|#{1,6}|>)\s+/, '').slice(0, 80)
+    return {
+      heading: span.heading,
+      charCount: bodyText.length,
+      preview,
+    }
+  })
+}
+
+export function extractMarkdownSection(
+  content: string,
+  query: string,
+): { heading: string; content: string } | null {
+  const want = query
+    .trim()
+    .replace(/^#{1,6}[ \t]+/, '')
+    .trim()
+  if (!want) return null
+  const lines = content.replace(/\r\n/g, '\n').split('\n')
+  const spans = scanH2Sections(lines)
+  if (!spans.length) return null
+
+  const lowerWant = want.toLowerCase()
+  const matched =
+    spans.find((s) => s.heading === want) ??
+    spans.find((s) => s.heading.toLowerCase() === lowerWant) ??
+    spans.find((s) => s.heading.toLowerCase().includes(lowerWant))
+  if (!matched) return null
+
+  return {
+    heading: matched.heading,
+    content: lines.slice(matched.startLine, matched.endLine).join('\n').trim(),
+  }
+}
+
+// ---- 存量确定性预清洗与结构体检契约 ----
+
+export const HYGIENE_SWEEP_FIX_KINDS = [
+  'strip_duplicate_heading',
+  'strip_legacy_glossary',
+  'rewrite_legacy_links',
+] as const
+export const HygieneSweepFixKind = z.enum(HYGIENE_SWEEP_FIX_KINDS)
+export type HygieneSweepFixKind = z.infer<typeof HygieneSweepFixKind>
+
+export const HygieneSweepRewrite = z.object({
+  raw: z.string(),
+  replacement: z.string(),
+  targetShortId: ShortId,
+  targetTitle: z.string(),
+})
+export type HygieneSweepRewrite = z.infer<typeof HygieneSweepRewrite>
+
+export const HygieneSweepCandidate = z.object({
+  id: z.uuid(),
+  shortId: ShortId,
+  title: z.string(),
+  isPinned: z.boolean(),
+  version: z.number().int(),
+  fixes: z.array(HygieneSweepFixKind),
+  rewrites: z.array(HygieneSweepRewrite),
+  unresolvedRefs: z.array(z.string()),
+  beforeChars: z.number().int(),
+  afterChars: z.number().int(),
+})
+export type HygieneSweepCandidate = z.infer<typeof HygieneSweepCandidate>
+
+export const HygieneSweepFlag = z.object({
+  id: z.uuid(),
+  shortId: ShortId,
+  title: z.string(),
+  isPinned: z.boolean(),
+  charCount: z.number().int(),
+  reason: z.string(),
+})
+export type HygieneSweepFlag = z.infer<typeof HygieneSweepFlag>
+
+export const HygieneSweepPreviewResponse = z.object({
+  totalScanned: z.number().int(),
+  dirtyTitleCount: z.number().int(),
+  deterministicCandidates: z.array(HygieneSweepCandidate),
+  suspectTruncated: z.array(HygieneSweepFlag),
+  suspectObsolete: z.array(HygieneSweepFlag),
+})
+export type HygieneSweepPreviewResponse = z.infer<typeof HygieneSweepPreviewResponse>
+
+export const HygieneSweepApplyRequest = z.object({
+  shortIds: z.array(ShortId).max(500).optional(),
+})
+export type HygieneSweepApplyRequest = z.infer<typeof HygieneSweepApplyRequest>
+
+export const HygieneSweepApplyResponse = z.object({
+  applied: z.number().int(),
+  skipped: z.number().int(),
+  appliedShortIds: z.array(ShortId),
+})
+export type HygieneSweepApplyResponse = z.infer<typeof HygieneSweepApplyResponse>

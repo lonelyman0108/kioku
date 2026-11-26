@@ -1,6 +1,8 @@
 import {
+  applyCapturePatch,
   buildSearchTags,
   deriveEntryTitle,
+  lintEntryHygiene,
   normalizeSlugList,
   type ApplySuggestionRequest,
   type ApplySuggestionResponse,
@@ -12,15 +14,19 @@ import {
   type EntryBrowseItem,
   type EntryBrowseResponse,
   type EntryDetailResponse,
+  type EntryDiffMeta,
   type EntryFacetsSummary,
   type EntryHistoryItem,
+  type EntryHistoryQuery,
   type EntryHistoryResponse,
   type EntryListItem,
   type EntryListQuery,
   type EntryListResponse,
+  type EntryRecentHistoryItem,
   type EntrySnapshot,
   type EntryTabCounts,
   type EntryView,
+  type HygieneWarning,
   type RestoreEntryRequest,
   type UpdateEntryRequest,
 } from '@kioku/contracts'
@@ -63,7 +69,12 @@ import { dreamSuggestions, entries, entryEmbeddings, entryEvents } from '../db/s
 import { planCapture as planQuickCapture, type PlanCaptureOptions } from '../extraction/capture'
 import type { Jobs } from '../jobs/queue'
 import { recallEntries } from '../recall/recall'
+import { resolveActorMetaMap } from './actorMeta'
 import { MemoryError } from './errors'
+import {
+  applyHygieneSweep as runHygieneSweepApply,
+  previewHygieneSweep as runHygieneSweepPreview,
+} from './hygieneSweep'
 import { loadEntryLinks, syncEntryLinks } from './links'
 import { insertWithAllocatedShortId, parseShortId } from './shortId'
 
@@ -71,7 +82,56 @@ type EntryRow = typeof entries.$inferSelect
 
 const VALID_TO_MIN_AHEAD_MS = 60_000
 const HISTORY_LIMIT = 200
+const RECENT_HISTORY_LIMIT = 5
 const EPISODE_TTL_DAYS = 14
+
+function cleanOptionalText(value: string | null | undefined): string | null {
+  const trimmed = value?.trim()
+  return trimmed ? trimmed : null
+}
+
+function sameStringList(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((v, i) => v === b[i])
+}
+
+function computeDiffMeta(
+  before: EntryRow,
+  after: {
+    title: string
+    summary: string | null
+    content: string
+    disclosure: string | null
+    isPinned: boolean
+    envs: readonly string[]
+    realms: readonly string[]
+    projects: readonly string[]
+    runtimes: readonly string[]
+    topics: readonly string[]
+    validTo: Date | null
+    kind: string
+  },
+): EntryDiffMeta {
+  const changedFields: string[] = []
+  if (before.title !== after.title) changedFields.push('title')
+  if ((before.summary ?? null) !== (after.summary ?? null)) changedFields.push('summary')
+  if (before.content !== after.content) changedFields.push('content')
+  if ((before.disclosure ?? null) !== (after.disclosure ?? null)) changedFields.push('disclosure')
+  if (before.isPinned !== after.isPinned) changedFields.push('isPinned')
+  if (!sameStringList(before.envs, after.envs)) changedFields.push('envs')
+  if (!sameStringList(before.realms, after.realms)) changedFields.push('realms')
+  if (!sameStringList(before.projects, after.projects)) changedFields.push('projects')
+  if (!sameStringList(before.runtimes, after.runtimes)) changedFields.push('runtimes')
+  if (!sameStringList(before.topics, after.topics)) changedFields.push('topics')
+  if ((before.validTo?.getTime() ?? null) !== (after.validTo?.getTime() ?? null)) {
+    changedFields.push('validTo')
+  }
+  if (before.kind !== after.kind) changedFields.push('kind')
+  return {
+    changedFields,
+    contentCharsBefore: before.content.length,
+    contentCharsAfter: after.content.length,
+  }
+}
 
 function toEntryView(row: EntryRow): EntryView {
   return {
@@ -79,6 +139,7 @@ function toEntryView(row: EntryRow): EntryView {
     shortId: row.shortId,
     kind: row.kind,
     title: row.title,
+    summary: row.summary,
     content: row.content,
     disclosure: row.disclosure,
     isPinned: row.isPinned,
@@ -90,6 +151,8 @@ function toEntryView(row: EntryRow): EntryView {
     deviceKey: row.deviceKey,
     projectSlug: row.projectSlug,
     validTo: row.validTo ? row.validTo.toISOString() : null,
+    verifiedAt: row.verifiedAt ? row.verifiedAt.toISOString() : null,
+    lastChangeSummary: row.lastChangeSummary,
     version: row.version,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -103,6 +166,7 @@ function toListItem(row: EntryRow, extra?: { snippet?: string; score?: number })
     shortId: row.shortId,
     kind: row.kind,
     title: row.title,
+    summary: row.summary,
     disclosure: row.disclosure,
     isPinned: row.isPinned,
     envs: row.envs,
@@ -111,6 +175,9 @@ function toListItem(row: EntryRow, extra?: { snippet?: string; score?: number })
     runtimes: row.runtimes,
     topics: row.topics,
     validTo: row.validTo ? row.validTo.toISOString() : null,
+    verifiedAt: row.verifiedAt ? row.verifiedAt.toISOString() : null,
+    lastChangeSummary: row.lastChangeSummary,
+    charCount: row.content.length,
     version: row.version,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -124,6 +191,7 @@ function toSnapshot(row: EntryRow): EntrySnapshot {
   return {
     kind: row.kind,
     title: row.title,
+    summary: row.summary,
     content: row.content,
     disclosure: row.disclosure,
     isPinned: row.isPinned,
@@ -133,6 +201,7 @@ function toSnapshot(row: EntryRow): EntrySnapshot {
     runtimes: row.runtimes,
     topics: row.topics,
     validTo: row.validTo ? row.validTo.toISOString() : null,
+    verifiedAt: row.verifiedAt ? row.verifiedAt.toISOString() : null,
     version: row.version,
   }
 }
@@ -155,20 +224,83 @@ export class EntryService {
     private readonly jobs: Jobs | null,
   ) {}
 
+  // 历史事件行同样按快照中的 realms 校验密钥硬边界，防止词条变更场域后泄露旧场域历史内容
+  private readableHistoryEventSql(scope: AccessScope): SQL | undefined {
+    if (scope.kind === 'console' || scope.allowedRealms === null) return undefined
+    if (scope.allowedRealms.length === 0) {
+      return sql`coalesce(jsonb_array_length(${entryEvents.snapshot}->'realms'), 0) = 0`
+    }
+    return sql`(coalesce(jsonb_array_length(${entryEvents.snapshot}->'realms'), 0) = 0 or exists (select 1 from jsonb_array_elements_text(${entryEvents.snapshot}->'realms') r where r = any(${textArraySql(scope.allowedRealms)})))`
+  }
+
+  private visibleActorForScope(scope: AccessScope, rawActor: string): string {
+    if (scope.kind === 'console') return rawActor
+    if (rawActor.startsWith('key:') && rawActor !== `key:${scope.prefix}`) return 'key'
+    return rawActor
+  }
+
+  private async loadRecentHistory(
+    tx: Db | Tx,
+    scope: AccessScope,
+    entryId: string,
+    limit = RECENT_HISTORY_LIMIT,
+  ): Promise<EntryRecentHistoryItem[]> {
+    const rows = await tx
+      .select({
+        id: entryEvents.id,
+        eventType: entryEvents.eventType,
+        actor: entryEvents.actor,
+        changeSummary: entryEvents.changeSummary,
+        diffMeta: entryEvents.diffMeta,
+        occurredAt: entryEvents.occurredAt,
+        version: sql<number | null>`(${entryEvents.snapshot}->>'version')::int`,
+        createdAt: entryEvents.createdAt,
+      })
+      .from(entryEvents)
+      .where(and(eq(entryEvents.entryId, entryId), this.readableHistoryEventSql(scope)))
+      .orderBy(desc(entryEvents.id))
+      .limit(limit)
+
+    const actorMap = await resolveActorMetaMap(
+      tx,
+      rows.map((r) => r.actor),
+      scope.kind === 'key' ? { ownKeyPrefix: scope.prefix, redactOtherKeyNames: true } : {},
+    )
+
+    return rows.map((r) => {
+      const actorMeta = actorMap.get(r.actor)
+      return {
+        id: r.id,
+        version: r.eventType === 'archive_note' ? null : r.version,
+        eventType: r.eventType,
+        actor: this.visibleActorForScope(scope, r.actor),
+        ...(actorMeta ? { actorMeta } : {}),
+        changeSummary: r.changeSummary,
+        ...(r.diffMeta ? { diffMeta: r.diffMeta } : {}),
+        ...(r.occurredAt ? { occurredAt: r.occurredAt.toISOString() } : {}),
+        createdAt: r.createdAt.toISOString(),
+      }
+    })
+  }
+
   private async hydrateDetail(
     tx: Db | Tx,
     scope: AccessScope,
     row: EntryRow,
+    warnings?: HygieneWarning[],
   ): Promise<EntryDetailResponse> {
-    const [{ outboundLinks, backlinks }, credentialRefs] = await Promise.all([
+    const [{ outboundLinks, backlinks }, credentialRefs, recentHistory] = await Promise.all([
       loadEntryLinks(tx, scope, row.id, row.shortId),
       this.credentials.placeholderStatuses(tx, scope, row.content),
+      this.loadRecentHistory(tx, scope, row.id),
     ])
     return {
       entry: toEntryView(row),
       outboundLinks,
       backlinks,
       credentialRefs,
+      recentHistory,
+      ...(warnings?.length ? { warnings } : {}),
     }
   }
 
@@ -209,6 +341,8 @@ export class EntryService {
     assertEntryWriteAllowed(scope, input.realms)
     const detail = await withTx(this.db, async (tx, now) => {
       const validTo = parseValidTo(input.validTo, now)
+      const summary = cleanOptionalText(input.summary)
+      const changeSummary = cleanOptionalText(input.changeSummary)
       const { value: row } = await insertWithAllocatedShortId(tx, async (sp, shortId) => {
         const title = deriveEntryTitle(input.title, input.content, shortId)
         const searchTags = buildSearchTags({
@@ -225,8 +359,9 @@ export class EntryService {
             shortId,
             kind: 'entry',
             title,
+            summary,
             content: input.content,
-            disclosure: input.disclosure ?? null,
+            disclosure: cleanOptionalText(input.disclosure),
             isPinned: input.isPinned,
             envs: input.envs,
             realms: input.realms,
@@ -235,6 +370,8 @@ export class EntryService {
             topics: input.topics,
             searchTags,
             validTo,
+            verifiedAt: now,
+            lastChangeSummary: changeSummary,
             version: 1,
             createdAt: now,
             updatedAt: now,
@@ -248,10 +385,24 @@ export class EntryService {
         entryId: row.id,
         eventType: 'create',
         actor: actorLabel(scope),
+        changeSummary,
+        diffMeta: {
+          changedFields: ['title', 'content'],
+          contentCharsBefore: 0,
+          contentCharsAfter: row.content.length,
+        },
         snapshot: toSnapshot(row),
         createdAt: now,
       })
-      return this.hydrateDetail(tx, scope, row)
+
+      const warnings = lintEntryHygiene({
+        title: row.title,
+        content: row.content,
+        summary: row.summary,
+        isPinned: row.isPinned,
+        isUpdate: false,
+      })
+      return this.hydrateDetail(tx, scope, row, warnings)
     })
 
     this.jobs?.enqueueEmbed(detail.entry.id)
@@ -294,12 +445,26 @@ export class EntryService {
       if (nextKind === 'episode' && input.isPinned === true) {
         throw new MemoryError(400, '会话摘要不能直接标为常驻，请先提炼为正式记忆')
       }
-      const nextContent = input.content ?? existing.content
+
+      let nextContent = existing.content
+      if (input.patch !== undefined) {
+        const patched = applyCapturePatch(existing.content, input.patch)
+        if (!patched.ok) {
+          throw new MemoryError(400, `局部补丁应用失败：${patched.reason}`)
+        }
+        nextContent = patched.content
+      } else if (input.content !== undefined) {
+        nextContent = input.content
+      }
+
       const nextTitle =
         input.title !== undefined
           ? deriveEntryTitle(input.title, nextContent, existing.shortId)
           : existing.title
-      const nextDisclosure = input.disclosure !== undefined ? input.disclosure : existing.disclosure
+      const nextSummary =
+        input.summary !== undefined ? cleanOptionalText(input.summary) : existing.summary
+      const nextDisclosure =
+        input.disclosure !== undefined ? cleanOptionalText(input.disclosure) : existing.disclosure
       const nextIsPinned = nextKind === 'episode' ? false : (input.isPinned ?? existing.isPinned)
       const nextEnvs = input.envs ?? existing.envs
       const nextProjects = input.projects ?? existing.projects
@@ -323,11 +488,41 @@ export class EntryService {
         runtimes: nextRuntimes,
       })
 
+      const contentChanged = nextContent !== existing.content
+      const titleChanged = nextTitle !== existing.title
+      const summaryChanged = (nextSummary ?? null) !== (existing.summary ?? null)
+      const realmsChanged = !sameStringList(existing.realms, nextRealms)
+      const explicitChangeSummary = cleanOptionalText(input.changeSummary)
+      // 显式提交变更说明时更新缓存；实质改动正文/标题/概要或变更场域却未填说明时清空旧缓存，避免张冠李戴或跨场域泄露
+      const nextLastChangeSummary =
+        explicitChangeSummary !== null
+          ? explicitChangeSummary
+          : contentChanged || titleChanged || summaryChanged || realmsChanged
+            ? null
+            : existing.lastChangeSummary
+      const nextVerifiedAt = contentChanged || input.verified === true ? now : existing.verifiedAt
+
+      const diffMeta = computeDiffMeta(existing, {
+        kind: nextKind,
+        title: nextTitle,
+        summary: nextSummary,
+        content: nextContent,
+        disclosure: nextDisclosure,
+        isPinned: nextIsPinned,
+        envs: nextEnvs,
+        realms: nextRealms,
+        projects: nextProjects,
+        runtimes: nextRuntimes,
+        topics: nextTopics,
+        validTo: nextValidTo,
+      })
+
       const [updated] = await tx
         .update(entries)
         .set({
           kind: nextKind,
           title: nextTitle,
+          summary: nextSummary,
           content: nextContent,
           disclosure: nextDisclosure,
           isPinned: nextIsPinned,
@@ -340,6 +535,8 @@ export class EntryService {
           projectSlug: nextProjectSlug,
           searchTags,
           validTo: nextValidTo,
+          verifiedAt: nextVerifiedAt,
+          lastChangeSummary: nextLastChangeSummary,
           version: nextVersion,
           updatedAt: now,
         })
@@ -354,10 +551,23 @@ export class EntryService {
         entryId: updated.id,
         eventType: 'update',
         actor: actorLabel(scope),
+        changeSummary: explicitChangeSummary,
+        diffMeta,
         snapshot: toSnapshot(updated),
         createdAt: now,
       })
-      return this.hydrateDetail(tx, scope, updated)
+
+      const warnings = lintEntryHygiene({
+        title: updated.title,
+        content: updated.content,
+        summary: updated.summary,
+        isPinned: updated.isPinned,
+        isUpdate: true,
+        contentChanged,
+        changeSummary: explicitChangeSummary,
+        previousContent: existing.content,
+      })
+      return this.hydrateDetail(tx, scope, updated, warnings)
     })
 
     if (detail.entry.kind === 'entry') {
@@ -369,7 +579,7 @@ export class EntryService {
   async remove(
     scope: AccessScope,
     idOrShortId: string,
-    options: { expectedVersion?: number; permanent?: boolean } = {},
+    options: { expectedVersion?: number; permanent?: boolean; changeSummary?: string | null } = {},
   ): Promise<void> {
     if (options.permanent && scope.kind !== 'console') {
       throw new MemoryError(403, '只有管理界面允许永久删除')
@@ -395,11 +605,13 @@ export class EntryService {
         return
       }
 
+      const changeSummary = cleanOptionalText(options.changeSummary)
       const [deleted] = await tx
         .update(entries)
         .set({
           deletedAt: now,
           updatedAt: now,
+          ...(changeSummary !== null ? { lastChangeSummary: changeSummary } : {}),
           version: existing.version + 1,
         })
         .where(and(eq(entries.id, existing.id), eq(entries.version, existing.version)))
@@ -413,6 +625,7 @@ export class EntryService {
         entryId: deleted.id,
         eventType: 'delete',
         actor: actorLabel(scope),
+        changeSummary,
         snapshot: toSnapshot(deleted),
         createdAt: now,
       })
@@ -427,6 +640,7 @@ export class EntryService {
     const detail = await withTx(this.db, async (tx, now) => {
       const existing = await this.findByIdOrTitle(tx, scope, shortId, { includeDeleted: true })
       if (!existing) throw new MemoryError(404, '词条不存在')
+      assertEntryWriteAllowed(scope, existing.realms)
 
       if (input.expectedVersion !== undefined && existing.version !== input.expectedVersion) {
         throw new MemoryError(
@@ -438,10 +652,12 @@ export class EntryService {
 
       if (input.version === undefined) {
         if (!existing.deletedAt) throw new MemoryError(409, '该词条未在回收站中')
+        const changeSummary = '从回收站恢复生效'
         const [restored] = await tx
           .update(entries)
           .set({
             deletedAt: null,
+            lastChangeSummary: changeSummary,
             updatedAt: now,
             version: existing.version + 1,
           })
@@ -454,20 +670,28 @@ export class EntryService {
           entryId: restored.id,
           eventType: 'undelete',
           actor: actorLabel(scope),
+          changeSummary,
           snapshot: toSnapshot(restored),
           createdAt: now,
         })
         return this.hydrateDetail(tx, scope, restored)
       }
 
-      const historyRows = await tx
+      const [targetEvent] = await tx
         .select()
         .from(entryEvents)
-        .where(eq(entryEvents.entryId, existing.id))
+        .where(
+          and(
+            eq(entryEvents.entryId, existing.id),
+            this.readableHistoryEventSql(scope),
+            sql`(${entryEvents.snapshot}->>'version')::int = ${input.version} and ${entryEvents.eventType} <> 'archive_note'`,
+          ),
+        )
         .orderBy(desc(entryEvents.id))
-      const targetEvent = historyRows.find((ev) => ev.snapshot.version === input.version)
+        .limit(1)
       if (!targetEvent) throw new MemoryError(404, `未找到版本 ${input.version} 的历史记录`)
       const snap = targetEvent.snapshot
+      assertEntryWriteAllowed(scope, snap.realms)
 
       const nextKind = snap.kind
       const nextIsPinned = nextKind === 'episode' ? false : snap.isPinned
@@ -479,11 +703,29 @@ export class EntryService {
         projects: snap.projects,
         runtimes: snap.runtimes,
       })
+      const changeSummary = `恢复至版本 v${input.version}`
+      const nextValidTo = snap.validTo ? new Date(snap.validTo) : null
+      const diffMeta = computeDiffMeta(existing, {
+        kind: nextKind,
+        title: snap.title,
+        summary: snap.summary ?? null,
+        content: snap.content,
+        disclosure: snap.disclosure,
+        isPinned: nextIsPinned,
+        envs: snap.envs,
+        realms: snap.realms,
+        projects: snap.projects,
+        runtimes: snap.runtimes,
+        topics: snap.topics,
+        validTo: nextValidTo,
+      })
+
       const [restored] = await tx
         .update(entries)
         .set({
           kind: nextKind,
           title: snap.title,
+          summary: snap.summary ?? null,
           content: snap.content,
           disclosure: snap.disclosure,
           isPinned: nextIsPinned,
@@ -493,7 +735,9 @@ export class EntryService {
           runtimes: snap.runtimes,
           topics: snap.topics,
           searchTags,
-          validTo: snap.validTo ? new Date(snap.validTo) : null,
+          validTo: nextValidTo,
+          verifiedAt: snap.verifiedAt ? new Date(snap.verifiedAt) : existing.verifiedAt,
+          lastChangeSummary: changeSummary,
           deletedAt: null,
           version: existing.version + 1,
           updatedAt: now,
@@ -509,6 +753,8 @@ export class EntryService {
         entryId: restored.id,
         eventType: 'restore',
         actor: actorLabel(scope),
+        changeSummary,
+        diffMeta,
         snapshot: toSnapshot(restored),
         createdAt: now,
       })
@@ -521,30 +767,56 @@ export class EntryService {
     return detail
   }
 
-  async history(shortId: string): Promise<EntryHistoryResponse> {
-    const parsed = parseShortId(shortId)
-    if (!parsed) throw new MemoryError(400, '短 ID 格式不正确')
-    const [entry] = await this.db
-      .select({ id: entries.id })
-      .from(entries)
-      .where(eq(entries.shortId, parsed))
-      .limit(1)
-    if (!entry) throw new MemoryError(404, '词条不存在')
+  async history(
+    scope: AccessScope,
+    idOrShortId: string,
+    options: EntryHistoryQuery = {},
+  ): Promise<EntryHistoryResponse> {
+    const entry = await this.findByIdOrTitle(this.db, scope, idOrShortId, {
+      includeDeleted: scope.kind === 'console',
+    })
+    if (!entry) throw new MemoryError(404, '词条不存在或不可见')
+
+    const limit = Math.min(options.limit ?? HISTORY_LIMIT, HISTORY_LIMIT)
+    const includeSnapshots =
+      options.includeSnapshots ?? (scope.kind === 'console' || options.version !== undefined)
 
     const rows = await this.db
       .select()
       .from(entryEvents)
-      .where(eq(entryEvents.entryId, entry.id))
+      .where(
+        and(
+          eq(entryEvents.entryId, entry.id),
+          this.readableHistoryEventSql(scope),
+          options.version !== undefined
+            ? sql`(${entryEvents.snapshot}->>'version')::int = ${options.version} and ${entryEvents.eventType} <> 'archive_note'`
+            : undefined,
+        ),
+      )
       .orderBy(desc(entryEvents.id))
-      .limit(HISTORY_LIMIT)
+      .limit(limit)
 
-    const items: EntryHistoryItem[] = rows.map((r) => ({
-      id: r.id,
-      eventType: r.eventType,
-      actor: r.actor,
-      snapshot: r.snapshot,
-      createdAt: r.createdAt.toISOString(),
-    }))
+    const actorMap = await resolveActorMetaMap(
+      this.db,
+      rows.map((r) => r.actor),
+      scope.kind === 'key' ? { ownKeyPrefix: scope.prefix, redactOtherKeyNames: true } : {},
+    )
+
+    const items: EntryHistoryItem[] = rows.map((r) => {
+      const actorMeta = actorMap.get(r.actor)
+      return {
+        id: r.id,
+        eventType: r.eventType,
+        actor: this.visibleActorForScope(scope, r.actor),
+        ...(actorMeta ? { actorMeta } : {}),
+        changeSummary: r.changeSummary,
+        ...(r.diffMeta ? { diffMeta: r.diffMeta } : {}),
+        ...(r.occurredAt ? { occurredAt: r.occurredAt.toISOString() } : {}),
+        version: r.eventType === 'archive_note' ? null : r.snapshot.version,
+        ...(includeSnapshots && r.eventType !== 'archive_note' ? { snapshot: r.snapshot } : {}),
+        createdAt: r.createdAt.toISOString(),
+      }
+    })
     return { items }
   }
 
@@ -559,6 +831,7 @@ export class EntryService {
         regular: sql<number>`count(*) filter (where ${entries.kind} = 'entry' and ${entries.isPinned} = false and ${entries.deletedAt} is null)::int`,
         episodes: sql<number>`count(*) filter (where ${entries.kind} = 'episode' and ${entries.deletedAt} is null)::int`,
         trash: sql<number>`count(*) filter (where ${entries.deletedAt} is not null)::int`,
+        pinnedChars: sql<number>`coalesce(sum(char_length(${entries.content}) + char_length(${entries.title})) filter (where ${entries.kind} = 'entry' and ${entries.isPinned} = true and ${entries.deletedAt} is null), 0)::int`,
       })
       .from(entries)
 
@@ -592,6 +865,7 @@ export class EntryService {
         regular: countRow?.regular ?? 0,
         episodes: countRow?.episodes ?? 0,
         trash: countRow?.trash ?? 0,
+        pinnedChars: countRow?.pinnedChars ?? 0,
       },
       facets: {
         projects: facetRow?.projects ?? [],
@@ -686,6 +960,7 @@ export class EntryService {
             or(
               ilike(entries.shortId, like),
               ilike(entries.title, like),
+              ilike(entries.summary, like),
               ilike(entries.disclosure, like),
               ilike(entries.content, like),
             ),
@@ -762,6 +1037,7 @@ export class EntryService {
         or(
           ilike(entries.shortId, like),
           ilike(entries.title, like),
+          ilike(entries.summary, like),
           ilike(entries.disclosure, like),
           ilike(entries.content, like),
         )!,
@@ -833,6 +1109,7 @@ export class EntryService {
       const item: EntryBrowseItem = {
         shortId: row.shortId,
         title: row.title,
+        summary: row.summary,
         kind: row.kind,
         isPinned: row.isPinned,
         topics: row.topics,
@@ -841,6 +1118,9 @@ export class EntryService {
         projects: row.projects,
         runtimes: row.runtimes,
         disclosure: row.disclosure,
+        updatedAt: row.updatedAt.toISOString(),
+        lastChangeSummary: row.lastChangeSummary,
+        contentLength: row.content.length,
       }
       if (query.groupBy === 'kind') {
         addTo(row.kind === 'episode' ? '会话摘要' : '正式记忆', item)
@@ -904,6 +1184,7 @@ export class EntryService {
             shortId,
             kind: 'episode',
             title,
+            summary: null,
             content: input.content,
             disclosure: null,
             isPinned: false,
@@ -916,6 +1197,8 @@ export class EntryService {
             projectSlug,
             searchTags,
             validTo,
+            verifiedAt: now,
+            lastChangeSummary: null,
             version: 1,
             createdAt: now,
             updatedAt: now,
@@ -928,6 +1211,7 @@ export class EntryService {
         entryId: inserted.id,
         eventType: 'create',
         actor: 'extraction',
+        changeSummary: '自动抽取会话摘要',
         snapshot: toSnapshot(inserted),
         createdAt: now,
       })
@@ -956,6 +1240,7 @@ export class EntryService {
         .select()
         .from(entries)
         .where(inArray(entries.id, suggestion.entryIds))
+        .orderBy(asc(entries.id))
         .for('update')
       const byId = new Map(targetRows.map((r) => [r.id, r]))
 
@@ -971,12 +1256,16 @@ export class EntryService {
         }
       }
 
-      let resulting: { id: string; shortId: string; title: string } | null
+      let resulting: ApplySuggestionResponse['entry']
       let embedId: string | null = null
 
       if (suggestion.kind === 'distill_episode') {
         const firstSource = byId.get(suggestion.entryIds[0]!)!
         const content = overrides.content ?? suggestion.proposedContent ?? firstSource.content
+        const summary =
+          overrides.summary !== undefined
+            ? cleanOptionalText(overrides.summary)
+            : cleanOptionalText(suggestion.proposedSummary)
         const envs = overrides.envs ?? suggestion.proposedEnvs ?? firstSource.envs
         const realms = overrides.realms ?? suggestion.proposedRealms ?? firstSource.realms
         const projects = overrides.projects ?? suggestion.proposedProjects ?? firstSource.projects
@@ -984,8 +1273,12 @@ export class EntryService {
         const topics = overrides.topics ?? suggestion.proposedTopics ?? []
         const disclosure =
           overrides.disclosure !== undefined
-            ? overrides.disclosure
-            : (suggestion.proposedDisclosure ?? null)
+            ? cleanOptionalText(overrides.disclosure)
+            : cleanOptionalText(suggestion.proposedDisclosure)
+        const changeSummary =
+          cleanOptionalText(overrides.changeSummary) ??
+          cleanOptionalText(suggestion.proposedChangeSummary) ??
+          '由会话摘要提炼为正式记忆'
         const isPinned = overrides.isPinned ?? false
 
         const { value: created } = await insertWithAllocatedShortId(tx, async (sp, shortId) => {
@@ -1001,6 +1294,7 @@ export class EntryService {
               shortId,
               kind: 'entry',
               title,
+              summary,
               content,
               disclosure,
               isPinned,
@@ -1010,6 +1304,8 @@ export class EntryService {
               runtimes,
               topics,
               searchTags,
+              verifiedAt: now,
+              lastChangeSummary: changeSummary,
               version: 1,
               createdAt: now,
               updatedAt: now,
@@ -1023,6 +1319,7 @@ export class EntryService {
           entryId: created.id,
           eventType: 'create',
           actor: 'dream',
+          changeSummary,
           snapshot: toSnapshot(created),
           createdAt: now,
         })
@@ -1037,12 +1334,18 @@ export class EntryService {
             entryId: source.id,
             eventType: 'delete',
             actor: 'dream',
+            changeSummary: `已提炼至 [[${created.shortId}]]`,
             snapshot: toSnapshot(removed!),
             createdAt: now,
           })
         }
 
-        resulting = { id: created.id, shortId: created.shortId, title: created.title }
+        resulting = {
+          id: created.id,
+          shortId: created.shortId,
+          title: created.title,
+          version: created.version,
+        }
         embedId = created.id
       } else if (suggestion.kind === 'merge_duplicates') {
         const keepId =
@@ -1051,6 +1354,10 @@ export class EntryService {
             : suggestion.entryIds[0]!
         const keep = byId.get(keepId)!
         const content = overrides.content ?? suggestion.proposedContent ?? keep.content
+        const summary =
+          overrides.summary !== undefined
+            ? cleanOptionalText(overrides.summary)
+            : (cleanOptionalText(suggestion.proposedSummary) ?? keep.summary)
         const title = deriveEntryTitle(
           overrides.title ?? suggestion.proposedTitle ?? keep.title,
           content,
@@ -1058,8 +1365,12 @@ export class EntryService {
         )
         const disclosure =
           overrides.disclosure !== undefined
-            ? overrides.disclosure
-            : (suggestion.proposedDisclosure ?? keep.disclosure)
+            ? cleanOptionalText(overrides.disclosure)
+            : (cleanOptionalText(suggestion.proposedDisclosure) ?? keep.disclosure)
+        const changeSummary =
+          cleanOptionalText(overrides.changeSummary) ??
+          cleanOptionalText(suggestion.proposedChangeSummary) ??
+          '合并重复记忆'
         const topics = overrides.topics ?? suggestion.proposedTopics ?? keep.topics
         const envs = overrides.envs ?? suggestion.proposedEnvs ?? keep.envs
         const realms = overrides.realms ?? suggestion.proposedRealms ?? keep.realms
@@ -1074,11 +1385,26 @@ export class EntryService {
           projects,
           runtimes,
         })
+        const diffMeta = computeDiffMeta(keep, {
+          kind: keep.kind,
+          title,
+          summary,
+          content,
+          disclosure,
+          isPinned,
+          envs,
+          realms,
+          projects,
+          runtimes,
+          topics,
+          validTo: keep.validTo,
+        })
 
         const [updated] = await tx
           .update(entries)
           .set({
             title,
+            summary,
             content,
             disclosure,
             topics,
@@ -1088,6 +1414,8 @@ export class EntryService {
             runtimes,
             isPinned,
             searchTags,
+            verifiedAt: now,
+            lastChangeSummary: changeSummary,
             version: keep.version + 1,
             updatedAt: now,
           })
@@ -1099,6 +1427,8 @@ export class EntryService {
           entryId: updated!.id,
           eventType: 'update',
           actor: 'dream',
+          changeSummary,
+          diffMeta,
           snapshot: toSnapshot(updated!),
           createdAt: now,
         })
@@ -1115,18 +1445,34 @@ export class EntryService {
             entryId: other.id,
             eventType: 'delete',
             actor: 'dream',
+            changeSummary: `已合并入 [[${keep.shortId}]]`,
             snapshot: toSnapshot(removed!),
             createdAt: now,
           })
         }
 
-        resulting = { id: updated!.id, shortId: updated!.shortId, title: updated!.title }
+        resulting = {
+          id: updated!.id,
+          shortId: updated!.shortId,
+          title: updated!.title,
+          version: updated!.version,
+          previousVersion: keep.version,
+        }
         embedId = updated!.id
       } else if (suggestion.kind === 'mark_stale') {
         const target = byId.get(suggestion.entryIds[0]!)!
+        const changeSummary =
+          cleanOptionalText(overrides.changeSummary) ??
+          cleanOptionalText(suggestion.proposedChangeSummary) ??
+          `标记过时并移入回收站：${suggestion.reason.slice(0, 120)}`
         const [removed] = await tx
           .update(entries)
-          .set({ deletedAt: now, updatedAt: now, version: target.version + 1 })
+          .set({
+            deletedAt: now,
+            lastChangeSummary: changeSummary,
+            updatedAt: now,
+            version: target.version + 1,
+          })
           .where(eq(entries.id, target.id))
           .returning()
         await tx.delete(entryEmbeddings).where(eq(entryEmbeddings.entryId, target.id))
@@ -1134,13 +1480,19 @@ export class EntryService {
           entryId: target.id,
           eventType: 'delete',
           actor: 'dream',
+          changeSummary,
           snapshot: toSnapshot(removed!),
           createdAt: now,
         })
         resulting = null
       } else {
+        // 同时处理 update 与 tidy（规范与精简）
         const target = byId.get(suggestion.entryIds[0]!)!
         const content = overrides.content ?? suggestion.proposedContent ?? target.content
+        const summary =
+          overrides.summary !== undefined
+            ? cleanOptionalText(overrides.summary)
+            : (cleanOptionalText(suggestion.proposedSummary) ?? target.summary)
         const title = deriveEntryTitle(
           overrides.title ?? suggestion.proposedTitle ?? target.title,
           content,
@@ -1148,8 +1500,12 @@ export class EntryService {
         )
         const disclosure =
           overrides.disclosure !== undefined
-            ? overrides.disclosure
-            : (suggestion.proposedDisclosure ?? target.disclosure)
+            ? cleanOptionalText(overrides.disclosure)
+            : (cleanOptionalText(suggestion.proposedDisclosure) ?? target.disclosure)
+        const changeSummary =
+          cleanOptionalText(overrides.changeSummary) ??
+          cleanOptionalText(suggestion.proposedChangeSummary) ??
+          (suggestion.kind === 'tidy' ? '规范标题与结构并归档历史说明' : '根据整理建议更新内容')
         const topics = overrides.topics ?? suggestion.proposedTopics ?? target.topics
         const envs = overrides.envs ?? suggestion.proposedEnvs ?? target.envs
         const realms = overrides.realms ?? suggestion.proposedRealms ?? target.realms
@@ -1164,11 +1520,49 @@ export class EntryService {
           projects,
           runtimes,
         })
+        const diffMeta = computeDiffMeta(target, {
+          kind: target.kind,
+          title,
+          summary,
+          content,
+          disclosure,
+          isPinned,
+          envs,
+          realms,
+          projects,
+          runtimes,
+          topics,
+          validTo: target.validTo,
+        })
+
+        // tidy 剥离的旧日期流水先按 archive_note 沉淀入 entry_events（保留原始快照与发生时间）
+        const archivedNotes = suggestion.archivedNotes ?? []
+        if (overrides.applyArchivedNotes !== false && archivedNotes.length) {
+          const beforeSnap = toSnapshot(target)
+          for (const item of archivedNotes) {
+            const noteText = item.note.trim()
+            if (!noteText) continue
+            const occurredAt = item.occurredAt ? new Date(item.occurredAt) : null
+            await tx.insert(entryEvents).values({
+              entryId: target.id,
+              eventType: 'archive_note',
+              actor: 'dream',
+              changeSummary: noteText,
+              occurredAt: occurredAt && !Number.isNaN(occurredAt.getTime()) ? occurredAt : null,
+              snapshot: beforeSnap,
+              createdAt: now,
+            })
+          }
+        }
+
+        // tidy 仅做格式整理，不伪造新的事实核实时间；update 更新事实则刷新 verifiedAt
+        const nextVerifiedAt = suggestion.kind === 'tidy' ? target.verifiedAt : now
 
         const [updated] = await tx
           .update(entries)
           .set({
             title,
+            summary,
             content,
             disclosure,
             topics,
@@ -1178,6 +1572,8 @@ export class EntryService {
             runtimes,
             isPinned,
             searchTags,
+            verifiedAt: nextVerifiedAt,
+            lastChangeSummary: changeSummary,
             version: target.version + 1,
             updatedAt: now,
           })
@@ -1189,11 +1585,19 @@ export class EntryService {
           entryId: updated!.id,
           eventType: 'update',
           actor: 'dream',
+          changeSummary,
+          diffMeta,
           snapshot: toSnapshot(updated!),
           createdAt: now,
         })
 
-        resulting = { id: updated!.id, shortId: updated!.shortId, title: updated!.title }
+        resulting = {
+          id: updated!.id,
+          shortId: updated!.shortId,
+          title: updated!.title,
+          version: updated!.version,
+          previousVersion: target.version,
+        }
         embedId = updated!.kind === 'entry' ? updated!.id : null
       }
 
@@ -1234,5 +1638,13 @@ export class EntryService {
     options?: PlanCaptureOptions,
   ): Promise<CapturePlanResponse> {
     return planQuickCapture(this.db, this.masterKey, scope, input, options)
+  }
+
+  async previewHygieneSweep() {
+    return runHygieneSweepPreview(this.db)
+  }
+
+  async applyHygieneSweep(request: { shortIds?: string[] | undefined } = {}) {
+    return runHygieneSweepApply(this.db, this.jobs, request)
   }
 }

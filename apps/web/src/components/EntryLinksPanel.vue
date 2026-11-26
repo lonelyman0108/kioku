@@ -4,25 +4,36 @@ import type { EntryLinkNeighbor } from '@kioku/contracts'
 import { entryKindLabels } from '../labels'
 import SectionHeading from './ui/SectionHeading.vue'
 
-defineProps<{
-  outboundLinks: readonly EntryLinkNeighbor[]
-  backlinks: readonly EntryLinkNeighbor[]
-}>()
+withDefaults(
+  defineProps<{
+    outboundLinks: readonly EntryLinkNeighbor[]
+    backlinks: readonly EntryLinkNeighbor[]
+    compact?: boolean
+  }>(),
+  { compact: false },
+)
 
 const emit = defineEmits<{ open: [shortId: string] }>()
 </script>
 
 <template>
-  <div v-if="outboundLinks.length || backlinks.length" class="links-panel">
+  <div v-if="outboundLinks.length || backlinks.length" class="links-panel" :class="{ compact }">
     <section v-if="outboundLinks.length" class="links-section">
       <SectionHeading title="出链" :level="3" />
       <ul class="links-list">
         <li v-for="item in outboundLinks" :key="`out-${item.shortId}`">
           <button type="button" class="link-row" @click="emit('open', item.shortId)">
-            <span class="link-title">{{ item.title }}</span>
-            <span class="link-meta">
-              <span class="font-mono">{{ item.shortId }}</span>
-              <span>{{ entryKindLabels[item.kind] }}</span>
+            <span class="link-head">
+              <span class="link-title">{{ item.title }}</span>
+              <span class="link-meta">
+                <span class="font-mono">{{ item.shortId }}</span>
+                <span v-if="!compact">{{ entryKindLabels[item.kind] }}</span>
+              </span>
+            </span>
+            <span v-if="item.relation || item.contextSnippet" class="link-context">
+              <span v-if="item.relation" class="link-relation">{{ item.relation }}</span>
+              <span v-if="item.relation && item.contextSnippet" aria-hidden="true"> · </span>
+              <span v-if="item.contextSnippet">{{ item.contextSnippet }}</span>
             </span>
           </button>
         </li>
@@ -34,10 +45,17 @@ const emit = defineEmits<{ open: [shortId: string] }>()
       <ul class="links-list">
         <li v-for="item in backlinks" :key="`in-${item.shortId}`">
           <button type="button" class="link-row" @click="emit('open', item.shortId)">
-            <span class="link-title">{{ item.title }}</span>
-            <span class="link-meta">
-              <span class="font-mono">{{ item.shortId }}</span>
-              <span>{{ entryKindLabels[item.kind] }}</span>
+            <span class="link-head">
+              <span class="link-title">{{ item.title }}</span>
+              <span class="link-meta">
+                <span class="font-mono">{{ item.shortId }}</span>
+                <span v-if="!compact">{{ entryKindLabels[item.kind] }}</span>
+              </span>
+            </span>
+            <span v-if="item.relation || item.contextSnippet" class="link-context">
+              <span v-if="item.relation" class="link-relation">{{ item.relation }}</span>
+              <span v-if="item.relation && item.contextSnippet" aria-hidden="true"> · </span>
+              <span v-if="item.contextSnippet">{{ item.contextSnippet }}</span>
             </span>
           </button>
         </li>
@@ -55,6 +73,20 @@ const emit = defineEmits<{ open: [shortId: string] }>()
   padding-top: 16px;
   border-top: 1px solid var(--ui-border);
 }
+.links-panel.compact {
+  gap: 14px;
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+.links-panel.compact :deep(.section-head) {
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--ui-rule);
+}
+.links-panel.compact :deep(.section-title) {
+  font-size: 12px;
+  font-weight: 600;
+}
 .links-section {
   display: flex;
   flex-direction: column;
@@ -65,9 +97,8 @@ const emit = defineEmits<{ open: [shortId: string] }>()
 }
 .link-row {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
+  flex-direction: column;
+  gap: 3px;
   width: 100%;
   padding: 7px 4px;
   border-bottom: 1px solid var(--ui-border);
@@ -75,14 +106,26 @@ const emit = defineEmits<{ open: [shortId: string] }>()
   font-size: 14px;
   cursor: pointer;
 }
+.links-panel.compact .link-row {
+  padding: 6px 2px;
+  font-size: 13px;
+}
 .link-row:hover {
   background: var(--ui-bg-elevated);
+}
+.link-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
 }
 .link-title {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--ui-text-highlighted);
 }
 .link-meta {
   flex: none;
@@ -91,5 +134,18 @@ const emit = defineEmits<{ open: [shortId: string] }>()
   gap: 8px;
   font-size: 12px;
   color: var(--ui-text-muted);
+}
+.link-context {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ui-text-muted);
+}
+.link-relation {
+  color: var(--ui-text-toned);
+  font-weight: 500;
 }
 </style>

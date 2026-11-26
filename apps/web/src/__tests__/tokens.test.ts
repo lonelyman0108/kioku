@@ -117,6 +117,20 @@ describe('两套主题的令牌', () => {
         const hovered = over(t['--ui-text'], linkLine, t['--ui-bg-elevated'])
         expect(contrast(hovered, t['--ui-bg-elevated'])).toBeGreaterThanOrEqual(3)
       })
+
+      it('变更对比底色与词级高亮上的正文过 4.5:1', () => {
+        expect(contrast(t['--ui-text-highlighted'], t['--ui-diff-add-bg'])).toBeGreaterThanOrEqual(
+          4.5,
+        )
+        expect(
+          contrast(t['--ui-text-highlighted'], t['--ui-diff-add-mark']),
+        ).toBeGreaterThanOrEqual(4.5)
+        expect(contrast(t['--ui-text'], t['--ui-diff-del-bg'])).toBeGreaterThanOrEqual(4.5)
+        expect(
+          contrast(t['--ui-text-highlighted'], t['--ui-diff-del-mark']),
+        ).toBeGreaterThanOrEqual(4.5)
+        expect(contrast(t['--ui-diff-hunk-fg'], t['--ui-diff-hunk-bg'])).toBeGreaterThanOrEqual(4.5)
+      })
     })
   }
 

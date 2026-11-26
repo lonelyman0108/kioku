@@ -1,8 +1,13 @@
 import { createHash } from 'node:crypto'
 
+import { stripDuplicateLeadingHeading } from '@kioku/contracts'
+
+import { clipChars } from '../recall/text'
+
 export interface EmbeddableEntry {
   shortId: string
   title: string
+  summary?: string | null | undefined
   disclosure: string | null
   topics: readonly string[]
   envs: readonly string[]
@@ -12,10 +17,53 @@ export interface EmbeddableEntry {
   content: string
 }
 
-// 拼接词条用于生成向量的文本，保持语义与场景标签完整
+const EMBEDDING_CONTENT_MAX_CHARS = 2_500
+const FENCE_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/
+const ANY_HEADING_RE = /^ {0,3}(#{1,6})[ \t]+/
+const CHANGELOG_HEADING_RE =
+  /^ {0,3}(#{2,4})[ \t]+(?:更新日志|变更记录|变更历史|状态变更|历史变更|修改记录|演进记录|changelog|history)(?:\b|[（(：:\s]|$)/i
+
+// 剥离正文残留的更新日志小节，按对应标题层级闭合，避免误删同级有效小节
+function stripTrailingChangelogSections(content: string): string {
+  const lines = content.replace(/\r\n/g, '\n').split('\n')
+  const out: string[] = []
+  let fence: string | null = null
+  let skipLevel: number | null = null
+  for (const line of lines) {
+    const [, marker, info = ''] = FENCE_RE.exec(line) ?? []
+    if (fence !== null) {
+      const closes = marker !== undefined && marker[0] === fence[0] && marker.length >= fence.length
+      if (closes && /^[ \t]*$/.test(info)) fence = null
+      if (skipLevel === null) out.push(line)
+      continue
+    }
+    if (marker && !(marker[0] === '`' && info.includes('`'))) {
+      fence = marker
+      if (skipLevel === null) out.push(line)
+      continue
+    }
+    const changelogMatch = CHANGELOG_HEADING_RE.exec(line)
+    if (changelogMatch?.[1]) {
+      skipLevel = changelogMatch[1].length
+      continue
+    }
+    if (skipLevel !== null) {
+      const headingMatch = ANY_HEADING_RE.exec(line)
+      if (headingMatch?.[1] && headingMatch[1].length <= skipLevel) {
+        skipLevel = null
+      }
+    }
+    if (skipLevel === null) out.push(line)
+  }
+  const joined = out.join('\n').trim()
+  return joined || content.trim()
+}
+
+// 拼接高信噪比向量文本：标题、现行概要、触发场景、标签与去噪后的正文前段
 export function buildEmbeddingText(entry: EmbeddableEntry): string {
-  const lines: string[] = [entry.title]
-  if (entry.disclosure) lines.push(entry.disclosure)
+  const lines: string[] = [entry.title.trim()]
+  if (entry.summary?.trim()) lines.push(entry.summary.trim())
+  if (entry.disclosure?.trim()) lines.push(entry.disclosure.trim())
   const tags = [
     ...entry.topics,
     ...entry.projects,
@@ -24,7 +72,9 @@ export function buildEmbeddingText(entry: EmbeddableEntry): string {
     ...entry.runtimes,
   ]
   if (tags.length) lines.push(tags.join(' '))
-  lines.push(entry.content)
+  const deduped = stripDuplicateLeadingHeading(entry.title, entry.content)
+  const cleaned = clipChars(stripTrailingChangelogSections(deduped), EMBEDDING_CONTENT_MAX_CHARS)
+  if (cleaned) lines.push(cleaned)
   return lines.join('\n').trim()
 }
 

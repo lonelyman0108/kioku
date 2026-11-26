@@ -425,4 +425,142 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
     // 只剩冲突未应用的那条 update 仍在 pending
     expect(inboxAfter.pendingCount).toBe(1)
   })
+
+  it('Dream tidy 模式按完整正文规范脏标题并归档历史说明，同时拦截丢失双链或凭据的草案', async () => {
+    const masterKey = testMasterKey()
+    await saveModelEndpoint(database.db, masterKey, CHAT_LLM_SETTING_KEY, {
+      baseUrl: fakeAi.baseUrl,
+      model: 'fake-chat',
+      apiKey: 'sk-chat',
+      enabled: true,
+    })
+
+    const app = createTestApp(database, { masterKey })
+    const { cookie } = await createOwnerSession(database)
+    const credSvc = new CredentialService(database.db, masterKey)
+    const entrySvc = new EntryService(database.db, masterKey, credSvc, null)
+    const consoleScope = { kind: 'console' as const, accountId: 'acc', sessionId: 'sess' }
+
+    const refEntry = await entrySvc.create(
+      consoleScope,
+      entryInput({ title: '关联参考文档', content: '基础说明。' }),
+    )
+    const tailMarker = '尾部关键约束-完整传入不得截断'
+    const dirtyEntry = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '主机部署架构（2026-09-12 迁移；2026-10-21 切换编排）',
+        content: [
+          '## 现状',
+          `主节点运行核心服务，凭据使用 {{cred:ops-token}}，详见 [[${refEntry.entry.shortId}]]。`,
+          '常规说明段落。'.repeat(180),
+          '## 更新日志',
+          '- 2026-09-12 完成初次迁移',
+          '- 2026-10-21 切换编排工具',
+          `- ${tailMarker}`,
+        ].join('\n'),
+        isPinned: true,
+      }),
+    )
+
+    // 先验证完整性守卫：丢失凭据占位符的草案必须被静默丢弃
+    fakeAi.setChatHandler(() =>
+      JSON.stringify({
+        needed: true,
+        title: '主机部署架构',
+        summary: '主节点运行核心服务。',
+        content: `主节点运行核心服务，详见 [[${refEntry.entry.shortId}]]。`,
+        change_summary: '精简历史',
+        archived_notes: [],
+        reason: '测试拦截丢凭据',
+      }),
+    )
+    const blockedRun = await runDream(database.db, masterKey, {
+      runId: 'tidy-blocked',
+      trigger: 'manual',
+      mode: 'tidy',
+      limit: 5,
+    })
+    expect(blockedRun.suggested).toBe(0)
+
+    // 正常草案：验证长文未截断传入模型、保留全部双链与凭据、并产出 archived_notes
+    let sawTail = false
+    fakeAi.setChatHandler((messages) => {
+      if (messages.some((m) => m.content.includes(tailMarker))) sawTail = true
+      return JSON.stringify({
+        needed: true,
+        title: '主机部署架构',
+        summary: '主节点运行核心服务，统一经编排工具部署。',
+        content: `## 现行架构\n- 主节点运行核心服务，凭据使用 {{cred:ops-token}}，详见 [[${refEntry.entry.shortId}|参考文档]]。`,
+        change_summary: '规范标题并剥离历史迁移流水',
+        archived_notes: [
+          { occurred_at: '2026-09-12', note: '完成初次迁移，曾使用 {{cred:ops-token}} 测试' },
+          { occurred_at: '2026-10-21', note: '切换编排工具' },
+        ],
+        reason: '标题含日期日志且正文夹带旧更新记录',
+      })
+    })
+    const tidyRun = await runDream(database.db, masterKey, {
+      runId: 'tidy-ok',
+      trigger: 'manual',
+      mode: 'tidy',
+      limit: 5,
+    })
+    expect(sawTail).toBe(true)
+    expect(tidyRun.outcome).toBe('ok')
+    expect(tidyRun.suggested).toBe(1)
+
+    const inbox = InboxResponse.parse(
+      await (await app.request('/v1/console/inbox', { headers: { cookie } })).json(),
+    )
+    const tidyCard = inbox.items.find((i) => i.kind === 'tidy')!
+    expect(tidyCard.proposedTitle).toBe('主机部署架构')
+    expect(tidyCard.proposedSummary).toContain('主节点运行核心服务')
+    expect(tidyCard.archivedNotes).toHaveLength(2)
+
+    const applyRes = await app.request(`/v1/console/inbox/${tidyCard.id}/apply`, {
+      method: 'POST',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({}),
+    })
+    expect(applyRes.status).toBe(200)
+    const applied = ApplySuggestionResponse.parse(await applyRes.json())
+    expect(applied.entry?.previousVersion).toBe(1)
+    expect(applied.entry?.version).toBe(2)
+
+    const history = await entrySvc.history(consoleScope, dirtyEntry.entry.shortId)
+    expect(history.items.filter((i) => i.eventType === 'archive_note')).toHaveLength(2)
+    expect(history.items.some((i) => i.changeSummary?.includes('{{cred:'))).toBe(false)
+    expect(history.items[0]?.changeSummary).toBe('规范标题并剥离历史迁移流水')
+
+    // 模型判 needed:false 的词条记录已检版本，二次触发不再重复调用或饿死队列
+    await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '无需调整的超长标题样例用于触发检测（2026-06-01 记录）',
+        content: '简短说明。',
+      }),
+    )
+    let calls = 0
+    fakeAi.setChatHandler(() => {
+      calls++
+      return JSON.stringify({ needed: false })
+    })
+    const firstCheck = await runDream(database.db, masterKey, {
+      runId: 'tidy-noop-1',
+      trigger: 'manual',
+      mode: 'tidy',
+      limit: 5,
+    })
+    expect(firstCheck.considered).toBe(1)
+    expect(calls).toBe(1)
+    const secondCheck = await runDream(database.db, masterKey, {
+      runId: 'tidy-noop-2',
+      trigger: 'manual',
+      mode: 'tidy',
+      limit: 5,
+    })
+    expect(secondCheck.considered).toBe(0)
+    expect(calls).toBe(1)
+  })
 })
