@@ -1,4 +1,8 @@
-import { extractTargetShortIds, type EntryKind, type EntryLinkNeighbor } from '@kioku/contracts'
+import {
+  extractEntryLinksWithContext,
+  type EntryKind,
+  type EntryLinkNeighbor,
+} from '@kioku/contracts'
 import { and, eq, inArray } from 'drizzle-orm'
 
 import {
@@ -10,19 +14,28 @@ import {
 import type { Db, Tx } from '../db/client'
 import { entries, entryLinks } from '../db/schema'
 
-// 同步单条词条正文中 [[m-xxxxxx]] 出链（排除指向自身）
+// 同步单条词条正文中 [[m-xxxxxx]] 与 [[m-xxxxxx|语境]] 出链（排除指向自身）
 export async function syncEntryLinks(
   tx: Tx,
   sourceEntryId: string,
   sourceShortId: string,
   content: string,
 ): Promise<void> {
-  const targets = extractTargetShortIds(content).filter((id) => id !== sourceShortId)
+  const links = extractEntryLinksWithContext(content).filter(
+    (item) => item.targetShortId !== sourceShortId,
+  )
   await tx.delete(entryLinks).where(eq(entryLinks.sourceEntryId, sourceEntryId))
-  if (!targets.length) return
+  if (!links.length) return
   await tx
     .insert(entryLinks)
-    .values(targets.map((targetShortId) => ({ sourceEntryId, targetShortId })))
+    .values(
+      links.map((item) => ({
+        sourceEntryId,
+        targetShortId: item.targetShortId,
+        relation: item.relation,
+        contextSnippet: item.contextSnippet,
+      })),
+    )
     .onConflictDoNothing()
 }
 
@@ -39,6 +52,8 @@ export async function loadEntryLinks(
         shortId: entries.shortId,
         title: entries.title,
         kind: entries.kind,
+        relation: entryLinks.relation,
+        contextSnippet: entryLinks.contextSnippet,
       })
       .from(entryLinks)
       .innerJoin(entries, eq(entries.shortId, entryLinks.targetShortId))
@@ -48,6 +63,8 @@ export async function loadEntryLinks(
         shortId: entries.shortId,
         title: entries.title,
         kind: entries.kind,
+        relation: entryLinks.relation,
+        contextSnippet: entryLinks.contextSnippet,
       })
       .from(entryLinks)
       .innerJoin(entries, eq(entries.id, entryLinks.sourceEntryId))
@@ -55,7 +72,13 @@ export async function loadEntryLinks(
   ])
 
   const dedupe = (
-    rows: { shortId: string; title: string; kind: EntryKind }[],
+    rows: {
+      shortId: string
+      title: string
+      kind: EntryKind
+      relation: string | null
+      contextSnippet: string | null
+    }[],
     direction: 'outgoing' | 'incoming',
   ): EntryLinkNeighbor[] => {
     const seen = new Set<string>()
@@ -63,7 +86,14 @@ export async function loadEntryLinks(
     for (const r of rows) {
       if (r.shortId === shortId || seen.has(r.shortId)) continue
       seen.add(r.shortId)
-      out.push({ shortId: r.shortId, title: r.title, kind: r.kind, direction })
+      out.push({
+        shortId: r.shortId,
+        title: r.title,
+        kind: r.kind,
+        direction,
+        ...(r.relation ? { relation: r.relation } : {}),
+        ...(r.contextSnippet ? { contextSnippet: r.contextSnippet } : {}),
+      })
     }
     return out
   }
@@ -84,6 +114,7 @@ export interface OneHopNeighbor {
   entryId: string
   shortId: string
   title: string
+  summary: string | null
   kind: EntryKind
   isPinned: boolean
   envs: string[]
@@ -91,6 +122,9 @@ export interface OneHopNeighbor {
   projects: string[]
   runtimes: string[]
   disclosure: string | null
+  updatedAt: string
+  lastChangeSummary: string | null
+  linkRelation: string | null
   score: number
   viaSeedShortId: string
 }
@@ -114,6 +148,7 @@ export async function expandOneHopNeighbors(
       .select({
         sourceEntryId: entryLinks.sourceEntryId,
         targetShortId: entryLinks.targetShortId,
+        relation: entryLinks.relation,
       })
       .from(entryLinks)
       .where(inArray(entryLinks.sourceEntryId, seedIds)),
@@ -121,25 +156,30 @@ export async function expandOneHopNeighbors(
       .select({
         sourceEntryId: entryLinks.sourceEntryId,
         targetShortId: entryLinks.targetShortId,
+        relation: entryLinks.relation,
       })
       .from(entryLinks)
       .where(inArray(entryLinks.targetShortId, seedShortIds)),
   ])
 
-  const bestTargetByShort = new Map<string, OneHopSeed>()
+  const bestTargetByShort = new Map<string, { seed: OneHopSeed; relation: string | null }>()
   for (const edge of outEdges) {
     const seed = seedById.get(edge.sourceEntryId)
     if (!seed || seedByShort.has(edge.targetShortId)) continue
     const prev = bestTargetByShort.get(edge.targetShortId)
-    if (!prev || seed.score > prev.score) bestTargetByShort.set(edge.targetShortId, seed)
+    if (!prev || seed.score > prev.seed.score) {
+      bestTargetByShort.set(edge.targetShortId, { seed, relation: edge.relation })
+    }
   }
 
-  const bestSourceById = new Map<string, OneHopSeed>()
+  const bestSourceById = new Map<string, { seed: OneHopSeed; relation: string | null }>()
   for (const edge of inEdges) {
     const seed = seedByShort.get(edge.targetShortId)
     if (!seed || seedById.has(edge.sourceEntryId)) continue
     const prev = bestSourceById.get(edge.sourceEntryId)
-    if (!prev || seed.score > prev.score) bestSourceById.set(edge.sourceEntryId, seed)
+    if (!prev || seed.score > prev.seed.score) {
+      bestSourceById.set(edge.sourceEntryId, { seed, relation: edge.relation })
+    }
   }
 
   const targetShorts = [...bestTargetByShort.keys()]
@@ -150,6 +190,7 @@ export async function expandOneHopNeighbors(
     id: entries.id,
     shortId: entries.shortId,
     title: entries.title,
+    summary: entries.summary,
     kind: entries.kind,
     isPinned: entries.isPinned,
     envs: entries.envs,
@@ -157,6 +198,8 @@ export async function expandOneHopNeighbors(
     projects: entries.projects,
     runtimes: entries.runtimes,
     disclosure: entries.disclosure,
+    updatedAt: entries.updatedAt,
+    lastChangeSummary: entries.lastChangeSummary,
   }
 
   const [outRows, inRows] = await Promise.all([
@@ -183,16 +226,20 @@ export async function expandOneHopNeighbors(
   ])
 
   const merged = new Map<string, OneHopNeighbor>()
-  const consider = (row: (typeof outRows)[number], seed: OneHopSeed | undefined) => {
-    if (!seed || seedById.has(row.id)) return
+  const consider = (
+    row: (typeof outRows)[number],
+    edgeInfo: { seed: OneHopSeed; relation: string | null } | undefined,
+  ) => {
+    if (!edgeInfo || seedById.has(row.id)) return
     if (hasExclusiveSceneConflict(row, focus)) return
-    const score = seed.score * decay
+    const score = edgeInfo.seed.score * decay
     const existing = merged.get(row.id)
     if (!existing || score > existing.score) {
       merged.set(row.id, {
         entryId: row.id,
         shortId: row.shortId,
         title: row.title,
+        summary: row.summary,
         kind: row.kind,
         isPinned: row.isPinned,
         envs: row.envs,
@@ -200,8 +247,11 @@ export async function expandOneHopNeighbors(
         projects: row.projects,
         runtimes: row.runtimes,
         disclosure: row.disclosure,
+        updatedAt: row.updatedAt.toISOString(),
+        lastChangeSummary: row.lastChangeSummary,
+        linkRelation: edgeInfo.relation,
         score,
-        viaSeedShortId: seed.shortId,
+        viaSeedShortId: edgeInfo.seed.shortId,
       })
     }
   }

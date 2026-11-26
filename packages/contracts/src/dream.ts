@@ -1,16 +1,25 @@
 import { z } from 'zod'
 
 import {
+  ArchivedHistoryNote,
+  ChangeSummary,
   Disclosure,
   EntryContent,
   EntryKind,
+  EntrySummary,
   EntryTitle,
   SceneSlugList,
   TopicList,
 } from './entries'
 import { ShortId } from './links'
 
-export const DREAM_KINDS = ['distill_episode', 'merge_duplicates', 'mark_stale', 'update'] as const
+export const DREAM_KINDS = [
+  'distill_episode',
+  'merge_duplicates',
+  'mark_stale',
+  'update',
+  'tidy',
+] as const
 export const DreamSuggestionKind = z.enum(DREAM_KINDS).meta({ id: 'DreamSuggestionKind' })
 export type DreamSuggestionKind = z.infer<typeof DreamSuggestionKind>
 
@@ -19,6 +28,7 @@ export const DREAM_KIND_NAMES: Record<DreamSuggestionKind, string> = {
   merge_duplicates: '合并重复记忆',
   mark_stale: '标记过时记忆',
   update: '更新记忆内容',
+  tidy: '规范与精简',
 }
 
 export const DREAM_STATUSES = ['pending', 'applied', 'rejected'] as const
@@ -60,6 +70,7 @@ export const DreamEntrySnapshot = z.object({
   shortId: ShortId,
   kind: EntryKind,
   title: z.string(),
+  summary: z.string().nullable().optional(),
   content: z.string(),
   disclosure: z.string().nullable(),
   isPinned: z.boolean(),
@@ -68,6 +79,8 @@ export const DreamEntrySnapshot = z.object({
   projects: z.array(z.string()),
   runtimes: z.array(z.string()),
   topics: z.array(z.string()),
+  verifiedAt: z.string().nullable().optional(),
+  lastChangeSummary: z.string().nullable().optional(),
   version: z.number().int(),
   updatedAt: z.string(),
 })
@@ -81,8 +94,11 @@ export const DreamSuggestionView = z.object({
   keepId: z.uuid().nullable(),
   entries: z.array(DreamEntrySnapshot),
   proposedTitle: z.string().nullable(),
+  proposedSummary: z.string().nullable().optional(),
   proposedContent: z.string().nullable(),
   proposedDisclosure: z.string().nullable(),
+  proposedChangeSummary: z.string().nullable().optional(),
+  archivedNotes: z.array(ArchivedHistoryNote).nullable().optional(),
   proposedTopics: z.array(z.string()).nullable(),
   proposedEnvs: z.array(z.string()).nullable(),
   proposedRealms: z.array(z.string()).nullable(),
@@ -102,11 +118,14 @@ export const InboxResponse = z.object({
 })
 export type InboxResponse = z.infer<typeof InboxResponse>
 
-// 应用建议时可选附带编辑后的草稿字段（编辑后应用）
+// 应用建议时可选附带编辑后的草稿字段（编辑后应用或分项应用）
 export const ApplySuggestionRequest = z.object({
   title: EntryTitle.optional(),
+  summary: EntrySummary.nullable().optional(),
   content: EntryContent.optional(),
   disclosure: Disclosure.nullable().optional(),
+  changeSummary: ChangeSummary.nullable().optional(),
+  applyArchivedNotes: z.boolean().optional(),
   topics: TopicList.optional(),
   envs: SceneSlugList.optional(),
   realms: SceneSlugList.optional(),
@@ -122,10 +141,19 @@ export const ApplySuggestionResponse = z.object({
       id: z.uuid(),
       shortId: ShortId,
       title: z.string(),
+      version: z.number().int().optional(),
+      previousVersion: z.number().int().optional(),
     })
     .nullable(),
 })
 export type ApplySuggestionResponse = z.infer<typeof ApplySuggestionResponse>
+
+export const TriggerDreamRequest = z.object({
+  mode: z.enum(['standard', 'tidy']).default('standard'),
+  limit: z.number().int().min(1).max(20).optional(),
+  pinnedFirst: z.boolean().optional(),
+})
+export type TriggerDreamRequest = z.infer<typeof TriggerDreamRequest>
 
 export const TriggerDreamResponse = z.object({
   started: z.boolean(),

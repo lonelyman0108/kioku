@@ -6,9 +6,9 @@ import {
   Disclosure,
   DISCLOSURE_MAX,
   ENTRY_CONTENT_MAX,
-  ENTRY_TITLE_MAX,
-  EntryTitle,
+  ENTRY_TITLE_NEW_MAX,
   extractMarkdownHeadings,
+  NewEntryTitle,
   TOPICS_MAX,
   TopicTag,
   type CaptureCandidate,
@@ -251,7 +251,7 @@ const mergeValidationProblem = computed(() => {
 const createValidationProblem = computed(() => {
   if (viewAction.value !== 'create') return null
   if (createForm.title.trim()) {
-    const parsed = EntryTitle.safeParse(createForm.title)
+    const parsed = NewEntryTitle.safeParse(createForm.title)
     if (!parsed.success) return parsed.error.issues[0]?.message ?? '标题格式有误'
   }
   if (createForm.disclosure.trim()) {
@@ -752,7 +752,7 @@ onBeforeUnmount(() => {
               <UInput
                 v-model="createForm.title"
                 name="title"
-                :maxlength="ENTRY_TITLE_MAX"
+                :maxlength="ENTRY_TITLE_NEW_MAX"
                 :disabled="applyBusy"
                 class="w-full"
               />

@@ -16,8 +16,8 @@ import {
   testMasterKey,
 } from '../../testing/db'
 import { startFakeOpenAi, type FakeOpenAiServer } from '../../testing/fakeOpenAi'
-import { compileBoot } from '../boot'
-import { recallEntries } from '../recall'
+import { compileBoot, formatBootBlock } from '../boot'
+import { formatRecallBlock, recallEntries } from '../recall'
 
 describe.skipIf(!testDatabaseUrl)('Presence Engine：启动加载与混合召回', () => {
   let database: Database
@@ -310,5 +310,100 @@ describe.skipIf(!testDatabaseUrl)('Presence Engine：启动加载与混合召回
     expect(res.status).toBe(200)
     const parsed = RecallResponse.parse(await res.json())
     expect(parsed.candidates[0]?.shortId).toBe(macMatch.entry.shortId)
+    expect(parsed.candidates[0]?.updatedAt).toBeTruthy()
+    expect(formatRecallBlock(parsed.candidates)).toContain('更新 ')
+  })
+
+  it('两遍渐进式 Boot 保护短规则展开并把巨型常驻降级为可读目录，同时 BM25F 标题权重高于正文偶发提及', async () => {
+    const masterKey = testMasterKey()
+    const entrySvc = new EntryService(
+      database.db,
+      masterKey,
+      new CredentialService(database.db, masterKey),
+      null,
+    )
+    const consoleScope = { kind: 'console' as const, accountId: 'acc', sessionId: 'sess' }
+
+    // 先建巨型常驻手册（在旧算法下会抢占先机吃光预算），再建短规范
+    const giant = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '核心运维总览手册',
+        summary: '汇总全部节点拓扑与编排边界。',
+        content: `# 核心运维总览手册\n\n${'详细端口配置与运维说明。'.repeat(240)}`,
+        changeSummary: '迁至统一编排平台',
+        isPinned: true,
+      }),
+    )
+    const shortRule = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '全局协作约定',
+        content: '# 全局协作约定\n\n所有提交信息使用中文。',
+        changeSummary: '明确中文提交规范',
+        isPinned: true,
+      }),
+    )
+
+    const boot = await compileBoot(database.db, consoleScope, {
+      focus: { envs: [], realms: [], projects: [], runtimes: [] },
+      budget: 2_000,
+    })
+    expect(boot.entries.map((e) => e.shortId)).toEqual([shortRule.entry.shortId])
+    expect(boot.omitted).toEqual([giant.entry.shortId])
+    expect(boot.omittedItems?.[0]?.summary).toBe('汇总全部节点拓扑与编排边界。')
+
+    const rendered = formatBootBlock(boot, 'GUIDANCE')
+    expect(rendered).toContain('核心运维总览手册')
+    expect(rendered).toContain('汇总全部节点拓扑与编排边界。')
+    expect(rendered).toContain('迁至统一编排平台')
+    // 展示层自动去重正文首行与标题相同的 # H1
+    expect(rendered).not.toMatch(/^# 全局协作约定$/m)
+
+    // BM25F 字段权重验证：标题含「故障恢复」应高于仅正文提一次「故障恢复」
+    const titleHit = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '数据库故障恢复指南',
+        content: '备份检查与恢复步骤说明。',
+      }),
+    )
+    const bodyOnly = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '日常开发排程备忘',
+        content: '周会同步进度，顺便提一句数据库故障恢复演练安排在月底。',
+      }),
+    )
+    const hits = await recallEntries(database.db, masterKey, consoleScope, '数据库故障恢复', {
+      focus: { envs: [], realms: [], projects: [], runtimes: [] },
+      useSemantic: false,
+      includeLinks: false,
+      limit: 5,
+    })
+    expect(hits[0]?.shortId).toBe(titleHit.entry.shortId)
+    expect(hits.findIndex((c) => c.shortId === titleHit.entry.shortId)).toBeLessThan(
+      hits.findIndex((c) => c.shortId === bodyOnly.entry.shortId),
+    )
+
+    // 验证多条超软上限（2500字）常驻在 6850 预算下仍能展开合理条数而非全部跳过导致零展开
+    for (let i = 1; i <= 3; i++) {
+      await entrySvc.create(
+        consoleScope,
+        entryInput({
+          title: `中型常驻手册${i}`,
+          summary: `第 ${i} 份手册概要`,
+          content: `第${i}份规则。`.repeat(420),
+          isPinned: true,
+          envs: ['linux'],
+        }),
+      )
+    }
+    const mediumBoot = await compileBoot(database.db, consoleScope, {
+      focus: { envs: ['linux'], realms: [], projects: [], runtimes: [] },
+      budget: 6_850,
+    })
+    expect(mediumBoot.entries.length).toBeGreaterThanOrEqual(2)
+    expect(mediumBoot.omitted.length).toBeGreaterThanOrEqual(1)
   })
 })

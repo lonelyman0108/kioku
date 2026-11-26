@@ -70,17 +70,26 @@ export async function pgBossConnection(url: string): Promise<PgBossConnection> {
   }
 }
 
+export interface DreamEnqueueOptions {
+  mode?: 'standard' | 'tidy' | undefined
+  limit?: number | undefined
+  pinnedFirst?: boolean | undefined
+}
+
 export interface Jobs {
   enqueueEmbed(entryId: string): void
   enqueueBackfill(): Promise<boolean>
   enqueueExtraction(target: BufferedBucket, delaySeconds: number): Promise<void>
-  enqueueDream(): Promise<string | null>
+  enqueueDream(options?: DreamEnqueueOptions): Promise<string | null>
   isDreamRunning(): Promise<boolean>
   enqueueCleanup(): Promise<boolean>
 }
 
 interface DreamJobData {
   trigger: DreamTrigger
+  mode?: 'standard' | 'tidy' | undefined
+  limit?: number | undefined
+  pinnedFirst?: boolean | undefined
 }
 
 export async function startJobs(options: {
@@ -134,9 +143,15 @@ export async function startJobs(options: {
         console.error('摘要抽取入队失败', loggableError(err))
       }
     },
-    enqueueDream: async () => {
+    enqueueDream: async (opts) => {
       try {
-        const id = await boss.send(DREAM, { trigger: 'manual' } satisfies DreamJobData, {
+        const data: DreamJobData = {
+          trigger: 'manual',
+          ...(opts?.mode ? { mode: opts.mode } : {}),
+          ...(opts?.limit !== undefined ? { limit: opts.limit } : {}),
+          ...(opts?.pinnedFirst !== undefined ? { pinnedFirst: opts.pinnedFirst } : {}),
+        }
+        const id = await boss.send(DREAM, data, {
           singletonKey: 'dream',
         })
         return id
@@ -183,6 +198,9 @@ export async function startJobs(options: {
       const result = await runDream(options.db, options.masterKey, {
         runId: job.id,
         trigger,
+        mode: job.data?.mode,
+        limit: job.data?.limit,
+        pinnedFirst: job.data?.pinnedFirst,
       })
       if (result.outcome === 'failed') {
         console.error('记忆整理出错', result.error)

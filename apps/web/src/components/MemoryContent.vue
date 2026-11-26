@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 
 import { renderMarkdown, type CredentialLinks, type WikiLinkTargets } from '../markdown'
 
@@ -10,12 +10,40 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ open: [shortId: string]; credential: [slug: string] }>()
 
+const rootRef = ref<HTMLElement | null>(null)
+
 const html = computed(() =>
   renderMarkdown(props.content, {
     credentials: props.credentials ?? null,
     wikiLinks: props.wikiLinks ?? null,
   }),
 )
+
+function normalizeHeadingText(text: string): string {
+  return text
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/[*_~]+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+}
+
+function scrollToHeading(heading: string, index?: number) {
+  const root = rootRef.value
+  if (!root) return
+  const headings = [...root.querySelectorAll<HTMLElement>('h2')]
+  const normalized = normalizeHeadingText(heading)
+  const byIndex = index !== undefined ? headings[index] : undefined
+  const target =
+    (byIndex && normalizeHeadingText(byIndex.textContent ?? '') === normalized ? byIndex : null) ??
+    headings.find((el) => normalizeHeadingText(el.textContent ?? '') === normalized) ??
+    byIndex
+  target?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
+defineExpose({ scrollToHeading })
 
 function onClick(event: MouseEvent) {
   const target = event.target as HTMLElement | null
@@ -35,7 +63,7 @@ function onClick(event: MouseEvent) {
 
 <template>
   <!-- eslint-disable-next-line vue/no-v-html -- 已经过 DOMPurify 清洗，见 markdown.ts -->
-  <div class="kioku-markdown" @click="onClick" v-html="html" />
+  <div ref="rootRef" class="kioku-markdown" @click="onClick" v-html="html" />
 </template>
 
 <style scoped>
@@ -63,6 +91,7 @@ function onClick(event: MouseEvent) {
 .kioku-markdown :deep(h2) {
   margin: 22px 0 7px;
   font-size: 16px;
+  scroll-margin-top: 16px;
 }
 .kioku-markdown :deep(h3),
 .kioku-markdown :deep(h4) {
@@ -184,6 +213,40 @@ function onClick(event: MouseEvent) {
 .kioku-markdown :deep(hr) {
   margin: 18px 0;
   border-color: var(--ui-border);
+}
+.kioku-markdown :deep(details) {
+  padding: 8px 12px;
+  border: 1px solid var(--ui-border);
+  background: var(--ui-bg-muted);
+}
+.kioku-markdown :deep(summary) {
+  position: relative;
+  padding-left: 16px;
+  font-weight: 500;
+  color: var(--ui-text-highlighted);
+  list-style: none;
+  cursor: pointer;
+}
+.kioku-markdown :deep(summary::-webkit-details-marker) {
+  display: none;
+}
+.kioku-markdown :deep(summary)::before {
+  content: '▸';
+  position: absolute;
+  left: 0;
+  top: 0;
+  color: var(--ui-text-muted);
+}
+.kioku-markdown :deep(details[open] > summary) {
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.kioku-markdown :deep(details[open] > summary)::before {
+  content: '▾';
+}
+.kioku-markdown :deep(details > :last-child) {
+  margin-bottom: 0;
 }
 .kioku-markdown :deep(a.kioku-wikilink) {
   color: inherit;

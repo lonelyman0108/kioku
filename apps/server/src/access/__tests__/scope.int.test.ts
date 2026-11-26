@@ -13,6 +13,7 @@ import { CredentialService } from '../../credential/service'
 import type { Database } from '../../db/client'
 import { credentials, entries } from '../../db/schema'
 import type { KeyPrincipal } from '../../http/env'
+import { EntryService } from '../../memory/service'
 import {
   databaseNow,
   openTestDatabase,
@@ -227,5 +228,68 @@ describe.skipIf(!testDatabaseUrl)('allowed_realms 硬边界（JS 与 SQL 一致�
       .map((c) => c.slug)
       .sort()
     expect(visibleToWork).toEqual(['both', 'work-only'])
+  })
+
+  it('EntryService.history 严格执行 allowed_realms 权限隔离，禁止越权读取历史版本', async () => {
+    const masterKey = testMasterKey()
+    const credSvc = new CredentialService(database.db, masterKey)
+    const entrySvc = new EntryService(database.db, masterKey, credSvc, null)
+    const consoleScope: AccessScope = { kind: 'console', accountId: 'acc', sessionId: 'sess' }
+
+    const personalEntry = await entrySvc.create(consoleScope, {
+      title: '个人备忘',
+      content: '私人内容',
+      realms: ['personal'],
+      isPinned: false,
+      envs: [],
+      projects: [],
+      runtimes: [],
+      topics: [],
+    })
+    const workEntry = await entrySvc.create(consoleScope, {
+      title: '工作约定',
+      content: '工作内容',
+      realms: ['work'],
+      isPinned: false,
+      envs: [],
+      projects: [],
+      runtimes: [],
+      topics: [],
+    })
+    const universalEntry = await entrySvc.create(consoleScope, {
+      title: '通用规范',
+      content: '通用内容',
+      realms: [],
+      isPinned: false,
+      envs: [],
+      projects: [],
+      runtimes: [],
+      topics: [],
+    })
+
+    const workScope = keyScope({ allowedRealms: ['work'] })
+    await expect(entrySvc.history(workScope, personalEntry.entry.shortId)).rejects.toMatchObject({
+      status: 404,
+    })
+    const workHistory = await entrySvc.history(workScope, workEntry.entry.shortId)
+    expect(workHistory.items).toHaveLength(1)
+    const universalHistory = await entrySvc.history(workScope, universalEntry.entry.shortId)
+    expect(universalHistory.items).toHaveLength(1)
+
+    // 词条从 personal 改迁至 work 后，work 密钥绝不可读取原 personal 版本的历史快照或说明
+    await entrySvc.update(consoleScope, personalEntry.entry.shortId, {
+      content: '脱敏后的工作内容',
+      realms: ['work'],
+    })
+    const migratedDetail = await entrySvc.get(workScope, personalEntry.entry.shortId)
+    expect(migratedDetail.entry.lastChangeSummary).toBeNull()
+    expect(migratedDetail.recentHistory?.every((ev) => ev.version !== 1)).toBe(true)
+
+    const migratedHistory = await entrySvc.history(workScope, personalEntry.entry.shortId, {
+      includeSnapshots: true,
+    })
+    expect(migratedHistory.items.map((ev) => ev.version)).toEqual([2])
+    const v1Attempt = await entrySvc.history(workScope, personalEntry.entry.shortId, { version: 1 })
+    expect(v1Attempt.items).toEqual([])
   })
 })

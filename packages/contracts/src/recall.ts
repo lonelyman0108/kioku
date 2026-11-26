@@ -98,9 +98,27 @@ export const BootEntry = z
     title: z.string(),
     kind: EntryKind,
     content: z.string(),
+    summary: z.string().nullable().optional(),
+    updatedAt: z.string().optional(),
+    lastChangeSummary: z.string().nullable().optional(),
+    version: z.number().int().optional(),
+    charCount: z.number().int().optional(),
   })
   .meta({ id: 'BootEntry' })
 export type BootEntry = z.infer<typeof BootEntry>
+
+export const BootOmittedItem = z
+  .object({
+    shortId: ShortId,
+    title: z.string(),
+    summary: z.string().nullable().optional(),
+    disclosure: z.string().nullable().optional(),
+    updatedAt: z.string().optional(),
+    lastChangeSummary: z.string().nullable().optional(),
+    charCount: z.number().int().optional(),
+  })
+  .meta({ id: 'BootOmittedItem' })
+export type BootOmittedItem = z.infer<typeof BootOmittedItem>
 
 export const SessionSummary = z
   .object({
@@ -117,7 +135,9 @@ export const RecentEntry = z
     shortId: ShortId,
     title: z.string(),
     isPinned: z.boolean(),
+    summary: z.string().nullable().optional(),
     disclosure: z.string().nullable(),
+    lastChangeSummary: z.string().nullable().optional(),
     updatedAt: z.string(),
   })
   .meta({ id: 'RecentEntry' })
@@ -128,6 +148,7 @@ export const BootResponse = z
     entries: z.array(BootEntry),
     episodes: z.array(SessionSummary).default([]),
     omitted: z.array(ShortId),
+    omittedItems: z.array(BootOmittedItem).optional(),
   })
   .meta({ id: 'BootResponse' })
 export type BootResponse = z.infer<typeof BootResponse>
@@ -156,7 +177,11 @@ export const RecallCandidate = z
     realms: z.array(z.string()),
     projects: z.array(z.string()),
     runtimes: z.array(z.string()),
+    summary: z.string().nullable().optional(),
     disclosure: z.string().nullable(),
+    updatedAt: z.string().optional(),
+    lastChangeSummary: z.string().nullable().optional(),
+    linkRelation: z.string().nullable().optional(),
     score: z.number(),
     via: z.array(RecallVia),
     cues: z.array(z.string()),

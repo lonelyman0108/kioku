@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import {
   DISCLOSURE_MAX,
-  ENTRY_TITLE_MAX,
-  EntryTitle,
+  ENTRY_SUMMARY_MAX,
+  ENTRY_TITLE_NEW_MAX,
+  EntrySummary,
+  NewEntryTitle,
   TOPICS_MAX,
   TopicTag,
   type EntryDetailResponse,
@@ -12,8 +14,10 @@ import { computed, reactive, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import { icons } from '../icons'
 import { detectSecretPrefixes } from '../secretHint'
 import { earliestValidTo, fromLocalInput, validToTooSoon } from '../time'
+import { analyzeTitleHint } from '../titleHint'
 import SceneScopePicker, { type SceneScopeValue } from './SceneScopePicker.vue'
 import NoteLine from './ui/NoteLine.vue'
 
@@ -28,6 +32,7 @@ const emit = defineEmits<{ created: [detail: EntryDetailResponse] }>()
 
 const form = reactive({
   title: '',
+  summary: '',
   content: '',
   disclosure: '',
   isPinned: false,
@@ -42,6 +47,7 @@ const error = ref<string | null>(null)
 watch(open, (visible) => {
   if (!visible) return
   form.title = ''
+  form.summary = ''
   form.content = ''
   form.disclosure = ''
   form.isPinned = false
@@ -53,11 +59,22 @@ watch(open, (visible) => {
 })
 
 const secretWarnings = computed(() => detectSecretPrefixes(form.content))
+const titleHint = computed(() => analyzeTitleHint(form.title, form.content, 'create'))
+
+function applyCleanTitle() {
+  const split = titleHint.value.splittable
+  if (!split) return
+  form.title = split.cleanTitle
+}
 
 const validationProblem = computed(() => {
   if (form.title.trim()) {
-    const parsed = EntryTitle.safeParse(form.title)
+    const parsed = NewEntryTitle.safeParse(form.title)
     if (!parsed.success) return parsed.error.issues[0]?.message ?? '标题格式有误'
+  }
+  if (form.summary.trim()) {
+    const parsed = EntrySummary.safeParse(form.summary)
+    if (!parsed.success) return parsed.error.issues[0]?.message ?? '现行概要格式有误'
   }
   if (form.topics.length > TOPICS_MAX) return `主题标签最多 ${TOPICS_MAX} 个`
   for (const tag of form.topics) {
@@ -80,6 +97,7 @@ async function submit() {
     const validTo = form.validTo ? fromLocalInput(form.validTo) : null
     const detail = await api.createEntry({
       ...(form.title.trim() ? { title: form.title.trim() } : {}),
+      summary: form.summary.trim() || null,
       content: form.content,
       disclosure: form.disclosure.trim() || null,
       isPinned: form.isPinned,
@@ -110,13 +128,42 @@ async function submit() {
     <template #body>
       <div class="space-y-4">
         <div class="grid gap-3 sm:grid-cols-2">
-          <UFormField label="标题" help="留空时自动提取正文首个标题或短 ID">
-            <UInput v-model="form.title" :maxlength="ENTRY_TITLE_MAX" class="w-full" />
+          <UFormField label="标题">
+            <UInput v-model="form.title" :maxlength="ENTRY_TITLE_NEW_MAX" class="w-full" />
+            <template #help>
+              <div v-if="titleHint.message" class="title-hint-row">
+                <span class="title-hint-text">{{ titleHint.message }}</span>
+                <UButton
+                  v-if="titleHint.splittable"
+                  type="button"
+                  size="xs"
+                  color="warning"
+                  variant="outline"
+                  :icon="icons.split"
+                  @click="applyCleanTitle"
+                >
+                  精简为短标题
+                </UButton>
+              </div>
+              <span v-else>留空时自动提取正文首个标题或短 ID</span>
+            </template>
           </UFormField>
           <UFormField label="主题">
             <UInputTags v-model="form.topics" add-on-blur placeholder="输入后回车" class="w-full" />
           </UFormField>
         </div>
+
+        <UFormField label="现行概要（可选）" help="1–2 句概括当前结论，用于启动加载与列表预览">
+          <UTextarea
+            v-model="form.summary"
+            :rows="2"
+            autoresize
+            :maxrows="4"
+            :maxlength="ENTRY_SUMMARY_MAX"
+            placeholder="例如：生产环境统一使用 Docker Compose 部署，反向代理监听本机回环端口。"
+            class="w-full"
+          />
+        </UFormField>
 
         <NoteLine v-if="secretWarnings.length" tone="warning">
           正文疑似包含{{
@@ -184,3 +231,17 @@ async function submit() {
     </template>
   </UModal>
 </template>
+
+<style scoped>
+.title-hint-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+.title-hint-text {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ui-warning);
+}
+</style>

@@ -40,7 +40,7 @@ async function mcpRpc(
   return { status: res.status, body: JSON.parse(jsonText) as Record<string, unknown> }
 }
 
-describe.skipIf(!testDatabaseUrl)('无状态 MCP 服务与 8 个扁平工具', () => {
+describe.skipIf(!testDatabaseUrl)('无状态 MCP 服务与 9 个扁平工具', () => {
   let database: Database
 
   beforeAll(async () => {
@@ -55,7 +55,7 @@ describe.skipIf(!testDatabaseUrl)('无状态 MCP 服务与 8 个扁平工具', (
     await database.close()
   })
 
-  it('GET /v1/mcp 返回 405，tools/list 暴露 8 个工具且全链路 CRUD/检索/凭据元数据隔离生效', async () => {
+  it('GET /v1/mcp 返回 405，tools/list 暴露 9 个工具且全链路 CRUD/检索/凭据元数据隔离生效', async () => {
     const masterKey = testMasterKey()
     const app = createTestApp(database, { masterKey })
     const credSvc = new CredentialService(database.db, masterKey)
@@ -94,7 +94,7 @@ describe.skipIf(!testDatabaseUrl)('无状态 MCP 服务与 8 个扁平工具', (
     })
     expect(getRes.status).toBe(405)
 
-    // 1. tools/list 恰好暴露 8 个工具
+    // 1. tools/list 恰好暴露 9 个工具（含只读 kioku_history）
     const listRes = await mcpRpc(app, workKey.key, 'tools/list')
     expect(listRes.status).toBe(200)
     const tools = (listRes.body.result as { tools: { name: string }[] }).tools
@@ -104,6 +104,7 @@ describe.skipIf(!testDatabaseUrl)('无状态 MCP 服务与 8 个扁平工具', (
       'kioku_create',
       'kioku_delete',
       'kioku_get',
+      'kioku_history',
       'kioku_list_credentials',
       'kioku_search',
       'kioku_update',
@@ -289,5 +290,121 @@ describe.skipIf(!testDatabaseUrl)('无状态 MCP 服务与 8 个扁平工具', (
     }
     expect(delResult.isError).not.toBe(true)
     expect(delResult.structuredContent).toEqual({ deleted: true, id: shortId })
+  })
+
+  it('支持 kioku_get 大纲/小节直取、kioku_update 局部 patch 与软提醒，以及带场域隔离的 kioku_history', async () => {
+    const masterKey = testMasterKey()
+    const app = createTestApp(database, { masterKey })
+    const workKey = await issueTestApiKey(database, {
+      runtimeFamily: 'claudecode',
+      allowedRealms: ['work'],
+      canWrite: true,
+    })
+    const personalKey = await issueTestApiKey(database, {
+      runtimeFamily: 'codex',
+      allowedRealms: ['personal'],
+      canWrite: true,
+    })
+
+    const created = await mcpRpc(app, workKey.key, 'tools/call', {
+      name: 'kioku_create',
+      arguments: {
+        title: '网络架构手册',
+        summary: '主路由负责拨号，核心交换负责万兆汇聚。',
+        content: [
+          '# 网络架构手册',
+          '',
+          '## 拓扑结构',
+          '- 主路由 127.0.0.1',
+          '',
+          '## 关键禁令',
+          '- 严禁破坏既有端口划分',
+        ].join('\n'),
+        realms: ['work'],
+        change_summary: '初始化网络架构手册',
+      },
+    })
+    const createRes = created.body.result as {
+      content: { text: string }[]
+      structuredContent?: unknown
+    }
+    const detail = EntryDetailResponse.parse(createRes.structuredContent)
+    expect(detail.warnings?.some((w) => w.code === 'content_repeats_title')).toBe(true)
+    expect(createRes.content[0]!.text).toContain('更新：')
+    expect(createRes.content[0]!.text).toContain('现行概要：主路由负责拨号')
+
+    // kioku_get view=outline 与 section 按需直取
+    const outlineRes = await mcpRpc(app, workKey.key, 'tools/call', {
+      name: 'kioku_get',
+      arguments: { id: detail.entry.shortId, view: 'outline' },
+    })
+    const outlineText = (outlineRes.body.result as { content: { text: string }[] }).content[0]!.text
+    expect(outlineText).toContain('## 正文大纲')
+    expect(outlineText).toContain('拓扑结构')
+    expect(outlineText).toContain('关键禁令')
+
+    const secRes = await mcpRpc(app, workKey.key, 'tools/call', {
+      name: 'kioku_get',
+      arguments: { id: detail.entry.shortId, section: '关键禁令' },
+    })
+    const secText = (secRes.body.result as { content: { text: string }[] }).content[0]!.text
+    expect(secText).toContain('严禁破坏既有端口划分')
+    expect(secText).not.toContain('主路由 127.0.0.1')
+
+    // kioku_update 局部 patch + change_summary
+    const patched = await mcpRpc(app, workKey.key, 'tools/call', {
+      name: 'kioku_update',
+      arguments: {
+        id: detail.entry.shortId,
+        expected_version: 1,
+        patch: {
+          kind: 'insert_under_heading',
+          heading: '关键禁令',
+          text: '- 变更前先导出配置快照',
+        },
+        change_summary: '补充变更前导出快照要求',
+      },
+    })
+    const patchedDetail = EntryDetailResponse.parse(
+      (patched.body.result as { structuredContent?: unknown }).structuredContent,
+    )
+    expect(patchedDetail.entry.version).toBe(2)
+    expect(patchedDetail.entry.content).toContain('变更前先导出配置快照')
+    expect(patchedDetail.entry.lastChangeSummary).toBe('补充变更前导出快照要求')
+
+    // kioku_history 默认轻量时间线不返回大 snapshot；传 version 返回快照；跨场域密钥被 404 隔离
+    const histTimeline = await mcpRpc(app, workKey.key, 'tools/call', {
+      name: 'kioku_history',
+      arguments: { id: detail.entry.shortId },
+    })
+    const histResult = histTimeline.body.result as {
+      content: { text: string }[]
+      structuredContent?: { items: Array<{ snapshot?: unknown; changeSummary?: string | null }> }
+    }
+    expect(histResult.content[0]!.text).toContain('补充变更前导出快照要求')
+    expect(histResult.structuredContent?.items).toHaveLength(2)
+    expect(histResult.structuredContent?.items[0]?.snapshot).toBeUndefined()
+
+    const histV1 = await mcpRpc(app, workKey.key, 'tools/call', {
+      name: 'kioku_history',
+      arguments: { id: detail.entry.shortId, version: 1 },
+    })
+    const histV1Result = histV1.body.result as {
+      content: { text: string }[]
+      structuredContent?: { items: Array<{ snapshot?: { version: number } }> }
+    }
+    expect(histV1Result.content[0]!.text).toContain('历史版本')
+    expect(histV1Result.structuredContent?.items[0]?.snapshot?.version).toBe(1)
+
+    const crossRealmHist = await mcpRpc(app, personalKey.key, 'tools/call', {
+      name: 'kioku_history',
+      arguments: { id: detail.entry.shortId },
+    })
+    const crossResult = crossRealmHist.body.result as {
+      isError?: boolean
+      structuredContent?: Record<string, unknown>
+    }
+    expect(crossResult.isError).toBe(true)
+    expect(crossResult.structuredContent).toMatchObject({ status: 404 })
   })
 })

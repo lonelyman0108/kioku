@@ -1,22 +1,43 @@
 <script setup lang="ts">
-import type { ApplySuggestionRequest } from '@kioku/contracts'
+import {
+  DREAM_KINDS,
+  hasDuplicateLeadingHeading,
+  stripDuplicateLeadingHeading,
+  type ApplySuggestionRequest,
+  type DreamSuggestionKind,
+  type DreamSuggestionView,
+} from '@kioku/contracts'
 import { useToast } from '@nuxt/ui/composables'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import DreamSuggestionCard from '../components/DreamSuggestionCard.vue'
+import HygieneSweepDrawer from '../components/HygieneSweepDrawer.vue'
 import EmptyState from '../components/ui/EmptyState.vue'
 import NoteLine from '../components/ui/NoteLine.vue'
 import PageHead from '../components/ui/PageHead.vue'
 import ReadFailureNote from '../components/ui/ReadFailureNote.vue'
 import { useSession } from '../composables/useSession'
+import { isTitleOnlyTidy } from '../diff'
 import { icons } from '../icons'
-import { dreamOutcomeLabels } from '../labels'
-import { settingsRoute } from '../routes'
+import { dreamKindLabels, dreamOutcomeLabels } from '../labels'
+import { entryRoute, settingsRoute } from '../routes'
 import { formatRelative, formatTime } from '../time'
 
+type KindFilter = 'all' | DreamSuggestionKind
+
+const FILTER_ORDER: readonly DreamSuggestionKind[] = [
+  'tidy',
+  'distill_episode',
+  'merge_duplicates',
+  'update',
+  'mark_stale',
+]
+
+const router = useRouter()
 const toast = useToast()
 const queryClient = useQueryClient()
 const { me } = useSession()
@@ -31,14 +52,124 @@ const data = computed(() => inboxQuery.data.value ?? null)
 const items = computed(() => data.value?.items ?? [])
 const state = computed(() => data.value?.dreamState ?? null)
 
-const triggering = ref(false)
-async function triggerDream() {
-  if (triggering.value) return
-  triggering.value = true
+const kindFilter = ref<KindFilter>('all')
+const sweepOpen = ref(false)
+const quickTableMode = ref(false)
+const selectedTableIds = ref<string[]>([])
+const batchBusy = ref(false)
+const undoingKeys = new Set<string>()
+const undoneKeys = new Set<string>()
+
+const kindCounts = computed(() => {
+  const counts: Record<KindFilter, number> = {
+    all: items.value.length,
+    tidy: 0,
+    distill_episode: 0,
+    merge_duplicates: 0,
+    mark_stale: 0,
+    update: 0,
+  }
+  for (const item of items.value) {
+    counts[item.kind]++
+  }
+  return counts
+})
+
+const filterTabs = computed<{ value: KindFilter; label: string; count: number }[]>(() => [
+  { value: 'all', label: '全部', count: kindCounts.value.all },
+  ...FILTER_ORDER.filter((k) => DREAM_KINDS.includes(k)).map((k) => ({
+    value: k as KindFilter,
+    label: dreamKindLabels[k],
+    count: kindCounts.value[k],
+  })),
+])
+
+const filteredItems = computed(() =>
+  kindFilter.value === 'all'
+    ? items.value
+    : items.value.filter((item) => item.kind === kindFilter.value),
+)
+
+const titleOnlyItems = computed(() => items.value.filter(isTitleOnlyTidy))
+const canUseQuickTable = computed(() => titleOnlyItems.value.length >= 3)
+
+watch(canUseQuickTable, (available) => {
+  if (!available) quickTableMode.value = false
+})
+
+watch(quickTableMode, (enabled) => {
+  if (enabled) {
+    selectedTableIds.value = titleOnlyItems.value.map((item) => item.id)
+  }
+})
+
+watch(titleOnlyItems, (list) => {
+  if (!quickTableMode.value) return
+  const validIds = new Set(list.map((item) => item.id))
+  selectedTableIds.value = selectedTableIds.value.filter((id) => validIds.has(id))
+})
+
+function onFilterTabKeydown(event: KeyboardEvent, index: number) {
+  const tabs = filterTabs.value
+  if (!tabs.length) return
+  let nextIdx = -1
+  if (event.key === 'ArrowRight') nextIdx = (index + 1) % tabs.length
+  else if (event.key === 'ArrowLeft') nextIdx = (index - 1 + tabs.length) % tabs.length
+  else if (event.key === 'Home') nextIdx = 0
+  else if (event.key === 'End') nextIdx = tabs.length - 1
+  if (nextIdx < 0) return
+  event.preventDefault()
+  quickTableMode.value = false
+  kindFilter.value = tabs[nextIdx]!.value
+  const listEl = (event.currentTarget as HTMLElement | null)?.parentElement
+  listEl?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[nextIdx]?.focus()
+}
+
+const allTableSelected = computed(
+  () =>
+    titleOnlyItems.value.length > 0 &&
+    selectedTableIds.value.length === titleOnlyItems.value.length,
+)
+
+function toggleTableAll() {
+  if (allTableSelected.value) {
+    selectedTableIds.value = []
+  } else {
+    selectedTableIds.value = titleOnlyItems.value.map((item) => item.id)
+  }
+}
+
+function toggleTableRow(id: string) {
+  if (selectedTableIds.value.includes(id)) {
+    selectedTableIds.value = selectedTableIds.value.filter((x) => x !== id)
+  } else {
+    selectedTableIds.value = [...selectedTableIds.value, id]
+  }
+}
+
+function baseEntryOf(suggestion: DreamSuggestionView) {
+  if (suggestion.keepId) {
+    return (
+      suggestion.entries.find((e) => e.id === suggestion.keepId) ?? suggestion.entries[0] ?? null
+    )
+  }
+  return suggestion.entries[0] ?? null
+}
+
+const triggeringMode = ref<'standard' | 'tidy' | null>(null)
+async function triggerDream(mode: 'standard' | 'tidy') {
+  if (triggeringMode.value) return
+  triggeringMode.value = mode
   try {
-    const res = await api.runDream()
+    const res =
+      mode === 'tidy'
+        ? await api.runDream({ mode: 'tidy', pinnedFirst: true, limit: 8 })
+        : await api.runDream({ mode: 'standard' })
     if (res.started) {
-      toast.add({ title: '已发起整理任务', color: 'success' })
+      toast.add({
+        title: mode === 'tidy' ? '已发起存量规范整理任务' : '已发起整理任务',
+        color: 'success',
+      })
     } else {
       toast.add({ title: res.reason ?? '当前无需重复整理', color: 'neutral' })
     }
@@ -46,23 +177,102 @@ async function triggerDream() {
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '触发整理失败', color: 'error' })
   } finally {
-    triggering.value = false
+    triggeringMode.value = null
+  }
+}
+
+async function undoAppliedSuggestion(
+  shortId: string,
+  previousVersion: number,
+  appliedVersion: number,
+  title: string,
+) {
+  const key = `${shortId}:${appliedVersion}`
+  if (undoingKeys.has(key) || undoneKeys.has(key)) return
+  undoingKeys.add(key)
+  try {
+    const restored = await api.restoreEntry(shortId, {
+      version: previousVersion,
+      expectedVersion: appliedVersion,
+    })
+    undoneKeys.add(key)
+    queryClient.setQueryData(['entry', shortId], restored)
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['entries'] }),
+      queryClient.invalidateQueries({ queryKey: ['entry-history', shortId] }),
+      queryClient.invalidateQueries({ queryKey: ['inbox'] }),
+    ])
+    toast.add({
+      title: `已撤销对「${title}」的应用，恢复至版本 ${previousVersion}`,
+      color: 'success',
+    })
+  } catch (err) {
+    toast.add({
+      title:
+        err instanceof ApiError && err.status === 409
+          ? `「${title}」已有其他更新，无法自动撤销，请在版本历史中手动恢复`
+          : err instanceof ApiError
+            ? err.message
+            : '撤销失败，请在版本历史中手动恢复',
+      color: err instanceof ApiError && err.status === 409 ? 'warning' : 'error',
+    })
+  } finally {
+    undoingKeys.delete(key)
   }
 }
 
 const busyId = ref<string | null>(null)
 async function onApply(id: string, body: ApplySuggestionRequest) {
-  if (busyId.value) return
+  if (busyId.value || batchBusy.value) return
+  const suggestion = items.value.find((item) => item.id === id)
   busyId.value = id
   try {
     const res = await api.applySuggestion(id, body)
-    toast.add({
-      title: res.entry ? `已应用到「${res.entry.title}」` : '已应用整理建议',
-      color: 'success',
-    })
+    const applied = res.entry
+    // 合并重复会同时软删其他重复记忆，不支持单条恢复撤销，避免误导
+    const canOfferUndo =
+      suggestion?.kind !== 'merge_duplicates' &&
+      applied &&
+      applied.previousVersion !== undefined &&
+      applied.version !== undefined
+    if (canOfferUndo) {
+      const { shortId, title, previousVersion, version } = applied
+      toast.add({
+        title: `已应用到「${title}」（版本 ${version}）`,
+        color: 'success',
+        duration: 8000,
+        actions: [
+          {
+            label: '查看记忆',
+            color: 'neutral',
+            variant: 'outline',
+            onClick: () => void router.push(entryRoute(shortId)),
+          },
+          {
+            label: '撤销',
+            color: 'neutral',
+            variant: 'outline',
+            onClick: () => void undoAppliedSuggestion(shortId, previousVersion!, version!, title),
+          },
+        ],
+      })
+    } else {
+      toast.add({
+        title: applied ? `已应用到「${applied.title}」` : '已应用整理建议',
+        color: 'success',
+      })
+    }
+    const affectedShortIds = new Set<string>([
+      ...(applied ? [applied.shortId] : []),
+      ...(suggestion?.entries.map((e) => e.shortId) ?? []),
+    ])
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ['inbox'] }),
       queryClient.invalidateQueries({ queryKey: ['entries'] }),
+      ...[...affectedShortIds].flatMap((sid) => [
+        queryClient.invalidateQueries({ queryKey: ['entry', sid] }),
+        queryClient.invalidateQueries({ queryKey: ['entry-history', sid] }),
+      ]),
     ])
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '应用失败', color: 'error' })
@@ -75,7 +285,7 @@ async function onApply(id: string, body: ApplySuggestionRequest) {
 }
 
 async function onDismiss(id: string) {
-  if (busyId.value) return
+  if (busyId.value || batchBusy.value) return
   busyId.value = id
   try {
     await api.dismissSuggestion(id)
@@ -87,6 +297,71 @@ async function onDismiss(id: string) {
     busyId.value = null
   }
 }
+
+async function applyQuickTableSelected() {
+  if (batchBusy.value || busyId.value || !selectedTableIds.value.length) return
+  batchBusy.value = true
+  const chosen = titleOnlyItems.value.filter((item) => selectedTableIds.value.includes(item.id))
+  const touchedShortIds = new Set<string>()
+  let okCount = 0
+  let failCount = 0
+  for (const s of chosen) {
+    const base = baseEntryOf(s)
+    const nextSummary =
+      s.proposedSummary !== undefined &&
+      s.proposedSummary !== null &&
+      s.proposedSummary.trim() !== (base?.summary?.trim() ?? '')
+        ? s.proposedSummary.trim() || null
+        : undefined
+    const titleChanged = Boolean(
+      s.proposedTitle?.trim() && base && s.proposedTitle.trim() !== base.title,
+    )
+    // 若更换标题或建议剥离了原正文重复首行 H1，同步剥离避免暴露失配旧 H1
+    const shouldStripOldH1 =
+      base !== null &&
+      hasDuplicateLeadingHeading(base.title, base.content) &&
+      (titleChanged ||
+        (Boolean(s.proposedContent) && s.proposedContent!.trim() !== base.content.trim()))
+    const safeContent = shouldStripOldH1
+      ? stripDuplicateLeadingHeading(base.title, base.content)
+      : base?.content
+    const body: ApplySuggestionRequest = {
+      ...(s.proposedTitle?.trim() ? { title: s.proposedTitle.trim() } : {}),
+      ...(nextSummary !== undefined ? { summary: nextSummary } : {}),
+      ...(safeContent !== undefined ? { content: safeContent } : {}),
+      applyArchivedNotes: false,
+      ...(s.proposedChangeSummary?.trim() ? { changeSummary: s.proposedChangeSummary.trim() } : {}),
+    }
+    try {
+      const res = await api.applySuggestion(s.id, body)
+      if (res.entry?.shortId) touchedShortIds.add(res.entry.shortId)
+      if (base?.shortId) touchedShortIds.add(base.shortId)
+      okCount++
+    } catch {
+      failCount++
+    }
+  }
+  await Promise.all([
+    queryClient.invalidateQueries({ queryKey: ['inbox'] }),
+    queryClient.invalidateQueries({ queryKey: ['entries'] }),
+    ...[...touchedShortIds].flatMap((sid) => [
+      queryClient.invalidateQueries({ queryKey: ['entry', sid] }),
+      queryClient.invalidateQueries({ queryKey: ['entry-history', sid] }),
+    ]),
+  ])
+  if (failCount === 0) {
+    toast.add({
+      title: `已批量应用 ${okCount} 条标题与概要规范建议`,
+      color: 'success',
+    })
+  } else {
+    toast.add({
+      title: `批量应用完成：成功 ${okCount} 条，失败 ${failCount} 条`,
+      color: okCount > 0 ? 'warning' : 'error',
+    })
+  }
+  batchBusy.value = false
+}
 </script>
 
 <template>
@@ -94,7 +369,7 @@ async function onDismiss(id: string) {
     <div class="inbox-shell">
       <PageHead title="待处理">
         <template #note>
-          整理任务提出的提炼摘要、合并重复、标记过时与更新建议，确认后才会写入记忆。
+          整理任务提出的规范与精简、提炼摘要、合并重复、标记过时与更新建议，确认后才会写入记忆。
         </template>
         <template #actions>
           <UButton
@@ -102,16 +377,37 @@ async function onDismiss(id: string) {
             size="sm"
             color="neutral"
             variant="ghost"
-            aria-label="刷新"
             :loading="inboxQuery.isFetching.value"
             @click="inboxQuery.refetch()"
-          />
+          >
+            刷新
+          </UButton>
+          <UButton
+            :icon="icons.shieldCheck"
+            size="sm"
+            color="neutral"
+            variant="outline"
+            @click="sweepOpen = true"
+          >
+            结构体检与预清洗
+          </UButton>
+          <UButton
+            :icon="icons.tidy"
+            size="sm"
+            color="neutral"
+            variant="outline"
+            :loading="triggeringMode === 'tidy' || Boolean(state?.running)"
+            :disabled="!me.data.value?.hasChatModel || Boolean(triggeringMode)"
+            @click="triggerDream('tidy')"
+          >
+            存量规范整理
+          </UButton>
           <UButton
             :icon="icons.sparkles"
             size="sm"
-            :loading="triggering || Boolean(state?.running)"
-            :disabled="!me.data.value?.hasChatModel"
-            @click="triggerDream"
+            :loading="triggeringMode === 'standard' || Boolean(state?.running)"
+            :disabled="!me.data.value?.hasChatModel || Boolean(triggeringMode)"
+            @click="triggerDream('standard')"
           >
             {{ state?.running ? '整理中' : '立即整理' }}
           </UButton>
@@ -122,7 +418,7 @@ async function onDismiss(id: string) {
         <ReadFailureNote v-if="inboxQuery.isError.value" :query="inboxQuery" />
 
         <NoteLine v-if="me.data.value && !me.data.value.hasChatModel" tone="warning">
-          尚未配置对话与整理模型，自动摘要与整理功能未启用。
+          尚未配置对话与整理模型，自动摘要与智能整理未启用；仍可使用「结构体检与预清洗」执行确定性结构修复。
           <template #actions>
             <UButton size="sm" color="neutral" variant="outline" :to="settingsRoute('models')">
               去配置模型
@@ -146,33 +442,199 @@ async function onDismiss(id: string) {
           <span v-if="state.lastError" class="text-error">错误：{{ state.lastError }}</span>
         </div>
 
+        <!-- 建议类型分段筛选与纯标题速审表切换 -->
+        <div v-if="items.length" class="filter-bar">
+          <div class="kind-tabs" role="tablist" aria-label="按建议类型筛选">
+            <button
+              v-for="(tab, idx) in filterTabs"
+              :key="tab.value"
+              type="button"
+              role="tab"
+              class="kind-tab"
+              :class="{ active: !quickTableMode && kindFilter === tab.value }"
+              :aria-selected="!quickTableMode && kindFilter === tab.value"
+              :tabindex="
+                (!quickTableMode && kindFilter === tab.value) || (quickTableMode && idx === 0)
+                  ? 0
+                  : -1
+              "
+              @click="((quickTableMode = false), (kindFilter = tab.value))"
+              @keydown="onFilterTabKeydown($event, idx)"
+            >
+              <span>{{ tab.label }}</span>
+              <span class="kind-tab-num tabular-nums">{{ tab.count }}</span>
+            </button>
+          </div>
+
+          <UButton
+            v-if="canUseQuickTable"
+            size="xs"
+            :color="quickTableMode ? 'primary' : 'neutral'"
+            :variant="quickTableMode ? 'solid' : 'outline'"
+            :icon="icons.table"
+            @click="quickTableMode = !quickTableMode"
+          >
+            {{ quickTableMode ? '返回卡片视图' : `纯标题速审表（${titleOnlyItems.length} 条）` }}
+          </UButton>
+        </div>
+
         <div v-if="inboxQuery.isPending.value" class="space-y-4">
           <USkeleton v-for="n in 3" :key="n" class="h-36 w-full" />
         </div>
 
-        <div v-else-if="items.length" class="card-list">
+        <!-- 纯标题速审表 -->
+        <section v-else-if="quickTableMode && canUseQuickTable" class="quick-table-panel">
+          <div class="quick-table-head">
+            <span class="text-xs text-muted">
+              以下建议仅调整标题或现行概要，不改动正文主体；原有内容保留在版本历史中，可随时恢复。
+            </span>
+            <div class="quick-table-actions">
+              <UButton
+                size="xs"
+                color="neutral"
+                variant="ghost"
+                :disabled="batchBusy"
+                @click="toggleTableAll"
+              >
+                {{ allTableSelected ? '取消全选' : '全选' }}
+              </UButton>
+              <UButton
+                size="xs"
+                :icon="icons.listChecks"
+                :loading="batchBusy"
+                :disabled="!selectedTableIds.length || busyId !== null"
+                @click="applyQuickTableSelected"
+              >
+                批量应用所选（{{ selectedTableIds.length }} 条）
+              </UButton>
+            </div>
+          </div>
+
+          <div class="quick-table-scroll">
+            <table class="quick-table">
+              <thead>
+                <tr>
+                  <th class="col-check">
+                    <input
+                      type="checkbox"
+                      aria-label="全选纯标题规范建议"
+                      :checked="allTableSelected"
+                      :disabled="batchBusy"
+                      @change="toggleTableAll"
+                    />
+                  </th>
+                  <th>记忆</th>
+                  <th>旧标题 → 新短标题与现行概要</th>
+                  <th class="col-ops">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="s in titleOnlyItems" :key="s.id">
+                  <td class="col-check">
+                    <input
+                      type="checkbox"
+                      :aria-label="`选择 ${baseEntryOf(s)?.title ?? s.id}`"
+                      :checked="selectedTableIds.includes(s.id)"
+                      :disabled="batchBusy"
+                      @change="toggleTableRow(s.id)"
+                    />
+                  </td>
+                  <td class="col-entry">
+                    <RouterLink
+                      v-if="baseEntryOf(s)"
+                      :to="entryRoute(baseEntryOf(s)!.shortId)"
+                      class="text-primary font-mono text-xs"
+                    >
+                      {{ baseEntryOf(s)!.shortId }}
+                    </RouterLink>
+                    <span v-if="baseEntryOf(s)?.isPinned" class="mini-pill">常驻</span>
+                  </td>
+                  <td class="col-diff">
+                    <div class="table-title-diff">
+                      <span class="table-old">{{ baseEntryOf(s)?.title }}</span>
+                      <UIcon :name="icons.inherits" class="table-arrow" aria-hidden="true" />
+                      <span class="table-new">{{ s.proposedTitle ?? baseEntryOf(s)?.title }}</span>
+                    </div>
+                    <p v-if="s.proposedSummary?.trim()" class="table-summary">
+                      概要：{{ s.proposedSummary }}
+                    </p>
+                  </td>
+                  <td class="col-ops">
+                    <UButton
+                      size="xs"
+                      color="neutral"
+                      variant="ghost"
+                      :disabled="batchBusy || busyId !== null"
+                      @click="onDismiss(s.id)"
+                    >
+                      忽略
+                    </UButton>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- 常规卡片列表 -->
+        <div v-else-if="filteredItems.length" class="card-list">
           <DreamSuggestionCard
-            v-for="item in items"
+            v-for="item in filteredItems"
             :key="item.id"
             :suggestion="item"
             :busy="busyId === item.id"
+            :disabled="batchBusy || (busyId !== null && busyId !== item.id)"
             @apply="onApply"
             @dismiss="onDismiss"
           />
         </div>
 
         <EmptyState
+          v-else-if="items.length && !filteredItems.length"
+          title="该分类暂无待处理建议"
+          description="可切换其他建议分类，或查看全部待处理建议。"
+        >
+          <template #actions>
+            <UButton size="sm" color="neutral" variant="outline" @click="kindFilter = 'all'">
+              查看全部
+            </UButton>
+          </template>
+        </EmptyState>
+
+        <EmptyState
           v-else-if="!inboxQuery.isError.value"
           title="暂无待处理建议"
           description="会话摘要与记忆库变动累积后，定时整理或手动触发会在此生成建议。"
         >
-          <template v-if="me.data.value?.hasChatModel" #actions>
+          <template #actions>
             <UButton
+              size="sm"
+              color="neutral"
+              variant="outline"
+              :icon="icons.shieldCheck"
+              @click="sweepOpen = true"
+            >
+              结构体检与预清洗
+            </UButton>
+            <UButton
+              v-if="me.data.value?.hasChatModel"
+              size="sm"
+              variant="outline"
+              :icon="icons.tidy"
+              :loading="triggeringMode === 'tidy' || Boolean(state?.running)"
+              :disabled="Boolean(triggeringMode)"
+              @click="triggerDream('tidy')"
+            >
+              存量规范整理
+            </UButton>
+            <UButton
+              v-if="me.data.value?.hasChatModel"
               size="sm"
               variant="outline"
               :icon="icons.sparkles"
-              :loading="triggering || Boolean(state?.running)"
-              @click="triggerDream"
+              :loading="triggeringMode === 'standard' || Boolean(state?.running)"
+              :disabled="Boolean(triggeringMode)"
+              @click="triggerDream('standard')"
             >
               立即整理
             </UButton>
@@ -180,6 +642,8 @@ async function onDismiss(id: string) {
         </EmptyState>
       </div>
     </div>
+
+    <HygieneSweepDrawer v-model:open="sweepOpen" />
   </div>
 </template>
 
@@ -190,7 +654,7 @@ async function onDismiss(id: string) {
   overflow-y: auto;
 }
 .inbox-shell {
-  max-width: 56rem;
+  max-width: 58rem;
 }
 .inbox-body {
   padding: 0 32px 48px;
@@ -199,12 +663,157 @@ async function onDismiss(id: string) {
   display: flex;
   flex-wrap: wrap;
   gap: 8px 18px;
-  margin-bottom: 18px;
+  margin-bottom: 14px;
   padding: 8px 0;
   border-top: 1px solid var(--ui-rule);
   border-bottom: 1px solid var(--ui-border);
   font-size: 13px;
   color: var(--ui-text-muted);
+}
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.kind-tabs {
+  display: inline-flex;
+  align-items: stretch;
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--ui-border-accented);
+}
+.kind-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border-right: 1px solid var(--ui-border);
+  font-size: 13px;
+  color: var(--ui-text-muted);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.kind-tab:last-child {
+  border-right: 0;
+}
+.kind-tab:hover {
+  background: var(--ui-bg-elevated);
+  color: var(--ui-text-highlighted);
+}
+.kind-tab:hover .kind-tab-num {
+  color: var(--ui-text-muted);
+}
+.kind-tab.active {
+  background: var(--ui-selected);
+  color: var(--ui-on-selected);
+  font-weight: 500;
+}
+.kind-tab-num {
+  font-size: 12px;
+  color: var(--ui-text-dimmed);
+}
+.kind-tab.active .kind-tab-num,
+.kind-tab.active:hover .kind-tab-num {
+  color: var(--ui-on-selected-muted);
+}
+.quick-table-panel {
+  border: 1px solid var(--ui-rule);
+  background: var(--ui-bg);
+}
+.quick-table-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-bg-muted);
+}
+.quick-table-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.quick-table-scroll {
+  overflow-x: auto;
+}
+.quick-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.quick-table th,
+.quick-table td {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--ui-border);
+  text-align: left;
+  vertical-align: top;
+}
+.quick-table th {
+  border-bottom-color: var(--ui-rule);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ui-text-muted);
+  white-space: nowrap;
+}
+.quick-table tr:last-child td {
+  border-bottom: 0;
+}
+.col-check {
+  width: 34px;
+}
+.col-check input[type='checkbox'] {
+  accent-color: var(--ui-primary);
+}
+.col-entry {
+  white-space: nowrap;
+}
+.col-ops {
+  width: 64px;
+  white-space: nowrap;
+}
+.mini-pill {
+  margin-left: 6px;
+  padding: 0 5px;
+  border: 1px solid var(--ui-rule);
+  font-size: 12px;
+  line-height: 1.35;
+}
+.table-title-diff {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 6px;
+  line-height: 1.5;
+}
+.table-old {
+  color: var(--ui-text-muted);
+  text-decoration: line-through;
+  overflow-wrap: anywhere;
+}
+.table-arrow {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
+  color: var(--ui-text-dimmed);
+}
+.table-new {
+  font-weight: 600;
+  color: var(--ui-text-highlighted);
+  overflow-wrap: anywhere;
+}
+.table-summary {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ui-text-muted);
+  overflow-wrap: anywhere;
 }
 .card-list {
   display: flex;

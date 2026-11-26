@@ -8,7 +8,7 @@ import {
   CREDENTIAL_PLACEHOLDER_PREFIX,
   DISCLOSURE_MAX,
   ENTRY_CONTENT_MAX,
-  ENTRY_TITLE_MAX,
+  ENTRY_TITLE_NEW_MAX,
   extractMarkdownHeadings,
   firstMarkdownHeading,
   normalizeShortId,
@@ -146,7 +146,7 @@ export function buildDefaultProposedNew(text: string): CaptureProposedNew {
 
   const heading = firstMarkdownHeading(content)
   if (heading) {
-    title = sanitizePlainField(heading, ENTRY_TITLE_MAX)
+    title = sanitizePlainField(heading, ENTRY_TITLE_NEW_MAX)
   }
 
   if (!title) {
@@ -202,7 +202,7 @@ function mergeProposedNew(fallback: CaptureProposedNew, raw: unknown): CapturePr
 
   const title =
     typeof rec.title === 'string'
-      ? sanitizePlainField(rec.title, ENTRY_TITLE_MAX) || fallback.title
+      ? sanitizePlainField(rec.title, ENTRY_TITLE_NEW_MAX) || fallback.title
       : fallback.title
 
   const content =

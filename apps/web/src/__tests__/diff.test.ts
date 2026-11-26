@@ -1,6 +1,13 @@
+import type { DreamSuggestionView, EntrySnapshot } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
-import { collapseUnchanged, diffLines, diffWithStatus } from '../diff'
+import {
+  collapseUnchanged,
+  diffEntrySnapshots,
+  diffLines,
+  diffWithStatus,
+  isTitleOnlyTidy,
+} from '../diff'
 
 describe('按行对比', () => {
   it('找出删掉与加上的行，没变的行保留', () => {
@@ -69,5 +76,192 @@ describe('对比算没算完', () => {
     const { lines, complete } = diffWithStatus(before, after)
     expect(complete).toBe(false)
     expect(lines.filter((l) => l.kind === 'add')).toHaveLength(2000)
+  })
+})
+
+function makeSnapshot(overrides: Partial<EntrySnapshot> = {}): EntrySnapshot {
+  return {
+    kind: 'entry',
+    title: '默认标题',
+    summary: null,
+    content: '正文内容',
+    disclosure: null,
+    isPinned: false,
+    envs: [],
+    realms: [],
+    projects: [],
+    runtimes: [],
+    topics: [],
+    validTo: null,
+    verifiedAt: null,
+    version: 1,
+    ...overrides,
+  }
+}
+
+describe('快照属性变动对比', () => {
+  it('识别纯元数据变动，输出中文标签与改前改后值', () => {
+    const prev = makeSnapshot({
+      title: '旧标题',
+      summary: null,
+      isPinned: false,
+      topics: ['docker'],
+      envs: ['mac'],
+      disclosure: null,
+      validTo: null,
+    })
+    const curr = makeSnapshot({
+      title: '新短标题',
+      summary: '一条简明概要',
+      isPinned: true,
+      topics: ['docker', 'network'],
+      envs: ['linux', 'mac'],
+      disclosure: '排查容器网络时',
+      validTo: '2026-12-31T15:59:00Z',
+      version: 2,
+    })
+    const changes = diffEntrySnapshots(prev, curr)
+    expect(changes.map((c) => c.field)).toEqual([
+      'title',
+      'summary',
+      'isPinned',
+      'disclosure',
+      'topics',
+      'envs',
+      'validTo',
+    ])
+    expect(changes.find((c) => c.field === 'isPinned')).toEqual({
+      field: 'isPinned',
+      label: '常驻',
+      before: '按需',
+      after: '常驻',
+    })
+    expect(changes.find((c) => c.field === 'summary')).toEqual({
+      field: 'summary',
+      label: '现行概要',
+      before: '（空）',
+      after: '一条简明概要',
+    })
+    expect(changes.find((c) => c.field === 'envs')).toEqual({
+      field: 'envs',
+      label: '环境',
+      before: 'macOS',
+      after: 'Linux、macOS',
+    })
+  })
+
+  it('无元数据差异时返回空数组', () => {
+    const snap = makeSnapshot({ topics: ['a', 'b'] })
+    expect(diffEntrySnapshots(snap, makeSnapshot({ topics: ['b', 'a'], version: 2 }))).toEqual([])
+    expect(diffEntrySnapshots(null, snap)).toEqual([])
+  })
+})
+
+function makeTidySuggestion(overrides: Partial<DreamSuggestionView> = {}): DreamSuggestionView {
+  const baseId = '11111111-1111-4111-8111-111111111111'
+  return {
+    id: '22222222-2222-4222-8222-222222222222',
+    kind: 'tidy',
+    entryIds: [baseId],
+    entryVersions: [2],
+    keepId: baseId,
+    entries: [
+      {
+        id: baseId,
+        shortId: 'm-234abc',
+        kind: 'entry',
+        title: '网络拓扑（2026-10-01 更新）',
+        summary: null,
+        content: '# 网络拓扑（2026-10-01 更新）\n\n## 当前配置\n- 路由运行正常\n'.repeat(10),
+        disclosure: null,
+        isPinned: true,
+        envs: [],
+        realms: [],
+        projects: [],
+        runtimes: [],
+        topics: [],
+        verifiedAt: null,
+        lastChangeSummary: null,
+        version: 2,
+        updatedAt: '2026-10-01T00:00:00Z',
+      },
+    ],
+    proposedTitle: '网络拓扑',
+    proposedSummary: '家庭网络当前路由结构正常',
+    proposedContent: '# 网络拓扑（2026-10-01 更新）\n\n## 当前配置\n- 路由运行正常\n'.repeat(10),
+    proposedDisclosure: null,
+    proposedChangeSummary: '精简标题并补充现行概要',
+    archivedNotes: null,
+    proposedTopics: null,
+    proposedEnvs: null,
+    proposedRealms: null,
+    proposedProjects: null,
+    proposedRuntimes: null,
+    reason: '移除标题中的更新日期后缀',
+    status: 'pending',
+    createdAt: '2026-10-02T00:00:00Z',
+    decidedAt: null,
+    ...overrides,
+  }
+}
+
+describe('纯标题速审表判定', () => {
+  it('仅改标题或补概要时不改动正文主体的 tidy 建议可进入速审表', () => {
+    expect(isTitleOnlyTidy(makeTidySuggestion())).toBe(true)
+    expect(isTitleOnlyTidy(makeTidySuggestion({ proposedContent: null }))).toBe(true)
+    expect(
+      isTitleOnlyTidy(
+        makeTidySuggestion({
+          entries: [
+            {
+              ...makeTidySuggestion().entries[0]!,
+              content: '# 网络拓扑（2026-10-01 更新）\n\n## 当前配置\n- 路由运行正常\n',
+            },
+          ],
+          proposedContent: '## 当前配置\n- 路由运行正常\n',
+        }),
+      ),
+    ).toBe(true)
+    expect(
+      isTitleOnlyTidy(
+        makeTidySuggestion({
+          entries: [
+            {
+              ...makeTidySuggestion().entries[0]!,
+              content: '# 网络拓扑（2026-10-01 更新）\n\n## 当前配置\n- 路由运行正常\n',
+            },
+          ],
+          proposedContent: '# 网络拓扑\n\n## 当前配置\n- 路由运行正常\n',
+        }),
+      ),
+    ).toBe(true)
+  })
+
+  it('含历史归档说明、大段正文改写或非 tidy 类型不进入速审表', () => {
+    expect(
+      isTitleOnlyTidy(
+        makeTidySuggestion({
+          archivedNotes: [{ occurredAt: '2026-10-01T00:00:00Z', note: '旧记录' }],
+        }),
+      ),
+    ).toBe(false)
+    expect(
+      isTitleOnlyTidy(
+        makeTidySuggestion({
+          proposedContent: '完全重写的新正文内容，删掉了原有全部段落',
+        }),
+      ),
+    ).toBe(false)
+    // 哪怕只改了一行实质配置，也不允许进入纯标题速审表静默丢弃
+    expect(
+      isTitleOnlyTidy(
+        makeTidySuggestion({
+          proposedContent:
+            '# 网络拓扑（2026-10-01 更新）\n\n## 当前配置\n- 路由端口改为 8443\n' +
+            '# 网络拓扑（2026-10-01 更新）\n\n## 当前配置\n- 路由运行正常\n'.repeat(9),
+        }),
+      ),
+    ).toBe(false)
+    expect(isTitleOnlyTidy(makeTidySuggestion({ kind: 'update' }))).toBe(false)
   })
 })

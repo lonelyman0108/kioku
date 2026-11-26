@@ -8,6 +8,8 @@ import {
   normalizeSlugList,
   RUNTIME_FAMILIES,
   SCENE_SLUG_PATTERN,
+  stripDuplicateLeadingHeading,
+  stripLegacyGlossaryLines,
   TOPICS_MAX,
   TopicTag,
 } from '@kioku/contracts'
@@ -254,6 +256,9 @@ export function parseLoreToEntries(raw: unknown): ParsedLoreResult {
 
     const heading = content ? firstMarkdownHeading(content) : null
     const title = (heading ?? mapped.fallbackTitle).slice(0, 200) || uri
+    const cleanedContent = content
+      ? stripLegacyGlossaryLines(stripDuplicateLeadingHeading(title, content)).content
+      : ''
     const rawDisclosure = edge.disclosure?.trim() ?? ''
     const disclosure =
       rawDisclosure && !rawDisclosure.includes(CREDENTIAL_PLACEHOLDER_PREFIX)
@@ -267,7 +272,7 @@ export function parseLoreToEntries(raw: unknown): ParsedLoreResult {
       key: uri,
       uri,
       title,
-      content,
+      content: cleanedContent,
       disclosure,
       isPinned: edge.priority <= 1,
       envs: [],

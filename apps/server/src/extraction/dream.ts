@@ -1,29 +1,38 @@
 import { createHash } from 'node:crypto'
 
-import type {
-  DreamEntrySnapshot,
-  DreamOutcome,
-  DreamRunSummary,
-  DreamSuggestionKind,
-  DreamSuggestionView,
-  DreamTrigger,
-  InboxResponse,
+import {
+  lintEntryHygiene,
+  type DreamEntrySnapshot,
+  type DreamOutcome,
+  type DreamRunSummary,
+  type DreamSuggestionKind,
+  type DreamSuggestionView,
+  type DreamTrigger,
+  type InboxResponse,
 } from '@kioku/contracts'
-import { and, asc, desc, eq, gt, inArray, isNull, notInArray, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, gt, inArray, isNull, notInArray, or, sql } from 'drizzle-orm'
 
 import { stillValidSql } from '../access/scope'
 import type { MasterKey } from '../crypto/keyring'
 import type { Db } from '../db/client'
-import { dreamSuggestions, entries } from '../db/schema'
+import { dreamSuggestions, entries, entryLinks } from '../db/schema'
 import { chatComplete } from '../models/client'
 import {
   CHAT_LLM_SETTING_KEY,
   loadDreamState,
   loadResolvedModel,
+  loadTidyCheckedVersions,
   recordDreamRun,
+  saveTidyCheckedVersions,
 } from '../models/store'
 import { anyTermQuery, clipChars, searchTerms } from '../recall/recall'
-import { buildDreamMessages, parseDreamProposals, type DreamPromptItem } from './dreamPrompt'
+import {
+  buildDreamMessages,
+  buildTidyMessages,
+  evaluateTidyResponse,
+  parseDreamProposals,
+  type DreamPromptItem,
+} from './dreamPrompt'
 
 const MAX_CALLS_PER_RUN = 4
 const CHANGED_PER_CALL = 20
@@ -31,17 +40,20 @@ const MAX_NEIGHBORS_PER_CALL = 15
 const NEIGHBORS_PER_ITEM = 5
 const INPUT_CHAR_BUDGET = 16_000
 const ITEM_CONTENT_LIMIT = 1_500
+const TIDY_CONTENT_LIMIT = 16_000
+const DEFAULT_TIDY_BATCH_LIMIT = 8
 
 type EntryRow = typeof entries.$inferSelect
 
-function toPromptItem(row: EntryRow): DreamPromptItem {
-  const truncated = row.content.length > ITEM_CONTENT_LIMIT
+function toPromptItem(row: EntryRow, contentLimit = ITEM_CONTENT_LIMIT): DreamPromptItem {
+  const truncated = row.content.length > contentLimit
   return {
     id: row.id,
     shortId: row.shortId,
     kind: row.kind,
     title: row.title,
-    content: truncated ? clipChars(row.content, ITEM_CONTENT_LIMIT) : row.content,
+    summary: row.summary,
+    content: truncated ? clipChars(row.content, contentLimit) : row.content,
     disclosure: row.disclosure,
     envs: row.envs,
     realms: row.realms,
@@ -65,21 +77,31 @@ export function suggestionFingerprint(
     .digest('hex')
 }
 
-async function findFtsNeighbors(
+async function findLinkedNeighbors(
   db: Db,
   seedRows: readonly EntryRow[],
   excludeIds: readonly string[],
 ): Promise<EntryRow[]> {
   if (!seedRows.length) return []
-  const queryText = seedRows
-    .map((r) => `${r.title} ${r.topics.join(' ')} ${r.projects.join(' ')}`)
-    .join(' ')
-    .slice(0, 1000)
-  const [lex] = await db.execute<{ terms: string[] }>(
-    sql`select tsvector_to_array(to_tsvector('kioku_zh', ${queryText})) as terms`,
+  const seedIds = seedRows.map((r) => r.id)
+  const seedShorts = seedRows.map((r) => r.shortId)
+  const edges = await db
+    .select({
+      sourceEntryId: entryLinks.sourceEntryId,
+      targetShortId: entryLinks.targetShortId,
+    })
+    .from(entryLinks)
+    .where(
+      or(inArray(entryLinks.sourceEntryId, seedIds), inArray(entryLinks.targetShortId, seedShorts)),
+    )
+    .limit(40)
+
+  const excludeSet = new Set(excludeIds)
+  const targetShorts = [...new Set(edges.map((e) => e.targetShortId))]
+  const sourceIds = [...new Set(edges.map((e) => e.sourceEntryId))].filter(
+    (id) => !excludeSet.has(id),
   )
-  const terms = searchTerms(lex?.terms ?? []).slice(0, 24)
-  if (!terms.length) return []
+  if (!targetShorts.length && !sourceIds.length) return []
 
   return db
     .select()
@@ -90,11 +112,54 @@ async function findFtsNeighbors(
         stillValidSql(),
         eq(entries.kind, 'entry'),
         excludeIds.length ? notInArray(entries.id, [...excludeIds]) : undefined,
+        or(
+          targetShorts.length ? inArray(entries.shortId, targetShorts) : undefined,
+          sourceIds.length ? inArray(entries.id, sourceIds) : undefined,
+        ),
+      ),
+    )
+    .orderBy(desc(entries.updatedAt))
+    .limit(MAX_NEIGHBORS_PER_CALL)
+}
+
+async function findFtsNeighbors(
+  db: Db,
+  seedRows: readonly EntryRow[],
+  excludeIds: readonly string[],
+): Promise<EntryRow[]> {
+  if (!seedRows.length) return []
+  const linked = await findLinkedNeighbors(db, seedRows, excludeIds)
+  const seen = new Set<string>([...excludeIds, ...linked.map((r) => r.id)])
+  const remaining =
+    Math.min(MAX_NEIGHBORS_PER_CALL, seedRows.length * NEIGHBORS_PER_ITEM) - linked.length
+  if (remaining <= 0) return linked.slice(0, MAX_NEIGHBORS_PER_CALL)
+
+  const queryText = seedRows
+    .map((r) => `${r.title} ${r.topics.join(' ')} ${r.projects.join(' ')}`)
+    .join(' ')
+    .slice(0, 1000)
+  const [lex] = await db.execute<{ terms: string[] }>(
+    sql`select tsvector_to_array(to_tsvector('kioku_zh', ${queryText})) as terms`,
+  )
+  const terms = searchTerms(lex?.terms ?? []).slice(0, 24)
+  if (!terms.length) return linked
+
+  const ftsNeighbors = await db
+    .select()
+    .from(entries)
+    .where(
+      and(
+        isNull(entries.deletedAt),
+        stillValidSql(),
+        eq(entries.kind, 'entry'),
+        seen.size ? notInArray(entries.id, [...seen]) : undefined,
         sql`${entries.fts} @@ ${anyTermQuery(terms)}::tsquery`,
       ),
     )
     .orderBy(desc(entries.updatedAt))
-    .limit(Math.min(MAX_NEIGHBORS_PER_CALL, seedRows.length * NEIGHBORS_PER_ITEM))
+    .limit(remaining)
+
+  return [...linked, ...ftsNeighbors].slice(0, MAX_NEIGHBORS_PER_CALL)
 }
 
 export async function isDreamDue(db: Db, now = new Date()): Promise<boolean> {
@@ -113,11 +178,19 @@ export interface DreamExecutionResult {
   error: string | null
 }
 
-// 统一单阶段整理：扫描 version > dream_checked_version 的活跃词条与摘要，生成 4 类待审建议
+export interface RunDreamOptions {
+  runId: string
+  trigger: DreamTrigger
+  mode?: 'standard' | 'tidy' | undefined
+  limit?: number | undefined
+  pinnedFirst?: boolean | undefined
+}
+
+// 统一后台整理：standard 扫描增量变动并查重/核对双链矛盾；tidy 按完整正文分批规范标题、概要与历史流水
 export async function runDream(
   db: Db,
   masterKey: MasterKey | null,
-  options: { runId: string; trigger: DreamTrigger },
+  options: RunDreamOptions,
 ): Promise<DreamExecutionResult> {
   const finish = async (result: DreamExecutionResult): Promise<DreamExecutionResult> => {
     const summary: DreamRunSummary = {
@@ -147,6 +220,110 @@ export async function runDream(
   let totalSuggested = 0
 
   try {
+    if (options.mode === 'tidy') {
+      const batchLimit = Math.min(Math.max(options.limit ?? DEFAULT_TIDY_BATCH_LIMIT, 1), 20)
+      const pinnedFirst = options.pinnedFirst !== false
+
+      const activeEntries = await db
+        .select()
+        .from(entries)
+        .where(and(isNull(entries.deletedAt), stillValidSql(), eq(entries.kind, 'entry')))
+        .orderBy(
+          ...(pinnedFirst ? [desc(entries.isPinned)] : []),
+          desc(entries.updatedAt),
+          asc(entries.shortId),
+        )
+
+      const existingTidy = await db
+        .select({ fingerprint: dreamSuggestions.fingerprint })
+        .from(dreamSuggestions)
+        .where(eq(dreamSuggestions.kind, 'tidy'))
+      const seenFingerprints = new Set(existingTidy.map((r) => r.fingerprint))
+      const tidyChecked = await loadTidyCheckedVersions(db)
+      let tidyCheckedDirty = false
+
+      const candidates = activeEntries
+        .filter((row) => {
+          if (row.content.length > TIDY_CONTENT_LIMIT) return false
+          if (tidyChecked[row.id] === row.version) return false
+          const fp = suggestionFingerprint('tidy', [row.id], [row.version])
+          if (seenFingerprints.has(fp)) return false
+          const warnings = lintEntryHygiene({
+            title: row.title,
+            content: row.content,
+            summary: row.summary,
+            isPinned: row.isPinned,
+            isUpdate: false,
+          })
+          return (
+            warnings.length > 0 ||
+            (!row.summary?.trim() && (row.isPinned || row.content.length >= 400))
+          )
+        })
+        .slice(0, batchLimit)
+
+      for (const row of candidates) {
+        totalConsidered++
+        const promptItem = toPromptItem(row, TIDY_CONTENT_LIMIT)
+        const res = await chatComplete(conn, buildTidyMessages(promptItem), {
+          temperature: 0.1,
+          jsonMode: true,
+          maxTokens: 4_000,
+        })
+        const evaluated = evaluateTidyResponse(res.content, promptItem)
+        if (evaluated.status === 'not_needed') {
+          tidyChecked[row.id] = row.version
+          tidyCheckedDirty = true
+          continue
+        }
+        if (evaluated.status !== 'proposal') continue
+        const prop = evaluated.proposal
+        const versions = [row.version]
+        const fingerprint = suggestionFingerprint('tidy', [row.id], versions)
+        const inserted = await db
+          .insert(dreamSuggestions)
+          .values({
+            kind: 'tidy',
+            entryIds: prop.entryIds,
+            entryVersions: versions,
+            keepId: null,
+            proposedTitle: prop.proposedTitle,
+            proposedSummary: prop.proposedSummary,
+            proposedContent: prop.proposedContent,
+            proposedDisclosure: prop.proposedDisclosure,
+            proposedChangeSummary: prop.proposedChangeSummary,
+            archivedNotes: prop.archivedNotes,
+            proposedTopics: prop.proposedTopics,
+            proposedEnvs: prop.proposedEnvs,
+            proposedRealms: prop.proposedRealms,
+            proposedProjects: prop.proposedProjects,
+            proposedRuntimes: prop.proposedRuntimes,
+            reason: prop.reason,
+            fingerprint,
+            status: 'pending',
+          })
+          .onConflictDoNothing()
+          .returning({ id: dreamSuggestions.id })
+        if (inserted.length) totalSuggested++
+      }
+
+      if (tidyCheckedDirty) {
+        const activeIds = new Set(activeEntries.map((r) => r.id))
+        const pruned: Record<string, number> = {}
+        for (const [id, ver] of Object.entries(tidyChecked)) {
+          if (activeIds.has(id)) pruned[id] = ver
+        }
+        await saveTidyCheckedVersions(db, pruned)
+      }
+
+      return finish({
+        outcome: totalConsidered === 0 ? 'skipped' : 'ok',
+        considered: totalConsidered,
+        suggested: totalSuggested,
+        error: null,
+      })
+    }
+
     for (let call = 0; call < MAX_CALLS_PER_RUN; call++) {
       const unchecked = await db
         .select()
@@ -178,8 +355,8 @@ export async function runDream(
         batch.map((r) => r.id),
       )
 
-      const promptChanged = batch.map(toPromptItem)
-      const promptNeighbors = neighbors.map(toPromptItem)
+      const promptChanged = batch.map((r) => toPromptItem(r))
+      const promptNeighbors = neighbors.map((r) => toPromptItem(r))
       const catalog = new Map<string, DreamPromptItem>()
       const rowById = new Map<string, EntryRow>()
       for (const row of [...batch, ...neighbors]) rowById.set(row.id, row)
@@ -203,8 +380,11 @@ export async function runDream(
             entryVersions: versions,
             keepId: prop.keepId,
             proposedTitle: prop.proposedTitle,
+            proposedSummary: prop.proposedSummary,
             proposedContent: prop.proposedContent,
             proposedDisclosure: prop.proposedDisclosure,
+            proposedChangeSummary: prop.proposedChangeSummary,
+            archivedNotes: prop.archivedNotes,
             proposedTopics: prop.proposedTopics,
             proposedEnvs: prop.proposedEnvs,
             proposedRealms: prop.proposedRealms,
@@ -253,6 +433,7 @@ function toDreamEntrySnapshot(row: EntryRow): DreamEntrySnapshot {
     shortId: row.shortId,
     kind: row.kind,
     title: row.title,
+    summary: row.summary,
     content: row.content,
     disclosure: row.disclosure,
     isPinned: row.isPinned,
@@ -261,6 +442,8 @@ function toDreamEntrySnapshot(row: EntryRow): DreamEntrySnapshot {
     projects: row.projects,
     runtimes: row.runtimes,
     topics: row.topics,
+    verifiedAt: row.verifiedAt ? row.verifiedAt.toISOString() : null,
+    lastChangeSummary: row.lastChangeSummary,
     version: row.version,
     updatedAt: row.updatedAt.toISOString(),
   }
@@ -293,8 +476,11 @@ export async function loadInbox(db: Db, running = false): Promise<InboxResponse>
       .map((id) => byId.get(id))
       .filter((x): x is DreamEntrySnapshot => x !== undefined),
     proposedTitle: r.proposedTitle,
+    proposedSummary: r.proposedSummary,
     proposedContent: r.proposedContent,
     proposedDisclosure: r.proposedDisclosure,
+    proposedChangeSummary: r.proposedChangeSummary,
+    archivedNotes: r.archivedNotes,
     proposedTopics: r.proposedTopics,
     proposedEnvs: r.proposedEnvs,
     proposedRealms: r.proposedRealms,

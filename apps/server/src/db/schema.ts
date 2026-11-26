@@ -1,6 +1,8 @@
 import type {
+  ArchivedHistoryNote,
   DreamSuggestionKind,
   DreamSuggestionStatus,
+  EntryDiffMeta,
   EntryEventType,
   EntryKind,
   EntrySnapshot,
@@ -144,6 +146,7 @@ export const entries = pgTable(
     shortId: text().notNull().unique(),
     kind: text().$type<EntryKind>().notNull().default('entry'),
     title: text().notNull(),
+    summary: text(),
     content: text().notNull(),
     disclosure: text(),
     isPinned: boolean().notNull().default(false),
@@ -172,13 +175,15 @@ export const entries = pgTable(
     // 写入时同步拼接短 ID、主题与场景标签，保证下方 generated 全文索引列只调用不可变函数
     searchTags: text().notNull().default(''),
     validTo: timestamp({ withTimezone: true }),
+    verifiedAt: timestamp({ withTimezone: true }),
+    lastChangeSummary: text(),
     version: integer().notNull().default(1),
     dreamCheckedVersion: integer().notNull().default(0),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
     deletedAt: timestamp({ withTimezone: true }),
     fts: tsvector().generatedAlwaysAs(
-      sql`to_tsvector('kioku_zh'::regconfig, coalesce(title, '') || ' ' || coalesce(disclosure, '') || ' ' || coalesce(search_tags, '') || ' ' || content)`,
+      sql`setweight(to_tsvector('kioku_zh'::regconfig, coalesce(title, '')), 'A') || setweight(to_tsvector('kioku_zh'::regconfig, coalesce(summary, '') || ' ' || coalesce(disclosure, '') || ' ' || coalesce(search_tags, '')), 'B') || setweight(to_tsvector('kioku_zh'::regconfig, content), 'C')`,
     ),
   },
   (t) => [
@@ -226,6 +231,8 @@ export const entryLinks = pgTable(
       .notNull()
       .references(() => entries.id, { onDelete: 'cascade' }),
     targetShortId: text().notNull(),
+    relation: text(),
+    contextSnippet: text(),
     createdAt: createdAt(),
   },
   (t) => [
@@ -244,6 +251,9 @@ export const entryEvents = pgTable(
       .references(() => entries.id, { onDelete: 'cascade' }),
     eventType: text().$type<EntryEventType>().notNull(),
     actor: text().notNull(),
+    changeSummary: text(),
+    diffMeta: jsonb().$type<EntryDiffMeta | null>(),
+    occurredAt: timestamp({ withTimezone: true }),
     snapshot: jsonb().$type<EntrySnapshot>().notNull(),
     createdAt: createdAt(),
   },
@@ -251,7 +261,7 @@ export const entryEvents = pgTable(
     index('entry_events_entry_idx').on(t.entryId, t.id),
     check(
       'entry_events_type_check',
-      sql`${t.eventType} in ('create', 'update', 'delete', 'undelete', 'restore')`,
+      sql`${t.eventType} in ('create', 'update', 'delete', 'undelete', 'restore', 'archive_note')`,
     ),
   ],
 )
@@ -306,8 +316,11 @@ export const dreamSuggestions = pgTable(
     entryVersions: integer().array().notNull(),
     keepId: uuid(),
     proposedTitle: text(),
+    proposedSummary: text(),
     proposedContent: text(),
     proposedDisclosure: text(),
+    proposedChangeSummary: text(),
+    archivedNotes: jsonb().$type<ArchivedHistoryNote[] | null>(),
     proposedTopics: text().array(),
     proposedEnvs: text().array(),
     proposedRealms: text().array(),
@@ -323,7 +336,7 @@ export const dreamSuggestions = pgTable(
     index('dream_suggestions_status_idx').on(t.status, t.createdAt),
     check(
       'dream_suggestions_kind_check',
-      sql`${t.kind} in ('distill_episode', 'merge_duplicates', 'mark_stale', 'update')`,
+      sql`${t.kind} in ('distill_episode', 'merge_duplicates', 'mark_stale', 'update', 'tidy')`,
     ),
     check('dream_suggestions_status_check', sql`${t.status} in ('pending', 'applied', 'rejected')`),
     check(

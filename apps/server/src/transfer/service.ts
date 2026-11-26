@@ -6,6 +6,8 @@ import {
   detectSecretPrefixes,
   KIOKU_EXPORT_FORMAT,
   KIOKU_EXPORT_SCHEMA_VERSION,
+  LEGACY_LORE_URI_REGEX,
+  NON_SHORT_ID_WIKI_LINK_REGEX,
   normalizeSlugList,
   WIKI_LINK_REGEX,
   type ExportDataRequest,
@@ -29,6 +31,7 @@ import type { Jobs } from '../jobs/queue'
 import { MemoryError } from '../memory/errors'
 import { syncEntryLinks } from '../memory/links'
 import { insertWithAllocatedShortId } from '../memory/shortId'
+import { clipChars } from '../recall/text'
 import { decryptExportCredentials, encryptExportCredentials } from './crypto'
 import { fetchLoreBackup } from './loreFetch'
 import { parseLoreToEntries } from './loreParse'
@@ -39,6 +42,7 @@ interface ImportCandidate {
   shortId: string | null
   kind: 'entry' | 'episode'
   title: string
+  summary: string | null
   content: string
   disclosure: string | null
   isPinned: boolean
@@ -50,6 +54,8 @@ interface ImportCandidate {
   deviceKey: string
   projectSlug: string
   validTo: Date | null
+  verifiedAt: Date | null
+  lastChangeSummary: string | null
   createdAt: Date | null
   updatedAt: Date | null
   skippedReason: string | null
@@ -68,6 +74,68 @@ function rewriteWikiLinks(content: string, remap: ReadonlyMap<string, string>): 
     if (!next) return full
     return display !== undefined ? `[[${next}|${display}]]` : `[[${next}]]`
   })
+}
+
+const FENCE_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/
+const INLINE_CODE_SPLIT_RE = /(`+[^`\r\n]*?`+)/g
+
+function sanitizeLoreWikiAlias(raw: string): string {
+  const cleaned = raw
+    .replace(/[[\]|\r\n]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return clipChars(cleaned, 28)
+}
+
+function rewriteLoreReferences(
+  content: string,
+  selfShortId: string,
+  uriMap: ReadonlyMap<string, { shortId: string; title: string }>,
+  slugMap: ReadonlyMap<string, { shortId: string; title: string } | null>,
+): string {
+  if (!uriMap.size && !slugMap.size) return content
+  const lines = content.replace(/\r\n/g, '\n').split('\n')
+  let fence: string | null = null
+  const out: string[] = []
+
+  const replaceSegment = (segment: string): string => {
+    let next = segment.replace(new RegExp(LEGACY_LORE_URI_REGEX.source, 'gi'), (raw) => {
+      const trimmed = raw.replace(/[.,;:]+$/, '')
+      const trailing = raw.slice(trimmed.length)
+      const hit = uriMap.get(trimmed.toLowerCase())
+      if (!hit || hit.shortId === selfShortId) return raw
+      const label = sanitizeLoreWikiAlias(hit.title)
+      return label ? `[[${hit.shortId}|${label}]]${trailing}` : `[[${hit.shortId}]]${trailing}`
+    })
+    next = next.replace(
+      new RegExp(NON_SHORT_ID_WIKI_LINK_REGEX.source, 'gi'),
+      (full, slug: string, alias?: string) => {
+        const hit = slugMap.get(slug.trim().toLowerCase())
+        if (!hit || hit.shortId === selfShortId) return full
+        const label = sanitizeLoreWikiAlias(alias ?? '') || sanitizeLoreWikiAlias(hit.title)
+        return label ? `[[${hit.shortId}|${label}]]` : `[[${hit.shortId}]]`
+      },
+    )
+    return next
+  }
+
+  for (const line of lines) {
+    const [, marker, info = ''] = FENCE_RE.exec(line) ?? []
+    if (fence !== null) {
+      const closes = marker !== undefined && marker[0] === fence[0] && marker.length >= fence.length
+      if (closes && /^[ \t]*$/.test(info)) fence = null
+      out.push(line)
+      continue
+    }
+    if (marker && !(marker[0] === '`' && info.includes('`'))) {
+      fence = marker
+      out.push(line)
+      continue
+    }
+    const parts = line.split(INLINE_CODE_SPLIT_RE)
+    out.push(parts.map((part, idx) => (idx % 2 === 1 ? part : replaceSegment(part))).join(''))
+  }
+  return out.join('\n')
 }
 
 function openCredentialForExport(
@@ -172,6 +240,7 @@ export async function exportTransferBundle(
       shortId: row.shortId,
       kind: row.kind,
       title: row.title,
+      summary: row.summary,
       content: row.content,
       disclosure: row.disclosure,
       isPinned: row.isPinned,
@@ -183,6 +252,8 @@ export async function exportTransferBundle(
       deviceKey: row.deviceKey,
       projectSlug: row.projectSlug,
       validTo: row.validTo ? row.validTo.toISOString() : null,
+      verifiedAt: row.verifiedAt ? row.verifiedAt.toISOString() : null,
+      lastChangeSummary: row.lastChangeSummary,
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),
     })),
@@ -234,6 +305,7 @@ async function resolveSource(
         shortId: item.shortId,
         kind: item.kind,
         title: item.title,
+        summary: item.summary ?? null,
         content: item.content,
         disclosure: item.disclosure ?? null,
         isPinned: item.kind === 'episode' ? false : item.isPinned,
@@ -245,6 +317,8 @@ async function resolveSource(
         deviceKey: item.deviceKey ?? '',
         projectSlug: item.projectSlug ?? '',
         validTo: item.validTo ? new Date(item.validTo) : null,
+        verifiedAt: item.verifiedAt ? new Date(item.verifiedAt) : null,
+        lastChangeSummary: item.lastChangeSummary ?? null,
         createdAt: item.createdAt ? new Date(item.createdAt) : null,
         updatedAt: item.updatedAt ? new Date(item.updatedAt) : null,
         skippedReason: null,
@@ -276,6 +350,7 @@ async function resolveSource(
       shortId: null,
       kind: 'entry',
       title: item.title,
+      summary: null,
       content: item.content,
       disclosure: item.disclosure,
       isPinned: item.isPinned,
@@ -287,6 +362,8 @@ async function resolveSource(
       deviceKey: '',
       projectSlug: '',
       validTo: null,
+      verifiedAt: null,
+      lastChangeSummary: null,
       createdAt: item.createdAt,
       updatedAt: item.updatedAt,
       skippedReason: item.skippedReason,
@@ -448,11 +525,15 @@ export async function applyTransferImport(
     const insertedRows: Array<{
       id: string
       shortId: string
+      title: string
+      sourceRef: string
       content: string
       needsRewrite: boolean
     }> = []
 
     const actor = resolved.sourceKind === 'lore' ? 'import:lore' : 'import:kioku'
+    const loreUriMap = new Map<string, { shortId: string; title: string }>()
+    const loreSlugMap = new Map<string, { shortId: string; title: string } | null>()
 
     for (const item of planned) {
       const c = item.candidate
@@ -476,6 +557,7 @@ export async function applyTransferImport(
             shortId,
             kind: c.kind,
             title,
+            summary: c.summary,
             content: c.content,
             disclosure: c.disclosure,
             isPinned: c.kind === 'episode' ? false : c.isPinned,
@@ -488,6 +570,8 @@ export async function applyTransferImport(
             projectSlug: c.kind === 'episode' ? c.projectSlug : null,
             searchTags,
             validTo: c.validTo,
+            verifiedAt: c.verifiedAt ?? updatedAt,
+            lastChangeSummary: c.lastChangeSummary,
             version: 1,
             createdAt,
             updatedAt,
@@ -496,6 +580,8 @@ export async function applyTransferImport(
         insertedRows.push({
           id: row!.id,
           shortId: row!.shortId,
+          title: row!.title,
+          sourceRef: c.sourceRef,
           content: row!.content,
           needsRewrite: resolved.sourceKind === 'kioku',
         })
@@ -517,6 +603,7 @@ export async function applyTransferImport(
               shortId: sid,
               kind: c.kind,
               title,
+              summary: c.summary,
               content: c.content,
               disclosure: c.disclosure,
               isPinned: c.kind === 'episode' ? false : c.isPinned,
@@ -529,6 +616,8 @@ export async function applyTransferImport(
               projectSlug: c.kind === 'episode' ? c.projectSlug : null,
               searchTags,
               validTo: c.validTo,
+              verifiedAt: c.verifiedAt ?? updatedAt,
+              lastChangeSummary: c.lastChangeSummary,
               version: 1,
               createdAt,
               updatedAt,
@@ -541,9 +630,25 @@ export async function applyTransferImport(
           remap.set(c.shortId, shortId)
           reallocatedEntries++
         }
+        if (resolved.sourceKind === 'lore' && c.sourceRef) {
+          const refInfo = { shortId, title: row.title }
+          loreUriMap.set(c.sourceRef.toLowerCase(), refInfo)
+          const lastSeg = c.sourceRef
+            .replace(/^[a-z]+:\/\//i, '')
+            .split('/')
+            .filter(Boolean)
+            .at(-1)
+          if (lastSeg) {
+            const slugKey = lastSeg.toLowerCase()
+            // 仅在批次内尾段唯一无歧义时映射，冲突标记为 null 避免静默指错目标
+            loreSlugMap.set(slugKey, loreSlugMap.has(slugKey) ? null : refInfo)
+          }
+        }
         insertedRows.push({
           id: row.id,
           shortId,
+          title: row.title,
+          sourceRef: c.sourceRef,
           content: row.content,
           needsRewrite: resolved.sourceKind === 'kioku',
         })
@@ -551,15 +656,22 @@ export async function applyTransferImport(
       }
     }
 
-    // 第二遍：如有重分配短 ID，统一重写本批所有词条正文的双链，再写入出链与版本历史
+    // 第二遍：如有重分配短 ID 或 Lore 内部路径引用，统一重写本批词条正文的双链，再写入出链与版本历史
     for (const inserted of insertedRows) {
       let finalContent = inserted.content
       if (inserted.needsRewrite && remap.size) {
-        const rewritten = rewriteWikiLinks(finalContent, remap)
-        if (rewritten !== finalContent) {
-          finalContent = rewritten
-          await tx.update(entries).set({ content: finalContent }).where(eq(entries.id, inserted.id))
-        }
+        finalContent = rewriteWikiLinks(finalContent, remap)
+      }
+      if (resolved.sourceKind === 'lore' && (loreUriMap.size || loreSlugMap.size)) {
+        finalContent = rewriteLoreReferences(
+          finalContent,
+          inserted.shortId,
+          loreUriMap,
+          loreSlugMap,
+        )
+      }
+      if (finalContent !== inserted.content) {
+        await tx.update(entries).set({ content: finalContent }).where(eq(entries.id, inserted.id))
       }
       await syncEntryLinks(tx, inserted.id, inserted.shortId, finalContent)
       const [fresh] = await tx.select().from(entries).where(eq(entries.id, inserted.id)).limit(1)
@@ -568,9 +680,11 @@ export async function applyTransferImport(
           entryId: fresh.id,
           eventType: 'create',
           actor,
+          changeSummary: resolved.sourceKind === 'lore' ? '从 Lore 导入' : '从 Kioku 备份导入',
           snapshot: {
             kind: fresh.kind,
             title: fresh.title,
+            summary: fresh.summary,
             content: fresh.content,
             disclosure: fresh.disclosure,
             isPinned: fresh.isPinned,
@@ -580,6 +694,7 @@ export async function applyTransferImport(
             runtimes: fresh.runtimes,
             topics: fresh.topics,
             validTo: fresh.validTo ? fresh.validTo.toISOString() : null,
+            verifiedAt: fresh.verifiedAt ? fresh.verifiedAt.toISOString() : null,
             version: fresh.version,
           },
           createdAt: now,

@@ -1,12 +1,18 @@
 import { describe, expect, it } from 'vitest'
 
 import createMemoryModal from '../components/CreateMemoryModal.vue?raw'
+import dreamSuggestionCard from '../components/DreamSuggestionCard.vue?raw'
+import entryLinksPanel from '../components/EntryLinksPanel.vue?raw'
+import hygieneSweepDrawer from '../components/HygieneSweepDrawer.vue?raw'
+import memoryContent from '../components/MemoryContent.vue?raw'
 import memoryEditor from '../components/MemoryEditor.vue?raw'
+import memoryHistoryDrawer from '../components/MemoryHistoryDrawer.vue?raw'
 import memoryList from '../components/MemoryList.vue?raw'
 import quickCaptureModal from '../components/QuickCaptureModal.vue?raw'
 import consoleSearch from '../composables/useConsoleSearch.ts?raw'
 import { icons } from '../icons'
 import consoleLayout from '../layouts/ConsoleLayout.vue?raw'
+import inboxPage from '../pages/InboxPage.vue?raw'
 import memoriesPage from '../pages/MemoriesPage.vue?raw'
 import themeSource from '../theme.ts?raw'
 
@@ -98,6 +104,49 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(memoryEditor).toContain('insertCredential')
     expect(memoryEditor).toContain('<MemoryHistoryDrawer')
     expect(memoryEditor).toContain('<EntryLinksPanel')
+    expect(memoryEditor).toContain('@container (min-width: 960px)')
+    expect(memoryEditor).toContain('stripDuplicateLeadingHeading')
+    expect(memoryEditor).toContain('extractMarkdownOutline')
+    expect(memoryEditor).toContain('analyzeTitleHint')
+    expect(memoryEditor).toContain('拆出至变更说明')
+    expect(memoryEditor).toContain('<SaveBar')
+    expect(memoryContent).toContain(':deep(details)')
+    expect(entryLinksPanel).toContain('contextSnippet')
+  })
+
+  it('列表保留近改副行与常驻水位，历史抽屉支持筛选、属性变动表、两版对比与快照预览', () => {
+    expect(memoryList).toContain('近改：')
+    expect(memoryList).toContain('PINNED_CHAR_BUDGET')
+    expect(memoryList).toContain('pinned-budget')
+    expect(memoryList).not.toContain('.list-pane.is-compact .row-disclosure')
+
+    expect(memoryHistoryDrawer).toContain('max-w-2xl')
+    expect(memoryHistoryDrawer).toContain('diffEntrySnapshots')
+    expect(memoryHistoryDrawer).toContain('formatActorLabel')
+    expect(memoryHistoryDrawer).toContain('对比两版')
+    expect(memoryHistoryDrawer).toContain('预览快照')
+    expect(memoryHistoryDrawer).toContain('属性变动')
+  })
+
+  it('待处理页与建议卡片具备分类筛选、五重护栏、分项应用、纯标题速审表、预清洗抽屉与 8 秒撤销', () => {
+    expect(inboxPage).toContain('结构体检与预清洗')
+    expect(inboxPage).toContain('存量规范整理')
+    expect(inboxPage).toContain('纯标题速审表')
+    expect(inboxPage).toContain('duration: 8000')
+    expect(inboxPage).toContain('api.restoreEntry')
+    expect(inboxPage).toContain('<HygieneSweepDrawer')
+
+    expect(dreamSuggestionCard).toContain('checkCaptureIntegrity')
+    expect(dreamSuggestionCard).toContain('title-compare')
+    expect(dreamSuggestionCard).toContain('guard-strip')
+    expect(dreamSuggestionCard).toContain('规范标题')
+    expect(dreamSuggestionCard).toContain('原有完整内容保留在版本历史中，可随时恢复')
+    expect(dreamSuggestionCard).toContain('archivedNotes')
+
+    expect(hygieneSweepDrawer).toContain('api.previewHygieneSweep')
+    expect(hygieneSweepDrawer).toContain('api.applyHygieneSweep')
+    expect(hygieneSweepDrawer).toContain('疑似残缺记忆')
+    expect(hygieneSweepDrawer).toContain('疑似过时记忆')
   })
 
   it('界面中引用的全部 icons.* 均已在 icons.ts 注册，且没有直接写死未打包的 i-lucide-*', () => {
