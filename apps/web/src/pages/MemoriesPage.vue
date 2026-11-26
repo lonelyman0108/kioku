@@ -18,6 +18,7 @@ import QuickCaptureModal from '../components/QuickCaptureModal.vue'
 import { useDebounced } from '../composables/useDebounced'
 import { useViewport } from '../composables/useViewport'
 import { icons } from '../icons'
+import { entryRoute } from '../routes'
 
 const route = useRoute()
 const router = useRouter()
@@ -133,6 +134,14 @@ function select(shortId: string | null) {
   void router.replace(withQuery({ id: shortId }))
 }
 
+function openEntryFromCapture(shortId: string) {
+  if (route.name !== 'memories') {
+    void router.push(entryRoute(shortId))
+    return
+  }
+  select(shortId)
+}
+
 function toggleFullscreen() {
   if (!selectedId.value) return
   fullscreen.value = !fullscreen.value
@@ -208,7 +217,12 @@ function hasOpenOverlay(): boolean {
 function onKeydown(event: KeyboardEvent) {
   if (event.defaultPrevented || hasOpenOverlay()) return
 
-  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'j') {
+  if (
+    (event.metaKey || event.ctrlKey) &&
+    !event.shiftKey &&
+    !event.altKey &&
+    event.key.toLowerCase() === 'j'
+  ) {
     event.preventDefault()
     openCapture()
     return
@@ -360,7 +374,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
       :initial-text="captureDraft"
       @applied="onChanged"
       @created="onCaptureCreated"
-      @open-entry="select"
+      @open-entry="openEntryFromCapture"
     />
   </div>
 </template>

@@ -376,7 +376,7 @@ defineExpose({ filterOpen })
         </div>
         <template v-else-if="items.length">
           <ul role="listbox" aria-label="记忆清单">
-            <li v-for="item in items" :key="item.shortId">
+            <li v-for="item in items" :key="item.shortId" role="none">
               <button
                 type="button"
                 role="option"

@@ -269,6 +269,7 @@ export const theme = {
       variant: fieldVariants,
     },
     compoundVariants: fieldFocus,
+    defaultVariants: { fixed: true },
   },
   inputNumber: {
     variants: {

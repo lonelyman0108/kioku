@@ -427,6 +427,7 @@ function selectCandidate(cand: CaptureCandidate) {
 
 function onSectionChange(value: string) {
   if (applyBusy.value || editingDiff.value || !beforeContent.value) return
+  if (!confirmDiscardCustomDraft()) return
   const heading = value === END_SECTION ? null : value
   applyLocalAppend(beforeContent.value, heading)
   reason.value = heading
