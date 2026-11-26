@@ -3,15 +3,20 @@ import type { AddressInfo } from 'node:net'
 
 import { EMBEDDING_DIMENSIONS } from '../db/schema'
 
+export type FakeChatHandler = (
+  messages: { role: string; content: string }[],
+  body: Record<string, unknown>,
+) => string | Promise<string>
+
 export interface FakeOpenAiOptions {
   embed?: (input: string) => number[]
-  chat?: (messages: { role: string; content: string }[]) => string
+  chat?: FakeChatHandler
 }
 
 export interface FakeOpenAiServer {
   baseUrl: string
   requests: { path: string; body: unknown; auth: string | undefined }[]
-  setChatHandler: (fn: (messages: { role: string; content: string }[]) => string) => void
+  setChatHandler: (fn: FakeChatHandler) => void
   setEmbedHandler: (fn: (input: string) => number[]) => void
   close: () => Promise<void>
 }
@@ -75,15 +80,42 @@ export async function startFakeOpenAi(options: FakeOpenAiOptions = {}): Promise<
         const messages = Array.isArray(body.messages)
           ? (body.messages as { role: string; content: string }[])
           : []
-        const content = chatHandler(messages)
-        res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(
-          JSON.stringify({
-            id: 'chatcmpl-test',
-            object: 'chat.completion',
-            choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }],
-          }),
-        )
+        void Promise.resolve()
+          .then(() => chatHandler(messages, body))
+          .then((content) => {
+            if (body.stream === true) {
+              res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' })
+              const mid = Math.ceil(content.length / 2)
+              const parts = [content.slice(0, mid), content.slice(mid)].filter(Boolean)
+              for (const piece of parts) {
+                res.write(
+                  `data: ${JSON.stringify({
+                    id: 'chatcmpl-test',
+                    object: 'chat.completion.chunk',
+                    choices: [{ index: 0, delta: { content: piece }, finish_reason: null }],
+                  })}\n\n`,
+                )
+              }
+              res.write('data: [DONE]\n\n')
+              res.end()
+              return
+            }
+            res.writeHead(200, { 'content-type': 'application/json' })
+            res.end(
+              JSON.stringify({
+                id: 'chatcmpl-test',
+                object: 'chat.completion',
+                choices: [
+                  { index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' },
+                ],
+              }),
+            )
+          })
+          .catch((err: unknown) => {
+            const message = err instanceof Error ? err.message : String(err)
+            res.writeHead(500, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ error: { message } }))
+          })
         return
       }
 

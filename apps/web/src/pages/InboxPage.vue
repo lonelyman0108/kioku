@@ -6,7 +6,9 @@ import {
   type ApplySuggestionRequest,
   type DreamSuggestionKind,
   type DreamSuggestionView,
+  type TriggerDreamRequest,
 } from '@kioku/contracts'
+import type { DropdownMenuItem } from '@nuxt/ui'
 import { useToast } from '@nuxt/ui/composables'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
@@ -50,7 +52,14 @@ const inboxQuery = useQuery({
 
 const data = computed(() => inboxQuery.data.value ?? null)
 const items = computed(() => data.value?.items ?? [])
+const tidyPendingCount = computed(() => data.value?.tidyPendingCount ?? 0)
 const state = computed(() => data.value?.dreamState ?? null)
+const progress = computed(() => state.value?.progress ?? null)
+const progressPercent = computed(() =>
+  progress.value && progress.value.total > 0
+    ? Math.min(100, Math.round((progress.value.processed / progress.value.total) * 100))
+    : 0,
+)
 
 const kindFilter = ref<KindFilter>('all')
 const sweepOpen = ref(false)
@@ -158,29 +167,76 @@ function baseEntryOf(suggestion: DreamSuggestionView) {
 }
 
 const triggeringMode = ref<'standard' | 'tidy' | null>(null)
-async function triggerDream(mode: 'standard' | 'tidy') {
-  if (triggeringMode.value) return
+const tidyBusy = computed(
+  () =>
+    triggeringMode.value === 'tidy' ||
+    (Boolean(state.value?.running) && progress.value?.mode === 'tidy'),
+)
+const standardBusy = computed(
+  () =>
+    triggeringMode.value === 'standard' ||
+    (Boolean(state.value?.running) && progress.value?.mode !== 'tidy'),
+)
+const tidyDisabled = computed(
+  () =>
+    !data.value ||
+    !me.data.value?.hasChatModel ||
+    Boolean(triggeringMode.value) ||
+    Boolean(state.value?.running),
+)
+
+async function triggerDream(req: Partial<TriggerDreamRequest>) {
+  if (triggeringMode.value || state.value?.running) return
+  const mode = req.mode === 'tidy' ? 'tidy' : 'standard'
   triggeringMode.value = mode
   try {
-    const res =
-      mode === 'tidy'
-        ? await api.runDream({ mode: 'tidy', pinnedFirst: true, limit: 8 })
-        : await api.runDream({ mode: 'standard' })
+    const res = await api.runDream(req)
     if (res.started) {
-      toast.add({
-        title: mode === 'tidy' ? '已发起存量规范整理任务' : '已发起整理任务',
-        color: 'success',
-      })
+      const title =
+        mode === 'tidy'
+          ? req.all
+            ? '已发起全部存量规范整理任务'
+            : `已发起存量规范整理（本批 ${req.limit ?? 10} 条）`
+          : '已发起整理任务'
+      toast.add({ title, color: 'success' })
     } else {
       toast.add({ title: res.reason ?? '当前无需重复整理', color: 'neutral' })
     }
-    void queryClient.invalidateQueries({ queryKey: ['inbox'] })
+    await queryClient.invalidateQueries({ queryKey: ['inbox'] })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '触发整理失败', color: 'error' })
   } finally {
     triggeringMode.value = null
   }
 }
+
+const tidyMenuItems = computed<DropdownMenuItem[][]>(() => {
+  const count = tidyPendingCount.value
+  if (count <= 0) {
+    return [[{ type: 'label', label: '当前暂无待规范存量' }]]
+  }
+  const actions: DropdownMenuItem[] = []
+  if (count > 10) {
+    actions.push({
+      label: '整理本批 10 条',
+      icon: icons.tidy,
+      onSelect: () => void triggerDream({ mode: 'tidy', pinnedFirst: true, limit: 10 }),
+    })
+  }
+  if (count > 20) {
+    actions.push({
+      label: '整理本批 20 条',
+      icon: icons.tidy,
+      onSelect: () => void triggerDream({ mode: 'tidy', pinnedFirst: true, limit: 20 }),
+    })
+  }
+  actions.push({
+    label: `整理全部待规范（${count} 条）`,
+    icon: icons.listChecks,
+    onSelect: () => void triggerDream({ mode: 'tidy', pinnedFirst: true, all: true }),
+  })
+  return [[{ type: 'label', label: `待规范存量 ${count} 条 · 常驻优先` }, ...actions]]
+})
 
 async function undoAppliedSuggestion(
   shortId: string,
@@ -392,23 +448,32 @@ async function applyQuickTableSelected() {
           >
             结构体检与预清洗
           </UButton>
-          <UButton
-            :icon="icons.tidy"
-            size="sm"
-            color="neutral"
-            variant="outline"
-            :loading="triggeringMode === 'tidy' || Boolean(state?.running)"
-            :disabled="!me.data.value?.hasChatModel || Boolean(triggeringMode)"
-            @click="triggerDream('tidy')"
+          <UDropdownMenu
+            :items="tidyMenuItems"
+            :disabled="tidyDisabled"
+            :content="{ align: 'end' }"
+            :ui="{ content: 'min-w-52' }"
           >
-            存量规范整理
-          </UButton>
+            <UButton
+              :icon="icons.tidy"
+              :trailing-icon="icons.chevronDown"
+              size="sm"
+              color="neutral"
+              variant="outline"
+              :loading="tidyBusy"
+              :disabled="tidyDisabled"
+            >
+              {{ tidyPendingCount > 0 ? `存量规范整理（${tidyPendingCount}）` : '存量规范整理' }}
+            </UButton>
+          </UDropdownMenu>
           <UButton
             :icon="icons.sparkles"
             size="sm"
-            :loading="triggeringMode === 'standard' || Boolean(state?.running)"
-            :disabled="!me.data.value?.hasChatModel || Boolean(triggeringMode)"
-            @click="triggerDream('standard')"
+            :loading="standardBusy"
+            :disabled="
+              !me.data.value?.hasChatModel || Boolean(triggeringMode) || Boolean(state?.running)
+            "
+            @click="triggerDream({ mode: 'standard' })"
           >
             {{ state?.running ? '整理中' : '立即整理' }}
           </UButton>
@@ -449,6 +514,10 @@ async function applyQuickTableSelected() {
                     {{ items.length }} 条
                   </dd>
                 </div>
+                <div v-if="data" class="rail-stat-row">
+                  <dt>待规范存量</dt>
+                  <dd class="tabular-nums">{{ tidyPendingCount }} 条</dd>
+                </div>
                 <div v-if="state" class="rail-stat-row">
                   <dt>定时整理</dt>
                   <dd>{{ state.enabled ? `每 ${state.intervalHours} 小时` : '已关闭' }}</dd>
@@ -479,7 +548,39 @@ async function applyQuickTableSelected() {
                 </div>
               </dl>
 
-              <p v-if="state?.lastError" class="rail-error">错误：{{ state.lastError }}</p>
+              <div v-if="state?.running" class="rail-progress" role="status" aria-live="polite">
+                <div class="rail-progress-head">
+                  <span>{{ progress?.mode === 'tidy' ? '存量规范整理中' : '后台整理中' }}</span>
+                  <span v-if="progress && progress.total > 0" class="tabular-nums">
+                    {{ progress.processed }} / {{ progress.total }} 条
+                  </span>
+                </div>
+                <div
+                  v-if="progress && progress.total > 0"
+                  class="rail-progress-track"
+                  role="progressbar"
+                  aria-label="整理进度"
+                  aria-valuemin="0"
+                  aria-valuemax="100"
+                  :aria-valuenow="progressPercent"
+                >
+                  <div class="rail-progress-fill" :style="{ width: `${progressPercent}%` }" />
+                </div>
+                <p v-if="progress" class="rail-progress-meta tabular-nums">
+                  已生成 {{ progress.suggested }} 条建议<template v-if="progress.failed > 0"
+                    >，失败 {{ progress.failed }} 条</template
+                  >
+                </p>
+                <p v-else class="rail-progress-meta">任务已入队，正在准备候选记忆…</p>
+              </div>
+
+              <p
+                v-if="!state?.running && state?.lastError"
+                class="rail-error"
+                :class="{ 'is-partial': state.lastOutcome === 'partial' }"
+              >
+                {{ state.lastOutcome === 'partial' ? state.lastError : `错误：${state.lastError}` }}
+              </p>
             </section>
 
             <!-- 建议类型分段筛选与纯标题速审表切换 -->
@@ -669,27 +770,39 @@ async function applyQuickTableSelected() {
                   >
                     结构体检与预清洗
                   </UButton>
-                  <UButton
+                  <UDropdownMenu
                     v-if="me.data.value?.hasChatModel"
-                    size="sm"
-                    variant="outline"
-                    :icon="icons.tidy"
-                    :loading="triggeringMode === 'tidy' || Boolean(state?.running)"
-                    :disabled="Boolean(triggeringMode)"
-                    @click="triggerDream('tidy')"
+                    :items="tidyMenuItems"
+                    :disabled="tidyDisabled"
+                    :content="{ align: 'center' }"
+                    :ui="{ content: 'min-w-52' }"
                   >
-                    存量规范整理
-                  </UButton>
+                    <UButton
+                      size="sm"
+                      color="neutral"
+                      variant="outline"
+                      :icon="icons.tidy"
+                      :trailing-icon="icons.chevronDown"
+                      :loading="tidyBusy"
+                      :disabled="tidyDisabled"
+                    >
+                      {{
+                        tidyPendingCount > 0
+                          ? `存量规范整理（${tidyPendingCount}）`
+                          : '存量规范整理'
+                      }}
+                    </UButton>
+                  </UDropdownMenu>
                   <UButton
                     v-if="me.data.value?.hasChatModel"
                     size="sm"
                     variant="outline"
                     :icon="icons.sparkles"
-                    :loading="triggeringMode === 'standard' || Boolean(state?.running)"
-                    :disabled="Boolean(triggeringMode)"
-                    @click="triggerDream('standard')"
+                    :loading="standardBusy"
+                    :disabled="Boolean(triggeringMode) || Boolean(state?.running)"
+                    @click="triggerDream({ mode: 'standard' })"
                   >
-                    立即整理
+                    {{ state?.running ? '整理中' : '立即整理' }}
                   </UButton>
                 </template>
               </EmptyState>
@@ -797,6 +910,38 @@ async function applyQuickTableSelected() {
 .rail-outcome {
   color: var(--ui-text-muted);
 }
+.rail-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--ui-rule);
+  background: var(--ui-bg);
+}
+.rail-progress-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ui-text-highlighted);
+}
+.rail-progress-track {
+  height: 4px;
+  background: var(--ui-border);
+  overflow: hidden;
+}
+.rail-progress-fill {
+  height: 100%;
+  background: var(--ui-rule);
+  transition: width 180ms ease;
+}
+.rail-progress-meta {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ui-text-muted);
+}
 .rail-error {
   padding: 6px 8px;
   border: 1px solid var(--ui-error);
@@ -805,6 +950,10 @@ async function applyQuickTableSelected() {
   line-height: 1.5;
   color: var(--ui-error);
   overflow-wrap: anywhere;
+}
+.rail-error.is-partial {
+  border-color: var(--ui-warning);
+  color: var(--ui-warning);
 }
 .rail-quick-switch {
   padding-top: 8px;

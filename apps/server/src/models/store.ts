@@ -1,6 +1,7 @@
 import {
   DEFAULT_DREAM_INTERVAL_HOURS,
   type DreamOutcome,
+  type DreamProgress,
   type DreamRunSummary,
   type DreamSettingsConfig,
   type DreamState,
@@ -235,7 +236,10 @@ function parseStoredDreamState(raw: unknown): StoredDreamState {
     intervalHours: interval,
     lastRunAt: typeof r.lastRunAt === 'string' ? r.lastRunAt : null,
     lastOutcome:
-      r.lastOutcome === 'ok' || r.lastOutcome === 'skipped' || r.lastOutcome === 'failed'
+      r.lastOutcome === 'ok' ||
+      r.lastOutcome === 'partial' ||
+      r.lastOutcome === 'skipped' ||
+      r.lastOutcome === 'failed'
         ? r.lastOutcome
         : null,
     lastError: typeof r.lastError === 'string' ? r.lastError : null,
@@ -243,13 +247,17 @@ function parseStoredDreamState(raw: unknown): StoredDreamState {
   }
 }
 
-export async function loadDreamState(db: Db | Tx, running = false): Promise<DreamState> {
+export async function loadDreamState(
+  db: Db | Tx,
+  running = false,
+  progress: DreamProgress | null = null,
+): Promise<DreamState> {
   const [row] = await db
     .select()
     .from(settings)
     .where(eq(settings.key, DREAM_STATE_SETTING_KEY))
     .limit(1)
-  return { ...parseStoredDreamState(row?.value), running }
+  return { ...parseStoredDreamState(row?.value), running, progress: running ? progress : null }
 }
 
 export async function updateDreamConfig(

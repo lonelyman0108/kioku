@@ -293,11 +293,11 @@ export function parseDreamProposals(
 export type TidyParseResult =
   | { status: 'proposal'; proposal: ParsedDreamProposal }
   | { status: 'not_needed' }
-  | { status: 'invalid' }
+  | { status: 'invalid'; reason: string }
 
 export function evaluateTidyResponse(raw: string, target: DreamPromptItem): TidyParseResult {
   const rec = parseJsonObject(raw)
-  if (!rec) return { status: 'invalid' }
+  if (!rec) return { status: 'invalid', reason: '模型输出非合法 JSON' }
   if (rec.needed === false) return { status: 'not_needed' }
 
   const proposedTitle = sanitizeDreamPlainField(rec.title, ENTRY_TITLE_NEW_MAX) || target.title
@@ -323,7 +323,7 @@ export function evaluateTidyResponse(raw: string, target: DreamPromptItem): Tidy
   // 严格完整性守卫：规范精简允许安全压缩历史篇幅，但绝不允许丢失任一既有双链或凭据占位符
   const integrity = checkCaptureIntegrity(target.content, proposedContent)
   if (integrity.missingLinks.length > 0 || integrity.missingCreds.length > 0) {
-    return { status: 'invalid' }
+    return { status: 'invalid', reason: '草案丢失原有双链或凭据占位符，已拦截' }
   }
 
   return {

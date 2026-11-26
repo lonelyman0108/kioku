@@ -68,7 +68,8 @@ export function dreamRoutes(deps: Deps, entries: EntryService) {
   return router()
     .openapi(inboxRoute, async (c) => {
       const running = (await deps.jobs?.isDreamRunning()) ?? false
-      return c.json(await loadInbox(deps.db, running), 200)
+      const progress = running ? ((await deps.jobs?.getDreamProgress?.()) ?? null) : null
+      return c.json(await loadInbox(deps.db, running, progress), 200)
     })
     .openapi(applyRoute, async (c) => {
       const { id } = c.req.valid('param')

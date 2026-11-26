@@ -463,7 +463,7 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
       }),
     )
 
-    // 先验证完整性守卫：丢失凭据占位符的草案必须被静默丢弃
+    // 先验证完整性守卫：丢失凭据占位符的草案必须被拦截并记为失败，不入待处理且不标已检
     fakeAi.setChatHandler(() =>
       JSON.stringify({
         needed: true,
@@ -482,6 +482,8 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
       limit: 5,
     })
     expect(blockedRun.suggested).toBe(0)
+    expect(blockedRun.outcome).toBe('failed')
+    expect(blockedRun.error).toContain('双链或凭据')
 
     // 正常草案：验证长文未截断传入模型、保留全部双链与凭据、并产出 archived_notes
     let sawTail = false
@@ -562,5 +564,103 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
     })
     expect(secondCheck.considered).toBe(0)
     expect(calls).toBe(1)
+  })
+
+  it('Dream tidy 模式支持 3 路受控并发、全量批次、单条失败容错与进度回调，且返回待规范存量计数', async () => {
+    const masterKey = testMasterKey()
+    await saveModelEndpoint(database.db, masterKey, CHAT_LLM_SETTING_KEY, {
+      baseUrl: fakeAi.baseUrl,
+      model: 'fake-chat',
+      apiKey: 'sk-chat',
+      enabled: true,
+    })
+
+    const credSvc = new CredentialService(database.db, masterKey)
+    const entrySvc = new EntryService(database.db, masterKey, credSvc, null)
+    const consoleScope = { kind: 'console' as const, accountId: 'acc', sessionId: 'sess' }
+
+    const createdShorts: string[] = []
+    for (let i = 0; i < 6; i++) {
+      const res = await entrySvc.create(
+        consoleScope,
+        entryInput({
+          title: `待规范条目 ${i + 1}（2026-10-0${i + 1} 记录）`,
+          content: `第 ${i + 1} 条测试正文内容。`,
+          isPinned: i < 2,
+        }),
+      )
+      createdShorts.push(res.entry.shortId)
+    }
+
+    const failShortId = createdShorts[2]!
+    const noopShortId = createdShorts[3]!
+
+    const inboxBefore = await loadInbox(database.db, false)
+    expect(inboxBefore.tidyPendingCount).toBe(6)
+
+    let inFlight = 0
+    let maxInFlight = 0
+    fakeAi.setChatHandler(async (messages) => {
+      inFlight++
+      if (inFlight > maxInFlight) maxInFlight = inFlight
+      await new Promise((r) => setTimeout(r, 35))
+      const userPrompt = messages.find((m) => m.role === 'user')?.content ?? ''
+      try {
+        if (userPrompt.includes(`[${failShortId}]`)) {
+          throw new Error('upstream boom')
+        }
+        if (userPrompt.includes(`[${noopShortId}]`)) {
+          return JSON.stringify({ needed: false })
+        }
+        return JSON.stringify({
+          needed: true,
+          title: '规范化主题名',
+          summary: '清晰现行概要。',
+          content: '精简后的常青正文。',
+          change_summary: '规范标题与正文',
+          archived_notes: [],
+          reason: '去除标题日期',
+        })
+      } finally {
+        inFlight--
+      }
+    })
+
+    const progressEvents: {
+      processed: number
+      total: number
+      suggested: number
+      failed: number
+    }[] = []
+    const run = await runDream(database.db, masterKey, {
+      runId: 'tidy-all-resilient',
+      trigger: 'manual',
+      mode: 'tidy',
+      all: true,
+      onProgress: (p) => progressEvents.push({ ...p }),
+    })
+
+    // 3 路受控并发生效，且不会超发
+    expect(maxInFlight).toBeGreaterThanOrEqual(2)
+    expect(maxInFlight).toBeLessThanOrEqual(3)
+
+    // 6 条中 1 条失败、1 条无需调整、4 条生成建议：整批不停机，标记部分完成并指名失败短 ID
+    expect(run.outcome).toBe('partial')
+    expect(run.considered).toBe(6)
+    expect(run.suggested).toBe(4)
+    expect(run.error).toContain(failShortId)
+    expect(progressEvents.at(-1)).toEqual({
+      mode: 'tidy',
+      processed: 6,
+      total: 6,
+      suggested: 4,
+      failed: 1,
+    })
+
+    // 4 条已入队待处理 + 1 条 not_needed 已持久化已检版本，仅剩失败的那 1 条仍在待规范存量里
+    const inboxAfter = await loadInbox(database.db, false)
+    expect(inboxAfter.pendingCount).toBe(4)
+    expect(inboxAfter.tidyPendingCount).toBe(1)
+    expect(inboxAfter.dreamState.lastOutcome).toBe('partial')
   })
 })
