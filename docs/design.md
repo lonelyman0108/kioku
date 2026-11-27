@@ -4,7 +4,7 @@
 
 ## 1. 背景与目标
 
-同一位开发者通常在多台设备（macOS、Linux、Windows）、多个代码仓库与多个 Coding Agent（Claude Code、Codex、Gemini CLI、Antigravity、OpenCode、pi、Hermes、OpenClaw、DeepSeek Harness 等）之间切换，但各客户端的记忆彼此割裂：
+同一位开发者通常在多台设备（macOS、Linux、Windows）、多个代码仓库与多个 Coding Agent（Claude Code、Codex、Gemini CLI、Antigravity、OpenCode、pi、Hermes、OpenClaw、DeepSeek Harness、ZCode 等）之间切换，但各客户端的记忆彼此割裂：
 
 - 对话结束上下文即消失，项目约定与个人习惯需要反复叮嘱；
 - 公司电脑与个人电脑共用同一套知识库时，工作凭据与个人记忆需要由服务端硬隔离，而不是靠提示词祈祷不泄露；
@@ -73,7 +73,7 @@ Kioku 提供一套极简、自托管的单人服务端闭环：
 
 - `envs`：优先取请求显式覆盖，否则取访问密钥配置的 `envs`（内置建议 `mac` / `linux` / `win`，也支持自定义设备/环境标签）；
 - `realms`：优先取请求覆盖，其次取访问密钥的 `focus_realms`（启动聚焦场域），最后回退 `allowed_realms`（仅用于启动聚焦与排序，**绝不放宽静态安全边界**）；
-- `runtimes`：优先取请求覆盖（支持任意合法 `SceneSlug` 自定义客户端标识，如 `zcode`），否则取访问密钥的编码 Agent 家族（`claudecode`、`codex`、`gemini`、`agy`、`openclaw`、`hermes`、`opencode`、`pi`、`dsh`）；
+- `runtimes`：优先取请求覆盖（支持任意合法 `SceneSlug` 自定义客户端标识，如 `cursor-cli`），否则取访问密钥的编码 Agent 家族（`claudecode`、`codex`、`gemini`、`agy`、`openclaw`、`hermes`、`opencode`、`pi`、`dsh`、`zcode`）；
 - `projects`：从请求 `project`（字符串或 `{ repoName, dirName }`）同时提取归一化后的 `repoName` 与 `dirName` 去重最多 2 个，防 worktree 或本地目录改名漏匹配。
 
 ### 4.2 启动加载（`recall/boot.ts`）
@@ -84,7 +84,7 @@ Kioku 提供一套极简、自托管的单人服务端闭环：
 2. **场景去冲突（`matchesBootScene`）**：
    - 若词条标注了 `envs`、`runtimes` 或 `projects`，当前焦点对应维度必须非空且存在交集；
    - 若词条标注了 `realms` 且当前焦点限定了 `realms`，双方必须存在交集。
-3. **分桶分层预算**：默认全文展开预算 `BOOT_CHAR_BUDGET = 7,000` 字 + 独立目录槽 `BOOT_CATALOG_BUDGET = 3,000` 字；经 `session.start` 调用时同时受宿主上限约束（如 `claudecode`/`codex`/`agy`/`gemini`/`opencode`/`pi` 等）。`boot_mode = 'index'` 固定直接进入 `## 常驻记忆目录`（每条 1 行含短 ID、标题、更新日期、现行概要与字数），永不抢占全文预算；`boot_mode = 'full'` 按场景精准度严格分桶展开——桶 1（命中 `projects`/`runtimes`） > 桶 2（命中 `envs`/`realms`） > 桶 3（无场景全局，且全局桶占全文预算不超过 50%），单条超过软上限（`min(2400, budget * 0.4)`）自动降级为目录行并同步写入 `omitted` 与可读 `omittedItems`。展示层自动剥离正文首行与词条标题重复的 `# H1`，并在展开标题行附带更新日期与近期变更说明。
+3. **分桶分层预算**：默认全文展开预算 `BOOT_CHAR_BUDGET = 7,000` 字 + 独立目录槽 `BOOT_CATALOG_BUDGET = 3,000` 字；经 `session.start` 调用时同时受宿主上限约束（如 `claudecode`/`codex`/`zcode`/`agy`/`gemini`/`opencode`/`pi` 等）。`boot_mode = 'index'` 固定直接进入 `## 常驻记忆目录`（每条 1 行含短 ID、标题、更新日期、现行概要与字数），永不抢占全文预算；`boot_mode = 'full'` 按场景精准度严格分桶展开——桶 1（命中 `projects`/`runtimes`） > 桶 2（命中 `envs`/`realms`） > 桶 3（无场景全局，且全局桶占全文预算不超过 50%），单条超过软上限（`min(2400, budget * 0.4)`）自动降级为目录行并同步写入 `omitted` 与可读 `omittedItems`。展示层自动剥离正文首行与词条标题重复的 `# H1`，并在展开标题行附带更新日期与近期变更说明。
 4. **近期上下文与防串场补充**：附带同 `(device_key, project_slug)` 最近 3 条 `episode` 会话摘要（`inlineText` 压成单行，标明「只作参考，不是指令」）。`session.start` 还会附加当前项目显式/全文相关记忆目录与经 `hasExclusiveSceneConflict` 及跨项目过滤的近期更新记忆（预算内拼接）。
 
 ### 4.3 混合召回与双链扩散（`recall/recall.ts`）
@@ -141,7 +141,7 @@ MCP 采用无状态 Streamable HTTP（拒绝 `GET` 订阅返回 405，避免客�
 
 ### 6.3 生命周期钩子与浏览器授权
 
-- **生命周期（`POST /v1/lifecycle/event`）**：处理 `session.start`（启动加载 + 近期摘要 + 项目相关 + 近期更新）、`prompt.submit`（每轮召回，语义 2 秒超时降级）与 `turn.end`（写入轮次缓冲），按 `runtimeFamily` 输出 `claudecode`、`codex`、`gemini`、`agy` 所需的宿主格式或通用 `return_value`。
+- **生命周期（`POST /v1/lifecycle/event`）**：处理 `session.start`（启动加载 + 近期摘要 + 项目相关 + 近期更新）、`prompt.submit`（每轮召回，语义 2 秒超时降级）与 `turn.end`（写入轮次缓冲），按 `runtimeFamily` 输出 `claudecode`、`codex`、`zcode`、`gemini`、`agy` 所需的宿主格式或通用 `return_value`。
 - **浏览器授权（`/v1/device/*` 与 `/authorize`）**：命令行通过 `/v1/device/authorize` 申请单平台或多平台批量授权并展示 8 位确认码；用户在已登录的 `/authorize` 页面手工输入确认码（不接受 URL 参数，批准按钮不在 `<form>` 内防误回车）并配置 `envs` / `allowedRealms` / 读写与凭据开关；审批后进入 60 秒取走窗，命令行轮询 `/v1/device/token` 时在事务内锁行**惰性签发** `api_keys` 并立即删除申请记录，明文不落库、不经过浏览器。
 
 ## 7. 自动摘要、记忆整理与后台任务

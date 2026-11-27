@@ -121,10 +121,19 @@ describe('entry hygiene helpers', () => {
       projects: [],
       runtimes: [],
       knownProjects: ['alpha-app'],
-      knownRuntimes: ['zcode'],
+      knownRuntimes: ['custom-ide'],
     })
     expect(fullOversized.map((w) => w.code)).toContain('pinned_oversized')
     expect(fullOversized.map((w) => w.code)).toContain('pinned_scope_hint')
+
+    // 内置运行时 ZCode 无需依赖 knownRuntimes 与短语触发词即可精确命中客户端提示
+    const zcodeUnscoped = lintEntryHygiene({
+      title: 'ZCode 终端约定',
+      content: '仅在 ZCode 终端生效。',
+      bootMode: 'full',
+    })
+    const zcodeHint = zcodeUnscoped.find((w) => w.code === 'pinned_scope_hint')
+    expect(zcodeHint?.message).toContain('「ZCode」')
 
     // 改为目录常驻并补齐 runtimes 与概要后，上述两项提醒均消失
     const indexScoped = lintEntryHygiene({

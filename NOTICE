@@ -61,7 +61,7 @@ THE SOFTWARE.
 ----
 
 Runtime icons in the admin interface (Claude Code, Codex, Gemini CLI, Antigravity,
-OpenClaw, Hermes, OpenCode, Pi, DeepSeek Harness, and MCP) are adapted as
+OpenClaw, Hermes, OpenCode, Pi, DeepSeek Harness, ZCode, and MCP) are adapted as
 monochrome outlines from Lore (https://github.com/FFatTiger/lore) and LobeHub Icons
 (https://github.com/lobehub/lobe-icons), licensed under the MIT License:
 

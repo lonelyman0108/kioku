@@ -4,6 +4,7 @@ export const PROMPT_SEMANTIC_TIMEOUT_MS = 2_000
 export const HOST_CONTEXT_LIMIT: Record<string, number> = {
   claudecode: 9_500,
   codex: 9_500,
+  zcode: 9_500,
   agy: 11_000,
   gemini: 11_000,
   opencode: 11_000,
@@ -49,6 +50,7 @@ export function hostOutput(
           }
         : { mode: 'stdout_text', value: context }
     case 'codex':
+    case 'zcode':
       return {
         mode: 'stdout_json',
         value: { hookSpecificOutput: { hookEventName, additionalContext: context } },

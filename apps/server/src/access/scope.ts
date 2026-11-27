@@ -32,6 +32,7 @@ const AGENT_RUNTIMES = new Set([
   'opencode',
   'pi',
   'dsh',
+  'zcode',
 ])
 
 export function momentSql(at?: Date): SQL {
