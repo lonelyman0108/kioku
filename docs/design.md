@@ -146,7 +146,7 @@ MCP 采用无状态 Streamable HTTP（拒绝 `GET` 订阅返回 405，避免客�
 
 ## 7. 自动摘要、记忆整理与后台任务
 
-实例在「设置 › 模型」中配置至多两个 OpenAI 兼容端点：一个嵌入模型（1024 维，更换或停用时清空旧模型向量并触发后台补齐）和一个对话模型（同时驱动随手记、会话摘要抽取与记忆整理）。对话模型支持配置思考等级（`reasoningEffort: 'default' | 'off' | 'low' | 'medium' | 'high'`，默认 `default` 不注入字段，兼容非推理模型）及按任务覆盖（`fast` 快速任务 / `organize` 整理任务），开启思考时自动按档位补偿 `max_tokens`，并在 `models/client.ts` 实现结构化 `ModelClientError` 分层重试（`408/429/5xx/520–524`、断连、45s SSE 空闲僵死与未见 `[DONE]` 截断走指数退避 + Full Jitter + `Retry-After`；鉴权/配额/上下文超长/`finish_reason=length` 立即失败；遇 `reasoning_effort` 或 `temperature` 不兼容 400 自动剥离降级并缓存 1h；解析前确定性剥离 `<think>` 块）。
+实例在「设置 › 模型」中配置至多两个 OpenAI 兼容端点：一个嵌入模型（1024 维，更换或停用时清空旧模型向量并触发后台补齐）和一个对话模型（同时驱动随手记、会话摘要抽取与记忆整理）。对话模型支持配置思考等级（`reasoningEffort: 'default' | 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'`，默认 `default` 不注入字段，兼容非推理模型）及按任务覆盖（`fast` 快速任务 / `organize` 整理任务），开启思考时自动按档位补偿 `max_tokens`，并在 `models/client.ts` 实现结构化 `ModelClientError` 分层重试（`408/429/5xx/520–524`、断连、45s SSE 空闲僵死与未见 `[DONE]` 截断走指数退避 + Full Jitter + `Retry-After`；鉴权/配额/上下文超长/`finish_reason=length` 立即失败；遇 `reasoning_effort` 或 `temperature` 不兼容 400 自动剥离降级并缓存 1h；解析前确定性剥离 `<think>` 块）。
 
 pg-boss 运行 5 个队列（`jobs/queue.ts`，通过 `pgBossSsl` 将 `sslmode=require` 统一映射为 `{ rejectUnauthorized: false }`）：
 
@@ -155,7 +155,7 @@ pg-boss 运行 5 个队列（`jobs/queue.ts`，通过 `pgBossSsl` 将 `sslmode=r
 | `embed-entry` | 批量消费（`EMBED_BATCH`） | 词条新建或更新后异步计算 1024 维向量并写入 `entry_embeddings`（HTTP 重试 1 次） |
 | `embed-backfill` | `singleton` | 启动时或换嵌入模型后补齐缺失向量 |
 | `extract-episode` | `stately`，按 `deviceKey\|projectSlug` 去重 | `turn.end` 满 10 轮立即触发或空闲 10 分钟触发，调用对话模型生成 14 天有效期的 `episode` 摘要；坏 JSON 不删除 `turn_buffer` 并支持 1 次定向语义纠错 |
-| `dream` | `singleton`，每小时 41 分巡检（按 `intervalHours`）或手动触发（支持 `standard` / `tidy` / `cross_memory` 与 `targetShortIds`） | `standard` 模式结合 `entry_links`、pgvector 余弦近邻与全文近邻审阅新增/变动记录；`tidy` 模式 3 路受控并发（共享 429 冷却降并发、鉴权/配额熔断、记录结构化失败明细 `failedItems` 供一键重试）按完整正文规范脏标题与历史流水；`cross_memory` 模式走四阶段漏斗（Stage 0 场域硬边界 → Stage 1 零 LLM 向量聚类/中相似补链/同项目主题/相关性 FTS/断链候选图 → Stage 2 按优先级拆分查重簇、会话反向对账、缺失双链、常驻减肥 4 类 Micro-Task → Stage 3 去重入收件箱），产出全部 7 类建议。所有建议按 `fingerprint` 去重落库，人工审阅并校验版本号应用；合并重复在事务内强制检查全部被合并词条双链/凭据并集、同场域防线与最高 `boot_mode` 继承，并自动将全库活跃记忆的 `[[old]]` 反链重定向至保留目标（跳过代码块与 CommonMark 行内代码） |
+| `dream` | `singleton`，每小时 41 分巡检（`standard` / `cross_memory` / `tidy` 各自独立开关、周期 1–720 小时与最近执行时间）或手动触发（支持 `standard` / `tidy` / `cross_memory` 与 `targetShortIds`） | `standard` 模式结合 `entry_links`、pgvector 余弦近邻与全文近邻审阅新增/变动记录；`tidy` 模式 3 路受控并发（共享 429 冷却降并发、鉴权/配额熔断、记录结构化失败明细 `failedItems` 供一键重试）按完整正文规范脏标题与历史流水；`cross_memory` 模式走四阶段漏斗（Stage 0 场域硬边界 → Stage 1 零 LLM 向量聚类/中相似补链/同项目主题/相关性 FTS/断链候选图 → Stage 2 按优先级拆分查重簇、会话反向对账、缺失双链、常驻减肥 4 类 Micro-Task → Stage 3 去重入收件箱），产出全部 7 类建议。所有建议按 `fingerprint` 去重落库，人工审阅并校验版本号应用；合并重复在事务内强制检查全部被合并词条双链/凭据并集、同场域防线与最高 `boot_mode` 继承，并自动将全库活跃记忆的 `[[old]]` 反链重定向至保留目标（跳过代码块与 CommonMark 行内代码） |
 | `cleanup-expired` | `singleton`，每小时 17 分 | 清理过期 `sessions`、过期 `device_grants`、闲置超 24 小时的 `turn_buffer`、软删除超 30 天的回收站词条，以及已处理超 30 天的 `dream_suggestions` |
 
 除后台队列外，编辑页还提供**不占全局 `dream` 锁**的单条主动整理接口：`POST /v1/console/entries/{shortId}/tidy/preview`（SSE 阶段进度 + 5s 心跳 + 中止取消，先做确定性预清洗再完整正文规范并校验完整性）与 `/tidy/apply`（强校 `expectedVersion` 乐观锁，支持一键应用或暂存至待处理）、以及 `POST /v1/console/entries/{shortId}/cross-check`（以当前记忆为锚点跑 Stage 1 + 查重/补链并返回可即时审阅的建议列表）。

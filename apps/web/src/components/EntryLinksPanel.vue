@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { EntryLinkNeighbor } from '@kioku/contracts'
 
+import { icons } from '../icons'
 import { entryKindLabels } from '../labels'
 import SectionHeading from './ui/SectionHeading.vue'
 
@@ -19,7 +20,7 @@ const emit = defineEmits<{ open: [shortId: string] }>()
 <template>
   <div v-if="outboundLinks.length || backlinks.length" class="links-panel" :class="{ compact }">
     <section v-if="outboundLinks.length" class="links-section">
-      <SectionHeading title="出链" :level="3" />
+      <SectionHeading title="出链" :icon="icons.promote" :level="3" />
       <ul class="links-list">
         <li v-for="item in outboundLinks" :key="`out-${item.shortId}`">
           <button type="button" class="link-row" @click="emit('open', item.shortId)">
@@ -41,7 +42,7 @@ const emit = defineEmits<{ open: [shortId: string] }>()
     </section>
 
     <section v-if="backlinks.length" class="links-section">
-      <SectionHeading title="反向链接" :level="3" />
+      <SectionHeading title="反向链接" :icon="icons.links" :level="3" />
       <ul class="links-list">
         <li v-for="item in backlinks" :key="`in-${item.shortId}`">
           <button type="button" class="link-row" @click="emit('open', item.shortId)">

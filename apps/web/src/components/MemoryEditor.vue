@@ -755,7 +755,7 @@ const organizeMenuItems = computed<DropdownMenuItem[][]>(() => {
         onSelect: () => openOrganize('tidy'),
       },
       {
-        label: '查找重复与关联',
+        label: '查重/关联',
         icon: icons.links,
         onSelect: () => openOrganize('cross_check'),
       },
@@ -934,7 +934,8 @@ defineExpose({
               <template v-if="mode === 'read' && pendingSuggestionCount > 0">
                 <span class="status-sep" aria-hidden="true">·</span>
                 <RouterLink :to="{ name: 'inbox' }" class="text-primary status-history-link">
-                  待处理建议（{{ pendingSuggestionCount }}）
+                  <UIcon :name="icons.inbox" class="status-inline-icon" aria-hidden="true" />
+                  <span>待处理建议（{{ pendingSuggestionCount }}）</span>
                 </RouterLink>
               </template>
             </div>
@@ -1087,9 +1088,7 @@ defineExpose({
                   :icon="icons.tidy"
                   :trailing-icon="icons.chevronDown"
                   :disabled="!hasChatModel"
-                  :title="
-                    hasChatModel ? '主动规范此条或查找重复与关联记忆' : '请先在设置中配置对话模型'
-                  "
+                  :title="hasChatModel ? '主动规范此条或查重/关联' : '请先在设置中配置对话模型'"
                 >
                   整理
                 </UButton>
@@ -1583,7 +1582,10 @@ defineExpose({
             <!-- 宽屏右侧 240px 静态辅助轨（@container >= 960px 显示） -->
             <aside v-if="hasSideRail" class="read-rail" aria-label="文档辅助导航">
               <section v-if="outline.length" class="rail-section">
-                <h2 class="rail-heading">小节目录</h2>
+                <h2 class="rail-heading">
+                  <UIcon :name="icons.bookOpen" class="rail-heading-icon" aria-hidden="true" />
+                  <span>小节目录</span>
+                </h2>
                 <ol class="outline-list">
                   <li v-for="(sec, idx) in outline" :key="`${idx}-${sec.heading}`">
                     <button
@@ -1601,7 +1603,10 @@ defineExpose({
 
               <section v-if="railHistory.length" class="rail-section">
                 <div class="rail-heading-row">
-                  <h2 class="rail-heading">近期演进</h2>
+                  <h2 class="rail-heading">
+                    <UIcon :name="icons.history" class="rail-heading-icon" aria-hidden="true" />
+                    <span>近期演进</span>
+                  </h2>
                   <button type="button" class="text-primary rail-more-link" @click="openHistory()">
                     全部历史
                   </button>
@@ -1769,8 +1774,17 @@ defineExpose({
   color: var(--ui-text-toned);
 }
 .status-history-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-size: 12px;
   cursor: pointer;
+}
+.status-inline-icon {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
 }
 .pill {
   display: inline-flex;
@@ -2196,11 +2210,21 @@ defineExpose({
   border-bottom: 0;
 }
 .rail-heading {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   padding-bottom: 4px;
   border-bottom: 1px solid var(--ui-rule);
   font-size: 12px;
   font-weight: 600;
   color: var(--ui-text-highlighted);
+}
+.rail-heading-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+  color: var(--ui-text-muted);
 }
 .rail-more-link {
   font-size: 12px;

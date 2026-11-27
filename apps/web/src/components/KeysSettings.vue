@@ -97,7 +97,7 @@ async function confirmRevoke() {
 <template>
   <div class="space-y-8">
     <section class="space-y-3">
-      <SectionHeading title="快捷接入" :level="2" />
+      <SectionHeading title="快捷接入" :icon="icons.plug" :level="2" />
       <div class="connect-grid">
         <div class="connect-card">
           <span class="connect-label">MCP 端点</span>
@@ -133,7 +133,7 @@ async function confirmRevoke() {
     </section>
 
     <section class="space-y-3">
-      <SectionHeading title="访问密钥" :level="2">
+      <SectionHeading title="访问密钥" :icon="icons.keys" :level="2">
         <template #actions>
           <UButton size="sm" :icon="icons.add" @click="openIssue">签发访问密钥</UButton>
         </template>
@@ -244,7 +244,7 @@ async function confirmRevoke() {
         description="签发访问密钥或通过命令行发起浏览器授权，以接入编码工具。"
       >
         <template #actions>
-          <UButton size="sm" @click="openIssue">签发访问密钥</UButton>
+          <UButton size="sm" :icon="icons.add" @click="openIssue">签发访问密钥</UButton>
         </template>
       </EmptyState>
 
