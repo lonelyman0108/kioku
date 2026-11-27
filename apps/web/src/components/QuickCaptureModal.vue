@@ -230,6 +230,18 @@ const integrityWarning = computed(() => {
   return parts.join('；') || '检测到引用完整性异常，建议核对或改为文末追加'
 })
 
+const showGuardStrip = computed(() => {
+  const check = integrity.value
+  if (!check) return false
+  return Boolean(
+    integrityWarning.value ||
+    check.linksBefore > 0 ||
+    check.linksAfter > 0 ||
+    check.credsBefore > 0 ||
+    check.credsAfter > 0,
+  )
+})
+
 const hasDiffChanges = computed(
   () =>
     step.value === 'preview' &&
@@ -846,7 +858,7 @@ onBeforeUnmount(() => {
 
           <!-- 完整性校验条 -->
           <div
-            v-if="integrity"
+            v-if="integrity && showGuardStrip"
             class="guard-strip"
             :class="{ 'is-alert': Boolean(integrityWarning) }"
           >
@@ -858,14 +870,17 @@ onBeforeUnmount(() => {
               />
               {{ integrityWarning ?? '双链与凭据引用完整' }}
             </span>
-            <span class="guard-meta">
+            <span
+              v-if="integrityWarning || integrity.linksBefore > 0 || integrity.linksAfter > 0"
+              class="guard-meta"
+            >
               双链 {{ integrity.linksBefore }} → {{ integrity.linksAfter }}
             </span>
-            <span class="guard-meta">
+            <span
+              v-if="integrityWarning || integrity.credsBefore > 0 || integrity.credsAfter > 0"
+              class="guard-meta"
+            >
               凭据占位符 {{ integrity.credsBefore }} → {{ integrity.credsAfter }}
-            </span>
-            <span v-if="targetVersion !== null" class="guard-meta">
-              基于版本 {{ targetVersion }}
             </span>
           </div>
 
@@ -934,12 +949,7 @@ onBeforeUnmount(() => {
 
     <template #footer>
       <!-- 输入态底部 -->
-      <div v-if="step === 'input'" class="modal-foot">
-        <span class="text-xs text-muted">
-          {{
-            hasChatModel ? '检索相关记忆并生成归并方案预览' : '未配置对话模型，将按候选目标直接追加'
-          }}
-        </span>
+      <div v-if="step === 'input'" class="modal-foot is-end">
         <div class="foot-group">
           <UButton color="neutral" variant="ghost" size="sm" @click="open = false">取消</UButton>
           <UButton
@@ -955,8 +965,7 @@ onBeforeUnmount(() => {
       </div>
 
       <!-- 加载态底部 -->
-      <div v-else-if="step === 'loading'" class="modal-foot">
-        <span class="text-xs text-muted">仅调整命中段落，不重写无关正文</span>
+      <div v-else-if="step === 'loading'" class="modal-foot is-end">
         <div class="foot-group">
           <UButton color="neutral" variant="outline" size="sm" @click="cancelLoading">
             取消并返回
@@ -1016,9 +1025,6 @@ onBeforeUnmount(() => {
           <UButton color="neutral" variant="outline" size="sm" @click="switchToAppend">
             仍要追加至文末
           </UButton>
-          <UButton color="neutral" variant="outline" size="sm" @click="switchToCreate">
-            存为新记忆
-          </UButton>
         </div>
         <div class="foot-group">
           <UButton color="neutral" variant="ghost" size="sm" @click="open = false">关闭</UButton>
@@ -1048,15 +1054,6 @@ onBeforeUnmount(() => {
             @click="switchToAppend"
           >
             改为文末追加
-          </UButton>
-          <UButton
-            color="neutral"
-            variant="outline"
-            size="sm"
-            :disabled="applyBusy"
-            @click="switchToCreate"
-          >
-            存为新记忆
           </UButton>
         </div>
         <div class="foot-group">
@@ -1294,6 +1291,9 @@ onBeforeUnmount(() => {
   justify-content: space-between;
   gap: 8px 12px;
   width: 100%;
+}
+.modal-foot.is-end {
+  justify-content: flex-end;
 }
 .foot-group {
   display: flex;

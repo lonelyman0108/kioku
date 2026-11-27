@@ -410,10 +410,7 @@ const filteredPreviewItems = computed(() => {
     <div class="transfer-box space-y-3">
       <div class="space-y-1">
         <p class="text-sm font-medium">导出备份</p>
-        <p class="text-xs text-muted">
-          导出全部未删除记忆与场景元数据；默认不包含托管凭据，勾选下方选项后使用口令进行 AES-256-GCM
-          加密导出。
-        </p>
+        <p class="text-xs text-muted">导出全部未删除记忆，可选附带口令加密的托管凭据。</p>
       </div>
 
       <div class="space-y-2">
@@ -482,9 +479,7 @@ const filteredPreviewItems = computed(() => {
       <div class="flex flex-wrap items-center justify-between gap-2">
         <div class="space-y-0.5">
           <p class="text-sm font-medium">导入数据</p>
-          <p class="text-xs text-muted">
-            先预览映射结果与冲突项，勾选确认后再写入；导入不会覆盖现有记忆或凭据。
-          </p>
+          <p class="text-xs text-muted">预览确认后再写入，不覆盖现有数据。</p>
         </div>
         <SegmentedChoice v-model="importTab" :items="sourceTabOptions" label="导入来源" />
       </div>
@@ -570,14 +565,10 @@ const filteredPreviewItems = computed(() => {
                 选择 Lore 导出文件
               </UButton>
               <span v-if="loreFileName && loreBackup" class="text-xs text-muted">
-                已选 <code class="font-mono">{{ loreFileName }}</code
-                >（已在浏览器裁剪，仅上传 5 张记忆表）
+                已选 <code class="font-mono">{{ loreFileName }}</code>
               </span>
             </div>
-            <p class="text-xs text-muted">
-              支持 Lore 导出的 JSON
-              备份文件；系统配置与已废弃版本正文会在浏览器端自动剥离，不上传服务端。
-            </p>
+            <p class="text-xs text-muted">支持 Lore JSON 导出，仅读取记忆内容。</p>
           </div>
 
           <div v-else class="space-y-3">
@@ -640,14 +631,8 @@ const filteredPreviewItems = computed(() => {
           <span v-if="preview.credentialsDecrypted">
             凭据 {{ willImportCredsCount }} / {{ preview.summary.credentialTotal }} 条
           </span>
+          <span v-else-if="preview.hasEncryptedCredentials" class="meta-pill">未导入凭据</span>
         </div>
-
-        <NoteLine
-          v-if="preview.hasEncryptedCredentials && !preview.credentialsDecrypted"
-          tone="neutral"
-        >
-          该备份包含加密凭据，但本次未勾选解密导入；仅导入记忆正文与元数据。
-        </NoteLine>
 
         <div v-if="hasShortIdConflicts" class="flex flex-wrap items-center gap-3">
           <span class="text-xs text-muted">短 ID 已存在时：</span>
@@ -770,9 +755,7 @@ const filteredPreviewItems = computed(() => {
 
         <!-- 凭据元数据预览（绝不显示明文） -->
         <div v-if="preview.credentials.length" class="space-y-2 border-t border-default pt-3">
-          <p class="text-xs text-muted">
-            加密凭据预览（仅显示元数据，已存在的标识自动跳过、不覆盖）
-          </p>
+          <p class="text-xs text-muted">加密凭据预览（仅显示元数据，已存在项自动跳过）</p>
           <ul class="preview-list">
             <li
               v-for="cred in preview.credentials"
@@ -843,6 +826,7 @@ const filteredPreviewItems = computed(() => {
 .summary-bar {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 6px 14px;
   padding: 8px 0;
   border-top: 1px solid var(--ui-rule);

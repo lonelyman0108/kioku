@@ -165,6 +165,41 @@ const lengthDelta = computed(() => {
   return { before, after, text: `${sign}${Math.abs(pct)}%` }
 })
 
+const hasMissingRefs = computed(() =>
+  Boolean(
+    tidyResult.value &&
+    (tidyResult.value.integrity.missingLinks.length > 0 ||
+      tidyResult.value.integrity.missingCreds.length > 0),
+  ),
+)
+
+const isGuardNormal = computed(() =>
+  Boolean(
+    tidyResult.value &&
+    tidyResult.value.integrity.intact &&
+    !tidyResult.value.integrity.severeShrink &&
+    !hasMissingRefs.value,
+  ),
+)
+
+const showLinksMeta = computed(() =>
+  Boolean(
+    tidyResult.value &&
+    (!isGuardNormal.value ||
+      tidyResult.value.integrity.linksBefore > 0 ||
+      tidyResult.value.integrity.linksAfter > 0),
+  ),
+)
+
+const showCredsMeta = computed(() =>
+  Boolean(
+    tidyResult.value &&
+    (!isGuardNormal.value ||
+      tidyResult.value.integrity.credsBefore > 0 ||
+      tidyResult.value.integrity.credsAfter > 0),
+  ),
+)
+
 async function submitSingleTidy(stageToInbox: boolean) {
   const res = tidyResult.value
   if (!res || applying.value || staging.value || !anySelected.value) return
@@ -204,7 +239,7 @@ async function submitSingleTidy(stageToInbox: boolean) {
       emit('staged')
       open.value = false
     } else if (out.entry) {
-      toast.add({ title: '已应用规范整理并保留原版本历史', color: 'success' })
+      toast.add({ title: '已应用规范整理', color: 'success' })
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['entries'] }),
         queryClient.invalidateQueries({ queryKey: ['entry-history', props.shortId] }),
@@ -412,28 +447,32 @@ const drawerDescription = computed(() =>
             <div
               class="guard-strip tabular-nums"
               :class="{
-                'is-alert':
-                  tidyResult.integrity.missingLinks.length > 0 ||
-                  tidyResult.integrity.missingCreds.length > 0,
-                'is-warn': tidyResult.integrity.severeShrink,
+                'is-alert': hasMissingRefs,
+                'is-warn': !hasMissingRefs && tidyResult.integrity.severeShrink,
               }"
             >
               <span class="guard-status">
                 <UIcon
-                  :name="tidyResult.integrity.severeShrink ? icons.warning : icons.check"
+                  :name="
+                    hasMissingRefs || tidyResult.integrity.severeShrink
+                      ? icons.warning
+                      : icons.check
+                  "
                   class="guard-icon"
                   aria-hidden="true"
                 />
                 {{
-                  tidyResult.integrity.severeShrink
-                    ? '正文篇幅缩减较大，请核对已归档历史说明与下方对比'
-                    : '双链与凭据占位符完整'
+                  hasMissingRefs
+                    ? '检测到双链或凭据引用缺失，请核对下方对比'
+                    : tidyResult.integrity.severeShrink
+                      ? '正文篇幅缩减较大，请核对已归档历史说明与下方对比'
+                      : '双链与凭据占位符完整'
                 }}
               </span>
-              <span class="guard-meta">
+              <span v-if="showLinksMeta" class="guard-meta">
                 双链 {{ tidyResult.integrity.linksBefore }} → {{ tidyResult.integrity.linksAfter }}
               </span>
-              <span class="guard-meta">
+              <span v-if="showCredsMeta" class="guard-meta">
                 凭据 {{ tidyResult.integrity.credsBefore }} → {{ tidyResult.integrity.credsAfter }}
               </span>
               <span v-if="lengthDelta" class="guard-meta">
@@ -467,11 +506,6 @@ const drawerDescription = computed(() =>
                 </li>
               </ul>
             </details>
-
-            <p class="text-xs text-muted">
-              原有完整内容会保留在版本历史中，可随时恢复；应用前会校验版本
-              {{ tidyResult.baseVersion }} 防止并发覆盖。
-            </p>
           </template>
         </template>
 

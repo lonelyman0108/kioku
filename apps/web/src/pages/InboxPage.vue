@@ -1,9 +1,14 @@
 <script setup lang="ts">
 import {
+  checkCaptureIntegrity,
   DREAM_KINDS,
+  effectiveBootMode,
+  extractCredentialPlaceholders,
+  extractTargetShortIds,
   hasDuplicateLeadingHeading,
   stripDuplicateLeadingHeading,
   type ApplySuggestionRequest,
+  type CaptureIntegrity,
   type DreamMode,
   type DreamSuggestionKind,
   type DreamSuggestionView,
@@ -21,22 +26,21 @@ import DreamSuggestionCard from '../components/DreamSuggestionCard.vue'
 import HygieneSweepDrawer from '../components/HygieneSweepDrawer.vue'
 import EmptyState from '../components/ui/EmptyState.vue'
 import NoteLine from '../components/ui/NoteLine.vue'
-import PageHead from '../components/ui/PageHead.vue'
 import ReadFailureNote from '../components/ui/ReadFailureNote.vue'
 import { useSession } from '../composables/useSession'
 import { isTitleOnlyTidy } from '../diff'
 import { icons } from '../icons'
-import { dreamKindLabels, dreamOutcomeLabels } from '../labels'
+import { bootModeLabels, dreamKindLabels, dreamOutcomeLabels } from '../labels'
 import { entryRoute, settingsRoute } from '../routes'
 import { formatRelative, formatTime } from '../time'
 
 type KindFilter = 'all' | DreamSuggestionKind
 
 const FILTER_ORDER: readonly DreamSuggestionKind[] = [
-  'tidy',
-  'merge_duplicates',
-  'link_entries',
   'adjust_boot_mode',
+  'link_entries',
+  'merge_duplicates',
+  'tidy',
   'distill_episode',
   'update',
   'mark_stale',
@@ -72,20 +76,26 @@ const latestRunMode = computed<DreamMode>(
         ? 'cross_memory'
         : 'standard'),
 )
+const hasChatModel = computed(() => Boolean(me.data.value?.hasChatModel))
+const statusPopoverOpen = ref(false)
 const failedDetailsOpen = ref(false)
+const sweepOpen = ref(false)
+
 const progressPercent = computed(() =>
   progress.value && progress.value.total > 0
     ? Math.min(100, Math.round((progress.value.processed / progress.value.total) * 100))
     : 0,
 )
 
+const runningStageLabel = computed(() => {
+  if (progress.value?.stage) return `${progress.value.stage}中`
+  if (progress.value?.mode === 'tidy') return '存量规范整理中'
+  if (progress.value?.mode === 'cross_memory') return '全库查重与关联中'
+  return '增量整理中'
+})
+
+// ---- 分类筛选（仅渲染非零分类） ----
 const kindFilter = ref<KindFilter>('all')
-const sweepOpen = ref(false)
-const quickTableMode = ref(false)
-const selectedTableIds = ref<string[]>([])
-const batchBusy = ref(false)
-const undoingKeys = new Set<string>()
-const undoneKeys = new Set<string>()
 
 const kindCounts = computed(() => {
   const counts: Record<KindFilter, number> = {
@@ -106,37 +116,24 @@ const kindCounts = computed(() => {
 
 const filterTabs = computed<{ value: KindFilter; label: string; count: number }[]>(() => [
   { value: 'all', label: '全部', count: kindCounts.value.all },
-  ...FILTER_ORDER.filter((k) => DREAM_KINDS.includes(k)).map((k) => ({
+  ...FILTER_ORDER.filter((k) => DREAM_KINDS.includes(k) && kindCounts.value[k] > 0).map((k) => ({
     value: k as KindFilter,
     label: dreamKindLabels[k],
     count: kindCounts.value[k],
   })),
 ])
 
+watch(kindCounts, (counts) => {
+  if (kindFilter.value !== 'all' && counts[kindFilter.value] === 0) {
+    kindFilter.value = 'all'
+  }
+})
+
 const filteredItems = computed(() =>
   kindFilter.value === 'all'
     ? items.value
     : items.value.filter((item) => item.kind === kindFilter.value),
 )
-
-const titleOnlyItems = computed(() => items.value.filter(isTitleOnlyTidy))
-const canUseQuickTable = computed(() => titleOnlyItems.value.length >= 3)
-
-watch(canUseQuickTable, (available) => {
-  if (!available) quickTableMode.value = false
-})
-
-watch(quickTableMode, (enabled) => {
-  if (enabled) {
-    selectedTableIds.value = titleOnlyItems.value.map((item) => item.id)
-  }
-})
-
-watch(titleOnlyItems, (list) => {
-  if (!quickTableMode.value) return
-  const validIds = new Set(list.map((item) => item.id))
-  selectedTableIds.value = selectedTableIds.value.filter((id) => validIds.has(id))
-})
 
 function onFilterTabKeydown(event: KeyboardEvent, index: number) {
   const tabs = filterTabs.value
@@ -149,34 +146,12 @@ function onFilterTabKeydown(event: KeyboardEvent, index: number) {
   else if (event.key === 'End') nextIdx = tabs.length - 1
   if (nextIdx < 0) return
   event.preventDefault()
-  quickTableMode.value = false
   kindFilter.value = tabs[nextIdx]!.value
   const listEl = (event.currentTarget as HTMLElement | null)?.parentElement
   listEl?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[nextIdx]?.focus()
 }
 
-const allTableSelected = computed(
-  () =>
-    titleOnlyItems.value.length > 0 &&
-    selectedTableIds.value.length === titleOnlyItems.value.length,
-)
-
-function toggleTableAll() {
-  if (allTableSelected.value) {
-    selectedTableIds.value = []
-  } else {
-    selectedTableIds.value = titleOnlyItems.value.map((item) => item.id)
-  }
-}
-
-function toggleTableRow(id: string) {
-  if (selectedTableIds.value.includes(id)) {
-    selectedTableIds.value = selectedTableIds.value.filter((x) => x !== id)
-  } else {
-    selectedTableIds.value = [...selectedTableIds.value, id]
-  }
-}
-
+// ---- 台账行元数据与风险判定 ----
 function baseEntryOf(suggestion: DreamSuggestionView) {
   if (suggestion.keepId) {
     return (
@@ -186,17 +161,232 @@ function baseEntryOf(suggestion: DreamSuggestionView) {
   return suggestion.entries[0] ?? null
 }
 
+function targetTitleOf(s: DreamSuggestionView): string {
+  const base = baseEntryOf(s)
+  if (s.kind === 'distill_episode') {
+    return s.proposedTitle?.trim() || base?.title || '未命名记忆'
+  }
+  return base?.title || s.proposedTitle?.trim() || '未命名记忆'
+}
+
+function hasSummaryDiff(s: DreamSuggestionView): boolean {
+  const proposed = s.proposedSummary
+  if (proposed === undefined || proposed === null) return false
+  const base = baseEntryOf(s)
+  return proposed.trim() !== (base?.summary?.trim() ?? '')
+}
+
+function hasTitleDiff(s: DreamSuggestionView): boolean {
+  if (s.kind === 'distill_episode') return false
+  const base = baseEntryOf(s)
+  const proposed = s.proposedTitle?.trim() ?? ''
+  return Boolean(proposed && base && proposed !== base.title)
+}
+
+function computeIntegrityOf(s: DreamSuggestionView): CaptureIntegrity | null {
+  if (
+    s.kind === 'distill_episode' ||
+    s.kind === 'mark_stale' ||
+    s.kind === 'link_entries' ||
+    s.kind === 'adjust_boot_mode'
+  ) {
+    return null
+  }
+  const base = baseEntryOf(s)
+  const next = s.proposedContent
+  if (!base || next === null) return null
+  if (s.kind === 'merge_duplicates' && s.entries.length > 1) {
+    const mergedSelfIds = new Set(s.entries.map((e) => e.shortId))
+    const linksBeforeSet = new Set<string>()
+    const credsBeforeSet = new Set<string>()
+    const credKey = (p: { slug: string; field: string | null }) =>
+      p.field ? `${p.slug}#${p.field}` : p.slug
+    for (const item of s.entries) {
+      for (const sid of extractTargetShortIds(item.content)) {
+        if (!mergedSelfIds.has(sid)) linksBeforeSet.add(sid)
+      }
+      for (const cred of extractCredentialPlaceholders(item.content)) {
+        credsBeforeSet.add(credKey(cred))
+      }
+    }
+    const linksAfterSet = new Set(extractTargetShortIds(next))
+    const credsAfterSet = new Set(extractCredentialPlaceholders(next).map(credKey))
+    const missingLinks = [...linksBeforeSet].filter((id) => !linksAfterSet.has(id))
+    const missingCreds = [...credsBeforeSet].filter((k) => !credsAfterSet.has(k))
+    const severeShrink =
+      base.content.length >= 200 && next.length < Math.floor(base.content.length * 0.5)
+    return {
+      intact: missingLinks.length === 0 && missingCreds.length === 0 && !severeShrink,
+      linksBefore: linksBeforeSet.size,
+      linksAfter: linksAfterSet.size,
+      missingLinks,
+      credsBefore: credsBeforeSet.size,
+      credsAfter: credsAfterSet.size,
+      missingCreds,
+      severeShrink,
+    }
+  }
+  return checkCaptureIntegrity(base.content, next)
+}
+
+function hasIntegrityAlert(s: DreamSuggestionView): boolean {
+  const integ = computeIntegrityOf(s)
+  if (!integ) return false
+  return integ.missingLinks.length > 0 || integ.missingCreds.length > 0 || integ.severeShrink
+}
+
+// 合并、移入回收站或存在完整性/缩水告警的行强制先展开核对，避免盲点误操作
+function isHighRisk(s: DreamSuggestionView): boolean {
+  return s.kind === 'merge_duplicates' || s.kind === 'mark_stale' || hasIntegrityAlert(s)
+}
+
+// 批量应用安全项仅放行无缺链/缺凭据、非高风险且属于纯标题/概要或启动加载/补全双链的建议
+function isSafeForBatch(s: DreamSuggestionView): boolean {
+  if (s.kind === 'merge_duplicates' || s.kind === 'mark_stale') return false
+  if (hasIntegrityAlert(s)) return false
+  if (s.kind === 'adjust_boot_mode') return true
+  if (s.kind === 'link_entries') return Boolean(s.proposedLinks?.length)
+  return isTitleOnlyTidy(s)
+}
+
+function contentDeltaInfo(s: DreamSuggestionView): {
+  changed: boolean
+  pct: number
+  label: string | null
+} {
+  const base = baseEntryOf(s)
+  const next = s.proposedContent
+  if (!base || next === null || next === base.content) {
+    return { changed: false, pct: 0, label: null }
+  }
+  const before = base.content.length
+  const after = next.length
+  if (before === 0) return { changed: true, pct: 0, label: '调整正文' }
+  const pct = Math.round(((after - before) / before) * 100)
+  if (pct <= -5) return { changed: true, pct, label: `精简 ${Math.abs(pct)}%` }
+  if (pct >= 5) return { changed: true, pct, label: `扩充 ${pct}%` }
+  return { changed: true, pct, label: '调整正文' }
+}
+
+function tidyDeltaPrimaryPill(s: DreamSuggestionView): string {
+  const parts: string[] = []
+  const titleChanged = hasTitleDiff(s)
+  const body = contentDeltaInfo(s)
+  if (titleChanged) parts.push(s.kind === 'tidy' ? '规范标题' : '更新标题')
+  if (body.label) parts.push(body.label)
+  if (!parts.length && hasSummaryDiff(s)) parts.push('更新概要')
+  return parts.length ? parts.join(' + ') : s.kind === 'tidy' ? '规范调整' : '更新内容'
+}
+
+function tidyDeltaSubText(s: DreamSuggestionView): { text: string; warn: boolean } | null {
+  const integ = computeIntegrityOf(s)
+  if (integ && (integ.missingLinks.length > 0 || integ.missingCreds.length > 0)) {
+    return { text: '存在引用缺失，请展开核对后再应用', warn: true }
+  }
+  const body = contentDeltaInfo(s)
+  if (integ?.severeShrink) {
+    return {
+      text: `正文缩减 ${Math.abs(body.pct)}%，请展开核对变更与归档说明`,
+      warn: true,
+    }
+  }
+  const bits: string[] = []
+  if (hasSummaryDiff(s)) bits.push('更新现行概要')
+  if (s.archivedNotes?.length) bits.push(`归档 ${s.archivedNotes.length} 条历史说明`)
+  if (!bits.length && body.changed && !hasTitleDiff(s)) {
+    const base = baseEntryOf(s)
+    if (base && s.proposedContent) {
+      bits.push(
+        `篇幅 ${base.content.length.toLocaleString()} → ${s.proposedContent.length.toLocaleString()} 字`,
+      )
+    }
+  }
+  return bits.length ? { text: bits.join('，'), warn: false } : null
+}
+
+function firstLinkAnchor(s: DreamSuggestionView): string | null {
+  const raw = s.proposedLinks?.[0]?.anchorHeading?.replace(/^#{1,6}\s*/, '').trim()
+  return raw || null
+}
+
+// ---- 行展开与勾选状态（进入页面默认全部折叠） ----
+const expandedIds = ref<string[]>([])
+const selectedIds = ref<string[]>([])
+
+watch(
+  filteredItems,
+  (list) => {
+    const valid = new Set(list.map((i) => i.id))
+    expandedIds.value = expandedIds.value.filter((id) => valid.has(id))
+    selectedIds.value = selectedIds.value.filter((id) => valid.has(id))
+  },
+  { immediate: true },
+)
+
+function isExpanded(id: string): boolean {
+  return expandedIds.value.includes(id)
+}
+
+function toggleExpand(id: string) {
+  if (expandedIds.value.includes(id)) {
+    expandedIds.value = expandedIds.value.filter((x) => x !== id)
+  } else {
+    expandedIds.value = [...expandedIds.value, id]
+  }
+}
+
+const anyVisibleExpanded = computed(() =>
+  filteredItems.value.some((item) => expandedIds.value.includes(item.id)),
+)
+
+function toggleAllExpanded() {
+  if (anyVisibleExpanded.value) {
+    expandedIds.value = []
+  } else {
+    expandedIds.value = filteredItems.value.map((i) => i.id)
+  }
+}
+
+const visibleSelectedItems = computed(() =>
+  filteredItems.value.filter((i) => selectedIds.value.includes(i.id)),
+)
+const safeSelectedItems = computed(() => visibleSelectedItems.value.filter(isSafeForBatch))
+const hasUnsafeSelected = computed(() =>
+  visibleSelectedItems.value.some((item) => !isSafeForBatch(item)),
+)
+const allVisibleSelected = computed(
+  () =>
+    filteredItems.value.length > 0 &&
+    visibleSelectedItems.value.length === filteredItems.value.length,
+)
+const someVisibleSelected = computed(
+  () =>
+    visibleSelectedItems.value.length > 0 &&
+    visibleSelectedItems.value.length < filteredItems.value.length,
+)
+
+function toggleSelectAll() {
+  if (allVisibleSelected.value) {
+    selectedIds.value = []
+  } else {
+    selectedIds.value = filteredItems.value.map((i) => i.id)
+  }
+}
+
+function toggleSelectRow(id: string) {
+  if (selectedIds.value.includes(id)) {
+    selectedIds.value = selectedIds.value.filter((x) => x !== id)
+  } else {
+    selectedIds.value = [...selectedIds.value, id]
+  }
+}
+
+function clearSelection() {
+  selectedIds.value = []
+}
+
+// ---- 触发后台整理与指挥条下拉菜单 ----
 const triggeringMode = ref<DreamMode | 'retry' | null>(null)
-const tidyBusy = computed(
-  () =>
-    triggeringMode.value === 'tidy' ||
-    (Boolean(state.value?.running) && progress.value?.mode === 'tidy'),
-)
-const crossMemoryBusy = computed(
-  () =>
-    triggeringMode.value === 'cross_memory' ||
-    (Boolean(state.value?.running) && progress.value?.mode === 'cross_memory'),
-)
 const standardBusy = computed(
   () =>
     triggeringMode.value === 'standard' ||
@@ -205,10 +395,10 @@ const standardBusy = computed(
       progress.value?.mode !== 'cross_memory'),
 )
 const retryFailedBusy = computed(() => triggeringMode.value === 'retry')
-const tidyDisabled = computed(
+const modelRunDisabled = computed(
   () =>
     !data.value ||
-    !me.data.value?.hasChatModel ||
+    !hasChatModel.value ||
     Boolean(triggeringMode.value) ||
     Boolean(state.value?.running),
 )
@@ -229,7 +419,7 @@ async function triggerDream(req: Partial<TriggerDreamRequest>) {
             ? req.all
               ? '已发起全部存量规范整理任务'
               : `已发起存量规范整理（本批 ${req.limit ?? 10} 条）`
-            : '已发起整理任务'
+            : '已发起增量整理任务'
       toast.add({ title, color: 'success' })
     } else {
       toast.add({ title: res.reason ?? '当前无需重复整理', color: 'neutral' })
@@ -242,33 +432,98 @@ async function triggerDream(req: Partial<TriggerDreamRequest>) {
   }
 }
 
-const tidyMenuItems = computed<DropdownMenuItem[][]>(() => {
+const organizeMenuItems = computed<DropdownMenuItem[][]>(() => {
   const count = tidyPendingCount.value
-  if (count <= 0) {
-    return [[{ type: 'label', label: '当前暂无待规范存量' }]]
-  }
-  const actions: DropdownMenuItem[] = []
+  const disabledLlm = modelRunDisabled.value
+
+  const tidyChildren: DropdownMenuItem[] = []
   if (count > 10) {
-    actions.push({
-      label: '整理本批 10 条',
+    tidyChildren.push({
+      label: '本批 10 条（常驻优先）',
       icon: icons.tidy,
+      disabled: disabledLlm,
       onSelect: () => void triggerDream({ mode: 'tidy', pinnedFirst: true, limit: 10 }),
     })
   }
   if (count > 20) {
-    actions.push({
-      label: '整理本批 20 条',
+    tidyChildren.push({
+      label: '本批 20 条（常驻优先）',
       icon: icons.tidy,
+      disabled: disabledLlm,
       onSelect: () => void triggerDream({ mode: 'tidy', pinnedFirst: true, limit: 20 }),
     })
   }
-  actions.push({
-    label: `整理全部待规范（${count} 条）`,
-    icon: icons.listChecks,
-    onSelect: () => void triggerDream({ mode: 'tidy', pinnedFirst: true, all: true }),
-  })
-  return [[{ type: 'label', label: `待规范存量 ${count} 条 · 常驻优先` }, ...actions]]
+  if (count > 10) {
+    tidyChildren.push({
+      label: `全部待规范（${count} 条）`,
+      icon: icons.listChecks,
+      disabled: disabledLlm,
+      onSelect: () => void triggerDream({ mode: 'tidy', pinnedFirst: true, all: true }),
+    })
+  }
+
+  const tidyItem: DropdownMenuItem =
+    count > 10
+      ? {
+          label: `存量规范整理（${count} 条）`,
+          description: '逐条规范脏标题、补概要并剥离旧日志',
+          icon: icons.tidy,
+          disabled: disabledLlm,
+          children: tidyChildren,
+        }
+      : {
+          label: count > 0 ? `存量规范整理（${count} 条）` : '存量规范整理',
+          description: count > 0 ? '逐条规范脏标题、补概要并剥离旧日志' : '当前暂无待规范存量',
+          icon: icons.tidy,
+          disabled: disabledLlm || count <= 0,
+          onSelect: () => void triggerDream({ mode: 'tidy', pinnedFirst: true, all: true }),
+        }
+
+  return [
+    [
+      {
+        label: '增量整理',
+        description: '只整理近期新增或改动的记忆与会话摘要（定时任务即运行此项）',
+        icon: icons.sparkles,
+        disabled: disabledLlm,
+        onSelect: () => void triggerDream({ mode: 'standard' }),
+      },
+      {
+        label: '全库查重与关联',
+        description: '全库扫描重复合并、补全双链与常驻降级',
+        icon: icons.links,
+        disabled: disabledLlm,
+        onSelect: () => void triggerDream({ mode: 'cross_memory', scope: 'full_corpus' }),
+      },
+      tidyItem,
+    ],
+    [
+      {
+        label: '结构体检与预清洗',
+        description: '不消耗模型，秒扫重复标题、旧引用与悬空断链',
+        icon: icons.shieldCheck,
+        onSelect: () => {
+          sweepOpen.value = true
+        },
+      },
+      {
+        label: '刷新列表',
+        description: '重新获取最新待处理队列',
+        icon: icons.refresh,
+        onSelect: () => {
+          void inboxQuery.refetch()
+        },
+      },
+    ],
+  ]
 })
+
+// ---- 应用、8 秒撤销与批量操作 ----
+const busyId = ref<string | null>(null)
+const batchBusy = ref(false)
+const batchDismissBusy = ref(false)
+const undoingKeys = new Set<string>()
+const undoneKeys = new Set<string>()
 
 async function undoAppliedSuggestion(
   shortId: string,
@@ -311,9 +566,8 @@ async function undoAppliedSuggestion(
   }
 }
 
-const busyId = ref<string | null>(null)
 async function onApply(id: string, body: ApplySuggestionRequest) {
-  if (busyId.value || batchBusy.value) return
+  if (busyId.value || batchBusy.value || batchDismissBusy.value) return
   const suggestion = items.value.find((item) => item.id === id)
   busyId.value = id
   try {
@@ -387,8 +641,16 @@ async function onApply(id: string, body: ApplySuggestionRequest) {
   }
 }
 
+function onQuickApply(s: DreamSuggestionView) {
+  if (isHighRisk(s)) {
+    toggleExpand(s.id)
+    return
+  }
+  void onApply(s.id, {})
+}
+
 async function onDismiss(id: string) {
-  if (busyId.value || batchBusy.value) return
+  if (busyId.value || batchBusy.value || batchDismissBusy.value) return
   busyId.value = id
   try {
     await api.dismissSuggestion(id)
@@ -401,49 +663,60 @@ async function onDismiss(id: string) {
   }
 }
 
-async function applyQuickTableSelected() {
-  if (batchBusy.value || busyId.value || !selectedTableIds.value.length) return
+function buildSafeBatchPayload(s: DreamSuggestionView): ApplySuggestionRequest {
+  if (s.kind === 'adjust_boot_mode') return {}
+  if (s.kind === 'link_entries') return { proposedLinks: s.proposedLinks ?? [] }
+  const base = baseEntryOf(s)
+  const nextSummary =
+    s.proposedSummary !== undefined &&
+    s.proposedSummary !== null &&
+    s.proposedSummary.trim() !== (base?.summary?.trim() ?? '')
+      ? s.proposedSummary.trim() || null
+      : undefined
+  const titleChanged = Boolean(
+    s.proposedTitle?.trim() && base && s.proposedTitle.trim() !== base.title,
+  )
+  // 若更换标题或建议剥离了原正文重复首行 H1，同步剥离避免暴露失配旧 H1
+  const shouldStripOldH1 =
+    base !== null &&
+    hasDuplicateLeadingHeading(base.title, base.content) &&
+    (titleChanged ||
+      (Boolean(s.proposedContent) && s.proposedContent!.trim() !== base.content.trim()))
+  const safeContent = shouldStripOldH1
+    ? stripDuplicateLeadingHeading(base.title, base.content)
+    : base?.content
+  return {
+    ...(s.proposedTitle?.trim() ? { title: s.proposedTitle.trim() } : {}),
+    ...(nextSummary !== undefined ? { summary: nextSummary } : {}),
+    ...(safeContent !== undefined ? { content: safeContent } : {}),
+    applyArchivedNotes: false,
+    ...(s.proposedChangeSummary?.trim() ? { changeSummary: s.proposedChangeSummary.trim() } : {}),
+  }
+}
+
+async function batchApplySafe() {
+  const chosen = safeSelectedItems.value
+  if (batchBusy.value || batchDismissBusy.value || busyId.value || !chosen.length) return
   batchBusy.value = true
-  const chosen = titleOnlyItems.value.filter((item) => selectedTableIds.value.includes(item.id))
   const touchedShortIds = new Set<string>()
+  const appliedIds = new Set<string>()
   let okCount = 0
   let failCount = 0
   for (const s of chosen) {
     const base = baseEntryOf(s)
-    const nextSummary =
-      s.proposedSummary !== undefined &&
-      s.proposedSummary !== null &&
-      s.proposedSummary.trim() !== (base?.summary?.trim() ?? '')
-        ? s.proposedSummary.trim() || null
-        : undefined
-    const titleChanged = Boolean(
-      s.proposedTitle?.trim() && base && s.proposedTitle.trim() !== base.title,
-    )
-    // 若更换标题或建议剥离了原正文重复首行 H1，同步剥离避免暴露失配旧 H1
-    const shouldStripOldH1 =
-      base !== null &&
-      hasDuplicateLeadingHeading(base.title, base.content) &&
-      (titleChanged ||
-        (Boolean(s.proposedContent) && s.proposedContent!.trim() !== base.content.trim()))
-    const safeContent = shouldStripOldH1
-      ? stripDuplicateLeadingHeading(base.title, base.content)
-      : base?.content
-    const body: ApplySuggestionRequest = {
-      ...(s.proposedTitle?.trim() ? { title: s.proposedTitle.trim() } : {}),
-      ...(nextSummary !== undefined ? { summary: nextSummary } : {}),
-      ...(safeContent !== undefined ? { content: safeContent } : {}),
-      applyArchivedNotes: false,
-      ...(s.proposedChangeSummary?.trim() ? { changeSummary: s.proposedChangeSummary.trim() } : {}),
-    }
+    const body = buildSafeBatchPayload(s)
     try {
       const res = await api.applySuggestion(s.id, body)
       if (res.entry?.shortId) touchedShortIds.add(res.entry.shortId)
       if (base?.shortId) touchedShortIds.add(base.shortId)
+      for (const link of s.proposedLinks ?? []) touchedShortIds.add(link.targetShortId)
+      appliedIds.add(s.id)
       okCount++
     } catch {
       failCount++
     }
   }
+  selectedIds.value = selectedIds.value.filter((id) => !appliedIds.has(id))
   await Promise.all([
     queryClient.invalidateQueries({ queryKey: ['inbox'] }),
     queryClient.invalidateQueries({ queryKey: ['entries'] }),
@@ -454,10 +727,7 @@ async function applyQuickTableSelected() {
     ]),
   ])
   if (failCount === 0) {
-    toast.add({
-      title: `已批量应用 ${okCount} 条标题与概要规范建议`,
-      color: 'success',
-    })
+    toast.add({ title: `已批量应用 ${okCount} 条安全建议`, color: 'success' })
   } else {
     toast.add({
       title: `批量应用完成：成功 ${okCount} 条，失败 ${failCount} 条`,
@@ -466,480 +736,743 @@ async function applyQuickTableSelected() {
   }
   batchBusy.value = false
 }
+
+async function batchDismissSelected() {
+  const chosen = visibleSelectedItems.value
+  if (batchBusy.value || batchDismissBusy.value || busyId.value || !chosen.length) return
+  batchDismissBusy.value = true
+  let okCount = 0
+  let failCount = 0
+  for (const s of chosen) {
+    try {
+      await api.dismissSuggestion(s.id)
+      okCount++
+    } catch {
+      failCount++
+    }
+  }
+  selectedIds.value = []
+  await queryClient.invalidateQueries({ queryKey: ['inbox'] })
+  if (failCount === 0) {
+    toast.add({ title: `已批量忽略 ${okCount} 条建议`, color: 'neutral' })
+  } else {
+    toast.add({
+      title: `批量忽略完成：成功 ${okCount} 条，失败 ${failCount} 条`,
+      color: okCount > 0 ? 'warning' : 'error',
+    })
+  }
+  batchDismissBusy.value = false
+}
 </script>
 
 <template>
   <div class="inbox-page">
     <div class="inbox-shell">
-      <PageHead title="待处理">
-        <template #note>
-          整理任务提出的规范与精简、合并重复、补全双链、调整启动加载、提炼摘要、标记过时与更新建议，确认后才会写入记忆。
-        </template>
-        <template #actions>
-          <UButton
-            :icon="icons.refresh"
-            size="sm"
-            color="neutral"
-            variant="ghost"
-            :loading="inboxQuery.isFetching.value"
-            @click="inboxQuery.refetch()"
+      <!-- 顶部单行指挥条 -->
+      <header class="command-bar" aria-label="待处理指挥条">
+        <div class="command-left">
+          <h1 class="page-title">待处理</h1>
+
+          <UPopover
+            v-if="state || data"
+            v-model:open="statusPopoverOpen"
+            :content="{ align: 'start', sideOffset: 6 }"
           >
-            刷新
-          </UButton>
-          <UButton
-            :icon="icons.shieldCheck"
-            size="sm"
-            color="neutral"
-            variant="outline"
-            @click="sweepOpen = true"
-          >
-            结构体检与预清洗
-          </UButton>
-          <UButton
-            :icon="icons.links"
-            size="sm"
-            color="neutral"
-            variant="outline"
-            :loading="crossMemoryBusy"
-            :disabled="tidyDisabled"
-            @click="triggerDream({ mode: 'cross_memory', scope: 'full_corpus' })"
-          >
-            全库查重与关联
-          </UButton>
-          <UDropdownMenu
-            :items="tidyMenuItems"
-            :disabled="tidyDisabled"
-            :content="{ align: 'end' }"
-            :ui="{ content: 'min-w-52' }"
-          >
-            <UButton
-              :icon="icons.tidy"
-              :trailing-icon="icons.chevronDown"
-              size="sm"
-              color="neutral"
-              variant="outline"
-              :loading="tidyBusy"
-              :disabled="tidyDisabled"
+            <button
+              type="button"
+              class="status-summary-btn tabular-nums"
+              :aria-expanded="statusPopoverOpen"
             >
-              {{ tidyPendingCount > 0 ? `存量规范整理（${tidyPendingCount}）` : '存量规范整理' }}
+              <template v-if="state?.running">
+                <span class="status-running">{{ runningStageLabel }}</span>
+                <template v-if="progress && progress.total > 0">
+                  <span class="hair-sep" aria-hidden="true" />
+                  <span>{{ progress.processed }} / {{ progress.total }} 条</span>
+                </template>
+                <span class="hair-sep" aria-hidden="true" />
+                <span :class="items.length > 0 ? 'status-count-hot' : 'status-count-clear'">
+                  {{ items.length }} 条待处理
+                </span>
+              </template>
+              <template v-else>
+                <span :class="items.length > 0 ? 'status-count-hot' : 'status-count-clear'">
+                  {{ items.length }} 条待处理
+                </span>
+                <span class="hair-sep" aria-hidden="true" />
+                <span v-if="state?.lastRunAt" :title="formatTime(state.lastRunAt)">
+                  上次 {{ formatRelative(state.lastRunAt) }}
+                </span>
+                <span v-else>尚未整理</span>
+                <span class="hair-sep" aria-hidden="true" />
+                <span>{{ state?.enabled ? `每 ${state.intervalHours} 小时` : '定时关闭' }}</span>
+              </template>
+              <UIcon :name="icons.chevronDown" class="status-caret" aria-hidden="true" />
+            </button>
+
+            <template #content>
+              <div class="status-popover">
+                <div class="popover-head">
+                  <span class="popover-title">后台整理状态</span>
+                  <span class="popover-state" :class="{ 'is-active': state?.running }">
+                    {{ state?.running ? '整理中' : '空闲' }}
+                  </span>
+                </div>
+
+                <dl class="kv-list tabular-nums">
+                  <dt>定时增量整理</dt>
+                  <dd>{{ state?.enabled ? `每 ${state.intervalHours} 小时` : '已关闭' }}</dd>
+                  <dt>待规范存量</dt>
+                  <dd>{{ tidyPendingCount }} 条</dd>
+                  <dt>对话模型</dt>
+                  <dd>{{ hasChatModel ? '已启用' : '未配置' }}</dd>
+                  <dt>上次整理</dt>
+                  <dd>
+                    <span v-if="state?.running">正在整理…</span>
+                    <template v-else-if="state?.lastRunAt">
+                      {{ formatRelative(state.lastRunAt) }}
+                      <template v-if="state.lastOutcome">
+                        （{{ dreamOutcomeLabels[state.lastOutcome] }}）
+                      </template>
+                    </template>
+                    <span v-else>尚未执行过</span>
+                  </dd>
+                  <template v-if="latestRun">
+                    <dt>最近批次</dt>
+                    <dd>
+                      评估 {{ latestRun.considered }} 条，生成 {{ latestRun.suggested }} 条
+                      <template v-if="latestRun.retriedCount">
+                        （重试 {{ latestRun.retriedCount }} 次）
+                      </template>
+                    </dd>
+                  </template>
+                </dl>
+
+                <p
+                  v-if="!state?.running && state?.lastError"
+                  class="popover-error"
+                  :class="{ 'is-partial': state.lastOutcome === 'partial' }"
+                >
+                  {{
+                    state.lastOutcome === 'partial' ? state.lastError : `错误：${state.lastError}`
+                  }}
+                </p>
+
+                <div
+                  v-if="!state?.running && latestFailedItems.length > 0"
+                  class="popover-failures"
+                >
+                  <div class="failures-head tabular-nums">
+                    <span>失败明细（{{ latestFailedItems.length }} 条）</span>
+                    <button
+                      type="button"
+                      class="failures-toggle"
+                      :aria-expanded="failedDetailsOpen"
+                      @click="failedDetailsOpen = !failedDetailsOpen"
+                    >
+                      <span>{{ failedDetailsOpen ? '收起' : '展开' }}</span>
+                    </button>
+                  </div>
+
+                  <ul v-if="failedDetailsOpen" class="failures-list">
+                    <li v-for="item in latestFailedItems" :key="item.shortId" class="failure-row">
+                      <div class="failure-top">
+                        <RouterLink
+                          :to="entryRoute(item.shortId)"
+                          class="text-primary font-mono text-xs"
+                          @click="statusPopoverOpen = false"
+                        >
+                          {{ item.shortId }}
+                        </RouterLink>
+                        <span class="failure-title">{{ item.title }}</span>
+                      </div>
+                      <p class="failure-reason">{{ item.reason }}</p>
+                    </li>
+                  </ul>
+
+                  <UButton
+                    v-if="hasChatModel"
+                    size="xs"
+                    color="neutral"
+                    variant="outline"
+                    :icon="icons.refresh"
+                    :loading="retryFailedBusy"
+                    :disabled="modelRunDisabled"
+                    block
+                    @click="
+                      ((statusPopoverOpen = false),
+                      triggerDream({
+                        mode: latestRunMode,
+                        targetShortIds: latestRetryableShortIds,
+                      }))
+                    "
+                  >
+                    仅重试失败项（{{ latestRetryableShortIds.length }} 条）
+                  </UButton>
+                </div>
+
+                <div class="popover-foot">
+                  <span>确认后才写入记忆</span>
+                  <RouterLink
+                    :to="settingsRoute('models')"
+                    class="text-primary"
+                    @click="statusPopoverOpen = false"
+                  >
+                    前往模型设置
+                  </RouterLink>
+                </div>
+              </div>
+            </template>
+          </UPopover>
+        </div>
+
+        <div class="command-right">
+          <div class="split-action">
+            <UButton
+              v-if="me.data.value && !hasChatModel"
+              size="sm"
+              :icon="icons.shieldCheck"
+              @click="sweepOpen = true"
+            >
+              结构体检与预清洗
             </UButton>
-          </UDropdownMenu>
-          <UButton
-            :icon="icons.sparkles"
-            size="sm"
-            :loading="standardBusy"
-            :disabled="
-              !me.data.value?.hasChatModel || Boolean(triggeringMode) || Boolean(state?.running)
-            "
-            @click="triggerDream({ mode: 'standard' })"
-          >
-            {{ state?.running ? '整理中' : '立即整理' }}
-          </UButton>
-        </template>
-      </PageHead>
+            <UButton
+              v-else
+              size="sm"
+              :icon="icons.sparkles"
+              :loading="standardBusy"
+              :disabled="modelRunDisabled"
+              @click="triggerDream({ mode: 'standard' })"
+            >
+              {{ state?.running ? '整理中' : '增量整理' }}
+            </UButton>
+
+            <UDropdownMenu
+              :items="organizeMenuItems"
+              :content="{ align: 'end', sideOffset: 6 }"
+              :ui="{
+                content: 'w-80',
+                item: 'items-start py-2',
+                itemLeadingIcon: 'mt-0.5',
+                itemDescription: 'whitespace-normal text-xs text-muted',
+              }"
+            >
+              <UButton
+                size="sm"
+                color="neutral"
+                variant="outline"
+                :trailing-icon="icons.chevronDown"
+                :loading="inboxQuery.isFetching.value && !state?.running"
+              >
+                更多整理
+              </UButton>
+            </UDropdownMenu>
+          </div>
+        </div>
+      </header>
 
       <div class="inbox-body">
         <ReadFailureNote v-if="inboxQuery.isError.value" :query="inboxQuery" />
 
-        <NoteLine v-if="me.data.value && !me.data.value.hasChatModel" tone="warning">
-          尚未配置对话与整理模型，自动摘要与智能整理未启用；仍可使用「结构体检与预清洗」执行确定性结构修复。
+        <NoteLine v-if="me.data.value && !hasChatModel" tone="warning">
+          尚未配置对话与整理模型，智能整理未启用；仍可执行结构体检与预清洗。
           <template #actions>
             <UButton size="sm" color="neutral" variant="outline" :to="settingsRoute('models')">
-              去配置模型
+              前往模型设置
             </UButton>
           </template>
         </NoteLine>
 
-        <div class="inbox-workspace">
-          <!-- 左侧整理状态与分类筛选轨（宽屏固定侧栏，窄屏收敛至主区上方） -->
-          <aside class="inbox-rail" aria-label="整理状态与建议筛选">
-            <section class="rail-card">
-              <div class="rail-card-head">
-                <span class="rail-card-title">整理状态</span>
-                <span
-                  v-if="state"
-                  class="rail-state-tag"
-                  :class="{ 'is-active': state.running || state.enabled }"
-                >
-                  {{ state.running ? '整理中' : state.enabled ? '定时开启' : '定时关闭' }}
+        <!-- 运行中实时进度条 -->
+        <div v-if="state?.running" class="run-banner tabular-nums" role="status" aria-live="polite">
+          <div class="run-banner-left">
+            <UIcon :name="icons.sparkles" class="banner-icon" aria-hidden="true" />
+            <span class="run-banner-title">{{ runningStageLabel }}</span>
+            <span v-if="progress" class="run-banner-meta">
+              已生成 {{ progress.suggested }} 条建议<template v-if="progress.failed > 0"
+                >，失败 {{ progress.failed }} 条</template
+              >
+            </span>
+            <span v-else class="run-banner-meta">任务已入队，正在准备候选记忆…</span>
+          </div>
+          <div v-if="progress && progress.total > 0" class="run-banner-right">
+            <div
+              class="run-progress-track"
+              role="progressbar"
+              aria-label="整理进度"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              :aria-valuenow="progressPercent"
+            >
+              <div class="run-progress-fill" :style="{ width: `${progressPercent}%` }" />
+            </div>
+            <span class="run-banner-count">{{ progress.processed }} / {{ progress.total }} 条</span>
+          </div>
+        </div>
+
+        <!-- 上次存在失败项或报错时的就地重试条 -->
+        <div
+          v-if="!state?.running && (latestFailedItems.length > 0 || state?.lastError)"
+          class="failure-banner"
+          :class="{ 'is-partial': state?.lastOutcome === 'partial' }"
+          role="status"
+        >
+          <div class="failure-banner-head">
+            <div class="failure-banner-msg">
+              <UIcon :name="icons.warning" class="banner-icon" aria-hidden="true" />
+              <span v-if="latestFailedItems.length > 0" class="tabular-nums">
+                上次整理有 {{ latestFailedItems.length }} 条记忆处理失败
+                <template v-if="state?.lastError">（{{ state.lastError }}）</template>
+              </span>
+              <span v-else>{{ state?.lastError }}</span>
+            </div>
+            <div class="failure-banner-actions">
+              <UButton
+                v-if="latestFailedItems.length > 0"
+                size="xs"
+                color="neutral"
+                variant="ghost"
+                :aria-expanded="failedDetailsOpen"
+                @click="failedDetailsOpen = !failedDetailsOpen"
+              >
+                {{ failedDetailsOpen ? '收起明细' : '查看明细' }}
+              </UButton>
+              <UButton
+                v-if="hasChatModel && latestRetryableShortIds.length > 0"
+                size="xs"
+                color="neutral"
+                variant="outline"
+                :icon="icons.refresh"
+                :loading="retryFailedBusy"
+                :disabled="modelRunDisabled"
+                @click="
+                  triggerDream({
+                    mode: latestRunMode,
+                    targetShortIds: latestRetryableShortIds,
+                  })
+                "
+              >
+                仅重试失败项（{{ latestRetryableShortIds.length }} 条）
+              </UButton>
+            </div>
+          </div>
+
+          <ul v-if="failedDetailsOpen && latestFailedItems.length > 0" class="banner-failure-list">
+            <li v-for="item in latestFailedItems" :key="item.shortId" class="banner-failure-item">
+              <RouterLink :to="entryRoute(item.shortId)" class="text-primary font-mono text-xs">
+                {{ item.shortId }}
+              </RouterLink>
+              <span class="banner-failure-title">{{ item.title }}</span>
+              <span class="banner-failure-reason">{{ item.reason }}</span>
+            </li>
+          </ul>
+        </div>
+
+        <!-- 骨架加载 -->
+        <div v-if="inboxQuery.isPending.value" class="space-y-3">
+          <USkeleton v-for="n in 4" :key="n" class="h-16 w-full" />
+        </div>
+
+        <!-- 主体：非零分类筛选轨 + 速审台账表 -->
+        <template v-else-if="items.length > 0">
+          <section class="ledger-controls" aria-label="分类筛选与批量操作">
+            <div class="filter-tabs" role="tablist" aria-label="按建议性质筛选">
+              <button
+                v-for="(tab, idx) in filterTabs"
+                :key="tab.value"
+                type="button"
+                role="tab"
+                class="filter-tab"
+                :aria-selected="kindFilter === tab.value"
+                :tabindex="kindFilter === tab.value ? 0 : -1"
+                @click="kindFilter = tab.value"
+                @keydown="onFilterTabKeydown($event, idx)"
+              >
+                <span>{{ tab.label }}</span>
+                <span class="tab-count tabular-nums">{{ tab.count }}</span>
+              </button>
+            </div>
+
+            <div class="batch-zone">
+              <template v-if="visibleSelectedItems.length > 0">
+                <span class="batch-selected-note tabular-nums">
+                  已选 {{ visibleSelectedItems.length }} 条
                 </span>
-              </div>
-
-              <dl class="rail-stats">
-                <div class="rail-stat-row">
-                  <dt>待处理建议</dt>
-                  <dd class="tabular-nums" :class="{ 'is-count-hot': items.length > 0 }">
-                    {{ items.length }} 条
-                  </dd>
-                </div>
-                <div v-if="data" class="rail-stat-row">
-                  <dt>待规范存量</dt>
-                  <dd class="tabular-nums">{{ tidyPendingCount }} 条</dd>
-                </div>
-                <div v-if="state" class="rail-stat-row">
-                  <dt>定时整理</dt>
-                  <dd>{{ state.enabled ? `每 ${state.intervalHours} 小时` : '已关闭' }}</dd>
-                </div>
-                <div v-if="state" class="rail-stat-row">
-                  <dt>上次整理</dt>
-                  <dd>
-                    <span v-if="state.running" class="text-highlighted font-medium">正在整理…</span>
-                    <template v-else-if="state.lastRunAt">
-                      <time :datetime="state.lastRunAt" :title="formatTime(state.lastRunAt)">
-                        {{ formatRelative(state.lastRunAt) }}
-                      </time>
-                      <span v-if="state.lastOutcome" class="rail-outcome">
-                        （{{ dreamOutcomeLabels[state.lastOutcome] }}）
-                      </span>
-                    </template>
-                    <span v-else>尚未执行过</span>
-                  </dd>
-                </div>
-                <div v-if="me.data.value" class="rail-stat-row">
-                  <dt>对话模型</dt>
-                  <dd>
-                    <span v-if="me.data.value.hasChatModel">已启用</span>
-                    <RouterLink v-else :to="settingsRoute('models')" class="text-primary">
-                      未配置
-                    </RouterLink>
-                  </dd>
-                </div>
-              </dl>
-
-              <div v-if="state?.running" class="rail-progress" role="status" aria-live="polite">
-                <div class="rail-progress-head">
-                  <span>
-                    {{
-                      progress?.stage
-                        ? `${progress.stage}中`
-                        : progress?.mode === 'tidy'
-                          ? '存量规范整理中'
-                          : progress?.mode === 'cross_memory'
-                            ? '全库查重与关联中'
-                            : '后台整理中'
-                    }}
-                  </span>
-                  <span v-if="progress && progress.total > 0" class="tabular-nums">
-                    {{ progress.processed }} / {{ progress.total }} 条
-                  </span>
-                </div>
-                <div
-                  v-if="progress && progress.total > 0"
-                  class="rail-progress-track"
-                  role="progressbar"
-                  aria-label="整理进度"
-                  aria-valuemin="0"
-                  aria-valuemax="100"
-                  :aria-valuenow="progressPercent"
-                >
-                  <div class="rail-progress-fill" :style="{ width: `${progressPercent}%` }" />
-                </div>
-                <p v-if="progress" class="rail-progress-meta tabular-nums">
-                  已生成 {{ progress.suggested }} 条建议<template v-if="progress.failed > 0"
-                    >，失败 {{ progress.failed }} 条</template
-                  >
-                </p>
-                <p v-else class="rail-progress-meta">任务已入队，正在准备候选记忆…</p>
-              </div>
-
-              <p
-                v-if="!state?.running && state?.lastError"
-                class="rail-error"
-                :class="{ 'is-partial': state.lastOutcome === 'partial' }"
-              >
-                {{ state.lastOutcome === 'partial' ? state.lastError : `错误：${state.lastError}` }}
-              </p>
-
-              <p
-                v-if="!state?.running && latestRun?.retriedCount"
-                class="rail-retry-note tabular-nums"
-              >
-                上次运行期间已自动重试 {{ latestRun.retriedCount }} 次
-              </p>
-
-              <div v-if="!state?.running && latestFailedItems.length > 0" class="rail-failures">
-                <div class="rail-failures-head">
-                  <span class="tabular-nums">失败明细（{{ latestFailedItems.length }} 条）</span>
-                  <button
-                    type="button"
-                    class="rail-failures-toggle"
-                    :aria-expanded="failedDetailsOpen"
-                    @click="failedDetailsOpen = !failedDetailsOpen"
-                  >
-                    <UIcon
-                      :name="failedDetailsOpen ? icons.chevronDown : icons.chevronRight"
-                      class="rail-failures-chevron"
-                      aria-hidden="true"
-                    />
-                    <span>{{ failedDetailsOpen ? '收起' : '展开' }}</span>
-                  </button>
-                </div>
-
-                <ul v-if="failedDetailsOpen" class="rail-failures-list">
-                  <li
-                    v-for="item in latestFailedItems"
-                    :key="item.shortId"
-                    class="rail-failure-row"
-                  >
-                    <div class="rail-failure-top">
-                      <RouterLink
-                        :to="entryRoute(item.shortId)"
-                        class="rail-failure-id text-primary font-mono text-xs"
-                      >
-                        {{ item.shortId }}
-                      </RouterLink>
-                      <span class="rail-failure-title">{{ item.title }}</span>
-                    </div>
-                    <p class="rail-failure-reason">{{ item.reason }}</p>
-                  </li>
-                </ul>
-
                 <UButton
-                  v-if="me.data.value?.hasChatModel"
+                  size="xs"
+                  :icon="icons.listChecks"
+                  :loading="batchBusy"
+                  :disabled="safeSelectedItems.length === 0 || busyId !== null || batchDismissBusy"
+                  @click="batchApplySafe"
+                >
+                  批量应用安全项（{{ safeSelectedItems.length }} 条）
+                </UButton>
+                <UButton
                   size="xs"
                   color="neutral"
                   variant="outline"
-                  :icon="icons.refresh"
-                  :loading="retryFailedBusy"
-                  :disabled="tidyDisabled"
-                  block
-                  @click="
-                    triggerDream({
-                      mode: latestRunMode,
-                      targetShortIds: latestRetryableShortIds,
-                    })
-                  "
+                  :icon="icons.cancel"
+                  :loading="batchDismissBusy"
+                  :disabled="batchBusy || busyId !== null"
+                  @click="batchDismissSelected"
                 >
-                  仅重试失败项（{{ latestRetryableShortIds.length }} 条）
+                  批量忽略
                 </UButton>
-              </div>
-            </section>
-
-            <!-- 建议类型分段筛选与纯标题速审表切换 -->
-            <section v-if="items.length" class="rail-filter-card">
-              <div class="rail-card-head">
-                <span class="rail-card-title">建议分类</span>
-              </div>
-              <div class="kind-tabs" role="tablist" aria-label="按建议类型筛选">
-                <button
-                  v-for="(tab, idx) in filterTabs"
-                  :key="tab.value"
-                  type="button"
-                  role="tab"
-                  class="kind-tab"
-                  :class="{ active: !quickTableMode && kindFilter === tab.value }"
-                  :aria-selected="!quickTableMode && kindFilter === tab.value"
-                  :tabindex="
-                    (!quickTableMode && kindFilter === tab.value) || (quickTableMode && idx === 0)
-                      ? 0
-                      : -1
-                  "
-                  @click="((quickTableMode = false), (kindFilter = tab.value))"
-                  @keydown="onFilterTabKeydown($event, idx)"
-                >
-                  <span>{{ tab.label }}</span>
-                  <span class="kind-tab-num tabular-nums">{{ tab.count }}</span>
-                </button>
-              </div>
-
-              <div v-if="canUseQuickTable" class="rail-quick-switch">
                 <UButton
                   size="xs"
-                  :color="quickTableMode ? 'primary' : 'neutral'"
-                  :variant="quickTableMode ? 'solid' : 'outline'"
-                  :icon="icons.table"
-                  block
-                  @click="quickTableMode = !quickTableMode"
+                  color="neutral"
+                  variant="ghost"
+                  :disabled="batchBusy || batchDismissBusy"
+                  @click="clearSelection"
                 >
-                  {{
-                    quickTableMode ? '返回卡片视图' : `纯标题速审表（${titleOnlyItems.length} 条）`
-                  }}
+                  取消选择
                 </UButton>
-              </div>
-            </section>
-          </aside>
-
-          <!-- 右侧主审阅流 -->
-          <div class="inbox-main">
-            <div v-if="inboxQuery.isPending.value" class="space-y-4">
-              <USkeleton v-for="n in 3" :key="n" class="h-36 w-full" />
+                <span v-if="hasUnsafeSelected" class="quiet-hint">高风险项须展开核对</span>
+              </template>
+              <UButton
+                v-else-if="filteredItems.length > 0"
+                size="xs"
+                color="neutral"
+                variant="ghost"
+                :icon="anyVisibleExpanded ? icons.foldVertical : icons.unfoldVertical"
+                @click="toggleAllExpanded"
+              >
+                {{ anyVisibleExpanded ? '全部收起' : '全部展开' }}
+              </UButton>
             </div>
+          </section>
 
-            <!-- 纯标题速审表 -->
-            <section v-else-if="quickTableMode && canUseQuickTable" class="quick-table-panel">
-              <div class="quick-table-head">
-                <span class="text-xs text-muted">
-                  以下建议仅调整标题或现行概要，不改动正文主体；原有内容保留在版本历史中，可随时恢复。
-                </span>
-                <div class="quick-table-actions">
-                  <UButton
-                    size="xs"
-                    color="neutral"
-                    variant="ghost"
-                    :disabled="batchBusy"
-                    @click="toggleTableAll"
-                  >
-                    {{ allTableSelected ? '取消全选' : '全选' }}
-                  </UButton>
-                  <UButton
-                    size="xs"
-                    :icon="icons.listChecks"
-                    :loading="batchBusy"
-                    :disabled="!selectedTableIds.length || busyId !== null"
-                    @click="applyQuickTableSelected"
-                  >
-                    批量应用所选（{{ selectedTableIds.length }} 条）
-                  </UButton>
-                </div>
-              </div>
+          <section class="ledger-wrap" aria-label="待处理审校台账">
+            <table class="ledger-table">
+              <thead>
+                <tr>
+                  <th scope="col" class="col-target">
+                    <label class="th-object">
+                      <input
+                        type="checkbox"
+                        class="ledger-check"
+                        aria-label="全选当前筛选结果"
+                        :checked="allVisibleSelected"
+                        :indeterminate.prop="someVisibleSelected"
+                        :disabled="batchBusy || batchDismissBusy || filteredItems.length === 0"
+                        @change="toggleSelectAll"
+                      />
+                      <span>对象</span>
+                    </label>
+                  </th>
+                  <th scope="col" class="col-delta">具体改动</th>
+                  <th scope="col" class="col-meta">性质与时间</th>
+                  <th scope="col" class="col-actions">快速决断</th>
+                </tr>
+              </thead>
 
-              <div class="quick-table-scroll">
-                <table class="quick-table">
-                  <thead>
-                    <tr>
-                      <th class="col-check">
+              <tbody>
+                <template v-for="s in filteredItems" :key="s.id">
+                  <tr
+                    class="ledger-row"
+                    :class="[
+                      `row-kind-${s.kind}`,
+                      {
+                        'is-expanded': isExpanded(s.id),
+                        'is-selected': selectedIds.includes(s.id),
+                      },
+                    ]"
+                  >
+                    <!-- 列 1：对象 -->
+                    <td class="cell-target" @click="toggleExpand(s.id)">
+                      <div class="target-wrap">
                         <input
                           type="checkbox"
-                          aria-label="全选纯标题规范建议"
-                          :checked="allTableSelected"
-                          :disabled="batchBusy"
-                          @change="toggleTableAll"
+                          class="ledger-check"
+                          :aria-label="`选择 ${targetTitleOf(s)}`"
+                          :checked="selectedIds.includes(s.id)"
+                          :disabled="batchBusy || batchDismissBusy"
+                          @click.stop
+                          @change="toggleSelectRow(s.id)"
                         />
-                      </th>
-                      <th>记忆</th>
-                      <th>旧标题 → 新短标题与现行概要</th>
-                      <th class="col-ops">操作</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="s in titleOnlyItems" :key="s.id">
-                      <td class="col-check">
-                        <input
-                          type="checkbox"
-                          :aria-label="`选择 ${baseEntryOf(s)?.title ?? s.id}`"
-                          :checked="selectedTableIds.includes(s.id)"
-                          :disabled="batchBusy"
-                          @change="toggleTableRow(s.id)"
-                        />
-                      </td>
-                      <td class="col-entry">
-                        <RouterLink
-                          v-if="baseEntryOf(s)"
-                          :to="entryRoute(baseEntryOf(s)!.shortId)"
-                          class="text-primary font-mono text-xs"
-                        >
-                          {{ baseEntryOf(s)!.shortId }}
-                        </RouterLink>
-                        <span v-if="baseEntryOf(s)?.isPinned" class="mini-pill">常驻</span>
-                      </td>
-                      <td class="col-diff">
-                        <div class="table-title-diff">
-                          <span class="table-old">{{ baseEntryOf(s)?.title }}</span>
-                          <UIcon :name="icons.inherits" class="table-arrow" aria-hidden="true" />
-                          <span class="table-new">{{
-                            s.proposedTitle ?? baseEntryOf(s)?.title
-                          }}</span>
+                        <div class="target-info">
+                          <span class="target-title">{{ targetTitleOf(s) }}</span>
+                          <span class="target-sub">
+                            <span v-if="baseEntryOf(s)" class="short-id font-mono">
+                              {{ baseEntryOf(s)!.shortId }}
+                            </span>
+                            <span v-if="baseEntryOf(s)?.isPinned" class="tiny-cue">常驻</span>
+                            <span
+                              v-if="s.kind === 'merge_duplicates' && s.entries.length > 1"
+                              class="tiny-cue tabular-nums"
+                            >
+                              等 {{ s.entries.length }} 条
+                            </span>
+                          </span>
                         </div>
-                        <p v-if="s.proposedSummary?.trim()" class="table-summary">
-                          概要：{{ s.proposedSummary }}
-                        </p>
-                      </td>
-                      <td class="col-ops">
-                        <UButton
-                          size="xs"
-                          color="neutral"
-                          variant="ghost"
-                          :disabled="batchBusy || busyId !== null"
-                          @click="onDismiss(s.id)"
+                      </div>
+                    </td>
+
+                    <!-- 列 2：具体改动 -->
+                    <td class="cell-delta" @click="toggleExpand(s.id)">
+                      <!-- 调整启动加载 -->
+                      <template
+                        v-if="s.kind === 'adjust_boot_mode' && baseEntryOf(s) && s.proposedBootMode"
+                      >
+                        <div class="delta-primary">
+                          <span class="delta-pill delta-pill-old">
+                            {{ bootModeLabels[effectiveBootMode(baseEntryOf(s)!)] }}
+                          </span>
+                          <span class="delta-arrow" aria-hidden="true">──▶</span>
+                          <span class="delta-pill delta-pill-ochre">
+                            {{ bootModeLabels[s.proposedBootMode] }}
+                          </span>
+                          <span v-if="hasSummaryDiff(s)" class="delta-pill">+ 补概要</span>
+                        </div>
+                        <div class="delta-sub tabular-nums">
+                          <template
+                            v-if="
+                              effectiveBootMode(baseEntryOf(s)!) === 'full' &&
+                              s.proposedBootMode === 'index'
+                            "
+                          >
+                            原全文
+                            {{ baseEntryOf(s)!.content.length.toLocaleString() }}
+                            字，启动改为目录索引
+                          </template>
+                          <template v-else>调整会话启动加载方式，保留正文与检索</template>
+                        </div>
+                      </template>
+
+                      <!-- 补全双链 -->
+                      <template v-else-if="s.kind === 'link_entries'">
+                        <div class="delta-primary">
+                          <span class="delta-pill delta-pill-lake tabular-nums">
+                            +{{ s.proposedLinks?.length ?? 0 }} 双链
+                          </span>
+                          <template v-if="s.proposedLinks?.length">
+                            <span class="delta-arrow" aria-hidden="true">→</span>
+                            <span class="delta-target-name">
+                              {{
+                                s.proposedLinks[0]!.targetTitle ||
+                                s.proposedLinks[0]!.targetShortId
+                              }}<template v-if="s.proposedLinks.length > 1">
+                                等 {{ s.proposedLinks.length }} 条</template
+                              >
+                            </span>
+                          </template>
+                        </div>
+                        <div class="delta-sub">
+                          <template v-if="firstLinkAnchor(s)">
+                            写入小节「{{ firstLinkAnchor(s) }}」，不改写其余正文
+                          </template>
+                          <template v-else>追加至相关记忆，不改写其余正文</template>
+                        </div>
+                      </template>
+
+                      <!-- 合并重复记忆 -->
+                      <template v-else-if="s.kind === 'merge_duplicates'">
+                        <div class="delta-primary">
+                          <span class="delta-pill delta-pill-new tabular-nums">
+                            合并 {{ s.entries.length }} 条
+                          </span>
+                          <span class="delta-arrow" aria-hidden="true">→</span>
+                          <span class="delta-target-name">
+                            {{ s.proposedTitle?.trim() || baseEntryOf(s)?.title }}
+                          </span>
+                        </div>
+                        <div
+                          class="delta-sub tabular-nums"
+                          :class="{ 'delta-sub-warn': (s.affectedBacklinkCount ?? 0) > 0 }"
                         >
-                          忽略
-                        </UButton>
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            </section>
+                          <template v-if="(s.affectedBacklinkCount ?? 0) > 0">
+                            自动重定向 {{ s.affectedBacklinkCount }} 条反链，其余重复项移入回收站
+                          </template>
+                          <template v-else>保留主词条，其余重复项移入回收站</template>
+                        </div>
+                      </template>
 
-            <!-- 常规卡片列表 -->
-            <div v-else-if="filteredItems.length" class="card-list">
-              <DreamSuggestionCard
-                v-for="item in filteredItems"
-                :key="item.id"
-                :suggestion="item"
-                :busy="busyId === item.id"
-                :disabled="batchBusy || (busyId !== null && busyId !== item.id)"
-                @apply="onApply"
-                @dismiss="onDismiss"
-              />
-            </div>
+                      <!-- 提炼会话摘要 -->
+                      <template v-else-if="s.kind === 'distill_episode'">
+                        <div class="delta-primary">
+                          <span class="delta-pill delta-pill-moss">提炼为正式记忆</span>
+                          <template v-if="s.proposedTitle?.trim()">
+                            <span class="delta-arrow" aria-hidden="true">→</span>
+                            <span class="delta-target-name">{{ s.proposedTitle }}</span>
+                          </template>
+                        </div>
+                        <div class="delta-sub tabular-nums">
+                          提炼自 {{ s.entries.length }} 条会话摘要
+                          <template v-if="s.proposedContent">
+                            · 约 {{ s.proposedContent.length.toLocaleString() }} 字
+                          </template>
+                        </div>
+                      </template>
 
-            <div v-else-if="items.length && !filteredItems.length" class="empty-frame">
-              <EmptyState
-                title="该分类暂无待处理建议"
-                description="可切换其他建议分类，或查看全部待处理建议。"
-              >
-                <template #actions>
-                  <UButton size="sm" color="neutral" variant="outline" @click="kindFilter = 'all'">
-                    查看全部
-                  </UButton>
+                      <!-- 标记过时记忆 -->
+                      <template v-else-if="s.kind === 'mark_stale'">
+                        <div class="delta-primary">
+                          <span class="delta-pill delta-pill-brick">移入回收站</span>
+                        </div>
+                        <div class="delta-sub line-clamp-1">{{ s.reason }}</div>
+                      </template>
+
+                      <!-- 规范与精简 / 更新记忆内容 -->
+                      <template v-else>
+                        <div class="delta-primary">
+                          <span class="delta-pill delta-pill-moss tabular-nums">
+                            {{ tidyDeltaPrimaryPill(s) }}
+                          </span>
+                          <template v-if="hasTitleDiff(s) && s.proposedTitle?.trim()">
+                            <span class="delta-arrow" aria-hidden="true">→</span>
+                            <span class="delta-target-name">{{ s.proposedTitle }}</span>
+                          </template>
+                        </div>
+                        <div
+                          v-if="tidyDeltaSubText(s)"
+                          class="delta-sub tabular-nums"
+                          :class="{ 'delta-sub-warn': tidyDeltaSubText(s)!.warn }"
+                        >
+                          {{ tidyDeltaSubText(s)!.text }}
+                        </div>
+                      </template>
+                    </td>
+
+                    <!-- 列 3：性质与时间 -->
+                    <td class="cell-meta" @click="toggleExpand(s.id)">
+                      <div class="kind-line">
+                        <span class="kind-mark" aria-hidden="true" />
+                        <span>{{ dreamKindLabels[s.kind] }}</span>
+                      </div>
+                      <div class="time-line">
+                        <time :datetime="s.createdAt" :title="formatTime(s.createdAt)">
+                          {{ formatRelative(s.createdAt) }}
+                        </time>
+                      </div>
+                    </td>
+
+                    <!-- 列 4：快速决断 -->
+                    <td class="cell-actions">
+                      <div class="row-actions">
+                        <template v-if="isHighRisk(s)">
+                          <UButton
+                            size="xs"
+                            color="neutral"
+                            variant="outline"
+                            :icon="icons.compare"
+                            :aria-expanded="isExpanded(s.id)"
+                            @click.stop="toggleExpand(s.id)"
+                          >
+                            {{ isExpanded(s.id) ? '收起' : '展开核对' }}
+                          </UButton>
+                          <UButton
+                            size="xs"
+                            color="neutral"
+                            variant="ghost"
+                            :disabled="batchBusy || batchDismissBusy || busyId !== null"
+                            @click.stop="onDismiss(s.id)"
+                          >
+                            忽略
+                          </UButton>
+                        </template>
+
+                        <template v-else>
+                          <UButton
+                            size="xs"
+                            color="primary"
+                            variant="outline"
+                            :icon="icons.check"
+                            :loading="busyId === s.id"
+                            :disabled="
+                              batchBusy || batchDismissBusy || (busyId !== null && busyId !== s.id)
+                            "
+                            @click.stop="onQuickApply(s)"
+                          >
+                            应用
+                          </UButton>
+                          <UButton
+                            size="xs"
+                            color="neutral"
+                            variant="ghost"
+                            :disabled="batchBusy || batchDismissBusy || busyId !== null"
+                            @click.stop="onDismiss(s.id)"
+                          >
+                            忽略
+                          </UButton>
+                          <button
+                            type="button"
+                            class="btn-expand"
+                            :aria-expanded="isExpanded(s.id)"
+                            @click.stop="toggleExpand(s.id)"
+                          >
+                            <span>{{ isExpanded(s.id) ? '收起' : '详情' }}</span>
+                            <UIcon
+                              :name="icons.chevronDown"
+                              class="expand-chevron"
+                              aria-hidden="true"
+                            />
+                          </button>
+                        </template>
+                      </div>
+                    </td>
+                  </tr>
+
+                  <!-- 行内 65/35 展开审校面板 -->
+                  <tr v-if="isExpanded(s.id)" class="inspector-row" :class="`row-kind-${s.kind}`">
+                    <td colspan="4">
+                      <DreamSuggestionCard
+                        :suggestion="s"
+                        layout="inspector"
+                        :busy="busyId === s.id"
+                        :disabled="
+                          batchBusy || batchDismissBusy || (busyId !== null && busyId !== s.id)
+                        "
+                        @apply="onApply"
+                        @dismiss="onDismiss"
+                      />
+                    </td>
+                  </tr>
                 </template>
-              </EmptyState>
-            </div>
+              </tbody>
+            </table>
 
-            <div v-else-if="!inboxQuery.isError.value" class="empty-frame">
-              <EmptyState
-                title="暂无待处理建议"
-                description="会话摘要与记忆库变动累积后，定时整理或手动触发会在此生成建议。"
+            <footer class="ledger-footnote">所有应用均记入版本历史，支持 8 秒内撤销。</footer>
+          </section>
+        </template>
+
+        <!-- 空态 -->
+        <div v-else-if="!inboxQuery.isError.value" class="empty-frame">
+          <EmptyState
+            title="暂无待处理建议"
+            description="会话摘要与记忆变动累积后，定时或手动整理会在此生成建议。"
+          >
+            <template #actions>
+              <UButton
+                size="sm"
+                color="neutral"
+                variant="outline"
+                :icon="icons.shieldCheck"
+                @click="sweepOpen = true"
               >
-                <template #actions>
-                  <UButton
-                    size="sm"
-                    color="neutral"
-                    variant="outline"
-                    :icon="icons.shieldCheck"
-                    @click="sweepOpen = true"
-                  >
-                    结构体检与预清洗
-                  </UButton>
-                  <UDropdownMenu
-                    v-if="me.data.value?.hasChatModel"
-                    :items="tidyMenuItems"
-                    :disabled="tidyDisabled"
-                    :content="{ align: 'center' }"
-                    :ui="{ content: 'min-w-52' }"
-                  >
-                    <UButton
-                      size="sm"
-                      color="neutral"
-                      variant="outline"
-                      :icon="icons.tidy"
-                      :trailing-icon="icons.chevronDown"
-                      :loading="tidyBusy"
-                      :disabled="tidyDisabled"
-                    >
-                      {{
-                        tidyPendingCount > 0
-                          ? `存量规范整理（${tidyPendingCount}）`
-                          : '存量规范整理'
-                      }}
-                    </UButton>
-                  </UDropdownMenu>
-                  <UButton
-                    v-if="me.data.value?.hasChatModel"
-                    size="sm"
-                    variant="outline"
-                    :icon="icons.sparkles"
-                    :loading="standardBusy"
-                    :disabled="Boolean(triggeringMode) || Boolean(state?.running)"
-                    @click="triggerDream({ mode: 'standard' })"
-                  >
-                    {{ state?.running ? '整理中' : '立即整理' }}
-                  </UButton>
-                </template>
-              </EmptyState>
-            </div>
-          </div>
+                结构体检与预清洗
+              </UButton>
+              <UButton
+                v-if="hasChatModel"
+                size="sm"
+                color="neutral"
+                variant="outline"
+                :icon="icons.links"
+                :disabled="modelRunDisabled"
+                @click="triggerDream({ mode: 'cross_memory', scope: 'full_corpus' })"
+              >
+                全库查重与关联
+              </UButton>
+              <UButton
+                v-if="hasChatModel"
+                size="sm"
+                :icon="icons.sparkles"
+                :loading="standardBusy"
+                :disabled="modelRunDisabled"
+                @click="triggerDream({ mode: 'standard' })"
+              >
+                {{ state?.running ? '整理中' : '增量整理' }}
+              </UButton>
+            </template>
+          </EmptyState>
         </div>
       </div>
     </div>
@@ -956,125 +1489,142 @@ async function applyQuickTableSelected() {
 }
 .inbox-shell {
   width: 100%;
-  max-width: 80rem;
+  max-width: 1200px;
   margin-inline: auto;
+  padding: 20px 32px 56px;
 }
-.inbox-body {
+
+/* ---- 顶部单行指挥条 ---- */
+.command-bar {
   display: flex;
-  flex-direction: column;
-  gap: 16px;
-  padding: 0 32px 48px;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--ui-rule);
 }
-.inbox-workspace {
-  display: grid;
-  grid-template-columns: 248px minmax(0, 1fr);
-  gap: 28px;
-  align-items: start;
-}
-.inbox-rail {
-  position: sticky;
-  top: 20px;
+.command-left {
   display: flex;
-  flex-direction: column;
-  gap: 14px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 18px;
+  min-width: 0;
 }
-.rail-card,
-.rail-filter-card {
+.page-title {
+  font-size: 24px;
+  font-weight: 500;
+  line-height: 1.3;
+  letter-spacing: -0.005em;
+  color: var(--ui-text-highlighted);
+}
+.status-summary-btn {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 9px;
+  padding: 4px 10px;
+  border: 1px solid var(--ui-border-accented);
+  background: transparent;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--ui-text-toned);
+  cursor: pointer;
+}
+.status-summary-btn:hover,
+.status-summary-btn[aria-expanded='true'] {
+  border-color: var(--ui-rule);
+  background: var(--ui-bg-bright);
+  color: var(--ui-text-highlighted);
+}
+.status-count-hot {
+  font-weight: 600;
+  color: var(--ui-error);
+}
+.status-count-clear {
+  font-weight: 600;
+  color: var(--ui-success);
+}
+.status-running {
+  font-weight: 600;
+  color: var(--ui-text-highlighted);
+}
+.hair-sep {
+  display: inline-block;
+  flex: none;
+  width: 1px;
+  height: 11px;
+  background: var(--ui-border-accented);
+}
+.status-caret {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--ui-text-muted);
+}
+
+.command-right {
+  display: flex;
+  align-items: center;
+  flex: none;
+}
+.split-action {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 状态 Popover 详情 */
+.status-popover {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 14px;
-  border: 1px solid var(--ui-border-accented);
-  background: var(--ui-bg-muted);
+  width: 320px;
+  max-width: calc(100vw - 32px);
+  padding: 14px 16px;
+  background: var(--ui-bg-bright);
 }
-.rail-card-head {
+.popover-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding-bottom: 6px;
-  border-bottom: 1px solid var(--ui-rule);
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--ui-border);
 }
-.rail-card-title {
-  font-size: 12px;
+.popover-title {
+  font-size: 13px;
   font-weight: 600;
   color: var(--ui-text-highlighted);
 }
-.rail-state-tag {
-  padding: 0 5px;
+.popover-state {
+  padding: 0 6px;
   border: 1px solid var(--ui-border-accented);
-  background: var(--ui-bg);
   font-size: 12px;
-  line-height: 1.45;
   color: var(--ui-text-muted);
 }
-.rail-state-tag.is-active {
+.popover-state.is-active {
   border-color: var(--ui-rule);
   color: var(--ui-text-highlighted);
 }
-.rail-stats {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
+.kv-list {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 14px;
   font-size: 13px;
 }
-.rail-stat-row {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-}
-.rail-stat-row dt {
-  flex: none;
-  font-size: 12px;
+.kv-list dt {
   color: var(--ui-text-muted);
+  white-space: nowrap;
 }
-.rail-stat-row dd {
-  min-width: 0;
+.kv-list dd {
   text-align: right;
-  color: var(--ui-text);
+  color: var(--ui-text-highlighted);
   overflow-wrap: anywhere;
 }
-.rail-stat-row dd.is-count-hot {
-  font-weight: 600;
-  color: var(--ui-error);
-}
-.rail-outcome {
-  color: var(--ui-text-muted);
-}
-.rail-progress {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 8px;
-  border: 1px solid var(--ui-rule);
-  background: var(--ui-bg);
-}
-.rail-progress-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--ui-text-highlighted);
-}
-.rail-progress-track {
-  height: 4px;
-  background: var(--ui-border);
-  overflow: hidden;
-}
-.rail-progress-fill {
-  height: 100%;
-  background: var(--ui-rule);
-  transition: width 180ms ease;
-}
-.rail-progress-meta {
-  font-size: 12px;
-  line-height: 1.45;
-  color: var(--ui-text-muted);
-}
-.rail-error {
+.popover-error {
   padding: 6px 8px;
   border: 1px solid var(--ui-error);
   background: var(--ui-bg);
@@ -1083,22 +1633,18 @@ async function applyQuickTableSelected() {
   color: var(--ui-error);
   overflow-wrap: anywhere;
 }
-.rail-error.is-partial {
+.popover-error.is-partial {
   border-color: var(--ui-warning);
   color: var(--ui-warning);
 }
-.rail-retry-note {
-  font-size: 12px;
-  color: var(--ui-text-muted);
-}
-.rail-failures {
+.popover-failures {
   display: flex;
   flex-direction: column;
   gap: 8px;
   padding-top: 8px;
   border-top: 1px solid var(--ui-border);
 }
-.rail-failures-head {
+.failures-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1106,55 +1652,40 @@ async function applyQuickTableSelected() {
   font-size: 12px;
   color: var(--ui-text-muted);
 }
-.rail-failures-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
+.failures-toggle {
   font-size: 12px;
   color: var(--ui-text-highlighted);
+  text-decoration: underline;
   cursor: pointer;
 }
-.rail-failures-toggle:hover {
-  text-decoration: underline;
-}
-.rail-failures-chevron {
-  display: inline-block;
-  flex: none;
-  width: 13px;
-  height: 13px;
-}
-.rail-failures-list {
+.failures-list {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  max-height: 200px;
+  max-height: 180px;
   overflow-y: auto;
   padding: 6px 8px;
   border: 1px solid var(--ui-border);
   background: var(--ui-bg);
 }
-.rail-failure-row {
+.failure-row {
   display: flex;
   flex-direction: column;
   gap: 2px;
   padding-bottom: 6px;
   border-bottom: 1px solid var(--ui-border);
 }
-.rail-failure-row:last-child {
+.failure-row:last-child {
   padding-bottom: 0;
   border-bottom: 0;
 }
-.rail-failure-top {
+.failure-top {
   display: flex;
   align-items: baseline;
   gap: 6px;
   min-width: 0;
 }
-.rail-failure-id {
-  flex: none;
-  white-space: nowrap;
-}
-.rail-failure-title {
+.failure-title {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1162,189 +1693,596 @@ async function applyQuickTableSelected() {
   font-size: 12px;
   color: var(--ui-text-highlighted);
 }
-.rail-failure-reason {
+.failure-reason {
   font-size: 12px;
   line-height: 1.4;
   color: var(--ui-text-muted);
   overflow-wrap: anywhere;
 }
-.rail-quick-switch {
-  padding-top: 8px;
-  border-top: 1px solid var(--ui-border);
-}
-.inbox-main {
-  min-width: 0;
-}
-.empty-frame {
-  border: 1px dashed var(--ui-border-accented);
-  background: var(--ui-bg-bright);
-  padding: 12px 16px;
-}
-.kind-tabs {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.kind-tab {
+.popover-foot {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  width: 100%;
-  padding: 6px 8px;
-  border-left: 2px solid transparent;
+  padding-top: 8px;
+  border-top: 1px solid var(--ui-border);
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+
+/* ---- 主区与进度/失败横幅 ---- */
+.inbox-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-top: 14px;
+}
+
+.run-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  padding: 9px 14px;
+  border: 1px solid var(--ui-rule);
+  background: var(--ui-bg-bright);
+  font-size: 13px;
+}
+.run-banner-left {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.run-banner-title {
+  font-weight: 600;
+  color: var(--ui-text-highlighted);
+}
+.run-banner-meta {
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.run-banner-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.run-progress-track {
+  width: 160px;
+  height: 6px;
+  border: 1px solid var(--ui-rule);
+  background: var(--ui-bg);
+}
+.run-progress-fill {
+  height: 100%;
+  background: var(--ui-rule);
+  transition: width 180ms ease;
+}
+.run-banner-count {
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.banner-icon {
+  display: inline-block;
+  flex: none;
+  width: 15px;
+  height: 15px;
+}
+
+.failure-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 9px 14px;
+  border: 1px solid var(--ui-error);
+  background: color-mix(in srgb, var(--ui-error) 5%, var(--ui-bg));
+  font-size: 13px;
+}
+.failure-banner.is-partial {
+  border-color: var(--ui-warning);
+  background: color-mix(in srgb, var(--ui-warning) 6%, var(--ui-bg));
+}
+.failure-banner-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 14px;
+}
+.failure-banner-msg {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ui-error);
+  min-width: 0;
+}
+.failure-banner.is-partial .failure-banner-msg {
+  color: var(--ui-warning);
+}
+.failure-banner-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.banner-failure-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--ui-border);
+  font-size: 12px;
+}
+.banner-failure-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+}
+.banner-failure-title {
+  font-weight: 500;
+  color: var(--ui-text-highlighted);
+}
+.banner-failure-reason {
+  color: var(--ui-text-muted);
+  overflow-wrap: anywhere;
+}
+
+/* ---- 非零分类筛选轨 + 批量条 ---- */
+.ledger-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  border-bottom: 1px solid var(--ui-border-accented);
+  min-height: 42px;
+}
+.filter-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 2px;
+  margin-bottom: -1px;
+}
+.filter-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px 8px;
+  border-bottom: 2px solid transparent;
   font-size: 13px;
   color: var(--ui-text-muted);
   white-space: nowrap;
   cursor: pointer;
 }
-.kind-tab:hover {
-  background: var(--ui-bg-elevated);
+.filter-tab:hover {
   color: var(--ui-text-highlighted);
 }
-.kind-tab:hover .kind-tab-num {
+.filter-tab[aria-selected='true'] {
+  border-bottom-color: var(--ui-rule);
+  font-weight: 600;
+  color: var(--ui-text-highlighted);
+}
+.tab-count {
+  font-size: 12px;
   color: var(--ui-text-muted);
 }
-.kind-tab.active {
-  border-left-color: var(--ui-rule);
-  background: var(--ui-selected);
-  color: var(--ui-on-selected);
-  font-weight: 500;
+.filter-tab[aria-selected='true'] .tab-count {
+  color: var(--ui-text-highlighted);
 }
-.kind-tab-num {
-  font-size: 12px;
-  color: var(--ui-text-dimmed);
-}
-.kind-tab.active .kind-tab-num,
-.kind-tab.active:hover .kind-tab-num {
-  color: var(--ui-on-selected-muted);
-}
-.quick-table-panel {
-  border: 1px solid var(--ui-rule);
-  background: var(--ui-bg);
-}
-.quick-table-head {
+.batch-zone {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px 12px;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--ui-border);
-  background: var(--ui-bg-muted);
+  gap: 8px;
+  padding-bottom: 6px;
 }
-.quick-table-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+.batch-selected-note {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ui-text-highlighted);
 }
-.quick-table-scroll {
-  overflow-x: auto;
+.quiet-hint {
+  font-size: 12px;
+  color: var(--ui-text-muted);
 }
-.quick-table {
+
+/* ---- 四列纸墨速审台账表 ---- */
+.ledger-wrap {
+  width: 100%;
+}
+.ledger-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 13px;
+  table-layout: fixed;
 }
-.quick-table th,
-.quick-table td {
+.ledger-table thead th {
   padding: 9px 12px;
-  border-bottom: 1px solid var(--ui-border);
+  border-bottom: 1px solid var(--ui-rule);
+  background: var(--ui-bg-muted);
   text-align: left;
-  vertical-align: top;
-}
-.quick-table th {
-  border-bottom-color: var(--ui-rule);
   font-size: 12px;
   font-weight: 500;
   color: var(--ui-text-muted);
+  vertical-align: middle;
   white-space: nowrap;
 }
-.quick-table tr:last-child td {
-  border-bottom: 0;
+.ledger-table thead th.col-actions {
+  text-align: right;
 }
-.col-check {
-  width: 34px;
+.col-target {
+  width: 27%;
 }
-.col-check input[type='checkbox'] {
+.col-delta {
+  width: 38%;
+}
+.col-meta {
+  width: 14%;
+}
+.col-actions {
+  width: 21%;
+}
+
+.th-object {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+}
+.ledger-check {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  margin: 0;
   accent-color: var(--ui-primary);
+  cursor: pointer;
 }
-.col-entry {
-  white-space: nowrap;
+
+.ledger-row {
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-bg);
+  transition: background-color 110ms ease;
 }
-.col-ops {
-  width: 64px;
-  white-space: nowrap;
+.ledger-row:hover {
+  background: var(--ui-bg-elevated);
 }
-.mini-pill {
-  margin-left: 6px;
-  padding: 0 5px;
-  border: 1px solid var(--ui-rule);
-  font-size: 12px;
-  line-height: 1.35;
+.ledger-row.is-selected {
+  background: var(--ui-bg-muted);
 }
-.table-title-diff {
+.ledger-row.is-expanded {
+  background: var(--ui-bg-bright);
+}
+.ledger-row td {
+  padding: 12px;
+  vertical-align: middle;
+}
+.ledger-row td:first-child {
+  position: relative;
+  padding-left: 14px;
+}
+.ledger-row td:first-child::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: transparent;
+}
+.ledger-row.is-expanded td:first-child::before,
+.ledger-row:hover td:first-child::before {
+  background: var(--row-accent, var(--ui-text-muted));
+}
+
+/* 语义色点与左缘坐标线 */
+.row-kind-merge_duplicates {
+  --row-accent: var(--ui-rule);
+}
+.row-kind-link_entries {
+  --row-accent: var(--ui-info);
+}
+.row-kind-adjust_boot_mode {
+  --row-accent: var(--ui-warning);
+}
+.row-kind-mark_stale {
+  --row-accent: var(--ui-error);
+}
+.row-kind-tidy,
+.row-kind-update,
+.row-kind-distill_episode {
+  --row-accent: var(--ui-text-muted);
+}
+
+.cell-target,
+.cell-delta,
+.cell-meta {
+  cursor: pointer;
+}
+
+/* 列 1：对象 */
+.target-wrap {
   display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 4px 6px;
-  line-height: 1.5;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
 }
-.table-old {
-  color: var(--ui-text-muted);
-  text-decoration: line-through;
+.target-wrap .ledger-check {
+  margin-top: 3px;
+}
+.target-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.target-title {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--ui-text-highlighted);
   overflow-wrap: anywhere;
 }
-.table-arrow {
-  display: inline-block;
-  flex: none;
-  width: 12px;
-  height: 12px;
-  color: var(--ui-text-dimmed);
+.target-sub {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ui-text-muted);
 }
-.table-new {
+.short-id {
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.tiny-cue {
+  padding: 0 4px;
+  border: 1px solid var(--ui-border-accented);
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--ui-text-muted);
+}
+
+/* 列 2：具体改动 */
+.delta-primary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px 7px;
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--ui-text-highlighted);
+}
+.delta-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border: 1px solid var(--ui-border-accented);
+  background: var(--ui-bg-bright);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.45;
+}
+.delta-pill-old {
+  border-style: dashed;
+  background: transparent;
+  color: var(--ui-text-muted);
+}
+.delta-pill-new {
+  border-color: var(--ui-rule);
+  font-weight: 600;
+  color: var(--ui-text-highlighted);
+}
+.delta-pill-lake {
+  border-color: var(--ui-info);
+  background: color-mix(in srgb, var(--ui-info) 8%, var(--ui-bg-bright));
+  font-weight: 600;
+  color: var(--ui-info);
+}
+.delta-pill-moss {
+  border-color: var(--ui-success);
+  background: color-mix(in srgb, var(--ui-success) 8%, var(--ui-bg-bright));
+  font-weight: 600;
+  color: var(--ui-success);
+}
+.delta-pill-ochre {
+  border-color: var(--ui-warning);
+  background: color-mix(in srgb, var(--ui-warning) 8%, var(--ui-bg-bright));
+  font-weight: 600;
+  color: var(--ui-warning);
+}
+.delta-pill-brick {
+  border-color: var(--ui-error);
+  background: color-mix(in srgb, var(--ui-error) 8%, var(--ui-bg-bright));
+  font-weight: 600;
+  color: var(--ui-error);
+}
+.delta-arrow {
+  font-size: 12px;
+  color: var(--ui-text-muted);
+  user-select: none;
+}
+.delta-target-name {
   font-weight: 600;
   color: var(--ui-text-highlighted);
   overflow-wrap: anywhere;
 }
-.table-summary {
-  margin-top: 4px;
+.delta-sub {
+  margin-top: 3px;
   font-size: 12px;
-  line-height: 1.5;
+  line-height: 1.45;
   color: var(--ui-text-muted);
   overflow-wrap: anywhere;
 }
-.card-list {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
+.delta-sub-warn {
+  font-weight: 500;
+  color: var(--ui-warning);
 }
-@media (max-width: 1023.98px) {
-  .inbox-body {
-    padding: 0 16px 36px;
+
+/* 列 3：性质与时间 */
+.kind-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ui-text-toned);
+  white-space: nowrap;
+}
+.kind-mark {
+  display: inline-block;
+  flex: none;
+  width: 6px;
+  height: 6px;
+  background: var(--row-accent, var(--ui-text-muted));
+}
+.time-line {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+
+/* 列 4：快速决断 */
+.cell-actions {
+  text-align: right;
+}
+.row-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+}
+.btn-expand {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 26px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  font-size: 12px;
+  color: var(--ui-text-toned);
+  cursor: pointer;
+}
+.btn-expand:hover {
+  background: var(--ui-bg-elevated);
+  color: var(--ui-text-highlighted);
+}
+.ledger-row.is-expanded .btn-expand {
+  border-color: var(--ui-border-accented);
+  background: var(--ui-bg-muted);
+  color: var(--ui-text-highlighted);
+}
+.expand-chevron {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+  transition: transform 150ms ease;
+}
+.ledger-row.is-expanded .expand-chevron {
+  transform: rotate(180deg);
+}
+
+/* 行内展开审校面板外框 */
+.inspector-row {
+  border-bottom: 1px solid var(--ui-rule);
+}
+.inspector-row > td {
+  padding: 0;
+  border-left: 3px solid var(--row-accent, var(--ui-rule));
+}
+
+.ledger-footnote {
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+
+.empty-frame {
+  padding: 16px;
+  border: 1px dashed var(--ui-border-accented);
+  background: var(--ui-bg-bright);
+}
+
+/* ---- 窄屏退化为紧凑纸墨卡片（390px 零横向溢出） ---- */
+@media (max-width: 960px) {
+  .inbox-shell {
+    padding: 16px 16px 40px;
   }
-  .inbox-workspace {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 16px;
+}
+
+@media (max-width: 820px) {
+  .command-bar {
+    flex-direction: column;
+    align-items: stretch;
   }
-  .inbox-rail {
-    position: static;
+  .command-right {
+    justify-content: flex-start;
   }
-  .kind-tabs {
-    flex-direction: row;
-    overflow-x: auto;
-    gap: 0;
-    border: 1px solid var(--ui-border-accented);
+  .run-banner {
+    flex-direction: column;
+    align-items: stretch;
   }
-  .kind-tab {
+  .run-progress-track {
+    flex: 1;
     width: auto;
-    height: 28px;
-    padding: 0 10px;
-    border-left: 0;
-    border-right: 1px solid var(--ui-border);
   }
-  .kind-tab:last-child {
-    border-right: 0;
+
+  .ledger-table,
+  .ledger-table tbody,
+  .ledger-table tr,
+  .ledger-table td {
+    display: block;
+    width: 100%;
+  }
+  .ledger-table thead {
+    display: none;
+  }
+  .ledger-row {
+    position: relative;
+    padding: 12px 12px 12px 14px;
+    border-bottom: 1px solid var(--ui-border-accented);
+  }
+  .ledger-row td {
+    padding: 0;
+  }
+  .ledger-row td:first-child {
+    position: static;
+    padding-left: 0;
+  }
+  .ledger-row .cell-delta {
+    margin-top: 8px;
+    padding-left: 25px;
+  }
+  .ledger-row .cell-meta {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 8px;
+    padding-left: 25px;
+  }
+  .ledger-row .cell-meta .time-line {
+    margin-top: 0;
+  }
+  .ledger-row .cell-actions {
+    margin-top: 10px;
+    padding-top: 8px;
+    padding-left: 25px;
+    border-top: 1px solid var(--ui-border-muted);
+    text-align: left;
+  }
+  .row-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+  .row-actions .btn-expand {
+    margin-left: auto;
+  }
+  .inspector-row > td {
+    padding: 0;
   }
 }
 </style>

@@ -42,7 +42,6 @@ import { icons } from '../icons'
 import {
   bootModeDescriptions,
   bootModeLabels,
-  entryKindLabels,
   envDisplayName,
   eventTypeLabels,
   formatActorLabel,
@@ -913,7 +912,7 @@ defineExpose({
               <span v-if="isDeleted" class="pill danger">已在回收站</span>
             </div>
 
-            <!-- 轻量动态状态行：版本、相对更新时间、来源、常驻字数、最新变更摘要与历史直达 -->
+            <!-- 轻量动态状态行：版本、相对更新时间、来源、常驻字数与最新变更摘要 -->
             <div class="head-status-line">
               <span class="tabular-nums">版本 {{ entry.version }}</span>
               <span class="status-sep" aria-hidden="true">·</span>
@@ -932,21 +931,11 @@ defineExpose({
                   近改：{{ latestChangeText }}
                 </span>
               </template>
-              <template v-if="mode === 'read'">
+              <template v-if="mode === 'read' && pendingSuggestionCount > 0">
                 <span class="status-sep" aria-hidden="true">·</span>
-                <button
-                  type="button"
-                  class="text-primary status-history-link"
-                  @click="openHistory()"
-                >
-                  查看历史
-                </button>
-                <template v-if="pendingSuggestionCount > 0">
-                  <span class="status-sep" aria-hidden="true">·</span>
-                  <RouterLink :to="{ name: 'inbox' }" class="text-primary status-history-link">
-                    待处理建议（{{ pendingSuggestionCount }}）
-                  </RouterLink>
-                </template>
+                <RouterLink :to="{ name: 'inbox' }" class="text-primary status-history-link">
+                  待处理建议（{{ pendingSuggestionCount }}）
+                </RouterLink>
               </template>
             </div>
           </div>
@@ -1019,12 +1008,12 @@ defineExpose({
                       </button>
                     </div>
 
-                    <NoteLine v-if="pinDraft.recommendedIndex" tone="neutral">
-                      正文超过 1,200 字，已默认推荐目录常驻；也可按需切换为全文常驻。
-                    </NoteLine>
+                    <p v-if="pinDraft.recommendedIndex" class="text-xs text-muted">
+                      正文超过 1,200 字，已默认推荐目录常驻。
+                    </p>
 
-                    <NoteLine v-for="warn in pinDraftWarnings" :key="warn.code" tone="warning">
-                      {{ warn.message }}
+                    <NoteLine v-if="pinDraftWarnings.length" tone="warning" flush>
+                      {{ pinDraftWarnings.map((w) => w.message).join('；') }}
                     </NoteLine>
 
                     <div v-if="pinDraft.bootMode === 'index'" class="space-y-1">
@@ -1180,17 +1169,14 @@ defineExpose({
                 </template>
               </UFormField>
 
-              <UFormField
-                label="现行概要（可选）"
-                help="1–2 句概括当前结论，用于启动加载与列表预览"
-              >
+              <UFormField label="现行概要（可选）">
                 <UTextarea
                   v-model="form.summary"
                   :rows="1"
                   autoresize
                   :maxrows="3"
                   :maxlength="ENTRY_SUMMARY_MAX"
-                  placeholder="简明概括现行结论，避免写入逐日流水账"
+                  placeholder="1–2 句概括当前结论，用于启动加载与列表预览"
                   class="w-full"
                 />
               </UFormField>
@@ -1262,10 +1248,18 @@ defineExpose({
               </div>
             </div>
 
-            <NoteLine v-for="warn in editBootWarnings" :key="warn.code" tone="warning">
-              {{ warn.message }}
-              <template v-if="warn.code === 'pinned_oversized'" #actions>
+            <NoteLine v-if="editBootWarnings.length" tone="warning">
+              {{ editBootWarnings.map((w) => w.message).join('；') }}
+              <template
+                v-if="
+                  editBootWarnings.some(
+                    (w) => w.code === 'pinned_oversized' || w.code === 'pinned_scope_hint',
+                  )
+                "
+                #actions
+              >
                 <UButton
+                  v-if="editBootWarnings.some((w) => w.code === 'pinned_oversized')"
                   size="xs"
                   color="neutral"
                   variant="outline"
@@ -1273,9 +1267,13 @@ defineExpose({
                 >
                   改为目录常驻
                 </UButton>
-              </template>
-              <template v-else-if="warn.code === 'pinned_scope_hint'" #actions>
-                <UButton size="xs" color="neutral" variant="outline" @click="attrsOpen = true">
+                <UButton
+                  v-if="editBootWarnings.some((w) => w.code === 'pinned_scope_hint')"
+                  size="xs"
+                  color="neutral"
+                  variant="outline"
+                  @click="attrsOpen = true"
+                >
                   限定场景
                 </UButton>
               </template>
@@ -1489,10 +1487,6 @@ defineExpose({
           <div class="read-layout" :class="{ 'has-rail': hasSideRail }">
             <div class="read-main">
               <dl class="meta-strip">
-                <div>
-                  <dt>类型</dt>
-                  <dd>{{ entryKindLabels[entry.kind] }}</dd>
-                </div>
                 <div>
                   <dt>场景</dt>
                   <dd>

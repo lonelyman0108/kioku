@@ -301,9 +301,7 @@ function closeOnce() {
             默认场域
             {{ outOfScopeFocusRealms.join('、') }} 不在上方允许范围内，启动聚焦仅在允许场域内生效。
           </NoteLine>
-          <p class="text-xs text-muted">
-            仅影响会话启动与召回时的默认场域聚焦，不改变上方允许访问的场域边界。
-          </p>
+          <p v-else class="text-xs text-muted">仅作会话启动与召回默认聚焦，不放宽上方允许场域。</p>
         </div>
 
         <div class="flex flex-wrap gap-6 pt-1">

@@ -399,7 +399,6 @@ async function confirmRestore() {
   <UModal
     v-model:open="open"
     :title="`版本历史 · ${shortId}`"
-    description="左侧切换版本，右侧审查属性与正文变更，可随时切换任意历史版本作为对比基准"
     :ui="{
       content: 'w-[95vw] max-w-[1640px] sm:max-w-[1640px] h-[90vh] max-h-[90vh] ring-2 ring-rule',
       body: 'p-0 sm:p-0 flex-1 min-h-0 overflow-hidden flex flex-col',
@@ -616,10 +615,7 @@ async function confirmRestore() {
 
               <div class="commit-meta">
                 <template v-if="customBaseItem && activeItem.snapshot">
-                  <span class="font-mono font-medium">
-                    跨版本累计变动（版本 {{ customBaseItem.snapshot.version }} → 版本
-                    {{ activeItem.snapshot.version }}）
-                  </span>
+                  <span class="font-medium">跨版本累计变动</span>
                   <span>·</span>
                   <span>目标变更：{{ summaryTextOf(activeItem) }}</span>
                 </template>

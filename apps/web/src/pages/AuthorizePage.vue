@@ -475,8 +475,8 @@ async function deny() {
               {{ outOfScopeFocusRealms.join('、') }}
               不在上方允许范围内，启动聚焦仅在允许场域内生效。
             </NoteLine>
-            <p class="text-xs text-muted">
-              仅用于会话启动与召回的默认场域聚焦，不改变上方允许访问的场域边界。
+            <p v-else class="text-xs text-muted">
+              仅作会话启动与召回默认聚焦，不放宽上方允许场域。
             </p>
           </div>
 

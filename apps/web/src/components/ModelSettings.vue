@@ -18,6 +18,7 @@ import { api } from '../api/endpoints'
 import { icons } from '../icons'
 import { reasoningEffortLabels } from '../labels'
 import { ME_KEY } from '../query'
+import Hint from './Hint.vue'
 import SegmentedChoice from './SegmentedChoice.vue'
 import NoteLine from './ui/NoteLine.vue'
 import ReadFailureNote from './ui/ReadFailureNote.vue'
@@ -400,8 +401,8 @@ async function rebuildEmbeddings() {
             label="API Key"
             :help="
               form.embedding.hasApiKey && !form.embedding.clearKey
-                ? '已保存密钥；留空表示保持不变'
-                : '本地无鉴权服务可留空'
+                ? '已保存密钥，留空保持不变'
+                : undefined
             "
             class="sm:col-span-2"
           >
@@ -409,7 +410,11 @@ async function rebuildEmbeddings() {
               <UInput
                 v-model="form.embedding.apiKey"
                 type="password"
-                :placeholder="form.embedding.hasApiKey ? '••••••••' : 'sk-...'"
+                :placeholder="
+                  form.embedding.hasApiKey && !form.embedding.clearKey
+                    ? '••••••••'
+                    : 'sk-...（无需鉴权可留空）'
+                "
                 class="min-w-0 flex-1 font-mono"
                 autocomplete="off"
                 @update:model-value="form.embedding.clearKey = false"
@@ -510,8 +515,8 @@ async function rebuildEmbeddings() {
             label="API Key"
             :help="
               form.chatLlm.hasApiKey && !form.chatLlm.clearKey
-                ? '已保存密钥；留空表示保持不变'
-                : '本地无鉴权服务可留空'
+                ? '已保存密钥，留空保持不变'
+                : undefined
             "
             class="sm:col-span-2"
           >
@@ -519,7 +524,11 @@ async function rebuildEmbeddings() {
               <UInput
                 v-model="form.chatLlm.apiKey"
                 type="password"
-                :placeholder="form.chatLlm.hasApiKey ? '••••••••' : 'sk-...'"
+                :placeholder="
+                  form.chatLlm.hasApiKey && !form.chatLlm.clearKey
+                    ? '••••••••'
+                    : 'sk-...（无需鉴权可留空）'
+                "
                 class="min-w-0 flex-1 font-mono"
                 autocomplete="off"
                 @update:model-value="form.chatLlm.clearKey = false"
@@ -539,9 +548,14 @@ async function rebuildEmbeddings() {
 
           <UFormField
             label="思考等级"
-            help="选「跟随默认」时不附加思考参数，兼容非推理模型；开启后会按档位自动放宽输出上限。"
+            :ui="{ labelWrapper: 'justify-start gap-1.5' }"
             class="sm:col-span-2"
           >
+            <template #hint>
+              <Hint label="思考等级说明">
+                选「跟随默认」时不附加思考参数，兼容非推理模型；开启后会按档位自动放宽输出上限。
+              </Hint>
+            </template>
             <div class="effort-row">
               <SegmentedChoice
                 v-model="form.chatLlm.reasoningEffort"

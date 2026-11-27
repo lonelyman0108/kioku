@@ -130,13 +130,13 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(entryLinksPanel).toContain('contextSnippet')
   })
 
-  it('宽屏采用居中画布对齐，待处理与设置采用双栏侧边导航结构，弹窗与抽屉幅面匹配内容密度', () => {
+  it('宽屏采用居中画布对齐，待处理采用全宽速审台账，设置采用双栏侧边导航结构，弹窗与抽屉幅面匹配内容密度', () => {
     expect(consoleLayout).toContain('console-header-inner')
     expect(memoriesPage).toContain('margin-inline: auto')
     expect(credentialsPage).toContain('credentials-shell')
     expect(credentialsPage).toContain('margin-inline: auto')
-    expect(inboxPage).toContain('inbox-workspace')
-    expect(inboxPage).toContain('inbox-rail')
+    expect(inboxPage).toContain('command-bar')
+    expect(inboxPage).toContain('ledger-table')
     expect(inboxPage).toContain('margin-inline: auto')
     expect(settingsPage).toContain('settings-workspace')
     expect(settingsPage).toContain('settings-vnav')
@@ -185,10 +185,14 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(hygieneSweepDrawer).toContain('<DiffViewer')
   })
 
-  it('待处理页与建议卡片具备分类筛选、五重护栏、分项应用、纯标题速审表、预清洗抽屉与 8 秒撤销', () => {
+  it('待处理页采用四流速审台账、行内双栏审校面板、高风险展开护栏、批量安全应用、预清洗抽屉与 8 秒撤销，且消除逐卡免责套话', () => {
     expect(inboxPage).toContain('结构体检与预清洗')
     expect(inboxPage).toContain('存量规范整理')
-    expect(inboxPage).toContain('纯标题速审表')
+    expect(inboxPage).toContain('增量整理')
+    expect(inboxPage).toContain('批量应用安全项')
+    expect(inboxPage).toContain('展开核对')
+    expect(inboxPage).toContain('layout="inspector"')
+    expect(inboxPage).toContain('ledger-footnote')
     expect(inboxPage).toContain('duration: 8000')
     expect(inboxPage).toContain('api.restoreEntry')
     expect(inboxPage).toContain('<HygieneSweepDrawer')
@@ -197,9 +201,12 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(dreamSuggestionCard).toContain('title-compare')
     expect(dreamSuggestionCard).toContain('guard-strip')
     expect(dreamSuggestionCard).toContain('规范标题')
-    expect(dreamSuggestionCard).toContain('原有完整内容保留在版本历史中，可随时恢复')
+    expect(dreamSuggestionCard).toContain('整理依据')
+    expect(dreamSuggestionCard).not.toContain('原有完整内容保留在版本历史中')
     expect(dreamSuggestionCard).toContain('archivedNotes')
 
+    expect(singleTidyDrawer).not.toContain('原有完整内容会保留在版本历史中')
+    expect(hygieneSweepDrawer).not.toContain('原有完整内容均保存在版本历史中')
     expect(hygieneSweepDrawer).toContain('api.previewHygieneSweep')
     expect(hygieneSweepDrawer).toContain('api.applyHygieneSweep')
     expect(hygieneSweepDrawer).toContain('疑似残缺记忆')
