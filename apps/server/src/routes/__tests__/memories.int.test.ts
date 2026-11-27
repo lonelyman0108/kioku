@@ -924,6 +924,16 @@ describe.skipIf(!testDatabaseUrl)('扁平记忆 CRUD、双链、筛选、回收�
     )
     expect(page2.items.map((i) => i.shortId)).toEqual([globalFullShort.entry.shortId])
     expect(page2.nextCursor).toBeNull()
+
+    // 跨模式传入超过 PostgreSQL int4 上限的时间戳游标时返回 400 而非 500
+    const oversizedCursor = Buffer.from(
+      JSON.stringify(['1700000000000000', globalFullLong.entry.id]),
+    ).toString('base64url')
+    const badCursorRes = await app.request(
+      `/v1/console/entries?tab=pinned&pinnedGroup=global_full&cursor=${encodeURIComponent(oversizedCursor)}`,
+      { headers: { cookie } },
+    )
+    expect(badCursorRes.status).toBe(400)
   })
 
   it('列表、详情与历史接口批量解析双链标题并过滤已删除目标，无引用时省略 linkedTitles', async () => {

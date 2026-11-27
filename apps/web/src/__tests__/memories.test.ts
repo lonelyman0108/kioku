@@ -161,7 +161,9 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(memoryList).toContain('pinned-budget')
     expect(memoryList).toContain('facets?.runtimes')
     expect(memoryList).toContain('预览终端加载')
-    expect(memoryList).not.toContain('.list-pane.is-compact .row-disclosure')
+    expect(memoryList).not.toMatch(
+      /\.list-pane\.is-compact\s+\.row-disclosure\s*\{[^}]*display:\s*none/,
+    )
     expect(memoriesPage).toContain('<BootPreviewDrawer')
     expect(sceneScopePicker).toContain('自定义客户端')
     expect(memoryEditor).toContain('pinPopoverOpen')

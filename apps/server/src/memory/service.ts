@@ -1275,7 +1275,9 @@ export class EntryService {
       const [cursorKey, cursorId] = decoded
       if (sortByBootChars) {
         const cursorChars = Number(cursorKey)
-        if (!Number.isSafeInteger(cursorChars)) throw new MemoryError(400, INVALID_CURSOR)
+        if (!Number.isSafeInteger(cursorChars) || cursorChars > 0x7fffffff) {
+          throw new MemoryError(400, INVALID_CURSOR)
+        }
         filters.push(
           or(
             lt(bootCharsExpr, cursorChars),
