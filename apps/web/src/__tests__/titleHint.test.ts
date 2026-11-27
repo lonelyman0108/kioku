@@ -83,7 +83,7 @@ describe('操作来源与事件中文映射', () => {
     expect(formatActorLabel('dream')).toBe('后台整理')
     expect(resolveActorDisplay('dream').group).toBe('dream')
     expect(formatActorLabel('extraction')).toBe('自动摘要')
-    expect(formatActorLabel('hygiene:sweep')).toBe('结构预清洗')
+    expect(formatActorLabel('hygiene:sweep')).toBe('结构检查')
     expect(formatActorLabel('import:lore')).toBe('数据导入（Lore）')
   })
 })

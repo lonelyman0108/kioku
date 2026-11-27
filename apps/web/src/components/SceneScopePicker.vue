@@ -119,7 +119,7 @@ function setUniversal() {
           :disabled="disabled"
           @click="setUniversal"
         >
-          所有环境
+          全局通用
         </UButton>
         <UButton
           type="button"

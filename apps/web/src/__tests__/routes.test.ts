@@ -89,7 +89,7 @@ describe('路由守卫', () => {
     expect(router.currentRoute.value.query.next).toBe('/credentials')
   })
 
-  it('未登录时跳转到登录页，已登录时根路径重定向到记忆页', async () => {
+  it('未登录时跳转到登录页，已登录时根路径重定向到记忆页且旧版 /inbox 重定向到 /organize', async () => {
     vi.spyOn(api, 'setupStatus').mockResolvedValue(readyStatus)
     vi.spyOn(api, 'me').mockRejectedValue(Object.assign(new Error('401'), { status: 401 }))
     queryClient.setQueryData(ME_KEY, null)
@@ -98,10 +98,14 @@ describe('路由守卫', () => {
     await router.push('/inbox')
     await router.isReady()
     expect(router.currentRoute.value.name).toBe('login')
-    expect(router.currentRoute.value.query.next).toBe('/inbox')
+    expect(router.currentRoute.value.query.next).toBe('/organize')
 
     queryClient.setQueryData(ME_KEY, sampleMe)
     await router.push('/')
     expect(router.currentRoute.value.name).toBe('memories')
+
+    await router.push('/inbox?from=bookmark')
+    expect(router.currentRoute.value.name).toBe('organize')
+    expect(router.currentRoute.value.fullPath).toBe('/organize?from=bookmark')
   })
 })

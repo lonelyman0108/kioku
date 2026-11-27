@@ -205,7 +205,7 @@ export async function exportTransferBundle(
       if (row.runtimes.length) meta.push(`客户端：${row.runtimes.join(', ')}`)
       if (row.topics.length) meta.push(`主题：${row.topics.join(', ')}`)
       if (row.disclosure) {
-        meta.push(`${row.kind === 'episode' ? '信号要点' : '触发场景'}：${row.disclosure}`)
+        meta.push(`${row.kind === 'episode' ? '信号要点' : '召回时机'}：${row.disclosure}`)
       }
       if (row.validTo) meta.push(`有效期至：${row.validTo.toISOString()}`)
       sections.push(`## ${row.title} (${row.shortId})`)

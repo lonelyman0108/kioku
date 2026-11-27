@@ -81,8 +81,8 @@ const attrsSummary = computed(() => {
     scope.value.realms.length +
     scope.value.projects.length +
     scope.value.runtimes.length
-  parts.push(scopeCount > 0 ? `${scopeCount} 项场景限定` : '所有环境')
-  if (form.disclosure.trim()) parts.push('已设触发场景')
+  parts.push(scopeCount > 0 ? `${scopeCount} 项场景限定` : '全局通用')
+  if (form.disclosure.trim()) parts.push('已设召回时机')
   if (form.validTo) parts.push('已设有效期')
   return parts.join(' · ')
 })
@@ -135,7 +135,7 @@ const validationProblem = computed(() => {
   }
   if (form.disclosure.trim()) {
     const parsed = Disclosure.safeParse(form.disclosure)
-    if (!parsed.success) return parsed.error.issues[0]?.message ?? '触发场景格式有误'
+    if (!parsed.success) return parsed.error.issues[0]?.message ?? '召回时机格式有误'
   }
   if (form.content.length > ENTRY_CONTENT_MAX) {
     return `正文最多 ${ENTRY_CONTENT_MAX.toLocaleString()} 字`
@@ -375,7 +375,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onModalKeydown))
             </UFormField>
 
             <div class="grid gap-3 sm:grid-cols-2">
-              <UFormField label="触发场景（可选）" help="简述何时需要召回此记忆">
+              <UFormField label="召回时机（可选）" help="简述何时需要召回此记忆">
                 <UInput v-model="form.disclosure" :maxlength="DISCLOSURE_MAX" class="w-full" />
               </UFormField>
               <UFormField label="有效期（可选）">

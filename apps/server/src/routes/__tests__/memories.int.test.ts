@@ -579,8 +579,8 @@ describe.skipIf(!testDatabaseUrl)('扁平记忆 CRUD、双链、筛选、回收�
     expect(cleanedDetail.outboundLinks[0]?.shortId).toBe(dbGuide.entry.shortId)
     expect(cleanedDetail.outboundLinks[0]?.relation).toBe('统一数据层指南')
     expect(cleanedDetail.recentHistory?.length).toBeGreaterThanOrEqual(2)
-    expect(cleanedDetail.recentHistory?.[0]?.actorMeta?.label).toBe('结构预清洗')
-    // 结构预清洗不伪造新的核实时间
+    expect(cleanedDetail.recentHistory?.[0]?.actorMeta?.label).toBe('结构检查')
+    // 结构检查不伪造新的核实时间
     expect(cleanedDetail.entry.verifiedAt).toBe(initialVerifiedAt)
 
     // 悬空断链扫描：目标已软删除（deleted）与目标不存在（missing）均应在 brokenLinks 中报告

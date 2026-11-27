@@ -170,7 +170,7 @@ export const ChangeSummary = z
 export const Disclosure = z
   .string()
   .trim()
-  .max(DISCLOSURE_MAX, `触发场景最多 ${DISCLOSURE_MAX} 个字符`)
+  .max(DISCLOSURE_MAX, `召回时机最多 ${DISCLOSURE_MAX} 个字符`)
   .refine((v) => !v.includes(CREDENTIAL_PLACEHOLDER_PREFIX), '凭据占位符只能写在正文里')
 
 export interface EpisodeSignals {
@@ -821,7 +821,7 @@ export const CapturePlanRequest = z
       ctx.addIssue({
         code: 'custom',
         path: ['targetShortId'],
-        message: '按说明微调必须指定目标记忆',
+        message: '按说明修订必须指定目标记忆',
       })
     }
   })

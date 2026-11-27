@@ -80,7 +80,7 @@ export async function previewSingleTidy(
   const conn = await loadResolvedModel(db, masterKey, CHAT_LLM_SETTING_KEY)
   if (!conn) throw new MemoryError(400, '尚未配置或启用对话模型')
 
-  options.onStage?.('preclean', '正在执行确定性结构预清洗…')
+  options.onStage?.('preclean', '正在执行结构检查与自动修复…')
   if (options.signal?.aborted) throw new CaptureAbortedError()
 
   const activeTargets = await db
@@ -186,7 +186,7 @@ export async function previewSingleTidy(
       baseVersion: target.version,
       needed: hasPreCleanDiff,
       reason: hasPreCleanDiff
-        ? '模型判定无需进一步改写，但确定性预清洗已修复重复标题、旧关键词行或旧路径引用。'
+        ? '模型判定无需进一步改写，但结构检查已自动修复重复标题、旧关键词行或旧路径引用。'
         : '当前记忆标题清晰、概要与正文结构良好，无需进一步规范。',
       preCleanedFixes,
       before: {
@@ -202,7 +202,7 @@ export async function previewSingleTidy(
         content: preCleanedContent,
         topics: target.topics,
         disclosure: target.disclosure,
-        changeSummary: hasPreCleanDiff ? '确定性结构预清洗' : '',
+        changeSummary: hasPreCleanDiff ? '结构检查自动修复' : '',
         archivedNotes: [],
       },
       integrity,
@@ -256,7 +256,7 @@ export async function previewSingleTidy(
       content: finalContent,
       topics: finalTopics,
       disclosure: finalDisclosure,
-      changeSummary: prop.proposedChangeSummary ?? '规范标题与正文结构，剥离历史流水账',
+      changeSummary: prop.proposedChangeSummary ?? '规范标题与正文结构，归档旧日志',
       archivedNotes: prop.archivedNotes ?? [],
     },
     integrity,

@@ -38,9 +38,9 @@ const vueSources = import.meta.glob<string>('../**/*.{vue,ts}', {
 })
 
 describe('记忆布局、随手记与图标清单', () => {
-  it('顶部导航仅包含记忆、待处理、凭据与设置四项，无记忆圈切换器', () => {
+  it('顶部导航仅包含记忆、整理、凭据与设置四项，无记忆圈切换器', () => {
     expect(consoleLayout).toContain("label: '记忆'")
-    expect(consoleLayout).toContain("label: '待处理'")
+    expect(consoleLayout).toContain("label: '整理'")
     expect(consoleLayout).toContain("label: '凭据'")
     expect(consoleLayout).toContain("label: '设置'")
     expect(consoleLayout).not.toContain('switchCircle')
@@ -139,7 +139,7 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(entryLinksPanel).toContain('contextSnippet')
   })
 
-  it('宽屏采用居中画布对齐，待处理采用全宽速审台账，设置采用双栏侧边导航结构，弹窗与抽屉幅面匹配内容密度', () => {
+  it('宽屏采用居中画布对齐，整理页采用全宽待确认列表，设置采用双栏侧边导航结构，弹窗与抽屉幅面匹配内容密度', () => {
     expect(consoleLayout).toContain('console-header-inner')
     expect(memoriesPage).toContain('margin-inline: auto')
     expect(credentialsPage).toContain('credentials-shell')
@@ -196,7 +196,7 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(hygieneSweepDrawer).toContain('<DiffViewer')
   })
 
-  it('待处理页采用四流速审台账、行内双栏审校面板、高风险展开护栏、批量安全应用、预清洗抽屉与 8 秒撤销，且消除逐卡免责套话', () => {
+  it('整理页采用四列待确认列表、行内双栏审校面板、高风险展开护栏、批量安全应用、结构检查抽屉与 8 秒撤销，且消除逐卡免责套话', () => {
     expect(inboxPage).toContain('结构检查')
     expect(inboxPage).toContain('规范整理')
     expect(inboxPage).toContain('增量整理')
@@ -228,8 +228,8 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(hygieneSweepDrawer).toContain('brokenLinks')
   })
 
-  it('具备跨记忆查重/关联、反链提示、单条主动整理抽屉、三模式独立定时与思考等级参数预览', () => {
-    expect(inboxPage).toContain('查重/关联')
+  it('具备跨记忆查重与关联、反链提示、单条主动整理抽屉、三模式独立定时与思考等级参数预览', () => {
+    expect(inboxPage).toContain('查重与关联')
     expect(inboxPage).toContain("mode: 'cross_memory'")
     expect(inboxPage).toContain('redirectedBacklinkCount')
     expect(inboxPage).toContain('link_entries')
@@ -243,7 +243,7 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(dreamSuggestionCard).toContain('scope-review')
     expect(dreamSuggestionCard).toContain('将写入场景')
     expect(dreamSuggestionCard).toContain('来源设备')
-    expect(dreamSuggestionCard).toContain('所有环境（未限定场景）')
+    expect(dreamSuggestionCard).toContain('全局通用')
     expect(dreamSuggestionCard).toContain('effectiveDisclosure')
     expect(dreamSuggestionCard).toContain('entry.deviceKey')
     expect(dreamSuggestionCard).not.toMatch(/font-size:\s*1[01](?:\.\d+)?px/)
@@ -253,14 +253,14 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(memoryEditor).toContain('<SingleTidyDrawer')
     expect(memoryEditor).toContain('<QuickCaptureModal')
     expect(memoryEditor).toContain(':target-entry')
-    expect(memoryEditor).toContain('按说明微调')
+    expect(memoryEditor).toContain('按说明修订')
     expect(memoryEditor).toContain('规范此条')
-    expect(memoryEditor).toContain('查重/关联')
+    expect(memoryEditor).toContain('查重与关联')
     expect(memoryEditor).toContain('pendingSuggestionCount')
 
     expect(quickCaptureModal).toContain('targetEntry')
     expect(quickCaptureModal).toContain("mode: 'refine'")
-    expect(quickCaptureModal).toContain('按说明微调')
+    expect(quickCaptureModal).toContain('按说明修订')
     expect(quickCaptureModal).toContain('adoptMeta')
     expect(quickCaptureModal).toContain('proposedEnvs')
     expect(quickCaptureModal).toContain('<SceneScopePicker')
@@ -286,7 +286,7 @@ describe('记忆布局、随手记与图标清单', () => {
 
     expect(memoryList).toContain('批量整理')
     expect(memoryList).toContain('规范所选')
-    expect(memoryList).toContain('查重/关联')
+    expect(memoryList).toContain('查重与关联')
     expect(memoriesPage).toContain('onBatchOrganize')
 
     expect(modelSettings).toContain('reasoningEffortWireValues')

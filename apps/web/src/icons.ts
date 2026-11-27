@@ -3,7 +3,6 @@
 export const icons = {
   // 主导航
   memories: 'i-lucide-brain',
-  inbox: 'i-lucide-inbox',
   credentials: 'i-lucide-vault',
   settings: 'i-lucide-settings',
   // 设置分组

@@ -213,7 +213,7 @@ const requestFacts = computed<Property[][]>(() => {
       ...(info.value.clientAddress
         ? [{ key: 'addr', label: '来源地址', value: info.value.clientAddress }]
         : []),
-      { key: 'expires', label: '有效至', value: formatTime(info.value.expiresAt) },
+      { key: 'expires', label: '有效期至', value: formatTime(info.value.expiresAt) },
     ],
   ]
 })

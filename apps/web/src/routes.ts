@@ -29,9 +29,13 @@ export const routes: RouteRecordRaw[] = [
         component: () => import('./pages/MemoriesPage.vue'),
       },
       {
-        path: 'inbox',
-        name: 'inbox',
+        path: 'organize',
+        name: 'organize',
         component: () => import('./pages/InboxPage.vue'),
+      },
+      {
+        path: 'inbox',
+        redirect: (to) => ({ name: 'organize', query: to.query, hash: to.hash }),
       },
       {
         path: 'credentials',

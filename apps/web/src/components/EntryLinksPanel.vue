@@ -74,7 +74,7 @@ const resolvedTitles = computed<Map<string, { title: string }>>(() => {
     </section>
 
     <section v-if="backlinks.length" class="links-section">
-      <SectionHeading title="反向链接" :icon="icons.backlink" :level="3" />
+      <SectionHeading title="反链" :icon="icons.backlink" :level="3" />
       <ul class="links-list">
         <li v-for="item in backlinks" :key="`in-${item.shortId}`">
           <button

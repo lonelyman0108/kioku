@@ -337,7 +337,7 @@ const metaChanges = computed<MetaDiffRow[]>(() => {
   if (normDisclosure !== metaBaseline.disclosure.trim()) {
     list.push({
       key: 'disclosure',
-      label: '触发场景',
+      label: '召回时机',
       before: metaBaseline.disclosure.trim() || '（无）',
       after: normDisclosure || '（清空）',
     })
@@ -406,7 +406,7 @@ const mergeValidationProblem = computed(() => {
     }
     if (metaDraft.disclosure.trim()) {
       const parsed = Disclosure.safeParse(metaDraft.disclosure)
-      if (!parsed.success) return parsed.error.issues[0]?.message ?? '触发场景格式有误'
+      if (!parsed.success) return parsed.error.issues[0]?.message ?? '召回时机格式有误'
     }
   }
   if (metaDraft.changeSummary.trim()) {
@@ -424,7 +424,7 @@ const createValidationProblem = computed(() => {
   }
   if (createForm.disclosure.trim()) {
     const parsed = Disclosure.safeParse(createForm.disclosure)
-    if (!parsed.success) return parsed.error.issues[0]?.message ?? '触发场景格式有误'
+    if (!parsed.success) return parsed.error.issues[0]?.message ?? '召回时机格式有误'
   }
   if (!createForm.content.trim()) return '正文不能为空'
   if (createForm.content.length > ENTRY_CONTENT_MAX) {
@@ -533,7 +533,7 @@ function applyPlanResponse(res: CapturePlanResponse) {
 
 function confirmDiscardCustomDraft(): boolean {
   if (!hasCustomDraft.value) return true
-  return window.confirm('已微调正文内容，切换后将放弃当前微调。确定继续？')
+  return window.confirm('已手动修改正文内容，切换后将放弃当前改动。确定继续？')
 }
 
 async function runCapturePlan(targetId?: string) {
@@ -545,7 +545,7 @@ async function runCapturePlan(targetId?: string) {
   const effectiveTargetId = targetId ?? props.targetEntry?.shortId
   loadingReturnStep = step.value === 'preview' ? 'preview' : 'input'
   loadingHint.value = isRefineMode.value
-    ? '正在按说明生成微调方案'
+    ? '正在按说明生成修订方案'
     : targetId
       ? '正在按所选目标重新生成修改方案'
       : hasChatModel.value
@@ -575,7 +575,7 @@ async function runCapturePlan(targetId?: string) {
       err instanceof ApiError
         ? err.message
         : isRefineMode.value
-          ? '生成微调方案失败，请重试'
+          ? '生成修订方案失败，请重试'
           : '匹配失败，请重试'
     step.value = loadingReturnStep
   }
@@ -731,7 +731,7 @@ async function confirmMerge() {
   const changeSummaryText =
     metaDraft.changeSummary.trim() ||
     planProposedChangeSummary.value?.trim() ||
-    (refining ? '按说明微调记忆' : '')
+    (refining ? '按说明修订记忆' : '')
   if (changeSummaryText) {
     payload.changeSummary = changeSummaryText
   }
@@ -767,7 +767,7 @@ async function confirmMerge() {
     emit('applied', updated)
     toast.add({
       title: refining
-        ? `已微调「${updated.entry.title}」（版本 ${mergedVersion}）`
+        ? `已修订「${updated.entry.title}」（版本 ${mergedVersion}）`
         : `已归并至「${updated.entry.title}」（版本 ${mergedVersion}）`,
       color: 'success',
       duration: 8000,
@@ -801,7 +801,7 @@ async function confirmMerge() {
         err instanceof ApiError
           ? err.message
           : refining
-            ? '应用微调失败，请重试'
+            ? '应用修订失败，请重试'
             : '归并失败，请重试'
     }
   } finally {
@@ -896,10 +896,10 @@ onBeforeUnmount(() => {
 <template>
   <UModal
     :open="open"
-    :title="isRefineMode ? '按说明微调' : '随手记'"
+    :title="isRefineMode ? '按说明修订' : '随手记'"
     :description="
       isRefineMode && targetEntry
-        ? `针对「${targetEntry.title}」生成单轮修改方案`
+        ? `针对「${targetEntry.title}」生成单轮修订方案`
         : '自动匹配并归并至既有记忆'
     "
     :dismissible="!applyBusy && step !== 'loading'"
@@ -925,7 +925,7 @@ onBeforeUnmount(() => {
         </div>
 
         <UFormField
-          :label="isRefineMode ? '微调说明' : '记录内容'"
+          :label="isRefineMode ? '修订说明' : '记录内容'"
           name="text"
           :help="
             isRefineMode
@@ -1085,7 +1085,7 @@ onBeforeUnmount(() => {
             </UFormField>
           </div>
 
-          <UFormField label="触发场景（可选）" name="disclosure">
+          <UFormField label="召回时机（可选）" name="disclosure">
             <UInput
               v-model="createForm.disclosure"
               name="disclosure"
@@ -1250,7 +1250,7 @@ onBeforeUnmount(() => {
                 />
               </UFormField>
               <div class="grid gap-3 sm:grid-cols-2">
-                <UFormField label="触发场景（可选）" name="metaDisclosure">
+                <UFormField label="召回时机（可选）" name="metaDisclosure">
                   <UInput
                     v-model="metaDraft.disclosure"
                     name="metaDisclosure"
@@ -1297,13 +1297,7 @@ onBeforeUnmount(() => {
           <div class="space-y-1.5">
             <div class="diff-toolbar">
               <span class="section-label">
-                {{
-                  editingDiff
-                    ? isRefineMode
-                      ? '微调修改后正文'
-                      : '微调归并后正文'
-                    : '变更预览（行级对比）'
-                }}
+                {{ editingDiff ? '手动修改正文' : '变更预览（行级对比）' }}
               </span>
               <div class="diff-toolbar-actions">
                 <UButton
@@ -1325,7 +1319,7 @@ onBeforeUnmount(() => {
                   :disabled="applyBusy"
                   @click="editingDiff = !editingDiff"
                 >
-                  {{ editingDiff ? '返回对比视图' : '微调内容' }}
+                  {{ editingDiff ? '返回对比视图' : '手动编辑' }}
                 </UButton>
               </div>
             </div>
@@ -1384,7 +1378,7 @@ onBeforeUnmount(() => {
             :disabled="!rawText.trim()"
             @click="runCapturePlan()"
           >
-            {{ isRefineMode ? '生成微调方案' : hasChatModel ? '匹配归并方案' : '检索候选目标' }}
+            {{ isRefineMode ? '生成修订方案' : hasChatModel ? '匹配归并方案' : '检索候选目标' }}
             <span class="shortcut-hint" aria-hidden="true">{{ submitShortcut }}</span>
           </UButton>
         </div>
@@ -1514,7 +1508,7 @@ onBeforeUnmount(() => {
             :disabled="!canConfirmMerge"
             @click="confirmMerge"
           >
-            {{ isRefineMode ? '确认应用微调' : '确认归并' }}
+            {{ isRefineMode ? '确认应用修订' : '确认归并' }}
             <span v-if="!integrityWarning" class="shortcut-hint" aria-hidden="true">{{
               submitShortcut
             }}</span>

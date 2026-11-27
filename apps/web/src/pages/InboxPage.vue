@@ -162,7 +162,7 @@ const progressPercent = computed(() =>
 const runningStageLabel = computed(() => {
   if (progress.value?.stage) return `${progress.value.stage}中`
   if (progress.value?.mode === 'tidy') return '规范整理中'
-  if (progress.value?.mode === 'cross_memory') return '查重/关联中'
+  if (progress.value?.mode === 'cross_memory') return '查重与关联中'
   return '增量整理中'
 })
 
@@ -597,13 +597,13 @@ function requestHeavyDreamConfirm(confirm: PendingDreamConfirm) {
 function openCrossMemoryConfirm() {
   requestHeavyDreamConfirm({
     req: { mode: 'cross_memory', scope: 'full_corpus' },
-    title: '发起全库查重/关联？',
-    action: '开始查重/关联',
+    title: '发起全库查重与关联？',
+    action: '开始查重与关联',
     icon: icons.links,
     consequences: [
       '将对全部活跃记忆扫描重复合并、缺失双链与常驻结构，会触发多轮模型调用并耗时数分钟。',
-      '整理结果仅写入待处理建议，不会直接修改现有记忆。',
-      '执行期间可随时在待处理页或顶部导航栏取消。',
+      '整理结果仅写入待确认建议，不会直接修改现有记忆。',
+      '执行期间可随时在整理页或顶部导航栏取消。',
     ],
   })
 }
@@ -632,7 +632,7 @@ async function triggerDream(
       const title = isRetry
         ? `已发起失败项重试（${req.targetShortIds!.length} 条）`
         : mode === 'cross_memory'
-          ? '已发起查重/关联整理'
+          ? '已发起查重与关联任务'
           : mode === 'tidy'
             ? req.all
               ? '已发起全部规范整理任务'
@@ -685,9 +685,9 @@ const organizeMenuItems = computed<DropdownMenuItem[][]>(() => {
       action: '开始规范整理',
       icon: icons.tidy,
       consequences: [
-        `将逐条对全部 ${count} 条待规范记忆执行标题规范、概要补全与旧日志剥离，会触发多轮模型调用。`,
-        '整理结果仅写入待处理建议，不会直接修改现有记忆。',
-        '执行期间可随时在待处理页或顶部导航栏取消。',
+        `将逐条对全部 ${count} 条待规范记忆执行标题规范、概要补全与旧日志归档，会触发多轮模型调用。`,
+        '整理结果仅写入待确认建议，不会直接修改现有记忆。',
+        '执行期间可随时在整理页或顶部导航栏取消。',
       ],
     })
 
@@ -721,14 +721,14 @@ const organizeMenuItems = computed<DropdownMenuItem[][]>(() => {
     count > 10
       ? {
           label: `规范整理（${count} 条）`,
-          description: '逐条规范脏标题、补概要并剥离旧日志',
+          description: '逐条规范标题、补概要并归档旧日志',
           icon: icons.tidy,
           disabled: disabledLlm,
           children: tidyChildren,
         }
       : {
           label: count > 0 ? `规范整理（${count} 条）` : '规范整理',
-          description: count > 0 ? '逐条规范脏标题、补概要并剥离旧日志' : '当前暂无待规范存量',
+          description: count > 0 ? '逐条规范标题、补概要并归档旧日志' : '当前暂无待规范记忆',
           icon: icons.tidy,
           disabled: disabledLlm || count <= 0,
           onSelect: openFullTidyConfirm,
@@ -737,14 +737,7 @@ const organizeMenuItems = computed<DropdownMenuItem[][]>(() => {
   return [
     [
       {
-        label: '增量整理',
-        description: '整理近期新增或改动的记忆与会话摘要',
-        icon: icons.sparkles,
-        disabled: disabledLlm,
-        onSelect: () => void triggerDream({ mode: 'standard' }),
-      },
-      {
-        label: '查重/关联',
+        label: '查重与关联',
         description: '全库扫描重复合并、补全双链与常驻巡检',
         icon: icons.links,
         disabled: disabledLlm,
@@ -763,7 +756,7 @@ const organizeMenuItems = computed<DropdownMenuItem[][]>(() => {
       },
       {
         label: '刷新列表',
-        description: '重新获取最新待处理队列',
+        description: '重新获取最新待确认建议',
         icon: icons.refresh,
         onSelect: () => {
           void inboxQuery.refetch()
@@ -878,7 +871,7 @@ async function onApply(id: string, body: ApplySuggestionRequest) {
       })
     } else {
       const redirectSuffix = res.redirectedBacklinkCount
-        ? `，并自动重定向 ${res.redirectedBacklinkCount} 条引用双链`
+        ? `，并自动重定向 ${res.redirectedBacklinkCount} 条反链`
         : ''
       showInboxActionToast({
         title: applied
@@ -1050,10 +1043,10 @@ async function batchDismissSelected() {
 <template>
   <div class="inbox-page">
     <div class="inbox-shell">
-      <!-- 顶部单行指挥条 -->
-      <header class="command-bar" aria-label="待处理指挥条">
+      <!-- 顶部单行操作栏 -->
+      <header class="command-bar" aria-label="整理操作栏">
         <div class="command-left">
-          <h1 class="page-title">待处理</h1>
+          <h1 class="page-title">整理</h1>
 
           <UPopover
             v-if="state || data"
@@ -1076,7 +1069,7 @@ async function batchDismissSelected() {
                 </template>
                 <span class="hair-sep" aria-hidden="true" />
                 <span :class="items.length > 0 ? 'status-count-hot' : 'status-count-clear'">
-                  {{ items.length }} 条待处理
+                  {{ items.length }} 条待确认
                 </span>
               </template>
               <template v-else>
@@ -1084,8 +1077,8 @@ async function batchDismissSelected() {
                   class="status-chunk"
                   :class="items.length > 0 ? 'status-count-hot' : 'status-count-clear'"
                 >
-                  <UIcon :name="icons.inbox" class="status-inline-icon" aria-hidden="true" />
-                  <span>{{ items.length }} 条待处理</span>
+                  <UIcon :name="icons.listChecks" class="status-inline-icon" aria-hidden="true" />
+                  <span>{{ items.length }} 条待确认</span>
                 </span>
                 <span class="hair-sep" aria-hidden="true" />
                 <span v-if="state?.lastRunAt" :title="formatTime(state.lastRunAt)">
@@ -1134,7 +1127,7 @@ async function batchDismissSelected() {
                 </ul>
 
                 <dl class="kv-list tabular-nums">
-                  <dt>待规范存量</dt>
+                  <dt>待规范记忆</dt>
                   <dd>{{ tidyPendingCount }} 条</dd>
                   <dt>对话模型</dt>
                   <dd>{{ hasChatModel ? '已启用' : '未配置' }}</dd>
@@ -1301,7 +1294,7 @@ async function batchDismissSelected() {
         <ReadFailureNote v-if="inboxQuery.isError.value" :query="inboxQuery" />
 
         <NoteLine v-if="me.data.value && !hasChatModel" tone="warning">
-          尚未配置对话与整理模型，智能整理未启用；仍可执行结构检查。
+          尚未配置对话模型，自动整理未启用；仍可执行结构检查。
           <template #actions>
             <UButton
               size="sm"
@@ -1445,7 +1438,7 @@ async function batchDismissSelected() {
         <!-- 主体：非零分类筛选轨 + 速审台账表 -->
         <template v-else-if="items.length > 0">
           <section class="ledger-controls" aria-label="分类筛选与批量操作">
-            <div class="filter-tabs" role="tablist" aria-label="按建议性质筛选">
+            <div class="filter-tabs" role="tablist" aria-label="按建议类型筛选">
               <button
                 v-for="(tab, idx) in filterTabs"
                 :key="tab.value"
@@ -1516,7 +1509,7 @@ async function batchDismissSelected() {
             </div>
           </section>
 
-          <section class="ledger-wrap" aria-label="待处理审校台账">
+          <section class="ledger-wrap" aria-label="待确认建议列表">
             <table class="ledger-table">
               <thead>
                 <tr>
@@ -1531,12 +1524,12 @@ async function batchDismissSelected() {
                         :disabled="batchBusy || batchDismissBusy || filteredItems.length === 0"
                         @change="toggleSelectAll"
                       />
-                      <span>对象</span>
+                      <span>记忆</span>
                     </label>
                   </th>
-                  <th scope="col" class="col-delta">具体改动</th>
-                  <th scope="col" class="col-meta">性质与时间</th>
-                  <th scope="col" class="col-actions">快速决断</th>
+                  <th scope="col" class="col-delta">建议改动</th>
+                  <th scope="col" class="col-meta">类型与时间</th>
+                  <th scope="col" class="col-actions">操作</th>
                 </tr>
               </thead>
 
@@ -1728,7 +1721,7 @@ async function batchDismissSelected() {
                               自动重定向 {{ s.affectedBacklinkCount }} 条反链，其余重复项移入回收站
                             </span>
                           </template>
-                          <template v-else>保留主词条，其余重复项移入回收站</template>
+                          <template v-else>保留主记忆，其余重复项移入回收站</template>
                         </div>
                       </template>
 
@@ -1927,7 +1920,7 @@ async function batchDismissSelected() {
           <EmptyState
             :icon="icons.checkCircle"
             tone="success"
-            title="暂无待处理建议"
+            title="暂无待确认建议"
             description="会话摘要与记忆变动累积后，定时或手动整理会在此生成建议。"
           >
             <template #actions>
@@ -1949,7 +1942,7 @@ async function batchDismissSelected() {
                 :disabled="modelRunDisabled"
                 @click="openCrossMemoryConfirm"
               >
-                查重/关联
+                查重与关联
               </UButton>
               <UButton
                 v-if="hasChatModel"

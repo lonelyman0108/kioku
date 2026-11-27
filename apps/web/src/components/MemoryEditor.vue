@@ -245,7 +245,7 @@ const dirtyChanges = computed<SaveBarChange[]>(() => {
   const baseDisclosure = e.disclosure?.trim() ?? ''
   if (normDisclosure !== baseDisclosure) {
     list.push({
-      label: e.kind === 'episode' ? '信号要点' : '触发场景',
+      label: e.kind === 'episode' ? '信号要点' : '召回时机',
       before: baseDisclosure || '（空）',
       after: normDisclosure || '（空）',
     })
@@ -771,7 +771,7 @@ const organizeMenuItems = computed<DropdownMenuItem[][]>(() => {
   return [
     [
       {
-        label: '按说明微调',
+        label: '按说明修订',
         icon: icons.sparkles,
         onSelect: () => openRefine(),
       },
@@ -781,7 +781,7 @@ const organizeMenuItems = computed<DropdownMenuItem[][]>(() => {
         onSelect: () => openOrganize('tidy'),
       },
       {
-        label: '查重/关联',
+        label: '查重与关联',
         icon: icons.links,
         onSelect: () => openOrganize('cross_check'),
       },
@@ -875,9 +875,9 @@ const editAttrsSummary = computed(() => {
     scope.value.realms.length +
     scope.value.projects.length +
     scope.value.runtimes.length
-  parts.push(scopeCount > 0 ? `${scopeCount} 项场景限定` : '所有环境')
+  parts.push(scopeCount > 0 ? `${scopeCount} 项场景限定` : '全局通用')
   if (form.disclosure.trim()) {
-    parts.push(entry.value?.kind === 'episode' ? '已设信号要点' : '已设触发场景')
+    parts.push(entry.value?.kind === 'episode' ? '已设信号要点' : '已设召回时机')
   }
   if (form.validTo) parts.push('已设有效期')
   return parts.join(' · ')
@@ -986,9 +986,9 @@ defineExpose({
               </template>
               <template v-if="mode === 'read' && pendingSuggestionCount > 0">
                 <span class="status-sep" aria-hidden="true">·</span>
-                <RouterLink :to="{ name: 'inbox' }" class="text-primary status-history-link">
-                  <UIcon :name="icons.inbox" class="status-inline-icon" aria-hidden="true" />
-                  <span>待处理建议（{{ pendingSuggestionCount }}）</span>
+                <RouterLink :to="{ name: 'organize' }" class="text-primary status-history-link">
+                  <UIcon :name="icons.listChecks" class="status-inline-icon" aria-hidden="true" />
+                  <span>待确认建议（{{ pendingSuggestionCount }}）</span>
                 </RouterLink>
               </template>
               <span class="status-sep" aria-hidden="true">·</span>
@@ -1192,7 +1192,7 @@ defineExpose({
                   :trailing-icon="icons.chevronDown"
                   :disabled="!hasChatModel"
                   :title="
-                    hasChatModel ? '按说明微调、规范此条或查重/关联' : '请先在设置中配置对话模型'
+                    hasChatModel ? '按说明修订、规范此条或查重与关联' : '请先在设置中配置对话模型'
                   "
                 >
                   整理
@@ -1361,7 +1361,7 @@ defineExpose({
 
                 <div class="grid gap-3 sm:grid-cols-2">
                   <UFormField
-                    :label="entry.kind === 'episode' ? '信号要点（可选）' : '触发场景（可选）'"
+                    :label="entry.kind === 'episode' ? '信号要点（可选）' : '召回时机（可选）'"
                   >
                     <UInput v-model="form.disclosure" :maxlength="DISCLOSURE_MAX" class="w-full" />
                   </UFormField>
@@ -1612,7 +1612,7 @@ defineExpose({
                     <span>场景</span>
                   </dt>
                   <dd>
-                    <span v-if="!scopeTags.length" class="text-muted">所有环境</span>
+                    <span v-if="!scopeTags.length" class="text-muted">全局通用</span>
                     <span v-else class="tag-row">
                       <span v-for="tag in scopeTags" :key="tag" class="meta-pill">{{ tag }}</span>
                     </span>
@@ -1632,7 +1632,7 @@ defineExpose({
                 <div v-if="entry.disclosure">
                   <dt>
                     <UIcon :name="icons.trigger" class="meta-dt-icon" aria-hidden="true" />
-                    <span>{{ entry.kind === 'episode' ? '信号要点' : '触发场景' }}</span>
+                    <span>{{ entry.kind === 'episode' ? '信号要点' : '召回时机' }}</span>
                   </dt>
                   <dd>{{ entry.disclosure }}</dd>
                 </div>
