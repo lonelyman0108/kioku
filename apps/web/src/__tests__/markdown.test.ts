@@ -8,6 +8,7 @@ import {
   renderMarkdown,
   splitWikiLinks,
   stripInlineMarkdown,
+  stripInlineMarkdownSegments,
 } from '../markdown'
 
 describe('rawHtml', () => {
@@ -237,6 +238,57 @@ describe('stripInlineMarkdown 行内符号清理', () => {
       stripInlineMarkdown('见 [[m-ab2345|工作_流]] 与 **dev_profile**，~~旧方案~~ _斜体_'),
     ).toBe('见 [[m-ab2345|工作_流]] 与 dev_profile，旧方案 斜体')
     expect(stripInlineMarkdown('截断后的 **未闭合粗体')).toBe('截断后的 未闭合粗体')
+    expect(stripInlineMarkdown('未闭合粗体**：说明')).toBe('未闭合粗体：说明')
+  })
+
+  it('行内代码内容原样保留，不被强调或链接规则误改，且代码内双链不转为活动双链', () => {
+    expect(stripInlineMarkdown('遍历 `apps/**/*.ts` 目录')).toBe('遍历 apps/**/*.ts 目录')
+    expect(stripInlineMarkdown('区分 `personal-*` 与 `work-*` 场域')).toBe(
+      '区分 personal-* 与 work-* 场域',
+    )
+    expect(stripInlineMarkdown('覆盖 `__init__` 与 `` `嵌套` ``')).toBe('覆盖 __init__ 与 `嵌套`')
+
+    expect(stripInlineMarkdownSegments('示例 `[[m-ab2345]]` 与 **[[m-345678|真实引用]]**')).toEqual(
+      [
+        { text: '示例 [[m-ab2345]] 与 ' },
+        {
+          text: '[[m-345678|真实引用]]',
+          link: { shortId: 'm-345678', alias: '真实引用' },
+        },
+      ],
+    )
+  })
+
+  it('保留通配符、乘号、幂运算、裸网址下划线，并正确展开含括号链接与嵌套强调', () => {
+    expect(stripInlineMarkdown('匹配 *.ts 和 *.vue 文件')).toBe('匹配 *.ts 和 *.vue 文件')
+    expect(stripInlineMarkdown('匹配 *.ts 文件，以及 *斜体* 文字')).toBe(
+      '匹配 *.ts 文件，以及 斜体 文字',
+    )
+    expect(stripInlineMarkdown('计算 2 * 3 * 4 与 2**10')).toBe('计算 2 * 3 * 4 与 2**10')
+    expect(stripInlineMarkdown('范围 apps/**/*.ts 和 packages/**/*.ts')).toBe(
+      '范围 apps/**/*.ts 和 packages/**/*.ts',
+    )
+    expect(stripInlineMarkdown('见 https://example.com/_foo_/bar，_说明_')).toBe(
+      '见 https://example.com/_foo_/bar，说明',
+    )
+    expect(stripInlineMarkdown('[Foo](https://en.wikipedia.org/wiki/Foo_(bar))')).toBe('Foo')
+    expect(
+      stripInlineMarkdown('[![build](https://example.com/b.svg)](https://example.com/ci)'),
+    ).toBe('build')
+    expect(stripInlineMarkdown('__a _b_ c__ 与 ***粗斜*** 与 **bold *italic***')).toBe(
+      'a b c 与 粗斜 与 bold italic',
+    )
+  })
+
+  it('对大量未闭合括号或反引号保持线性时间，不发生回溯卡顿', () => {
+    const cases = ['['.repeat(50_000) + 'a', '[a]('.repeat(20_000) + 'x', '`'.repeat(50_000)]
+    for (const input of cases) {
+      const started = performance.now()
+      const out = stripInlineMarkdown(input)
+      const elapsed = performance.now() - started
+      expect(out.length).toBeGreaterThan(0)
+      expect(elapsed).toBeLessThan(200)
+    }
   })
 })
 

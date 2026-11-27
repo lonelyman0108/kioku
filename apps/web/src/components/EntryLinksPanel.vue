@@ -4,7 +4,6 @@ import { computed } from 'vue'
 
 import { icons } from '../icons'
 import { entryKindLabels } from '../labels'
-import { stripInlineMarkdown } from '../markdown'
 import SectionHeading from './ui/SectionHeading.vue'
 import WikiText from './ui/WikiText.vue'
 
@@ -39,10 +38,6 @@ const resolvedTitles = computed<Map<string, { title: string }>>(() => {
   for (const item of props.backlinks) map.set(item.shortId, { title: item.title })
   return map
 })
-
-function formatSnippet(raw: string): string {
-  return stripInlineMarkdown(raw)
-}
 </script>
 
 <template>
@@ -70,10 +65,11 @@ function formatSnippet(raw: string): string {
               <span v-if="item.relation && item.contextSnippet" aria-hidden="true"> · </span>
               <WikiText
                 v-if="item.contextSnippet"
-                :text="formatSnippet(item.contextSnippet)"
+                :text="item.contextSnippet"
                 :titles="resolvedTitles"
                 :interactive="false"
                 :mark-missing="false"
+                strip-markdown
                 compact
               />
             </span>
@@ -105,10 +101,11 @@ function formatSnippet(raw: string): string {
               <span v-if="item.relation && item.contextSnippet" aria-hidden="true"> · </span>
               <WikiText
                 v-if="item.contextSnippet"
-                :text="formatSnippet(item.contextSnippet)"
+                :text="item.contextSnippet"
                 :titles="resolvedTitles"
                 :interactive="false"
                 :mark-missing="false"
+                strip-markdown
                 compact
               />
             </span>

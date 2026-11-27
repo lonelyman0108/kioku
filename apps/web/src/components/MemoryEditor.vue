@@ -24,7 +24,7 @@ import {
 import type { DropdownMenuItem } from '@nuxt/ui'
 import { useKbd, useToast } from '@nuxt/ui/composables'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, useId, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
@@ -56,6 +56,14 @@ import {
   type WikiLinkTargets,
 } from '../markdown'
 import { placeholderOf } from '../placeholders'
+import {
+  clampRailWidth,
+  computeMaxRailWidth,
+  estimateElasticRailWidth,
+  parseStoredRailWidth,
+  RAIL_CONTAINER_MIN,
+  RAIL_WIDTH_MIN,
+} from '../readRail'
 import { credentialRoute, entryRoute } from '../routes'
 import { runtimeName } from '../runtimes'
 import { detectSecretPrefixes } from '../secretHint'
@@ -737,6 +745,7 @@ const hasSideRail = computed(
 )
 const railHistoryOnly = computed(() => outline.value.length === 0 && !hasLinks.value)
 const railHistoryExpanded = ref(false)
+const railHistoryListId = useId()
 
 watch(
   () => props.shortId,
@@ -746,81 +755,83 @@ watch(
 )
 
 // 右侧辅助轨默认按容器弹性自适应，拖拽后持久化像素宽度，双击分隔线恢复自适应
-const RAIL_WIDTH_MIN = 240
-const RAIL_WIDTH_MAX = 480
-const RAIL_CONTAINER_MIN = 960
-const RAIL_MAIN_MIN_WIDTH = 460
-const RAIL_GAP = 28
-
-function readStoredRailWidth(): number | null {
-  const raw = readStoredString(UI_STORAGE_KEYS.readRailWidth)
-  if (!raw) return null
-  const parsed = Number(raw)
-  return Number.isFinite(parsed) && parsed >= RAIL_WIDTH_MIN && parsed <= RAIL_WIDTH_MAX
-    ? Math.round(parsed)
-    : null
-}
-
 const editorScrollRef = ref<HTMLElement | null>(null)
 const readRailRef = ref<HTMLElement | null>(null)
 const editorScrollWidth = ref(0)
-const storedRailWidth = ref<number | null>(readStoredRailWidth())
+const editorScrollHeight = ref(0)
+const storedRailWidth = ref<number | null>(
+  parseStoredRailWidth(readStoredString(UI_STORAGE_KEYS.readRailWidth)),
+)
 const railResizing = ref(false)
+const railDragged = ref(false)
 let editorScrollObserver: ResizeObserver | null = null
 let railDragStartX = 0
 let railDragStartWidth = 320
 
-const maxRailWidth = computed(() => {
-  if (editorScrollWidth.value <= 0) return RAIL_WIDTH_MAX
-  const canvasWidth = Math.min(1320, Math.max(0, editorScrollWidth.value - 56))
-  return Math.max(
-    RAIL_WIDTH_MIN,
-    Math.min(RAIL_WIDTH_MAX, Math.floor(canvasWidth - RAIL_MAIN_MIN_WIDTH - RAIL_GAP)),
-  )
-})
+function measureContentBox(el: HTMLElement): { width: number; height: number } {
+  const cs = getComputedStyle(el)
+  const padX = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0)
+  const padY = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0)
+  return {
+    width: Math.max(0, Math.round(el.clientWidth - padX)),
+    height: Math.max(0, Math.round(el.clientHeight - padY)),
+  }
+}
+
+const maxRailWidth = computed(() => computeMaxRailWidth(editorScrollWidth.value))
 
 const effectiveRailWidth = computed<number | null>(() => {
   if (storedRailWidth.value === null) return null
-  return Math.max(RAIL_WIDTH_MIN, Math.min(storedRailWidth.value, maxRailWidth.value))
+  return clampRailWidth(storedRailWidth.value, maxRailWidth.value)
 })
 
-const readLayoutStyle = computed(() =>
-  effectiveRailWidth.value !== null
-    ? { '--rail-width': `${effectiveRailWidth.value}px` }
-    : undefined,
+const ariaRailWidth = computed(
+  () => effectiveRailWidth.value ?? estimateElasticRailWidth(editorScrollWidth.value),
 )
+
+const readLayoutStyle = computed<Record<string, string> | undefined>(() => {
+  const style: Record<string, string> = {}
+  if (effectiveRailWidth.value !== null) {
+    style['--rail-width'] = `${effectiveRailWidth.value}px`
+  }
+  if (editorScrollHeight.value > 0) {
+    style['--rail-max-height'] = `${editorScrollHeight.value}px`
+  }
+  return Object.keys(style).length ? style : undefined
+})
 
 function currentRailWidthPx(): number {
   if (effectiveRailWidth.value !== null) return effectiveRailWidth.value
-  const measured = Math.round(readRailRef.value?.getBoundingClientRect().width ?? 320)
-  return Math.max(RAIL_WIDTH_MIN, Math.min(maxRailWidth.value, measured))
+  const measured = readRailRef.value?.getBoundingClientRect().width ?? 0
+  if (measured > 0) return clampRailWidth(measured, maxRailWidth.value)
+  return estimateElasticRailWidth(editorScrollWidth.value)
 }
 
 function onRailPointerMove(event: PointerEvent) {
   if (!railResizing.value) return
-  const next = Math.round(
-    Math.max(
-      RAIL_WIDTH_MIN,
-      Math.min(maxRailWidth.value, railDragStartWidth - (event.clientX - railDragStartX)),
-    ),
-  )
-  storedRailWidth.value = next
+  const deltaX = event.clientX - railDragStartX
+  if (!railDragged.value && Math.abs(deltaX) < 2) return
+  railDragged.value = true
+  storedRailWidth.value = clampRailWidth(railDragStartWidth - deltaX, maxRailWidth.value)
 }
 
 function stopRailResize() {
   if (!railResizing.value) return
+  const dragged = railDragged.value
   railResizing.value = false
+  railDragged.value = false
   window.removeEventListener('pointermove', onRailPointerMove)
   window.removeEventListener('pointerup', stopRailResize)
   window.removeEventListener('pointercancel', stopRailResize)
   window.removeEventListener('blur', stopRailResize)
-  if (storedRailWidth.value !== null) {
+  if (dragged && storedRailWidth.value !== null) {
     writeStoredString(UI_STORAGE_KEYS.readRailWidth, String(storedRailWidth.value))
   }
 }
 
 function startRailResize(event: PointerEvent) {
   if (
+    railResizing.value ||
     event.button !== 0 ||
     mode.value !== 'read' ||
     (editorScrollWidth.value > 0 && editorScrollWidth.value < RAIL_CONTAINER_MIN)
@@ -830,7 +841,7 @@ function startRailResize(event: PointerEvent) {
   event.preventDefault()
   railDragStartX = event.clientX
   railDragStartWidth = currentRailWidthPx()
-  storedRailWidth.value = railDragStartWidth
+  railDragged.value = false
   railResizing.value = true
   window.addEventListener('pointermove', onRailPointerMove)
   window.addEventListener('pointerup', stopRailResize)
@@ -854,12 +865,12 @@ function onRailSplitterKeydown(event: KeyboardEvent) {
   const step = event.shiftKey ? 40 : 16
   if (event.key === 'ArrowLeft') {
     event.preventDefault()
-    const next = Math.min(maxRailWidth.value, currentRailWidthPx() + step)
+    const next = clampRailWidth(currentRailWidthPx() + step, maxRailWidth.value)
     storedRailWidth.value = next
     writeStoredString(UI_STORAGE_KEYS.readRailWidth, String(next))
   } else if (event.key === 'ArrowRight') {
     event.preventDefault()
-    const next = Math.max(RAIL_WIDTH_MIN, currentRailWidthPx() - step)
+    const next = clampRailWidth(currentRailWidthPx() - step, maxRailWidth.value)
     storedRailWidth.value = next
     writeStoredString(UI_STORAGE_KEYS.readRailWidth, String(next))
   } else if (event.key === 'Home') {
@@ -868,8 +879,8 @@ function onRailSplitterKeydown(event: KeyboardEvent) {
   }
 }
 
-watch(mode, (next) => {
-  if (next !== 'read') stopRailResize()
+watch([mode, hasSideRail], ([nextMode, hasRail]) => {
+  if (nextMode !== 'read' || !hasRail) stopRailResize()
 })
 
 watch(
@@ -877,14 +888,24 @@ watch(
   (el) => {
     editorScrollObserver?.disconnect()
     editorScrollObserver = null
-    if (!el || typeof ResizeObserver === 'undefined') return
-    editorScrollWidth.value = Math.round(el.clientWidth)
+    if (!el) {
+      stopRailResize()
+      editorScrollWidth.value = 0
+      editorScrollHeight.value = 0
+      return
+    }
+    const box = measureContentBox(el)
+    editorScrollWidth.value = box.width
+    editorScrollHeight.value = box.height
+    if (typeof ResizeObserver === 'undefined') return
     editorScrollObserver = new ResizeObserver((entries) => {
-      const w = entries[0]?.contentRect.width
-      if (w !== undefined) {
-        editorScrollWidth.value = Math.round(w)
-        if (w < RAIL_CONTAINER_MIN) stopRailResize()
-      }
+      const rect = entries[0]?.contentRect
+      if (!rect) return
+      const w = Math.max(0, Math.round(rect.width))
+      const h = Math.max(0, Math.round(rect.height))
+      editorScrollWidth.value = w
+      editorScrollHeight.value = h
+      if (w < RAIL_CONTAINER_MIN) stopRailResize()
     })
     editorScrollObserver.observe(el)
   },
@@ -1910,7 +1931,7 @@ defineExpose({
                 role="separator"
                 aria-orientation="vertical"
                 aria-label="拖动调节右侧辅助栏宽度"
-                :aria-valuenow="effectiveRailWidth ?? undefined"
+                :aria-valuenow="ariaRailWidth"
                 :aria-valuemin="RAIL_WIDTH_MIN"
                 :aria-valuemax="maxRailWidth"
                 tabindex="0"
@@ -1920,7 +1941,7 @@ defineExpose({
                 @keydown="onRailSplitterKeydown"
               />
               <span
-                v-if="railResizing && effectiveRailWidth !== null"
+                v-if="railResizing && railDragged && effectiveRailWidth !== null"
                 class="rail-width-badge tabular-nums"
                 aria-hidden="true"
               >
@@ -1957,8 +1978,11 @@ defineExpose({
                   @open="(sid) => emit('open', sid)"
                 />
 
-                <section v-if="railHistory.length && railHistoryOnly" class="rail-section">
-                  <div class="rail-heading-row">
+                <section
+                  v-if="railHistory.length"
+                  :class="railHistoryOnly ? 'rail-section' : 'rail-history-disclosure'"
+                >
+                  <div v-if="railHistoryOnly" class="rail-heading-row">
                     <h2 class="rail-heading">
                       <UIcon :name="icons.history" class="rail-heading-icon" aria-hidden="true" />
                       <span>近期演进</span>
@@ -1972,51 +1996,12 @@ defineExpose({
                       全部历史
                     </button>
                   </div>
-                  <ol class="rail-history-list">
-                    <li v-for="ev in railHistory" :key="ev.id">
-                      <div
-                        role="button"
-                        tabindex="0"
-                        class="rail-history-btn"
-                        @click="openHistory(ev.id)"
-                        @keydown.enter.self="openHistory(ev.id)"
-                        @keydown.space.prevent.self="openHistory(ev.id)"
-                      >
-                        <span class="rail-history-meta">
-                          <span v-if="ev.version !== null" class="font-mono"
-                            >版本 {{ ev.version }}</span
-                          >
-                          <span v-else>{{ eventTypeLabels[ev.eventType] }}</span>
-                          <time :datetime="ev.occurredAt ?? ev.createdAt">
-                            {{ formatRelative(ev.occurredAt ?? ev.createdAt) }}
-                          </time>
-                        </span>
-                        <span class="rail-history-body">
-                          <UIcon
-                            :name="eventTypeIcons[ev.eventType]"
-                            class="rail-history-icon"
-                            aria-hidden="true"
-                          />
-                          <span class="rail-history-text">
-                            <WikiText
-                              :text="ev.changeSummary?.trim() || eventTypeLabels[ev.eventType]"
-                              :titles="resolvedTitles"
-                              compact
-                              @open="emit('open', $event)"
-                            />
-                          </span>
-                        </span>
-                      </div>
-                    </li>
-                  </ol>
-                </section>
-
-                <section v-else-if="railHistory.length" class="rail-history-disclosure">
-                  <div class="rail-disclosure-head">
+                  <div v-else class="rail-disclosure-head">
                     <button
                       type="button"
                       class="rail-disclosure-toggle"
                       :aria-expanded="railHistoryExpanded"
+                      :aria-controls="railHistoryListId"
                       @click="railHistoryExpanded = !railHistoryExpanded"
                     >
                       <UIcon
@@ -2037,8 +2022,11 @@ defineExpose({
                       全部历史
                     </button>
                   </div>
-                  <div v-if="railHistoryExpanded" class="rail-disclosure-body">
-                    <ol class="rail-history-list">
+                  <div
+                    v-if="railHistoryOnly || railHistoryExpanded"
+                    :class="{ 'rail-disclosure-body': !railHistoryOnly }"
+                  >
+                    <ol :id="railHistoryListId" class="rail-history-list">
                       <li v-for="ev in railHistory" :key="ev.id">
                         <div
                           role="button"
@@ -2715,7 +2703,7 @@ defineExpose({
   .read-layout.has-rail .read-rail {
     position: sticky;
     top: 0;
-    max-height: calc(100vh - 11.5rem);
+    max-height: var(--rail-max-height, calc(100vh - 16rem));
     display: flex;
     flex-direction: column;
     border-left: 1px solid var(--ui-border);
@@ -2859,6 +2847,8 @@ defineExpose({
   color: var(--ui-text-muted);
 }
 .rail-more-link {
+  flex: none;
+  white-space: nowrap;
   font-size: 12px;
   cursor: pointer;
 }

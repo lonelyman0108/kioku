@@ -1,4 +1,4 @@
-import { extractWikiLinks } from '@kioku/contracts'
+import { extractWikiLinks, WIKI_LINK_REGEX } from '@kioku/contracts'
 import DOMPurify from 'dompurify'
 import { Marked, Tokenizer, type Token, type Tokens } from 'marked'
 
@@ -175,25 +175,363 @@ export function splitWikiLinks(text: string): WikiLinkSegment[] {
   return segments
 }
 
-// 剥离标题与双链语境摘要中的常见行内 Markdown 符号，保留 [[m-xxxxxx|别名]] 与标识符内下划线
-export function stripInlineMarkdown(text: string): string {
-  const cleanPlain = (raw: string) =>
-    raw
-      .replace(/`([^`]+)`/g, '$1')
-      .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
-      .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
-      .replace(/\*\*([^*]+?)\*\*/g, '$1')
-      .replace(/__([^_]+?)__/g, '$1')
-      .replace(/~~([^~]+?)~~/g, '$1')
-      .replace(/(^|[^\w])\*([^*]+?)\*(?=[^\w]|$)/g, '$1$2')
-      .replace(/(^|[^\w])_([^_]+?)_(?=[^\w]|$)/g, '$1$2')
-      .replace(/\*\*|~~/g, '')
+interface InlineToken {
+  text: string
+  link?: { shortId: string; alias: string | null }
+}
 
-  return splitWikiLinks(text)
-    .map((seg) => (seg.link ? seg.text : cleanPlain(seg.text)))
+const ASCII_WORD_OR_SLASH = /[A-Za-z0-9_/]/
+const BARE_URL_PREFIX_STICKY = /(?:(?:https?|ftp):\/\/|www\.)/iy
+const DANGLING_OPEN = /(^|[\s（(「『【[，。；：、,:;])(?:\*\*|~~)(?=[^\s*~/])/g
+const DANGLING_CLOSE = /(?<=[^\s*~/])(?:\*\*|~~)(?=$|[\s）)」』】\]，。；：、.,:;!?！？])/g
+
+function bareUrlEnd(src: string, from: number): number {
+  let host = true
+  let previous = ''
+  for (let i = from; i < src.length;) {
+    const ch = String.fromCodePoint(src.codePointAt(i)!)
+    if (ch === '\x00' || ch === '\x01' || ch === '<' || SPACE.test(ch)) return i
+    if (endsUrl(ch)) return i
+    if (ch === '/' || ch === '?' || ch === '#') host = false
+    else if (host && CJK_LETTER.test(ch) && !inHostLabel(previous)) return i
+    previous = ch
+    i += ch.length
+  }
+  return src.length
+}
+
+// 线性保护行内代码、双链与控制字符占位，避免后续链接/强调清理误改代码内容或把代码内双链激活
+function protectCodeAndWikiLinks(text: string, tokens: InlineToken[]): string {
+  const tickRuns = new Map<number, number[]>()
+  const n = text.length
+  for (let i = 0; i < n;) {
+    if (text[i] !== '`') {
+      i++
+      continue
+    }
+    const start = i
+    while (i < n && text[i] === '`') i++
+    const len = i - start
+    let list = tickRuns.get(len)
+    if (!list) {
+      list = []
+      tickRuns.set(len, list)
+    }
+    list.push(start)
+  }
+
+  const tickCursors = new Map<number, number>()
+  const wikiSticky = new RegExp(WIKI_LINK_REGEX.source, 'iy')
+  const out: string[] = []
+  let plainStart = 0
+
+  const flushPlain = (end: number) => {
+    if (end > plainStart) out.push(text.slice(plainStart, end))
+  }
+
+  const emitToken = (token: InlineToken) => {
+    const id = tokens.length
+    tokens.push(token)
+    out.push(`\x00${id}\x01`)
+  }
+
+  for (let i = 0; i < n;) {
+    const ch = text[i]!
+    if (ch === '\x00' || ch === '\x01') {
+      flushPlain(i)
+      emitToken({ text: ch })
+      i++
+      plainStart = i
+      continue
+    }
+
+    if (ch === '`') {
+      const start = i
+      while (i < n && text[i] === '`') i++
+      const len = i - start
+      const list = tickRuns.get(len)
+      if (list) {
+        let cursor = tickCursors.get(len) ?? 0
+        while (cursor < list.length && list[cursor]! <= start) cursor++
+        tickCursors.set(len, cursor)
+        if (cursor < list.length) {
+          const closeStart = list[cursor]!
+          tickCursors.set(len, cursor + 1)
+          let inner = text.slice(i, closeStart)
+          if (
+            inner.length >= 2 &&
+            inner.startsWith(' ') &&
+            inner.endsWith(' ') &&
+            /[^ ]/.test(inner)
+          ) {
+            inner = inner.slice(1, -1)
+          }
+          flushPlain(start)
+          emitToken({ text: inner })
+          i = closeStart + len
+          plainStart = i
+          continue
+        }
+      }
+      continue
+    }
+
+    if (ch === '[' && text[i + 1] === '[') {
+      wikiSticky.lastIndex = i
+      const match = wikiSticky.exec(text)
+      if (match) {
+        flushPlain(i)
+        const shortId = match[1]!.toLowerCase()
+        const alias = match[2] !== undefined ? match[2].trim() || null : null
+        emitToken({ text: match[0], link: { shortId, alias } })
+        i += match[0].length
+        plainStart = i
+        continue
+      }
+    }
+
+    i++
+  }
+
+  flushPlain(n)
+  return out.join('')
+}
+
+// 线性展开 Markdown 图片与行内链接，支持链接地址内成对括号（如 Wikipedia 词条）
+function unwrapMarkdownLinks(src: string): string {
+  const n = src.length
+  const closeParen = new Int32Array(n).fill(-1)
+  const parenStack: number[] = []
+  for (let i = 0; i < n; i++) {
+    const ch = src[i]!
+    if (ch === '\\' && i + 1 < n) {
+      i++
+      continue
+    }
+    if (ch === '\n' || ch === '\r') {
+      parenStack.length = 0
+      continue
+    }
+    if (ch === '(') {
+      parenStack.push(i)
+    } else if (ch === ')' && parenStack.length > 0) {
+      closeParen[parenStack.pop()!] = i
+    }
+  }
+
+  const out: string[] = []
+  const stack: Array<{ outIdx: number; isImage: boolean }> = []
+
+  const hasLabelContent = (fromIdx: number): boolean => {
+    for (let k = fromIdx + 1; k < out.length; k++) {
+      if (out[k]) return true
+    }
+    return false
+  }
+
+  for (let i = 0; i < n;) {
+    if (src[i] === '!' && src[i + 1] === '[') {
+      stack.push({ outIdx: out.length, isImage: true })
+      out.push('![')
+      i += 2
+      continue
+    }
+    if (src[i] === '[') {
+      stack.push({ outIdx: out.length, isImage: false })
+      out.push('[')
+      i += 1
+      continue
+    }
+    if (src[i] === ']' && stack.length > 0) {
+      const top = stack[stack.length - 1]!
+      if (src[i + 1] === '(') {
+        const closeIdx = closeParen[i + 1]!
+        if (closeIdx !== -1 && (top.isImage || hasLabelContent(top.outIdx))) {
+          stack.pop()
+          out[top.outIdx] = ''
+          i = closeIdx + 1
+          continue
+        }
+      }
+      stack.pop()
+      out.push(']')
+      i += 1
+      continue
+    }
+    out.push(src[i]!)
+    i += 1
+  }
+
+  return out.join('')
+}
+
+// 线性保护裸网址，避免路径中的 _foo_ 或 ** 被强调规则改写
+function protectBareUrls(src: string, tokens: InlineToken[]): string {
+  const n = src.length
+  const out: string[] = []
+  let plainStart = 0
+
+  for (let i = 0; i < n;) {
+    const ch = src[i]!
+    if (ch === 'h' || ch === 'H' || ch === 'f' || ch === 'F' || ch === 'w' || ch === 'W') {
+      const isWww = ch === 'w' || ch === 'W'
+      if (!isWww || i === 0 || !ASCII_WORD_OR_SLASH.test(src[i - 1]!)) {
+        BARE_URL_PREFIX_STICKY.lastIndex = i
+        const match = BARE_URL_PREFIX_STICKY.exec(src)
+        if (match) {
+          const end = bareUrlEnd(src, i + match[0].length)
+          if (end > i + match[0].length) {
+            if (i > plainStart) out.push(src.slice(plainStart, i))
+            const id = tokens.length
+            tokens.push({ text: src.slice(i, end) })
+            out.push(`\x00${id}\x01`)
+            i = end
+            plainStart = i
+            continue
+          }
+        }
+      }
+    }
+    i++
+  }
+
+  if (plainStart === 0) return src
+  if (plainStart < n) out.push(src.slice(plainStart))
+  return out.join('')
+}
+
+// 线性配对剥离强调/粗体/删除线边界，避开单词内下划线、乘号、路径通配符与空格内侧
+function stripPairedDelimiter(input: string, delim: string, checkWordBoundary: boolean): string {
+  const d = delim.length
+  const ch = delim[0]!
+  if (!input.includes(delim)) return input
+
+  const n = input.length
+  const openStack: number[] = []
+  const removed = new Uint8Array(n)
+  let hasRemoved = false
+
+  for (let i = 0; i <= n - d;) {
+    if (input[i] !== ch) {
+      i++
+      continue
+    }
+    const runStart = i
+    while (i < n && input[i] === ch) i++
+    const runLen = i - runStart
+    if (runLen < d) continue
+
+    const leftOfRun = runStart > 0 ? input[runStart - 1]! : ''
+    const rightOfRun = i < n ? input[i]! : ''
+
+    const canClose =
+      openStack.length > 0 &&
+      leftOfRun !== '' &&
+      !/\s/.test(leftOfRun) &&
+      leftOfRun !== '/' &&
+      (!checkWordBoundary || !ASCII_WORD_OR_SLASH.test(rightOfRun))
+
+    if (canClose) {
+      const openPos = openStack.pop()!
+      const closePos = i - d
+      for (let k = 0; k < d; k++) {
+        removed[openPos + k] = 1
+        removed[closePos + k] = 1
+      }
+      hasRemoved = true
+      continue
+    }
+
+    const canOpen =
+      rightOfRun !== '' &&
+      !/\s/.test(rightOfRun) &&
+      rightOfRun !== '/' &&
+      (!checkWordBoundary || !ASCII_WORD_OR_SLASH.test(leftOfRun))
+
+    if (canOpen) {
+      openStack.push(i - d)
+    }
+  }
+
+  if (!hasRemoved) return input
+  const out: string[] = []
+  let keepStart = 0
+  for (let i = 0; i < n; i++) {
+    if (removed[i]) {
+      if (i > keepStart) out.push(input.slice(keepStart, i))
+      keepStart = i + 1
+    }
+  }
+  if (keepStart < n) out.push(input.slice(keepStart))
+  return out.join('')
+}
+
+// 剥离标题与双链语境摘要中的常见行内 Markdown 符号，输出可供纯文本或 WikiText 消费的切分结果
+export function stripInlineMarkdownSegments(text: string): WikiLinkSegment[] {
+  if (!text) return []
+  const tokens: InlineToken[] = []
+  let s = protectCodeAndWikiLinks(text, tokens)
+  s = unwrapMarkdownLinks(s)
+  s = protectBareUrls(s, tokens)
+  s = stripPairedDelimiter(s, '***', true)
+  s = stripPairedDelimiter(s, '___', true)
+  s = stripPairedDelimiter(s, '**', true)
+  s = stripPairedDelimiter(s, '__', true)
+  s = stripPairedDelimiter(s, '~~', false)
+  s = stripPairedDelimiter(s, '*', true)
+  s = stripPairedDelimiter(s, '_', true)
+  s = s.replace(DANGLING_OPEN, '$1').replace(DANGLING_CLOSE, '')
+
+  const segments: WikiLinkSegment[] = []
+  let plainBuf = ''
+  const flushPlain = () => {
+    if (!plainBuf) return
+    const normalized = plainBuf.replace(/\s+/g, ' ')
+    plainBuf = ''
+    if (normalized) segments.push({ text: normalized })
+  }
+
+  let cursor = 0
+  while (cursor < s.length) {
+    const start = s.indexOf('\x00', cursor)
+    if (start === -1) {
+      plainBuf += s.slice(cursor)
+      break
+    }
+    const end = s.indexOf('\x01', start + 1)
+    if (end === -1) {
+      plainBuf += s.slice(cursor)
+      break
+    }
+    if (start > cursor) plainBuf += s.slice(cursor, start)
+    const token = tokens[Number(s.slice(start + 1, end))]
+    if (token?.link) {
+      flushPlain()
+      segments.push({ text: token.text, link: token.link })
+    } else if (token) {
+      plainBuf += token.text
+    }
+    cursor = end + 1
+  }
+  flushPlain()
+
+  if (segments.length > 0 && !segments[0]!.link) {
+    segments[0]!.text = segments[0]!.text.trimStart()
+    if (!segments[0]!.text) segments.shift()
+  }
+  if (segments.length > 0 && !segments[segments.length - 1]!.link) {
+    const last = segments[segments.length - 1]!
+    last.text = last.text.trimEnd()
+    if (!last.text) segments.pop()
+  }
+
+  return segments
+}
+
+export function stripInlineMarkdown(text: string): string {
+  return stripInlineMarkdownSegments(text)
+    .map((seg) => seg.text)
     .join('')
-    .replace(/\s+/g, ' ')
-    .trim()
 }
 
 export function renderMarkdown(
