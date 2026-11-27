@@ -115,6 +115,9 @@ function onRowClick(item: EntryListItem) {
 function submitBatch(mode: 'tidy' | 'cross_memory') {
   if (selectedBatchIds.value.length < 2 || props.batchBusy) return
   emit('batchOrganize', mode, [...selectedBatchIds.value])
+}
+
+function exitBatchMode() {
   batchMode.value = false
   selectedBatchIds.value = []
 }
@@ -243,7 +246,7 @@ watch(
   },
 )
 
-defineExpose({ filterOpen })
+defineExpose({ filterOpen, exitBatchMode })
 </script>
 
 <template>

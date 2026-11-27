@@ -64,6 +64,13 @@ import {
   validToTooSoon,
 } from '../time'
 import { analyzeTitleHint, appendExtractedChangeNote } from '../titleHint'
+import {
+  readStoredBoolean,
+  readStoredEnum,
+  UI_STORAGE_KEYS,
+  writeStoredBoolean,
+  writeStoredString,
+} from '../uiState'
 import ConsequenceModal from './ConsequenceModal.vue'
 import EntryLinksPanel from './EntryLinksPanel.vue'
 import MemoryContent from './MemoryContent.vue'
@@ -129,9 +136,12 @@ const entry = computed(() => detail.value?.entry ?? null)
 const entryBootMode = computed<BootMode>(() =>
   entry.value ? effectiveBootMode(entry.value) : 'none',
 )
+const EDIT_VIEW_MODES: readonly EditViewMode[] = ['edit', 'split', 'preview']
 const mode = ref<'read' | 'edit'>('read')
-const editView = ref<EditViewMode>('edit')
-const syncScroll = ref(true)
+const editView = ref<EditViewMode>(
+  readStoredEnum(UI_STORAGE_KEYS.editorView, EDIT_VIEW_MODES, 'edit'),
+)
+const syncScroll = ref(readStoredBoolean(UI_STORAGE_KEYS.editorSyncScroll, true))
 const attrsOpen = ref(false)
 const historyOpen = ref(false)
 const focusedHistoryEventId = ref<number | null>(null)
@@ -141,10 +151,15 @@ const previewScrollRef = ref<HTMLElement | null>(null)
 const workbenchRef = ref<HTMLElement | null>(null)
 
 watch(editView, async (next) => {
+  writeStoredString(UI_STORAGE_KEYS.editorView, next)
   if (next === 'split' && mode.value === 'edit') {
     await nextTick()
     workbenchRef.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
   }
+})
+
+watch(syncScroll, (next) => {
+  writeStoredBoolean(UI_STORAGE_KEYS.editorSyncScroll, next)
 })
 
 const form = reactive({
@@ -364,7 +379,6 @@ function startEditing() {
 function cancelEditing() {
   if (detail.value) loadDetail(detail.value)
   mode.value = 'read'
-  editView.value = 'edit'
   attrsOpen.value = false
 }
 
@@ -399,7 +413,6 @@ async function save() {
     queryClient.setQueryData(queryKey.value, updated)
     loadDetail(updated)
     mode.value = 'read'
-    editView.value = 'edit'
     attrsOpen.value = false
     toast.add({ title: '已保存', color: 'success' })
     void queryClient.invalidateQueries({ queryKey: ['entry-history', current.shortId] })
@@ -630,7 +643,6 @@ function onHistoryRestored(updated: EntryDetailResponse) {
   queryClient.setQueryData(queryKey.value, updated)
   loadDetail(updated)
   mode.value = 'read'
-  editView.value = 'edit'
   attrsOpen.value = false
   emit('changed', updated)
 }

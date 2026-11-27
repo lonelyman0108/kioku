@@ -29,6 +29,7 @@ import {
   type ActorFilterGroup,
 } from '../labels'
 import { formatRelative, formatShort, formatTime } from '../time'
+import { readStoredEnum, UI_STORAGE_KEYS, writeStoredString } from '../uiState'
 import ConsequenceModal from './ConsequenceModal.vue'
 import MemoryContent from './MemoryContent.vue'
 import SegmentedChoice from './SegmentedChoice.vue'
@@ -82,15 +83,30 @@ const history = useQuery({
   enabled: open,
 })
 
+const DIFF_LAYOUT_MODES: readonly DiffLayoutMode[] = ['unified', 'split']
+const DIFF_CONTEXT_MODES: readonly DiffContextMode[] = ['folded', 'full']
+
 const items = computed(() => history.data.value?.items ?? [])
 const searchInput = ref('')
 const sourceFilter = ref<SourceFilter>('all')
 const activeItemId = ref<number | null>(null)
 const baseItemId = ref<number | null>(null)
 const inspectTab = ref<InspectTab>('diff')
-const diffLayout = ref<DiffLayoutMode>('unified')
-const diffContext = ref<DiffContextMode>('folded')
+const diffLayout = ref<DiffLayoutMode>(
+  readStoredEnum(UI_STORAGE_KEYS.historyDiffLayout, DIFF_LAYOUT_MODES, 'unified'),
+)
+const diffContext = ref<DiffContextMode>(
+  readStoredEnum(UI_STORAGE_KEYS.historyDiffContext, DIFF_CONTEXT_MODES, 'folded'),
+)
 const mobileDetailOpen = ref(false)
+
+watch(diffLayout, (next) => {
+  writeStoredString(UI_STORAGE_KEYS.historyDiffLayout, next)
+})
+
+watch(diffContext, (next) => {
+  writeStoredString(UI_STORAGE_KEYS.historyDiffContext, next)
+})
 
 const listRef = ref<HTMLElement | null>(null)
 const diffViewerRef = ref<InstanceType<typeof DiffViewer> | null>(null)
@@ -351,16 +367,11 @@ watch(
   { immediate: true },
 )
 
-watch([activeItemId, baseItemId, () => props.shortId], () => {
-  diffContext.value = 'folded'
-})
-
 watch(open, (visible) => {
   if (!visible) {
     baseItemId.value = null
     activeItemId.value = null
     inspectTab.value = 'diff'
-    diffContext.value = 'folded'
     mobileDetailOpen.value = false
     searchInput.value = ''
     sourceFilter.value = 'all'

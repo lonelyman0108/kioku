@@ -3,6 +3,7 @@ import {
   ApiKeyView,
   ApplySuggestionResponse,
   BootPreviewResponse,
+  CancelTaskResponse,
   CapturePlanResponse,
   CredentialListResponse,
   CredentialMeta,
@@ -282,6 +283,7 @@ export const api = {
       ...(body ? { body } : {}),
       schema: TriggerDreamResponse,
     }),
+  cancelDream: () => request('POST', '/console/dream/cancel', { schema: CancelTaskResponse }),
 
   // 托管凭据（明文值只在显式查看时返回，不进 TanStack Query 缓存）
   credentials: () => request('GET', '/console/credentials', { schema: CredentialListResponse }),
@@ -325,6 +327,10 @@ export const api = {
   backfillEmbeddings: () =>
     request('POST', '/console/settings/embedding/backfill', {
       schema: RebuildEmbeddingsResponse,
+    }),
+  cancelEmbeddingBackfill: () =>
+    request('POST', '/console/settings/embedding/backfill/cancel', {
+      schema: CancelTaskResponse,
     }),
   exportData: (format: ExportFormat) => download('GET', `/console/export?format=${format}`),
   exportBundle: (body: ExportDataRequest) => download('POST', '/console/export', body),

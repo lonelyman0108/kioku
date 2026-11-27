@@ -10,12 +10,21 @@ withDefaults(
     consequences: readonly string[]
     action: string
     actionIcon?: string
+    titleIcon?: string
+    tone?: 'error' | 'primary'
     busy?: boolean
     error?: string | null
     // 还缺什么时不能点（例如没选转让给谁）
     disabled?: boolean
   }>(),
-  { actionIcon: icons.warning, busy: false, error: null, disabled: false },
+  {
+    actionIcon: icons.warning,
+    titleIcon: undefined,
+    tone: 'error',
+    busy: false,
+    error: null,
+    disabled: false,
+  },
 )
 const emit = defineEmits<{ confirm: []; close: [] }>()
 </script>
@@ -29,7 +38,12 @@ const emit = defineEmits<{ confirm: []; close: [] }>()
   >
     <template #title>
       <span class="modal-title">
-        <UIcon :name="icons.warning" class="modal-warn-icon" aria-hidden="true" />
+        <UIcon
+          :name="titleIcon ?? (tone === 'error' ? icons.warning : actionIcon)"
+          class="modal-title-icon"
+          :class="{ 'is-error': tone === 'error' }"
+          aria-hidden="true"
+        />
         <span>{{ title }}</span>
       </span>
     </template>
@@ -46,7 +60,7 @@ const emit = defineEmits<{ confirm: []; close: [] }>()
           >取消</UButton
         >
         <UButton
-          color="error"
+          :color="tone"
           :icon="actionIcon"
           :loading="busy"
           :disabled="disabled || busy"
@@ -64,11 +78,14 @@ const emit = defineEmits<{ confirm: []; close: [] }>()
   align-items: center;
   gap: 6px;
 }
-.modal-warn-icon {
+.modal-title-icon {
   display: inline-block;
   flex: none;
   width: 16px;
   height: 16px;
+  color: var(--ui-text-muted);
+}
+.modal-title-icon.is-error {
   color: var(--ui-error);
 }
 .consequences {
