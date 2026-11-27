@@ -320,5 +320,6 @@ export const SingleCrossCheckResponse = z.object({
   createdCount: z.number().int().min(0),
   suggestions: z.array(DreamSuggestionView),
   retriedCount: z.number().int().min(0).optional(),
+  warnings: z.array(z.string()).optional(),
 })
 export type SingleCrossCheckResponse = z.infer<typeof SingleCrossCheckResponse>

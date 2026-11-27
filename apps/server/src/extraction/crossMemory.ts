@@ -976,6 +976,24 @@ export async function runSingleCrossCheck(
     throw new MemoryError(502, `查重与关联失败：${funnel.result.error}`)
   }
 
+  const warnings: string[] = []
+  if (funnel.result.outcome === 'partial') {
+    const seen = new Set<string>()
+    const addWarning = (raw: string | null | undefined) => {
+      const text = raw?.trim()
+      if (!text || seen.has(text)) return
+      seen.add(text)
+      warnings.push(text)
+    }
+    addWarning(funnel.result.abortedReason)
+    for (const item of funnel.result.failedItems) {
+      addWarning(item.reason)
+    }
+    if (warnings.length === 0) {
+      addWarning(funnel.result.error ?? '部分关联检查未完成')
+    }
+  }
+
   // 返回本次新生成与该词条当前所有待处理建议，便于抽屉内联审阅
   const pendingRows = await db
     .select()
@@ -997,5 +1015,6 @@ export async function runSingleCrossCheck(
     createdCount: funnel.insertedIds.length,
     suggestions,
     ...(funnel.result.retriedCount > 0 ? { retriedCount: funnel.result.retriedCount } : {}),
+    ...(warnings.length > 0 ? { warnings } : {}),
   }
 }

@@ -836,20 +836,6 @@ export async function runDream(
     return result
   }
 
-  const conn = await loadResolvedModel(db, masterKey, CHAT_LLM_SETTING_KEY)
-  if (!conn) {
-    return finish({
-      mode: runMode,
-      outcome: 'skipped',
-      considered: 0,
-      suggested: 0,
-      error: '未配置对话模型',
-      failedItems: [],
-      retriedCount: 0,
-      abortedReason: null,
-    })
-  }
-
   let totalConsidered = 0
   let totalSuggested = 0
   let totalSucceeded = 0
@@ -861,6 +847,20 @@ export async function runDream(
     guard.abortedReason ?? (options.signal?.aborted ? '任务已中止' : null)
 
   try {
+    const conn = await loadResolvedModel(db, masterKey, CHAT_LLM_SETTING_KEY)
+    if (!conn) {
+      return finish({
+        mode: runMode,
+        outcome: 'skipped',
+        considered: 0,
+        suggested: 0,
+        error: '未配置对话模型',
+        failedItems: [],
+        retriedCount: 0,
+        abortedReason: null,
+      })
+    }
+
     if (runMode === 'cross_memory') {
       const funnel = await runCrossMemoryFunnel(db, conn, {
         scope: options.scope,

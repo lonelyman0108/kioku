@@ -23,8 +23,13 @@ export interface TaskHistoryItem {
   outcome: DreamOutcome
   summary: string
   error: string | null
+  errorDetail?: string | null
   finishedAt: string
   routeTarget: 'inbox' | 'models' | null
+}
+
+export function isTaskIssueOutcome(outcome: DreamOutcome): boolean {
+  return outcome === 'failed' || outcome === 'partial'
 }
 
 function dreamIconFor(mode: DreamMode | undefined): string {
@@ -33,16 +38,29 @@ function dreamIconFor(mode: DreamMode | undefined): string {
   return icons.sparkles
 }
 
+function resolveDreamErrorDetail(run: DreamState['recentRuns'][number]): string | null {
+  const rawError = run.error?.trim()
+  if (rawError) return rawError
+  const firstFailed = run.failedItems?.find((item) => item.reason.trim().length > 0)
+  if (firstFailed) {
+    return `${firstFailed.shortId}：${firstFailed.reason.trim()}`
+  }
+  if (isTaskIssueOutcome(run.outcome)) {
+    return run.abortedReason?.trim() || null
+  }
+  return null
+}
+
 function summarizeDreamRun(run: DreamState['recentRuns'][number]): string {
   if (run.outcome === 'failed') {
-    return run.error?.trim() || '执行过程中遇到错误'
+    return resolveDreamErrorDetail(run) || '执行过程中遇到错误'
   }
   if (run.outcome === 'cancelled') {
     if (run.suggested > 0) return `已取消 · 已保留 ${run.suggested} 条待处理建议`
     return run.abortedReason?.trim() || '已手动取消'
   }
   if (run.outcome === 'skipped') {
-    return '当前无可整理项'
+    return run.error?.trim() || '当前无可整理项'
   }
   const bits: string[] = []
   if (run.suggested > 0) bits.push(`新增 ${run.suggested} 条建议`)
@@ -88,25 +106,62 @@ export function mergeTaskHistory(
   const seen = new Set<string>()
   const merged: TaskHistoryItem[] = []
 
-  for (const run of dreamState?.recentRuns ?? []) {
-    const key = `dream:${run.id}`
-    if (seen.has(key)) continue
-    seen.add(key)
-    const mode = run.mode ?? 'standard'
-    merged.push({
-      key,
-      id: run.id,
-      source: 'dream',
-      title: dreamModeLabels[mode],
-      icon: dreamIconFor(mode),
-      trigger: run.trigger,
-      outcome: run.outcome,
-      summary: summarizeDreamRun(run),
-      error: run.error,
-      finishedAt: run.createdAt,
-      routeTarget:
-        run.suggested > 0 || run.outcome === 'failed' || run.outcome === 'partial' ? 'inbox' : null,
-    })
+  const dreamRuns = dreamState?.recentRuns
+  if (dreamRuns && dreamRuns.length > 0) {
+    for (const run of dreamRuns) {
+      const key = `dream:${run.id}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      const mode = run.mode ?? 'standard'
+      merged.push({
+        key,
+        id: run.id,
+        source: 'dream',
+        title: dreamModeLabels[mode],
+        icon: dreamIconFor(mode),
+        trigger: run.trigger,
+        outcome: run.outcome,
+        summary: summarizeDreamRun(run),
+        error: run.error,
+        errorDetail: resolveDreamErrorDetail(run),
+        finishedAt: run.createdAt,
+        routeTarget: run.suggested > 0 || isTaskIssueOutcome(run.outcome) ? 'inbox' : null,
+      })
+    }
+  } else if (dreamState?.lastRunAt && dreamState.lastOutcome) {
+    const fallback: DreamState['recentRuns'][number] = {
+      id: dreamState.lastRunAt,
+      trigger: 'manual',
+      mode: 'standard',
+      outcome: dreamState.lastOutcome,
+      considered: 0,
+      suggested: 0,
+      error: dreamState.lastError,
+      createdAt: dreamState.lastRunAt,
+    }
+    const key = `dream:${fallback.id}`
+    if (!seen.has(key)) {
+      seen.add(key)
+      merged.push({
+        key,
+        id: fallback.id,
+        source: 'dream',
+        title: '记忆整理',
+        icon: icons.sparkles,
+        trigger: fallback.trigger,
+        outcome: fallback.outcome,
+        summary:
+          fallback.outcome === 'partial'
+            ? '部分整理未完成'
+            : fallback.outcome === 'ok'
+              ? '整理完成'
+              : summarizeDreamRun(fallback),
+        error: fallback.error,
+        errorDetail: resolveDreamErrorDetail(fallback),
+        finishedAt: fallback.createdAt,
+        routeTarget: isTaskIssueOutcome(fallback.outcome) ? 'inbox' : null,
+      })
+    }
   }
 
   const backfillRuns = embeddingBackfill?.recentRuns
@@ -125,6 +180,7 @@ export function mergeTaskHistory(
         outcome: run.outcome,
         summary: summarizeBackfillRun(run),
         error: run.error,
+        errorDetail: run.error?.trim() || null,
         finishedAt: run.finishedAt,
         routeTarget: run.outcome === 'failed' ? 'models' : null,
       })
@@ -154,6 +210,7 @@ export function mergeTaskHistory(
         outcome: fallback.outcome,
         summary: summarizeBackfillRun(fallback),
         error: fallback.error,
+        errorDetail: fallback.error?.trim() || null,
         finishedAt: fallback.finishedAt,
         routeTarget: fallback.outcome === 'failed' ? 'models' : null,
       })
@@ -184,7 +241,7 @@ export function countUnreadFailures(
 ): number {
   let count = 0
   for (const item of items) {
-    if (item.outcome !== 'failed') continue
+    if (!isTaskIssueOutcome(item.outcome)) continue
     if (!isAfterWatermark(item.finishedAt, clearedBefore)) continue
     if (!isAfterWatermark(item.finishedAt, ackErrorAt)) continue
     count++
@@ -194,9 +251,33 @@ export function countUnreadFailures(
 
 export function latestFailedTimestamp(items: readonly TaskHistoryItem[]): string | null {
   for (const item of items) {
-    if (item.outcome === 'failed') return item.finishedAt
+    if (isTaskIssueOutcome(item.outcome)) return item.finishedAt
   }
   return null
+}
+
+export function latestInboxFailureTimestamp(dreamState: DreamState | null): string | null {
+  if (!dreamState) return null
+  return dreamState.recentRuns[0]?.createdAt ?? dreamState.lastRunAt ?? null
+}
+
+export function shouldShowInboxFailureBanner(
+  dreamState: DreamState | null,
+  dismissedAt: string | null,
+  clearedBefore: string | null,
+): boolean {
+  if (!dreamState || dreamState.running) return false
+  if (dreamState.lastOutcome === 'skipped') return false
+  const latestRun = dreamState.recentRuns[0] ?? null
+  const hasFailedItems = (latestRun?.failedItems?.length ?? 0) > 0
+  const hasError = Boolean(dreamState.lastError)
+  if (!hasFailedItems && !hasError) return false
+
+  const failureAt = latestInboxFailureTimestamp(dreamState)
+  if (!failureAt) return true
+  if (dismissedAt && !isAfterWatermark(failureAt, dismissedAt)) return false
+  if (clearedBefore && !isAfterWatermark(failureAt, clearedBefore)) return false
+  return true
 }
 
 // 汇总当前全部运行中任务的归一化进度；准备阶段总数未知时返回 null 以便渲染旋转弧

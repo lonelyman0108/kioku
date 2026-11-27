@@ -2,7 +2,7 @@
 import type { DreamOutcome, DreamState, EmbeddingBackfillState } from '@kioku/contracts'
 import { useToast } from '@nuxt/ui/composables'
 import { useQueryClient } from '@tanstack/vue-query'
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
@@ -12,16 +12,22 @@ import { dreamModeLabels, dreamOutcomeLabels } from '../labels'
 import { settingsRoute } from '../routes'
 import {
   computeOverallProgress,
-  countUnreadFailures,
   filterVisibleHistory,
   isAfterWatermark,
+  isTaskIssueOutcome,
   latestFailedTimestamp,
+  latestInboxFailureTimestamp,
   mergeTaskHistory,
   TASK_HISTORY_LIMIT,
   type TaskHistoryItem,
 } from '../taskCenter'
 import { formatRelative, formatTime } from '../time'
-import { readStoredString, UI_STORAGE_KEYS, writeStoredString } from '../uiState'
+import {
+  readStoredString,
+  subscribeStoredString,
+  UI_STORAGE_KEYS,
+  writeStoredString,
+} from '../uiState'
 
 const RING_SIZE = 20
 const RING_STROKE = 2
@@ -44,6 +50,17 @@ const cancellingBackfill = ref(false)
 const clearedBefore = ref<string | null>(readStoredString(UI_STORAGE_KEYS.tasksClearedBefore))
 const ackErrorAt = ref<string | null>(readStoredString(UI_STORAGE_KEYS.tasksAckErrorAt))
 
+const stopClearedSync = subscribeStoredString(UI_STORAGE_KEYS.tasksClearedBefore, (value) => {
+  clearedBefore.value = value
+})
+const stopAckSync = subscribeStoredString(UI_STORAGE_KEYS.tasksAckErrorAt, (value) => {
+  ackErrorAt.value = value
+})
+onBeforeUnmount(() => {
+  stopClearedSync()
+  stopAckSync()
+})
+
 const dreamRunning = computed(() => Boolean(props.dreamState?.running))
 const dreamProgress = computed(() => props.dreamState?.progress ?? null)
 const backfillRunning = computed(() => Boolean(props.embeddingBackfill?.running))
@@ -51,17 +68,25 @@ const activeCount = computed(() => (dreamRunning.value ? 1 : 0) + (backfillRunni
 
 const allHistory = computed(() => mergeTaskHistory(props.dreamState, props.embeddingBackfill))
 const visibleHistory = computed(() => filterVisibleHistory(allHistory.value, clearedBefore.value))
-const unreadFailedCount = computed(() =>
-  countUnreadFailures(allHistory.value, clearedBefore.value, ackErrorAt.value),
+const unreadIssues = computed(() =>
+  allHistory.value.filter(
+    (item) =>
+      isTaskIssueOutcome(item.outcome) &&
+      isAfterWatermark(item.finishedAt, clearedBefore.value) &&
+      isAfterWatermark(item.finishedAt, ackErrorAt.value),
+  ),
+)
+const unreadFailedCount = computed(() => unreadIssues.value.length)
+const unreadOnlyPartial = computed(
+  () =>
+    unreadIssues.value.length > 0 && unreadIssues.value.every((item) => item.outcome === 'partial'),
 )
 const unreadBadgeText = computed(() =>
   unreadFailedCount.value > 9 ? '9+' : String(unreadFailedCount.value),
 )
 
 const issueHistoryCount = computed(
-  () =>
-    visibleHistory.value.filter((item) => item.outcome === 'failed' || item.outcome === 'partial')
-      .length,
+  () => visibleHistory.value.filter((item) => isTaskIssueOutcome(item.outcome)).length,
 )
 
 const overallProgress = computed(() =>
@@ -116,7 +141,11 @@ const triggerTooltip = computed(() => {
     )
   }
   if (unreadFailedCount.value > 0) {
-    parts.push(`${unreadFailedCount.value} 项失败待查看`)
+    parts.push(
+      unreadOnlyPartial.value && unreadFailedCount.value === 1
+        ? '最近一次整理部分失败'
+        : `有 ${unreadFailedCount.value} 条异常未查看`,
+    )
   }
   if (parts.length === 0) return '后台任务：空闲'
   return `后台任务：${parts.join(' · ')}`
@@ -135,18 +164,28 @@ function acknowledgeErrors() {
 }
 
 watch(open, (visible) => {
-  if (visible) acknowledgeErrors()
+  if (visible) {
+    acknowledgeErrors()
+    void queryClient.invalidateQueries({ queryKey: ['inbox'] })
+  }
 })
 
 watch(visibleHistory, () => {
   if (open.value) acknowledgeErrors()
 })
 
-function clearFinishedHistory() {
+function clearHistory() {
   const newest = visibleHistory.value[0]?.finishedAt ?? null
   if (!newest) return
   advanceWatermark(clearedBefore, UI_STORAGE_KEYS.tasksClearedBefore, newest)
   advanceWatermark(ackErrorAt, UI_STORAGE_KEYS.tasksAckErrorAt, newest)
+  const latestFailure = latestInboxFailureTimestamp(props.dreamState)
+  const dismissTarget =
+    latestFailure && isAfterWatermark(latestFailure, newest) ? latestFailure : newest
+  const prevDismissed = readStoredString(UI_STORAGE_KEYS.inboxFailureDismissedAt)
+  if (!prevDismissed || isAfterWatermark(dismissTarget, prevDismissed)) {
+    writeStoredString(UI_STORAGE_KEYS.inboxFailureDismissedAt, dismissTarget)
+  }
 }
 
 function outcomeIcon(outcome: DreamOutcome): string {
@@ -225,8 +264,13 @@ watch(
           ...(inboxAction ? { actions: inboxAction } : {}),
         })
       } else if (latest.outcome === 'partial') {
+        const errReason = latest.error?.trim() || latest.failedItems?.[0]?.reason?.trim()
         toast.add({
-          title: `${modeLabel}部分完成，生成 ${latest.suggested} 条待处理建议`,
+          title:
+            latest.suggested > 0
+              ? `${modeLabel}部分完成，生成 ${latest.suggested} 条待处理建议`
+              : `${modeLabel}部分失败`,
+          ...(errReason ? { description: errReason } : {}),
           color: 'warning',
           orientation: 'horizontal',
           ...(inboxAction ? { actions: inboxAction } : {}),
@@ -358,7 +402,8 @@ async function cancelBackfill() {
       class="task-trigger tabular-nums"
       :class="{
         'is-running': activeCount > 0,
-        'is-error': activeCount === 0 && unreadFailedCount > 0,
+        'is-error': activeCount === 0 && unreadFailedCount > 0 && !unreadOnlyPartial,
+        'is-warning': activeCount === 0 && unreadFailedCount > 0 && unreadOnlyPartial,
         'has-badge': unreadFailedCount > 0,
       }"
       :title="triggerTooltip"
@@ -395,9 +440,18 @@ async function cancelBackfill() {
       </span>
       <UIcon
         v-else
-        :name="icons.tasksIdle"
+        :name="
+          unreadFailedCount > 0
+            ? unreadOnlyPartial
+              ? icons.warning
+              : icons.error
+            : icons.tasksIdle
+        "
         class="idle-icon"
-        :class="{ 'is-error': unreadFailedCount > 0 }"
+        :class="{
+          'is-error': unreadFailedCount > 0 && !unreadOnlyPartial,
+          'is-warning': unreadFailedCount > 0 && unreadOnlyPartial,
+        }"
         aria-hidden="true"
       />
       <span v-if="unreadFailedCount > 0" class="corner-badge" aria-hidden="true">
@@ -570,9 +624,9 @@ async function cancelBackfill() {
               color="neutral"
               variant="ghost"
               :icon="icons.eraser"
-              @click="clearFinishedHistory"
+              @click="clearHistory"
             >
-              清除已完成
+              清空记录
             </UButton>
           </div>
 
@@ -604,6 +658,13 @@ async function cancelBackfill() {
                 </div>
                 <p class="history-summary" :class="{ 'is-error': item.outcome === 'failed' }">
                   {{ item.summary }}
+                </p>
+                <p
+                  v-if="item.errorDetail && item.errorDetail !== item.summary"
+                  class="history-error-detail"
+                  :class="item.outcome === 'partial' ? 'is-warning' : 'is-error'"
+                >
+                  {{ item.errorDetail }}
                 </p>
                 <div v-if="item.routeTarget" class="history-links">
                   <RouterLink
@@ -666,6 +727,9 @@ async function cancelBackfill() {
 .task-trigger.is-error {
   border-color: var(--ui-error);
 }
+.task-trigger.is-warning {
+  border-color: var(--ui-warning);
+}
 .task-trigger.has-badge {
   margin-right: 3px;
 }
@@ -679,6 +743,9 @@ async function cancelBackfill() {
 }
 .idle-icon.is-error {
   color: var(--ui-error);
+}
+.idle-icon.is-warning {
+  color: var(--ui-warning);
 }
 
 .ring-box {
@@ -975,6 +1042,19 @@ async function cancelBackfill() {
 }
 .history-summary.is-error {
   color: var(--ui-error);
+}
+.history-error-detail {
+  margin-top: 2px;
+  padding-left: 8px;
+  border-left: 2px solid var(--ui-error);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ui-error);
+  overflow-wrap: anywhere;
+}
+.history-error-detail.is-warning {
+  border-left-color: var(--ui-warning);
+  color: var(--ui-warning);
 }
 .history-links {
   display: flex;
