@@ -255,56 +255,6 @@ function forEachPlainMarkdownSegment(
   }
 }
 
-// 按 CommonMark 等长反引号规则扫描行内代码，仅在代码跨度之外执行替换回调
-function replaceOutsideInlineCode(line: string, replacePlain: (segment: string) => string): string {
-  if (!line.includes('`')) return replacePlain(line)
-  let out = ''
-  let plainStart = 0
-  let i = 0
-  const n = line.length
-
-  while (i < n) {
-    if (line[i] !== '`') {
-      i++
-      continue
-    }
-    const tickStart = i
-    while (i < n && line[i] === '`') i++
-    const tickLen = i - tickStart
-
-    // 查找下一个恰好等长（前后均非反引号）的闭合反引号序列
-    let closeStart = -1
-    let j = i
-    while (j < n) {
-      if (line[j] !== '`') {
-        j++
-        continue
-      }
-      const runStart = j
-      while (j < n && line[j] === '`') j++
-      if (j - runStart === tickLen) {
-        closeStart = runStart
-        break
-      }
-    }
-
-    if (closeStart !== -1) {
-      const closeEnd = closeStart + tickLen
-      if (tickStart > plainStart) {
-        out += replacePlain(line.slice(plainStart, tickStart))
-      }
-      out += line.slice(tickStart, closeEnd)
-      i = closeEnd
-      plainStart = closeEnd
-    }
-  }
-
-  if (plainStart < n) {
-    out += replacePlain(line.slice(plainStart))
-  }
-  return out
-}
-
 // 确定性重定向正文中的 [[oldShortId]] / [[oldShortId|别名]] 双链（跳过围栏代码块与行内代码），用于合并重复后修复全库反链
 export function redirectWikiLinksInContent(
   content: string,
@@ -323,15 +273,13 @@ export function redirectWikiLinksInContent(
     return { content, replacedCount: 0, redirectedTargets: [] }
   }
 
-  const eol = content.includes('\r\n') ? '\r\n' : '\n'
-  const normalized = content.replace(/\r\n/g, '\n')
-  const lines = normalized.split('\n')
-  let fence: string | null = null
   let replacedCount = 0
   const redirectedTargets = new Set<string>()
+  const chunks: string[] = []
+  let cursor = 0
 
-  const replaceSegment = (segment: string) =>
-    segment.replace(
+  forEachPlainMarkdownSegment(content, (segment, offset) => {
+    const replaced = segment.replace(
       new RegExp(WIKI_LINK_REGEX.source, 'gi'),
       (full, rawId: string, alias?: string) => {
         const target = normalizedMap.get(rawId.toLowerCase())
@@ -341,24 +289,18 @@ export function redirectWikiLinksInContent(
         return alias !== undefined ? `[[${target}|${alias}]]` : `[[${target}]]`
       },
     )
-
-  const outLines = lines.map((line) => {
-    const [, marker, info = ''] = FENCE_LINE_RE.exec(line) ?? []
-    if (fence !== null) {
-      const closes = marker !== undefined && marker[0] === fence[0] && marker.length >= fence.length
-      if (closes && /^[ \t]*$/.test(info)) fence = null
-      return line
+    if (replaced !== segment) {
+      chunks.push(content.slice(cursor, offset), replaced)
+      cursor = offset + segment.length
     }
-    if (marker && !(marker[0] === '`' && info.includes('`'))) {
-      fence = marker
-      return line
-    }
-
-    return replaceOutsideInlineCode(line, replaceSegment)
   })
 
+  if (replacedCount === 0) {
+    return { content, replacedCount: 0, redirectedTargets: [] }
+  }
+  chunks.push(content.slice(cursor))
   return {
-    content: replacedCount > 0 ? outLines.join(eol) : content,
+    content: chunks.join(''),
     replacedCount,
     redirectedTargets: [...redirectedTargets],
   }

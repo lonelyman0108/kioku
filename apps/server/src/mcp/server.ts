@@ -346,7 +346,7 @@ export function createKiokuMcpServer(
           '适用环境或主机标识，除系统名（如 ["mac", "linux", "win"]）外亦支持自定义主机标识（如 ["home-24"]）；envs 按交集匹配，专属单机隔离时仅标主机标识、勿同时混标通用系统名',
         ),
         realms: McpTagList.optional().describe(
-          '适用场域，如 ["work"]；不限场域的密钥留空表示通用，限定场域的密钥留空时自动继承当前默认场域',
+          '适用场域，如 ["work"]；不限场域的密钥省略表示通用，限定场域的密钥省略此字段时自动继承当前默认场域（不可显式传空数组）',
         ),
         projects: McpTagList.optional().describe('适用项目标识列表'),
         runtimes: McpTagList.optional().describe('适用客户端标识列表（支持自定义客户端标识）'),

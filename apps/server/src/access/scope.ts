@@ -168,23 +168,23 @@ export function synthesizeFocus(scope: AccessScope, overrides: FocusOverrides = 
       : []
 
   let realms: string[] = []
+  const requestedRealms = overrides.realm ? normalizeSlugList([overrides.realm]) : []
   if (scope.kind === 'key') {
     const allowed = scope.allowedRealms !== null ? normalizeSlugList(scope.allowedRealms) : null
     const defaultRealms = resolveKeyDefaultRealms(scope)
-    if (overrides.realm) {
-      const requested = normalizeSlugList([overrides.realm])
+    if (requestedRealms.length) {
       if (allowed === null) {
-        realms = requested
+        realms = requestedRealms
       } else {
         const allowedSet = new Set(allowed)
-        const intersection = requested.filter((r) => allowedSet.has(r))
+        const intersection = requestedRealms.filter((r) => allowedSet.has(r))
         realms = intersection.length ? intersection : defaultRealms
       }
     } else {
       realms = defaultRealms
     }
-  } else if (overrides.realm) {
-    realms = normalizeSlugList([overrides.realm])
+  } else if (requestedRealms.length) {
+    realms = requestedRealms
   }
 
   const runtimes = overrides.runtime

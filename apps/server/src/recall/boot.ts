@@ -857,12 +857,11 @@ export function formatBootBlock(
 ): string {
   if (!result.entries.length && !result.omitted.length) return guidance
   const catalogBudget = options.catalogBudget ?? BOOT_CATALOG_BUDGET
-  const hasScoped = result.entries.some((e) => e.bucket === 'exact' || e.bucket === 'context')
-  const hasGlobal = result.entries.some((e) => e.bucket === 'global')
+  const bucketCount = new Set(result.entries.map((e) => e.bucket).filter(Boolean)).size
   const sections: string[] = []
-  if (hasScoped && hasGlobal) {
+  if (bucketCount > 1) {
     sections.push(
-      '> 按场景优先级从高到低排列：若具体项目、环境或场域约定与后文通用偏好冲突，以更具体场景为准。',
+      '> 按场景优先级从高到低排列：若更具体的项目、环境或场域约定与后文更通用规则冲突，以更具体场景为准。',
     )
   }
   for (const e of result.entries) {

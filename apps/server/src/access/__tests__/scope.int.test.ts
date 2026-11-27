@@ -74,6 +74,12 @@ describe('场景焦点合成与互斥冲突判定', () => {
       realm: 'Personal',
     })
     expect(unrestrictedOverride.realms).toEqual(['personal'])
+    // 纯空白 realm 覆盖不应清空已有 focusRealms
+    const blankOverride = synthesizeFocus(
+      keyScope({ allowedRealms: null, focusRealms: ['work'] }),
+      { realm: '   ' },
+    )
+    expect(blankOverride.realms).toEqual(['work'])
 
     // focusRealms 在不限 allowedRealms 时提供启动聚焦，限定 allowedRealms 时取交集绝不越权放宽
     const unrestrictedFocus = synthesizeFocus(
@@ -468,5 +474,36 @@ describe.skipIf(!testDatabaseUrl)('allowed_realms 硬边界（JS 与 SQL 一致�
     await expect(entrySvc.remove(workScope, globalEntry.entry.shortId)).rejects.toMatchObject({
       status: 403,
     })
+
+    // 5. 仅通用密钥（allowedRealms=[]）拒绝写入非空场域；focusRealms 越界时省略 realms 回退 allowedRealms
+    const universalOnly = keyScope({ allowedRealms: [], canWrite: true })
+    await expect(
+      entrySvc.create(universalOnly, {
+        title: '仅通用密钥越界写场域',
+        content: '不应允许',
+        realms: ['work'],
+        envs: [],
+        projects: [],
+        runtimes: [],
+        topics: [],
+        isPinned: false,
+      }),
+    ).rejects.toMatchObject({ status: 403 })
+
+    const fallbackScope = keyScope({
+      allowedRealms: ['work'],
+      focusRealms: ['personal'],
+      canWrite: true,
+    })
+    const fallbackCreated = await entrySvc.create(fallbackScope, {
+      title: '焦点越界回退测试',
+      content: '应回退到 allowedRealms',
+      envs: [],
+      projects: [],
+      runtimes: [],
+      topics: [],
+      isPinned: false,
+    })
+    expect(fallbackCreated.entry.realms).toEqual(['work'])
   })
 })
