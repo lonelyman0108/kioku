@@ -80,10 +80,14 @@ export function toPromptItem(
     | 'topics'
     | 'version'
     | 'updatedAt'
-  > & { bootMode?: EntryRow['bootMode'] | undefined },
+  > & {
+    bootMode?: EntryRow['bootMode'] | undefined
+    deviceKey?: EntryRow['deviceKey'] | undefined
+  },
   contentLimit = ITEM_CONTENT_LIMIT,
 ): DreamPromptItem {
   const truncated = row.content.length > contentLimit
+  const deviceKey = row.deviceKey?.trim() || null
   return {
     id: row.id,
     shortId: row.shortId,
@@ -98,6 +102,7 @@ export function toPromptItem(
     projects: row.projects,
     runtimes: row.runtimes,
     topics: row.topics,
+    ...(deviceKey ? { deviceKey } : {}),
     version: row.version,
     updatedAt: row.updatedAt.toISOString(),
     truncated,
@@ -1210,6 +1215,7 @@ function toDreamEntrySnapshot(row: EntryRow): DreamEntrySnapshot {
     projects: row.projects,
     runtimes: row.runtimes,
     topics: row.topics,
+    deviceKey: row.deviceKey?.trim() || null,
     verifiedAt: row.verifiedAt ? row.verifiedAt.toISOString() : null,
     lastChangeSummary: row.lastChangeSummary,
     version: row.version,

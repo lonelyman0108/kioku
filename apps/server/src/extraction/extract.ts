@@ -41,9 +41,9 @@ export async function extractEpisodeBatch(
   if (!rows.length) return { turns: 0, createdShortId: null, skippedReason: 'empty' }
 
   const lastRow = rows.at(-1)!
-  // 按原密钥 ID 读取环境与场域边界（不过滤 revokedAt），避免密钥在去抖窗口内轮换或吊销时丢失场域隔离
+  // 按原密钥 ID 读取终端名、环境与场域边界（不过滤 revokedAt），避免密钥在去抖窗口内轮换或吊销时丢失终端身份与场域隔离
   const [keyRow] = await db
-    .select({ envs: apiKeys.envs, allowedRealms: apiKeys.allowedRealms })
+    .select({ name: apiKeys.name, envs: apiKeys.envs, allowedRealms: apiKeys.allowedRealms })
     .from(apiKeys)
     .where(eq(apiKeys.id, lastRow.keyId))
     .limit(1)
@@ -61,9 +61,11 @@ export async function extractEpisodeBatch(
     return { turns: rows.length, createdShortId: null, skippedReason: 'key_missing' }
   }
 
+  const deviceName = keyRow.name?.trim() ?? ''
   const messages = buildEpisodeMessages(rows, {
     ...(bucket.projectSlug ? { projectSlug: bucket.projectSlug } : {}),
     ...(bucket.deviceKey ? { deviceKey: bucket.deviceKey } : {}),
+    ...(deviceName ? { deviceName } : {}),
   })
 
   const result = await chatComplete(conn, messages, {

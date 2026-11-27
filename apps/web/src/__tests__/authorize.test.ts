@@ -31,4 +31,11 @@ describe('浏览器授权与一次性访问密钥弹窗约束', () => {
     expect(keysSettings).toContain(':dismissible="false"')
     expect(keysSettings).toContain(':close="false"')
   })
+
+  it('签发弹窗与浏览器授权页清楚说明自定义主机标识与单机隔离口径', () => {
+    expect(issueKeyModal).toContain('自定义主机标识')
+    expect(issueKeyModal).toContain('仅标主机标识')
+    expect(authorizePage).toContain('自定义主机标识')
+    expect(authorizePage).toContain('仅标主机标识')
+  })
 })
