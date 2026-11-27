@@ -111,7 +111,7 @@ const versionText = computed(() =>
   <div class="space-y-8">
     <!-- 账号资料 -->
     <section class="space-y-3">
-      <SectionHeading title="账号资料" :level="2" />
+      <SectionHeading title="账号资料" :icon="icons.account" :level="2" />
       <p v-if="me.data.value" class="text-xs text-muted">
         用户名：<span class="font-mono">{{ me.data.value.username }}</span>
       </p>
@@ -122,6 +122,7 @@ const versionText = computed(() =>
         <UButton
           type="submit"
           size="sm"
+          :icon="icons.check"
           :loading="profileBusy"
           :disabled="!profileDirty || !profileValid"
         >
@@ -132,7 +133,7 @@ const versionText = computed(() =>
 
     <!-- 修改密码 -->
     <section class="space-y-3">
-      <SectionHeading title="修改密码" :level="2" />
+      <SectionHeading title="修改密码" :icon="icons.lock" :level="2" />
       <form class="max-w-xl space-y-3" @submit.prevent="changePassword">
         <div class="grid gap-3 sm:grid-cols-2">
           <UFormField label="当前密码">
@@ -156,6 +157,7 @@ const versionText = computed(() =>
         <UButton
           type="submit"
           size="sm"
+          :icon="icons.check"
           :loading="passwordBusy"
           :disabled="!passwordForm.currentPassword || passwordForm.newPassword.length < 10"
         >
@@ -166,7 +168,7 @@ const versionText = computed(() =>
 
     <!-- 登录设备 -->
     <section class="space-y-3">
-      <SectionHeading title="登录设备" :level="2" />
+      <SectionHeading title="登录设备" :icon="icons.currentDevice" :level="2" />
       <ReadFailureNote v-if="sessionsQuery.isError.value" :query="sessionsQuery" />
       <div v-if="sessionsQuery.isPending.value" class="space-y-2">
         <USkeleton v-for="n in 2" :key="n" class="h-12 w-full" />
@@ -210,6 +212,7 @@ const versionText = computed(() =>
             size="xs"
             color="error"
             variant="ghost"
+            :icon="icons.logout"
             :loading="revokingId === session.id"
             @click="revokeSession(session.id)"
           >

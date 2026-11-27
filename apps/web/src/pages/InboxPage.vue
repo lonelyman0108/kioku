@@ -30,7 +30,13 @@ import ReadFailureNote from '../components/ui/ReadFailureNote.vue'
 import { useSession } from '../composables/useSession'
 import { isTitleOnlyTidy } from '../diff'
 import { icons } from '../icons'
-import { bootModeLabels, dreamKindLabels, dreamOutcomeLabels } from '../labels'
+import {
+  bootModeLabels,
+  dreamKindIcons,
+  dreamKindLabels,
+  dreamModeLabels,
+  dreamOutcomeLabels,
+} from '../labels'
 import { entryRoute, settingsRoute } from '../routes'
 import { formatRelative, formatTime } from '../time'
 
@@ -89,10 +95,69 @@ const progressPercent = computed(() =>
 
 const runningStageLabel = computed(() => {
   if (progress.value?.stage) return `${progress.value.stage}中`
-  if (progress.value?.mode === 'tidy') return '存量规范整理中'
-  if (progress.value?.mode === 'cross_memory') return '全库查重与关联中'
+  if (progress.value?.mode === 'tidy') return '规范整理中'
+  if (progress.value?.mode === 'cross_memory') return '查重/关联中'
   return '增量整理中'
 })
+
+interface ScheduleDisplayItem {
+  mode: DreamMode
+  label: string
+  icon: string
+  enabled: boolean
+  intervalHours: number
+  lastRunAt: string | null
+}
+
+const scheduleItems = computed<ScheduleDisplayItem[]>(() => {
+  const s = state.value
+  const sc = s?.schedules
+  return [
+    {
+      mode: 'standard',
+      label: dreamModeLabels.standard,
+      icon: icons.sparkles,
+      enabled: sc?.standard.enabled ?? s?.enabled ?? false,
+      intervalHours: sc?.standard.intervalHours ?? s?.intervalHours ?? 24,
+      lastRunAt: sc?.standard.lastRunAt ?? null,
+    },
+    {
+      mode: 'cross_memory',
+      label: dreamModeLabels.cross_memory,
+      icon: icons.links,
+      enabled: sc?.crossMemory.enabled ?? false,
+      intervalHours: sc?.crossMemory.intervalHours ?? 168,
+      lastRunAt: sc?.crossMemory.lastRunAt ?? null,
+    },
+    {
+      mode: 'tidy',
+      label: dreamModeLabels.tidy,
+      icon: icons.tidy,
+      enabled: sc?.tidy.enabled ?? false,
+      intervalHours: sc?.tidy.intervalHours ?? 72,
+      lastRunAt: sc?.tidy.lastRunAt ?? null,
+    },
+  ]
+})
+
+const enabledSchedules = computed(() => scheduleItems.value.filter((item) => item.enabled))
+
+const scheduleSummaryText = computed(() => {
+  const list = enabledSchedules.value
+  if (list.length === 0) return '定时关闭'
+  if (list.length === 1) {
+    const only = list[0]!
+    return `${only.label} 每 ${only.intervalHours}h`
+  }
+  return `定时已开 ${list.length} 项`
+})
+
+function formatScheduleInterval(hours: number): string {
+  if (hours >= 24 && hours % 24 === 0) {
+    return `每 ${hours / 24} 天（${hours}h）`
+  }
+  return `每 ${hours} 小时`
+}
 
 // ---- 分类筛选（仅渲染非零分类） ----
 const kindFilter = ref<KindFilter>('all')
@@ -114,14 +179,17 @@ const kindCounts = computed(() => {
   return counts
 })
 
-const filterTabs = computed<{ value: KindFilter; label: string; count: number }[]>(() => [
-  { value: 'all', label: '全部', count: kindCounts.value.all },
-  ...FILTER_ORDER.filter((k) => DREAM_KINDS.includes(k) && kindCounts.value[k] > 0).map((k) => ({
-    value: k as KindFilter,
-    label: dreamKindLabels[k],
-    count: kindCounts.value[k],
-  })),
-])
+const filterTabs = computed<{ value: KindFilter; label: string; icon: string; count: number }[]>(
+  () => [
+    { value: 'all', label: '全部', icon: icons.layers, count: kindCounts.value.all },
+    ...FILTER_ORDER.filter((k) => DREAM_KINDS.includes(k) && kindCounts.value[k] > 0).map((k) => ({
+      value: k as KindFilter,
+      label: dreamKindLabels[k],
+      icon: dreamKindIcons[k],
+      count: kindCounts.value[k],
+    })),
+  ],
+)
 
 watch(kindCounts, (counts) => {
   if (kindFilter.value !== 'all' && counts[kindFilter.value] === 0) {
@@ -414,11 +482,11 @@ async function triggerDream(req: Partial<TriggerDreamRequest>) {
       const title = isRetry
         ? `已发起失败项重试（${req.targetShortIds!.length} 条）`
         : mode === 'cross_memory'
-          ? '已发起全库查重与关联整理'
+          ? '已发起查重/关联整理'
           : mode === 'tidy'
             ? req.all
-              ? '已发起全部存量规范整理任务'
-              : `已发起存量规范整理（本批 ${req.limit ?? 10} 条）`
+              ? '已发起全部规范整理任务'
+              : `已发起规范整理（本批 ${req.limit ?? 10} 条）`
             : '已发起增量整理任务'
       toast.add({ title, color: 'success' })
     } else {
@@ -465,14 +533,14 @@ const organizeMenuItems = computed<DropdownMenuItem[][]>(() => {
   const tidyItem: DropdownMenuItem =
     count > 10
       ? {
-          label: `存量规范整理（${count} 条）`,
+          label: `规范整理（${count} 条）`,
           description: '逐条规范脏标题、补概要并剥离旧日志',
           icon: icons.tidy,
           disabled: disabledLlm,
           children: tidyChildren,
         }
       : {
-          label: count > 0 ? `存量规范整理（${count} 条）` : '存量规范整理',
+          label: count > 0 ? `规范整理（${count} 条）` : '规范整理',
           description: count > 0 ? '逐条规范脏标题、补概要并剥离旧日志' : '当前暂无待规范存量',
           icon: icons.tidy,
           disabled: disabledLlm || count <= 0,
@@ -483,14 +551,14 @@ const organizeMenuItems = computed<DropdownMenuItem[][]>(() => {
     [
       {
         label: '增量整理',
-        description: '只整理近期新增或改动的记忆与会话摘要（定时任务即运行此项）',
+        description: '整理近期新增或改动的记忆与会话摘要',
         icon: icons.sparkles,
         disabled: disabledLlm,
         onSelect: () => void triggerDream({ mode: 'standard' }),
       },
       {
-        label: '全库查重与关联',
-        description: '全库扫描重复合并、补全双链与常驻降级',
+        label: '查重/关联',
+        description: '全库扫描重复合并、补全双链与常驻巡检',
         icon: icons.links,
         disabled: disabledLlm,
         onSelect: () => void triggerDream({ mode: 'cross_memory', scope: 'full_corpus' }),
@@ -499,8 +567,8 @@ const organizeMenuItems = computed<DropdownMenuItem[][]>(() => {
     ],
     [
       {
-        label: '结构体检与预清洗',
-        description: '不消耗模型，秒扫重复标题、旧引用与悬空断链',
+        label: '结构检查',
+        description: '不消耗模型，检查并清理重复标题、旧引用与悬空断链',
         icon: icons.shieldCheck,
         onSelect: () => {
           sweepOpen.value = true
@@ -784,7 +852,10 @@ async function batchDismissSelected() {
               :aria-expanded="statusPopoverOpen"
             >
               <template v-if="state?.running">
-                <span class="status-running">{{ runningStageLabel }}</span>
+                <span class="status-chunk status-running">
+                  <UIcon :name="icons.sparkles" class="status-inline-icon" aria-hidden="true" />
+                  <span>{{ runningStageLabel }}</span>
+                </span>
                 <template v-if="progress && progress.total > 0">
                   <span class="hair-sep" aria-hidden="true" />
                   <span>{{ progress.processed }} / {{ progress.total }} 条</span>
@@ -795,8 +866,12 @@ async function batchDismissSelected() {
                 </span>
               </template>
               <template v-else>
-                <span :class="items.length > 0 ? 'status-count-hot' : 'status-count-clear'">
-                  {{ items.length }} 条待处理
+                <span
+                  class="status-chunk"
+                  :class="items.length > 0 ? 'status-count-hot' : 'status-count-clear'"
+                >
+                  <UIcon :name="icons.inbox" class="status-inline-icon" aria-hidden="true" />
+                  <span>{{ items.length }} 条待处理</span>
                 </span>
                 <span class="hair-sep" aria-hidden="true" />
                 <span v-if="state?.lastRunAt" :title="formatTime(state.lastRunAt)">
@@ -804,7 +879,10 @@ async function batchDismissSelected() {
                 </span>
                 <span v-else>尚未整理</span>
                 <span class="hair-sep" aria-hidden="true" />
-                <span>{{ state?.enabled ? `每 ${state.intervalHours} 小时` : '定时关闭' }}</span>
+                <span class="status-chunk">
+                  <UIcon :name="icons.clock" class="status-inline-icon" aria-hidden="true" />
+                  <span>{{ scheduleSummaryText }}</span>
+                </span>
               </template>
               <UIcon :name="icons.chevronDown" class="status-caret" aria-hidden="true" />
             </button>
@@ -812,15 +890,32 @@ async function batchDismissSelected() {
             <template #content>
               <div class="status-popover">
                 <div class="popover-head">
-                  <span class="popover-title">后台整理状态</span>
+                  <span class="popover-title">
+                    <UIcon
+                      :name="icons.calendarClock"
+                      class="popover-head-icon"
+                      aria-hidden="true"
+                    />
+                    <span>整理状态与定时</span>
+                  </span>
                   <span class="popover-state" :class="{ 'is-active': state?.running }">
                     {{ state?.running ? '整理中' : '空闲' }}
                   </span>
                 </div>
 
+                <ul class="popover-schedules tabular-nums" aria-label="定时整理日程">
+                  <li v-for="sched in scheduleItems" :key="sched.mode" class="popover-sched-row">
+                    <span class="popover-sched-name">
+                      <UIcon :name="sched.icon" class="popover-sched-icon" aria-hidden="true" />
+                      <span>{{ sched.label }}</span>
+                    </span>
+                    <span class="popover-sched-val" :class="{ 'is-enabled': sched.enabled }">
+                      {{ sched.enabled ? formatScheduleInterval(sched.intervalHours) : '已关闭' }}
+                    </span>
+                  </li>
+                </ul>
+
                 <dl class="kv-list tabular-nums">
-                  <dt>定时增量整理</dt>
-                  <dd>{{ state?.enabled ? `每 ${state.intervalHours} 小时` : '已关闭' }}</dd>
                   <dt>待规范存量</dt>
                   <dd>{{ tidyPendingCount }} 条</dd>
                   <dt>对话模型</dt>
@@ -933,7 +1028,7 @@ async function batchDismissSelected() {
               :icon="icons.shieldCheck"
               @click="sweepOpen = true"
             >
-              结构体检与预清洗
+              结构检查
             </UButton>
             <UButton
               v-else
@@ -960,10 +1055,11 @@ async function batchDismissSelected() {
                 size="sm"
                 color="neutral"
                 variant="outline"
+                :icon="icons.sliders"
                 :trailing-icon="icons.chevronDown"
                 :loading="inboxQuery.isFetching.value && !state?.running"
               >
-                更多整理
+                更多
               </UButton>
             </UDropdownMenu>
           </div>
@@ -974,7 +1070,7 @@ async function batchDismissSelected() {
         <ReadFailureNote v-if="inboxQuery.isError.value" :query="inboxQuery" />
 
         <NoteLine v-if="me.data.value && !hasChatModel" tone="warning">
-          尚未配置对话与整理模型，智能整理未启用；仍可执行结构体检与预清洗。
+          尚未配置对话与整理模型，智能整理未启用；仍可执行结构检查。
           <template #actions>
             <UButton size="sm" color="neutral" variant="outline" :to="settingsRoute('models')">
               前往模型设置
@@ -1087,6 +1183,7 @@ async function batchDismissSelected() {
                 @click="kindFilter = tab.value"
                 @keydown="onFilterTabKeydown($event, idx)"
               >
+                <UIcon :name="tab.icon" class="tab-icon" aria-hidden="true" />
                 <span>{{ tab.label }}</span>
                 <span class="tab-count tabular-nums">{{ tab.count }}</span>
               </button>
@@ -1195,7 +1292,18 @@ async function batchDismissSelected() {
                             <span v-if="baseEntryOf(s)" class="short-id font-mono">
                               {{ baseEntryOf(s)!.shortId }}
                             </span>
-                            <span v-if="baseEntryOf(s)?.isPinned" class="tiny-cue">常驻</span>
+                            <span v-if="baseEntryOf(s)?.isPinned" class="tiny-cue">
+                              <UIcon
+                                :name="
+                                  effectiveBootMode(baseEntryOf(s)!) === 'index'
+                                    ? icons.bookmark
+                                    : icons.pin
+                                "
+                                class="tiny-cue-icon"
+                                aria-hidden="true"
+                              />
+                              <span>常驻</span>
+                            </span>
                             <span
                               v-if="s.kind === 'merge_duplicates' && s.entries.length > 1"
                               class="tiny-cue tabular-nums"
@@ -1335,7 +1443,11 @@ async function batchDismissSelected() {
                     <!-- 列 3：性质与时间 -->
                     <td class="cell-meta" @click="toggleExpand(s.id)">
                       <div class="kind-line">
-                        <span class="kind-mark" aria-hidden="true" />
+                        <UIcon
+                          :name="dreamKindIcons[s.kind]"
+                          class="kind-icon"
+                          aria-hidden="true"
+                        />
                         <span>{{ dreamKindLabels[s.kind] }}</span>
                       </div>
                       <div class="time-line">
@@ -1363,6 +1475,7 @@ async function batchDismissSelected() {
                             size="xs"
                             color="neutral"
                             variant="ghost"
+                            :icon="icons.cancel"
                             :disabled="batchBusy || batchDismissBusy || busyId !== null"
                             @click.stop="onDismiss(s.id)"
                           >
@@ -1388,6 +1501,7 @@ async function batchDismissSelected() {
                             size="xs"
                             color="neutral"
                             variant="ghost"
+                            :icon="icons.cancel"
                             :disabled="batchBusy || batchDismissBusy || busyId !== null"
                             @click.stop="onDismiss(s.id)"
                           >
@@ -1448,7 +1562,7 @@ async function batchDismissSelected() {
                 :icon="icons.shieldCheck"
                 @click="sweepOpen = true"
               >
-                结构体检与预清洗
+                结构检查
               </UButton>
               <UButton
                 v-if="hasChatModel"
@@ -1459,7 +1573,7 @@ async function batchDismissSelected() {
                 :disabled="modelRunDisabled"
                 @click="triggerDream({ mode: 'cross_memory', scope: 'full_corpus' })"
               >
-                全库查重与关联
+                查重/关联
               </UButton>
               <UButton
                 v-if="hasChatModel"
@@ -1549,6 +1663,17 @@ async function batchDismissSelected() {
   font-weight: 600;
   color: var(--ui-text-highlighted);
 }
+.status-chunk {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.status-inline-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+}
 .hair-sep {
   display: inline-block;
   flex: none;
@@ -1595,8 +1720,52 @@ async function batchDismissSelected() {
   border-bottom: 1px solid var(--ui-border);
 }
 .popover-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 13px;
   font-weight: 600;
+  color: var(--ui-text-highlighted);
+}
+.popover-head-icon {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--ui-text-muted);
+}
+.popover-schedules {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--ui-border);
+  font-size: 12px;
+}
+.popover-sched-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.popover-sched-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ui-text-toned);
+}
+.popover-sched-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+  color: var(--ui-text-muted);
+}
+.popover-sched-val {
+  color: var(--ui-text-muted);
+}
+.popover-sched-val.is-enabled {
+  font-weight: 500;
   color: var(--ui-text-highlighted);
 }
 .popover-state {
@@ -1866,6 +2035,12 @@ async function batchDismissSelected() {
   font-weight: 600;
   color: var(--ui-text-highlighted);
 }
+.tab-icon {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 14px;
+}
 .tab-count {
   font-size: 12px;
   color: var(--ui-text-muted);
@@ -1976,6 +2151,10 @@ async function batchDismissSelected() {
 .ledger-row:hover td:first-child::before {
   background: var(--row-accent, var(--ui-text-muted));
 }
+.ledger-row.is-expanded td:first-child::before {
+  bottom: -1px;
+  z-index: 1;
+}
 
 /* 语义色点与左缘坐标线 */
 .row-kind-merge_duplicates {
@@ -2038,11 +2217,20 @@ async function batchDismissSelected() {
   color: var(--ui-text-muted);
 }
 .tiny-cue {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   padding: 0 4px;
   border: 1px solid var(--ui-border-accented);
   font-size: 12px;
   line-height: 1.35;
   color: var(--ui-text-muted);
+}
+.tiny-cue-icon {
+  display: inline-block;
+  flex: none;
+  width: 11px;
+  height: 11px;
 }
 
 /* 列 2：具体改动 */
@@ -2131,12 +2319,12 @@ async function batchDismissSelected() {
   color: var(--ui-text-toned);
   white-space: nowrap;
 }
-.kind-mark {
+.kind-icon {
   display: inline-block;
   flex: none;
-  width: 6px;
-  height: 6px;
-  background: var(--row-accent, var(--ui-text-muted));
+  width: 14px;
+  height: 14px;
+  color: var(--row-accent, var(--ui-text-muted));
 }
 .time-line {
   margin-top: 2px;
@@ -2186,13 +2374,24 @@ async function batchDismissSelected() {
   transform: rotate(180deg);
 }
 
-/* 行内展开审校面板外框 */
+/* 行内展开审校面板外框：与主行同样以 3px ::before 贴齐内缘，避免 border-collapse 居中错位 */
 .inspector-row {
   border-bottom: 1px solid var(--ui-rule);
 }
 .inspector-row > td {
-  padding: 0;
-  border-left: 3px solid var(--row-accent, var(--ui-rule));
+  position: relative;
+  padding: 0 0 0 3px;
+}
+.inspector-row > td::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: -1px;
+  bottom: 0;
+  width: 3px;
+  background: var(--row-accent, var(--ui-rule));
+  pointer-events: none;
+  z-index: 1;
 }
 
 .ledger-footnote {
@@ -2282,7 +2481,7 @@ async function batchDismissSelected() {
     margin-left: auto;
   }
   .inspector-row > td {
-    padding: 0;
+    padding: 0 0 0 3px;
   }
 }
 </style>

@@ -1,16 +1,19 @@
 import {
+  DEFAULT_CROSS_MEMORY_INTERVAL_HOURS,
   DEFAULT_DREAM_INTERVAL_HOURS,
+  DEFAULT_TIDY_INTERVAL_HOURS,
+  DREAM_INTERVAL_HOURS_MAX,
   REASONING_EFFORTS,
   type DreamFailedItem,
   type DreamOutcome,
   type DreamProgress,
   type DreamRunSummary,
-  type DreamSettingsConfig,
   type DreamState,
   type ModelEndpointConfig,
   type ModelEndpointInput,
   type ReasoningEffort,
   type TaskReasoningEffort,
+  type UpdateDreamSettingsInput,
 } from '@kioku/contracts'
 import { eq, inArray, sql } from 'drizzle-orm'
 
@@ -54,9 +57,20 @@ export interface ResolvedModelEndpoint {
   taskReasoningEffort?: TaskReasoningEffort | undefined
 }
 
+export interface StoredModeSchedule {
+  enabled: boolean
+  intervalHours: number
+  lastRunAt: string | null
+}
+
 export interface StoredDreamState {
   enabled: boolean
   intervalHours: number
+  schedules: {
+    standard: StoredModeSchedule
+    crossMemory: StoredModeSchedule
+    tidy: StoredModeSchedule
+  }
   lastRunAt: string | null
   lastOutcome: DreamOutcome | null
   lastError: string | null
@@ -66,6 +80,23 @@ export interface StoredDreamState {
 const DEFAULT_DREAM_STATE: StoredDreamState = {
   enabled: false,
   intervalHours: DEFAULT_DREAM_INTERVAL_HOURS,
+  schedules: {
+    standard: {
+      enabled: false,
+      intervalHours: DEFAULT_DREAM_INTERVAL_HOURS,
+      lastRunAt: null,
+    },
+    crossMemory: {
+      enabled: false,
+      intervalHours: DEFAULT_CROSS_MEMORY_INTERVAL_HOURS,
+      lastRunAt: null,
+    },
+    tidy: {
+      enabled: false,
+      intervalHours: DEFAULT_TIDY_INTERVAL_HOURS,
+      lastRunAt: null,
+    },
+  },
   lastRunAt: null,
   lastOutcome: null,
   lastError: null,
@@ -324,7 +355,8 @@ function parseDreamRunSummary(raw: unknown): DreamRunSummary | null {
     return null
   }
   const failedItems = parseFailedItems(r.failedItems)
-  const mode = r.mode === 'standard' || r.mode === 'tidy' ? r.mode : undefined
+  const mode =
+    r.mode === 'standard' || r.mode === 'tidy' || r.mode === 'cross_memory' ? r.mode : undefined
   const retriedCount =
     typeof r.retriedCount === 'number' && Number.isInteger(r.retriedCount) && r.retriedCount >= 0
       ? r.retriedCount
@@ -350,23 +382,71 @@ function parseDreamRunSummary(raw: unknown): DreamRunSummary | null {
   }
 }
 
+function parseIntervalHours(raw: unknown, fallback: number): number {
+  return typeof raw === 'number' && Number.isInteger(raw) && raw >= 1
+    ? Math.min(DREAM_INTERVAL_HOURS_MAX, raw)
+    : fallback
+}
+
+function parseModeSchedule(raw: unknown, fallback: StoredModeSchedule): StoredModeSchedule {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ...fallback }
+  const rec = raw as Record<string, unknown>
+  return {
+    enabled: typeof rec.enabled === 'boolean' ? rec.enabled : fallback.enabled,
+    intervalHours: parseIntervalHours(rec.intervalHours, fallback.intervalHours),
+    lastRunAt: typeof rec.lastRunAt === 'string' ? rec.lastRunAt : fallback.lastRunAt,
+  }
+}
+
 function parseStoredDreamState(raw: unknown): StoredDreamState {
-  if (!raw || typeof raw !== 'object') return { ...DEFAULT_DREAM_STATE, recentRuns: [] }
+  if (!raw || typeof raw !== 'object') {
+    return {
+      ...DEFAULT_DREAM_STATE,
+      schedules: {
+        standard: { ...DEFAULT_DREAM_STATE.schedules.standard },
+        crossMemory: { ...DEFAULT_DREAM_STATE.schedules.crossMemory },
+        tidy: { ...DEFAULT_DREAM_STATE.schedules.tidy },
+      },
+      recentRuns: [],
+    }
+  }
   const r = raw as Record<string, unknown>
-  const interval =
-    typeof r.intervalHours === 'number' && Number.isInteger(r.intervalHours) && r.intervalHours >= 1
-      ? Math.min(168, r.intervalHours)
-      : DEFAULT_DREAM_INTERVAL_HOURS
+  const enabled = typeof r.enabled === 'boolean' ? r.enabled : false
+  const interval = parseIntervalHours(r.intervalHours, DEFAULT_DREAM_INTERVAL_HOURS)
+  const lastRunAt = typeof r.lastRunAt === 'string' ? r.lastRunAt : null
   const recentRuns = Array.isArray(r.recentRuns)
     ? r.recentRuns
         .map(parseDreamRunSummary)
         .filter((x): x is DreamRunSummary => x !== null)
         .slice(0, RECENT_RUNS_LIMIT)
     : []
-  return {
-    enabled: typeof r.enabled === 'boolean' ? r.enabled : false,
+  const rawSchedules =
+    r.schedules && typeof r.schedules === 'object' && !Array.isArray(r.schedules)
+      ? (r.schedules as Record<string, unknown>)
+      : null
+  const standardSchedule = parseModeSchedule(rawSchedules?.standard, {
+    enabled,
     intervalHours: interval,
-    lastRunAt: typeof r.lastRunAt === 'string' ? r.lastRunAt : null,
+    lastRunAt,
+  })
+  // 顶层 enabled/intervalHours 与 standard 定时保持严格一致，确保旧客户端读法兼容
+  standardSchedule.enabled = enabled
+  standardSchedule.intervalHours = interval
+  const crossMemorySchedule = parseModeSchedule(rawSchedules?.crossMemory, {
+    ...DEFAULT_DREAM_STATE.schedules.crossMemory,
+  })
+  const tidySchedule = parseModeSchedule(rawSchedules?.tidy, {
+    ...DEFAULT_DREAM_STATE.schedules.tidy,
+  })
+  return {
+    enabled,
+    intervalHours: interval,
+    schedules: {
+      standard: standardSchedule,
+      crossMemory: crossMemorySchedule,
+      tidy: tidySchedule,
+    },
+    lastRunAt,
     lastOutcome:
       r.lastOutcome === 'ok' ||
       r.lastOutcome === 'partial' ||
@@ -394,19 +474,40 @@ export async function loadDreamState(
 
 export async function updateDreamConfig(
   db: Db | Tx,
-  patch: {
-    enabled?: DreamSettingsConfig['enabled'] | undefined
-    intervalHours?: DreamSettingsConfig['intervalHours'] | undefined
-  },
+  patch: UpdateDreamSettingsInput,
 ): Promise<StoredDreamState> {
   const current = parseStoredDreamState(
     (await db.select().from(settings).where(eq(settings.key, DREAM_STATE_SETTING_KEY)).limit(1))[0]
       ?.value,
   )
+  const nextEnabled = patch.enabled !== undefined ? patch.enabled : current.enabled
+  const nextInterval =
+    patch.intervalHours !== undefined ? patch.intervalHours : current.intervalHours
   const next: StoredDreamState = {
     ...current,
-    ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
-    ...(patch.intervalHours !== undefined ? { intervalHours: patch.intervalHours } : {}),
+    enabled: nextEnabled,
+    intervalHours: nextInterval,
+    schedules: {
+      standard: {
+        ...current.schedules.standard,
+        enabled: nextEnabled,
+        intervalHours: nextInterval,
+      },
+      crossMemory: {
+        ...current.schedules.crossMemory,
+        ...(patch.crossMemory?.enabled !== undefined ? { enabled: patch.crossMemory.enabled } : {}),
+        ...(patch.crossMemory?.intervalHours !== undefined
+          ? { intervalHours: patch.crossMemory.intervalHours }
+          : {}),
+      },
+      tidy: {
+        ...current.schedules.tidy,
+        ...(patch.tidy?.enabled !== undefined ? { enabled: patch.tidy.enabled } : {}),
+        ...(patch.tidy?.intervalHours !== undefined
+          ? { intervalHours: patch.tidy.intervalHours }
+          : {}),
+      },
+    },
   }
   await db
     .insert(settings)
@@ -423,8 +524,22 @@ export async function recordDreamRun(db: Db | Tx, summary: DreamRunSummary): Pro
     (await db.select().from(settings).where(eq(settings.key, DREAM_STATE_SETTING_KEY)).limit(1))[0]
       ?.value,
   )
+  const runMode = summary.mode ?? 'standard'
+  const nextSchedules = {
+    standard: { ...current.schedules.standard },
+    crossMemory: { ...current.schedules.crossMemory },
+    tidy: { ...current.schedules.tidy },
+  }
+  if (runMode === 'cross_memory') {
+    nextSchedules.crossMemory.lastRunAt = summary.createdAt
+  } else if (runMode === 'tidy') {
+    nextSchedules.tidy.lastRunAt = summary.createdAt
+  } else {
+    nextSchedules.standard.lastRunAt = summary.createdAt
+  }
   const next: StoredDreamState = {
     ...current,
+    schedules: nextSchedules,
     lastRunAt: summary.createdAt,
     lastOutcome: summary.outcome,
     lastError: summary.error,

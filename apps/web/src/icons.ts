@@ -61,6 +61,16 @@ export const icons = {
   listChecks: 'i-lucide-list-checks',
   table: 'i-lucide-table-2',
   tidy: 'i-lucide-wand-sparkles',
+  // 待处理与记忆分类
+  merge: 'i-lucide-git-merge',
+  updateDoc: 'i-lucide-file-pen-line',
+  stale: 'i-lucide-archive-x',
+  layers: 'i-lucide-layers',
+  bookmark: 'i-lucide-bookmark',
+  messageSquare: 'i-lucide-message-square-text',
+  lightbulb: 'i-lucide-lightbulb',
+  gauge: 'i-lucide-gauge',
+  shieldAlert: 'i-lucide-shield-alert',
   // 凭据、密钥、模型与导出
   reveal: 'i-lucide-eye',
   hide: 'i-lucide-eye-off',
@@ -69,6 +79,10 @@ export const icons = {
   download: 'i-lucide-download',
   upload: 'i-lucide-upload',
   globe: 'i-lucide-globe',
+  plug: 'i-lucide-plug-zap',
+  database: 'i-lucide-database',
+  arrowLeftRight: 'i-lucide-arrow-left-right',
+  calendarClock: 'i-lucide-calendar-clock',
   // 状态提示
   unsaved: 'i-lucide-circle-alert',
   error: 'i-lucide-circle-alert',

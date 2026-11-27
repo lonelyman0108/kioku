@@ -21,7 +21,13 @@ import {
 import { computed, reactive, ref, watch } from 'vue'
 
 import { icons } from '../icons'
-import { bootModeDescriptions, bootModeLabels, dreamKindLabels, entryKindLabels } from '../labels'
+import {
+  bootModeDescriptions,
+  bootModeLabels,
+  dreamKindIcons,
+  dreamKindLabels,
+  entryKindLabels,
+} from '../labels'
 import { entryRoute } from '../routes'
 import { detectSecretPrefixes } from '../secretHint'
 import { formatRelative, formatShort, formatTime } from '../time'
@@ -463,7 +469,14 @@ function applyEdited() {
   <div v-if="isInspector" class="inspector-grid">
     <section class="inspector-main" aria-label="建议改动详情">
       <div class="section-eyebrow">
-        <span>{{ deltaSectionTitle }}</span>
+        <span class="eyebrow-lead">
+          <UIcon
+            :name="editing ? icons.edit : dreamKindIcons[suggestion.kind]"
+            class="eyebrow-icon"
+            aria-hidden="true"
+          />
+          <span>{{ deltaSectionTitle }}</span>
+        </span>
         <span v-if="editing" class="eyebrow-sub">修改仅对本次写入生效</span>
         <span v-else-if="isLinkEntries && suggestion.proposedLinks?.length" class="tabular-nums">
           已选 {{ selectedLinkShortIds.length }} / {{ suggestion.proposedLinks.length }} 条
@@ -788,12 +801,18 @@ function applyEdited() {
     <!-- 右栏 35%：整理依据、涉及记忆、护栏与操作 -->
     <aside class="inspector-side" aria-label="整理依据与护栏">
       <div class="side-block">
-        <h3 class="side-heading">整理依据</h3>
+        <h3 class="side-heading">
+          <UIcon :name="icons.lightbulb" class="side-heading-icon" aria-hidden="true" />
+          <span>整理依据</span>
+        </h3>
         <p class="side-reason">{{ suggestion.reason }}</p>
       </div>
 
       <div v-if="suggestion.entries.length" class="side-block">
-        <h3 class="side-heading">涉及记忆</h3>
+        <h3 class="side-heading">
+          <UIcon :name="icons.file" class="side-heading-icon" aria-hidden="true" />
+          <span>涉及记忆</span>
+        </h3>
         <ul class="involved-list">
           <li v-for="entry in suggestion.entries" :key="entry.id" class="involved-item">
             <RouterLink :to="entryRoute(entry.shortId)" class="text-primary font-medium">
@@ -824,7 +843,10 @@ function applyEdited() {
 
       <!-- 完整性护栏 / 改动影响 -->
       <div v-if="integrity || nonContentImpactNote" class="side-block">
-        <h3 class="side-heading">{{ integrity ? '完整性护栏' : '改动影响' }}</h3>
+        <h3 class="side-heading">
+          <UIcon :name="icons.shieldCheck" class="side-heading-icon" aria-hidden="true" />
+          <span>{{ integrity ? '完整性护栏' : '改动影响' }}</span>
+        </h3>
         <div
           v-if="integrity"
           class="guard-strip is-inspector tabular-nums"
@@ -895,6 +917,7 @@ function applyEdited() {
           size="sm"
           color="neutral"
           variant="ghost"
+          :icon="icons.cancel"
           :disabled="busy || disabled"
           @click="emit('dismiss', suggestion.id)"
         >
@@ -908,7 +931,10 @@ function applyEdited() {
   <article v-else class="suggestion-card">
     <header class="card-head">
       <div class="card-head-main">
-        <span class="kind-tag">{{ dreamKindLabels[suggestion.kind] }}</span>
+        <span class="kind-tag">
+          <UIcon :name="dreamKindIcons[suggestion.kind]" class="kind-tag-icon" aria-hidden="true" />
+          <span>{{ dreamKindLabels[suggestion.kind] }}</span>
+        </span>
         <span class="card-target-title">{{ displayTitle }}</span>
         <span v-if="baseEntry" class="font-mono text-xs text-muted">{{ baseEntry.shortId }}</span>
         <span v-if="baseEntry?.isPinned" class="keep-tag">常驻</span>
@@ -1210,6 +1236,7 @@ function applyEdited() {
           size="sm"
           color="neutral"
           variant="ghost"
+          :icon="icons.cancel"
           :disabled="busy || disabled"
           @click="emit('dismiss', suggestion.id)"
         >
@@ -1272,6 +1299,17 @@ function applyEdited() {
   font-size: 12px;
   font-weight: 600;
   color: var(--ui-text-muted);
+}
+.eyebrow-lead {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.eyebrow-icon {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 14px;
 }
 .eyebrow-sub {
   font-weight: 400;
@@ -1633,9 +1671,18 @@ function applyEdited() {
   border-top: 1px solid var(--ui-border);
 }
 .side-heading {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-size: 12px;
   font-weight: 600;
   color: var(--ui-text-muted);
+}
+.side-heading-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
 }
 .side-reason {
   font-size: 14px;
@@ -1783,11 +1830,20 @@ function applyEdited() {
   min-width: 0;
 }
 .kind-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   padding: 1px 6px;
   border: 1px solid var(--ui-rule);
   font-size: 12px;
   font-weight: 500;
   color: var(--ui-text-highlighted);
+}
+.kind-tag-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
 }
 .card-target-title {
   font-size: 15px;

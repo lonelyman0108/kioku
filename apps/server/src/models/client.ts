@@ -108,10 +108,16 @@ const RETRY_AFTER_MAX_MS = 60_000
 const REASONING_CACHE_TTL_MS = 3_600_000
 const REASONING_CACHE_MAX_SIZE = 128
 
-const REASONING_MAX_TOKENS_BONUS: Record<'low' | 'medium' | 'high', number> = {
+const REASONING_MAX_TOKENS_BONUS: Record<
+  'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max',
+  number
+> = {
+  minimal: 1_000,
   low: 2_000,
   medium: 4_000,
   high: 8_000,
+  xhigh: 12_000,
+  max: 16_000,
 }
 
 const STREAM_UNSUPPORTED_RE = /\bstream(?:ing)?\b|流式/i
@@ -877,9 +883,8 @@ export async function chatComplete(
       }
       if (options.maxTokens !== undefined) {
         const bonus =
-          flags.includeReasoning &&
-          (effectiveEffort === 'low' || effectiveEffort === 'medium' || effectiveEffort === 'high')
-            ? REASONING_MAX_TOKENS_BONUS[effectiveEffort]
+          flags.includeReasoning && effectiveEffort in REASONING_MAX_TOKENS_BONUS
+            ? REASONING_MAX_TOKENS_BONUS[effectiveEffort as keyof typeof REASONING_MAX_TOKENS_BONUS]
             : 0
         body.max_tokens = options.maxTokens + bonus
       }

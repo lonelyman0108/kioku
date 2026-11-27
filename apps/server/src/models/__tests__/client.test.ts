@@ -388,6 +388,21 @@ describe('chatComplete 流式、重试与思考等级处理', () => {
     expect(seenBodies.at(-1)?.reasoning_effort).toBe('high')
     expect(seenBodies.at(-1)?.max_tokens).toBe(10_000)
 
+    // 2b. 扩展思考档位：minimal (+1000)、xhigh (+12000)、max (+16000)
+    for (const [effort, expectedMax] of [
+      ['minimal', 2_000],
+      ['xhigh', 13_000],
+      ['max', 17_000],
+    ] as const) {
+      await chatComplete(
+        { baseUrl: okStub.baseUrl, model: 'm-frontier', apiKey: null, reasoningEffort: effort },
+        [{ role: 'user', content: 'hi' }],
+        { maxTokens: 1_000 },
+      )
+      expect(seenBodies.at(-1)?.reasoning_effort).toBe(effort)
+      expect(seenBodies.at(-1)?.max_tokens).toBe(expectedMax)
+    }
+
     // 3. temperature 冲突时剥离 temperature 但保留 reasoning_effort
     const tempBodies: Record<string, unknown>[] = []
     const tempStub = await startStubServer((_req, res, body) => {

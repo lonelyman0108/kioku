@@ -356,13 +356,37 @@ async function findRelevantNeighbors(
   return [...linked, ...vectorNeighbors, ...ftsNeighbors].slice(0, MAX_NEIGHBORS_PER_CALL)
 }
 
-export async function isDreamDue(db: Db, now = new Date()): Promise<boolean> {
-  const state = await loadDreamState(db)
-  if (!state.enabled) return false
-  if (!state.lastRunAt) return true
-  const last = Date.parse(state.lastRunAt)
+function isModeScheduleDue(
+  schedule: { enabled: boolean; intervalHours: number; lastRunAt: string | null },
+  now: Date,
+): boolean {
+  if (!schedule.enabled) return false
+  if (!schedule.lastRunAt) return true
+  const last = Date.parse(schedule.lastRunAt)
   if (Number.isNaN(last)) return true
-  return now.getTime() - last >= state.intervalHours * 3600_000
+  return now.getTime() - last >= schedule.intervalHours * 3600_000
+}
+
+export async function getDueScheduledDreamModes(db: Db, now = new Date()): Promise<DreamMode[]> {
+  const state = await loadDreamState(db)
+  const standard = state.schedules?.standard ?? {
+    enabled: state.enabled,
+    intervalHours: state.intervalHours,
+    lastRunAt: state.lastRunAt,
+  }
+  const due: DreamMode[] = []
+  if (isModeScheduleDue(standard, now)) due.push('standard')
+  if (state.schedules?.crossMemory && isModeScheduleDue(state.schedules.crossMemory, now)) {
+    due.push('cross_memory')
+  }
+  if (state.schedules?.tidy && isModeScheduleDue(state.schedules.tidy, now)) {
+    due.push('tidy')
+  }
+  return due
+}
+
+export async function isDreamDue(db: Db, now = new Date()): Promise<boolean> {
+  return (await getDueScheduledDreamModes(db, now)).length > 0
 }
 
 export interface DreamExecutionResult {

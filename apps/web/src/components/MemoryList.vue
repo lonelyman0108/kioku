@@ -12,7 +12,7 @@ import { useKbd } from '@nuxt/ui/composables'
 import { computed, nextTick, ref, watch } from 'vue'
 
 import { icons } from '../icons'
-import { bootModeLabels, entryTabLabels, envDisplayName } from '../labels'
+import { bootModeLabels, entryTabIcons, entryTabLabels, envDisplayName } from '../labels'
 import type { ReadState } from '../query'
 import { runtimeName } from '../runtimes'
 import { formatRelative, formatTime, isExpired } from '../time'
@@ -259,6 +259,7 @@ defineExpose({ filterOpen })
           >
             <span v-if="value === 'pinned'" class="rail-swatch solid" aria-hidden="true" />
             <span v-else-if="value === 'episodes'" class="rail-swatch dashed" aria-hidden="true" />
+            <UIcon :name="entryTabIcons[value]" class="view-tab-icon" aria-hidden="true" />
             <span>{{ entryTabLabels[value] }}</span>
             <span v-if="counts?.[value] !== undefined" class="tab-num">{{ counts[value] }}</span>
           </button>
@@ -566,16 +567,31 @@ defineExpose({ filterOpen })
                         class="sub-status"
                         :class="{ 'is-index': effectiveBootMode(item) === 'index' }"
                       >
-                        {{ bootModeLabels[effectiveBootMode(item)] }}
+                        <UIcon
+                          :name="effectiveBootMode(item) === 'index' ? icons.bookmark : icons.pin"
+                          class="sub-status-icon"
+                          aria-hidden="true"
+                        />
+                        <span>{{ bootModeLabels[effectiveBootMode(item)] }}</span>
                       </span>
                     </template>
                     <template v-else-if="item.kind === 'episode'">
                       <span class="sub-dot" aria-hidden="true">·</span>
-                      <span class="sub-status is-episode">摘要</span>
+                      <span class="sub-status is-episode">
+                        <UIcon
+                          :name="icons.messageSquare"
+                          class="sub-status-icon"
+                          aria-hidden="true"
+                        />
+                        <span>摘要</span>
+                      </span>
                     </template>
                     <template v-if="isExpired(item.validTo)">
                       <span class="sub-dot" aria-hidden="true">·</span>
-                      <span class="sub-status is-warn">已过期</span>
+                      <span class="sub-status is-warn">
+                        <UIcon :name="icons.clock" class="sub-status-icon" aria-hidden="true" />
+                        <span>已过期</span>
+                      </span>
                     </template>
                     <template v-if="rowSubtitle(item)">
                       <span class="sub-dot sub-disclosure-sep" aria-hidden="true">·</span>
@@ -701,7 +717,7 @@ defineExpose({ filterOpen })
             :disabled="selectedBatchIds.length < 2"
             @click="submitBatch('cross_memory')"
           >
-            查重与关联
+            查重/关联
           </UButton>
         </div>
       </div>
@@ -797,6 +813,12 @@ defineExpose({ filterOpen })
 }
 .view-tab.active .tab-num {
   color: var(--ui-on-selected-muted);
+}
+.view-tab-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
 }
 /* 统一线轨图例：顶栏分段与列表左缘保持一致（实线=常驻，虚线=近期摘要） */
 .rail-swatch {
@@ -1111,10 +1133,19 @@ defineExpose({ filterOpen })
   color: var(--ui-on-selected-muted);
 }
 .sub-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   flex: none;
   font-size: 12px;
   font-weight: 500;
   color: var(--ui-text-highlighted);
+}
+.sub-status-icon {
+  display: inline-block;
+  flex: none;
+  width: 11px;
+  height: 11px;
 }
 .sub-status.is-index {
   color: var(--ui-text-toned);

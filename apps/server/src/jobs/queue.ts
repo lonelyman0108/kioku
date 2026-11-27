@@ -8,7 +8,7 @@ import { loggableError, postgresOptions, type Db } from '../db/client'
 import { runBackfillEmbeddings, runEmbedBatch, type EmbedJobTarget } from '../embedding/jobs'
 import { EMBED_BATCH } from '../embedding/worker'
 import type { BufferedBucket } from '../extraction/buffer'
-import { isDreamDue, runDream } from '../extraction/dream'
+import { getDueScheduledDreamModes, runDream } from '../extraction/dream'
 import { extractEpisodeBatch } from '../extraction/extract'
 import { EntryService } from '../memory/service'
 import { cleanupExpired } from './cleanup'
@@ -230,7 +230,9 @@ export async function startJobs(options: {
       if (oldest) handledDreamIds.delete(oldest)
     }
     const trigger: DreamTrigger = job.data?.trigger === 'manual' ? 'manual' : 'scheduled'
-    if (trigger === 'scheduled' && !(await isDreamDue(options.db))) return
+    const scheduledModes =
+      trigger === 'scheduled' ? await getDueScheduledDreamModes(options.db) : []
+    if (trigger === 'scheduled' && !scheduledModes.length) return
     if (dreamPendingId === job.id || dreamPendingId === null) {
       dreamPendingId = null
       dreamPendingUntil = 0
@@ -238,22 +240,42 @@ export async function startJobs(options: {
     dreamRunning = true
     dreamProgress = null
     try {
-      const result = await runDream(options.db, options.masterKey, {
-        runId: job.id,
-        trigger,
-        mode: job.data?.mode,
-        scope: job.data?.scope,
-        limit: job.data?.limit,
-        all: job.data?.all,
-        pinnedFirst: job.data?.pinnedFirst,
-        targetShortIds: job.data?.targetShortIds,
-        signal: stopController.signal,
-        onProgress: (progress) => {
-          dreamProgress = progress
-        },
-      })
-      if (result.outcome === 'failed' || result.outcome === 'partial') {
-        console.error('记忆整理出错', result.error)
+      if (trigger === 'scheduled') {
+        for (const mode of scheduledModes) {
+          if (stopController.signal.aborted) break
+          const result = await runDream(options.db, options.masterKey, {
+            runId: `${job.id}:${mode}`,
+            trigger: 'scheduled',
+            mode,
+            ...(mode === 'cross_memory' ? { scope: 'full_corpus' as const } : {}),
+            ...(mode === 'tidy' ? { limit: 20, pinnedFirst: true } : {}),
+            signal: stopController.signal,
+            onProgress: (progress) => {
+              dreamProgress = progress
+            },
+          })
+          if (result.outcome === 'failed' || result.outcome === 'partial') {
+            console.error(`定时记忆整理（${mode}）出错`, result.error)
+          }
+        }
+      } else {
+        const result = await runDream(options.db, options.masterKey, {
+          runId: job.id,
+          trigger,
+          mode: job.data?.mode,
+          scope: job.data?.scope,
+          limit: job.data?.limit,
+          all: job.data?.all,
+          pinnedFirst: job.data?.pinnedFirst,
+          targetShortIds: job.data?.targetShortIds,
+          signal: stopController.signal,
+          onProgress: (progress) => {
+            dreamProgress = progress
+          },
+        })
+        if (result.outcome === 'failed' || result.outcome === 'partial') {
+          console.error('记忆整理出错', result.error)
+        }
       }
     } finally {
       dreamRunning = false

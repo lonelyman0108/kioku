@@ -10,8 +10,10 @@ import { CredentialService } from '../../credential/service'
 import type { Database } from '../../db/client'
 import { deviceGrants, entries, entryEmbeddings, sessions } from '../../db/schema'
 import { embedEntryIds } from '../../embedding/worker'
+import { getDueScheduledDreamModes } from '../../extraction/dream'
 import { cleanupExpired } from '../../jobs/cleanup'
 import { EntryService } from '../../memory/service'
+import { recordDreamRun } from '../../models/store'
 import {
   consoleHeaders,
   createOwnerSession,
@@ -98,9 +100,14 @@ describe.skipIf(!testDatabaseUrl)('模型设置、向量回填、数据导出与
           apiKey: 'sk-chat-secret',
           enabled: true,
           reasoningEffort: 'medium',
-          taskReasoningEffort: { fast: 'off', organize: 'high' },
+          taskReasoningEffort: { fast: 'off', organize: 'xhigh' },
         },
-        dream: { enabled: true, intervalHours: 12 },
+        dream: {
+          enabled: true,
+          intervalHours: 12,
+          crossMemory: { enabled: true, intervalHours: 168 },
+          tidy: { enabled: true, intervalHours: 72 },
+        },
       }),
     })
     expect(put1.status).toBe(200)
@@ -108,9 +115,64 @@ describe.skipIf(!testDatabaseUrl)('模型设置、向量回填、数据导出与
     expect(body1.embedding?.hasApiKey).toBe(true)
     expect(body1.chatLlm?.hasApiKey).toBe(true)
     expect(body1.chatLlm?.reasoningEffort).toBe('medium')
-    expect(body1.chatLlm?.taskReasoningEffort).toEqual({ fast: 'off', organize: 'high' })
-    expect(body1.dream).toEqual({ enabled: true, intervalHours: 12 })
+    expect(body1.chatLlm?.taskReasoningEffort).toEqual({ fast: 'off', organize: 'xhigh' })
+    expect(body1.dream).toEqual({
+      enabled: true,
+      intervalHours: 12,
+      crossMemory: { enabled: true, intervalHours: 168 },
+      tidy: { enabled: true, intervalHours: 72 },
+    })
     expect(backfillCalls).toBe(1)
+
+    // 验证三种整理模式各自按独立周期与独立 lastRunAt 判定是否到期
+    const t0 = new Date('2026-05-01T00:00:00.000Z')
+    expect(await getDueScheduledDreamModes(database.db, t0)).toEqual([
+      'standard',
+      'cross_memory',
+      'tidy',
+    ])
+    await recordDreamRun(database.db, {
+      id: 'sched-std',
+      trigger: 'scheduled',
+      mode: 'standard',
+      createdAt: t0.toISOString(),
+      considered: 1,
+      suggested: 0,
+      outcome: 'ok',
+      error: null,
+    })
+    await recordDreamRun(database.db, {
+      id: 'sched-cross',
+      trigger: 'scheduled',
+      mode: 'cross_memory',
+      createdAt: t0.toISOString(),
+      considered: 2,
+      suggested: 0,
+      outcome: 'ok',
+      error: null,
+    })
+    await recordDreamRun(database.db, {
+      id: 'sched-tidy',
+      trigger: 'scheduled',
+      mode: 'tidy',
+      createdAt: t0.toISOString(),
+      considered: 1,
+      suggested: 0,
+      outcome: 'ok',
+      error: null,
+    })
+    // 13 小时后仅 standard (12h) 到期
+    expect(
+      await getDueScheduledDreamModes(database.db, new Date(t0.getTime() + 13 * 3_600_000)),
+    ).toEqual(['standard'])
+    // 73 小时后 standard 与 tidy (72h) 到期，cross_memory (168h) 未到期
+    expect(
+      await getDueScheduledDreamModes(database.db, new Date(t0.getTime() + 73 * 3_600_000)),
+    ).toEqual(['standard', 'tidy'])
+    // 169 小时后三者均到期
+    expect(
+      await getDueScheduledDreamModes(database.db, new Date(t0.getTime() + 169 * 3_600_000)),
+    ).toEqual(['standard', 'cross_memory', 'tidy'])
 
     // 计算当前模型向量并验证覆盖度
     await embedEntryIds(database.db, masterKey, [created.entry.id])

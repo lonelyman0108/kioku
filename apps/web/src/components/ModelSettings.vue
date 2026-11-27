@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import {
+  DEFAULT_CROSS_MEMORY_INTERVAL_HOURS,
   DEFAULT_DREAM_INTERVAL_HOURS,
+  DEFAULT_TIDY_INTERVAL_HOURS,
   DREAM_INTERVAL_HOURS_MAX,
   DREAM_INTERVAL_HOURS_MIN,
   REASONING_EFFORTS,
@@ -16,10 +18,13 @@ import { computed, reactive, ref, watch } from 'vue'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { icons } from '../icons'
-import { reasoningEffortLabels } from '../labels'
+import {
+  reasoningEffortDescriptions,
+  reasoningEffortLabels,
+  reasoningEffortWireValues,
+} from '../labels'
 import { ME_KEY } from '../query'
 import Hint from './Hint.vue'
-import SegmentedChoice from './SegmentedChoice.vue'
 import NoteLine from './ui/NoteLine.vue'
 import ReadFailureNote from './ui/ReadFailureNote.vue'
 import SaveBar from './ui/SaveBar.vue'
@@ -36,17 +41,24 @@ const settingsQuery = useQuery({
   queryFn: () => api.modelsSettings(),
 })
 
-const reasoningOptions = REASONING_EFFORTS.map((value) => ({
-  value,
-  label: reasoningEffortLabels[value],
-}))
+const reasoningSelectItems = REASONING_EFFORTS.map((value) => {
+  const wire = reasoningEffortWireValues[value]
+  return {
+    value,
+    label: wire
+      ? `${reasoningEffortLabels[value]} · ${wire}`
+      : `${reasoningEffortLabels[value]}（不注入参数）`,
+  }
+})
 
-const taskOverrideOptions: readonly { value: TaskEffortChoice; label: string }[] = [
+const taskOverrideSelectItems: { value: TaskEffortChoice; label: string }[] = [
   { value: 'inherit', label: '跟随全局' },
-  { value: 'off', label: reasoningEffortLabels.off },
-  { value: 'low', label: reasoningEffortLabels.low },
-  { value: 'medium', label: reasoningEffortLabels.medium },
-  { value: 'high', label: reasoningEffortLabels.high },
+  ...REASONING_EFFORTS.filter((v): v is Exclude<ReasoningEffort, 'default'> => v !== 'default').map(
+    (value) => ({
+      value,
+      label: `${reasoningEffortLabels[value]} · ${reasoningEffortWireValues[value]}`,
+    }),
+  ),
 ]
 
 interface EndpointDraft {
@@ -64,11 +76,19 @@ interface ChatEndpointDraft extends EndpointDraft {
   organizeEffort: TaskEffortChoice
 }
 
+interface DreamScheduleDraft {
+  enabled: boolean
+  intervalHours: number
+}
+
 const form = reactive<{
   embedding: EndpointDraft
   chatLlm: ChatEndpointDraft
-  dreamEnabled: boolean
-  dreamIntervalHours: number
+  dream: {
+    standard: DreamScheduleDraft
+    crossMemory: DreamScheduleDraft
+    tidy: DreamScheduleDraft
+  }
 }>({
   embedding: {
     enabled: false,
@@ -89,8 +109,11 @@ const form = reactive<{
     fastEffort: 'inherit',
     organizeEffort: 'inherit',
   },
-  dreamEnabled: true,
-  dreamIntervalHours: DEFAULT_DREAM_INTERVAL_HOURS,
+  dream: {
+    standard: { enabled: true, intervalHours: DEFAULT_DREAM_INTERVAL_HOURS },
+    crossMemory: { enabled: false, intervalHours: DEFAULT_CROSS_MEMORY_INTERVAL_HOURS },
+    tidy: { enabled: false, intervalHours: DEFAULT_TIDY_INTERVAL_HOURS },
+  },
 })
 
 const taskOverridesOpen = ref(false)
@@ -121,11 +144,18 @@ function syncFromSaved(data: ModelsSettingsResponse) {
     fastEffort,
     organizeEffort,
   }
-  if (fastEffort !== 'inherit' || organizeEffort !== 'inherit') {
-    taskOverridesOpen.value = true
+  form.dream.standard = {
+    enabled: data.dream.enabled,
+    intervalHours: data.dream.intervalHours,
   }
-  form.dreamEnabled = data.dream.enabled
-  form.dreamIntervalHours = data.dream.intervalHours
+  form.dream.crossMemory = {
+    enabled: data.dream.crossMemory?.enabled ?? false,
+    intervalHours: data.dream.crossMemory?.intervalHours ?? DEFAULT_CROSS_MEMORY_INTERVAL_HOURS,
+  }
+  form.dream.tidy = {
+    enabled: data.dream.tidy?.enabled ?? false,
+    intervalHours: data.dream.tidy?.intervalHours ?? DEFAULT_TIDY_INTERVAL_HOURS,
+  }
 }
 
 watch(
@@ -144,11 +174,58 @@ const coveragePercent = computed(() => {
   return Math.round((c.embedded / c.total) * 100)
 })
 
+const selectedWireValue = computed(() => reasoningEffortWireValues[form.chatLlm.reasoningEffort])
+
 const activeOverrideCount = computed(
   () =>
     (form.chatLlm.fastEffort !== 'inherit' ? 1 : 0) +
     (form.chatLlm.organizeEffort !== 'inherit' ? 1 : 0),
 )
+
+const overrideSummaryText = computed(() => {
+  const parts: string[] = []
+  if (form.chatLlm.fastEffort !== 'inherit') {
+    const wire = reasoningEffortWireValues[form.chatLlm.fastEffort]
+    parts.push(`快速：${reasoningEffortLabels[form.chatLlm.fastEffort]} (${wire})`)
+  }
+  if (form.chatLlm.organizeEffort !== 'inherit') {
+    const wire = reasoningEffortWireValues[form.chatLlm.organizeEffort]
+    parts.push(`整理：${reasoningEffortLabels[form.chatLlm.organizeEffort]} (${wire})`)
+  }
+  return parts.length ? parts.join(' · ') : '全部跟随全局'
+})
+
+const scheduleRows = computed(
+  () =>
+    [
+      {
+        key: 'standard' as const,
+        label: '增量整理',
+        desc: '整理近期新增或改动的记忆与会话摘要',
+        icon: icons.sparkles,
+        draft: form.dream.standard,
+      },
+      {
+        key: 'crossMemory' as const,
+        label: '查重/关联',
+        desc: '全库扫描重复合并、补全双链与常驻巡检',
+        icon: icons.links,
+        draft: form.dream.crossMemory,
+      },
+      {
+        key: 'tidy' as const,
+        label: '规范整理',
+        desc: '批量规范脏标题、补概要并剥离旧日志',
+        icon: icons.tidy,
+        draft: form.dream.tidy,
+      },
+    ] as const,
+)
+
+function formatDaysHint(hours: number): string | null {
+  if (!Number.isFinite(hours) || hours < 24 || hours % 24 !== 0) return null
+  return `即每 ${hours / 24} 天`
+}
 
 interface ChatProbeTarget {
   effort: ReasoningEffort
@@ -206,8 +283,29 @@ const dirtyCount = computed(() => {
   let count = 0
   if (endpointChanged(form.embedding, saved.embedding)) count++
   if (chatEndpointChanged(form.chatLlm, saved.chatLlm)) count++
-  if (form.dreamEnabled !== saved.dream.enabled) count++
-  if (form.dreamIntervalHours !== saved.dream.intervalHours) count++
+  if (
+    form.dream.standard.enabled !== saved.dream.enabled ||
+    form.dream.standard.intervalHours !== saved.dream.intervalHours
+  ) {
+    count++
+  }
+  const savedCrossEnabled = saved.dream.crossMemory?.enabled ?? false
+  const savedCrossInterval =
+    saved.dream.crossMemory?.intervalHours ?? DEFAULT_CROSS_MEMORY_INTERVAL_HOURS
+  if (
+    form.dream.crossMemory.enabled !== savedCrossEnabled ||
+    form.dream.crossMemory.intervalHours !== savedCrossInterval
+  ) {
+    count++
+  }
+  const savedTidyEnabled = saved.dream.tidy?.enabled ?? false
+  const savedTidyInterval = saved.dream.tidy?.intervalHours ?? DEFAULT_TIDY_INTERVAL_HOURS
+  if (
+    form.dream.tidy.enabled !== savedTidyEnabled ||
+    form.dream.tidy.intervalHours !== savedTidyInterval
+  ) {
+    count++
+  }
   return count
 })
 
@@ -231,11 +329,13 @@ const validationProblem = computed(() => {
   if (hasExplicitThinking && (!form.chatLlm.baseUrl.trim() || !form.chatLlm.model.trim())) {
     return '配置思考等级时须同时填写对话模型的接口地址与模型名称'
   }
-  if (
-    form.dreamIntervalHours < DREAM_INTERVAL_HOURS_MIN ||
-    form.dreamIntervalHours > DREAM_INTERVAL_HOURS_MAX
-  ) {
-    return `整理间隔须在 ${DREAM_INTERVAL_HOURS_MIN} 到 ${DREAM_INTERVAL_HOURS_MAX} 小时之间`
+  for (const row of scheduleRows.value) {
+    if (
+      row.draft.intervalHours < DREAM_INTERVAL_HOURS_MIN ||
+      row.draft.intervalHours > DREAM_INTERVAL_HOURS_MAX
+    ) {
+      return `${row.label}间隔须在 ${DREAM_INTERVAL_HOURS_MIN} 到 ${DREAM_INTERVAL_HOURS_MAX} 小时之间`
+    }
   }
   return null
 })
@@ -280,8 +380,16 @@ async function save() {
       embedding: buildEndpointPayload(form.embedding),
       chatLlm: buildChatPayload(form.chatLlm),
       dream: {
-        enabled: form.dreamEnabled,
-        intervalHours: Number(form.dreamIntervalHours),
+        enabled: form.dream.standard.enabled,
+        intervalHours: Number(form.dream.standard.intervalHours),
+        crossMemory: {
+          enabled: form.dream.crossMemory.enabled,
+          intervalHours: Number(form.dream.crossMemory.intervalHours),
+        },
+        tidy: {
+          enabled: form.dream.tidy.enabled,
+          intervalHours: Number(form.dream.tidy.intervalHours),
+        },
       },
     })
     queryClient.setQueryData(['models-settings'], saved)
@@ -311,8 +419,9 @@ const testResults = reactive<Partial<Record<ModelKind, ModelTestDisplay>>>({})
 function formatChatProbeSuffix(res: ModelTestDisplay): string {
   if (!res.probedEffort || res.probedEffort === 'default') return ''
   const level = reasoningEffortLabels[res.probedEffort]
+  const wire = reasoningEffortWireValues[res.probedEffort]
   const src = res.probedSource ? `（${res.probedSource}）` : ''
-  return ` · 探测思考等级：${level}${src}`
+  return ` · 探测思考等级：${level} (${wire})${src}`
 }
 
 async function runTest(kind: ModelKind) {
@@ -376,7 +485,7 @@ async function rebuildEmbeddings() {
     <template v-else-if="settingsQuery.data.value">
       <!-- 嵌入模型 -->
       <section class="space-y-4">
-        <SectionHeading title="嵌入模型（向量检索）" :level="2">
+        <SectionHeading title="嵌入模型（向量检索）" :icon="icons.database" :level="2">
           <template #actions>
             <USwitch v-model="form.embedding.enabled" label="启用" />
           </template>
@@ -425,6 +534,7 @@ async function rebuildEmbeddings() {
                 size="sm"
                 color="neutral"
                 variant="outline"
+                :icon="icons.cancel"
                 @click="((form.embedding.clearKey = true), (form.embedding.apiKey = ''))"
               >
                 清除密钥
@@ -439,6 +549,7 @@ async function rebuildEmbeddings() {
             size="sm"
             color="neutral"
             variant="outline"
+            :icon="icons.plug"
             :loading="testing === 'embedding'"
             :disabled="!form.embedding.baseUrl.trim() || !form.embedding.model.trim()"
             @click="runTest('embedding')"
@@ -487,7 +598,7 @@ async function rebuildEmbeddings() {
 
       <!-- 对话与整理模型 -->
       <section class="space-y-4">
-        <SectionHeading title="对话与整理模型（可选）" :level="2">
+        <SectionHeading title="对话与整理模型（可选）" :icon="icons.sparkles" :level="2">
           <template #actions>
             <USwitch v-model="form.chatLlm.enabled" label="启用" />
           </template>
@@ -539,6 +650,7 @@ async function rebuildEmbeddings() {
                 size="sm"
                 color="neutral"
                 variant="outline"
+                :icon="icons.cancel"
                 @click="((form.chatLlm.clearKey = true), (form.chatLlm.apiKey = ''))"
               >
                 清除密钥
@@ -553,60 +665,91 @@ async function rebuildEmbeddings() {
           >
             <template #hint>
               <Hint label="思考等级说明">
-                选「跟随默认」时不附加思考参数，兼容非推理模型；开启后会按档位自动放宽输出上限。
+                透传 OpenAI 兼容接口的 reasoning_effort 参数（none / minimal / low / medium / high /
+                xhigh / max）；选「跟随默认」不附加该字段，开启后会按档位自动放宽输出上限。
               </Hint>
             </template>
-            <div class="effort-row">
-              <SegmentedChoice
+
+            <div class="effort-control-row">
+              <USelect
                 v-model="form.chatLlm.reasoningEffort"
-                :items="reasoningOptions"
-                label="对话模型默认思考等级"
+                :items="reasoningSelectItems"
+                value-key="value"
+                aria-label="对话模型默认思考等级"
+                class="effort-select"
               />
+              <span class="effort-wire-badge font-mono">
+                <UIcon :name="icons.gauge" class="effort-wire-icon" aria-hidden="true" />
+                <span>
+                  {{
+                    selectedWireValue
+                      ? `reasoning_effort = "${selectedWireValue}"`
+                      : '不注入思考参数'
+                  }}
+                </span>
+              </span>
+            </div>
+
+            <p class="effort-desc">
+              {{ reasoningEffortDescriptions[form.chatLlm.reasoningEffort] }}
+            </p>
+
+            <div class="override-disclosure">
               <button
                 type="button"
                 class="override-toggle"
                 :aria-expanded="taskOverridesOpen"
                 @click="taskOverridesOpen = !taskOverridesOpen"
               >
-                <UIcon
-                  :name="taskOverridesOpen ? icons.chevronDown : icons.chevronRight"
-                  class="override-chevron"
-                  aria-hidden="true"
-                />
-                <span>
-                  {{
-                    activeOverrideCount > 0
-                      ? `按任务覆盖（已设 ${activeOverrideCount} 项）`
-                      : '按任务覆盖'
-                  }}
+                <span class="override-toggle-lead">
+                  <UIcon
+                    :name="taskOverridesOpen ? icons.chevronDown : icons.chevronRight"
+                    class="override-chevron"
+                    aria-hidden="true"
+                  />
+                  <UIcon :name="icons.sliders" class="override-icon" aria-hidden="true" />
+                  <span>按任务覆盖</span>
+                  <span v-if="activeOverrideCount > 0" class="override-badge tabular-nums">
+                    已设 {{ activeOverrideCount }} 项
+                  </span>
                 </span>
+                <span class="override-summary">{{ overrideSummaryText }}</span>
               </button>
-            </div>
 
-            <div v-if="taskOverridesOpen" class="override-box">
-              <div class="override-item">
-                <div class="override-meta">
-                  <span class="override-title">快速任务</span>
-                  <span class="override-desc">随手记归并与会话摘要，建议关闭或设低以防超时</span>
+              <div v-if="taskOverridesOpen" class="override-box">
+                <div class="override-item">
+                  <div class="override-meta">
+                    <span class="override-title">快速任务</span>
+                    <span class="override-desc">随手记归并与会话摘要，建议关闭或设低以防超时</span>
+                  </div>
+                  <USelect
+                    v-model="form.chatLlm.fastEffort"
+                    :items="taskOverrideSelectItems"
+                    value-key="value"
+                    size="sm"
+                    aria-label="快速任务思考等级"
+                    class="override-select"
+                  />
                 </div>
-                <SegmentedChoice
-                  v-model="form.chatLlm.fastEffort"
-                  :items="taskOverrideOptions"
-                  label="快速任务思考等级"
-                  compact
-                />
-              </div>
-              <div class="override-item">
-                <div class="override-meta">
-                  <span class="override-title">整理任务</span>
-                  <span class="override-desc">后台整理与存量规范整理，可按需提高推理深度</span>
+                <div class="override-item">
+                  <div class="override-meta">
+                    <span class="override-title">整理任务</span>
+                    <span class="override-desc"
+                      >增量整理、查重/关联与规范整理，可按需提高推理深度</span
+                    >
+                  </div>
+                  <USelect
+                    v-model="form.chatLlm.organizeEffort"
+                    :items="taskOverrideSelectItems"
+                    value-key="value"
+                    size="sm"
+                    aria-label="整理任务思考等级"
+                    class="override-select"
+                  />
                 </div>
-                <SegmentedChoice
-                  v-model="form.chatLlm.organizeEffort"
-                  :items="taskOverrideOptions"
-                  label="整理任务思考等级"
-                  compact
-                />
+                <p class="override-footnote">
+                  不同模型支持的最高档位不同（如 xhigh / max），调整后可点击下方「测试连接」验证。
+                </p>
               </div>
             </div>
           </UFormField>
@@ -618,6 +761,7 @@ async function rebuildEmbeddings() {
             size="sm"
             color="neutral"
             variant="outline"
+            :icon="icons.plug"
             :loading="testing === 'chat_llm'"
             :disabled="!form.chatLlm.baseUrl.trim() || !form.chatLlm.model.trim()"
             @click="runTest('chat_llm')"
@@ -638,22 +782,51 @@ async function rebuildEmbeddings() {
         </div>
       </section>
 
-      <!-- 定时整理 -->
-      <section class="space-y-4">
-        <SectionHeading title="定时整理" :level="2" />
-        <div class="flex flex-wrap items-end gap-6">
-          <div class="pb-1.5">
-            <USwitch v-model="form.dreamEnabled" label="启用后台定时整理" />
+      <!-- 定时整理（三模式独立配置） -->
+      <section class="space-y-3">
+        <SectionHeading title="定时整理" :icon="icons.calendarClock" :level="2" />
+        <p class="text-xs text-muted">
+          三种整理各自独立计时；生成的建议均进入待处理队列，确认后才写入记忆。
+        </p>
+        <div class="schedule-list">
+          <div
+            v-for="row in scheduleRows"
+            :key="row.key"
+            class="schedule-row"
+            :class="{ 'is-disabled': !row.draft.enabled }"
+          >
+            <div class="schedule-info">
+              <div class="schedule-title-row">
+                <UIcon :name="row.icon" class="schedule-icon" aria-hidden="true" />
+                <span class="schedule-name">{{ row.label }}</span>
+              </div>
+              <p class="schedule-desc">{{ row.desc }}</p>
+            </div>
+            <div class="schedule-controls">
+              <USwitch
+                v-model="row.draft.enabled"
+                :aria-label="`启用定时${row.label}`"
+                label="启用"
+              />
+              <div class="schedule-interval tabular-nums">
+                <span class="interval-label">每</span>
+                <UInputNumber
+                  v-model="row.draft.intervalHours"
+                  :min="DREAM_INTERVAL_HOURS_MIN"
+                  :max="DREAM_INTERVAL_HOURS_MAX"
+                  :disabled="!row.draft.enabled"
+                  :aria-label="`${row.label}间隔小时`"
+                  size="sm"
+                  class="w-28"
+                />
+                <span class="interval-label">
+                  小时<template v-if="formatDaysHint(row.draft.intervalHours)"
+                    >（{{ formatDaysHint(row.draft.intervalHours) }}）</template
+                  >
+                </span>
+              </div>
+            </div>
           </div>
-          <UFormField label="整理间隔（小时）" class="w-40">
-            <UInputNumber
-              v-model="form.dreamIntervalHours"
-              :min="DREAM_INTERVAL_HOURS_MIN"
-              :max="DREAM_INTERVAL_HOURS_MAX"
-              :disabled="!form.dreamEnabled"
-              class="w-full"
-            />
-          </UFormField>
         </div>
       </section>
 
@@ -686,41 +859,99 @@ async function rebuildEmbeddings() {
   inset: 0 auto 0 0;
   background: var(--ui-text-highlighted);
 }
-.effort-row {
+
+/* 思考等级主选择与协议参数预览 */
+.effort-control-row {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 10px 14px;
+  gap: 8px 12px;
 }
-.override-toggle {
+.effort-select {
+  width: 15.5rem;
+  max-width: 100%;
+}
+.effort-wire-badge {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 2px 6px;
-  border: 1px solid transparent;
+  gap: 6px;
+  padding: 4px 9px;
+  border: 1px solid var(--ui-border-accented);
+  background: var(--ui-bg-muted);
   font-size: 12px;
+  line-height: 1.4;
+  color: var(--ui-text-toned);
+}
+.effort-wire-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
   color: var(--ui-text-muted);
+}
+.effort-desc {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--ui-text-muted);
+}
+
+/* 按任务覆盖（默认收起，带内联摘要） */
+.override-disclosure {
+  margin-top: 10px;
+  border: 1px solid var(--ui-border);
+  background: var(--ui-bg);
+}
+.override-toggle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 12px;
+  width: 100%;
+  padding: 7px 10px;
+  background: var(--ui-bg-muted);
+  text-align: left;
+  font-size: 13px;
+  color: var(--ui-text-highlighted);
   cursor: pointer;
 }
 .override-toggle:hover {
-  border-color: var(--ui-border-accented);
-  background: var(--ui-bg-muted);
-  color: var(--ui-text-highlighted);
+  background: var(--ui-bg-elevated);
 }
-.override-chevron {
+.override-toggle-lead {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 500;
+}
+.override-chevron,
+.override-icon {
   display: inline-block;
   flex: none;
   width: 14px;
   height: 14px;
+  color: var(--ui-text-muted);
+}
+.override-badge {
+  padding: 0 5px;
+  border: 1px solid var(--ui-rule);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+  color: var(--ui-text-highlighted);
+}
+.override-summary {
+  font-size: 12px;
+  color: var(--ui-text-muted);
 }
 .override-box {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  margin-top: 10px;
-  padding: 10px 12px;
-  border: 1px solid var(--ui-border);
-  background: var(--ui-bg-muted);
+  padding: 12px;
+  border-top: 1px solid var(--ui-border);
+  background: var(--ui-bg);
 }
 .override-item {
   display: flex;
@@ -738,6 +969,7 @@ async function rebuildEmbeddings() {
   flex-direction: column;
   gap: 2px;
   min-width: 0;
+  flex: 1 1 14rem;
 }
 .override-title {
   font-size: 13px;
@@ -747,5 +979,82 @@ async function rebuildEmbeddings() {
 .override-desc {
   font-size: 12px;
   color: var(--ui-text-muted);
+}
+.override-select {
+  width: 13.5rem;
+  max-width: 100%;
+}
+.override-footnote {
+  padding-top: 8px;
+  border-top: 1px dashed var(--ui-border);
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+
+/* 三模式独立定时整理日程表 */
+.schedule-list {
+  border: 1px solid var(--ui-border);
+  background: var(--ui-bg);
+}
+.schedule-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  padding: 12px 14px;
+}
+.schedule-row + .schedule-row {
+  border-top: 1px solid var(--ui-border);
+}
+.schedule-row.is-disabled {
+  background: var(--ui-bg-muted);
+}
+.schedule-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 15rem;
+}
+.schedule-title-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.schedule-icon {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--ui-text-toned);
+}
+.schedule-row.is-disabled .schedule-icon {
+  color: var(--ui-text-muted);
+}
+.schedule-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ui-text-highlighted);
+}
+.schedule-desc {
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.schedule-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 18px;
+}
+.schedule-interval {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.interval-label {
+  font-size: 12px;
+  color: var(--ui-text-muted);
+  white-space: nowrap;
 }
 </style>

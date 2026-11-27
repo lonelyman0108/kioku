@@ -303,7 +303,7 @@ async function onBatchOrganize(mode: 'tidy' | 'cross_memory', shortIds: string[]
   try {
     const res = await api.runDream({ mode, targetShortIds: shortIds })
     if (res.started) {
-      const label = mode === 'tidy' ? '规范整理' : '查重与关联'
+      const label = mode === 'tidy' ? '规范整理' : '查重/关联'
       toast.add({
         title: `已发起所选 ${shortIds.length} 条记忆的${label}任务`,
         color: 'success',

@@ -329,7 +329,7 @@ async function onDismissCrossSuggestion(id: string) {
   }
 }
 
-const drawerTitle = computed(() => (props.mode === 'tidy' ? '规范此条记忆' : '查找重复与关联记忆'))
+const drawerTitle = computed(() => (props.mode === 'tidy' ? '规范此条记忆' : '查重/关联'))
 const drawerDescription = computed(() =>
   props.mode === 'tidy'
     ? `对「${props.entryTitle}」执行确定性预清洗与单条规范重构，确认后才写入记忆`
@@ -565,6 +565,7 @@ const drawerDescription = computed(() =>
             size="sm"
             color="neutral"
             variant="outline"
+            :icon="icons.inbox"
             :loading="staging"
             :disabled="applying || !anySelected"
             @click="submitSingleTidy(true)"
