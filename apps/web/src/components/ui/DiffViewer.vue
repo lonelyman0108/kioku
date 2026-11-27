@@ -356,7 +356,10 @@ defineExpose({
       </div>
     </div>
 
-    <p v-if="!structured.complete" class="diff-incomplete-note">改动跨度较大，已按整段增删展示。</p>
+    <p v-if="!structured.complete" class="diff-incomplete-note">
+      <UIcon :name="icons.warning" class="diff-note-icon" aria-hidden="true" />
+      <span>改动跨度较大，已按整段增删展示。</span>
+    </p>
 
     <p v-if="!hasChanges" class="diff-empty">{{ emptyText }}</p>
 
@@ -571,11 +574,20 @@ defineExpose({
   color: var(--ui-text-muted);
 }
 .diff-incomplete-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   padding: 5px 10px;
   border-bottom: 1px solid var(--ui-border);
   background: var(--ui-bg-muted);
   font-size: 12px;
   color: var(--ui-warning);
+}
+.diff-note-icon {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 14px;
 }
 .diff-empty {
   padding: 12px;

@@ -52,7 +52,7 @@ watch(
     <div class="save-main">
       <span class="save-status" role="status">
         <template v-if="props.count > 0">
-          <UIcon :name="icons.unsaved" class="save-icon" />
+          <UIcon :name="icons.unsaved" class="save-icon" aria-hidden="true" />
           <span class="save-count tabular-nums">{{ props.count }} 项未保存</span>
         </template>
         <span v-else class="save-idle">暂无未保存改动</span>
@@ -63,7 +63,7 @@ watch(
         color="neutral"
         variant="outline"
         size="xs"
-        :icon="showDiff ? icons.up : icons.down"
+        :icon="showDiff ? icons.chevronUp : icons.chevronDown"
         :aria-expanded="showDiff"
         @click="showDiff = !showDiff"
         >{{ showDiff ? '收起变更' : '查看变更' }}</UButton
@@ -74,6 +74,7 @@ watch(
         type="button"
         color="neutral"
         variant="ghost"
+        :icon="icons.undelete"
         :disabled="props.saving"
         @click="emit('discard')"
         >{{ props.discardLabel }}</UButton
@@ -81,6 +82,7 @@ watch(
       <UButton
         :type="props.submitType"
         color="primary"
+        :icon="icons.save"
         :loading="props.saving"
         :disabled="props.saving || props.count === 0 || Boolean(props.problem)"
         @click="props.submitType === 'button' ? emit('save') : undefined"

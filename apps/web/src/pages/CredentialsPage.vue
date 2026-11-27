@@ -198,11 +198,15 @@ watch(highlightSlug, (slug) => {
                 </td>
                 <td>
                   <span v-if="item.allowedRealms === null" class="text-xs text-muted">不限</span>
-                  <span v-else-if="!item.allowedRealms.length" class="text-xs text-muted">
-                    仅无场域
+                  <span v-else-if="!item.allowedRealms.length" class="realm-tag">
+                    <UIcon :name="icons.lock" class="tag-icon" aria-hidden="true" />
+                    <span>仅无场域</span>
                   </span>
                   <div v-else class="flex flex-wrap gap-1">
-                    <span v-for="r in item.allowedRealms" :key="r" class="realm-tag">{{ r }}</span>
+                    <span v-for="r in item.allowedRealms" :key="r" class="realm-tag">
+                      <UIcon :name="icons.realm" class="tag-icon" aria-hidden="true" />
+                      <span>{{ r }}</span>
+                    </span>
                   </div>
                 </td>
                 <td>
@@ -254,6 +258,7 @@ watch(highlightSlug, (slug) => {
 
         <EmptyState
           v-else-if="!credentialsQuery.isError.value"
+          :icon="icons.credentials"
           title="暂无凭据"
           description="新建凭据后，可在记忆正文里插入占位符，避免明文密码进入上下文。"
         >
@@ -276,7 +281,10 @@ watch(highlightSlug, (slug) => {
       <template #body>
         <div class="space-y-4">
           <div class="space-y-1.5">
-            <p class="text-xs font-medium text-muted">当前明文值</p>
+            <p class="field-caption">
+              <UIcon :name="icons.reveal" class="field-caption-icon" aria-hidden="true" />
+              <span>当前明文值</span>
+            </p>
             <USkeleton v-if="revealing" class="h-12 w-full" />
             <div v-else-if="revealedValue !== null" class="secret-box">
               <pre class="secret-text">{{ revealedValue }}</pre>
@@ -335,6 +343,7 @@ watch(highlightSlug, (slug) => {
         '引用该占位符的记忆与命令行调用将无法再解析到值。',
       ]"
       action="确认删除"
+      :action-icon="icons.remove"
       :busy="deleteBusy"
       :error="deleteError"
       @confirm="confirmDelete"
@@ -397,10 +406,35 @@ watch(highlightSlug, (slug) => {
   gap: 6px;
 }
 .realm-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   padding: 0 5px;
   border: 1px solid var(--ui-border-accented);
   font-size: 12px;
   line-height: 1.5;
+  white-space: nowrap;
+}
+.tag-icon {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
+  color: var(--ui-text-muted);
+}
+.field-caption {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ui-text-muted);
+}
+.field-caption-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
 }
 .row-actions {
   display: flex;

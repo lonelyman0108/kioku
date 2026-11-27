@@ -12,7 +12,7 @@ import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { icons } from '../icons'
-import { hygieneFixLabels } from '../labels'
+import { hygieneFixIcons, hygieneFixLabels } from '../labels'
 import { formatShort } from '../time'
 import DreamSuggestionCard from './DreamSuggestionCard.vue'
 import DiffViewer from './ui/DiffViewer.vue'
@@ -352,7 +352,14 @@ const drawerDescription = computed(() =>
       <div class="drawer-body">
         <div v-if="loading" class="progress-panel" role="status" aria-live="polite">
           <div class="progress-head">
-            <span class="progress-title">{{ stageMessage || '正在执行整理…' }}</span>
+            <span class="progress-title">
+              <UIcon
+                :name="mode === 'tidy' ? icons.tidy : icons.links"
+                class="progress-icon"
+                aria-hidden="true"
+              />
+              <span>{{ stageMessage || '正在执行整理…' }}</span>
+            </span>
             <UButton
               size="xs"
               color="neutral"
@@ -386,6 +393,8 @@ const drawerDescription = computed(() =>
         <template v-else-if="mode === 'tidy' && tidyResult">
           <EmptyState
             v-if="!tidyResult.needed"
+            :icon="icons.shieldCheck"
+            tone="success"
             title="当前记忆结构良好"
             :description="tidyResult.reason"
           />
@@ -394,14 +403,21 @@ const drawerDescription = computed(() =>
             <p class="reason-line">{{ tidyResult.reason }}</p>
 
             <div v-if="tidyResult.preCleanedFixes.length" class="fix-strip">
-              <span class="strip-label">已叠加确定性预清洗</span>
+              <span class="strip-label">
+                <UIcon :name="icons.shieldCheck" class="strip-label-icon" aria-hidden="true" />
+                <span>已叠加确定性预清洗</span>
+              </span>
               <span v-for="fix in tidyResult.preCleanedFixes" :key="fix" class="fix-pill">
-                {{ hygieneFixLabels[fix] }}
+                <UIcon :name="hygieneFixIcons[fix]" class="fix-pill-icon" aria-hidden="true" />
+                <span>{{ hygieneFixLabels[fix] }}</span>
               </span>
             </div>
 
             <div class="partial-bar" role="group" aria-label="选择要应用的规范改动">
-              <span class="strip-label">勾选需要应用的改动</span>
+              <span class="strip-label">
+                <UIcon :name="icons.listChecks" class="strip-label-icon" aria-hidden="true" />
+                <span>勾选需要应用的改动</span>
+              </span>
               <div class="partial-checks">
                 <label v-if="hasTitleChange" class="part-check">
                   <input v-model="parts.title" type="checkbox" :disabled="applying || staging" />
@@ -440,7 +456,10 @@ const drawerDescription = computed(() =>
               v-if="hasSummaryChange && parts.summary && tidyResult.proposed.summary"
               class="summary-box"
             >
-              <span class="strip-label">建议现行概要</span>
+              <span class="strip-label">
+                <UIcon :name="icons.summary" class="strip-label-icon" aria-hidden="true" />
+                <span>建议现行概要</span>
+              </span>
               <p class="summary-text">{{ tidyResult.proposed.summary }}</p>
             </div>
 
@@ -454,9 +473,11 @@ const drawerDescription = computed(() =>
               <span class="guard-status">
                 <UIcon
                   :name="
-                    hasMissingRefs || tidyResult.integrity.severeShrink
-                      ? icons.warning
-                      : icons.check
+                    hasMissingRefs
+                      ? icons.shieldAlert
+                      : tidyResult.integrity.severeShrink
+                        ? icons.warning
+                        : icons.check
                   "
                   class="guard-icon"
                   aria-hidden="true"
@@ -495,7 +516,11 @@ const drawerDescription = computed(() =>
               class="archived-box"
             >
               <summary class="archived-head">
-                将写入版本历史的归档说明（{{ tidyResult.proposed.archivedNotes.length }} 条）
+                <UIcon :name="icons.chevronRight" class="archived-chevron" aria-hidden="true" />
+                <UIcon :name="icons.history" class="archived-icon" aria-hidden="true" />
+                <span>
+                  将写入版本历史的归档说明（{{ tidyResult.proposed.archivedNotes.length }} 条）
+                </span>
               </summary>
               <ul class="archived-list">
                 <li v-for="(item, idx) in tidyResult.proposed.archivedNotes" :key="idx">
@@ -512,9 +537,12 @@ const drawerDescription = computed(() =>
         <!-- 模式 2：单条深度查重与关联 -->
         <template v-else-if="mode === 'cross_check' && crossResult">
           <div class="cross-meta tabular-nums">
-            <span>
-              已比对 {{ crossResult.consideredNeighbors }} 条相邻记忆，本次新发现
-              {{ crossResult.createdCount }} 条建议
+            <span class="cross-meta-summary">
+              <UIcon :name="icons.links" class="cross-meta-icon" aria-hidden="true" />
+              <span>
+                已比对 {{ crossResult.consideredNeighbors }} 条相邻记忆，本次新发现
+                {{ crossResult.createdCount }} 条建议
+              </span>
             </span>
             <UButton
               size="xs"
@@ -529,6 +557,8 @@ const drawerDescription = computed(() =>
 
           <EmptyState
             v-if="!crossResult.suggestions.length"
+            :icon="icons.shieldCheck"
+            tone="success"
             title="未发现需要处理的重复或缺失关联"
             description="该记忆与相邻记忆界限清晰，暂无需合并、更新或补全双链。"
           />
@@ -608,9 +638,19 @@ const drawerDescription = computed(() =>
   gap: 12px;
 }
 .progress-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 14px;
   font-weight: 500;
   color: var(--ui-text-highlighted);
+}
+.progress-icon {
+  display: inline-block;
+  flex: none;
+  width: 15px;
+  height: 15px;
+  color: var(--ui-text-muted);
 }
 .reason-line {
   font-size: 14px;
@@ -629,15 +669,34 @@ const drawerDescription = computed(() =>
   font-size: 13px;
 }
 .strip-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-size: 12px;
   color: var(--ui-text-muted);
 }
+.strip-label-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+}
 .fix-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   padding: 1px 6px;
   border: 1px solid var(--ui-border-accented);
   background: var(--ui-bg);
   font-size: 12px;
   color: var(--ui-text-toned);
+}
+.fix-pill-icon {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
+  color: var(--ui-text-muted);
 }
 .partial-checks {
   display: flex;
@@ -669,6 +728,7 @@ const drawerDescription = computed(() =>
 }
 .compare-arrow {
   display: inline-block;
+  flex: none;
   width: 13px;
   height: 13px;
   color: var(--ui-text-dimmed);
@@ -725,6 +785,7 @@ const drawerDescription = computed(() =>
 }
 .guard-icon {
   display: inline-block;
+  flex: none;
   width: 14px;
   height: 14px;
 }
@@ -734,11 +795,32 @@ const drawerDescription = computed(() =>
   font-size: 13px;
 }
 .archived-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  list-style: none;
   padding: 7px 12px;
   font-size: 12px;
   font-weight: 500;
   color: var(--ui-text-toned);
   cursor: pointer;
+}
+.archived-head::-webkit-details-marker {
+  display: none;
+}
+.archived-chevron,
+.archived-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+  color: var(--ui-text-muted);
+}
+.archived-chevron {
+  transition: transform 150ms ease;
+}
+.archived-box[open] .archived-chevron {
+  transform: rotate(90deg);
 }
 .archived-list {
   display: flex;
@@ -764,6 +846,18 @@ const drawerDescription = computed(() =>
   background: var(--ui-bg-muted);
   font-size: 13px;
   color: var(--ui-text-toned);
+}
+.cross-meta-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.cross-meta-icon {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--ui-text-muted);
 }
 .drawer-foot {
   display: flex;

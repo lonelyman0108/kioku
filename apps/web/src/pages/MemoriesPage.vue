@@ -240,6 +240,17 @@ watch(
   { immediate: true },
 )
 
+// 支持通过 ?create=1 打开新建记忆并清理地址栏参数
+watch(
+  () => route.query.create,
+  (createFlag) => {
+    if (createFlag !== '1' && createFlag !== 'true') return
+    createOpen.value = true
+    void router.replace(withQuery({ create: null }))
+  },
+  { immediate: true },
+)
+
 function openCapture(draft = '') {
   captureDraft.value = draft
   captureOpen.value = true
@@ -310,6 +321,7 @@ async function onBatchOrganize(mode: 'tidy' | 'cross_memory', shortIds: string[]
         actions: [
           {
             label: '前往待处理',
+            icon: icons.inbox,
             color: 'neutral',
             variant: 'outline',
             onClick: () => void router.push({ name: 'inbox' }),

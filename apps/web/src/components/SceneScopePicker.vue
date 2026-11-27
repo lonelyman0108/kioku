@@ -8,6 +8,7 @@ import {
 } from '@kioku/contracts'
 import { computed, reactive, ref, watch } from 'vue'
 
+import { icons } from '../icons'
 import { envDisplayName } from '../labels'
 import { runtimeName } from '../runtimes'
 
@@ -114,6 +115,7 @@ function setUniversal() {
           size="xs"
           :color="!expanded ? 'primary' : 'neutral'"
           :variant="!expanded ? 'solid' : 'outline'"
+          :icon="icons.globe"
           :disabled="disabled"
           @click="setUniversal"
         >
@@ -124,6 +126,7 @@ function setUniversal() {
           size="xs"
           :color="expanded ? 'primary' : 'neutral'"
           :variant="expanded ? 'solid' : 'outline'"
+          :icon="icons.sliders"
           :disabled="disabled"
           @click="expanded = true"
         >
@@ -135,7 +138,10 @@ function setUniversal() {
 
     <div v-if="expanded" class="scope-grid">
       <div class="scope-row">
-        <span class="scope-label">环境</span>
+        <span class="scope-label">
+          <UIcon :name="icons.env" class="scope-label-icon" aria-hidden="true" />
+          <span>环境</span>
+        </span>
         <div class="scope-chips">
           <UButton
             v-for="slug in envChoices"
@@ -162,7 +168,10 @@ function setUniversal() {
       </div>
 
       <div class="scope-row">
-        <span class="scope-label">场域</span>
+        <span class="scope-label">
+          <UIcon :name="icons.realm" class="scope-label-icon" aria-hidden="true" />
+          <span>场域</span>
+        </span>
         <div class="scope-chips">
           <UButton
             v-for="slug in realmChoices"
@@ -189,7 +198,10 @@ function setUniversal() {
       </div>
 
       <div class="scope-row">
-        <span class="scope-label">项目</span>
+        <span class="scope-label">
+          <UIcon :name="icons.project" class="scope-label-icon" aria-hidden="true" />
+          <span>项目</span>
+        </span>
         <div class="scope-chips">
           <UButton
             v-for="slug in projectChoices"
@@ -216,7 +228,10 @@ function setUniversal() {
       </div>
 
       <div class="scope-row">
-        <span class="scope-label">客户端</span>
+        <span class="scope-label">
+          <UIcon :name="icons.terminal" class="scope-label-icon" aria-hidden="true" />
+          <span>客户端</span>
+        </span>
         <div class="scope-chips">
           <UButton
             v-for="rt in runtimeChoices"
@@ -273,14 +288,24 @@ function setUniversal() {
 }
 .scope-row {
   display: grid;
-  grid-template-columns: 3.5rem minmax(0, 1fr);
+  grid-template-columns: 4.75rem minmax(0, 1fr);
   align-items: start;
   gap: 8px;
 }
 .scope-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   padding-top: 3px;
   font-size: 12px;
   color: var(--ui-text-muted);
+  white-space: nowrap;
+}
+.scope-label-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
 }
 .scope-chips {
   display: flex;

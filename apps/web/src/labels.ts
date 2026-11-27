@@ -60,6 +60,15 @@ export const eventTypeLabels: Record<EntryEventType, string> = {
   archive_note: '历史归档',
 }
 
+export const eventTypeIcons: Record<EntryEventType, string> = {
+  create: icons.add,
+  update: icons.edit,
+  delete: icons.remove,
+  undelete: icons.undelete,
+  restore: icons.restore,
+  archive_note: icons.history,
+}
+
 export const entryFieldLabels: Record<string, string> = {
   title: '标题',
   summary: '现行概要',
@@ -85,6 +94,12 @@ export const hygieneFixLabels: Record<HygieneSweepFixKind, string> = {
   strip_duplicate_heading: '移除首行重复标题',
   strip_legacy_glossary: '清理旧版关键词行',
   rewrite_legacy_links: '修复旧路径引用为双链',
+}
+
+export const hygieneFixIcons: Record<HygieneSweepFixKind, string> = {
+  strip_duplicate_heading: icons.split,
+  strip_legacy_glossary: icons.eraser,
+  rewrite_legacy_links: icons.linkChain,
 }
 
 const RAW_KEY_PREFIX = 'key:'
@@ -243,6 +258,12 @@ export const bootModeLabels: Record<BootMode, string> = {
   full: '全文常驻',
 }
 
+export const bootModeIcons: Record<BootMode, string> = {
+  none: icons.bookOpen,
+  index: icons.bookmark,
+  full: icons.pin,
+}
+
 export const bootModeDescriptions: Record<BootMode, string> = {
   none: '仅在检索或提及相关主题时按需召回',
   index: '会话启动仅注入标题、概要与字数索引，适合长篇参考手册',
@@ -255,10 +276,22 @@ export const bootBucketLabels: Record<BootBucket, string> = {
   global: '全局通用',
 }
 
+export const bootBucketIcons: Record<BootBucket, string> = {
+  exact: icons.targetExact,
+  context: icons.layers,
+  global: icons.globe,
+}
+
 export const bootOmitReasonLabels: Record<BootOmitReason, string> = {
   index: '目录常驻',
   oversized: '超单条上限降级',
   budget: '超预算降级',
+}
+
+export const bootOmitReasonIcons: Record<BootOmitReason, string> = {
+  index: icons.bookmark,
+  oversized: icons.warning,
+  budget: icons.gauge,
 }
 
 export const bootExcludeReasonLabels: Record<BootExcludeReason, string> = {
@@ -266,4 +299,11 @@ export const bootExcludeReasonLabels: Record<BootExcludeReason, string> = {
   scene_conflict: '场景不匹配',
   project_mismatch: '非当前项目',
   expired: '已过期',
+}
+
+export const bootExcludeReasonIcons: Record<BootExcludeReason, string> = {
+  realm_forbidden: icons.lock,
+  scene_conflict: icons.filterX,
+  project_mismatch: icons.folderX,
+  expired: icons.clock,
 }

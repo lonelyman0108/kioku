@@ -42,7 +42,7 @@ const emit = defineEmits<{ open: [shortId: string] }>()
     </section>
 
     <section v-if="backlinks.length" class="links-section">
-      <SectionHeading title="反向链接" :icon="icons.links" :level="3" />
+      <SectionHeading title="反向链接" :icon="icons.backlink" :level="3" />
       <ul class="links-list">
         <li v-for="item in backlinks" :key="`in-${item.shortId}`">
           <button type="button" class="link-row" @click="emit('open', item.shortId)">

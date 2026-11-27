@@ -15,6 +15,7 @@ import { useLogout } from '../composables/useLogout'
 import { ME_KEY, useSession } from '../composables/useSession'
 import { icons } from '../icons'
 import { formatRelative, formatTime } from '../time'
+import { parseUserAgent, type SessionDeviceKind } from '../userAgent'
 import DataTransferPanel from './DataTransferPanel.vue'
 import ReadFailureNote from './ui/ReadFailureNote.vue'
 import SectionHeading from './ui/SectionHeading.vue'
@@ -87,6 +88,24 @@ const sessionsQuery = useQuery({
 })
 const sessions = computed(() => sessionsQuery.data.value?.items ?? [])
 const revokingId = ref<string | null>(null)
+
+function deviceIconOf(current: boolean, kind: SessionDeviceKind): string {
+  if (current) return icons.currentDevice
+  if (kind === 'mobile') return icons.deviceMobile
+  if (kind === 'tablet') return icons.deviceTablet
+  return icons.deviceDesktop
+}
+
+const sessionRows = computed(() =>
+  sessions.value.map((session) => {
+    const ua = parseUserAgent(session.userAgent)
+    return {
+      session,
+      uaLabel: ua.label,
+      icon: deviceIconOf(session.current, ua.deviceKind),
+    }
+  }),
+)
 
 async function revokeSession(id: string) {
   if (revokingId.value) return
@@ -175,23 +194,23 @@ const versionText = computed(() =>
       </div>
       <ul v-else class="divide-y divide-default border-y border-default">
         <li
-          v-for="session in sessions"
+          v-for="{ session, uaLabel, icon } in sessionRows"
           :key="session.id"
           class="flex flex-wrap items-center justify-between gap-3 py-2.5 text-sm"
         >
           <div class="min-w-0 space-y-0.5">
             <p class="flex flex-wrap items-center gap-2">
               <UIcon
-                v-if="session.current"
-                :name="icons.currentDevice"
+                :name="icon"
                 class="session-icon"
+                :class="session.current ? 'is-current' : 'is-other'"
                 aria-hidden="true"
               />
               <span class="font-medium">{{ session.clientAddress ?? '未知地址' }}</span>
               <span v-if="session.current" class="current-pill">当前设备</span>
             </p>
             <p class="truncate text-xs text-muted">
-              {{ session.userAgent ?? '未知浏览器' }} · 最近活动
+              <span :title="session.userAgent ?? undefined">{{ uaLabel }}</span> · 最近活动
               <time :datetime="session.lastActiveAt" :title="formatTime(session.lastActiveAt)">
                 {{ formatRelative(session.lastActiveAt) }}
               </time>
@@ -211,7 +230,7 @@ const versionText = computed(() =>
             v-else
             size="xs"
             color="error"
-            variant="ghost"
+            variant="outline"
             :icon="icons.logout"
             :loading="revokingId === session.id"
             @click="revokeSession(session.id)"
@@ -237,6 +256,12 @@ const versionText = computed(() =>
   flex: none;
   width: 15px;
   height: 15px;
+}
+.session-icon.is-current {
+  color: var(--ui-text-highlighted);
+}
+.session-icon.is-other {
+  color: var(--ui-text-muted);
 }
 .current-pill {
   padding: 0 5px;

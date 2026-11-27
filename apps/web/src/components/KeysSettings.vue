@@ -100,7 +100,10 @@ async function confirmRevoke() {
       <SectionHeading title="快捷接入" :icon="icons.plug" :level="2" />
       <div class="connect-grid">
         <div class="connect-card">
-          <span class="connect-label">MCP 端点</span>
+          <span class="connect-label">
+            <UIcon :name="icons.globe" class="connect-label-icon" aria-hidden="true" />
+            <span>MCP 端点</span>
+          </span>
           <div class="connect-value">
             <code class="font-mono text-xs">{{ mcpUrl }}</code>
             <UButton
@@ -115,7 +118,10 @@ async function confirmRevoke() {
           </div>
         </div>
         <div class="connect-card">
-          <span class="connect-label">命令行一键登录</span>
+          <span class="connect-label">
+            <UIcon :name="icons.terminal" class="connect-label-icon" aria-hidden="true" />
+            <span>命令行一键登录</span>
+          </span>
           <div class="connect-value">
             <code class="font-mono text-xs">{{ loginCmd }}</code>
             <UButton
@@ -170,24 +176,40 @@ async function confirmRevoke() {
               <td>
                 <div class="tag-list">
                   <span v-for="e in item.envs" :key="`e:${e}`" class="tag">
-                    {{ envDisplayName(e) }}
+                    <UIcon :name="icons.env" class="tag-icon" aria-hidden="true" />
+                    <span>{{ envDisplayName(e) }}</span>
                   </span>
                   <span v-if="item.allowedRealms === null" class="text-xs text-muted"
                     >全部场域</span
                   >
-                  <span v-else-if="!item.allowedRealms.length" class="tag">仅通用</span>
+                  <span v-else-if="!item.allowedRealms.length" class="tag">
+                    <UIcon :name="icons.lock" class="tag-icon" aria-hidden="true" />
+                    <span>仅通用</span>
+                  </span>
                   <span v-for="r in item.allowedRealms ?? []" :key="`r:${r}`" class="tag">
-                    场域:{{ r }}
+                    <UIcon :name="icons.realm" class="tag-icon" aria-hidden="true" />
+                    <span>场域:{{ r }}</span>
                   </span>
                   <span v-for="f in item.focusRealms ?? []" :key="`f:${f}`" class="tag tag-focus">
-                    聚焦:{{ f }}
+                    <UIcon :name="icons.focus" class="tag-icon" aria-hidden="true" />
+                    <span>聚焦:{{ f }}</span>
                   </span>
                 </div>
               </td>
               <td>
                 <div class="tag-list">
-                  <span class="tag">{{ item.canWrite ? '读写' : '只读' }}</span>
-                  <span v-if="item.canResolveCredentials" class="tag">解析凭据</span>
+                  <span class="tag">
+                    <UIcon
+                      :name="item.canWrite ? icons.edit : icons.reveal"
+                      class="tag-icon"
+                      aria-hidden="true"
+                    />
+                    <span>{{ item.canWrite ? '读写' : '只读' }}</span>
+                  </span>
+                  <span v-if="item.canResolveCredentials" class="tag">
+                    <UIcon :name="icons.credentials" class="tag-icon" aria-hidden="true" />
+                    <span>解析凭据</span>
+                  </span>
                 </div>
               </td>
               <td>
@@ -240,6 +262,7 @@ async function confirmRevoke() {
 
       <EmptyState
         v-else-if="!keysQuery.isError.value"
+        :icon="icons.keys"
         title="暂无访问密钥"
         description="签发访问密钥或通过命令行发起浏览器授权，以接入编码工具。"
       >
@@ -248,9 +271,11 @@ async function confirmRevoke() {
         </template>
       </EmptyState>
 
-      <details v-if="revokedKeys.length" class="pt-3">
-        <summary class="cursor-pointer text-xs text-muted">
-          已吊销的访问密钥（{{ revokedKeys.length }} 个）
+      <details v-if="revokedKeys.length" class="revoked-details pt-3">
+        <summary class="revoked-summary">
+          <UIcon :name="icons.chevronRight" class="revoked-chevron" aria-hidden="true" />
+          <UIcon :name="icons.revoked" class="revoked-icon" aria-hidden="true" />
+          <span>已吊销的访问密钥（{{ revokedKeys.length }} 个）</span>
         </summary>
         <ul class="mt-2 divide-y divide-default border-t border-default text-xs text-muted">
           <li
@@ -300,7 +325,7 @@ async function confirmRevoke() {
       </template>
       <template #footer>
         <div class="flex w-full justify-end">
-          <UButton @click="rotatedSecret = null">我已保存</UButton>
+          <UButton :icon="icons.check" @click="rotatedSecret = null">我已保存</UButton>
         </div>
       </template>
     </UModal>
@@ -313,6 +338,7 @@ async function confirmRevoke() {
         '吊销后不可恢复，如需继续接入请重新签发。',
       ]"
       action="确认吊销"
+      :action-icon="icons.revoked"
       :busy="revokeBusy"
       :error="revokeError"
       @confirm="confirmRevoke"
@@ -336,8 +362,17 @@ async function confirmRevoke() {
   background: var(--ui-bg-muted);
 }
 .connect-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-size: 12px;
   color: var(--ui-text-muted);
+}
+.connect-label-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
 }
 .connect-value {
   display: flex;
@@ -387,15 +422,53 @@ async function confirmRevoke() {
   gap: 4px;
 }
 .tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   padding: 0 5px;
   border: 1px solid var(--ui-border-accented);
   font-size: 12px;
   line-height: 1.5;
   white-space: nowrap;
 }
+.tag-icon {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
+  color: var(--ui-text-muted);
+}
 .tag-focus {
   border-style: dashed;
   color: var(--ui-text-muted);
+}
+.revoked-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--ui-text-muted);
+  cursor: pointer;
+  list-style: none;
+}
+.revoked-summary::-webkit-details-marker {
+  display: none;
+}
+.revoked-summary::marker {
+  content: '';
+}
+.revoked-chevron,
+.revoked-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+}
+.revoked-chevron {
+  transition: transform 0.15s ease;
+}
+.revoked-details[open] .revoked-chevron {
+  transform: rotate(90deg);
 }
 .row-actions {
   display: flex;

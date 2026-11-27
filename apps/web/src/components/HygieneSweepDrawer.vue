@@ -12,7 +12,7 @@ import { computed, ref, watch } from 'vue'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { icons } from '../icons'
-import { hygieneFixLabels } from '../labels'
+import { hygieneFixIcons, hygieneFixLabels } from '../labels'
 import { entryRoute } from '../routes'
 import DiffViewer from './ui/DiffViewer.vue'
 import EmptyState from './ui/EmptyState.vue'
@@ -282,7 +282,10 @@ async function applySelected() {
         <!-- 扫描概览（有结果项支持点击直达对应分组） -->
         <div class="sweep-stats tabular-nums">
           <div class="stat-cell">
-            <span class="stat-label">已扫描记忆</span>
+            <span class="stat-label">
+              <UIcon :name="icons.file" class="stat-label-icon" aria-hidden="true" />
+              <span>已扫描记忆</span>
+            </span>
             <span class="stat-val">{{ report.totalScanned }} 条</span>
           </div>
           <button
@@ -291,15 +294,24 @@ async function applySelected() {
             class="stat-cell is-clickable"
             @click="jumpToSection(candidatesSectionRef)"
           >
-            <span class="stat-label">可确定性预清洗</span>
+            <span class="stat-label">
+              <UIcon :name="icons.shieldCheck" class="stat-label-icon" aria-hidden="true" />
+              <span>可确定性预清洗</span>
+            </span>
             <span class="stat-val">{{ candidates.length }} 条</span>
           </button>
           <div v-else class="stat-cell">
-            <span class="stat-label">可确定性预清洗</span>
+            <span class="stat-label">
+              <UIcon :name="icons.shieldCheck" class="stat-label-icon" aria-hidden="true" />
+              <span>可确定性预清洗</span>
+            </span>
             <span class="stat-val">0 条</span>
           </div>
           <div class="stat-cell">
-            <span class="stat-label">待规范标题</span>
+            <span class="stat-label">
+              <UIcon :name="icons.tidy" class="stat-label-icon" aria-hidden="true" />
+              <span>待规范标题</span>
+            </span>
             <span class="stat-val" :class="{ 'text-warning': report.dirtyTitleCount > 0 }">
               {{ report.dirtyTitleCount }} 条
             </span>
@@ -310,7 +322,10 @@ async function applySelected() {
             class="stat-cell is-clickable"
             @click="jumpToSection(truncatedSectionRef ?? obsoleteSectionRef)"
           >
-            <span class="stat-label">异常标注</span>
+            <span class="stat-label">
+              <UIcon :name="icons.shieldAlert" class="stat-label-icon" aria-hidden="true" />
+              <span>异常标注</span>
+            </span>
             <span
               class="stat-val"
               :class="{
@@ -322,7 +337,10 @@ async function applySelected() {
             </span>
           </button>
           <div v-else class="stat-cell">
-            <span class="stat-label">异常标注</span>
+            <span class="stat-label">
+              <UIcon :name="icons.shieldAlert" class="stat-label-icon" aria-hidden="true" />
+              <span>异常标注</span>
+            </span>
             <span class="stat-val">0 条</span>
           </div>
           <button
@@ -331,17 +349,25 @@ async function applySelected() {
             class="stat-cell is-clickable"
             @click="jumpToSection(brokenLinksSectionRef)"
           >
-            <span class="stat-label">悬空断链</span>
+            <span class="stat-label">
+              <UIcon :name="icons.brokenLink" class="stat-label-icon" aria-hidden="true" />
+              <span>悬空断链</span>
+            </span>
             <span class="stat-val text-warning">{{ brokenLinks.length }} 条</span>
           </button>
           <div v-else class="stat-cell">
-            <span class="stat-label">悬空断链</span>
+            <span class="stat-label">
+              <UIcon :name="icons.brokenLink" class="stat-label-icon" aria-hidden="true" />
+              <span>悬空断链</span>
+            </span>
             <span class="stat-val">0 条</span>
           </div>
         </div>
 
         <EmptyState
           v-if="isClean"
+          :icon="icons.shieldCheck"
+          tone="success"
           :title="report.dirtyTitleCount > 0 ? '无需确定性预清洗' : '记忆结构良好'"
           :description="
             report.dirtyTitleCount > 0
@@ -358,6 +384,7 @@ async function applySelected() {
                 size="xs"
                 color="neutral"
                 variant="ghost"
+                :icon="allSelected ? icons.cancel : icons.listChecks"
                 :disabled="applying"
                 @click="toggleSelectAll"
               >
@@ -398,14 +425,18 @@ async function applySelected() {
                 </div>
                 <span class="sweep-meta tabular-nums">
                   <span class="font-mono">{{ item.shortId }}</span>
-                  <span v-if="item.isPinned" class="mini-pill">常驻</span>
+                  <span v-if="item.isPinned" class="mini-pill">
+                    <UIcon :name="icons.pin" class="mini-pill-icon" aria-hidden="true" />
+                    <span>常驻</span>
+                  </span>
                   <span>{{ item.beforeChars }} → {{ item.afterChars }} 字</span>
                 </span>
               </div>
 
               <div class="fix-tags">
                 <span v-for="fix in item.fixes" :key="fix" class="fix-tag">
-                  {{ hygieneFixLabels[fix] }}
+                  <UIcon :name="hygieneFixIcons[fix]" class="fix-tag-icon" aria-hidden="true" />
+                  <span>{{ hygieneFixLabels[fix] }}</span>
                 </span>
                 <UButton
                   type="button"
@@ -447,7 +478,8 @@ async function applySelected() {
               </ul>
 
               <p v-if="item.unresolvedRefs.length" class="unresolved-note">
-                未匹配到的旧引用（保留原文）：{{ item.unresolvedRefs.join('、') }}
+                <UIcon :name="icons.warning" class="unresolved-icon" aria-hidden="true" />
+                <span>未匹配到的旧引用（保留原文）：{{ item.unresolvedRefs.join('、') }}</span>
               </p>
             </li>
           </ul>
@@ -469,7 +501,10 @@ async function applySelected() {
                 </RouterLink>
                 <span class="sweep-meta tabular-nums">
                   <span class="font-mono">{{ flag.shortId }}</span>
-                  <span v-if="flag.isPinned" class="mini-pill">常驻</span>
+                  <span v-if="flag.isPinned" class="mini-pill">
+                    <UIcon :name="icons.pin" class="mini-pill-icon" aria-hidden="true" />
+                    <span>常驻</span>
+                  </span>
                   <span>{{ flag.charCount }} 字</span>
                 </span>
               </div>
@@ -494,7 +529,10 @@ async function applySelected() {
                 </RouterLink>
                 <span class="sweep-meta tabular-nums">
                   <span class="font-mono">{{ flag.shortId }}</span>
-                  <span v-if="flag.isPinned" class="mini-pill">常驻</span>
+                  <span v-if="flag.isPinned" class="mini-pill">
+                    <UIcon :name="icons.pin" class="mini-pill-icon" aria-hidden="true" />
+                    <span>常驻</span>
+                  </span>
                   <span>{{ flag.charCount }} 字</span>
                 </span>
               </div>
@@ -504,7 +542,7 @@ async function applySelected() {
         </section>
         <!-- 悬空断链记忆 -->
         <section v-if="brokenLinks.length" ref="brokenLinksSectionRef" class="sweep-section">
-          <SectionHeading title="悬空断链记忆" :icon="icons.links" :level="3" />
+          <SectionHeading title="悬空断链记忆" :icon="icons.brokenLink" :level="3" />
           <p class="text-xs text-muted">指向已删除或不存在的目标</p>
           <ul class="flag-list">
             <li v-for="item in brokenLinks" :key="item.shortId" class="flag-item is-warning">
@@ -518,7 +556,10 @@ async function applySelected() {
                 </RouterLink>
                 <span class="sweep-meta tabular-nums">
                   <span class="font-mono">{{ item.shortId }}</span>
-                  <span v-if="item.isPinned" class="mini-pill">常驻</span>
+                  <span v-if="item.isPinned" class="mini-pill">
+                    <UIcon :name="icons.pin" class="mini-pill-icon" aria-hidden="true" />
+                    <span>常驻</span>
+                  </span>
                   <span>{{ item.targets.length }} 处断链</span>
                 </span>
               </div>
@@ -568,8 +609,17 @@ async function applySelected() {
   background: var(--ui-bg-elevated);
 }
 .stat-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-size: 12px;
   color: var(--ui-text-muted);
+}
+.stat-label-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
 }
 .stat-val {
   font-size: 15px;
@@ -635,11 +685,20 @@ async function applySelected() {
   color: var(--ui-text-muted);
 }
 .mini-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   padding: 0 5px;
   border: 1px solid var(--ui-rule);
   font-size: 12px;
   line-height: 1.35;
   color: var(--ui-text-highlighted);
+}
+.mini-pill-icon {
+  display: inline-block;
+  flex: none;
+  width: 11px;
+  height: 11px;
 }
 .fix-tags {
   display: flex;
@@ -647,11 +706,21 @@ async function applySelected() {
   gap: 5px;
 }
 .fix-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   padding: 1px 6px;
   border: 1px solid var(--ui-border-accented);
   background: var(--ui-bg-muted);
   font-size: 12px;
   color: var(--ui-text-toned);
+}
+.fix-tag-icon {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
+  color: var(--ui-text-muted);
 }
 .rewrite-list {
   display: flex;
@@ -671,14 +740,25 @@ async function applySelected() {
 }
 .rewrite-arrow {
   display: inline-block;
+  flex: none;
   width: 12px;
   height: 12px;
   color: var(--ui-text-dimmed);
 }
 .unresolved-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
   font-size: 12px;
   color: var(--ui-warning);
   overflow-wrap: anywhere;
+}
+.unresolved-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+  margin-top: 2px;
 }
 .flag-item {
   display: flex;

@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
+import accountDataSettings from '../components/AccountDataSettings.vue?raw'
 import bootPreviewDrawer from '../components/BootPreviewDrawer.vue?raw'
+import consequenceModal from '../components/ConsequenceModal.vue?raw'
 import createMemoryModal from '../components/CreateMemoryModal.vue?raw'
+import dataTransferPanel from '../components/DataTransferPanel.vue?raw'
 import dreamSuggestionCard from '../components/DreamSuggestionCard.vue?raw'
 import entryLinksPanel from '../components/EntryLinksPanel.vue?raw'
 import hygieneSweepDrawer from '../components/HygieneSweepDrawer.vue?raw'
@@ -14,6 +17,9 @@ import quickCaptureModal from '../components/QuickCaptureModal.vue?raw'
 import sceneScopePicker from '../components/SceneScopePicker.vue?raw'
 import singleTidyDrawer from '../components/SingleTidyDrawer.vue?raw'
 import diffViewer from '../components/ui/DiffViewer.vue?raw'
+import emptyState from '../components/ui/EmptyState.vue?raw'
+import noteLine from '../components/ui/NoteLine.vue?raw'
+import shortIdLine from '../components/ui/ShortIdLine.vue?raw'
 import consoleSearch from '../composables/useConsoleSearch.ts?raw'
 import { icons } from '../icons'
 import consoleLayout from '../layouts/ConsoleLayout.vue?raw'
@@ -253,6 +259,17 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(modelSettings).not.toContain('taskOverridesOpen.value = true')
     expect(modelSettings).toContain('crossMemory')
     expect(modelSettings).toContain('schedule-list')
+
+    expect(noteLine).toContain('icons.warning')
+    expect(emptyState).toContain('empty-icon')
+    expect(shortIdLine).toContain('复制')
+    expect(consequenceModal).toContain('actionIcon')
+    expect(entryLinksPanel).toContain('icons.backlink')
+    expect(consoleSearch).toContain('createEntryRoute')
+    expect(consoleSearch).toContain('effectiveBootMode')
+    expect(accountDataSettings).toContain('parseUserAgent')
+    expect(dataTransferPanel).toContain('icons.fileDown')
+    expect(dataTransferPanel).toContain('icons.fileUp')
   })
 
   it('界面中引用的全部 icons.* 均已在 icons.ts 注册，且没有直接写死未打包的 i-lucide-*', () => {
