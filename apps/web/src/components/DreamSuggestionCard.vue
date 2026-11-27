@@ -45,6 +45,7 @@ import SceneScopePicker, { type SceneScopeValue } from './SceneScopePicker.vue'
 import SegmentedChoice from './SegmentedChoice.vue'
 import DiffViewer from './ui/DiffViewer.vue'
 import NoteLine from './ui/NoteLine.vue'
+import WikiText from './ui/WikiText.vue'
 
 const props = withDefaults(
   defineProps<{
@@ -108,6 +109,17 @@ const displayTitle = computed(() => {
     return props.suggestion.proposedTitle?.trim() || baseEntry.value?.title || '未命名记忆'
   }
   return baseEntry.value?.title || props.suggestion.proposedTitle?.trim() || '未命名记忆'
+})
+
+const knownTitles = computed<ReadonlyMap<string, { title: string }> | null>(() => {
+  const map = new Map<string, { title: string }>()
+  for (const entry of props.suggestion.entries) {
+    if (entry.title) map.set(entry.shortId, { title: entry.title })
+  }
+  for (const link of props.suggestion.proposedLinks ?? []) {
+    if (link.targetTitle) map.set(link.targetShortId, { title: link.targetTitle })
+  }
+  return map.size > 0 ? map : null
 })
 
 // 规范与精简建议的分项勾选状态
@@ -772,7 +784,9 @@ function applyEdited() {
               {{ showRevisedDiff ? '收起对比' : '查看对比' }}
             </UButton>
           </div>
-          <p class="revise-preview-reason">{{ revisedReason }}</p>
+          <p class="revise-preview-reason">
+            <WikiText :text="revisedReason" :titles="knownTitles" compact />
+          </p>
           <NoteLine v-if="hasLostRefs || integrity?.severeShrink" tone="warning" flush>
             {{ integrityMessage }}
           </NoteLine>
@@ -946,11 +960,21 @@ function applyEdited() {
           <div class="summary-diff-grid">
             <div class="summary-row">
               <span class="summary-tag">原概要</span>
-              <span class="summary-old">{{ baseEntry.summary?.trim() || '暂无' }}</span>
+              <span class="summary-old">
+                <WikiText
+                  v-if="baseEntry.summary?.trim()"
+                  :text="baseEntry.summary.trim()"
+                  :titles="knownTitles"
+                  compact
+                />
+                <template v-else>暂无</template>
+              </span>
             </div>
             <div class="summary-row">
               <span class="summary-tag">建议概要</span>
-              <span class="summary-new">{{ suggestion.proposedSummary }}</span>
+              <span class="summary-new">
+                <WikiText :text="suggestion.proposedSummary ?? ''" :titles="knownTitles" compact />
+              </span>
             </div>
           </div>
         </div>
@@ -966,7 +990,9 @@ function applyEdited() {
           >
             <strong class="index-preview-title">{{ baseEntry.title }}</strong>
             <span>（{{ baseEntry.content.length.toLocaleString() }} 字）</span>
-            <template v-if="indexPreviewSummary">：{{ indexPreviewSummary }}</template>
+            <template v-if="indexPreviewSummary"
+              >：<WikiText :text="indexPreviewSummary" :titles="knownTitles" compact
+            /></template>
           </div>
         </div>
       </template>
@@ -1005,7 +1031,9 @@ function applyEdited() {
                     小节：{{ link.anchorHeading }}
                   </span>
                 </span>
-                <p v-if="link.reason" class="link-reason">{{ link.reason }}</p>
+                <p v-if="link.reason" class="link-reason">
+                  <WikiText :text="link.reason" :titles="knownTitles" compact />
+                </p>
               </span>
             </label>
           </li>
@@ -1059,7 +1087,9 @@ function applyEdited() {
             <UIcon :name="icons.summary" class="summary-preview-icon" aria-hidden="true" />
             <span>建议现行概要</span>
           </span>
-          <p class="summary-preview-text">{{ suggestion.proposedSummary }}</p>
+          <p class="summary-preview-text">
+            <WikiText :text="suggestion.proposedSummary ?? ''" :titles="knownTitles" compact />
+          </p>
         </div>
 
         <div v-if="showScopeReview" class="scope-review">
@@ -1125,7 +1155,9 @@ function applyEdited() {
             <UIcon :name="icons.summary" class="summary-preview-icon" aria-hidden="true" />
             <span>建议现行概要</span>
           </span>
-          <p class="summary-preview-text">{{ suggestion.proposedSummary }}</p>
+          <p class="summary-preview-text">
+            <WikiText :text="suggestion.proposedSummary ?? ''" :titles="knownTitles" compact />
+          </p>
         </div>
         <div v-if="showScopeReview" class="scope-review">
           <div class="scope-review-row">
@@ -1232,7 +1264,9 @@ function applyEdited() {
             <UIcon :name="icons.summary" class="summary-preview-icon" aria-hidden="true" />
             <span>建议现行概要</span>
           </span>
-          <p class="summary-preview-text">{{ suggestion.proposedSummary }}</p>
+          <p class="summary-preview-text">
+            <WikiText :text="suggestion.proposedSummary ?? ''" :titles="knownTitles" compact />
+          </p>
         </div>
 
         <div v-if="showScopeReview" class="scope-review">
@@ -1305,7 +1339,7 @@ function applyEdited() {
             <span v-if="item.occurredAt" class="archived-date font-mono">
               {{ formatShort(item.occurredAt) }}
             </span>
-            <span>{{ item.note }}</span>
+            <WikiText :text="item.note" :titles="knownTitles" compact />
           </li>
         </ul>
       </details>
@@ -1346,7 +1380,9 @@ function applyEdited() {
           <UIcon :name="icons.lightbulb" class="side-heading-icon" aria-hidden="true" />
           <span>整理依据</span>
         </h3>
-        <p class="side-reason">{{ suggestion.reason }}</p>
+        <p class="side-reason">
+          <WikiText :text="suggestion.reason" :titles="knownTitles" compact />
+        </p>
       </div>
 
       <div v-if="suggestion.entries.length" class="side-block">
@@ -1553,7 +1589,9 @@ function applyEdited() {
               {{ showRevisedDiff ? '收起对比' : '查看对比' }}
             </UButton>
           </div>
-          <p class="revise-preview-reason">{{ revisedReason }}</p>
+          <p class="revise-preview-reason">
+            <WikiText :text="revisedReason" :titles="knownTitles" compact />
+          </p>
           <NoteLine v-if="hasLostRefs || integrity?.severeShrink" tone="warning" flush>
             {{ integrityMessage }}
           </NoteLine>
@@ -1742,7 +1780,9 @@ function applyEdited() {
                       小节：{{ link.anchorHeading }}
                     </span>
                   </span>
-                  <p v-if="link.reason" class="link-reason">{{ link.reason }}</p>
+                  <p v-if="link.reason" class="link-reason">
+                    <WikiText :text="link.reason" :titles="knownTitles" compact />
+                  </p>
                 </span>
               </label>
             </li>
@@ -1786,7 +1826,9 @@ function applyEdited() {
             <UIcon :name="icons.summary" class="summary-preview-icon" aria-hidden="true" />
             <span>建议现行概要</span>
           </span>
-          <p class="summary-preview-text">{{ suggestion.proposedSummary }}</p>
+          <p class="summary-preview-text">
+            <WikiText :text="suggestion.proposedSummary ?? ''" :titles="knownTitles" compact />
+          </p>
         </div>
 
         <!-- 非编辑审阅态适用场景、来源设备与触发场景 -->
@@ -1863,7 +1905,7 @@ function applyEdited() {
             <span v-if="item.occurredAt" class="archived-date font-mono">
               {{ formatShort(item.occurredAt) }}
             </span>
-            <span>{{ item.note }}</span>
+            <WikiText :text="item.note" :titles="knownTitles" compact />
           </li>
         </ul>
       </details>
@@ -1903,7 +1945,7 @@ function applyEdited() {
         <UIcon :name="icons.lightbulb" class="card-reason-icon" aria-hidden="true" />
         <span>整理依据：</span>
       </span>
-      <span>{{ suggestion.reason }}</span>
+      <WikiText :text="suggestion.reason" :titles="knownTitles" compact />
     </p>
 
     <div v-if="suggestion.entries.length > 1" class="card-affected">
