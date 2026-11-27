@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import {
   ENTRY_TABS,
+  PINNED_GROUPS,
   PROJECT_SCOPES,
   type EntryDetailResponse,
   type EntryTab,
+  type PinnedGroup,
   type ProjectScope,
 } from '@kioku/contracts'
 import { useToast } from '@nuxt/ui/composables'
@@ -52,6 +54,11 @@ const tab = computed<EntryTab>(() => {
   const raw = textQuery('tab')
   return raw && (ENTRY_TABS as readonly string[]).includes(raw) ? (raw as EntryTab) : 'all'
 })
+const pinnedGroup = computed<PinnedGroup | null>(() => {
+  if (tab.value !== 'pinned') return null
+  const raw = textQuery('pinnedGroup')
+  return raw && (PINNED_GROUPS as readonly string[]).includes(raw) ? (raw as PinnedGroup) : null
+})
 const env = computed(() => textQuery('env'))
 const realm = computed(() => textQuery('realm'))
 const project = computed(() => textQuery('project'))
@@ -80,6 +87,7 @@ const entriesQuery = useInfiniteQuery({
         'entries',
         {
           tab: tab.value,
+          pinnedGroup: tab.value === 'pinned' ? (pinnedGroup.value ?? undefined) : undefined,
           q: routeSearch.value || undefined,
           env: env.value ?? undefined,
           realm: realm.value ?? undefined,
@@ -100,6 +108,16 @@ const firstPage = computed(() => entriesQuery.data.value?.pages[0] ?? null)
 const items = computed(() => entriesQuery.data.value?.pages.flatMap((p) => p.items) ?? [])
 const facets = computed(() => firstPage.value?.facets ?? null)
 const counts = computed(() => firstPage.value?.counts ?? null)
+const linkedTitles = computed<Record<string, string>>(() => {
+  const map: Record<string, string> = {}
+  for (const page of entriesQuery.data.value?.pages ?? []) {
+    if (page.linkedTitles) Object.assign(map, page.linkedTitles)
+    for (const item of page.items) {
+      if (item.title) map[item.shortId] = item.title
+    }
+  }
+  return map
+})
 
 const createOpen = ref(false)
 const captureOpen = ref(false)
@@ -275,7 +293,16 @@ function toggleFullscreen() {
 }
 
 function setTab(next: EntryTab) {
-  void router.replace(withQuery({ tab: next === 'all' ? null : next }))
+  void router.replace(
+    withQuery({
+      tab: next === 'all' ? null : next,
+      ...(next !== 'pinned' ? { pinnedGroup: null } : {}),
+    }),
+  )
+}
+
+function setPinnedGroup(value: PinnedGroup | null) {
+  void router.replace(withQuery({ pinnedGroup: value }))
 }
 
 function setFilter(
@@ -361,7 +388,7 @@ async function confirmBatchOrganize() {
 function onCreated(detail: EntryDetailResponse) {
   queryClient.setQueryData(['entry', detail.entry.shortId], detail)
   invalidateEntries()
-  void router.replace(withQuery({ tab: null, id: detail.entry.shortId }))
+  void router.replace(withQuery({ tab: null, pinnedGroup: null, id: detail.entry.shortId }))
 }
 
 function onCaptureCreated(detail: EntryDetailResponse) {
@@ -383,7 +410,7 @@ function onDeleted(shortId: string) {
 function onRestored(detail: EntryDetailResponse) {
   queryClient.setQueryData(['entry', detail.entry.shortId], detail)
   invalidateEntries()
-  void router.replace(withQuery({ tab: null, id: detail.entry.shortId }))
+  void router.replace(withQuery({ tab: null, pinnedGroup: null, id: detail.entry.shortId }))
 }
 
 function isEditableElement(target: EventTarget | null): boolean {
@@ -439,7 +466,7 @@ function onKeydown(event: KeyboardEvent) {
     event.key === 'ArrowUp' ||
     event.key === 'k'
   ) {
-    const list = items.value
+    const list = listRef.value?.displayItems ?? items.value
     if (!list.length) return
     event.preventDefault()
     const currentIndex = list.findIndex((item) => item.shortId === selectedId.value)
@@ -490,6 +517,7 @@ onBeforeUnmount(() => {
     <MemoryList
       ref="listRef"
       :tab="tab"
+      :pinned-group="pinnedGroup"
       :search="searchInput"
       :env="env"
       :realm="realm"
@@ -500,6 +528,7 @@ onBeforeUnmount(() => {
       :selected-id="selectedId"
       :compact="isPeek"
       :items="items"
+      :linked-titles="linkedTitles"
       :facets="facets"
       :counts="counts"
       :query="entriesQuery"
@@ -508,6 +537,7 @@ onBeforeUnmount(() => {
       :has-chat-model="hasChatModel"
       :batch-busy="batchBusy"
       @update:tab="setTab"
+      @update:pinned-group="setPinnedGroup"
       @update:search="(v) => (searchInput = v)"
       @update:env="(v) => setFilter('env', v)"
       @update:realm="(v) => setFilter('realm', v)"
