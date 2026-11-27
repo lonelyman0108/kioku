@@ -60,9 +60,20 @@ describe('场景焦点合成与互斥冲突判定', () => {
       project: { repoName: 'org/sample-app', dirName: '/work/sample-app-wt' },
     })
     expect(overridden.envs).toEqual(['server'])
-    expect(overridden.realms).toEqual(['personal'])
+    // 受限密钥收到越界 realm 覆盖时忽略越界值并回退默认场域，防止屏蔽合法常驻
+    expect(overridden.realms).toEqual(['work'])
     expect(overridden.runtimes).toEqual(['custom-ide'])
     expect(overridden.projects).toEqual(['sample-app', 'sample-app-wt'])
+
+    // 多场域受限密钥允许在授权范围内聚焦，不限场域密钥允许自由覆盖
+    const scopedInRange = synthesizeFocus(keyScope({ allowedRealms: ['work', 'ops'] }), {
+      realm: 'Ops',
+    })
+    expect(scopedInRange.realms).toEqual(['ops'])
+    const unrestrictedOverride = synthesizeFocus(keyScope({ allowedRealms: null }), {
+      realm: 'Personal',
+    })
+    expect(unrestrictedOverride.realms).toEqual(['personal'])
 
     // focusRealms 在不限 allowedRealms 时提供启动聚焦，限定 allowedRealms 时取交集绝不越权放宽
     const unrestrictedFocus = synthesizeFocus(
@@ -341,8 +352,9 @@ describe.skipIf(!testDatabaseUrl)('allowed_realms 硬边界（JS 与 SQL 一致�
       isPinned: false,
     })
 
-    const workScope = keyScope({ allowedRealms: ['work'], canWrite: true })
-    const hiddenMention = await entrySvc.create(workScope, {
+    // 仅允许全局通用词条的受限密钥（allowedRealms=[]）创建全局常驻时，不会泄露不可见场域的项目或客户端名
+    const universalOnlyScope = keyScope({ allowedRealms: [], canWrite: true })
+    const hiddenMention = await entrySvc.create(universalOnlyScope, {
       title: 'secret-personal-proj 与 secret-rt 使用说明',
       content: '正文提及属于不可见场域的项目与客户端标识。',
       bootMode: 'full',
@@ -361,7 +373,9 @@ describe.skipIf(!testDatabaseUrl)('allowed_realms 硬边界（JS 与 SQL 一致�
       ),
     ).toBe(false)
 
-    const visibleMention = await entrySvc.create(workScope, {
+    // 不限场域的密钥可以看到所有可见项目并得到范围提示
+    const fullKeyScope = keyScope({ allowedRealms: null, canWrite: true })
+    const visibleMention = await entrySvc.create(fullKeyScope, {
       title: 'visible-work-proj 部署约定',
       content: '正文记录可见工作项目的部署流程。',
       bootMode: 'full',
@@ -377,5 +391,82 @@ describe.skipIf(!testDatabaseUrl)('allowed_realms 硬边界（JS 与 SQL 一致�
         (w) => w.code === 'pinned_scope_hint' && w.message.includes('visible-work-proj'),
       ),
     ).toBe(true)
+  })
+
+  it('限定场域的密钥缺省创建自动继承默认场域，且禁止写穿、篡改或删除无场域全局词条', async () => {
+    const masterKey = testMasterKey()
+    const credSvc = new CredentialService(database.db, masterKey)
+    const entrySvc = new EntryService(database.db, masterKey, credSvc, null)
+    const consoleScope: AccessScope = { kind: 'console', accountId: 'acc', sessionId: 'sess' }
+
+    const globalEntry = await entrySvc.create(consoleScope, {
+      title: '全局协作底线',
+      content: '所有会话保持简洁准确。',
+      realms: [],
+      envs: [],
+      projects: [],
+      runtimes: [],
+      topics: [],
+      isPinned: false,
+    })
+
+    const workScope = keyScope({ allowedRealms: ['work'], canWrite: true })
+    const focusedMultiScope = keyScope({
+      allowedRealms: ['work', 'ops'],
+      focusRealms: ['ops'],
+      canWrite: true,
+    })
+
+    // 1. 缺省未传 realms 时自动继承有效默认场域（优先 focusRealms ∩ allowedRealms）
+    const autoWork = await entrySvc.create(workScope, {
+      title: '公司构建规范',
+      content: '统一使用内部制品库。',
+      envs: [],
+      projects: [],
+      runtimes: [],
+      topics: [],
+      isPinned: false,
+    })
+    expect(autoWork.entry.realms).toEqual(['work'])
+
+    const autoOps = await entrySvc.create(focusedMultiScope, {
+      title: '运维值班手册',
+      content: '变更前先核对告警静默窗口。',
+      envs: [],
+      projects: [],
+      runtimes: [],
+      topics: [],
+      isPinned: false,
+    })
+    expect(autoOps.entry.realms).toEqual(['ops'])
+
+    // 2. 显式传入 realms: [] 企图写全局词条必须 403 拒绝
+    await expect(
+      entrySvc.create(workScope, {
+        title: '试图写穿全局',
+        content: '不应落成无场域全局词条。',
+        realms: [],
+        envs: [],
+        projects: [],
+        runtimes: [],
+        topics: [],
+        isPinned: false,
+      }),
+    ).rejects.toMatchObject({ status: 403 })
+
+    // 3. 企图通过 update 将 work 词条清空为全局 realms: [] 必须 403 拒绝
+    await expect(
+      entrySvc.update(workScope, autoWork.entry.shortId, { realms: [] }),
+    ).rejects.toMatchObject({ status: 403 })
+
+    // 4. 受限密钥可读通用全局词条，但不可修改或删除
+    const readGlobal = await entrySvc.get(workScope, globalEntry.entry.shortId)
+    expect(readGlobal.entry.shortId).toBe(globalEntry.entry.shortId)
+    await expect(
+      entrySvc.update(workScope, globalEntry.entry.shortId, { content: '越权篡改全局' }),
+    ).rejects.toMatchObject({ status: 403 })
+    await expect(entrySvc.remove(workScope, globalEntry.entry.shortId)).rejects.toMatchObject({
+      status: 403,
+    })
   })
 })

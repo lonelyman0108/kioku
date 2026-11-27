@@ -89,13 +89,50 @@ export function canReadEntry(
   return entry.realms.some((r) => allowed.has(r.trim().toLowerCase()))
 }
 
+// 计算密钥在允许场域约束下的有效默认场域（不限场域时若配置了 focusRealms 则返回聚焦场域，否则为空）
+export function resolveKeyDefaultRealms(scope: KeyPrincipal): string[] {
+  const allowed = scope.allowedRealms !== null ? normalizeSlugList(scope.allowedRealms) : null
+  const focused = scope.focusRealms?.length ? normalizeSlugList(scope.focusRealms) : null
+  if (focused) {
+    if (allowed === null) return focused
+    const allowedSet = new Set(allowed)
+    const intersection = focused.filter((r) => allowedSet.has(r))
+    return intersection.length ? intersection : allowed
+  }
+  return allowed ?? []
+}
+
+// 新建词条时解析落库场域：限定非空 allowedRealms 的密钥缺省未传 realms 时自动继承有效默认场域，避免误写穿为全局词条
+export function resolveCreateRealms(
+  scope: AccessScope,
+  inputRealms: readonly string[] | undefined,
+): string[] {
+  if (inputRealms !== undefined) return normalizeSlugList(inputRealms)
+  if (scope.kind === 'key' && scope.allowedRealms !== null) {
+    const allowed = normalizeSlugList(scope.allowedRealms)
+    if (allowed.length > 0) return resolveKeyDefaultRealms(scope)
+  }
+  return []
+}
+
 export function assertEntryWriteAllowed(scope: AccessScope, realms: readonly string[]): void {
   if (scope.kind === 'console') return
   if (!scope.canWrite) throw new MemoryError(403, '该访问密钥没有写入权限')
-  if (scope.allowedRealms === null || realms.length === 0) return
-  const allowed = new Set(normalizeSlugList(scope.allowedRealms))
-  for (const realm of realms) {
-    if (!allowed.has(realm.trim().toLowerCase())) {
+  if (scope.allowedRealms === null) return
+  const allowed = normalizeSlugList(scope.allowedRealms)
+  const normalized = normalizeSlugList(realms)
+  if (allowed.length === 0) {
+    if (normalized.length > 0) {
+      throw new MemoryError(403, `场域 ${normalized[0]} 超出该访问密钥允许的范围`)
+    }
+    return
+  }
+  if (normalized.length === 0) {
+    throw new MemoryError(403, '限定场域的访问密钥不能写入或修改为无场域全局词条')
+  }
+  const allowedSet = new Set(allowed)
+  for (const realm of normalized) {
+    if (!allowedSet.has(realm)) {
       throw new MemoryError(403, `场域 ${realm} 超出该访问密钥允许的范围`)
     }
   }
@@ -131,22 +168,23 @@ export function synthesizeFocus(scope: AccessScope, overrides: FocusOverrides = 
       : []
 
   let realms: string[] = []
-  if (overrides.realm) {
-    realms = normalizeSlugList([overrides.realm])
-  } else if (scope.kind === 'key') {
+  if (scope.kind === 'key') {
     const allowed = scope.allowedRealms !== null ? normalizeSlugList(scope.allowedRealms) : null
-    const focused = scope.focusRealms?.length ? normalizeSlugList(scope.focusRealms) : null
-    if (focused) {
+    const defaultRealms = resolveKeyDefaultRealms(scope)
+    if (overrides.realm) {
+      const requested = normalizeSlugList([overrides.realm])
       if (allowed === null) {
-        realms = focused
+        realms = requested
       } else {
         const allowedSet = new Set(allowed)
-        const intersection = focused.filter((r) => allowedSet.has(r))
-        realms = intersection.length ? intersection : allowed
+        const intersection = requested.filter((r) => allowedSet.has(r))
+        realms = intersection.length ? intersection : defaultRealms
       }
-    } else if (allowed !== null) {
-      realms = allowed
+    } else {
+      realms = defaultRealms
     }
+  } else if (overrides.realm) {
+    realms = normalizeSlugList([overrides.realm])
   }
 
   const runtimes = overrides.runtime

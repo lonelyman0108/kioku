@@ -67,6 +67,7 @@ import {
   actorLabel,
   assertEntryWriteAllowed,
   readableEntrySql,
+  resolveCreateRealms,
   synthesizeFocus,
   textArraySql,
   type AccessScope,
@@ -475,7 +476,8 @@ export class EntryService {
   }
 
   async create(scope: AccessScope, input: CreateEntryRequest): Promise<EntryDetailResponse> {
-    assertEntryWriteAllowed(scope, input.realms)
+    const realms = resolveCreateRealms(scope, input.realms)
+    assertEntryWriteAllowed(scope, realms)
     const detail = await withTx(this.db, async (tx, now) => {
       const validTo = parseValidTo(input.validTo, now)
       const summary = cleanOptionalText(input.summary)
@@ -488,7 +490,7 @@ export class EntryService {
           shortId,
           topics: input.topics,
           envs: input.envs,
-          realms: input.realms,
+          realms,
           projects: input.projects,
           runtimes: input.runtimes,
         })
@@ -504,7 +506,7 @@ export class EntryService {
             isPinned,
             bootMode,
             envs: input.envs,
-            realms: input.realms,
+            realms,
             projects: input.projects,
             runtimes: input.runtimes,
             topics: input.topics,

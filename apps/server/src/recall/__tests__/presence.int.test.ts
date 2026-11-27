@@ -148,12 +148,19 @@ describe.skipIf(!testDatabaseUrl)('Presence Engine：启动加载与混合召回
       projectSlug: 'kioku',
     })
     BootResponse.parse(boot)
+    // 全文展开严格按场景精准度分层输出（项目/客户端精准匹配排在全局通用之前）
     expect(boot.entries.map((e) => e.shortId)).toEqual([
-      universal.entry.shortId,
       matching.entry.shortId,
+      universal.entry.shortId,
     ])
     expect(boot.omitted).toEqual([huge.entry.shortId])
     expect(boot.episodes.map((e) => e.shortId)).toEqual([epMatch.shortId])
+
+    const renderedBoot = formatBootBlock(boot, 'GUIDANCE')
+    expect(renderedBoot).toContain('按场景优先级从高到低排列')
+    expect(renderedBoot.indexOf(matching.entry.shortId)).toBeLessThan(
+      renderedBoot.indexOf(universal.entry.shortId),
+    )
 
     // HTTP 接口 GET /v1/boot 返回一致结构
     const app = createTestApp(database, { masterKey })
@@ -586,5 +593,58 @@ describe.skipIf(!testDatabaseUrl)('Presence Engine：启动加载与混合召回
     expect(recentIds).not.toContain(otherProjRecent.entry.shortId)
     expect(recentIds).not.toContain(zcodeRule.entry.shortId)
     expect(recentIds).not.toContain(personalPinned.entry.shortId)
+  })
+
+  it('混合检索中尚未完成异步嵌入的新词条不承受 0.35 混合折损，仍可按全文立即召回', async () => {
+    const masterKey = testMasterKey()
+    await saveModelEndpoint(database.db, masterKey, EMBEDDING_SETTING_KEY, {
+      baseUrl: fakeAi.baseUrl,
+      model: 'fake-embed-1024',
+      apiKey: 'sk-test',
+      enabled: true,
+    })
+    const entrySvc = new EntryService(
+      database.db,
+      masterKey,
+      new CredentialService(database.db, masterKey),
+      null,
+    )
+    const consoleScope = { kind: 'console' as const, accountId: 'acc', sessionId: 'sess' }
+
+    // 已完成向量嵌入的既有词条，使本次检索进入 hybrid 分支（vectorHitCount > 0）
+    const alreadyEmbedded = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '既有网络拓扑说明',
+        content: '核心交换机与网关端口分配。',
+      }),
+    )
+    await embedEntryIds(database.db, masterKey, [alreadyEmbedded.entry.id])
+
+    // 刚刚写入、尚未生成向量的新词条，与查询高度匹配
+    const freshUnembedded = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '量子编译流水线缓存键规范',
+        content: '构建阶段统一使用量子编译流水线缓存键规范防止产物串用。',
+      }),
+    )
+
+    const hits = await recallEntries(
+      database.db,
+      masterKey,
+      consoleScope,
+      '量子编译流水线缓存键规范',
+      {
+        focus: { envs: [], realms: [], projects: [], runtimes: [] },
+        includeLinks: false,
+        limit: 5,
+      },
+    )
+    const hit = hits.find((c) => c.shortId === freshUnembedded.entry.shortId)
+    expect(hit).toBeDefined()
+    expect(hit!.via).toEqual(['fulltext'])
+    // 若误施加 0.35 混合折扣，即使全文分 0.65 也会掉到 ~0.227；未嵌入新词条应保留完整全文基础分
+    expect(hit!.score).toBeGreaterThan(0.4)
   })
 })

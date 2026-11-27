@@ -71,22 +71,25 @@ function extractLineSnippet(
   return clipClean(line, LINK_CONTEXT_MAX)
 }
 
-// 线性扫描正文提取双链，保持文本中出现的先后顺序
+// 线性扫描正文提取双链，跳过围栏代码块与行内代码，保持文本中出现的先后顺序
 export function extractWikiLinks(content: string): ParsedWikiLink[] {
-  const regex = new RegExp(WIKI_LINK_REGEX.source, 'gi')
   const result: ParsedWikiLink[] = []
-  let match: RegExpExecArray | null
-  while ((match = regex.exec(content)) !== null) {
-    const targetShortId = match[1]!.toLowerCase()
-    const alias = match[2] !== undefined ? match[2].trim() || null : null
-    result.push({
-      targetShortId,
-      alias,
-      raw: match[0],
-      start: match.index,
-      end: match.index + match[0].length,
-    })
-  }
+  forEachPlainMarkdownSegment(content, (segment, offset) => {
+    const regex = new RegExp(WIKI_LINK_REGEX.source, 'gi')
+    let match: RegExpExecArray | null
+    while ((match = regex.exec(segment)) !== null) {
+      const targetShortId = match[1]!.toLowerCase()
+      const alias = match[2] !== undefined ? match[2].trim() || null : null
+      const start = offset + match.index
+      result.push({
+        targetShortId,
+        alias,
+        raw: match[0],
+        start,
+        end: start + match[0].length,
+      })
+    }
+  })
   return result
 }
 
@@ -167,6 +170,90 @@ export function extractCredentialSlugs(content: string): string[] {
 }
 
 const FENCE_LINE_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/
+
+// 按 CommonMark 等长反引号规则遍历单行中位于行内代码之外的片段，附带行内起始偏移
+function forEachPlainSegmentInLine(
+  line: string,
+  lineOffset: number,
+  visitor: (segment: string, offset: number) => void,
+): void {
+  if (!line.includes('`')) {
+    if (line.length) visitor(line, lineOffset)
+    return
+  }
+  let plainStart = 0
+  let i = 0
+  const n = line.length
+
+  while (i < n) {
+    if (line[i] !== '`') {
+      i++
+      continue
+    }
+    const tickStart = i
+    while (i < n && line[i] === '`') i++
+    const tickLen = i - tickStart
+
+    let closeStart = -1
+    let j = i
+    while (j < n) {
+      if (line[j] !== '`') {
+        j++
+        continue
+      }
+      const runStart = j
+      while (j < n && line[j] === '`') j++
+      if (j - runStart === tickLen) {
+        closeStart = runStart
+        break
+      }
+    }
+
+    if (closeStart !== -1) {
+      const closeEnd = closeStart + tickLen
+      if (tickStart > plainStart) {
+        visitor(line.slice(plainStart, tickStart), lineOffset + plainStart)
+      }
+      i = closeEnd
+      plainStart = closeEnd
+    }
+  }
+
+  if (plainStart < n) {
+    visitor(line.slice(plainStart), lineOffset + plainStart)
+  }
+}
+
+// 遍历 Markdown 正文中位于围栏代码块与行内代码之外的普通片段，保留原文精确偏移量
+function forEachPlainMarkdownSegment(
+  content: string,
+  visitor: (segment: string, offset: number) => void,
+): void {
+  if (!content) return
+  let fence: string | null = null
+  let pos = 0
+  const n = content.length
+
+  while (pos < n) {
+    const nl = content.indexOf('\n', pos)
+    const rawLineEnd = nl === -1 ? n : nl
+    const lineEnd =
+      rawLineEnd > pos && content[rawLineEnd - 1] === '\r' ? rawLineEnd - 1 : rawLineEnd
+    const line = content.slice(pos, lineEnd)
+
+    const [, marker, info = ''] = FENCE_LINE_RE.exec(line) ?? []
+    if (fence !== null) {
+      const closes = marker !== undefined && marker[0] === fence[0] && marker.length >= fence.length
+      if (closes && /^[ \t]*$/.test(info)) fence = null
+    } else if (marker && !(marker[0] === '`' && info.includes('`'))) {
+      fence = marker
+    } else {
+      forEachPlainSegmentInLine(line, pos, visitor)
+    }
+
+    pos = nl === -1 ? n : nl + 1
+  }
+}
 
 // 按 CommonMark 等长反引号规则扫描行内代码，仅在代码跨度之外执行替换回调
 function replaceOutsideInlineCode(line: string, replacePlain: (segment: string) => string): string {
