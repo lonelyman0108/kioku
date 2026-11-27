@@ -1,3 +1,9 @@
+<script lang="ts">
+const INBOX_ACTION_TOAST_PREFIX = 'inbox-action-'
+let inboxToastSeq = 0
+let latestInboxToastId: string | null = null
+</script>
+
 <script setup lang="ts">
 import {
   checkCaptureIntegrity,
@@ -17,7 +23,7 @@ import {
 import type { DropdownMenuItem } from '@nuxt/ui'
 import { useToast } from '@nuxt/ui/composables'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
@@ -713,12 +719,31 @@ const organizeMenuItems = computed<DropdownMenuItem[][]>(() => {
   ]
 })
 
-// ---- 应用、8 秒撤销与批量操作 ----
+// ---- 应用、8 秒撤销与批量操作（连续处理时复用底部同一通知槽位，避免叠层遮挡列表） ----
 const busyId = ref<string | null>(null)
 const batchBusy = ref(false)
 const batchDismissBusy = ref(false)
 const undoingKeys = new Set<string>()
 const undoneKeys = new Set<string>()
+
+function showInboxActionToast(options: Omit<Parameters<typeof toast.add>[0], 'id'>) {
+  toast.toasts.value = toast.toasts.value.filter(
+    (item) => !String(item.id).startsWith(INBOX_ACTION_TOAST_PREFIX),
+  )
+  const nextId = `${INBOX_ACTION_TOAST_PREFIX}${++inboxToastSeq}`
+  latestInboxToastId = nextId
+  toast.add({
+    orientation: 'horizontal',
+    ...options,
+    id: nextId,
+  })
+  void nextTick(() => {
+    if (latestInboxToastId !== nextId) return
+    toast.toasts.value = toast.toasts.value.filter(
+      (item) => !String(item.id).startsWith(INBOX_ACTION_TOAST_PREFIX) || item.id === nextId,
+    )
+  })
+}
 
 async function undoAppliedSuggestion(
   shortId: string,
@@ -742,12 +767,12 @@ async function undoAppliedSuggestion(
       queryClient.invalidateQueries({ queryKey: ['inbox'] }),
       queryClient.invalidateQueries({ queryKey: ['boot-preview'] }),
     ])
-    toast.add({
+    showInboxActionToast({
       title: `已撤销对「${title}」的应用，恢复至版本 ${previousVersion}`,
       color: 'success',
     })
   } catch (err) {
-    toast.add({
+    showInboxActionToast({
       title:
         err instanceof ApiError && err.status === 409
           ? `「${title}」已有其他更新，无法自动撤销，请在版本历史中手动恢复`
@@ -776,7 +801,7 @@ async function onApply(id: string, body: ApplySuggestionRequest) {
       applied.version !== undefined
     if (canOfferUndo) {
       const { shortId, title, previousVersion, version } = applied
-      toast.add({
+      showInboxActionToast({
         title: `已应用到「${title}」（版本 ${version}）`,
         color: 'success',
         duration: 8000,
@@ -801,7 +826,7 @@ async function onApply(id: string, body: ApplySuggestionRequest) {
       const redirectSuffix = res.redirectedBacklinkCount
         ? `，并自动重定向 ${res.redirectedBacklinkCount} 条引用双链`
         : ''
-      toast.add({
+      showInboxActionToast({
         title: applied
           ? `已应用到「${applied.title}」${redirectSuffix}`
           : `已应用整理建议${redirectSuffix}`,
@@ -829,7 +854,10 @@ async function onApply(id: string, body: ApplySuggestionRequest) {
           ])),
     ])
   } catch (err) {
-    toast.add({ title: err instanceof ApiError ? err.message : '应用失败', color: 'error' })
+    showInboxActionToast({
+      title: err instanceof ApiError ? err.message : '应用失败',
+      color: 'error',
+    })
     if (err instanceof ApiError && err.status === 409) {
       void queryClient.invalidateQueries({ queryKey: ['inbox'] })
     }
@@ -851,10 +879,13 @@ async function onDismiss(id: string) {
   busyId.value = id
   try {
     await api.dismissSuggestion(id)
-    toast.add({ title: '已忽略建议', color: 'neutral' })
+    showInboxActionToast({ title: '已忽略建议', color: 'neutral' })
     void queryClient.invalidateQueries({ queryKey: ['inbox'] })
   } catch (err) {
-    toast.add({ title: err instanceof ApiError ? err.message : '操作失败', color: 'error' })
+    showInboxActionToast({
+      title: err instanceof ApiError ? err.message : '操作失败',
+      color: 'error',
+    })
   } finally {
     busyId.value = null
   }
@@ -924,9 +955,9 @@ async function batchApplySafe() {
     ]),
   ])
   if (failCount === 0) {
-    toast.add({ title: `已批量应用 ${okCount} 条安全建议`, color: 'success' })
+    showInboxActionToast({ title: `已批量应用 ${okCount} 条安全建议`, color: 'success' })
   } else {
-    toast.add({
+    showInboxActionToast({
       title: `批量应用完成：成功 ${okCount} 条，失败 ${failCount} 条`,
       color: okCount > 0 ? 'warning' : 'error',
     })
@@ -951,9 +982,9 @@ async function batchDismissSelected() {
   selectedIds.value = []
   await queryClient.invalidateQueries({ queryKey: ['inbox'] })
   if (failCount === 0) {
-    toast.add({ title: `已批量忽略 ${okCount} 条建议`, color: 'neutral' })
+    showInboxActionToast({ title: `已批量忽略 ${okCount} 条建议`, color: 'neutral' })
   } else {
-    toast.add({
+    showInboxActionToast({
       title: `批量忽略完成：成功 ${okCount} 条，失败 ${failCount} 条`,
       color: okCount > 0 ? 'warning' : 'error',
     })
