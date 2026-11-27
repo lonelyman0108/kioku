@@ -17,6 +17,7 @@ import { testModelConnection } from '../models/client'
 import {
   CHAT_LLM_SETTING_KEY,
   EMBEDDING_SETTING_KEY,
+  isDreamConfiguredByUser,
   loadDreamState,
   loadSavedModelApiKey,
   loadStoredModel,
@@ -141,12 +142,22 @@ export function settingsRoutes(deps: Deps) {
         }
       }
 
+      let chatNewlyEnabled = false
       if (body.chatLlm !== undefined) {
-        await saveModelEndpoint(deps.db, deps.masterKey, CHAT_LLM_SETTING_KEY, body.chatLlm)
+        const { previous, next } = await saveModelEndpoint(
+          deps.db,
+          deps.masterKey,
+          CHAT_LLM_SETTING_KEY,
+          body.chatLlm,
+        )
+        chatNewlyEnabled = !previous?.enabled && Boolean(next?.enabled)
       }
 
       if (body.dream !== undefined) {
-        await updateDreamConfig(deps.db, body.dream)
+        await updateDreamConfig(deps.db, body.dream, { markConfiguredByUser: true })
+      } else if (chatNewlyEnabled && !(await isDreamConfiguredByUser(deps.db))) {
+        // 首次启用对话模型且用户未手工配置过定时整理时，联动默认开启增量整理（24h）
+        await updateDreamConfig(deps.db, { enabled: true }, { markConfiguredByUser: false })
       }
 
       if (triggerBackfill) {

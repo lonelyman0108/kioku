@@ -16,6 +16,7 @@ import {
   EntryTitle,
   extractCredentialPlaceholders,
   extractTargetShortIds,
+  mergeFallbackTopics,
   normalizeSlugList,
   REVISABLE_DREAM_KINDS,
   ReviseSuggestionResponse,
@@ -617,12 +618,10 @@ export function buildCurrentDraftFromSuggestion(
   overrides: ReviseSuggestionRequest,
 ): ReviseCurrentDraft {
   const defaultEnvs =
-    suggestion.kind === 'merge_duplicates'
-      ? suggestion.proposedEnvs?.length
-        ? [...suggestion.proposedEnvs]
-        : normalizeSlugList(sourceEntries.flatMap((e) => e.envs))
-      : suggestion.proposedEnvs?.length
-        ? [...suggestion.proposedEnvs]
+    suggestion.proposedEnvs !== null
+      ? [...suggestion.proposedEnvs]
+      : suggestion.kind === 'merge_duplicates'
+        ? normalizeSlugList(sourceEntries.flatMap((e) => e.envs))
         : [...baseEntry.envs]
 
   const fallbackRealms =
@@ -643,38 +642,31 @@ export function buildCurrentDraftFromSuggestion(
   const defaultRealms = safeProposedRealms ?? fallbackRealms
 
   const defaultProjects =
-    suggestion.kind === 'merge_duplicates'
-      ? suggestion.proposedProjects?.length
-        ? [...suggestion.proposedProjects]
-        : normalizeSlugList(sourceEntries.flatMap((e) => e.projects))
-      : suggestion.proposedProjects?.length
-        ? [...suggestion.proposedProjects]
+    suggestion.proposedProjects !== null
+      ? [...suggestion.proposedProjects]
+      : suggestion.kind === 'merge_duplicates'
+        ? normalizeSlugList(sourceEntries.flatMap((e) => e.projects))
         : [...baseEntry.projects]
 
   const defaultRuntimes =
-    suggestion.kind === 'distill_episode'
-      ? suggestion.proposedRuntimes?.length
-        ? [...suggestion.proposedRuntimes]
-        : []
-      : suggestion.kind === 'merge_duplicates'
-        ? suggestion.proposedRuntimes?.length
-          ? [...suggestion.proposedRuntimes]
-          : normalizeSlugList(sourceEntries.flatMap((e) => e.runtimes))
-        : suggestion.proposedRuntimes?.length
-          ? [...suggestion.proposedRuntimes]
+    suggestion.proposedRuntimes !== null
+      ? [...suggestion.proposedRuntimes]
+      : suggestion.kind === 'distill_episode'
+        ? []
+        : suggestion.kind === 'merge_duplicates'
+          ? normalizeSlugList(sourceEntries.flatMap((e) => e.runtimes))
           : [...baseEntry.runtimes]
 
   const defaultTopics =
-    suggestion.kind === 'distill_episode'
-      ? suggestion.proposedTopics?.length
-        ? [...suggestion.proposedTopics]
-        : []
-      : suggestion.kind === 'merge_duplicates'
-        ? suggestion.proposedTopics?.length
-          ? [...suggestion.proposedTopics]
-          : normalizeSlugList(sourceEntries.flatMap((e) => e.topics))
-        : suggestion.proposedTopics?.length
-          ? [...suggestion.proposedTopics]
+    suggestion.proposedTopics !== null
+      ? [...suggestion.proposedTopics]
+      : suggestion.kind === 'distill_episode'
+        ? []
+        : suggestion.kind === 'merge_duplicates'
+          ? mergeFallbackTopics(
+              baseEntry.topics,
+              sourceEntries.map((e) => e.topics),
+            )
           : [...baseEntry.topics]
 
   const safeOverrideRealms =

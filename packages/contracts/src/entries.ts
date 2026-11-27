@@ -89,6 +89,34 @@ export function normalizeSlugList(values: readonly string[] | null | undefined):
   return [...set].sort()
 }
 
+export const MERGE_FALLBACK_TOPICS_MAX = 5
+
+// 合并重复词条且未指定新主题时，按出现频次与保留词条优先收敛主题上限，避免并集无限膨胀
+export function mergeFallbackTopics(
+  keepTopics: readonly string[],
+  allTopicLists: readonly (readonly string[])[],
+  limit = MERGE_FALLBACK_TOPICS_MAX,
+): string[] {
+  const keepSet = new Set(normalizeSlugList(keepTopics))
+  const counts = new Map<string, number>()
+  for (const list of allTopicLists) {
+    for (const tag of normalizeSlugList(list)) {
+      counts.set(tag, (counts.get(tag) ?? 0) + 1)
+    }
+  }
+  return [...counts.entries()]
+    .sort((a, b) => {
+      if (b[1] !== a[1]) return b[1] - a[1]
+      const aKeep = keepSet.has(a[0]) ? 1 : 0
+      const bKeep = keepSet.has(b[0]) ? 1 : 0
+      if (bKeep !== aKeep) return bKeep - aKeep
+      return a[0].localeCompare(b[0])
+    })
+    .slice(0, Math.max(0, limit))
+    .map(([tag]) => tag)
+    .sort()
+}
+
 export const SceneSlugList = z
   .array(SceneSlug)
   .max(SCENE_TAGS_MAX, `最多填写 ${SCENE_TAGS_MAX} 项`)

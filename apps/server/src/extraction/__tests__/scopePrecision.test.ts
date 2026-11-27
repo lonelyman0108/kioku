@@ -1,11 +1,13 @@
-import { DreamEntrySnapshot } from '@kioku/contracts'
+import { DreamEntrySnapshot, mergeFallbackTopics } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
 import { toPromptItem } from '../dream'
 import {
   buildDreamMessages,
   buildEpisodeReconcileMessages,
+  buildTidyMessages,
   evaluateDreamResponse,
+  evaluateTidyResponse,
   type DreamPromptItem,
 } from '../dreamPrompt'
 import { buildEpisodeMessages } from '../prompt'
@@ -159,5 +161,111 @@ describe('会话摘要与整理提示词的主机边界透传', () => {
       updatedAt: '2026-10-02T08:00:00Z',
     })
     expect(parsedWithoutDevice.deviceKey).toBeUndefined()
+  })
+
+  it('distill_episode 区分显式 [] 放宽与省略回退、支持 proposed_boot_mode 且严守 realms fail-closed', () => {
+    const ep: DreamPromptItem = toPromptItem(
+      makeRow({
+        realms: ['work'],
+        envs: ['mac'],
+        projects: ['kioku'],
+      }),
+    )
+    const catalog = new Map([[ep.shortId, ep]])
+    const evaluated = evaluateDreamResponse(
+      JSON.stringify({
+        suggestions: [
+          {
+            kind: 'distill_episode',
+            target_short_ids: [ep.shortId],
+            title: '提交前拆分 PR 规范',
+            summary: '代码修改按职责拆分 PR，合并后清理本地工作区与分支。',
+            content: '涉及代码改动时统一拆分 PR 提交，合并后删除临时分支。',
+            topics: ['git', 'workflow'],
+            envs: [],
+            projects: [],
+            realms: [],
+            proposed_boot_mode: 'full',
+            reason: '跨项目高频工作流铁律，显式放宽项目与环境但保留 work 场域',
+          },
+        ],
+      }),
+      catalog,
+    )
+    expect(evaluated.status).toBe('ok')
+    if (evaluated.status === 'ok') {
+      expect(evaluated.proposals).toHaveLength(1)
+      const prop = evaluated.proposals[0]!
+      expect(prop.proposedProjects).toEqual([])
+      expect(prop.proposedEnvs).toEqual([])
+      // realms 空数组一律视为无效（null），应用时继续沿用源 episode 的 work 场域
+      expect(prop.proposedRealms).toBeNull()
+      expect(prop.proposedTopics).toEqual(['git', 'workflow'])
+      expect(prop.proposedBootMode).toBe('full')
+    }
+  })
+
+  it('buildTidyMessages 透传高频主题参考，evaluateTidyResponse 支持仅调整 topics 或 disclosure', () => {
+    const entryItem: DreamPromptItem = toPromptItem(
+      makeRow({
+        kind: 'entry',
+        title: '容器部署规范',
+        summary: '轻应用统一用 compose 编排部署。',
+        content: '## 现行规范\n- 使用 compose 管理容器。',
+        disclosure: null,
+        topics: ['docker', 'deploy', 'tmp1', 'tmp2', 'tmp3', 'tmp4', 'tmp5', 'tmp6', 'tmp7'],
+      }),
+    )
+
+    const msgs = buildTidyMessages(entryItem, ['docker', 'postgres', 'network'])
+    expect(msgs[1]?.content).toContain('库内高频主题参考')
+    expect(msgs[1]?.content).toContain('docker、postgres、network')
+
+    // 仅收敛主题与补齐触发场景，标题/概要/正文不变时也应产出 proposal
+    const res = evaluateTidyResponse(
+      JSON.stringify({
+        needed: true,
+        title: entryItem.title,
+        summary: entryItem.summary,
+        content: entryItem.content,
+        topics: ['docker', 'deploy'],
+        disclosure: '新增或调整容器编排配置时查阅',
+        change_summary: '收敛主题标签并补齐触发场景',
+        archived_notes: [],
+        reason: '收敛膨胀主题并补充召回触发场景',
+      }),
+      entryItem,
+    )
+    expect(res.status).toBe('proposal')
+    if (res.status === 'proposal') {
+      expect(res.proposal.proposedTopics).toEqual(['deploy', 'docker'])
+      expect(res.proposal.proposedDisclosure).toBe('新增或调整容器编排配置时查阅')
+    }
+
+    // 若 topics 与 disclosure 也均与原值相同，应判定为 not_needed
+    const unchangedRes = evaluateTidyResponse(
+      JSON.stringify({
+        needed: true,
+        title: entryItem.title,
+        summary: entryItem.summary,
+        content: entryItem.content,
+        topics: entryItem.topics,
+        disclosure: null,
+      }),
+      entryItem,
+    )
+    expect(unchangedRes.status).toBe('not_needed')
+
+    // mergeFallbackTopics 优先保留共现与 keep 主题并上限收敛为 5 个
+    expect(
+      mergeFallbackTopics(
+        ['docker', 'k1', 'k2', 'k3'],
+        [
+          ['docker', 'k1', 'k2', 'k3'],
+          ['docker', 'shared', 'b1', 'b2', 'b3', 'b4'],
+          ['shared', 'c1', 'c2'],
+        ],
+      ),
+    ).toEqual(['docker', 'k1', 'k2', 'k3', 'shared'])
   })
 })

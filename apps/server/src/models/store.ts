@@ -66,6 +66,7 @@ export interface StoredModeSchedule {
 export interface StoredDreamState {
   enabled: boolean
   intervalHours: number
+  configuredByUser?: boolean | undefined
   schedules: {
     standard: StoredModeSchedule
     crossMemory: StoredModeSchedule
@@ -439,9 +440,11 @@ function parseStoredDreamState(raw: unknown): StoredDreamState {
   const tidySchedule = parseModeSchedule(rawSchedules?.tidy, {
     ...DEFAULT_DREAM_STATE.schedules.tidy,
   })
+  const configuredByUser = typeof r.configuredByUser === 'boolean' ? r.configuredByUser : undefined
   return {
     enabled,
     intervalHours: interval,
+    ...(configuredByUser !== undefined ? { configuredByUser } : {}),
     schedules: {
       standard: standardSchedule,
       crossMemory: crossMemorySchedule,
@@ -461,6 +464,15 @@ function parseStoredDreamState(raw: unknown): StoredDreamState {
   }
 }
 
+export async function isDreamConfiguredByUser(db: Db | Tx): Promise<boolean> {
+  const [row] = await db
+    .select()
+    .from(settings)
+    .where(eq(settings.key, DREAM_STATE_SETTING_KEY))
+    .limit(1)
+  return parseStoredDreamState(row?.value).configuredByUser === true
+}
+
 export async function loadDreamState(
   db: Db | Tx,
   running = false,
@@ -471,12 +483,24 @@ export async function loadDreamState(
     .from(settings)
     .where(eq(settings.key, DREAM_STATE_SETTING_KEY))
     .limit(1)
-  return { ...parseStoredDreamState(row?.value), running, progress: running ? progress : null }
+  const stored = parseStoredDreamState(row?.value)
+  return {
+    enabled: stored.enabled,
+    intervalHours: stored.intervalHours,
+    schedules: stored.schedules,
+    lastRunAt: stored.lastRunAt,
+    lastOutcome: stored.lastOutcome,
+    lastError: stored.lastError,
+    recentRuns: stored.recentRuns,
+    running,
+    progress: running ? progress : null,
+  }
 }
 
 export async function updateDreamConfig(
   db: Db | Tx,
   patch: UpdateDreamSettingsInput,
+  options: { markConfiguredByUser?: boolean | undefined } = {},
 ): Promise<StoredDreamState> {
   const current = parseStoredDreamState(
     (await db.select().from(settings).where(eq(settings.key, DREAM_STATE_SETTING_KEY)).limit(1))[0]
@@ -485,10 +509,13 @@ export async function updateDreamConfig(
   const nextEnabled = patch.enabled !== undefined ? patch.enabled : current.enabled
   const nextInterval =
     patch.intervalHours !== undefined ? patch.intervalHours : current.intervalHours
+  const nextConfiguredByUser =
+    options.markConfiguredByUser === false ? current.configuredByUser : true
   const next: StoredDreamState = {
     ...current,
     enabled: nextEnabled,
     intervalHours: nextInterval,
+    ...(nextConfiguredByUser !== undefined ? { configuredByUser: nextConfiguredByUser } : {}),
     schedules: {
       standard: {
         ...current.schedules.standard,

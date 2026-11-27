@@ -997,7 +997,7 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
     const inboxMissingSummary = await loadInbox(database.db, false)
     expect(inboxMissingSummary.tidyPendingCount).toBe(1)
 
-    // 主题标签超过 8 个时写入应给出客观提醒，但在 tidy 支持收敛主题前暂不计入批量待规范存量
+    // 主题标签超过 8 个时写入应给出客观提醒，并自动计入批量待规范存量
     const overTopics = await entrySvc.create(
       consoleScope,
       entryInput({
@@ -1009,7 +1009,146 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
     )
     expect(overTopics.warnings?.map((w) => w.code)).toContain('topics_too_many')
     const inboxOverTopics = await loadInbox(database.db, false)
-    expect(inboxOverTopics.tidyPendingCount).toBe(1)
+    expect(inboxOverTopics.tidyPendingCount).toBe(2)
+
+    // 额外写入两条带共享高频主题 docker 的词条，验证批量 tidy 透传高频词表并收敛 topics 与 disclosure 后不再反复排队
+    await saveModelEndpoint(database.db, masterKey, CHAT_LLM_SETTING_KEY, {
+      baseUrl: fakeAi.baseUrl,
+      model: 'fake-chat',
+      apiKey: 'sk-chat',
+      enabled: true,
+    })
+    await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '容器镜像拉取规范',
+        summary: '拉取镜像使用固定版本标签。',
+        content: '固定镜像版本标签。',
+        topics: ['docker'],
+      }),
+    )
+    await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '容器日志落盘策略',
+        summary: '限制容器日志大小防止占满磁盘。',
+        content: '配置 json-file 滚动上限。',
+        topics: ['docker'],
+      }),
+    )
+
+    let seenFrequentTopicsHint = false
+    fakeAi.setChatHandler((messages) => {
+      const userText = messages[1]?.content ?? ''
+      if (userText.includes('库内高频主题参考') && userText.includes('docker')) {
+        seenFrequentTopicsHint = true
+      }
+      return JSON.stringify({
+        needed: true,
+        title: '主题膨胀词条',
+        summary: '已有概要。',
+        content: '简明正文。',
+        topics: ['docker', 'ops'],
+        disclosure: '排查容器与日常运维配置时查阅',
+        change_summary: '收敛主题并补充触发场景',
+        archived_notes: [],
+        reason: '将 9 个零散主题收敛为 2 个稳定标签并补齐触发场景',
+      })
+    })
+
+    const tidyRun = await runDream(database.db, masterKey, {
+      runId: 'tidy-topics-converge',
+      trigger: 'manual',
+      mode: 'tidy',
+      targetShortIds: [overTopics.entry.shortId],
+    })
+    expect(tidyRun.outcome).toBe('ok')
+    expect(tidyRun.suggested).toBe(1)
+    expect(seenFrequentTopicsHint).toBe(true)
+
+    const inboxWithTidy = await loadInbox(database.db, false)
+    const tidyCard = inboxWithTidy.items.find(
+      (i) => i.kind === 'tidy' && i.entries[0]?.shortId === overTopics.entry.shortId,
+    )!
+    expect(tidyCard.proposedTopics).toEqual(['docker', 'ops'])
+    expect(tidyCard.proposedDisclosure).toBe('排查容器与日常运维配置时查阅')
+
+    await entrySvc.applySuggestion(tidyCard.id, {})
+    const afterTidy = await entrySvc.get(consoleScope, overTopics.entry.shortId)
+    expect(afterTidy.entry.topics).toEqual(['docker', 'ops'])
+    expect(afterTidy.entry.disclosure).toBe('排查容器与日常运维配置时查阅')
+    // 主题已收敛至 2 个，应用后不再重新落回待规范队列
+    const inboxAfterApply = await loadInbox(database.db, false)
+    expect(inboxAfterApply.tidyPendingCount).toBe(1)
+
+    // 单条快速规范预览与暂存/应用同样透传 topics 与 disclosure
+    const singlePreview = await entrySvc.previewSingleTidy(overTopics.entry.shortId)
+    expect(singlePreview.before.topics).toEqual(['docker', 'ops'])
+    expect(singlePreview.before.disclosure).toBe('排查容器与日常运维配置时查阅')
+    const singleApplied = await entrySvc.applySingleTidy(consoleScope, overTopics.entry.shortId, {
+      expectedVersion: afterTidy.entry.version,
+      title: afterTidy.entry.title,
+      summary: afterTidy.entry.summary ?? null,
+      content: afterTidy.entry.content,
+      topics: ['docker'],
+      disclosure: '调整容器运维配置时参考',
+    })
+    expect(singleApplied.entry?.entry.topics).toEqual(['docker'])
+    expect(singleApplied.entry?.entry.disclosure).toBe('调整容器运维配置时参考')
+
+    // distill_episode 显式传 projects: []、envs: [] 与 proposed_boot_mode: 'full' 应真实生效，且 realms: [] 保持 fail-closed
+    const ep = await entrySvc.writeEpisode({
+      title: '多项目提交习惯讨论',
+      content: '在多个仓库中均强调按职责拆分 PR，合并后清理工作区与本地分支。',
+      envs: ['mac'],
+      realms: ['work'],
+      projects: ['kioku'],
+      deviceKey: 'dev-mac',
+      projectSlug: 'kioku',
+    })
+    fakeAi.setChatHandler(() =>
+      JSON.stringify({
+        suggestions: [
+          {
+            kind: 'distill_episode',
+            target_short_ids: [ep.shortId],
+            title: '提交拆 PR 习惯',
+            summary: '按职责拆分 PR，合并后清理工作区与分支。',
+            content: '所有代码改动优先拆分小 PR 提交，合并后及时删除本地分支与临时工作区。',
+            topics: ['git'],
+            envs: [],
+            projects: [],
+            realms: [],
+            proposed_boot_mode: 'full',
+            reason: '跨项目高频工作流习惯',
+          },
+        ],
+      }),
+    )
+    const distillRun = await runDream(database.db, masterKey, {
+      runId: 'distill-widen-and-boot',
+      trigger: 'manual',
+      mode: 'standard',
+      targetShortIds: [ep.shortId],
+    })
+    expect(distillRun.suggested).toBe(1)
+    const inboxDistill = await loadInbox(database.db, false)
+    const distillCard = inboxDistill.items.find(
+      (i) => i.kind === 'distill_episode' && i.entries[0]?.shortId === ep.shortId,
+    )!
+    expect(distillCard.proposedProjects).toEqual([])
+    expect(distillCard.proposedEnvs).toEqual([])
+    expect(distillCard.proposedRealms).toBeNull()
+    expect(distillCard.proposedBootMode).toBe('full')
+
+    const appliedDistill = await entrySvc.applySuggestion(distillCard.id, {})
+    const distilledDetail = await entrySvc.get(consoleScope, appliedDistill.entry!.shortId)
+    expect(distilledDetail.entry.projects).toEqual([])
+    expect(distilledDetail.entry.envs).toEqual([])
+    expect(distilledDetail.entry.realms).toEqual(['work'])
+    expect(distilledDetail.entry.bootMode).toBe('full')
+    expect(distilledDetail.entry.isPinned).toBe(true)
+    expect(distilledDetail.entry.topics).toEqual(['git'])
   })
 
   it('跨记忆查重簇与增量整理严格拒绝合并 envs、projects 或 runtimes 互斥的高相似词条（含传递桥接防护）', async () => {

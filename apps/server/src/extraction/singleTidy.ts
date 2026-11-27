@@ -1,6 +1,7 @@
 import {
   checkCaptureIntegrity,
   normalizeShortId,
+  normalizeSlugList,
   type HygieneSweepFixKind,
   type SingleTidyPreviewResponse,
 } from '@kioku/contracts'
@@ -99,12 +100,25 @@ export async function previewSingleTidy(
   const preCleanedFixes: HygieneSweepFixKind[] = deterministic?.candidate.fixes ?? []
   const preCleanedContent = deterministic?.nextContent ?? target.content
 
+  // 统计当前库内出现 ≥ 2 次的高频主题（Top 40），供模型优先复用
+  const topicCounts = new Map<string, number>()
+  for (const row of activeTargets) {
+    for (const tag of normalizeSlugList(row.topics)) {
+      topicCounts.set(tag, (topicCounts.get(tag) ?? 0) + 1)
+    }
+  }
+  const frequentTopics = [...topicCounts.entries()]
+    .filter(([, count]) => count >= 2)
+    .sort((a, b) => (b[1] !== a[1] ? b[1] - a[1] : a[0].localeCompare(b[0])))
+    .slice(0, 40)
+    .map(([tag]) => tag)
+
   options.onStage?.('llm', '正在调用对话模型规范标题、现行概要与正文结构…')
   if (options.signal?.aborted) throw new CaptureAbortedError()
 
   const preCleanedRow = { ...target, content: preCleanedContent }
   const promptItem = toPromptItem(preCleanedRow, SINGLE_TIDY_CONTENT_LIMIT)
-  const tidyMessages = buildTidyMessages(promptItem)
+  const tidyMessages = buildTidyMessages(promptItem, frequentTopics)
   const maxTokens = computeSingleTidyMaxTokens(promptItem.content.length)
 
   let rawContent: string
@@ -178,11 +192,15 @@ export async function previewSingleTidy(
         title: target.title,
         summary: target.summary,
         content: target.content,
+        topics: target.topics,
+        disclosure: target.disclosure,
       },
       proposed: {
         title: target.title,
         summary: target.summary,
         content: preCleanedContent,
+        topics: target.topics,
+        disclosure: target.disclosure,
         changeSummary: hasPreCleanDiff ? '确定性结构预清洗' : '',
         archivedNotes: [],
       },
@@ -194,6 +212,8 @@ export async function previewSingleTidy(
   const finalTitle = prop.proposedTitle ?? target.title
   const finalSummary = prop.proposedSummary ?? target.summary
   const finalContent = prop.proposedContent ?? preCleanedContent
+  const finalTopics = prop.proposedTopics ?? target.topics
+  const finalDisclosure = prop.proposedDisclosure ?? target.disclosure
   const integrity = checkCaptureIntegrity(target.content, finalContent)
   if (integrity.missingLinks.length > 0 || integrity.missingCreds.length > 0) {
     throw new MemoryError(
@@ -202,10 +222,19 @@ export async function previewSingleTidy(
     )
   }
 
+  const beforeTopicsNorm = normalizeSlugList(target.topics)
+  const finalTopicsNorm = normalizeSlugList(finalTopics)
+  const topicsChanged =
+    beforeTopicsNorm.length !== finalTopicsNorm.length ||
+    beforeTopicsNorm.some((v, i) => v !== finalTopicsNorm[i])
+  const disclosureChanged = (finalDisclosure ?? null) !== (target.disclosure ?? null)
+
   const actuallyChanged =
     finalTitle !== target.title ||
     (finalSummary ?? null) !== (target.summary ?? null) ||
-    finalContent !== target.content
+    finalContent !== target.content ||
+    topicsChanged ||
+    disclosureChanged
 
   return {
     shortId: target.shortId,
@@ -217,11 +246,15 @@ export async function previewSingleTidy(
       title: target.title,
       summary: target.summary,
       content: target.content,
+      topics: target.topics,
+      disclosure: target.disclosure,
     },
     proposed: {
       title: finalTitle,
       summary: finalSummary,
       content: finalContent,
+      topics: finalTopics,
+      disclosure: finalDisclosure,
       changeSummary: prop.proposedChangeSummary ?? '规范标题与正文结构，剥离历史流水账',
       archivedNotes: prop.archivedNotes ?? [],
     },

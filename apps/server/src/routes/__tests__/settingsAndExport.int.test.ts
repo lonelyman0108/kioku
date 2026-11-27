@@ -321,4 +321,65 @@ describe.skipIf(!testDatabaseUrl)('模型设置、向量回填、数据导出与
       .where(sql`true`)
     expect(remaining.map((r) => r.shortId)).toEqual(['m-def222'])
   })
+
+  it('首次启用对话模型时联动默认开启增量整理，且尊重用户后续显式关闭', async () => {
+    const masterKey = testMasterKey()
+    const app = createTestApp(database, { masterKey })
+    const { cookie } = await createOwnerSession(database)
+
+    // 1. 仅保存启用 chatLlm（未携带 dream）：应自动开启 standard 增量整理（24h）
+    const enableRes = await app.request('/v1/console/settings/models', {
+      method: 'PUT',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({
+        chatLlm: {
+          baseUrl: fakeAi.baseUrl,
+          model: 'chat-model-first',
+          apiKey: 'sk-first',
+          enabled: true,
+        },
+      }),
+    })
+    expect(enableRes.status).toBe(200)
+    const afterFirstEnable = ModelsSettingsResponse.parse(await enableRes.json())
+    expect(afterFirstEnable.dream.enabled).toBe(true)
+    expect(afterFirstEnable.dream.intervalHours).toBe(24)
+
+    // 2. 用户显式关闭增量整理
+    const disableDreamRes = await app.request('/v1/console/settings/models', {
+      method: 'PUT',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({
+        dream: { enabled: false, intervalHours: 24 },
+      }),
+    })
+    expect(disableDreamRes.status).toBe(200)
+    expect(ModelsSettingsResponse.parse(await disableDreamRes.json()).dream.enabled).toBe(false)
+
+    // 3. 之后停用再重新启用 chatLlm（不带 dream）：不得违背用户显式关闭设置
+    await app.request('/v1/console/settings/models', {
+      method: 'PUT',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({
+        chatLlm: {
+          baseUrl: fakeAi.baseUrl,
+          model: 'chat-model-first',
+          enabled: false,
+        },
+      }),
+    })
+    const reEnableRes = await app.request('/v1/console/settings/models', {
+      method: 'PUT',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({
+        chatLlm: {
+          baseUrl: fakeAi.baseUrl,
+          model: 'chat-model-first',
+          enabled: true,
+        },
+      }),
+    })
+    expect(reEnableRes.status).toBe(200)
+    expect(ModelsSettingsResponse.parse(await reEnableRes.json()).dream.enabled).toBe(false)
+  })
 })
