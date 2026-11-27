@@ -398,7 +398,7 @@ const nonContentImpactNote = computed<string | null>(() => {
     return '移入回收站后不再参与召回，可随时从回收站恢复'
   }
   if (isDistillEpisode.value) {
-    return '新建 1 条正式记忆，原会话摘要保持不变'
+    return '新建 1 条正式记忆，原会话摘要将移入回收站（可随时恢复）'
   }
   return null
 })
