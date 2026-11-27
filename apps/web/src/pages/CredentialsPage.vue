@@ -258,7 +258,7 @@ watch(highlightSlug, (slug) => {
           description="新建凭据后，可在记忆正文里插入占位符，避免明文密码进入上下文。"
         >
           <template v-if="hasMasterKey" #actions>
-            <UButton size="sm" @click="openCreate">新建凭据</UButton>
+            <UButton size="sm" :icon="icons.add" @click="openCreate">新建凭据</UButton>
           </template>
         </EmptyState>
       </div>
@@ -305,7 +305,13 @@ watch(highlightSlug, (slug) => {
               />
             </UFormField>
             <div class="flex justify-end">
-              <UButton size="sm" :loading="rotating" :disabled="!rotateValue" @click="rotateSecret">
+              <UButton
+                size="sm"
+                :icon="icons.rotate"
+                :loading="rotating"
+                :disabled="!rotateValue"
+                @click="rotateSecret"
+              >
                 更新凭据值
               </UButton>
             </div>

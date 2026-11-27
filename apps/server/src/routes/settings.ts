@@ -89,6 +89,18 @@ async function buildModelsSettings(deps: Deps): Promise<ModelsSettingsResponse> 
     dream: {
       enabled: dreamState.enabled,
       intervalHours: dreamState.intervalHours,
+      ...(dreamState.schedules
+        ? {
+            crossMemory: {
+              enabled: dreamState.schedules.crossMemory.enabled,
+              intervalHours: dreamState.schedules.crossMemory.intervalHours,
+            },
+            tidy: {
+              enabled: dreamState.schedules.tidy.enabled,
+              intervalHours: dreamState.schedules.tidy.intervalHours,
+            },
+          }
+        : {}),
     },
     embeddingCoverage,
     hasMasterKey: Boolean(deps.masterKey),

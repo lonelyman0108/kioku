@@ -404,7 +404,7 @@ const filteredPreviewItems = computed(() => {
 
 <template>
   <section class="space-y-6">
-    <SectionHeading title="数据导入与导出" :level="2" />
+    <SectionHeading title="数据导入与导出" :icon="icons.arrowLeftRight" :level="2" />
 
     <!-- 导出 -->
     <div class="transfer-box space-y-3">

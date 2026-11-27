@@ -101,9 +101,23 @@ export const DreamRunSummary = z.object({
 })
 export type DreamRunSummary = z.infer<typeof DreamRunSummary>
 
+export const DreamModeScheduleState = z.object({
+  enabled: z.boolean(),
+  intervalHours: z.number().int(),
+  lastRunAt: z.string().nullable(),
+})
+export type DreamModeScheduleState = z.infer<typeof DreamModeScheduleState>
+
 export const DreamState = z.object({
   enabled: z.boolean(),
   intervalHours: z.number().int(),
+  schedules: z
+    .object({
+      standard: DreamModeScheduleState,
+      crossMemory: DreamModeScheduleState,
+      tidy: DreamModeScheduleState,
+    })
+    .optional(),
   running: z.boolean(),
   progress: DreamProgress.nullable().optional(),
   lastRunAt: z.string().nullable(),

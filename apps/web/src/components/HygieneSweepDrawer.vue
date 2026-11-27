@@ -249,8 +249,8 @@ async function applySelected() {
   <USlideover
     :open="open"
     side="right"
-    title="结构体检与预清洗"
-    description="无需对话模型，检查并修复重复标题、旧引用与异常记忆"
+    title="结构检查"
+    description="无需对话模型，检查并清理重复标题、旧引用与悬空断链"
     :dismissible="!applying"
     :close="!applying"
     :ui="{ content: 'w-[min(92vw,960px)] max-w-[960px] sm:max-w-[960px] ring-2 ring-rule' }"
@@ -345,14 +345,14 @@ async function applySelected() {
           :title="report.dirtyTitleCount > 0 ? '无需确定性预清洗' : '记忆结构良好'"
           :description="
             report.dirtyTitleCount > 0
-              ? `未检测到可自动修复的结构问题；另有 ${report.dirtyTitleCount} 条记忆标题含日期或较长，可在待处理页发起存量规范整理。`
+              ? `未检测到可自动修复的结构问题；另有 ${report.dirtyTitleCount} 条记忆标题含日期或较长，可在待处理页发起规范整理。`
               : '未检测到可确定性预清洗项，也未发现疑似残缺或过时记忆。'
           "
         />
 
         <!-- 确定性预清洗项 -->
         <section v-if="candidates.length" ref="candidatesSectionRef" class="sweep-section">
-          <SectionHeading title="确定性预清洗项" :level="3">
+          <SectionHeading title="确定性预清洗项" :icon="icons.shieldCheck" :level="3">
             <template #actions>
               <UButton
                 size="xs"
@@ -455,7 +455,7 @@ async function applySelected() {
 
         <!-- 疑似残缺记忆 -->
         <section v-if="suspectTruncated.length" ref="truncatedSectionRef" class="sweep-section">
-          <SectionHeading title="疑似残缺记忆" :level="3" />
+          <SectionHeading title="疑似残缺记忆" :icon="icons.shieldAlert" :level="3" />
           <p class="text-xs text-muted">篇幅异常偏短，建议核对版本历史</p>
           <ul class="flag-list">
             <li v-for="flag in suspectTruncated" :key="flag.shortId" class="flag-item is-error">
@@ -480,7 +480,7 @@ async function applySelected() {
 
         <!-- 疑似过时记忆 -->
         <section v-if="suspectObsolete.length" ref="obsoleteSectionRef" class="sweep-section">
-          <SectionHeading title="疑似过时记忆" :level="3" />
+          <SectionHeading title="疑似过时记忆" :icon="icons.stale" :level="3" />
           <p class="text-xs text-muted">阶段性或已停用，建议核实更新</p>
           <ul class="flag-list">
             <li v-for="flag in suspectObsolete" :key="flag.shortId" class="flag-item is-warning">
@@ -504,7 +504,7 @@ async function applySelected() {
         </section>
         <!-- 悬空断链记忆 -->
         <section v-if="brokenLinks.length" ref="brokenLinksSectionRef" class="sweep-section">
-          <SectionHeading title="悬空断链记忆" :level="3" />
+          <SectionHeading title="悬空断链记忆" :icon="icons.links" :level="3" />
           <p class="text-xs text-muted">指向已删除或不存在的目标</p>
           <ul class="flag-list">
             <li v-for="item in brokenLinks" :key="item.shortId" class="flag-item is-warning">

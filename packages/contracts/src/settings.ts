@@ -8,7 +8,16 @@ export const MODEL_KINDS = ['embedding', 'chat_llm'] as const
 export const ModelKind = z.enum(MODEL_KINDS)
 export type ModelKind = z.infer<typeof ModelKind>
 
-export const REASONING_EFFORTS = ['default', 'off', 'low', 'medium', 'high'] as const
+export const REASONING_EFFORTS = [
+  'default',
+  'off',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+] as const
 export const ReasoningEffort = z.enum(REASONING_EFFORTS)
 export type ReasoningEffort = z.infer<typeof ReasoningEffort>
 
@@ -60,14 +69,37 @@ export const ModelEndpointInput = z.object({
 export type ModelEndpointInput = z.infer<typeof ModelEndpointInput>
 
 export const DREAM_INTERVAL_HOURS_MIN = 1
-export const DREAM_INTERVAL_HOURS_MAX = 168
+export const DREAM_INTERVAL_HOURS_MAX = 720
 export const DEFAULT_DREAM_INTERVAL_HOURS = 24
+export const DEFAULT_CROSS_MEMORY_INTERVAL_HOURS = 168
+export const DEFAULT_TIDY_INTERVAL_HOURS = 72
+
+export const DreamModeSchedule = z.object({
+  enabled: z.boolean(),
+  intervalHours: z.number().int().min(DREAM_INTERVAL_HOURS_MIN).max(DREAM_INTERVAL_HOURS_MAX),
+})
+export type DreamModeSchedule = z.infer<typeof DreamModeSchedule>
 
 export const DreamSettingsConfig = z.object({
   enabled: z.boolean(),
   intervalHours: z.number().int().min(DREAM_INTERVAL_HOURS_MIN).max(DREAM_INTERVAL_HOURS_MAX),
+  crossMemory: DreamModeSchedule.optional(),
+  tidy: DreamModeSchedule.optional(),
 })
 export type DreamSettingsConfig = z.infer<typeof DreamSettingsConfig>
+
+export const UpdateDreamSettingsInput = z.object({
+  enabled: z.boolean().optional(),
+  intervalHours: z
+    .number()
+    .int()
+    .min(DREAM_INTERVAL_HOURS_MIN)
+    .max(DREAM_INTERVAL_HOURS_MAX)
+    .optional(),
+  crossMemory: DreamModeSchedule.partial().optional(),
+  tidy: DreamModeSchedule.partial().optional(),
+})
+export type UpdateDreamSettingsInput = z.infer<typeof UpdateDreamSettingsInput>
 
 export const EmbeddingCoverage = z.object({
   total: z.number().int(),
@@ -88,7 +120,7 @@ export type ModelsSettingsResponse = z.infer<typeof ModelsSettingsResponse>
 export const UpdateModelsSettingsRequest = z.object({
   embedding: ModelEndpointInput.nullable().optional(),
   chatLlm: ModelEndpointInput.nullable().optional(),
-  dream: DreamSettingsConfig.partial().optional(),
+  dream: UpdateDreamSettingsInput.optional(),
 })
 export type UpdateModelsSettingsRequest = z.infer<typeof UpdateModelsSettingsRequest>
 

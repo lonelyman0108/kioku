@@ -4,6 +4,7 @@ import {
   type BootExcludeReason,
   type BootMode,
   type BootOmitReason,
+  type DreamMode,
   type DreamOutcome,
   type DreamSuggestionKind,
   type DreamTrigger,
@@ -16,6 +17,7 @@ import {
   type ReasoningEffort,
 } from '@kioku/contracts'
 
+import { icons } from './icons'
 import { runtimeName } from './runtimes'
 
 export const entryKindLabels: Record<EntryKind, string> = {
@@ -29,6 +31,14 @@ export const entryTabLabels: Record<EntryTab, string> = {
   regular: '按需',
   episodes: '近期摘要',
   trash: '回收站',
+}
+
+export const entryTabIcons: Record<EntryTab, string> = {
+  all: icons.layers,
+  pinned: icons.pin,
+  regular: icons.bookOpen,
+  episodes: icons.messageSquare,
+  trash: icons.remove,
 }
 
 export const envLabels: Record<string, string> = {
@@ -166,6 +176,22 @@ export function formatActorLabel(actor: string, actorMeta?: EntryActorMeta | nul
 
 export const dreamKindLabels: Record<DreamSuggestionKind, string> = DREAM_KIND_NAMES
 
+export const dreamKindIcons: Record<DreamSuggestionKind, string> = {
+  adjust_boot_mode: icons.pin,
+  link_entries: icons.links,
+  merge_duplicates: icons.merge,
+  tidy: icons.tidy,
+  distill_episode: icons.promote,
+  update: icons.updateDoc,
+  mark_stale: icons.stale,
+}
+
+export const dreamModeLabels: Record<DreamMode, string> = {
+  standard: '增量整理',
+  cross_memory: '查重/关联',
+  tidy: '规范整理',
+}
+
 export const dreamTriggerLabels: Record<DreamTrigger, string> = {
   scheduled: '定时整理',
   manual: '手动整理',
@@ -181,9 +207,34 @@ export const dreamOutcomeLabels: Record<DreamOutcome, string> = {
 export const reasoningEffortLabels: Record<ReasoningEffort, string> = {
   default: '跟随默认',
   off: '关闭',
+  minimal: '极低',
   low: '低',
   medium: '中',
   high: '高',
+  xhigh: '超高',
+  max: '极限',
+}
+
+export const reasoningEffortWireValues: Record<ReasoningEffort, string | null> = {
+  default: null,
+  off: 'none',
+  minimal: 'minimal',
+  low: 'low',
+  medium: 'medium',
+  high: 'high',
+  xhigh: 'xhigh',
+  max: 'max',
+}
+
+export const reasoningEffortDescriptions: Record<ReasoningEffort, string> = {
+  default: '不向接口注入 reasoning_effort 参数，沿用服务端默认策略，兼容非推理模型',
+  off: '关闭思考链（发送 reasoning_effort: "none"），响应最快，适合随手记与会话摘要',
+  minimal: '极少量思考（发送 reasoning_effort: "minimal"），仅做最基础校验',
+  low: '轻量思考（发送 reasoning_effort: "low"），平衡响应速度与准确度',
+  medium: '中等思考（发送 reasoning_effort: "medium"），适合日常增量与规范整理',
+  high: '深度思考（发送 reasoning_effort: "high"），适合跨记忆查重合并与复杂规范',
+  xhigh: '超高深度思考（发送 reasoning_effort: "xhigh"），供支持超高档位的推理模型使用',
+  max: '最高推理预算（发送 reasoning_effort: "max"），耗时与开销最高，建议仅在深度整理时按需选用',
 }
 
 export const bootModeLabels: Record<BootMode, string> = {

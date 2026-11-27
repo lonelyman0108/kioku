@@ -9,6 +9,7 @@ import memoryContent from '../components/MemoryContent.vue?raw'
 import memoryEditor from '../components/MemoryEditor.vue?raw'
 import memoryHistoryDrawer from '../components/MemoryHistoryDrawer.vue?raw'
 import memoryList from '../components/MemoryList.vue?raw'
+import modelSettings from '../components/ModelSettings.vue?raw'
 import quickCaptureModal from '../components/QuickCaptureModal.vue?raw'
 import sceneScopePicker from '../components/SceneScopePicker.vue?raw'
 import singleTidyDrawer from '../components/SingleTidyDrawer.vue?raw'
@@ -186,13 +187,15 @@ describe('记忆布局、随手记与图标清单', () => {
   })
 
   it('待处理页采用四流速审台账、行内双栏审校面板、高风险展开护栏、批量安全应用、预清洗抽屉与 8 秒撤销，且消除逐卡免责套话', () => {
-    expect(inboxPage).toContain('结构体检与预清洗')
-    expect(inboxPage).toContain('存量规范整理')
+    expect(inboxPage).toContain('结构检查')
+    expect(inboxPage).toContain('规范整理')
     expect(inboxPage).toContain('增量整理')
     expect(inboxPage).toContain('批量应用安全项')
     expect(inboxPage).toContain('展开核对')
     expect(inboxPage).toContain('layout="inspector"')
     expect(inboxPage).toContain('ledger-footnote')
+    expect(inboxPage).toContain('dreamKindIcons')
+    expect(inboxPage).toContain('.inspector-row > td::before')
     expect(inboxPage).toContain('duration: 8000')
     expect(inboxPage).toContain('api.restoreEntry')
     expect(inboxPage).toContain('<HygieneSweepDrawer')
@@ -215,12 +218,13 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(hygieneSweepDrawer).toContain('brokenLinks')
   })
 
-  it('具备跨记忆全库查重与关联、反链提示、单条主动整理抽屉与列表轻量批量整理', () => {
-    expect(inboxPage).toContain('全库查重与关联')
+  it('具备跨记忆查重/关联、反链提示、单条主动整理抽屉、三模式独立定时与思考等级参数预览', () => {
+    expect(inboxPage).toContain('查重/关联')
     expect(inboxPage).toContain("mode: 'cross_memory'")
     expect(inboxPage).toContain('redirectedBacklinkCount')
     expect(inboxPage).toContain('link_entries')
     expect(inboxPage).toContain('adjust_boot_mode')
+    expect(inboxPage).toContain('popover-schedules')
 
     expect(dreamSuggestionCard).toContain('affectedBacklinkCount')
     expect(dreamSuggestionCard).toContain('proposedLinks')
@@ -229,7 +233,7 @@ describe('记忆布局、随手记与图标清单', () => {
 
     expect(memoryEditor).toContain('<SingleTidyDrawer')
     expect(memoryEditor).toContain('规范此条')
-    expect(memoryEditor).toContain('查找重复与关联')
+    expect(memoryEditor).toContain('查重/关联')
     expect(memoryEditor).toContain('pendingSuggestionCount')
 
     expect(singleTidyDrawer).toContain('api.previewSingleTidy')
@@ -241,8 +245,14 @@ describe('记忆布局、随手记与图标清单', () => {
 
     expect(memoryList).toContain('批量整理')
     expect(memoryList).toContain('规范所选')
-    expect(memoryList).toContain('查重与关联')
+    expect(memoryList).toContain('查重/关联')
     expect(memoriesPage).toContain('onBatchOrganize')
+
+    expect(modelSettings).toContain('reasoningEffortWireValues')
+    expect(modelSettings).toContain('overrideSummaryText')
+    expect(modelSettings).not.toContain('taskOverridesOpen.value = true')
+    expect(modelSettings).toContain('crossMemory')
+    expect(modelSettings).toContain('schedule-list')
   })
 
   it('界面中引用的全部 icons.* 均已在 icons.ts 注册，且没有直接写死未打包的 i-lucide-*', () => {
