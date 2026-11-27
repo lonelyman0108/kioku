@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-import { EntryKind, SceneSlug } from './entries'
+import { BootMode, EntryKind, SceneSlug } from './entries'
 import { ShortId } from './links'
 
 export const RECALL_VIAS = ['semantic', 'fulltext', 'link'] as const
@@ -33,6 +33,9 @@ export const SessionStartEvent = z
     sessionId: z.string().max(200).optional(),
     deviceKey: z.string().trim().max(128).optional(),
     project: LifecycleProject.optional(),
+    env: SceneSlug.optional(),
+    realm: SceneSlug.optional(),
+    runtime: SceneSlug.optional(),
     context: OptionalLifecycleContext,
   })
   .meta({ id: 'SessionStartEvent' })
@@ -44,6 +47,9 @@ export const PromptSubmitEvent = z
     sessionId: z.string().max(200).optional(),
     deviceKey: z.string().trim().max(128).optional(),
     project: LifecycleProject.optional(),
+    env: SceneSlug.optional(),
+    realm: SceneSlug.optional(),
+    runtime: SceneSlug.optional(),
     context: OptionalLifecycleContext,
     prompt: z.string().min(1).max(20_000),
   })
@@ -92,11 +98,30 @@ export type LifecycleResponse = LifecycleEventResponse
 
 // ---- 启动加载与召回契约 ----
 
+export const BOOT_OMIT_REASONS = ['index', 'oversized', 'budget'] as const
+export const BootOmitReason = z.enum(BOOT_OMIT_REASONS)
+export type BootOmitReason = z.infer<typeof BootOmitReason>
+
+export const BOOT_BUCKETS = ['exact', 'context', 'global'] as const
+export const BootBucket = z.enum(BOOT_BUCKETS)
+export type BootBucket = z.infer<typeof BootBucket>
+
+export const BOOT_EXCLUDE_REASONS = [
+  'realm_forbidden',
+  'scene_conflict',
+  'project_mismatch',
+  'expired',
+] as const
+export const BootExcludeReason = z.enum(BOOT_EXCLUDE_REASONS)
+export type BootExcludeReason = z.infer<typeof BootExcludeReason>
+
 export const BootEntry = z
   .object({
     shortId: ShortId,
     title: z.string(),
     kind: EntryKind,
+    bootMode: BootMode.optional(),
+    bucket: BootBucket.optional(),
     content: z.string(),
     summary: z.string().nullable().optional(),
     updatedAt: z.string().optional(),
@@ -111,6 +136,8 @@ export const BootOmittedItem = z
   .object({
     shortId: ShortId,
     title: z.string(),
+    bootMode: BootMode.optional(),
+    reason: BootOmitReason.optional(),
     summary: z.string().nullable().optional(),
     disclosure: z.string().nullable().optional(),
     updatedAt: z.string().optional(),
@@ -195,3 +222,78 @@ export const RecallResponse = z
   })
   .meta({ id: 'RecallResponse' })
 export type RecallResponse = z.infer<typeof RecallResponse>
+
+// ---- 控制台终端启动加载预览契约（只读）----
+
+export const BootPreviewRequest = z.object({
+  keyId: z.uuid().optional(),
+  project: z.string().trim().max(128).optional(),
+  runtime: SceneSlug.optional(),
+  env: SceneSlug.optional(),
+  realm: SceneSlug.optional(),
+})
+export type BootPreviewRequest = z.infer<typeof BootPreviewRequest>
+
+export const BootPreviewExpandedItem = z.object({
+  shortId: ShortId,
+  title: z.string(),
+  bootMode: BootMode,
+  bucket: BootBucket,
+  charCount: z.number().int(),
+  envs: z.array(z.string()),
+  realms: z.array(z.string()),
+  projects: z.array(z.string()),
+  runtimes: z.array(z.string()),
+})
+export type BootPreviewExpandedItem = z.infer<typeof BootPreviewExpandedItem>
+
+export const BootPreviewCatalogItem = z.object({
+  shortId: ShortId,
+  title: z.string(),
+  bootMode: BootMode,
+  reason: BootOmitReason,
+  summary: z.string().nullable(),
+  charCount: z.number().int(),
+  envs: z.array(z.string()),
+  realms: z.array(z.string()),
+  projects: z.array(z.string()),
+  runtimes: z.array(z.string()),
+})
+export type BootPreviewCatalogItem = z.infer<typeof BootPreviewCatalogItem>
+
+export const BootPreviewExcludedItem = z.object({
+  shortId: ShortId,
+  title: z.string(),
+  bootMode: BootMode,
+  reason: BootExcludeReason,
+  detail: z.string(),
+  envs: z.array(z.string()),
+  realms: z.array(z.string()),
+  projects: z.array(z.string()),
+  runtimes: z.array(z.string()),
+})
+export type BootPreviewExcludedItem = z.infer<typeof BootPreviewExcludedItem>
+
+export const BootPreviewResponse = z.object({
+  keyName: z.string().nullable(),
+  runtimeFamily: z.string().nullable(),
+  focus: z.object({
+    envs: z.array(z.string()),
+    realms: z.array(z.string()),
+    projects: z.array(z.string()),
+    runtimes: z.array(z.string()),
+  }),
+  fullBudget: z.number().int(),
+  catalogBudget: z.number().int(),
+  hostLimit: z.number().int().nullable(),
+  usedFullChars: z.number().int(),
+  usedCatalogChars: z.number().int(),
+  globalUsedChars: z.number().int(),
+  globalCapChars: z.number().int(),
+  totalRenderedChars: z.number().int(),
+  expanded: z.array(BootPreviewExpandedItem),
+  indexed: z.array(BootPreviewCatalogItem),
+  demoted: z.array(BootPreviewCatalogItem),
+  excluded: z.array(BootPreviewExcludedItem),
+})
+export type BootPreviewResponse = z.infer<typeof BootPreviewResponse>

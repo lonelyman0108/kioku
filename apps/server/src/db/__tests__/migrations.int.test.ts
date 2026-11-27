@@ -70,6 +70,30 @@ describe.skipIf(!testDatabaseUrl)('数据库迁移与探针', () => {
     expect([...cols]).toHaveLength(11)
   })
 
+  it('增量迁移新增了三态启动加载列、同步约束与密钥默认聚焦场域列', async () => {
+    const cols = await database.db.execute<{ table_name: string; column_name: string }>(sql`
+      select table_name, column_name
+      from information_schema.columns
+      where table_schema = 'public'
+        and (
+          (table_name = 'entries' and column_name = 'boot_mode')
+          or (table_name = 'api_keys' and column_name = 'focus_realms')
+          or (table_name = 'device_grants' and column_name = 'focus_realms')
+        )
+    `)
+    expect([...cols]).toHaveLength(3)
+
+    const checks = await database.db.execute<{ conname: string }>(sql`
+      select conname
+      from pg_constraint
+      where conname in ('entries_boot_mode_check', 'entries_boot_mode_pinned_sync')
+    `)
+    expect([...checks].map((r) => r.conname).sort()).toEqual([
+      'entries_boot_mode_check',
+      'entries_boot_mode_pinned_sync',
+    ])
+  })
+
   it('probeDatabase 对已迁移的库返回 ready 且允许超级用户或普通角色接入', async () => {
     const result = await probeDatabase(testDatabaseUrl!, migrationsFolder)
     expect(result.ready).toBe(true)

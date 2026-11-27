@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import {
+  effectiveBootMode,
   TRANSFER_PASSPHRASE_MIN,
   type ExportFormat,
   type ImportConflictStrategy,
@@ -17,7 +18,7 @@ import { api } from '../api/endpoints'
 import { useSession } from '../composables/useSession'
 import { saveFile } from '../download'
 import { icons } from '../icons'
-import { envDisplayName } from '../labels'
+import { bootModeLabels, envDisplayName } from '../labels'
 import { runtimeName } from '../runtimes'
 import { formatTime } from '../time'
 import {
@@ -710,7 +711,9 @@ const filteredPreviewItems = computed(() => {
                   <div class="flex flex-wrap items-center gap-1.5">
                     <span class="font-medium">{{ item.title }}</span>
                     <code class="font-mono text-xs text-muted">{{ item.sourceRef }}</code>
-                    <span v-if="item.isPinned" class="meta-pill pinned">启动加载</span>
+                    <span v-if="effectiveBootMode(item) !== 'none'" class="meta-pill pinned">
+                      {{ bootModeLabels[effectiveBootMode(item)] }}
+                    </span>
                     <span v-if="item.kind === 'episode'" class="meta-pill">近期摘要</span>
                     <span v-if="item.skippedReason" class="meta-pill warn">
                       跳过：{{ item.skippedReason }}

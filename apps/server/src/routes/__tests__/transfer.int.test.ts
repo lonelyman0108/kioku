@@ -36,16 +36,19 @@ function sampleLoreBackup() {
         { uuid: 'n1', created_at: now },
         { uuid: 'n2', created_at: now },
         { uuid: 'n3', created_at: now },
+        { uuid: 'n4', created_at: now },
       ],
       edges: [
         { id: 1, child_uuid: 'n1', priority: 0, disclosure: '启动必读' },
         { id: 2, child_uuid: 'n2', priority: 2, disclosure: '排查架构时' },
         { id: 3, child_uuid: 'n3', priority: 3, disclosure: null },
+        { id: 4, child_uuid: 'n4', priority: 1, disclosure: '参考客户端约束' },
       ],
       paths: [
         { domain: 'core', path: 'agent/claudecode', edge_id: 1, created_at: now },
         { domain: 'projects', path: 'kioku/arch', edge_id: 2, created_at: now },
         { domain: 'preferences', path: 'empty-node', edge_id: 3, created_at: now },
+        { domain: 'core', path: 'agent/zcode', edge_id: 4, created_at: now },
       ],
       memories: [
         {
@@ -68,6 +71,13 @@ function sampleLoreBackup() {
           node_uuid: 'n3',
           deprecated: false,
           content: '   ',
+          created_at: now,
+        },
+        {
+          id: 13,
+          node_uuid: 'n4',
+          deprecated: false,
+          content: '# ZCode 客户端约束\n\n仅在 zcode 生效的次级参考文档。',
           created_at: now,
         },
       ],
@@ -155,6 +165,7 @@ describe.skipIf(!testDatabaseUrl)('数据导入导出与外部 Lore 导入', () 
       entryInput({
         title: '关联说明',
         content: `详见 [[${first.entry.shortId}|核心规范]]。`,
+        bootMode: 'index',
       }),
     )
     await credSvcA.create({
@@ -183,6 +194,8 @@ describe.skipIf(!testDatabaseUrl)('数据导入导出与外部 Lore 导入', () 
     const bundle = KiokuExportBundle.parse(JSON.parse(exportedText))
     expect(bundle.format).toBe(KIOKU_EXPORT_FORMAT)
     expect(bundle.entries).toHaveLength(2)
+    expect(bundle.entries.find((e) => e.shortId === first.entry.shortId)?.bootMode).toBe('full')
+    expect(bundle.entries.find((e) => e.shortId === second.entry.shortId)?.bootMode).toBe('index')
     expect(bundle.encryptedCredentials).toBeTruthy()
 
     // 模拟另一个干净实例（不同主密钥 masterKeyB）
@@ -312,6 +325,9 @@ describe.skipIf(!testDatabaseUrl)('数据导入导出与外部 Lore 导入', () 
       (r) => r.title === '关联说明' && r.shortId !== second.entry.shortId,
     )
     expect(newFirst).toBeTruthy()
+    expect(newFirst?.bootMode).toBe('full')
+    expect(newSecond?.bootMode).toBe('index')
+    expect(newSecond?.isPinned).toBe(true)
     expect(newSecond?.content).toBe(`详见 [[${newFirst!.shortId}|核心规范]]。`)
     const links = await database.db.select().from(entryLinks)
     expect(
@@ -344,15 +360,22 @@ describe.skipIf(!testDatabaseUrl)('数据导入导出与外部 Lore 导入', () 
     expect(urlPreviewRes.status).toBe(200)
     const preview = ImportPreviewResponse.parse(await urlPreviewRes.json())
     expect(preview.sourceKind).toBe('lore')
-    expect(preview.summary).toMatchObject({ total: 3, ready: 2, skipped: 1, conflicts: 0 })
+    expect(preview.summary).toMatchObject({ total: 4, ready: 3, skipped: 1, conflicts: 0 })
 
     const claudeItem = preview.items.find((i) => i.sourceRef === 'core://agent/claudecode')!
     expect(claudeItem.isPinned).toBe(true)
+    expect(claudeItem.bootMode).toBe('full')
     expect(claudeItem.runtimes).toEqual(['claudecode'])
     expect(claudeItem.secretHintLabels).toContain('OpenAI / 服务密钥')
 
+    const zcodeItem = preview.items.find((i) => i.sourceRef === 'core://agent/zcode')!
+    expect(zcodeItem.isPinned).toBe(true)
+    expect(zcodeItem.bootMode).toBe('index')
+    expect(zcodeItem.runtimes).toEqual(['zcode'])
+
     const archItem = preview.items.find((i) => i.sourceRef === 'projects://kioku/arch')!
     expect(archItem.isPinned).toBe(false)
+    expect(archItem.bootMode).toBe('none')
     expect(archItem.projects).toEqual(['kioku'])
     expect(archItem.topics).toEqual(['arch', 'schema'])
 
@@ -370,7 +393,7 @@ describe.skipIf(!testDatabaseUrl)('数据导入导出与外部 Lore 导入', () 
     })
     expect(applyRes.status).toBe(200)
     expect(ImportApplyResponse.parse(await applyRes.json())).toEqual({
-      createdEntries: 1,
+      createdEntries: 2,
       reallocatedEntries: 0,
       skippedEntries: 2,
       createdCredentials: 0,
@@ -410,5 +433,75 @@ describe.skipIf(!testDatabaseUrl)('数据导入导出与外部 Lore 导入', () 
     expect(claudeRow.content).not.toContain('# Claude Code 习惯')
     expect(claudeRow.content).not.toContain('Glossary keywords:')
     expect(claudeRow.content).toContain(`[[${archRow.shortId}|Kioku 架构笔记]]`)
+  })
+
+  it('导入省略 bootMode 字段的旧版 Kioku JSON 备份时按 isPinned 兼容映射为 full 或 none', async () => {
+    const app = createTestApp(database)
+    const { cookie } = await createOwnerSession(database)
+    const legacyBundle = {
+      format: KIOKU_EXPORT_FORMAT,
+      exportedAt: '2026-10-01T00:00:00.000Z',
+      count: 2,
+      entries: [
+        {
+          shortId: 'm-234abc',
+          kind: 'entry',
+          title: '旧版常驻规范',
+          content: '旧版备份未携带 bootMode 字段。',
+          isPinned: true,
+          envs: [],
+          realms: [],
+          projects: [],
+          runtimes: [],
+          topics: [],
+          createdAt: '2026-10-01T00:00:00.000Z',
+          updatedAt: '2026-10-01T00:00:00.000Z',
+        },
+        {
+          shortId: 'm-234abd',
+          kind: 'entry',
+          title: '旧版普通记忆',
+          content: '旧版普通词条正文。',
+          isPinned: false,
+          envs: [],
+          realms: [],
+          projects: [],
+          runtimes: [],
+          topics: [],
+          createdAt: '2026-10-01T00:00:00.000Z',
+          updatedAt: '2026-10-01T00:00:00.000Z',
+        },
+      ],
+    }
+
+    const previewRes = await app.request('/v1/console/import/preview', {
+      method: 'POST',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({
+        source: { kind: 'kioku', bundle: legacyBundle, includeCredentials: false },
+      }),
+    })
+    expect(previewRes.status).toBe(200)
+    const preview = ImportPreviewResponse.parse(await previewRes.json())
+    expect(preview.items.find((i) => i.sourceRef === 'm-234abc')?.bootMode).toBe('full')
+    expect(preview.items.find((i) => i.sourceRef === 'm-234abd')?.bootMode).toBe('none')
+
+    const applyRes = await app.request('/v1/console/import/apply', {
+      method: 'POST',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({
+        source: { kind: 'kioku', bundle: legacyBundle, includeCredentials: false },
+      }),
+    })
+    expect(applyRes.status).toBe(200)
+    const rows = await database.db.select().from(entries)
+    expect(rows.find((r) => r.shortId === 'm-234abc')).toMatchObject({
+      bootMode: 'full',
+      isPinned: true,
+    })
+    expect(rows.find((r) => r.shortId === 'm-234abd')).toMatchObject({
+      bootMode: 'none',
+      isPinned: false,
+    })
   })
 })

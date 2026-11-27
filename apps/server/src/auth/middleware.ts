@@ -52,6 +52,7 @@ export async function authenticateApiKey(db: Db, rawKey: string): Promise<KeyPri
     runtimeFamily: row.key.runtimeFamily,
     envs: row.key.envs,
     allowedRealms: row.key.allowedRealms,
+    focusRealms: row.key.focusRealms,
     canWrite: row.key.canWrite,
     canResolveCredentials: row.key.canResolveCredentials,
   }

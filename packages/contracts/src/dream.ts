@@ -2,6 +2,7 @@ import { z } from 'zod'
 
 import {
   ArchivedHistoryNote,
+  BootMode,
   ChangeSummary,
   Disclosure,
   EntryContent,
@@ -96,6 +97,7 @@ export const DreamEntrySnapshot = z.object({
   content: z.string(),
   disclosure: z.string().nullable(),
   isPinned: z.boolean(),
+  bootMode: BootMode.optional(),
   envs: z.array(z.string()),
   realms: z.array(z.string()),
   projects: z.array(z.string()),
@@ -155,6 +157,7 @@ export const ApplySuggestionRequest = z.object({
   projects: SceneSlugList.optional(),
   runtimes: SceneSlugList.optional(),
   isPinned: z.boolean().optional(),
+  bootMode: BootMode.optional(),
 })
 export type ApplySuggestionRequest = z.infer<typeof ApplySuggestionRequest>
 

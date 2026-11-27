@@ -940,4 +940,47 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
     expect(rlRun.retriedCount).toBeGreaterThanOrEqual(1)
     expect(maxInFlightPostCooldown).toBe(1)
   })
+
+  it('待规范计数不会将长目录常驻或无卫生问题的长全文常驻误计为待规范', async () => {
+    const masterKey = testMasterKey()
+    const credSvc = new CredentialService(database.db, masterKey)
+    const entrySvc = new EntryService(database.db, masterKey, credSvc, null)
+    const consoleScope = { kind: 'console' as const, accountId: 'acc', sessionId: 'sess' }
+
+    const longCleanBody = '稳定的架构设计与接口约束说明。'.repeat(110)
+    await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '分层网络参考手册',
+        summary: '说明网关分层拓扑与排查入口。',
+        content: longCleanBody,
+        bootMode: 'index',
+      }),
+    )
+    await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '项目构建约束',
+        summary: '说明项目构建命令与检查项。',
+        content: longCleanBody,
+        bootMode: 'full',
+        projects: ['alpha-app'],
+      }),
+    )
+
+    const inboxClean = await loadInbox(database.db, false)
+    expect(inboxClean.tidyPendingCount).toBe(0)
+
+    // 缺少现行概要的目录常驻仍应被计入待规范，便于自动补齐概要
+    await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '缺少概要的目录手册',
+        content: '简明操作说明。',
+        bootMode: 'index',
+      }),
+    )
+    const inboxMissingSummary = await loadInbox(database.db, false)
+    expect(inboxMissingSummary.tidyPendingCount).toBe(1)
+  })
 })

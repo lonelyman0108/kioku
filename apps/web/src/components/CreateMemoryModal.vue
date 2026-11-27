@@ -1,14 +1,17 @@
 <script setup lang="ts">
 import {
+  BOOT_MODES,
   Disclosure,
   DISCLOSURE_MAX,
   ENTRY_CONTENT_MAX,
   ENTRY_SUMMARY_MAX,
   ENTRY_TITLE_NEW_MAX,
   EntrySummary,
+  lintEntryHygiene,
   NewEntryTitle,
   TOPICS_MAX,
   TopicTag,
+  type BootMode,
   type EntryDetailResponse,
   type EntryFacetsSummary,
 } from '@kioku/contracts'
@@ -18,6 +21,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { icons } from '../icons'
+import { bootModeDescriptions, bootModeLabels } from '../labels'
 import { detectSecretPrefixes } from '../secretHint'
 import { earliestValidTo, fromLocalInput, validToTooSoon } from '../time'
 import { analyzeTitleHint } from '../titleHint'
@@ -26,7 +30,7 @@ import SceneScopePicker, { type SceneScopeValue } from './SceneScopePicker.vue'
 import SegmentedChoice from './SegmentedChoice.vue'
 import NoteLine from './ui/NoteLine.vue'
 
-withDefaults(
+const props = withDefaults(
   defineProps<{
     facets?: EntryFacetsSummary | null
   }>(),
@@ -40,7 +44,7 @@ const form = reactive({
   summary: '',
   content: '',
   disclosure: '',
-  isPinned: false,
+  bootMode: 'none' as BootMode,
   topics: [] as string[],
   validTo: '',
 })
@@ -55,6 +59,11 @@ const CONTENT_TAB_OPTIONS: { value: 'edit' | 'preview'; label: string; icon: str
   { value: 'edit', label: '编辑', icon: icons.edit },
   { value: 'preview', label: '预览', icon: icons.reveal },
 ]
+
+const BOOT_MODE_OPTIONS: { value: BootMode; label: string }[] = BOOT_MODES.map((value) => ({
+  value,
+  label: bootModeLabels[value],
+}))
 
 const { getKbdKey } = useKbd()
 const submitShortcut = computed(() => {
@@ -81,7 +90,7 @@ watch(open, (visible) => {
   form.summary = ''
   form.content = ''
   form.disclosure = ''
-  form.isPinned = false
+  form.bootMode = 'none'
   form.topics = []
   form.validTo = ''
   scope.value = { envs: [], realms: [], projects: [], runtimes: [] }
@@ -92,6 +101,25 @@ watch(open, (visible) => {
 })
 
 const secretWarnings = computed(() => detectSecretPrefixes(form.content))
+const bootWarnings = computed(() =>
+  lintEntryHygiene({
+    title: form.title,
+    content: form.content,
+    summary: form.summary,
+    bootMode: form.bootMode,
+    envs: scope.value.envs,
+    realms: scope.value.realms,
+    projects: scope.value.projects,
+    runtimes: scope.value.runtimes,
+    knownProjects: props.facets?.projects,
+    knownRuntimes: props.facets?.runtimes,
+  }).filter(
+    (w) =>
+      w.code === 'pinned_oversized' ||
+      w.code === 'pinned_scope_hint' ||
+      w.code === 'pinned_missing_summary',
+  ),
+)
 const titleHint = computed(() => analyzeTitleHint(form.title, form.content, 'create'))
 
 function applyCleanTitle() {
@@ -140,7 +168,8 @@ async function submit() {
       summary: form.summary.trim() || null,
       content: form.content,
       disclosure: form.disclosure.trim() || null,
-      isPinned: form.isPinned,
+      bootMode: form.bootMode,
+      isPinned: form.bootMode !== 'none',
       topics: form.topics,
       envs: scope.value.envs,
       realms: scope.value.realms,
@@ -270,9 +299,32 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onModalKeydown))
           </div>
         </div>
 
-        <div class="flex flex-wrap items-center gap-6">
-          <USwitch v-model="form.isPinned" label="启动加载（会话开始时自动注入）" />
+        <div class="space-y-1.5">
+          <div class="flex flex-wrap items-center gap-3">
+            <span class="content-label">启动加载</span>
+            <SegmentedChoice
+              v-model="form.bootMode"
+              :items="BOOT_MODE_OPTIONS"
+              label="启动加载方式"
+              compact
+            />
+          </div>
+          <p class="text-xs text-muted">{{ bootModeDescriptions[form.bootMode] }}</p>
         </div>
+
+        <NoteLine v-for="warn in bootWarnings" :key="warn.code" tone="warning">
+          {{ warn.message }}
+          <template v-if="warn.code === 'pinned_oversized'" #actions>
+            <UButton size="xs" color="neutral" variant="outline" @click="form.bootMode = 'index'">
+              改为目录常驻
+            </UButton>
+          </template>
+          <template v-else-if="warn.code === 'pinned_scope_hint'" #actions>
+            <UButton size="xs" color="neutral" variant="outline" @click="attrsOpen = true">
+              限定场景
+            </UButton>
+          </template>
+        </NoteLine>
 
         <!-- 默认折叠的高级属性与场景，首屏直接展示核心编辑与创建按钮 -->
         <div class="attrs-collapse">

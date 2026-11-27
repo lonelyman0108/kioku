@@ -25,6 +25,11 @@ const IdParams = z.object({ id: z.uuid() })
 
 type ApiKeyRow = typeof apiKeys.$inferSelect
 
+function normalizeFocusRealms(value: readonly string[] | null | undefined): string[] | null {
+  if (!value || !value.length) return null
+  return [...value]
+}
+
 function toApiKeyView(row: ApiKeyRow): ApiKeyView {
   return {
     id: row.id,
@@ -33,6 +38,7 @@ function toApiKeyView(row: ApiKeyRow): ApiKeyView {
     prefix: row.prefix,
     envs: row.envs,
     allowedRealms: row.allowedRealms,
+    focusRealms: row.focusRealms,
     canWrite: row.canWrite,
     canResolveCredentials: row.canResolveCredentials,
     createdAt: row.createdAt.toISOString(),
@@ -107,6 +113,7 @@ export function keyRoutes(deps: Deps) {
           secretHash: generated.secretHash,
           envs: body.envs,
           allowedRealms: body.allowedRealms,
+          focusRealms: normalizeFocusRealms(body.focusRealms),
           canWrite: body.canWrite,
           canResolveCredentials: body.canResolveCredentials,
         })
@@ -124,6 +131,9 @@ export function keyRoutes(deps: Deps) {
           ...(body.runtimeFamily !== undefined ? { runtimeFamily: body.runtimeFamily } : {}),
           ...(body.envs !== undefined ? { envs: body.envs } : {}),
           ...(body.allowedRealms !== undefined ? { allowedRealms: body.allowedRealms } : {}),
+          ...(body.focusRealms !== undefined
+            ? { focusRealms: normalizeFocusRealms(body.focusRealms) }
+            : {}),
           ...(body.canWrite !== undefined ? { canWrite: body.canWrite } : {}),
           ...(body.canResolveCredentials !== undefined
             ? { canResolveCredentials: body.canResolveCredentials }
@@ -158,6 +168,7 @@ export function keyRoutes(deps: Deps) {
             secretHash: generated.secretHash,
             envs: existing.envs,
             allowedRealms: existing.allowedRealms,
+            focusRealms: existing.focusRealms,
             canWrite: existing.canWrite,
             canResolveCredentials: existing.canResolveCredentials,
           })

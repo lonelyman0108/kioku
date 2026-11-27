@@ -9,6 +9,7 @@ import {
   CredentialSlug,
 } from './credentials'
 import {
+  BootMode,
   ChangeSummary,
   Disclosure,
   EntryContent,
@@ -113,6 +114,7 @@ export const KiokuExportEntry = z.object({
   content: EntryContent,
   disclosure: Disclosure.nullable().optional(),
   isPinned: z.boolean().default(false),
+  bootMode: BootMode.optional(),
   envs: SceneSlugList.default([]),
   realms: SceneSlugList.default([]),
   projects: SceneSlugList.default([]),
@@ -230,6 +232,7 @@ export const ImportPreviewItem = z.object({
   contentPreview: z.string(),
   secretHintLabels: z.array(z.string()),
   isPinned: z.boolean(),
+  bootMode: BootMode.optional(),
   envs: z.array(z.string()),
   realms: z.array(z.string()),
   projects: z.array(z.string()),

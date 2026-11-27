@@ -150,6 +150,7 @@ export const DeviceGrantApproveRequest = z.object({
   userCode: DeviceUserCode,
   envs: SceneSlugList.default([]),
   allowedRealms: AllowedRealms.nullable().default(null),
+  focusRealms: AllowedRealms.nullable().optional(),
   canWrite: z.boolean().default(true),
   canResolveCredentials: z.boolean().default(false),
   items: z.array(DeviceGrantApproveItem).min(1).max(DEVICE_MAX_PLATFORMS),

@@ -10,10 +10,13 @@ import type { Deps, KeyPrincipal } from '../http/env'
 import {
   BOOT_CHAR_BUDGET,
   compileBoot,
+  computeEffectiveCatalogBudget,
   formatBootBlock,
   formatRecentBlock,
   formatSummaryBlock,
+  loadProjectScopedEntries,
   loadRecentEntries,
+  measureBootEntriesChars,
 } from '../recall/boot'
 import { formatRecallBlock, recallEntries } from '../recall/recall'
 import {
@@ -43,12 +46,18 @@ export async function handleLifecycleEvent(
   event: LifecycleEventRequest,
 ): Promise<LifecycleEventResponse> {
   if (event.event === 'session.start') {
-    const limit = HOST_CONTEXT_LIMIT[key.runtimeFamily]
+    const effectiveRuntime = event.runtime ?? key.runtimeFamily
+    const limit = HOST_CONTEXT_LIMIT[effectiveRuntime] ?? HOST_CONTEXT_LIMIT[key.runtimeFamily]
     const budget = Math.min(
       BOOT_CHAR_BUDGET,
-      limit ? Math.max(limit - GUIDANCE.length - CONTEXT_RESERVE, 1_000) : Infinity,
+      limit ? Math.max(limit - GUIDANCE.length - CONTEXT_RESERVE, 1_000) : BOOT_CHAR_BUDGET,
     )
-    const focus = synthesizeFocus(key, { project: event.project })
+    const focus = synthesizeFocus(key, {
+      project: event.project,
+      env: event.env,
+      realm: event.realm,
+      runtime: event.runtime,
+    })
     const projectSlug = normalizeProjectSlug(event.project) ?? ''
     const deviceKey = (event.deviceKey ?? '').trim()
 
@@ -61,32 +70,55 @@ export async function handleLifecycleEvent(
     })
 
     const bootedIds = bootResult.entries.map((e) => e.shortId)
-    const bootedSet = new Set(bootedIds)
+    const bootMentionedIds = [...new Set([...bootedIds, ...bootResult.omitted])]
+    const bootMentionedSet = new Set(bootMentionedIds)
     const pQuery = projectQuery(event.project)
 
-    const [related, recent] = await Promise.all([
+    const [projectTagged, queriedRelated, recent] = await Promise.all([
+      loadProjectScopedEntries(deps.db, key, focus, {
+        limit: SESSION_RELATED_LIMIT,
+        excludeShortIds: bootMentionedIds,
+      }),
       pQuery
         ? recallEntries(deps.db, deps.masterKey, key, pQuery, {
             focus,
-            limit: SESSION_RELATED_LIMIT + bootedSet.size,
+            limit: SESSION_RELATED_LIMIT + bootMentionedSet.size,
             useSemantic: false,
             includeLinks: false,
           }).then((list) =>
-            list.filter((c) => !bootedSet.has(c.shortId)).slice(0, SESSION_RELATED_LIMIT),
+            list.filter((c) => !bootMentionedSet.has(c.shortId)).slice(0, SESSION_RELATED_LIMIT),
           )
         : Promise.resolve([]),
       loadRecentEntries(deps.db, key, {
-        limit: SESSION_RECENT_LIMIT,
-        excludeShortIds: bootedIds,
+        limit: SESSION_RECENT_LIMIT + SESSION_RELATED_LIMIT,
+        excludeShortIds: bootMentionedIds,
+        focus,
       }),
     ])
 
-    let context = formatBootBlock(bootResult, GUIDANCE)
+    // 显式标注当前项目标签的非常驻词条优先进入相关目录，再由关键词召回补足余量
+    const related = [...projectTagged]
+    const relatedIds = new Set(related.map((c) => c.shortId))
+    for (const cand of queriedRelated) {
+      if (related.length >= SESSION_RELATED_LIMIT) break
+      if (relatedIds.has(cand.shortId)) continue
+      relatedIds.add(cand.shortId)
+      related.push(cand)
+    }
+
+    const dedupedRecent = recent
+      .filter((item) => !relatedIds.has(item.shortId))
+      .slice(0, SESSION_RECENT_LIMIT)
+
+    const usedFullChars = measureBootEntriesChars(bootResult.entries)
+    const catalogBudget = computeEffectiveCatalogBudget(limit, GUIDANCE.length, usedFullChars)
+
+    let context = formatBootBlock(bootResult, GUIDANCE, { catalogBudget })
     const summaryBlock = formatSummaryBlock(bootResult.episodes)
     const relatedBlock = related.length
       ? `## 当前项目相关记忆\n\n${formatRecallBlock(related, event.sessionId)}`
       : ''
-    const recentBlock = formatRecentBlock(recent)
+    const recentBlock = formatRecentBlock(dedupedRecent)
 
     context = appendWithinLimit(context, summaryBlock, limit)
     context = appendWithinLimit(context, relatedBlock, limit)
@@ -107,7 +139,12 @@ export async function handleLifecycleEvent(
   }
 
   if (event.event === 'prompt.submit') {
-    const focus = synthesizeFocus(key, { project: event.project })
+    const focus = synthesizeFocus(key, {
+      project: event.project,
+      env: event.env,
+      realm: event.realm,
+      runtime: event.runtime,
+    })
     const candidates = await recallEntries(deps.db, deps.masterKey, key, event.prompt, {
       focus,
       limit: PROMPT_RECALL_LIMIT,

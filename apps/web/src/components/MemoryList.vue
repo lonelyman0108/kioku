@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import {
+  effectiveBootMode,
   ENTRY_TABS,
   type EntryFacetsSummary,
   type EntryListItem,
@@ -11,8 +12,9 @@ import { useKbd } from '@nuxt/ui/composables'
 import { computed, nextTick, ref, watch } from 'vue'
 
 import { icons } from '../icons'
-import { entryTabLabels, envDisplayName } from '../labels'
+import { bootModeLabels, entryTabLabels, envDisplayName } from '../labels'
 import type { ReadState } from '../query'
+import { runtimeName } from '../runtimes'
 import { formatRelative, formatTime, isExpired } from '../time'
 import EmptyState from './ui/EmptyState.vue'
 import ReadFailureNote from './ui/ReadFailureNote.vue'
@@ -24,6 +26,7 @@ const props = withDefaults(
     env: string | null
     realm: string | null
     project: string | null
+    runtime: string | null
     topic: string | null
     projectScope: ProjectScope | null
     selectedId: string | null
@@ -47,6 +50,7 @@ const emit = defineEmits<{
   'update:env': [value: string | null]
   'update:realm': [value: string | null]
   'update:project': [value: string | null]
+  'update:runtime': [value: string | null]
   'update:topic': [value: string | null]
   'update:projectScope': [value: ProjectScope | null]
   select: [shortId: string]
@@ -55,6 +59,7 @@ const emit = defineEmits<{
   refresh: []
   loadMore: []
   clearFilters: []
+  previewBoot: []
 }>()
 
 const { getKbdKey } = useKbd()
@@ -72,7 +77,7 @@ const PROJECT_SCOPE_OPTIONS: { value: ProjectScope; label: string }[] = [
 ]
 
 interface ActiveFilterPill {
-  key: 'projectScope' | 'topic' | 'project' | 'env' | 'realm'
+  key: 'projectScope' | 'topic' | 'project' | 'runtime' | 'env' | 'realm'
   label: string
 }
 
@@ -86,6 +91,7 @@ const activeFilters = computed<ActiveFilterPill[]>(() => {
   }
   if (props.topic) pills.push({ key: 'topic', label: `主题：${props.topic}` })
   if (props.project) pills.push({ key: 'project', label: `项目：${props.project}` })
+  if (props.runtime) pills.push({ key: 'runtime', label: `客户端：${runtimeName(props.runtime)}` })
   if (props.env) pills.push({ key: 'env', label: `环境：${envDisplayName(props.env)}` })
   if (props.realm) pills.push({ key: 'realm', label: `场域：${props.realm}` })
   return pills
@@ -101,6 +107,7 @@ function removeFilter(key: ActiveFilterPill['key']) {
   if (key === 'projectScope') emit('update:projectScope', null)
   else if (key === 'topic') emit('update:topic', null)
   else if (key === 'project') emit('update:project', null)
+  else if (key === 'runtime') emit('update:runtime', null)
   else if (key === 'env') emit('update:env', null)
   else emit('update:realm', null)
 }
@@ -114,13 +121,16 @@ interface RowTag {
 function rowTags(item: EntryListItem): RowTag[] {
   const tags: RowTag[] = []
   for (const p of item.projects) tags.push({ key: `p:${p}`, label: p, kind: 'proj' })
+  for (const rt of item.runtimes) {
+    tags.push({ key: `rt:${rt}`, label: runtimeName(rt), kind: 'scope' })
+  }
   for (const e of item.envs) tags.push({ key: `e:${e}`, label: envDisplayName(e), kind: 'scope' })
   for (const r of item.realms) tags.push({ key: `r:${r}`, label: r, kind: 'scope' })
   if (tags.length > 0) return tags.slice(0, 4)
   return item.topics.slice(0, 2).map((t) => ({ key: `t:${t}`, label: t, kind: 'topic' as const }))
 }
 
-const PINNED_CHAR_BUDGET = 16_000
+const GLOBAL_FULL_CHAR_CAP = 3_500
 
 function rowSubtitle(item: EntryListItem): { isChange: boolean; text: string } | null {
   const lastChange = item.lastChangeSummary?.trim()
@@ -130,18 +140,20 @@ function rowSubtitle(item: EntryListItem): { isChange: boolean; text: string } |
   return null
 }
 
-const pinnedChars = computed<number | null>(() => {
-  if (props.tab !== 'pinned') return null
-  if (props.counts?.pinnedChars !== undefined) return props.counts.pinnedChars
-  if (!props.hasNextPage && props.items.every((item) => item.charCount !== undefined)) {
-    return props.items.reduce((sum, item) => sum + (item.charCount ?? 0), 0)
+const pinnedWatermark = computed(() => {
+  if (props.tab !== 'pinned' || !props.counts) return null
+  const globalCount = props.counts.globalFullPinnedCount ?? 0
+  const globalChars = props.counts.globalFullPinnedChars ?? 0
+  const scopedCount = props.counts.scopedFullPinnedCount ?? 0
+  const indexCount = props.counts.indexPinnedCount ?? 0
+  return {
+    globalCount,
+    globalChars,
+    scopedCount,
+    indexCount,
+    globalOverCap: globalChars > GLOBAL_FULL_CHAR_CAP,
   }
-  return null
 })
-
-const pinnedOverBudget = computed(
-  () => pinnedChars.value !== null && pinnedChars.value > PINNED_CHAR_BUDGET,
-)
 
 const isFiltered = computed(() => Boolean(props.search.trim()) || hasFilters.value)
 
@@ -303,6 +315,22 @@ defineExpose({ filterOpen })
                 </div>
               </div>
 
+              <div v-if="facets?.runtimes?.length" class="facet-group">
+                <span class="facet-label">客户端</span>
+                <div class="facet-chips">
+                  <button
+                    v-for="rt in facets.runtimes"
+                    :key="`rt:${rt}`"
+                    type="button"
+                    class="chip"
+                    :class="{ active: runtime === rt }"
+                    @click="emit('update:runtime', toggleValue(runtime, rt))"
+                  >
+                    {{ runtimeName(rt) }}
+                  </button>
+                </div>
+              </div>
+
               <div v-if="facets?.envs.length" class="facet-group">
                 <span class="facet-label">环境</span>
                 <div class="facet-chips">
@@ -383,29 +411,45 @@ defineExpose({ filterOpen })
 
     <!-- 列表滚动主体 -->
     <section class="list-pane" :class="{ 'is-compact': compact }" aria-label="记忆列表">
-      <div class="list-meta-bar">
+      <div class="list-meta-bar" :class="{ 'is-pinned-bar': pinnedWatermark !== null }">
         <div class="meta-summary tabular-nums">
           <span>{{ summaryText }}</span>
-          <template v-if="pinnedChars !== null">
+          <template v-if="pinnedWatermark">
             <span class="meta-sep" aria-hidden="true">·</span>
             <span
               class="pinned-budget"
-              :class="{ 'is-over': pinnedOverBudget }"
+              :class="{ 'is-over': pinnedWatermark.globalOverCap }"
               :title="
-                pinnedOverBudget
-                  ? '超过默认 16,000 字启动加载上限，部分较长常驻记忆将以目录摘要呈现'
-                  : '默认启动加载字数上限为 16,000 字'
+                pinnedWatermark.globalOverCap
+                  ? '全局全文常驻已超过默认 3,500 字占比上限，建议把长篇参考改为目录常驻或补充场景标签'
+                  : '无场景限定的全局全文常驻默认占比上限为 3,500 字'
               "
             >
-              {{ isFiltered ? '全部常驻约' : '约' }} {{ pinnedChars.toLocaleString() }} /
-              {{ PINNED_CHAR_BUDGET.toLocaleString() }} 字
+              全局全文 {{ pinnedWatermark.globalCount }} 条 /
+              {{ pinnedWatermark.globalChars.toLocaleString() }} 字
             </span>
+            <span class="meta-sep" aria-hidden="true">·</span>
+            <span>场景全文 {{ pinnedWatermark.scopedCount }} 条</span>
+            <span class="meta-sep" aria-hidden="true">·</span>
+            <span>目录常驻 {{ pinnedWatermark.indexCount }} 条</span>
           </template>
         </div>
-        <div v-if="!compact" class="list-hint" aria-hidden="true">
-          <span>↑ ↓ 切换</span>
-          <span>Esc 关闭详情</span>
-          <span>{{ captureShortcut }} 随手记</span>
+        <div class="meta-right">
+          <UButton
+            v-if="tab === 'pinned'"
+            size="xs"
+            color="neutral"
+            variant="outline"
+            :icon="icons.terminal"
+            @click="emit('previewBoot')"
+          >
+            预览终端加载
+          </UButton>
+          <div v-else-if="!compact" class="list-hint" aria-hidden="true">
+            <span>↑ ↓ 切换</span>
+            <span>Esc 关闭详情</span>
+            <span>{{ captureShortcut }} 随手记</span>
+          </div>
         </div>
       </div>
 
@@ -425,7 +469,8 @@ defineExpose({ filterOpen })
                 class="entry-row"
                 :class="{
                   selected: item.shortId === selectedId,
-                  'is-pinned': item.isPinned,
+                  'is-pinned': effectiveBootMode(item) === 'full',
+                  'is-pinned-index': effectiveBootMode(item) === 'index',
                   'is-episode': item.kind === 'episode' && !item.isPinned,
                 }"
                 :data-short-id="item.shortId"
@@ -440,7 +485,12 @@ defineExpose({ filterOpen })
                     <span class="row-id">{{ item.shortId }}</span>
                     <template v-if="item.isPinned">
                       <span class="sub-dot" aria-hidden="true">·</span>
-                      <span class="sub-status">常驻</span>
+                      <span
+                        class="sub-status"
+                        :class="{ 'is-index': effectiveBootMode(item) === 'index' }"
+                      >
+                        {{ bootModeLabels[effectiveBootMode(item)] }}
+                      </span>
                     </template>
                     <template v-else-if="item.kind === 'episode'">
                       <span class="sub-dot" aria-hidden="true">·</span>
@@ -761,22 +811,30 @@ defineExpose({ filterOpen })
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  height: 36px;
+  gap: 8px 12px;
   min-height: 36px;
-  padding: 0 20px;
+  padding: 5px 20px;
   border-bottom: 1px solid var(--ui-border);
   background: var(--ui-bg-muted);
   font-size: 12px;
   color: var(--ui-text-muted);
 }
+.list-meta-bar.is-pinned-bar {
+  flex-wrap: wrap;
+}
 .meta-summary {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
+  gap: 4px 6px;
   min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
+}
+.meta-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  margin-left: auto;
 }
 .meta-sep {
   color: var(--ui-border-accented);
@@ -821,6 +879,15 @@ defineExpose({ filterOpen })
   width: 3px;
   background: var(--ui-rule);
 }
+.entry-row.is-pinned-index::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: repeating-linear-gradient(to bottom, var(--ui-rule) 0 4px, transparent 4px 7px);
+}
 .entry-row.is-episode::before {
   content: '';
   position: absolute;
@@ -841,6 +908,13 @@ defineExpose({ filterOpen })
 }
 .entry-row.selected.is-pinned::before {
   background: var(--ui-on-selected);
+}
+.entry-row.selected.is-pinned-index::before {
+  background: repeating-linear-gradient(
+    to bottom,
+    var(--ui-on-selected-muted) 0 4px,
+    transparent 4px 7px
+  );
 }
 .entry-row.selected.is-episode::before {
   background: repeating-linear-gradient(
@@ -904,6 +978,9 @@ defineExpose({ filterOpen })
   font-weight: 500;
   color: var(--ui-text-highlighted);
 }
+.sub-status.is-index {
+  color: var(--ui-text-toned);
+}
 .sub-status.is-episode {
   color: var(--ui-info);
 }
@@ -911,6 +988,7 @@ defineExpose({ filterOpen })
   color: var(--ui-warning);
 }
 .entry-row.selected .sub-status,
+.entry-row.selected .sub-status.is-index,
 .entry-row.selected .sub-status.is-episode,
 .entry-row.selected .sub-status.is-warn {
   color: var(--ui-on-selected);
@@ -977,7 +1055,7 @@ defineExpose({ filterOpen })
 }
 /* 抽屉收窄（compact）态：标题与单行副行均保持可读，时间与标签转至底部一行 */
 .list-pane.is-compact .list-meta-bar {
-  padding: 0 16px;
+  padding: 5px 16px;
 }
 .list-pane.is-compact .entry-row {
   grid-template-columns: minmax(0, 1fr);
@@ -1011,7 +1089,7 @@ defineExpose({ filterOpen })
     margin-left: 0;
   }
   .list-meta-bar {
-    padding: 0 14px;
+    padding: 6px 14px;
   }
   .list-hint {
     display: none;

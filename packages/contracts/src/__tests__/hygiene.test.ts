@@ -109,5 +109,50 @@ describe('entry hygiene helpers', () => {
     })
     expect(fencedWarnings.map((w) => w.code)).not.toContain('content_has_legacy_glossary')
     expect(fencedWarnings.map((w) => w.code)).toContain('severe_shrink_or_lost_refs')
+
+    // 三态常驻软提醒：全文常驻超 1,200 字报 pinned_oversized；无场景但标题涉及客户端/已知项目报 pinned_scope_hint
+    const fullOversized = lintEntryHygiene({
+      title: 'Codex 运行时约束',
+      content: '规则说明。'.repeat(300),
+      bootMode: 'full',
+      summary: '已有概要',
+      envs: [],
+      realms: [],
+      projects: [],
+      runtimes: [],
+      knownProjects: ['alpha-app'],
+      knownRuntimes: ['zcode'],
+    })
+    expect(fullOversized.map((w) => w.code)).toContain('pinned_oversized')
+    expect(fullOversized.map((w) => w.code)).toContain('pinned_scope_hint')
+
+    // 改为目录常驻并补齐 runtimes 与概要后，上述两项提醒均消失
+    const indexScoped = lintEntryHygiene({
+      title: 'Codex 运行时约束',
+      content: '规则说明。'.repeat(300),
+      bootMode: 'index',
+      summary: '说明客户端约束边界。',
+      runtimes: ['codex'],
+    })
+    expect(indexScoped.map((w) => w.code)).not.toContain('pinned_oversized')
+    expect(indexScoped.map((w) => w.code)).not.toContain('pinned_scope_hint')
+    expect(indexScoped.map((w) => w.code)).not.toContain('pinned_missing_summary')
+
+    // 目录常驻缺概要报 pinned_missing_summary；无场景全文常驻命中已知项目名报 pinned_scope_hint
+    const indexNoSummary = lintEntryHygiene({
+      title: '参考手册',
+      content: '简短内容',
+      bootMode: 'index',
+      summary: null,
+    })
+    expect(indexNoSummary.map((w) => w.code)).toContain('pinned_missing_summary')
+
+    const projectTitleUnscoped = lintEntryHygiene({
+      title: 'alpha-app 部署约定',
+      content: '简短规则',
+      bootMode: 'full',
+      knownProjects: ['alpha-app'],
+    })
+    expect(projectTitleUnscoped.map((w) => w.code)).toContain('pinned_scope_hint')
   })
 })

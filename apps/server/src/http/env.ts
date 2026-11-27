@@ -43,6 +43,7 @@ export interface KeyPrincipal {
   runtimeFamily: RuntimeFamily
   envs: readonly string[]
   allowedRealms: readonly string[] | null
+  focusRealms?: readonly string[] | null
   canWrite: boolean
   canResolveCredentials: boolean
 }

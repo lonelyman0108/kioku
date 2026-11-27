@@ -7,6 +7,7 @@ import {
   normalizeProjectSlug,
   RecallRequest,
   RecallResponse,
+  SceneSlug,
 } from '@kioku/contracts'
 
 import { synthesizeFocus } from '../access/scope'
@@ -42,6 +43,9 @@ const bootRoute = createRoute({
     query: z.object({
       project: z.string().max(128).optional(),
       deviceKey: z.string().max(128).optional(),
+      env: SceneSlug.optional(),
+      realm: SceneSlug.optional(),
+      runtime: SceneSlug.optional(),
     }),
   },
   responses: { 200: jsonResponse('启动加载内容', BootResponse), ...errors },
@@ -70,7 +74,12 @@ export function recallRoutes(deps: Deps) {
   app.openapi(bootRoute, async (c) => {
     const key = c.get('key')
     const query = c.req.valid('query')
-    const focus = synthesizeFocus(key, { project: query.project })
+    const focus = synthesizeFocus(key, {
+      project: query.project,
+      env: query.env,
+      realm: query.realm,
+      runtime: query.runtime,
+    })
     const projectSlug = normalizeProjectSlug(query.project) ?? ''
     const result = await compileBoot(deps.db, key, {
       focus,

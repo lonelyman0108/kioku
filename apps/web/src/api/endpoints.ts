@@ -2,6 +2,7 @@ import {
   ApiKeyListResponse,
   ApiKeyView,
   ApplySuggestionResponse,
+  BootPreviewResponse,
   CapturePlanResponse,
   CredentialListResponse,
   CredentialMeta,
@@ -28,6 +29,7 @@ import {
   TestModelResponse,
   TriggerDreamResponse,
   type ApplySuggestionRequest,
+  type BootPreviewRequest,
   type CapturePlanRequest,
   type ChangePasswordRequest,
   type CreateApiKeyRequest,
@@ -134,6 +136,11 @@ export const api = {
     request('POST', '/console/entries/hygiene/apply', {
       body,
       schema: HygieneSweepApplyResponse,
+    }),
+  previewBoot: (body: BootPreviewRequest = {}) =>
+    request('POST', '/console/boot/preview', {
+      body,
+      schema: BootPreviewResponse,
     }),
 
   // 待处理整理建议

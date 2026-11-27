@@ -109,6 +109,7 @@ export const ApiKeyView = z
     prefix: z.string(),
     envs: z.array(z.string()),
     allowedRealms: z.array(z.string()).nullable(),
+    focusRealms: z.array(z.string()).nullable().optional(),
     canWrite: z.boolean(),
     canResolveCredentials: z.boolean(),
     createdAt: z.string(),
@@ -128,6 +129,7 @@ export const CreateApiKeyRequest = z.object({
   runtimeFamily: CompatRuntimeFamily.default('generic'),
   envs: SceneSlugList.default([]),
   allowedRealms: AllowedRealms.nullable().default(null),
+  focusRealms: AllowedRealms.nullable().optional(),
   canWrite: z.boolean().default(true),
   canResolveCredentials: z.boolean().default(false),
 })
@@ -138,6 +140,7 @@ export const UpdateApiKeyRequest = z.object({
   runtimeFamily: CompatRuntimeFamily.optional(),
   envs: SceneSlugList.optional(),
   allowedRealms: AllowedRealms.nullable().optional(),
+  focusRealms: AllowedRealms.nullable().optional(),
   canWrite: z.boolean().optional(),
   canResolveCredentials: z.boolean().optional(),
 })
@@ -168,6 +171,7 @@ export const WhoAmIKey = z.object({
   runtimeFamily: RuntimeFamily,
   envs: z.array(z.string()),
   allowedRealms: z.array(z.string()).nullable(),
+  focusRealms: z.array(z.string()).nullable().optional(),
   canWrite: z.boolean(),
   canResolveCredentials: z.boolean(),
 })

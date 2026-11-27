@@ -1,7 +1,9 @@
 import {
+  effectiveBootMode,
   extractMarkdownOutline,
   extractMarkdownSection,
   stripDuplicateLeadingHeading,
+  type BootMode,
   type CredentialMeta,
   type EntryBrowseResponse,
   type EntryDetailResponse,
@@ -13,6 +15,12 @@ import { clipChars, inlineText } from '../recall/text'
 export const TOOL_INTERNAL_ERROR = '服务内部错误，请稍后重试'
 
 const OUTLINE_HINT_MIN_CHARS = 4_000
+
+const BOOT_MODE_TEXT: Record<BootMode, string> = {
+  none: '按需召回',
+  index: '目录常驻',
+  full: '全文常驻',
+}
 
 const EVENT_TYPE_LABELS: Record<string, string> = {
   create: '创建',
@@ -35,9 +43,10 @@ export function formatEntryDetail(
   const { entry, outboundLinks, backlinks, credentialRefs, recentHistory, warnings } = detail
   const updatedDate = entry.updatedAt.slice(0, 10)
   const verifiedPart = entry.verifiedAt ? `（核实：${entry.verifiedAt.slice(0, 10)}）` : ''
+  const bootMode = effectiveBootMode(entry)
   const lines: string[] = [
     `# ${inlineText(entry.title)} (${entry.shortId})`,
-    `类型：${entry.kind === 'episode' ? '会话摘要' : '正式记忆'} | 常驻：${entry.isPinned ? '是' : '否'} | 版本：v${entry.version} | 更新：${updatedDate}${verifiedPart}`,
+    `类型：${entry.kind === 'episode' ? '会话摘要' : '正式记忆'} | 启动加载：${BOOT_MODE_TEXT[bootMode]} | 版本：v${entry.version} | 更新：${updatedDate}${verifiedPart}`,
   ]
   if (entry.lastChangeSummary) {
     const historyHint =
@@ -188,7 +197,8 @@ export function formatBrowseResponse(res: EntryBrowseResponse): string {
   for (const group of res.groups) {
     lines.push(`## ${inlineText(group.label)}（${group.count}）`)
     for (const item of group.items) {
-      const pin = item.isPinned ? ' [常驻]' : ''
+      const mode = effectiveBootMode(item)
+      const pin = mode === 'full' ? ' [全文常驻]' : mode === 'index' ? ' [目录常驻]' : ''
       const updated = item.updatedAt ? ` · ${item.updatedAt.slice(0, 10)}` : ''
       const chars =
         item.contentLength && item.contentLength >= 1000

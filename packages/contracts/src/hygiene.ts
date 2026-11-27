@@ -14,6 +14,8 @@ export const HYGIENE_WARNING_CODES = [
   'content_has_legacy_glossary',
   'legacy_lore_uri',
   'pinned_missing_summary',
+  'pinned_oversized',
+  'pinned_scope_hint',
   'missing_change_summary',
   'severe_shrink_or_lost_refs',
 ] as const
@@ -27,7 +29,19 @@ export const HygieneWarning = z.object({
 export type HygieneWarning = z.infer<typeof HygieneWarning>
 
 export const ENTRY_TITLE_RECOMMENDED_MAX = 32
+export const PINNED_FULL_SOFT_WARN_CHARS = 1_200
 const PINNED_SUMMARY_THRESHOLD_CHARS = 1_500
+
+const BUILTIN_RUNTIME_SCOPE_HINTS: readonly { label: string; pattern: RegExp }[] = [
+  { label: 'Claude Code', pattern: /\b(?:claude[\s-]?code|claudecode)\b/i },
+  { label: 'Codex', pattern: /\bcodex\b/i },
+  { label: 'Gemini CLI', pattern: /\bgemini[\s-]?cli\b/i },
+  { label: 'Antigravity', pattern: /\b(?:antigravity|agy)\b/i },
+  { label: 'OpenCode', pattern: /\bopencode\b/i },
+  { label: 'OpenClaw', pattern: /\bopenclaw\b/i },
+  { label: 'Hermes', pattern: /\bhermes\b/i },
+]
+const SCOPE_PHRASE_HINT_RE = /(?:运行时约束|客户端约束|客户端规范|项目规范|仓库约定|项目约束)/
 
 const TITLE_DATE_RE =
   /(?:20\d{2}[-./年]\d{1,2}(?:[-./月]\d{1,2}日?)?|(?<![0-9a-zA-Z])\d{2}-\d{2}(?![0-9a-zA-Z]))/
@@ -205,11 +219,32 @@ function hasChangelogSectionOrStreak(content: string): boolean {
   return false
 }
 
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function matchesSlugInTitle(title: string, slug: string): boolean {
+  const clean = slug.trim().toLowerCase()
+  if (!clean) return false
+  const hasCjk = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/.test(clean)
+  if (!hasCjk && clean.length < 3) return false
+  if (hasCjk && clean.length < 2) return false
+  if (hasCjk) return title.toLowerCase().includes(clean)
+  return new RegExp(`(?<![a-z0-9])${escapeRegExp(clean)}(?![a-z0-9])`, 'i').test(title)
+}
+
 export interface LintEntryHygieneInput {
   title: string
   content: string
   summary?: string | null | undefined
   isPinned?: boolean | undefined
+  bootMode?: 'none' | 'index' | 'full' | undefined
+  envs?: readonly string[] | undefined
+  realms?: readonly string[] | undefined
+  projects?: readonly string[] | undefined
+  runtimes?: readonly string[] | undefined
+  knownProjects?: readonly string[] | undefined
+  knownRuntimes?: readonly string[] | undefined
   isUpdate?: boolean | undefined
   contentChanged?: boolean | undefined
   changeSummary?: string | null | undefined
@@ -220,6 +255,8 @@ export function lintEntryHygiene(input: LintEntryHygieneInput): HygieneWarning[]
   const warnings: HygieneWarning[] = []
   const title = input.title.trim()
   const content = input.content
+  const effectiveMode: 'none' | 'index' | 'full' =
+    input.bootMode ?? (input.isPinned ? 'full' : 'none')
 
   if (title.length > ENTRY_TITLE_RECOMMENDED_MAX) {
     warnings.push({
@@ -269,11 +306,57 @@ export function lintEntryHygiene(input: LintEntryHygieneInput): HygieneWarning[]
     })
   }
 
-  if (input.isPinned && content.length > PINNED_SUMMARY_THRESHOLD_CHARS && !input.summary?.trim()) {
+  if (effectiveMode === 'index' && !input.summary?.trim()) {
+    warnings.push({
+      code: 'pinned_missing_summary',
+      message: '目录常驻记忆建议补充 1–2 句现行概要，便于会话开始时精准决定是否展开正文',
+    })
+  } else if (
+    effectiveMode === 'full' &&
+    content.length > PINNED_SUMMARY_THRESHOLD_CHARS &&
+    !input.summary?.trim()
+  ) {
     warnings.push({
       code: 'pinned_missing_summary',
       message: `常驻记忆正文较长（${content.length} 字），建议补充 1–2 句现行概要以便启动加载紧凑呈现`,
     })
+  }
+
+  if (effectiveMode === 'full' && content.length > PINNED_FULL_SOFT_WARN_CHARS) {
+    warnings.push({
+      code: 'pinned_oversized',
+      message: `全文常驻正文共 ${content.length} 字（建议控制在 ${PINNED_FULL_SOFT_WARN_CHARS} 字内），参考手册类建议改为目录常驻并补充现行概要`,
+    })
+  }
+
+  const isGlobalScope =
+    (input.envs?.length ?? 0) === 0 &&
+    (input.realms?.length ?? 0) === 0 &&
+    (input.projects?.length ?? 0) === 0 &&
+    (input.runtimes?.length ?? 0) === 0
+  if (effectiveMode === 'full' && isGlobalScope && title) {
+    const matchedHints: string[] = []
+    for (const rt of BUILTIN_RUNTIME_SCOPE_HINTS) {
+      if (rt.pattern.test(title)) matchedHints.push(rt.label)
+    }
+    for (const proj of input.knownProjects ?? []) {
+      if (matchesSlugInTitle(title, proj) && !matchedHints.includes(proj)) {
+        matchedHints.push(proj)
+      }
+    }
+    for (const rt of input.knownRuntimes ?? []) {
+      if (matchesSlugInTitle(title, rt) && !matchedHints.includes(rt)) {
+        matchedHints.push(rt)
+      }
+    }
+    if (matchedHints.length > 0 || SCOPE_PHRASE_HINT_RE.test(title)) {
+      const target =
+        matchedHints.length > 0 ? `「${matchedHints.slice(0, 2).join('、')}」` : '特定项目或客户端'
+      warnings.push({
+        code: 'pinned_scope_hint',
+        message: `当前未限定场景，但标题涉及${target}，建议补充项目或客户端标签以避免跨场景加载`,
+      })
+    }
   }
 
   if (input.isUpdate && input.contentChanged && !input.changeSummary?.trim()) {

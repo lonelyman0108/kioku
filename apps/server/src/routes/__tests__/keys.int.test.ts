@@ -45,6 +45,7 @@ describe.skipIf(!testDatabaseUrl)('访问密钥管理、轮换与 whoami 兼容�
         runtimeFamily: 'claudecode',
         envs: ['mac', 'office'],
         allowedRealms: ['work'],
+        focusRealms: ['work'],
         canWrite: true,
         canResolveCredentials: true,
       }),
@@ -55,6 +56,7 @@ describe.skipIf(!testDatabaseUrl)('访问密钥管理、轮换与 whoami 兼容�
     expect(issued.key).toMatch(/^kioku_/)
     expect(issued.item.envs).toEqual(['mac', 'office'])
     expect(issued.item.allowedRealms).toEqual(['work'])
+    expect(issued.item.focusRealms).toEqual(['work'])
 
     // GET /v1/whoami 返回透镜与 primaryCircle 兼容垫片
     const whoamiRes = await app.request('/v1/whoami', {
@@ -66,6 +68,7 @@ describe.skipIf(!testDatabaseUrl)('访问密钥管理、轮换与 whoami 兼容�
     expect(whoami.key.runtimeFamily).toBe('claudecode')
     expect(whoami.key.envs).toEqual(['mac', 'office'])
     expect(whoami.key.allowedRealms).toEqual(['work'])
+    expect(whoami.key.focusRealms).toEqual(['work'])
     expect(whoami.key.canResolveCredentials).toBe(true)
     expect(whoami.primaryCircle?.slug).toBe('default')
 
@@ -97,6 +100,7 @@ describe.skipIf(!testDatabaseUrl)('访问密钥管理、轮换与 whoami 兼容�
     expect(rotated.item.name).toBe('Office Mac Renamed')
     expect(rotated.item.envs).toEqual(['mac', 'office'])
     expect(rotated.item.allowedRealms).toEqual(['work'])
+    expect(rotated.item.focusRealms).toEqual(['work'])
     expect(rotated.item.canWrite).toBe(false)
 
     // 旧密钥即刻返回 401

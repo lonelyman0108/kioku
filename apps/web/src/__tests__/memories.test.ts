@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
+import bootPreviewDrawer from '../components/BootPreviewDrawer.vue?raw'
 import createMemoryModal from '../components/CreateMemoryModal.vue?raw'
 import dreamSuggestionCard from '../components/DreamSuggestionCard.vue?raw'
 import entryLinksPanel from '../components/EntryLinksPanel.vue?raw'
@@ -9,6 +10,7 @@ import memoryEditor from '../components/MemoryEditor.vue?raw'
 import memoryHistoryDrawer from '../components/MemoryHistoryDrawer.vue?raw'
 import memoryList from '../components/MemoryList.vue?raw'
 import quickCaptureModal from '../components/QuickCaptureModal.vue?raw'
+import sceneScopePicker from '../components/SceneScopePicker.vue?raw'
 import diffViewer from '../components/ui/DiffViewer.vue?raw'
 import consoleSearch from '../composables/useConsoleSearch.ts?raw'
 import { icons } from '../icons'
@@ -143,11 +145,19 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(createMemoryModal).toContain('attrs-collapse')
   })
 
-  it('列表保留近改副行与常驻水位，历史工作台与通用 DiffViewer 支持基准对比、词级高亮与按需展开上下文', () => {
+  it('列表保留近改副行与分层常驻水位，支持自定义客户端与终端启动加载预览，历史工作台与 DiffViewer 完整', () => {
     expect(memoryList).toContain('近改：')
-    expect(memoryList).toContain('PINNED_CHAR_BUDGET')
+    expect(memoryList).toContain('GLOBAL_FULL_CHAR_CAP')
     expect(memoryList).toContain('pinned-budget')
+    expect(memoryList).toContain('facets?.runtimes')
+    expect(memoryList).toContain('预览终端加载')
     expect(memoryList).not.toContain('.list-pane.is-compact .row-disclosure')
+    expect(memoriesPage).toContain('<BootPreviewDrawer')
+    expect(sceneScopePicker).toContain('自定义客户端')
+    expect(memoryEditor).toContain('pinPopoverOpen')
+    expect(memoryEditor).toContain('editBootWarnings')
+    expect(bootPreviewDrawer).toContain('api.previewBoot')
+    expect(bootPreviewDrawer).toContain('ring-2 ring-rule')
 
     expect(memoryHistoryDrawer).toContain('max-w-[1640px]')
     expect(memoryHistoryDrawer).toContain('ring-2 ring-rule')

@@ -66,6 +66,7 @@ export async function issueTestApiKey(
     runtimeFamily?: typeof apiKeys.$inferInsert.runtimeFamily
     envs?: string[]
     allowedRealms?: string[] | null
+    focusRealms?: string[] | null
     canWrite?: boolean
     canResolveCredentials?: boolean
   } = {},
@@ -80,6 +81,7 @@ export async function issueTestApiKey(
       secretHash: generated.secretHash,
       envs: options.envs ?? [],
       allowedRealms: options.allowedRealms ?? null,
+      focusRealms: options.focusRealms ?? null,
       canWrite: options.canWrite ?? true,
       canResolveCredentials: options.canResolveCredentials ?? false,
     })

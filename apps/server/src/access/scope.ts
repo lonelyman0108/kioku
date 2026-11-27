@@ -1,4 +1,4 @@
-import { normalizeProjectSlug, normalizeSlugList, type LifecycleProject } from '@kioku/contracts'
+import { extractProjectSlugs, normalizeSlugList, type LifecycleProject } from '@kioku/contracts'
 import { and, isNull, or, gt, sql, type SQL } from 'drizzle-orm'
 
 import { currentMoment } from '../db/moment'
@@ -128,21 +128,32 @@ export function synthesizeFocus(scope: AccessScope, overrides: FocusOverrides = 
     : scope.kind === 'key'
       ? normalizeSlugList(scope.envs)
       : []
-  const realms = overrides.realm
-    ? normalizeSlugList([overrides.realm])
-    : scope.kind === 'key' && scope.allowedRealms !== null
-      ? normalizeSlugList(scope.allowedRealms)
-      : []
+
+  let realms: string[] = []
+  if (overrides.realm) {
+    realms = normalizeSlugList([overrides.realm])
+  } else if (scope.kind === 'key') {
+    const allowed = scope.allowedRealms !== null ? normalizeSlugList(scope.allowedRealms) : null
+    const focused = scope.focusRealms?.length ? normalizeSlugList(scope.focusRealms) : null
+    if (focused) {
+      if (allowed === null) {
+        realms = focused
+      } else {
+        const allowedSet = new Set(allowed)
+        const intersection = focused.filter((r) => allowedSet.has(r))
+        realms = intersection.length ? intersection : allowed
+      }
+    } else if (allowed !== null) {
+      realms = allowed
+    }
+  }
+
   const runtimes = overrides.runtime
     ? normalizeSlugList([overrides.runtime])
     : scope.kind === 'key' && AGENT_RUNTIMES.has(scope.runtimeFamily)
       ? [scope.runtimeFamily]
       : []
-  const projectSlug =
-    typeof overrides.project === 'string'
-      ? normalizeProjectSlug(overrides.project)
-      : normalizeProjectSlug(overrides.project)
-  const projects = projectSlug ? [projectSlug] : []
+  const projects = extractProjectSlugs(overrides.project)
   return { envs, realms, projects, runtimes }
 }
 

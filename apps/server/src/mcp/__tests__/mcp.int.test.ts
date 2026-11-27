@@ -406,5 +406,33 @@ describe.skipIf(!testDatabaseUrl)('无状态 MCP 服务与 9 个扁平工具', (
     }
     expect(crossResult.isError).toBe(true)
     expect(crossResult.structuredContent).toMatchObject({ status: 404 })
+
+    // kioku_create 支持 boot_mode='index' 与自定义 runtimes，kioku_boot 支持 runtime 覆盖
+    const indexCreated = await mcpRpc(app, workKey.key, 'tools/call', {
+      name: 'kioku_create',
+      arguments: {
+        title: 'ZCode 索引参考',
+        summary: '自定义客户端参考手册概要。',
+        content: '详细参考内容。',
+        realms: ['work'],
+        runtimes: ['zcode'],
+        boot_mode: 'index',
+      },
+    })
+    const indexDetail = EntryDetailResponse.parse(
+      (indexCreated.body.result as { structuredContent?: unknown }).structuredContent,
+    )
+    expect(indexDetail.entry.bootMode).toBe('index')
+    expect(indexDetail.entry.isPinned).toBe(true)
+    expect(indexDetail.entry.runtimes).toEqual(['zcode'])
+
+    const zcodeBoot = await mcpRpc(app, workKey.key, 'tools/call', {
+      name: 'kioku_boot',
+      arguments: { runtime: 'zcode' },
+    })
+    const zcodeBootText = (zcodeBoot.body.result as { content: { text: string }[] }).content[0]!
+      .text
+    expect(zcodeBootText).toContain(indexDetail.entry.shortId)
+    expect(zcodeBootText).toContain('## 常驻记忆目录')
   })
 })

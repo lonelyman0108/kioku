@@ -1,5 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi'
 import {
+  BootPreviewRequest,
+  BootPreviewResponse,
   CapturePlanRequest,
   CapturePlanResponse,
   CreateEntryRequest,
@@ -80,6 +82,15 @@ const hygieneApplyRoute = createRoute({
   responses: { 200: jsonResponse('预清洗结果', HygieneSweepApplyResponse), ...errors },
 })
 
+const bootPreviewRoute = createRoute({
+  method: 'post',
+  path: '/console/boot/preview',
+  tags: ['console'],
+  summary: '只读预览指定访问密钥与场景下会话启动实际加载的常驻记忆、目录项与排除项',
+  request: { body: jsonBody(BootPreviewRequest) },
+  responses: { 200: jsonResponse('终端启动加载预览', BootPreviewResponse), ...errors },
+})
+
 const detailRoute = createRoute({
   method: 'get',
   path: '/console/entries/{shortId}',
@@ -144,6 +155,9 @@ export function memoryRoutes(entries: EntryService) {
     .openapi(hygienePreviewRoute, async (c) => c.json(await entries.previewHygieneSweep(), 200))
     .openapi(hygieneApplyRoute, async (c) =>
       c.json(await entries.applyHygieneSweep(c.req.valid('json')), 200),
+    )
+    .openapi(bootPreviewRoute, async (c) =>
+      c.json(await entries.previewBoot(c.req.valid('json')), 200),
     )
     .openapi(detailRoute, async (c) =>
       c.json(

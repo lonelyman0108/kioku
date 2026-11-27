@@ -1,18 +1,23 @@
 <script setup lang="ts">
 import {
+  BOOT_MODES,
   CHANGE_SUMMARY_MAX,
   ChangeSummary,
   DISCLOSURE_MAX,
+  effectiveBootMode,
   ENTRY_SUMMARY_MAX,
   ENTRY_TITLE_MAX,
   EntrySummary,
   EntryTitle,
   extractMarkdownOutline,
   hasDuplicateLeadingHeading,
+  lintEntryHygiene,
   normalizeSlugList,
+  PINNED_FULL_SOFT_WARN_CHARS,
   stripDuplicateLeadingHeading,
   TOPICS_MAX,
   TopicTag,
+  type BootMode,
   type EntryDetailResponse,
   type EntryFacetsSummary,
 } from '@kioku/contracts'
@@ -32,7 +37,14 @@ import { useDebounced } from '../composables/useDebounced'
 import { useMarkdownSyncScroll } from '../composables/useMarkdownSyncScroll'
 import { useNow } from '../composables/useNow'
 import { icons } from '../icons'
-import { entryKindLabels, envDisplayName, eventTypeLabels, formatActorLabel } from '../labels'
+import {
+  bootModeDescriptions,
+  bootModeLabels,
+  entryKindLabels,
+  envDisplayName,
+  eventTypeLabels,
+  formatActorLabel,
+} from '../labels'
 import type { CredentialLinks, WikiLinkTargets } from '../markdown'
 import { placeholderOf } from '../placeholders'
 import { credentialRoute, entryRoute } from '../routes'
@@ -100,8 +112,16 @@ const EDIT_VIEW_OPTIONS: { value: EditViewMode; label: string; icon: string; tit
   { value: 'preview', label: '预览', icon: icons.reveal, title: '渲染预览' },
 ]
 
+const BOOT_MODE_OPTIONS: { value: BootMode; label: string }[] = BOOT_MODES.map((value) => ({
+  value,
+  label: bootModeLabels[value],
+}))
+
 const detail = ref<EntryDetailResponse | null>(null)
 const entry = computed(() => detail.value?.entry ?? null)
+const entryBootMode = computed<BootMode>(() =>
+  entry.value ? effectiveBootMode(entry.value) : 'none',
+)
 const mode = ref<'read' | 'edit'>('read')
 const editView = ref<EditViewMode>('edit')
 const syncScroll = ref(true)
@@ -126,7 +146,7 @@ const form = reactive({
   content: '',
   disclosure: '',
   changeSummary: '',
-  isPinned: false,
+  bootMode: 'none' as BootMode,
   topics: [] as string[],
   validTo: '',
 })
@@ -142,7 +162,7 @@ function loadDetail(next: EntryDetailResponse) {
   form.content = e.content
   form.disclosure = e.disclosure ?? ''
   form.changeSummary = ''
-  form.isPinned = e.isPinned
+  form.bootMode = effectiveBootMode(e)
   form.topics = [...e.topics]
   form.validTo = validToInput(e.validTo)
   scope.value = {
@@ -189,11 +209,12 @@ const dirtyChanges = computed<SaveBarChange[]>(() => {
       after: normDisclosure || '（空）',
     })
   }
-  if (form.isPinned !== e.isPinned) {
+  const baseBootMode = effectiveBootMode(e)
+  if (form.bootMode !== baseBootMode) {
     list.push({
-      label: '常驻',
-      before: e.isPinned ? '常驻' : '按需',
-      after: form.isPinned ? '常驻' : '按需',
+      label: '启动加载',
+      before: bootModeLabels[baseBootMode],
+      after: bootModeLabels[form.bootMode],
     })
   }
   if (!sameList(form.topics, e.topics)) {
@@ -266,6 +287,26 @@ const isDeleted = computed(() => Boolean(entry.value?.deletedAt))
 const secretWarnings = computed(() =>
   mode.value === 'edit' ? detectSecretPrefixes(form.content) : [],
 )
+const editBootWarnings = computed(() => {
+  if (mode.value !== 'edit' || entry.value?.kind !== 'entry') return []
+  return lintEntryHygiene({
+    title: form.title,
+    content: form.content,
+    summary: form.summary,
+    bootMode: form.bootMode,
+    envs: scope.value.envs,
+    realms: scope.value.realms,
+    projects: scope.value.projects,
+    runtimes: scope.value.runtimes,
+    knownProjects: props.facets?.projects,
+    knownRuntimes: props.facets?.runtimes,
+  }).filter(
+    (w) =>
+      w.code === 'pinned_oversized' ||
+      w.code === 'pinned_scope_hint' ||
+      w.code === 'pinned_missing_summary',
+  )
+})
 const titleHint = computed(() =>
   mode.value === 'edit'
     ? analyzeTitleHint(form.title, form.content)
@@ -305,6 +346,7 @@ const validationProblem = computed(() => {
 
 function startEditing() {
   if (!entry.value || isDeleted.value) return
+  pinPopoverOpen.value = false
   minValidTo.value = earliestValidTo()
   attrsOpen.value = false
   form.changeSummary = ''
@@ -337,7 +379,8 @@ async function save() {
       content: form.content,
       disclosure: form.disclosure.trim() || null,
       ...(form.changeSummary.trim() ? { changeSummary: form.changeSummary.trim() } : {}),
-      isPinned: form.isPinned,
+      bootMode: form.bootMode,
+      isPinned: form.bootMode !== 'none',
       topics: form.topics,
       envs: scope.value.envs,
       realms: scope.value.realms,
@@ -361,23 +404,137 @@ async function save() {
   }
 }
 
-// 阅读态快捷切换「启动加载」或将「会话摘要」一键提炼为正式记忆
+// 阅读态常驻分层 Popover 与将「会话摘要」一键提炼为正式记忆
 const quickBusy = ref(false)
-async function togglePinnedQuick(nextPinned: boolean) {
+const pinPopoverOpen = ref(false)
+const pinDraft = reactive({
+  bootMode: 'none' as BootMode,
+  summary: '',
+  scope: { envs: [], realms: [], projects: [], runtimes: [] } as SceneScopeValue,
+  scopeExpanded: false,
+  recommendedIndex: false,
+})
+
+watch(pinPopoverOpen, (visible) => {
+  const current = entry.value
+  if (!visible || !current) return
+  const currentMode = effectiveBootMode(current)
+  const overSoftCap = current.content.length > PINNED_FULL_SOFT_WARN_CHARS
+  pinDraft.recommendedIndex = currentMode === 'none' && overSoftCap
+  pinDraft.bootMode = pinDraft.recommendedIndex ? 'index' : currentMode
+  pinDraft.summary = current.summary ?? ''
+  pinDraft.scope = {
+    envs: [...current.envs],
+    realms: [...current.realms],
+    projects: [...current.projects],
+    runtimes: [...current.runtimes],
+  }
+  const hints = lintEntryHygiene({
+    title: current.title,
+    content: current.content,
+    summary: current.summary,
+    bootMode: 'full',
+    envs: current.envs,
+    realms: current.realms,
+    projects: current.projects,
+    runtimes: current.runtimes,
+    knownProjects: props.facets?.projects,
+    knownRuntimes: props.facets?.runtimes,
+  })
+  pinDraft.scopeExpanded =
+    current.envs.length > 0 ||
+    current.realms.length > 0 ||
+    current.projects.length > 0 ||
+    current.runtimes.length > 0 ||
+    hints.some((w) => w.code === 'pinned_scope_hint')
+})
+
+const pinDraftWarnings = computed(() => {
+  const current = entry.value
+  if (!pinPopoverOpen.value || !current) return []
+  return lintEntryHygiene({
+    title: current.title,
+    content: current.content,
+    summary: pinDraft.summary,
+    bootMode: pinDraft.bootMode,
+    envs: pinDraft.scope.envs,
+    realms: pinDraft.scope.realms,
+    projects: pinDraft.scope.projects,
+    runtimes: pinDraft.scope.runtimes,
+    knownProjects: props.facets?.projects,
+    knownRuntimes: props.facets?.runtimes,
+  }).filter(
+    (w) =>
+      w.code === 'pinned_oversized' ||
+      w.code === 'pinned_scope_hint' ||
+      w.code === 'pinned_missing_summary',
+  )
+})
+
+const pinDraftDirty = computed(() => {
+  const current = entry.value
+  if (!current) return false
+  if (pinDraft.bootMode !== effectiveBootMode(current)) return true
+  if (
+    pinDraft.bootMode === 'index' &&
+    (pinDraft.summary.trim() || '') !== (current.summary?.trim() || '')
+  ) {
+    return true
+  }
+  if (pinDraft.bootMode !== 'none') {
+    if (!sameList(pinDraft.scope.envs, current.envs)) return true
+    if (!sameList(pinDraft.scope.realms, current.realms)) return true
+    if (!sameList(pinDraft.scope.projects, current.projects)) return true
+    if (!sameList(pinDraft.scope.runtimes, current.runtimes)) return true
+  }
+  return false
+})
+
+async function applyPinDraft() {
   const current = entry.value
   if (!current || quickBusy.value || isDeleted.value || current.kind === 'episode') return
+  const editingSummary = pinDraft.bootMode === 'index'
+  if (editingSummary && pinDraft.summary.trim()) {
+    const parsed = EntrySummary.safeParse(pinDraft.summary)
+    if (!parsed.success) {
+      toast.add({
+        title: parsed.error.issues[0]?.message ?? '现行概要格式有误',
+        color: 'error',
+      })
+      return
+    }
+  }
   quickBusy.value = true
   try {
+    const summaryChanged =
+      editingSummary && (pinDraft.summary.trim() || '') !== (current.summary?.trim() || '')
+    const includeScope = pinDraft.bootMode !== 'none'
     const updated = await api.updateEntry(current.shortId, {
       expectedVersion: current.version,
-      isPinned: nextPinned,
+      bootMode: pinDraft.bootMode,
+      isPinned: pinDraft.bootMode !== 'none',
+      ...(includeScope
+        ? {
+            envs: pinDraft.scope.envs,
+            realms: pinDraft.scope.realms,
+            projects: pinDraft.scope.projects,
+            runtimes: pinDraft.scope.runtimes,
+          }
+        : {}),
+      ...(summaryChanged ? { summary: pinDraft.summary.trim() || null } : {}),
     })
     queryClient.setQueryData(queryKey.value, updated)
     loadDetail(updated)
+    pinPopoverOpen.value = false
+    toast.add({ title: `已设为${bootModeLabels[pinDraft.bootMode]}`, color: 'success' })
     void queryClient.invalidateQueries({ queryKey: ['entry-history', current.shortId] })
     emit('changed', updated)
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '更新失败', color: 'error' })
+    if (err instanceof ApiError && err.status === 409) {
+      pinPopoverOpen.value = false
+      void detailQuery.refetch()
+    }
   } finally {
     quickBusy.value = false
   }
@@ -614,7 +771,7 @@ const scopeTags = computed(() => {
 const editAttrsSummary = computed(() => {
   const parts: string[] = []
   if (entry.value?.kind === 'entry') {
-    parts.push(form.isPinned ? '常驻' : '按需')
+    parts.push(bootModeLabels[form.bootMode])
   }
   if (form.topics.length) parts.push(`${form.topics.length} 个主题`)
   const scopeCount =
@@ -690,9 +847,13 @@ defineExpose({
           <div class="head-identity">
             <div class="head-title-row">
               <h1 ref="titleEl" tabindex="-1">{{ entry.title }}</h1>
-              <span v-if="entry.isPinned" class="pill status-pinned">
+              <span v-if="entryBootMode === 'full'" class="pill status-pinned">
                 <span class="rail-swatch solid" aria-hidden="true" />
-                常驻
+                全文常驻
+              </span>
+              <span v-else-if="entryBootMode === 'index'" class="pill status-pinned-index">
+                <span class="rail-swatch index" aria-hidden="true" />
+                目录常驻
               </span>
               <span v-if="entry.kind === 'episode'" class="pill status-episode">
                 <span class="rail-swatch dashed" aria-hidden="true" />
@@ -753,17 +914,120 @@ defineExpose({
               >
                 编辑
               </UButton>
-              <UButton
+              <UPopover
                 v-if="!isDeleted && entry.kind === 'entry'"
-                size="sm"
-                color="neutral"
-                variant="outline"
-                :icon="icons.pin"
-                :loading="quickBusy"
-                @click="togglePinnedQuick(!entry.isPinned)"
+                v-model:open="pinPopoverOpen"
+                :content="{ align: 'end', sideOffset: 6 }"
               >
-                {{ entry.isPinned ? '取消常驻' : '设为常驻' }}
-              </UButton>
+                <UButton
+                  size="sm"
+                  color="neutral"
+                  variant="outline"
+                  :icon="icons.pin"
+                  :loading="quickBusy"
+                  :aria-expanded="pinPopoverOpen"
+                >
+                  {{ entryBootMode === 'none' ? '设为常驻' : bootModeLabels[entryBootMode] }}
+                </UButton>
+                <template #content>
+                  <div class="pin-popover">
+                    <div class="pin-popover-head">
+                      <span class="pin-popover-title">启动加载方式</span>
+                      <span class="text-xs text-muted tabular-nums">
+                        约 {{ entry.content.length.toLocaleString() }} 字
+                      </span>
+                    </div>
+
+                    <div class="pin-mode-list" role="radiogroup" aria-label="选择启动加载方式">
+                      <button
+                        v-for="modeOpt in BOOT_MODES"
+                        :key="modeOpt"
+                        type="button"
+                        role="radio"
+                        class="pin-mode-card"
+                        :class="{ active: pinDraft.bootMode === modeOpt }"
+                        :aria-checked="pinDraft.bootMode === modeOpt"
+                        @click="pinDraft.bootMode = modeOpt"
+                      >
+                        <span class="pin-mode-head">
+                          <span class="pin-mode-name">{{ bootModeLabels[modeOpt] }}</span>
+                          <UIcon
+                            v-if="pinDraft.bootMode === modeOpt"
+                            :name="icons.check"
+                            class="pin-mode-check"
+                            aria-hidden="true"
+                          />
+                        </span>
+                        <span class="pin-mode-desc">{{ bootModeDescriptions[modeOpt] }}</span>
+                      </button>
+                    </div>
+
+                    <NoteLine v-if="pinDraft.recommendedIndex" tone="neutral">
+                      正文超过 1,200 字，已默认推荐目录常驻；也可按需切换为全文常驻。
+                    </NoteLine>
+
+                    <NoteLine v-for="warn in pinDraftWarnings" :key="warn.code" tone="warning">
+                      {{ warn.message }}
+                    </NoteLine>
+
+                    <div v-if="pinDraft.bootMode === 'index'" class="space-y-1">
+                      <label for="pin-summary-input" class="pin-field-label">
+                        现行概要（用于启动目录行）
+                      </label>
+                      <UTextarea
+                        id="pin-summary-input"
+                        v-model="pinDraft.summary"
+                        :rows="2"
+                        autoresize
+                        :maxrows="3"
+                        :maxlength="ENTRY_SUMMARY_MAX"
+                        placeholder="1–2 句概括当前结论，便于会话启动判断是否展开全文"
+                        class="w-full"
+                      />
+                    </div>
+
+                    <div v-if="pinDraft.bootMode !== 'none'" class="pin-scope-box">
+                      <button
+                        type="button"
+                        class="pin-scope-toggle"
+                        :aria-expanded="pinDraft.scopeExpanded"
+                        @click="pinDraft.scopeExpanded = !pinDraft.scopeExpanded"
+                      >
+                        <span>确认适用场景</span>
+                        <UIcon
+                          :name="pinDraft.scopeExpanded ? icons.chevronDown : icons.chevronRight"
+                          class="attrs-chevron"
+                          aria-hidden="true"
+                        />
+                      </button>
+                      <div v-if="pinDraft.scopeExpanded" class="pin-scope-body">
+                        <SceneScopePicker v-model="pinDraft.scope" :facets="facets" />
+                      </div>
+                    </div>
+
+                    <div class="pin-popover-foot">
+                      <UButton
+                        size="xs"
+                        color="neutral"
+                        variant="ghost"
+                        :disabled="quickBusy"
+                        @click="pinPopoverOpen = false"
+                      >
+                        取消
+                      </UButton>
+                      <UButton
+                        size="xs"
+                        :icon="icons.check"
+                        :loading="quickBusy"
+                        :disabled="!pinDraftDirty"
+                        @click="applyPinDraft"
+                      >
+                        保存设置
+                      </UButton>
+                    </div>
+                  </div>
+                </template>
+              </UPopover>
               <UButton
                 size="sm"
                 color="neutral"
@@ -885,14 +1149,19 @@ defineExpose({
                       class="w-full"
                     />
                   </UFormField>
-                  <div class="flex items-center pt-5">
-                    <USwitch
+                  <UFormField label="启动加载方式">
+                    <SegmentedChoice
                       v-if="entry.kind === 'entry'"
-                      v-model="form.isPinned"
-                      label="启动加载（会话开始时自动注入）"
+                      v-model="form.bootMode"
+                      :items="BOOT_MODE_OPTIONS"
+                      label="启动加载方式"
+                      compact
                     />
                     <span v-else class="text-xs text-muted">会话摘要不支持设为启动加载</span>
-                  </div>
+                    <template v-if="entry.kind === 'entry'" #help>
+                      <span>{{ bootModeDescriptions[form.bootMode] }}</span>
+                    </template>
+                  </UFormField>
                 </div>
 
                 <UFormField label="适用场景">
@@ -915,6 +1184,25 @@ defineExpose({
                 </div>
               </div>
             </div>
+
+            <NoteLine v-for="warn in editBootWarnings" :key="warn.code" tone="warning">
+              {{ warn.message }}
+              <template v-if="warn.code === 'pinned_oversized'" #actions>
+                <UButton
+                  size="xs"
+                  color="neutral"
+                  variant="outline"
+                  @click="form.bootMode = 'index'"
+                >
+                  改为目录常驻
+                </UButton>
+              </template>
+              <template v-else-if="warn.code === 'pinned_scope_hint'" #actions>
+                <UButton size="xs" color="neutral" variant="outline" @click="attrsOpen = true">
+                  限定场景
+                </UButton>
+              </template>
+            </NoteLine>
 
             <NoteLine v-if="secretWarnings.length" tone="warning">
               正文疑似包含{{
@@ -1418,6 +1706,9 @@ defineExpose({
 .pill.status-pinned {
   color: var(--ui-text-highlighted);
 }
+.pill.status-pinned-index {
+  color: var(--ui-text-toned);
+}
 .pill.status-episode {
   border-color: var(--ui-info);
   background: var(--ui-bg);
@@ -1436,8 +1727,122 @@ defineExpose({
 .rail-swatch.solid {
   background: var(--ui-rule);
 }
+.rail-swatch.index {
+  background: repeating-linear-gradient(to bottom, var(--ui-rule) 0 3px, transparent 3px 6px);
+}
 .rail-swatch.dashed {
   background: repeating-linear-gradient(to bottom, var(--ui-info) 0 3px, transparent 3px 6px);
+}
+.pin-popover {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(26rem, calc(100vw - 2rem));
+  max-height: 75vh;
+  overflow-y: auto;
+  padding: 14px 16px;
+}
+.pin-popover-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.pin-popover-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ui-text-highlighted);
+}
+.pin-mode-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pin-mode-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px 8px 12px;
+  border: 1px solid var(--ui-border-accented);
+  background: var(--ui-bg);
+  text-align: left;
+  cursor: pointer;
+}
+.pin-mode-card:hover {
+  border-color: var(--ui-rule);
+  background: var(--ui-bg-muted);
+}
+.pin-mode-card.active {
+  border-color: var(--ui-rule);
+  background: var(--ui-selected);
+  color: var(--ui-on-selected);
+}
+.pin-mode-card.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--ui-on-selected);
+}
+.pin-mode-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.pin-mode-name {
+  font-size: 13px;
+  font-weight: 500;
+}
+.pin-mode-check {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 14px;
+}
+.pin-mode-desc {
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.pin-mode-card.active .pin-mode-desc {
+  color: var(--ui-on-selected-muted);
+}
+.pin-field-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ui-text-muted);
+}
+.pin-scope-box {
+  border: 1px solid var(--ui-border);
+  background: var(--ui-bg-muted);
+}
+.pin-scope-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 7px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ui-text-highlighted);
+  cursor: pointer;
+}
+.pin-scope-body {
+  padding: 10px;
+  border-top: 1px solid var(--ui-border);
+  background: var(--ui-bg);
+}
+.pin-popover-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--ui-border);
 }
 .head-actions {
   display: flex;

@@ -11,6 +11,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { api } from '../api/endpoints'
+import BootPreviewDrawer from '../components/BootPreviewDrawer.vue'
 import CreateMemoryModal from '../components/CreateMemoryModal.vue'
 import MemoryEditor from '../components/MemoryEditor.vue'
 import MemoryList from '../components/MemoryList.vue'
@@ -46,6 +47,7 @@ const tab = computed<EntryTab>(() => {
 const env = computed(() => textQuery('env'))
 const realm = computed(() => textQuery('realm'))
 const project = computed(() => textQuery('project'))
+const runtime = computed(() => textQuery('runtime'))
 const topic = computed(() => textQuery('topic'))
 const projectScope = computed<ProjectScope | null>(() => {
   const raw = textQuery('projectScope')
@@ -74,6 +76,7 @@ const entriesQuery = useInfiniteQuery({
           env: env.value ?? undefined,
           realm: realm.value ?? undefined,
           project: project.value ?? undefined,
+          runtime: runtime.value ?? undefined,
           topic: topic.value ?? undefined,
           projectScope: projectScope.value ?? undefined,
         },
@@ -92,6 +95,7 @@ const counts = computed(() => firstPage.value?.counts ?? null)
 
 const createOpen = ref(false)
 const captureOpen = ref(false)
+const bootPreviewOpen = ref(false)
 const captureDraft = ref('')
 const fullscreen = ref(false)
 const layoutRef = ref<HTMLElement | null>(null)
@@ -256,7 +260,7 @@ function setTab(next: EntryTab) {
 }
 
 function setFilter(
-  key: 'env' | 'realm' | 'project' | 'topic' | 'projectScope',
+  key: 'env' | 'realm' | 'project' | 'runtime' | 'topic' | 'projectScope',
   value: string | null,
 ) {
   const changes: Record<string, string | null> = { [key]: value }
@@ -270,12 +274,20 @@ function setFilter(
 
 function clearFilters() {
   void router.replace(
-    withQuery({ env: null, realm: null, project: null, topic: null, projectScope: null }),
+    withQuery({
+      env: null,
+      realm: null,
+      project: null,
+      runtime: null,
+      topic: null,
+      projectScope: null,
+    }),
   )
 }
 
 function invalidateEntries() {
   void queryClient.invalidateQueries({ queryKey: ['entries'] })
+  void queryClient.invalidateQueries({ queryKey: ['boot-preview'] })
 }
 
 function onCreated(detail: EntryDetailResponse) {
@@ -313,7 +325,7 @@ function isEditableElement(target: EventTarget | null): boolean {
 }
 
 function hasOpenOverlay(): boolean {
-  if (createOpen.value || captureOpen.value) return true
+  if (createOpen.value || captureOpen.value || bootPreviewOpen.value) return true
   if (listRef.value?.filterOpen) return true
   return Boolean(document.querySelector('[role="dialog"], [data-reka-popper-content-wrapper]'))
 }
@@ -414,6 +426,7 @@ onBeforeUnmount(() => {
       :env="env"
       :realm="realm"
       :project="project"
+      :runtime="runtime"
       :topic="topic"
       :project-scope="projectScope"
       :selected-id="selectedId"
@@ -429,6 +442,7 @@ onBeforeUnmount(() => {
       @update:env="(v) => setFilter('env', v)"
       @update:realm="(v) => setFilter('realm', v)"
       @update:project="(v) => setFilter('project', v)"
+      @update:runtime="(v) => setFilter('runtime', v)"
       @update:topic="(v) => setFilter('topic', v)"
       @update:project-scope="(v) => setFilter('projectScope', v)"
       @select="select"
@@ -437,6 +451,7 @@ onBeforeUnmount(() => {
       @refresh="entriesQuery.refetch()"
       @load-more="entriesQuery.fetchNextPage()"
       @clear-filters="clearFilters"
+      @preview-boot="bootPreviewOpen = true"
     />
 
     <Transition name="detail-reveal">
@@ -515,6 +530,7 @@ onBeforeUnmount(() => {
       @created="onCaptureCreated"
       @open-entry="openEntryFromCapture"
     />
+    <BootPreviewDrawer v-model:open="bootPreviewOpen" :facets="facets" @select="select" />
   </div>
 </template>
 

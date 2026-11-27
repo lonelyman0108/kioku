@@ -54,8 +54,15 @@ const realmChoices = computed(() =>
 const projectChoices = computed(() =>
   normalizeSlugList([...(props.facets?.projects ?? []), ...props.modelValue.projects]),
 )
+const runtimeChoices = computed(() =>
+  normalizeSlugList([
+    ...RUNTIME_FAMILIES,
+    ...(props.facets?.runtimes ?? []),
+    ...props.modelValue.runtimes,
+  ]),
+)
 
-const draft = reactive({ env: '', realm: '', project: '' })
+const draft = reactive({ env: '', realm: '', project: '', runtime: '' })
 const draftError = ref<string | null>(null)
 
 function patch(key: keyof SceneScopeValue, list: string[]) {
@@ -71,7 +78,10 @@ function toggle(key: keyof SceneScopeValue, slug: string) {
   patch(key, current.includes(slug) ? current.filter((v) => v !== slug) : [...current, slug])
 }
 
-function addCustom(key: 'envs' | 'realms' | 'projects', inputKey: 'env' | 'realm' | 'project') {
+function addCustom(
+  key: 'envs' | 'realms' | 'projects' | 'runtimes',
+  inputKey: 'env' | 'realm' | 'project' | 'runtime',
+) {
   if (props.disabled) return
   const raw = draft[inputKey].trim()
   if (!raw) return
@@ -209,7 +219,7 @@ function setUniversal() {
         <span class="scope-label">客户端</span>
         <div class="scope-chips">
           <UButton
-            v-for="rt in RUNTIME_FAMILIES"
+            v-for="rt in runtimeChoices"
             :key="rt"
             type="button"
             size="xs"
@@ -220,6 +230,15 @@ function setUniversal() {
           >
             {{ runtimeName(rt) }}
           </UButton>
+          <UInput
+            v-model="draft.runtime"
+            size="xs"
+            placeholder="自定义客户端"
+            class="w-28"
+            :disabled="disabled"
+            @keydown.enter.prevent="addCustom('runtimes', 'runtime')"
+            @blur="addCustom('runtimes', 'runtime')"
+          />
         </div>
       </div>
 

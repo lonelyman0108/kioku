@@ -3,20 +3,24 @@ import { describe, expect, it } from 'vitest'
 import {
   applyCapturePatch,
   applyMarkdownAppend,
+  bootModeToPinned,
   buildSearchTags,
   CapturePlanRequest,
   checkCaptureIntegrity,
   CreateEntryRequest,
   deriveEntryTitle,
+  effectiveBootMode,
   ENTRY_CONTENT_MAX,
   ENTRY_TITLE_NEW_MAX,
   EntryListQuery,
   extractMarkdownHeadings,
   extractMarkdownOutline,
   extractMarkdownSection,
+  extractProjectSlugs,
   firstMarkdownHeading,
   normalizeProjectSlug,
   normalizeSlugList,
+  resolveBootMode,
   RestoreEntryRequest,
   UpdateEntryRequest,
 } from '../entries'
@@ -42,6 +46,20 @@ describe('entries contracts', () => {
     expect(normalizeSlugList([' Mac ', 'linux', 'mac', ''])).toEqual(['linux', 'mac'])
     expect(normalizeProjectSlug({ repoName: 'org/Kioku_Repo' })).toBe('kioku_repo')
     expect(normalizeProjectSlug({ dirName: '/Users/dev/My App' })).toBe('my-app')
+    expect(
+      extractProjectSlugs({ repoName: 'org/sample-app', dirName: '/work/sample-app-wt' }),
+    ).toEqual(['sample-app', 'sample-app-wt'])
+    expect(extractProjectSlugs({ repoName: 'org/kioku', dirName: '/work/kioku' })).toEqual([
+      'kioku',
+    ])
+    expect(resolveBootMode({ bootMode: 'index', isPinned: false })).toBe('index')
+    expect(resolveBootMode({ isPinned: true })).toBe('full')
+    expect(resolveBootMode({ isPinned: false })).toBe('none')
+    expect(effectiveBootMode({ isPinned: true })).toBe('full')
+    expect(effectiveBootMode({ isPinned: true, bootMode: 'index' })).toBe('index')
+    expect(bootModeToPinned('none')).toBe(false)
+    expect(bootModeToPinned('index')).toBe(true)
+    expect(bootModeToPinned('full')).toBe(true)
     expect(
       buildSearchTags({
         shortId: 'm-234abc'.toUpperCase(),

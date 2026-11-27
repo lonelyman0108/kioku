@@ -13,6 +13,31 @@ export const ENTRY_KINDS = ['entry', 'episode'] as const
 export const EntryKind = z.enum(ENTRY_KINDS).meta({ id: 'EntryKind' })
 export type EntryKind = z.infer<typeof EntryKind>
 
+export const BOOT_MODES = ['none', 'index', 'full'] as const
+export const BootMode = z.enum(BOOT_MODES).meta({ id: 'BootMode' })
+export type BootMode = z.infer<typeof BootMode>
+
+export function bootModeToPinned(mode: BootMode): boolean {
+  return mode !== 'none'
+}
+
+// 兼容同时存在 bootMode 与旧版 isPinned 字段的读写模型：显式 bootMode 优先，否则由 isPinned 推导
+export function resolveBootMode(
+  input: { bootMode?: BootMode | null | undefined; isPinned?: boolean | undefined },
+  fallback: BootMode = 'none',
+): BootMode {
+  if (input.bootMode !== undefined && input.bootMode !== null) return input.bootMode
+  if (input.isPinned !== undefined) return input.isPinned ? 'full' : 'none'
+  return fallback
+}
+
+export function effectiveBootMode(row: {
+  bootMode?: BootMode | null | undefined
+  isPinned: boolean
+}): BootMode {
+  return row.bootMode ?? (row.isPinned ? 'full' : 'none')
+}
+
 export const BUILTIN_ENVS = ['mac', 'linux', 'win'] as const
 export const BuiltinEnv = z.enum(BUILTIN_ENVS)
 export type BuiltinEnv = z.infer<typeof BuiltinEnv>
@@ -143,6 +168,24 @@ export function normalizeProjectSlug(
     .replace(/^-+|-+$/g, '')
     .slice(0, 64)
   return slug || null
+}
+
+// 同时提取 repoName 与 dirName 归一化标识（去重最多 2 个），避免 worktree 或改目录名漏匹配
+export function extractProjectSlugs(
+  input:
+    { repoName?: string | undefined; dirName?: string | undefined } | string | null | undefined,
+): string[] {
+  if (!input) return []
+  if (typeof input === 'string') {
+    const slug = normalizeProjectSlug(input)
+    return slug ? [slug] : []
+  }
+  const slugs: string[] = []
+  const repo = normalizeProjectSlug(input.repoName)
+  if (repo) slugs.push(repo)
+  const dir = normalizeProjectSlug(input.dirName)
+  if (dir && !slugs.includes(dir)) slugs.push(dir)
+  return slugs
 }
 
 // 构造全文索引附加词串（供 entries.search_tags 写入，保持 generated fts 列纯不可变表达式）
@@ -290,6 +333,7 @@ export const EntryView = z
     content: z.string(),
     disclosure: z.string().nullable(),
     isPinned: z.boolean(),
+    bootMode: BootMode.optional(),
     envs: z.array(z.string()),
     realms: z.array(z.string()),
     projects: z.array(z.string()),
@@ -317,6 +361,7 @@ export const EntryListItem = z
     summary: z.string().nullable().optional(),
     disclosure: z.string().nullable(),
     isPinned: z.boolean(),
+    bootMode: BootMode.optional(),
     envs: z.array(z.string()),
     realms: z.array(z.string()),
     projects: z.array(z.string()),
@@ -359,6 +404,7 @@ export const EntryFacetsSummary = z.object({
   projects: z.array(z.string()),
   envs: z.array(z.string()),
   realms: z.array(z.string()),
+  runtimes: z.array(z.string()).optional(),
   topics: z.array(z.string()),
 })
 export type EntryFacetsSummary = z.infer<typeof EntryFacetsSummary>
@@ -370,6 +416,10 @@ export const EntryTabCounts = z.object({
   episodes: z.number().int(),
   trash: z.number().int(),
   pinnedChars: z.number().int().optional(),
+  globalFullPinnedCount: z.number().int().optional(),
+  globalFullPinnedChars: z.number().int().optional(),
+  scopedFullPinnedCount: z.number().int().optional(),
+  indexPinnedCount: z.number().int().optional(),
 })
 export type EntryTabCounts = z.infer<typeof EntryTabCounts>
 
@@ -416,6 +466,7 @@ export const CreateEntryRequest = z.object({
   disclosure: Disclosure.nullable().optional(),
   changeSummary: ChangeSummary.nullable().optional(),
   isPinned: z.boolean().default(false),
+  bootMode: BootMode.optional(),
   envs: SceneSlugList.default([]),
   realms: SceneSlugList.default([]),
   projects: SceneSlugList.default([]),
@@ -436,6 +487,7 @@ export const UpdateEntryRequest = z
     changeSummary: ChangeSummary.nullable().optional(),
     verified: z.boolean().optional(),
     isPinned: z.boolean().optional(),
+    bootMode: BootMode.optional(),
     envs: SceneSlugList.optional(),
     realms: SceneSlugList.optional(),
     projects: SceneSlugList.optional(),
@@ -468,6 +520,7 @@ export const EntrySnapshot = z.object({
   content: z.string(),
   disclosure: z.string().nullable(),
   isPinned: z.boolean(),
+  bootMode: BootMode.optional(),
   envs: z.array(z.string()),
   realms: z.array(z.string()),
   projects: z.array(z.string()),
@@ -529,6 +582,7 @@ export const EntryBrowseItem = z.object({
   summary: z.string().nullable().optional(),
   kind: EntryKind,
   isPinned: z.boolean(),
+  bootMode: BootMode.optional(),
   topics: z.array(z.string()),
   envs: z.array(z.string()),
   realms: z.array(z.string()),
