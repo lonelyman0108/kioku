@@ -173,6 +173,135 @@ export const Disclosure = z
   .max(DISCLOSURE_MAX, `触发场景最多 ${DISCLOSURE_MAX} 个字符`)
   .refine((v) => !v.includes(CREDENTIAL_PLACEHOLDER_PREFIX), '凭据占位符只能写在正文里')
 
+export interface EpisodeSignals {
+  directives: string[]
+  facts: string[]
+}
+
+export const EPISODE_SIGNAL_ITEMS_MAX = 5
+export const EPISODE_SIGNAL_ITEM_MAX_CHARS = 100
+
+const EPISODE_DIRECTIVES_PREFIX = '偏好：'
+const EPISODE_FACTS_PREFIX = '事实：'
+const EPISODE_SIGNAL_SEP = ' | '
+const EPISODE_ITEM_SEP = '；'
+const EPISODE_CRED_PLACEHOLDER_RE = /\{\{cred:[^}]*\}\}/gi
+const EPISODE_CRED_PREFIX_RE = /\{\{cred:/gi
+const EPISODE_CTRL_RE = /\p{Cc}+/gu
+
+function cleanEpisodeSignalItems(raw: readonly string[] | undefined): string[] {
+  if (!raw?.length) return []
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const item of raw) {
+    if (typeof item !== 'string') continue
+    const cleaned = item
+      .replace(EPISODE_CRED_PLACEHOLDER_RE, '')
+      .replace(EPISODE_CRED_PREFIX_RE, '')
+      .replace(EPISODE_CTRL_RE, ' ')
+      .replace(/[；;|｜]/g, '，')
+      .replace(/\s+/g, ' ')
+      .trim()
+    if (!cleaned || cleaned.includes(CREDENTIAL_PLACEHOLDER_PREFIX)) continue
+    const clipped = [...cleaned].slice(0, EPISODE_SIGNAL_ITEM_MAX_CHARS).join('').trim()
+    const key = clipped.toLowerCase()
+    if (!clipped || seen.has(key)) continue
+    seen.add(key)
+    out.push(clipped)
+    if (out.length >= EPISODE_SIGNAL_ITEMS_MAX) break
+  }
+  return out
+}
+
+function packSignalSection(prefix: string, items: readonly string[], maxChars: number): string {
+  if (!items.length || maxChars <= prefix.length) return ''
+  const kept: string[] = []
+  let len = prefix.length
+  for (const item of items) {
+    const sepLen = kept.length > 0 ? EPISODE_ITEM_SEP.length : 0
+    if (len + sepLen + item.length <= maxChars) {
+      kept.push(item)
+      len += sepLen + item.length
+    } else if (kept.length === 0) {
+      const avail = maxChars - prefix.length
+      if (avail > 0) kept.push([...item].slice(0, avail).join('').trim())
+      break
+    } else {
+      break
+    }
+  }
+  return kept.length ? `${prefix}${kept.join(EPISODE_ITEM_SEP)}` : ''
+}
+
+// 将会话摘要分拣出的行为偏好与确认事实序列化为人类可读的单行结构文本，复用 disclosure 列零 DDL 落库
+export function serializeEpisodeSignals(
+  signals:
+    | {
+        directives?: readonly string[] | undefined
+        facts?: readonly string[] | undefined
+      }
+    | null
+    | undefined,
+): string | null {
+  if (!signals) return null
+  const directives = cleanEpisodeSignalItems(signals.directives)
+  const facts = cleanEpisodeSignalItems(signals.facts)
+  if (!directives.length && !facts.length) return null
+
+  if (directives.length && !facts.length) {
+    return packSignalSection(EPISODE_DIRECTIVES_PREFIX, directives, DISCLOSURE_MAX) || null
+  }
+  if (!directives.length && facts.length) {
+    return packSignalSection(EPISODE_FACTS_PREFIX, facts, DISCLOSURE_MAX) || null
+  }
+
+  const directiveBudget = Math.min(280, DISCLOSURE_MAX - EPISODE_SIGNAL_SEP.length - 40)
+  const dirPart = packSignalSection(EPISODE_DIRECTIVES_PREFIX, directives, directiveBudget)
+  const remaining = DISCLOSURE_MAX - (dirPart ? dirPart.length + EPISODE_SIGNAL_SEP.length : 0)
+  const factPart = packSignalSection(EPISODE_FACTS_PREFIX, facts, remaining)
+  const parts = [dirPart, factPart].filter(Boolean)
+  return parts.length ? parts.join(EPISODE_SIGNAL_SEP) : null
+}
+
+// 解析 episode.disclosure 中的结构化偏好与事实要点；旧版自由文本或空值安全返回空数组
+export function parseEpisodeSignals(raw: string | null | undefined): EpisodeSignals {
+  if (!raw?.trim()) return { directives: [], facts: [] }
+  const directives: string[] = []
+  const facts: string[] = []
+  const segments = raw
+    .split(/\s*\|\s*|\r?\n/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+  for (const seg of segments) {
+    if (seg.startsWith(EPISODE_DIRECTIVES_PREFIX)) {
+      const body = seg.slice(EPISODE_DIRECTIVES_PREFIX.length)
+      directives.push(
+        ...body
+          .split(EPISODE_ITEM_SEP)
+          .map((x) => x.trim())
+          .filter(Boolean),
+      )
+    } else if (seg.startsWith(EPISODE_FACTS_PREFIX)) {
+      const body = seg.slice(EPISODE_FACTS_PREFIX.length)
+      facts.push(
+        ...body
+          .split(EPISODE_ITEM_SEP)
+          .map((x) => x.trim())
+          .filter(Boolean),
+      )
+    }
+  }
+  return {
+    directives: cleanEpisodeSignalItems(directives),
+    facts: cleanEpisodeSignalItems(facts),
+  }
+}
+
+export function hasEpisodeSignals(raw: string | null | undefined): boolean {
+  const parsed = parseEpisodeSignals(raw)
+  return parsed.directives.length > 0 || parsed.facts.length > 0
+}
+
 const VALID_TO_FORMAT =
   'ISO 8601 时间，须带时区（例如 2026-12-31T23:59:00+08:00 或 2026-12-31T15:59:00Z）'
 export const ValidTo = z.iso.datetime({ offset: true }).describe(VALID_TO_FORMAT)

@@ -1,7 +1,7 @@
 import { and, isNotNull, lt, lte, ne, sql } from 'drizzle-orm'
 
 import type { Db } from '../db/client'
-import { deviceGrants, dreamSuggestions, entries, sessions } from '../db/schema'
+import { deviceGrants, dreamSuggestions, entries, entryEmbeddings, sessions } from '../db/schema'
 import { pruneIdleTurnBuffers } from '../extraction/buffer'
 
 const TRASH_RETENTION_DAYS = 30
@@ -50,6 +50,16 @@ export async function cleanupExpired(db: Db): Promise<CleanupCounts> {
           ),
         )
         .returning({ id: dreamSuggestions.id }),
+      // 回收已过期或软删会话摘要的信号向量，避免在 HNSW 索引中堆积
+      db.execute(sql`
+        delete from ${entryEmbeddings}
+        where ${entryEmbeddings.entryId} in (
+          select ${entries.id}
+          from ${entries}
+          where ${entries.kind} = 'episode'
+            and (${entries.deletedAt} is not null or ${entries.validTo} <= now())
+        )
+      `),
     ])
 
   return {

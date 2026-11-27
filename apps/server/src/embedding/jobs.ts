@@ -1,5 +1,7 @@
-import { and, eq, isNull } from 'drizzle-orm'
+import { hasEpisodeSignals } from '@kioku/contracts'
+import { and, eq, isNotNull, isNull, or } from 'drizzle-orm'
 
+import { stillValidSql } from '../access/scope'
 import type { MasterKey } from '../crypto/keyring'
 import type { Db } from '../db/client'
 import { entries, entryEmbeddings } from '../db/schema'
@@ -24,7 +26,7 @@ export async function runEmbedBatch(
   )
 }
 
-// 补齐当前模型下缺失向量的所有活跃正式词条
+// 补齐当前模型下缺失向量的全部活跃正式词条，以及含结构化信号的活跃会话摘要
 export async function runBackfillEmbeddings(
   db: Db,
   masterKey: MasterKey | null,
@@ -35,23 +37,27 @@ export async function runBackfillEmbeddings(
   if (!conn) return 0
 
   const rows = await db
-    .select({ id: entries.id })
+    .select({ id: entries.id, kind: entries.kind, disclosure: entries.disclosure })
     .from(entries)
     .leftJoin(
       entryEmbeddings,
       and(eq(entryEmbeddings.entryId, entries.id), eq(entryEmbeddings.model, conn.model)),
     )
     .where(
-      and(eq(entries.kind, 'entry'), isNull(entries.deletedAt), isNull(entryEmbeddings.entryId)),
+      and(
+        isNull(entries.deletedAt),
+        isNull(entryEmbeddings.entryId),
+        or(
+          eq(entries.kind, 'entry'),
+          and(eq(entries.kind, 'episode'), stillValidSql(), isNotNull(entries.disclosure)),
+        ),
+      ),
     )
 
-  if (!rows.length) return 0
-  onProgress?.({ processed: 0, total: rows.length, model: conn.model })
-  return embedEntryIds(
-    db,
-    masterKey,
-    rows.map((r) => r.id),
-    signal,
-    onProgress,
-  )
+  const targetIds = rows
+    .filter((r) => r.kind === 'entry' || hasEpisodeSignals(r.disclosure))
+    .map((r) => r.id)
+  if (!targetIds.length) return 0
+  onProgress?.({ processed: 0, total: targetIds.length, model: conn.model })
+  return embedEntryIds(db, masterKey, targetIds, signal, onProgress)
 }

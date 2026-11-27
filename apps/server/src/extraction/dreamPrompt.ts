@@ -13,6 +13,7 @@ import {
   extractMarkdownOutline,
   normalizeShortId,
   normalizeSlugList,
+  parseEpisodeSignals,
   SCENE_TAGS_MAX,
   SceneSlug,
   TOPICS_MAX,
@@ -198,7 +199,20 @@ function formatItem(item: DreamPromptItem, compact = false): string {
   if (item.topics.length) tags.push(`topic=${item.topics.join(',')}`)
   const head = `[${item.shortId}] (${item.kind}${item.truncated ? ', 已截断' : ''}, ${item.content.length}字) ${item.title} | 更新于 ${item.updatedAt.slice(0, 10)}${tags.length ? ` | ${tags.join(' ')}` : ''}`
   const sum = item.summary ? `\n现行概要：${item.summary}` : ''
-  const disc = item.disclosure ? `\n触发场景：${item.disclosure}` : ''
+  let disc = ''
+  if (item.disclosure) {
+    if (item.kind === 'episode') {
+      const signals = parseEpisodeSignals(item.disclosure)
+      if (signals.directives.length || signals.facts.length) {
+        if (signals.directives.length) disc += `\n提取偏好与指令：${signals.directives.join('；')}`
+        if (signals.facts.length) disc += `\n提取事实要点：${signals.facts.join('；')}`
+      } else {
+        disc = `\n触发场景：${item.disclosure}`
+      }
+    } else {
+      disc = `\n触发场景：${item.disclosure}`
+    }
+  }
   const outbound = item.outboundShortIds?.length
     ? `\n已有出链：${item.outboundShortIds.join(', ')}`
     : ''

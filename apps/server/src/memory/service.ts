@@ -15,6 +15,7 @@ import {
   normalizeSlugList,
   redirectWikiLinksInContent,
   resolveBootMode,
+  serializeEpisodeSignals,
   type ApplySuggestionRequest,
   type ApplySuggestionResponse,
   type BootMode,
@@ -1385,6 +1386,8 @@ export class EntryService {
     envs?: readonly string[]
     realms?: readonly string[]
     projects?: readonly string[]
+    facts?: readonly string[]
+    directives?: readonly string[]
     ttlDays?: number
   }): Promise<EntryView> {
     const ttlDays = input.ttlDays ?? EPISODE_TTL_DAYS
@@ -1396,6 +1399,10 @@ export class EntryService {
       ...(input.projects ?? []),
       ...(projectSlug ? [projectSlug] : []),
     ])
+    const disclosure = serializeEpisodeSignals({
+      facts: input.facts,
+      directives: input.directives,
+    })
 
     const row = await withTx(this.db, async (tx, now) => {
       const validTo = new Date(now.getTime() + ttlDays * 86_400_000)
@@ -1410,7 +1417,7 @@ export class EntryService {
             title,
             summary: null,
             content: input.content,
-            disclosure: null,
+            disclosure,
             isPinned: false,
             bootMode: 'none',
             envs,
@@ -1442,6 +1449,11 @@ export class EntryService {
       })
       return inserted
     })
+
+    // 仅对包含结构化偏好/事实信号的会话摘要触发信号定向向量化
+    if (disclosure) {
+      this.jobs?.enqueueEmbed(row.id)
+    }
 
     return toEntryView(row)
   }
@@ -1570,6 +1582,7 @@ export class EntryService {
             .set({ deletedAt: now, updatedAt: now, version: source.version + 1 })
             .where(eq(entries.id, source.id))
             .returning()
+          await tx.delete(entryEmbeddings).where(eq(entryEmbeddings.entryId, source.id))
           await tx.insert(entryEvents).values({
             entryId: source.id,
             eventType: 'delete',

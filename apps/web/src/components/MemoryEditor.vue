@@ -1628,7 +1628,7 @@ defineExpose({
                 <div v-if="entry.disclosure">
                   <dt>
                     <UIcon :name="icons.trigger" class="meta-dt-icon" aria-hidden="true" />
-                    <span>触发场景</span>
+                    <span>{{ entry.kind === 'episode' ? '信号要点' : '触发场景' }}</span>
                   </dt>
                   <dd>{{ entry.disclosure }}</dd>
                 </div>
