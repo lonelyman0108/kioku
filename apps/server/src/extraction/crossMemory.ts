@@ -15,12 +15,13 @@ import type { MasterKey } from '../crypto/keyring'
 import { databaseNow, type Db } from '../db/client'
 import { dreamSuggestions, entries, entryLinks } from '../db/schema'
 import { MemoryError } from '../memory/errors'
-import { chatComplete, type ModelConnection } from '../models/client'
+import { chatComplete, ModelClientError, type ModelConnection } from '../models/client'
 import { CHAT_LLM_SETTING_KEY, loadResolvedModel } from '../models/store'
 import { anyTermQuery, clipChars, searchTerms } from '../recall/recall'
 import { CaptureAbortedError } from './capture'
 import {
   BatchResilienceGuard,
+  computeDynamicOutputTokens,
   hydrateDreamSuggestions,
   insertDreamProposal,
   suggestionFingerprint,
@@ -57,6 +58,79 @@ const DEFAULT_MAX_CROSS_CALLS = 12
 const SINGLE_CROSS_MAX_CALLS = 4
 const CROSS_TIMEOUT_MS = 180_000
 const CROSS_HTTP_RETRIES = 2
+const CROSS_DYNAMIC_OUTPUT_TOKENS_MIN = 6_000
+const CROSS_DYNAMIC_OUTPUT_TOKENS_MAX = 16_384
+const CROSS_LINKS_MAX_TOKENS = 2_500
+const CROSS_BOOT_TRIM_MAX_TOKENS = 3_000
+
+export function computeCrossMemoryTaskMaxTokens(
+  kind: 'cluster' | 'episode' | 'links' | 'boot_trim',
+  targetChars = 0,
+): number {
+  if (kind === 'links') return CROSS_LINKS_MAX_TOKENS
+  if (kind === 'boot_trim') return CROSS_BOOT_TRIM_MAX_TOKENS
+  return computeDynamicOutputTokens(targetChars, {
+    min: CROSS_DYNAMIC_OUTPUT_TOKENS_MIN,
+    max: CROSS_DYNAMIC_OUTPUT_TOKENS_MAX,
+    overhead: 2_000,
+  })
+}
+
+export function selectTopTwoClusterRows<T extends { id: string }>(
+  rows: readonly T[],
+  edges: readonly { a: string; b: string; score: number }[],
+): T[] {
+  if (rows.length <= 2) return [...rows]
+  const indexById = new Map(rows.map((r, idx) => [r.id, idx]))
+  let bestPair: [number, number] | null = null
+  let bestScore = -Infinity
+  for (const edge of edges) {
+    const idxA = indexById.get(edge.a)
+    const idxB = indexById.get(edge.b)
+    if (idxA === undefined || idxB === undefined || idxA === idxB) continue
+    if (edge.score > bestScore) {
+      bestScore = edge.score
+      bestPair = idxA < idxB ? [idxA, idxB] : [idxB, idxA]
+    }
+  }
+  if (bestPair) {
+    return [rows[bestPair[0]]!, rows[bestPair[1]]!]
+  }
+  return rows.slice(0, 2)
+}
+
+// 3–4 条簇审阅命中输出长度截断时，降级选取簇内相似度最高的两条重试一次
+export async function runClusterTaskWithTopTwoFallback<T extends { id: string }, R>(
+  rows: readonly T[],
+  edges: readonly { a: string; b: string; score: number }[],
+  execute: (clusterRows: readonly T[]) => Promise<R>,
+  options: {
+    signal?: AbortSignal | undefined
+    guard?: Pick<BatchResilienceGuard, 'isAborted' | 'waitIfCooling'> | undefined
+    onFallback?: ((topTwo: readonly T[], err: ModelClientError) => void) | undefined
+  } = {},
+): Promise<R> {
+  try {
+    return await execute(rows)
+  } catch (err) {
+    if (
+      rows.length > 2 &&
+      err instanceof ModelClientError &&
+      err.category === 'length_limit' &&
+      !options.signal?.aborted &&
+      !options.guard?.isAborted
+    ) {
+      if (options.guard) {
+        await options.guard.waitIfCooling(options.signal)
+        if (options.signal?.aborted || options.guard.isAborted) throw err
+      }
+      const topTwo = selectTopTwoClusterRows(rows, edges)
+      options.onFallback?.(topTwo, err)
+      return execute(topTwo)
+    }
+    throw err
+  }
+}
 
 type VectorPairRow = {
   entry_a: string
@@ -680,71 +754,111 @@ export async function runCrossMemoryFunnel(
       failed: failedTasks,
     })
 
-    const catalog = new Map<string, DreamPromptItem>()
     const taskRows: EntryRow[] = []
-    let messages: ReturnType<typeof buildClusterAuditMessages>
-    let maxTokens: number
-
     if (task.kind === 'cluster') {
-      const perItemLimit = Math.min(
-        CLUSTER_ITEM_CHAR_LIMIT,
-        Math.floor(CLUSTER_TOTAL_CHAR_BUDGET / Math.max(1, task.rows.length)),
-      )
-      const promptItems = task.rows.map((r) =>
-        toClusterPromptItem(r, linkMaps.outboundByEntryId.get(r.id), perItemLimit),
-      )
-      for (const p of promptItems) catalog.set(p.shortId, p)
       taskRows.push(...task.rows)
-      messages = buildClusterAuditMessages(promptItems)
-      maxTokens = 3_600
     } else if (task.kind === 'episode') {
-      const epItem = toPromptItem(task.episode, 3_000)
-      const targetItems = task.targets.map((r) =>
-        toClusterPromptItem(r, linkMaps.outboundByEntryId.get(r.id), 4_000),
-      )
-      catalog.set(epItem.shortId, epItem)
-      for (const p of targetItems) catalog.set(p.shortId, p)
       taskRows.push(task.episode, ...task.targets)
-      messages = buildEpisodeReconcileMessages(epItem, targetItems)
-      maxTokens = 3_000
     } else if (task.kind === 'links') {
-      const seedItem: DreamPromptItem = {
-        ...toPromptItem(task.seed, LINK_SEED_CONTENT_LIMIT),
-        bootMode: task.seed.bootMode,
-        outboundShortIds: [...(linkMaps.outboundByEntryId.get(task.seed.id) ?? [])],
-      }
-      const candItems = task.candidates.map((r) => ({
-        ...toPromptItem(r, 400),
-        bootMode: r.bootMode,
-      }))
-      catalog.set(seedItem.shortId, seedItem)
-      for (const c of candItems) catalog.set(c.shortId, c)
       taskRows.push(task.seed)
-      messages = buildLinkAuditMessages(seedItem, candItems, task.broken)
-      maxTokens = 1_500
     } else {
-      const pinnedItems = task.rows.map((r) => ({
-        ...toPromptItem(r, 2_000),
-        bootMode: r.bootMode,
-      }))
-      for (const p of pinnedItems) catalog.set(p.shortId, p)
       taskRows.push(...task.rows)
-      messages = buildBootAuditMessages(pinnedItems)
-      maxTokens = 1_800
     }
 
-    considered += taskRows.length
-    try {
-      const evaluated = await runSingleLlmMicroTask(conn, messages, catalog, guard, {
+    const executeMicroTask = async () => {
+      const microTaskRetries = targetShortSet?.size === 1 ? 1 : CROSS_HTTP_RETRIES
+      if (task.kind === 'cluster') {
+        return runClusterTaskWithTopTwoFallback(
+          task.rows,
+          highSimEdges,
+          (clusterRows) => {
+            const perItemLimit = Math.min(
+              CLUSTER_ITEM_CHAR_LIMIT,
+              Math.floor(CLUSTER_TOTAL_CHAR_BUDGET / Math.max(1, clusterRows.length)),
+            )
+            const promptItems = clusterRows.map((r) =>
+              toClusterPromptItem(r, linkMaps.outboundByEntryId.get(r.id), perItemLimit),
+            )
+            const clusterCatalog = new Map<string, DreamPromptItem>()
+            for (const p of promptItems) clusterCatalog.set(p.shortId, p)
+            const clusterMessages = buildClusterAuditMessages(promptItems)
+            const targetChars = promptItems.reduce((sum, p) => sum + p.content.length, 0)
+            const clusterMaxTokens = computeCrossMemoryTaskMaxTokens('cluster', targetChars)
+            return runSingleLlmMicroTask(conn, clusterMessages, clusterCatalog, guard, {
+              allowedKinds: TASK_ALLOWED_KINDS.cluster,
+              maxTokens: clusterMaxTokens,
+              maxRetries: microTaskRetries,
+              retryBaseMs: options.retryBaseMs,
+              signal: options.signal,
+              onRetry: () => {
+                retriedCount++
+              },
+            })
+          },
+          {
+            signal: options.signal,
+            guard,
+            onFallback: () => {
+              retriedCount++
+            },
+          },
+        )
+      }
+
+      const catalog = new Map<string, DreamPromptItem>()
+      let messages: ReturnType<typeof buildClusterAuditMessages>
+      let maxTokens: number
+
+      if (task.kind === 'episode') {
+        const epItem = toPromptItem(task.episode, 3_000)
+        const targetItems = task.targets.map((r) =>
+          toClusterPromptItem(r, linkMaps.outboundByEntryId.get(r.id), 4_000),
+        )
+        catalog.set(epItem.shortId, epItem)
+        for (const p of targetItems) catalog.set(p.shortId, p)
+        messages = buildEpisodeReconcileMessages(epItem, targetItems)
+        const targetChars =
+          epItem.content.length + targetItems.reduce((sum, p) => sum + p.content.length, 0)
+        maxTokens = computeCrossMemoryTaskMaxTokens('episode', targetChars)
+      } else if (task.kind === 'links') {
+        const seedItem: DreamPromptItem = {
+          ...toPromptItem(task.seed, LINK_SEED_CONTENT_LIMIT),
+          bootMode: task.seed.bootMode,
+          outboundShortIds: [...(linkMaps.outboundByEntryId.get(task.seed.id) ?? [])],
+        }
+        const candItems = task.candidates.map((r) => ({
+          ...toPromptItem(r, 400),
+          bootMode: r.bootMode,
+        }))
+        catalog.set(seedItem.shortId, seedItem)
+        for (const c of candItems) catalog.set(c.shortId, c)
+        messages = buildLinkAuditMessages(seedItem, candItems, task.broken)
+        maxTokens = computeCrossMemoryTaskMaxTokens('links')
+      } else {
+        const pinnedItems = task.rows.map((r) => ({
+          ...toPromptItem(r, 2_000),
+          bootMode: r.bootMode,
+        }))
+        for (const p of pinnedItems) catalog.set(p.shortId, p)
+        messages = buildBootAuditMessages(pinnedItems)
+        maxTokens = computeCrossMemoryTaskMaxTokens('boot_trim')
+      }
+
+      return runSingleLlmMicroTask(conn, messages, catalog, guard, {
         allowedKinds: TASK_ALLOWED_KINDS[task.kind],
         maxTokens,
-        maxRetries: targetShortSet?.size === 1 ? 1 : CROSS_HTTP_RETRIES,
+        maxRetries: microTaskRetries,
         retryBaseMs: options.retryBaseMs,
         signal: options.signal,
         onRetry: () => {
           retriedCount++
         },
       })
+    }
+
+    considered += taskRows.length
+    try {
+      const evaluated = await executeMicroTask()
 
       if (evaluated.status === 'invalid') {
         failedTasks++

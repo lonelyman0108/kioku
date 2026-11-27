@@ -30,7 +30,7 @@ import type { Db } from '../db/client'
 import { entries } from '../db/schema'
 import { MemoryError } from '../memory/errors'
 import { parseShortId } from '../memory/shortId'
-import { chatComplete, stripThinkTags, type ChatMessage } from '../models/client'
+import { chatComplete, ModelClientError, stripThinkTags, type ChatMessage } from '../models/client'
 import {
   CHAT_LLM_SETTING_KEY,
   loadResolvedModel,
@@ -50,7 +50,7 @@ export const CAPTURE_PINNED_FALLBACK_SCORE = 0.05
 export const CAPTURE_PROMPT_CHAR_BUDGET = 28_000
 
 const CAPTURE_CHAT_TIMEOUT_MS = 30_000
-const CAPTURE_CHAT_MAX_TOKENS = 1_500
+export const CAPTURE_CHAT_MAX_TOKENS = 2_500
 const MAX_REASON_CHARS = 300
 const MAX_FALLBACK_TITLE_CHARS = 48
 const MAX_PROPOSED_TOPICS = 8
@@ -126,7 +126,7 @@ function buildSystemPrompt(nonce: string): string {
     '   - 若目标记忆无合适二级标题且不涉及旧陈述替换，使用 patch.kind="append"，将 text 追加到文档末尾。',
     '2. action="noop"：某条候选记忆已经完整包含该随手记的核心信息，无需重复写入。须填写 targetShortId 与 reason。',
     '3. action="create"：所有候选记忆均与随手记主题无关，或当前无候选记忆。须填写 newEntry 与 reason，targetShortId 为 null。',
-    '4. 无论 action 为何，均可附带 newEntry 作为新建草案参考。',
+    '4. 仅当 action="create" 时才填写 newEntry；action 为 "update" 或 "noop" 时将 newEntry 置为 null 即可，不要重复输出完整新建正文。',
     '5. 若提示中标明了用户指定目标，必须围绕该目标生成局部补丁或判断 noop，不要改选其他候选。',
     '6. 绝不改写或删除无关内容；替换片段中原有的 [[m-xxxxxx]] 双链与 {{cred:...}} 凭据占位符必须原样保留；严禁编造任何密码、令牌或 API Key。',
     '7. targetShortId 必须取自下方候选列表，严禁虚构短 ID。',
@@ -976,7 +976,15 @@ async function loadCaptureCandidates(
   return candidates.slice(0, CAPTURE_CANDIDATE_MAX)
 }
 
-function classifyModelError(err: unknown): string {
+export function classifyModelError(err: unknown): string {
+  if (err instanceof ModelClientError) {
+    if (err.category === 'length_limit') {
+      return '对话模型输出超出长度上限被截断，已切换为手动追加'
+    }
+    if (err.category === 'timeout') {
+      return '对话模型响应超时，已切换为手动追加'
+    }
+  }
   if (err instanceof Error) {
     if (err.name === 'TimeoutError' || err.name === 'AbortError' || err.message.includes('超时')) {
       return '对话模型响应超时，已切换为手动追加'

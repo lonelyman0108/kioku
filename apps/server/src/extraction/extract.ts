@@ -69,7 +69,8 @@ export async function extractEpisodeBatch(
   const result = await chatComplete(conn, messages, {
     temperature: 0.2,
     jsonMode: true,
-    maxTokens: 600,
+    maxTokens: 1_800,
+    stream: true,
     timeoutMs: 90_000,
     taskKind: 'fast',
     maxRetries: 1,
@@ -84,7 +85,8 @@ export async function extractEpisodeBatch(
     const retryResult = await chatComplete(conn, repairMessages, {
       temperature: 0,
       jsonMode: true,
-      maxTokens: 600,
+      maxTokens: 1_800,
+      stream: true,
       timeoutMs: 90_000,
       taskKind: 'fast',
       maxRetries: 0,
