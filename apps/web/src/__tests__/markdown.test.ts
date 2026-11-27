@@ -2,7 +2,14 @@ import DOMPurify from 'dompurify'
 import { Tokenizer } from 'marked'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { markdownToHtml, rawHtml, renderMarkdown, splitWikiLinks } from '../markdown'
+import {
+  markdownToHtml,
+  rawHtml,
+  renderMarkdown,
+  splitWikiLinks,
+  stripInlineMarkdown,
+  stripInlineMarkdownSegments,
+} from '../markdown'
 
 describe('rawHtml', () => {
   it('不带属性的排版标签照常渲染', () => {
@@ -219,6 +226,78 @@ describe('双链切分', () => {
     expect(splitWikiLinks('[[m-234567|   ]]')).toEqual([
       { text: '[[m-234567|   ]]', link: { shortId: 'm-234567', alias: null } },
     ])
+  })
+})
+
+describe('stripInlineMarkdown 行内符号清理', () => {
+  it('剥离粗体、斜体、删除线、行内代码与链接语法，同时保留双链与标识符下划线', () => {
+    expect(
+      stripInlineMarkdown('**关联注意点**：参考 `kioku_zh` 与 [文档](https://example.com)'),
+    ).toBe('关联注意点：参考 kioku_zh 与 文档')
+    expect(
+      stripInlineMarkdown('见 [[m-ab2345|工作_流]] 与 **dev_profile**，~~旧方案~~ _斜体_'),
+    ).toBe('见 [[m-ab2345|工作_流]] 与 dev_profile，旧方案 斜体')
+    expect(stripInlineMarkdown('截断后的 **未闭合粗体')).toBe('截断后的 未闭合粗体')
+    expect(stripInlineMarkdown('未闭合粗体**：说明')).toBe('未闭合粗体：说明')
+  })
+
+  it('行内代码内容原样保留，不被强调或链接规则误改，且代码内双链不转为活动双链', () => {
+    expect(stripInlineMarkdown('遍历 `apps/**/*.ts` 目录')).toBe('遍历 apps/**/*.ts 目录')
+    expect(stripInlineMarkdown('区分 `personal-*` 与 `work-*` 场域')).toBe(
+      '区分 personal-* 与 work-* 场域',
+    )
+    expect(stripInlineMarkdown('覆盖 `__init__` 与 `` `嵌套` ``')).toBe('覆盖 __init__ 与 `嵌套`')
+
+    expect(stripInlineMarkdownSegments('示例 `[[m-ab2345]]` 与 **[[m-345678|真实引用]]**')).toEqual(
+      [
+        { text: '示例 [[m-ab2345]] 与 ' },
+        {
+          text: '[[m-345678|真实引用]]',
+          link: { shortId: 'm-345678', alias: '真实引用' },
+        },
+      ],
+    )
+  })
+
+  it('保留通配符、乘号、幂运算、裸网址下划线，并正确展开含括号链接与嵌套强调', () => {
+    expect(stripInlineMarkdown('匹配 *.ts 和 *.vue 文件')).toBe('匹配 *.ts 和 *.vue 文件')
+    expect(stripInlineMarkdown('匹配 *.ts 文件，以及 *斜体* 文字')).toBe(
+      '匹配 *.ts 文件，以及 斜体 文字',
+    )
+    expect(stripInlineMarkdown('计算 2 * 3 * 4 与 2**10')).toBe('计算 2 * 3 * 4 与 2**10')
+    expect(stripInlineMarkdown('范围 apps/**/*.ts 和 packages/**/*.ts')).toBe(
+      '范围 apps/**/*.ts 和 packages/**/*.ts',
+    )
+    expect(stripInlineMarkdown('见 https://example.com/_foo_/bar，_说明_')).toBe(
+      '见 https://example.com/_foo_/bar，说明',
+    )
+    expect(stripInlineMarkdown('**https://example.com/foo**')).toBe('https://example.com/foo')
+    expect(stripInlineMarkdown('~~https://example.com/foo~~')).toBe('https://example.com/foo')
+    expect(stripInlineMarkdown('_https://example.com/foo_')).toBe('https://example.com/foo')
+    expect(stripInlineMarkdown('**a**b 与 **bold** 2**10')).toBe('ab 与 bold 2**10')
+    expect(stripInlineMarkdown('[Foo](https://en.wikipedia.org/wiki/Foo_(bar))')).toBe('Foo')
+    expect(
+      stripInlineMarkdown('[![build](https://example.com/b.svg)](https://example.com/ci)'),
+    ).toBe('build')
+    expect(stripInlineMarkdown('__a _b_ c__ 与 ***粗斜*** 与 **bold *italic***')).toBe(
+      'a b c 与 粗斜 与 bold italic',
+    )
+  })
+
+  it('对大量未闭合括号、空图片或反引号保持线性时间，不发生回溯卡顿', () => {
+    const cases = [
+      '['.repeat(50_000) + 'a',
+      '[a]('.repeat(20_000) + 'x',
+      '['.repeat(20_000) + '![](u)'.repeat(20_000) + 'a' + ']()'.repeat(20_000),
+      '`'.repeat(50_000),
+    ]
+    for (const input of cases) {
+      const started = performance.now()
+      const out = stripInlineMarkdown(input)
+      const elapsed = performance.now() - started
+      expect(out.length).toBeGreaterThan(0)
+      expect(elapsed).toBeLessThan(200)
+    }
   })
 })
 

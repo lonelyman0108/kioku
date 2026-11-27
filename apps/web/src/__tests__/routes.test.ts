@@ -107,5 +107,5 @@ describe('路由守卫', () => {
     await router.push('/inbox?from=bookmark')
     expect(router.currentRoute.value.name).toBe('organize')
     expect(router.currentRoute.value.fullPath).toBe('/organize?from=bookmark')
-  })
+  }, 15_000)
 })

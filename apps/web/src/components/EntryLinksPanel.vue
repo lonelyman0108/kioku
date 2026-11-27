@@ -43,7 +43,11 @@ const resolvedTitles = computed<Map<string, { title: string }>>(() => {
 <template>
   <div v-if="outboundLinks.length || backlinks.length" class="links-panel" :class="{ compact }">
     <section v-if="outboundLinks.length" class="links-section">
-      <SectionHeading title="出链" :icon="icons.promote" :level="3" />
+      <SectionHeading title="出链" :icon="icons.promote" :level="3">
+        <template #hint>
+          <span class="links-count tabular-nums">{{ outboundLinks.length }}</span>
+        </template>
+      </SectionHeading>
       <ul class="links-list">
         <li v-for="item in outboundLinks" :key="`out-${item.shortId}`">
           <button
@@ -65,6 +69,7 @@ const resolvedTitles = computed<Map<string, { title: string }>>(() => {
                 :titles="resolvedTitles"
                 :interactive="false"
                 :mark-missing="false"
+                strip-markdown
                 compact
               />
             </span>
@@ -74,7 +79,11 @@ const resolvedTitles = computed<Map<string, { title: string }>>(() => {
     </section>
 
     <section v-if="backlinks.length" class="links-section">
-      <SectionHeading title="反链" :icon="icons.backlink" :level="3" />
+      <SectionHeading title="反链" :icon="icons.backlink" :level="3">
+        <template #hint>
+          <span class="links-count tabular-nums">{{ backlinks.length }}</span>
+        </template>
+      </SectionHeading>
       <ul class="links-list">
         <li v-for="item in backlinks" :key="`in-${item.shortId}`">
           <button
@@ -96,6 +105,7 @@ const resolvedTitles = computed<Map<string, { title: string }>>(() => {
                 :titles="resolvedTitles"
                 :interactive="false"
                 :mark-missing="false"
+                strip-markdown
                 compact
               />
             </span>
@@ -133,6 +143,11 @@ const resolvedTitles = computed<Map<string, { title: string }>>(() => {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+.links-count {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--ui-text-dimmed);
 }
 .links-list {
   border-top: 1px solid var(--ui-border);

@@ -136,7 +136,15 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(memoryEditor).not.toContain('宽幅阅读')
     expect(memoryEditor).toContain('--canvas-max')
     expect(memoryEditor).toContain('edit-meta-grid')
+    expect(memoryEditor).toContain('rail-splitter')
+    expect(memoryEditor).toContain('readRailWidth')
+    expect(memoryEditor).toContain('ariaRailWidth')
+    expect(memoryEditor).toContain('--rail-max-height')
+    expect(memoryEditor).toContain('rail-history-disclosure')
+    expect(memoryEditor).toContain('railHistoryListId')
     expect(entryLinksPanel).toContain('contextSnippet')
+    expect(entryLinksPanel).toContain('strip-markdown')
+    expect(wikiText).toContain('stripInlineMarkdownSegments')
   })
 
   it('宽屏采用居中画布对齐，整理页采用全宽待确认列表，设置采用双栏侧边导航结构，弹窗与抽屉幅面匹配内容密度', () => {

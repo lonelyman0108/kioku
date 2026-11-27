@@ -3,7 +3,7 @@ import { computed, getCurrentInstance } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { icons } from '../../icons'
-import { splitWikiLinks } from '../../markdown'
+import { splitWikiLinks, stripInlineMarkdownSegments } from '../../markdown'
 import { entryRoute } from '../../routes'
 
 type WikiTitleSource =
@@ -27,12 +27,14 @@ const props = withDefaults(
     interactive?: boolean
     compact?: boolean
     markMissing?: boolean
+    stripMarkdown?: boolean
   }>(),
   {
     titles: null,
     interactive: true,
     compact: false,
     markMissing: true,
+    stripMarkdown: false,
   },
 )
 
@@ -55,7 +57,10 @@ function lookupTitle(titles: WikiTitleSource | null | undefined, shortId: string
 
 const segments = computed<RenderedSegment[]>(() => {
   const hasTitles = props.titles != null
-  return splitWikiLinks(props.text).map((seg) => {
+  const parsed = props.stripMarkdown
+    ? stripInlineMarkdownSegments(props.text)
+    : splitWikiLinks(props.text)
+  return parsed.map((seg) => {
     if (!seg.link) return { text: seg.text }
     const { shortId, alias } = seg.link
     const resolvedTitle = lookupTitle(props.titles, shortId)
