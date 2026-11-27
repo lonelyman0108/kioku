@@ -555,12 +555,27 @@ const drawerDescription = computed(() =>
             </UButton>
           </div>
 
+          <NoteLine v-if="crossResult.warnings?.length" tone="warning" flush>
+            部分关联检查未完成，结果可能不完整。
+            <template #detail>
+              {{ crossResult.warnings.join('；') }}
+            </template>
+          </NoteLine>
+
           <EmptyState
             v-if="!crossResult.suggestions.length"
-            :icon="icons.shieldCheck"
-            tone="success"
-            title="未发现需要处理的重复或缺失关联"
-            description="该记忆与相邻记忆界限清晰，暂无需合并、更新或补全双链。"
+            :icon="crossResult.warnings?.length ? icons.warning : icons.shieldCheck"
+            :tone="crossResult.warnings?.length ? 'neutral' : 'success'"
+            :title="
+              crossResult.warnings?.length
+                ? '部分关联检查未完成，暂未发现可处理建议'
+                : '未发现需要处理的重复或缺失关联'
+            "
+            :description="
+              crossResult.warnings?.length
+                ? '已完成的检查未发现重复或缺失双链，可稍后点击重新扫描补查未完成项。'
+                : '该记忆与相邻记忆界限清晰，暂无需合并、更新或补全双链。'
+            "
           />
 
           <div v-else class="space-y-4">

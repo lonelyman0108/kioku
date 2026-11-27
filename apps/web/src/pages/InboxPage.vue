@@ -23,7 +23,7 @@ import {
 import type { DropdownMenuItem } from '@nuxt/ui'
 import { useToast } from '@nuxt/ui/composables'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
@@ -46,7 +46,18 @@ import {
   dreamOutcomeLabels,
 } from '../labels'
 import { entryRoute, settingsRoute } from '../routes'
+import {
+  isAfterWatermark,
+  latestInboxFailureTimestamp,
+  shouldShowInboxFailureBanner,
+} from '../taskCenter'
 import { formatRelative, formatTime } from '../time'
+import {
+  readStoredString,
+  subscribeStoredString,
+  UI_STORAGE_KEYS,
+  writeStoredString,
+} from '../uiState'
 
 type KindFilter = 'all' | DreamSuggestionKind
 
@@ -98,6 +109,49 @@ const hasChatModel = computed(() => Boolean(me.data.value?.hasChatModel))
 const statusPopoverOpen = ref(false)
 const failedDetailsOpen = ref(false)
 const sweepOpen = ref(false)
+
+const failureDismissedAt = ref<string | null>(
+  readStoredString(UI_STORAGE_KEYS.inboxFailureDismissedAt),
+)
+const tasksClearedBefore = ref<string | null>(readStoredString(UI_STORAGE_KEYS.tasksClearedBefore))
+const dismissedWithoutTimestamp = ref(false)
+const latestFailureAt = computed(() => latestInboxFailureTimestamp(state.value))
+
+watch(latestFailureAt, (ts) => {
+  if (ts) dismissedWithoutTimestamp.value = false
+})
+
+const stopDismissSync = subscribeStoredString(UI_STORAGE_KEYS.inboxFailureDismissedAt, (value) => {
+  failureDismissedAt.value = value
+  if (value) failedDetailsOpen.value = false
+})
+const stopTasksClearSync = subscribeStoredString(UI_STORAGE_KEYS.tasksClearedBefore, (value) => {
+  tasksClearedBefore.value = value
+  if (value) failedDetailsOpen.value = false
+})
+onBeforeUnmount(() => {
+  stopDismissSync()
+  stopTasksClearSync()
+})
+
+const showFailureBanner = computed(
+  () =>
+    !dismissedWithoutTimestamp.value &&
+    shouldShowInboxFailureBanner(state.value, failureDismissedAt.value, tasksClearedBefore.value),
+)
+
+function dismissFailureBanner() {
+  failedDetailsOpen.value = false
+  const watermark = latestFailureAt.value
+  if (!watermark) {
+    dismissedWithoutTimestamp.value = true
+    return
+  }
+  if (!failureDismissedAt.value || isAfterWatermark(watermark, failureDismissedAt.value)) {
+    failureDismissedAt.value = watermark
+    writeStoredString(UI_STORAGE_KEYS.inboxFailureDismissedAt, watermark)
+  }
+}
 
 const progressPercent = computed(() =>
   progress.value && progress.value.total > 0
@@ -1304,7 +1358,7 @@ async function batchDismissSelected() {
 
         <!-- 上次存在失败项或报错时的就地重试条 -->
         <div
-          v-if="!state?.running && (latestFailedItems.length > 0 || state?.lastError)"
+          v-if="showFailureBanner"
           class="failure-banner"
           :class="{
             'is-partial': state?.lastOutcome === 'partial' || state?.lastOutcome === 'cancelled',
@@ -1356,6 +1410,15 @@ async function batchDismissSelected() {
                 "
               >
                 仅重试失败项（{{ latestRetryableShortIds.length }} 条）
+              </UButton>
+              <UButton
+                size="xs"
+                color="neutral"
+                variant="ghost"
+                :icon="icons.cancel"
+                @click="dismissFailureBanner"
+              >
+                关闭
               </UButton>
             </div>
           </div>
