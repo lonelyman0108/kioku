@@ -21,7 +21,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { icons } from '../icons'
-import { bootModeDescriptions, bootModeLabels } from '../labels'
+import { bootModeDescriptions, bootModeIcons, bootModeLabels } from '../labels'
 import { detectSecretPrefixes } from '../secretHint'
 import { earliestValidTo, fromLocalInput, validToTooSoon } from '../time'
 import { analyzeTitleHint } from '../titleHint'
@@ -60,10 +60,13 @@ const CONTENT_TAB_OPTIONS: { value: 'edit' | 'preview'; label: string; icon: str
   { value: 'preview', label: '预览', icon: icons.reveal },
 ]
 
-const BOOT_MODE_OPTIONS: { value: BootMode; label: string }[] = BOOT_MODES.map((value) => ({
-  value,
-  label: bootModeLabels[value],
-}))
+const BOOT_MODE_OPTIONS: { value: BootMode; label: string; icon: string }[] = BOOT_MODES.map(
+  (value) => ({
+    value,
+    label: bootModeLabels[value],
+    icon: bootModeIcons[value],
+  }),
+)
 
 const { getKbdKey } = useKbd()
 const submitShortcut = computed(() => {
@@ -265,6 +268,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onModalKeydown))
               size="xs"
               color="neutral"
               variant="outline"
+              :icon="icons.credentials"
               :to="{ name: 'credentials' }"
               @click="open = false"
             >
@@ -327,6 +331,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onModalKeydown))
               size="xs"
               color="neutral"
               variant="outline"
+              :icon="icons.bookmark"
               @click="form.bootMode = 'index'"
             >
               改为目录常驻
@@ -336,6 +341,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onModalKeydown))
               size="xs"
               color="neutral"
               variant="outline"
+              :icon="icons.sliders"
               @click="attrsOpen = true"
             >
               限定场景

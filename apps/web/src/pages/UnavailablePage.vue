@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 
 import EntryFrame from '../components/ui/EntryFrame.vue'
 import SectionHeading from '../components/ui/SectionHeading.vue'
+import { icons } from '../icons'
 import { formatTime } from '../time'
 import { retryNavigation, retryTarget } from '../unavailable'
 
@@ -30,22 +31,32 @@ const reload = () => window.location.assign(target.value)
 <template>
   <EntryFrame>
     <template v-if="assetsFailed">
-      <SectionHeading title="页面文件已更新" :level="1" />
+      <SectionHeading title="页面文件已更新" :level="1" :icon="icons.fileWarning" />
       <div class="mt-3 space-y-2">
         <p>服务可能已升级，当前页面的文件已失效。重新载入后回到之前的页面。</p>
         <p class="text-muted">重新载入后仍然失败时，请检查服务进程与反向代理的状态。</p>
       </div>
-      <UButton class="mt-5" size="lg" block @click="reload">重新载入</UButton>
+      <UButton class="mt-5" size="lg" block :icon="icons.refresh" @click="reload">重新载入</UButton>
     </template>
     <template v-else>
-      <SectionHeading title="无法连接到服务" :level="1" />
+      <SectionHeading title="无法连接到服务" :level="1" :icon="icons.serverOff" />
       <div class="mt-3 space-y-2">
         <p>服务可能正在重启或升级，请稍后重试。连接恢复后回到之前的页面。</p>
         <p class="text-muted">持续无法连接时，请检查服务进程、数据库与反向代理的状态。</p>
       </div>
-      <UButton class="mt-5" size="lg" block :loading="retrying" @click="retry">重试</UButton>
-      <p v-if="failedAt" class="mt-2 text-muted" role="status">
-        仍无法连接（{{ formatTime(failedAt) }}）
+      <UButton
+        class="mt-5"
+        size="lg"
+        block
+        :icon="icons.refresh"
+        :loading="retrying"
+        @click="retry"
+      >
+        重试
+      </UButton>
+      <p v-if="failedAt" class="mt-2 flex items-center gap-1.5 text-muted" role="status">
+        <UIcon :name="icons.clock" class="inline-block size-3.5 shrink-0" aria-hidden="true" />
+        <span>仍无法连接（{{ formatTime(failedAt) }}）</span>
       </p>
     </template>
   </EntryFrame>

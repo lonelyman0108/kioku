@@ -1,4 +1,4 @@
-import type { EntryListItem } from '@kioku/contracts'
+import { effectiveBootMode, type EntryListItem } from '@kioku/contracts'
 import type { CommandPaletteGroup, CommandPaletteItem } from '@nuxt/ui'
 import { computed, onBeforeUnmount, ref, watch, type Ref } from 'vue'
 import { useRoute } from 'vue-router'
@@ -7,9 +7,23 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { icons } from '../icons'
 import { entryKindLabels } from '../labels'
-import { captureRoute, entryRoute } from '../routes'
+import { captureRoute, createEntryRoute, entryRoute, settingsRoute } from '../routes'
 
 const SEARCH_DELAY_MS = 250
+
+const SETTINGS_SUBPAGES: CommandPaletteItem[] = [
+  { label: '设置 · 连接与终端', icon: icons.keys, to: settingsRoute('keys') },
+  { label: '设置 · 模型', icon: icons.models, to: settingsRoute('models') },
+  { label: '设置 · 账号与数据', icon: icons.account, to: settingsRoute('account') },
+]
+
+function entrySearchIcon(entry: EntryListItem): string {
+  if (entry.kind === 'episode') return icons.messageSquare
+  const mode = effectiveBootMode(entry)
+  if (mode === 'index') return icons.bookmark
+  if (mode === 'full') return icons.pin
+  return icons.bookOpen
+}
 
 // ⌘K 搜索：页面跳转由搜索框本地过滤，词条经服务端混合检索返回
 export function useConsoleSearch(pages: Ref<CommandPaletteItem[]>) {
@@ -49,6 +63,7 @@ export function useConsoleSearch(pages: Ref<CommandPaletteItem[]>) {
 
   const groups = computed<CommandPaletteGroup<CommandPaletteItem>[]>(() => {
     const query = term.value.trim()
+    const baseQuery = route.name === 'memories' ? route.query : undefined
     const list: CommandPaletteGroup<CommandPaletteItem>[] = [
       {
         id: 'capture',
@@ -59,11 +74,17 @@ export function useConsoleSearch(pages: Ref<CommandPaletteItem[]>) {
             label: query ? `随手记：${query}` : '随手记',
             suffix: query ? '归并至对应记忆' : '记录习惯、约定或事实更新',
             icon: icons.capture,
-            to: captureRoute(query, route.name === 'memories' ? route.query : undefined),
+            to: captureRoute(query, baseQuery),
+          },
+          {
+            label: '新建记忆',
+            suffix: '直接起草一条新记忆',
+            icon: icons.add,
+            to: createEntryRoute(baseQuery),
           },
         ],
       },
-      { id: 'pages', label: '页面', items: pages.value },
+      { id: 'pages', label: '页面', items: [...pages.value, ...SETTINGS_SUBPAGES] },
     ]
     if (failure.value) {
       list.push({
@@ -81,7 +102,7 @@ export function useConsoleSearch(pages: Ref<CommandPaletteItem[]>) {
       items: items.value.map((entry) => ({
         label: entry.title,
         suffix: entry.disclosure ?? `${entry.shortId} · ${entryKindLabels[entry.kind]}`,
-        icon: entry.isPinned ? icons.pin : icons.file,
+        icon: entrySearchIcon(entry),
         to: entryRoute(entry.shortId),
       })),
     })

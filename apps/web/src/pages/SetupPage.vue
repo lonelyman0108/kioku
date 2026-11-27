@@ -18,11 +18,30 @@ import NoteLine from '../components/ui/NoteLine.vue'
 import PropertyList from '../components/ui/PropertyList.vue'
 import SectionHeading from '../components/ui/SectionHeading.vue'
 import { ME_KEY } from '../composables/useSession'
+import { icons } from '../icons'
 import { queryClient } from '../query'
-import { checkRows, setupFailure, SSL_MODE_ITEMS, summaryFacts, VERDICT_NAMES } from '../setup'
+import {
+  checkRows,
+  setupFailure,
+  SSL_MODE_ITEMS,
+  summaryFacts,
+  VERDICT_NAMES,
+  type CheckVerdict,
+} from '../setup'
 
 // 首次初始化：数据库尚未配置时先填写或代建连接，已就绪时直接创建唯一管理员账号
 const router = useRouter()
+
+const VERDICT_ICONS: Record<CheckVerdict, string> = {
+  passed: icons.checkCircle,
+  notice: icons.warning,
+  blocked: icons.circleX,
+}
+const VERDICT_CLASSES: Record<CheckVerdict, string> = {
+  passed: 'text-success',
+  notice: 'text-warning',
+  blocked: 'text-error',
+}
 
 const status = ref<SetupStatus | null>(null)
 const loadError = ref<string | null>(null)
@@ -37,8 +56,8 @@ const admin = reactive({
 type Mode = 'fill' | 'provision'
 const mode = ref<Mode>('fill')
 const MODES = [
-  { value: 'fill' as const, label: '填写连接' },
-  { value: 'provision' as const, label: '用超级用户创建' },
+  { value: 'fill' as const, label: '填写连接', icon: icons.database },
+  { value: 'provision' as const, label: '用超级用户创建', icon: icons.sparkles },
 ]
 const connection = reactive({
   host: '127.0.0.1',
@@ -191,13 +210,26 @@ async function submitAdmin() {
     <SectionHeading title="初始化" :level="1">
       <template #actions>
         <ol class="steps">
-          <li :class="{ on: step === 'database' }">1 数据库</li>
-          <li :class="{ on: step === 'admin' }">2 账号</li>
+          <li :class="{ on: step === 'database', done: step === 'admin' }">
+            <UIcon
+              :name="step === 'admin' ? icons.checkCircle : icons.database"
+              class="step-icon"
+              aria-hidden="true"
+            />
+            <span>1 数据库</span>
+          </li>
+          <li :class="{ on: step === 'admin' }">
+            <UIcon :name="icons.account" class="step-icon" aria-hidden="true" />
+            <span>2 账号</span>
+          </li>
         </ol>
       </template>
     </SectionHeading>
 
-    <p v-if="loadError" class="mt-4 text-error" role="alert">{{ loadError }}</p>
+    <p v-if="loadError" class="mt-4 flex items-start gap-1.5 text-error" role="alert">
+      <UIcon :name="icons.error" class="mt-[3px] inline-block size-4 shrink-0" aria-hidden="true" />
+      <span>{{ loadError }}</span>
+    </p>
 
     <template v-else-if="status">
       <NoteLine v-if="!status.masterKey" class="mt-4" tone="warning">
@@ -253,11 +285,18 @@ async function submitAdmin() {
               </UFormField>
             </div>
             <div class="actions">
-              <UButton type="submit" color="neutral" variant="outline" :loading="busy === 'check'">
+              <UButton
+                type="submit"
+                color="neutral"
+                variant="outline"
+                :icon="icons.shieldCheck"
+                :loading="busy === 'check'"
+              >
                 检查
               </UButton>
               <UButton
                 type="button"
+                :icon="icons.plug"
                 :disabled="!check?.ready || busy !== null"
                 :loading="busy === 'connect'"
                 @click="connect"
@@ -311,23 +350,36 @@ async function submitAdmin() {
               </UFormField>
             </div>
             <div class="actions">
-              <UButton type="button" :loading="busy === 'provision'" @click="createAndConnect">
+              <UButton
+                type="button"
+                :icon="icons.plug"
+                :loading="busy === 'provision'"
+                @click="createAndConnect"
+              >
                 创建并接入
               </UButton>
             </div>
           </div>
         </template>
 
-        <p v-if="error" class="text-error" role="alert">{{ error }}</p>
+        <p v-if="error" class="flex items-start gap-1.5 text-error" role="alert">
+          <UIcon
+            :name="icons.error"
+            class="mt-[3px] inline-block size-4 shrink-0"
+            aria-hidden="true"
+          />
+          <span>{{ error }}</span>
+        </p>
 
         <section v-if="rows.length" aria-label="检查结果">
-          <SectionHeading title="检查结果" :level="2" />
+          <SectionHeading title="检查结果" :level="2" :icon="icons.listChecks" />
           <ul class="checks">
             <li v-for="row in rows" :key="row.key" :data-verdict="row.verdict">
               <span class="check-label">{{ row.label }}</span>
               <span class="check-value">{{ row.value }}</span>
-              <span class="check-verdict" :class="{ 'text-error': row.verdict === 'blocked' }">
-                {{ VERDICT_NAMES[row.verdict] }}
+              <span class="check-verdict" :class="VERDICT_CLASSES[row.verdict]">
+                <UIcon :name="VERDICT_ICONS[row.verdict]" class="verdict-icon" aria-hidden="true" />
+                <span>{{ VERDICT_NAMES[row.verdict] }}</span>
               </span>
               <p v-if="row.detail" class="check-detail">{{ row.detail }}</p>
             </li>
@@ -338,7 +390,14 @@ async function submitAdmin() {
       <!-- 第二步：创建管理员账号 -->
       <template v-else>
         <p class="mt-2 text-muted">创建本实例的所有者账号。</p>
-        <p v-if="connected" class="mt-1 text-sm text-muted">已接入数据库 {{ connected }}。</p>
+        <p v-if="connected" class="mt-1 flex items-center gap-1.5 text-sm text-muted">
+          <UIcon
+            :name="icons.checkCircle"
+            class="inline-block size-4 shrink-0 text-success"
+            aria-hidden="true"
+          />
+          <span>已接入数据库 {{ connected }}。</span>
+        </p>
         <div v-else-if="readySummary.length" class="mt-3">
           <p v-if="status.database.source" class="mb-2 text-xs text-muted">
             连接来自{{ DATABASE_SOURCE_NAMES[status.database.source] }}
@@ -379,8 +438,17 @@ async function submitAdmin() {
               class="w-full"
             />
           </UFormField>
-          <p v-if="error" class="text-error" role="alert">{{ error }}</p>
-          <UButton type="submit" size="lg" block :loading="busy === 'admin'">创建并登录</UButton>
+          <p v-if="error" class="flex items-start gap-1.5 text-error" role="alert">
+            <UIcon
+              :name="icons.error"
+              class="mt-[3px] inline-block size-4 shrink-0"
+              aria-hidden="true"
+            />
+            <span>{{ error }}</span>
+          </p>
+          <UButton type="submit" size="lg" block :icon="icons.userPlus" :loading="busy === 'admin'">
+            创建并登录
+          </UButton>
         </UForm>
       </template>
     </template>
@@ -392,6 +460,20 @@ async function submitAdmin() {
   display: flex;
   gap: 12px;
   font-size: 13px;
+}
+.steps li {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.step-icon {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 14px;
+}
+.steps .done .step-icon {
+  color: var(--ui-success);
 }
 .steps .on {
   color: var(--ui-text-highlighted);
@@ -430,7 +512,16 @@ async function submitAdmin() {
   overflow-wrap: anywhere;
 }
 .check-verdict {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-size: 13px;
+}
+.verdict-icon {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 14px;
 }
 .check-detail {
   grid-column: 2 / -1;

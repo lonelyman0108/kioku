@@ -41,6 +41,7 @@ import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
 import {
   bootModeDescriptions,
+  bootModeIcons,
   bootModeLabels,
   envDisplayName,
   eventTypeLabels,
@@ -114,10 +115,13 @@ const EDIT_VIEW_OPTIONS: { value: EditViewMode; label: string; icon: string; tit
   { value: 'preview', label: '预览', icon: icons.reveal, title: '渲染预览' },
 ]
 
-const BOOT_MODE_OPTIONS: { value: BootMode; label: string }[] = BOOT_MODES.map((value) => ({
-  value,
-  label: bootModeLabels[value],
-}))
+const BOOT_MODE_OPTIONS: { value: BootMode; label: string; icon: string }[] = BOOT_MODES.map(
+  (value) => ({
+    value,
+    label: bootModeLabels[value],
+    icon: bootModeIcons[value],
+  }),
+)
 
 const detail = ref<EntryDetailResponse | null>(null)
 const entry = computed(() => detail.value?.entry ?? null)
@@ -909,7 +913,10 @@ defineExpose({
                 <span class="rail-swatch dashed" aria-hidden="true" />
                 会话摘要
               </span>
-              <span v-if="isDeleted" class="pill danger">已在回收站</span>
+              <span v-if="isDeleted" class="pill danger">
+                <UIcon :name="icons.remove" class="pill-icon" aria-hidden="true" />
+                <span>已在回收站</span>
+              </span>
             </div>
 
             <!-- 轻量动态状态行：版本、相对更新时间、来源、常驻字数与最新变更摘要 -->
@@ -970,7 +977,7 @@ defineExpose({
                   size="sm"
                   color="neutral"
                   variant="outline"
-                  :icon="icons.pin"
+                  :icon="entryBootMode === 'index' ? icons.bookmark : icons.pin"
                   :loading="quickBusy"
                   :aria-expanded="pinPopoverOpen"
                 >
@@ -979,7 +986,10 @@ defineExpose({
                 <template #content>
                   <div class="pin-popover">
                     <div class="pin-popover-head">
-                      <span class="pin-popover-title">启动加载方式</span>
+                      <span class="pin-popover-title">
+                        <UIcon :name="icons.pin" class="pin-title-icon" aria-hidden="true" />
+                        <span>启动加载方式</span>
+                      </span>
                       <span class="text-xs text-muted tabular-nums">
                         约 {{ entry.content.length.toLocaleString() }} 字
                       </span>
@@ -997,7 +1007,14 @@ defineExpose({
                         @click="pinDraft.bootMode = modeOpt"
                       >
                         <span class="pin-mode-head">
-                          <span class="pin-mode-name">{{ bootModeLabels[modeOpt] }}</span>
+                          <span class="pin-mode-name">
+                            <UIcon
+                              :name="bootModeIcons[modeOpt]"
+                              class="pin-mode-icon"
+                              aria-hidden="true"
+                            />
+                            <span>{{ bootModeLabels[modeOpt] }}</span>
+                          </span>
                           <UIcon
                             v-if="pinDraft.bootMode === modeOpt"
                             :name="icons.check"
@@ -1040,7 +1057,10 @@ defineExpose({
                         :aria-expanded="pinDraft.scopeExpanded"
                         @click="pinDraft.scopeExpanded = !pinDraft.scopeExpanded"
                       >
-                        <span>确认适用场景</span>
+                        <span class="pin-scope-lead">
+                          <UIcon :name="icons.sliders" class="pin-scope-icon" aria-hidden="true" />
+                          <span>确认适用场景</span>
+                        </span>
                         <UIcon
                           :name="pinDraft.scopeExpanded ? icons.chevronDown : icons.chevronRight"
                           class="attrs-chevron"
@@ -1262,6 +1282,7 @@ defineExpose({
                   size="xs"
                   color="neutral"
                   variant="outline"
+                  :icon="icons.bookmark"
                   @click="form.bootMode = 'index'"
                 >
                   改为目录常驻
@@ -1271,6 +1292,7 @@ defineExpose({
                   size="xs"
                   color="neutral"
                   variant="outline"
+                  :icon="icons.sliders"
                   @click="attrsOpen = true"
                 >
                   限定场景
@@ -1283,7 +1305,13 @@ defineExpose({
                 secretWarnings.map((w) => w.label).join('、')
               }}，建议改存凭据并用占位符引用。
               <template #actions>
-                <UButton size="xs" color="neutral" variant="outline" :to="{ name: 'credentials' }">
+                <UButton
+                  size="xs"
+                  color="neutral"
+                  variant="outline"
+                  :icon="icons.credentials"
+                  :to="{ name: 'credentials' }"
+                >
                   前往凭据
                 </UButton>
               </template>
@@ -1305,6 +1333,7 @@ defineExpose({
                     <UInput
                       v-model="linkQueryInput"
                       size="xs"
+                      :icon="icons.search"
                       placeholder="按标题或短 ID 查找"
                       class="w-full"
                     />
@@ -1487,7 +1516,10 @@ defineExpose({
             <div class="read-main">
               <dl class="meta-strip">
                 <div>
-                  <dt>场景</dt>
+                  <dt>
+                    <UIcon :name="icons.sliders" class="meta-dt-icon" aria-hidden="true" />
+                    <span>场景</span>
+                  </dt>
                   <dd>
                     <span v-if="!scopeTags.length" class="text-muted">所有环境</span>
                     <span v-else class="tag-row">
@@ -1496,7 +1528,10 @@ defineExpose({
                   </dd>
                 </div>
                 <div v-if="entry.topics.length">
-                  <dt>主题</dt>
+                  <dt>
+                    <UIcon :name="icons.topic" class="meta-dt-icon" aria-hidden="true" />
+                    <span>主题</span>
+                  </dt>
                   <dd class="tag-row">
                     <span v-for="topic in entry.topics" :key="topic" class="meta-pill">{{
                       topic
@@ -1504,15 +1539,24 @@ defineExpose({
                   </dd>
                 </div>
                 <div v-if="entry.disclosure">
-                  <dt>触发场景</dt>
+                  <dt>
+                    <UIcon :name="icons.trigger" class="meta-dt-icon" aria-hidden="true" />
+                    <span>触发场景</span>
+                  </dt>
                   <dd>{{ entry.disclosure }}</dd>
                 </div>
                 <div v-if="entry.validTo">
-                  <dt>有效期</dt>
+                  <dt>
+                    <UIcon :name="icons.clock" class="meta-dt-icon" aria-hidden="true" />
+                    <span>有效期</span>
+                  </dt>
                   <dd :class="{ 'text-warning': expiredNow }">{{ formatTime(entry.validTo) }}</dd>
                 </div>
                 <div v-if="entry.verifiedAt">
-                  <dt>已核实</dt>
+                  <dt>
+                    <UIcon :name="icons.shieldCheck" class="meta-dt-icon" aria-hidden="true" />
+                    <span>已核实</span>
+                  </dt>
                   <dd :title="formatTime(entry.verifiedAt)">
                     {{ formatRelative(entry.verifiedAt) }}
                   </dd>
@@ -1520,7 +1564,10 @@ defineExpose({
               </dl>
 
               <section v-if="entry.summary?.trim()" class="summary-block" aria-label="现行概要">
-                <span class="summary-label">现行概要</span>
+                <span class="summary-label">
+                  <UIcon :name="icons.summary" class="summary-label-icon" aria-hidden="true" />
+                  <span>现行概要</span>
+                </span>
                 <p class="summary-text">{{ entry.summary }}</p>
               </section>
 
@@ -1543,7 +1590,8 @@ defineExpose({
                         class="evolution-chevron"
                         aria-hidden="true"
                       />
-                      近期演进（近 {{ recentHistory.length }} 条）
+                      <UIcon :name="icons.history" class="evolution-icon" aria-hidden="true" />
+                      <span>近期演进（近 {{ recentHistory.length }} 条）</span>
                     </span>
                     <span class="evolution-hint">点击定位历史版本</span>
                   </summary>
@@ -1673,6 +1721,7 @@ defineExpose({
             : ['移入回收站后不再参与召回与启动加载。', '可随时在回收站中恢复。']
         "
         :action="deleteModal === 'permanent' ? '彻底删除' : '移入回收站'"
+        :action-icon="icons.remove"
         :busy="deleteBusy"
         :error="deleteError"
         @confirm="confirmDelete"
@@ -1813,6 +1862,12 @@ defineExpose({
   border-color: var(--ui-error);
   color: var(--ui-error);
 }
+.pill-icon {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
+}
 .rail-swatch {
   display: inline-block;
   flex: none;
@@ -1845,9 +1900,19 @@ defineExpose({
   border-bottom: 1px solid var(--ui-border);
 }
 .pin-popover-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 13px;
   font-weight: 600;
   color: var(--ui-text-highlighted);
+}
+.pin-title-icon {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--ui-text-muted);
 }
 .pin-mode-list {
   display: flex;
@@ -1890,8 +1955,17 @@ defineExpose({
   gap: 8px;
 }
 .pin-mode-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 13px;
   font-weight: 500;
+}
+.pin-mode-icon {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 14px;
 }
 .pin-mode-check {
   display: inline-block;
@@ -1926,6 +2000,18 @@ defineExpose({
   font-weight: 500;
   color: var(--ui-text-highlighted);
   cursor: pointer;
+}
+.pin-scope-lead {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.pin-scope-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+  color: var(--ui-text-muted);
 }
 .pin-scope-body {
   padding: 10px;
@@ -2015,6 +2101,7 @@ defineExpose({
 .attrs-chevron,
 .attrs-icon {
   display: inline-block;
+  flex: none;
   width: 14px;
   height: 14px;
   color: var(--ui-text-muted);
@@ -2312,9 +2399,18 @@ defineExpose({
   gap: 8px;
 }
 .meta-strip dt {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-size: 12px;
   color: var(--ui-text-muted);
   white-space: nowrap;
+}
+.meta-dt-icon {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
 }
 .tag-row {
   display: inline-flex;
@@ -2335,11 +2431,19 @@ defineExpose({
   background: var(--ui-bg-muted);
 }
 .summary-label {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 5px;
   margin-bottom: 4px;
   font-size: 12px;
   font-weight: 600;
   color: var(--ui-text-muted);
+}
+.summary-label-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
 }
 .summary-text {
   font-size: 14px;
@@ -2373,12 +2477,15 @@ defineExpose({
   align-items: center;
   gap: 6px;
 }
-.evolution-chevron {
+.evolution-chevron,
+.evolution-icon {
   display: inline-block;
   flex: none;
   width: 14px;
   height: 14px;
   color: var(--ui-text-muted);
+}
+.evolution-chevron {
   transition: transform 0.12s ease;
 }
 .recent-evolution[open] .evolution-chevron {

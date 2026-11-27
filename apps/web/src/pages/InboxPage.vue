@@ -31,6 +31,7 @@ import { useSession } from '../composables/useSession'
 import { isTitleOnlyTidy } from '../diff'
 import { icons } from '../icons'
 import {
+  bootModeIcons,
   bootModeLabels,
   dreamKindIcons,
   dreamKindLabels,
@@ -99,6 +100,14 @@ const runningStageLabel = computed(() => {
   if (progress.value?.mode === 'cross_memory') return '查重/关联中'
   return '增量整理中'
 })
+
+const runningModeIcon = computed(() =>
+  progress.value?.mode === 'tidy'
+    ? icons.tidy
+    : progress.value?.mode === 'cross_memory'
+      ? icons.links
+      : icons.sparkles,
+)
 
 interface ScheduleDisplayItem {
   mode: DreamMode
@@ -346,16 +355,21 @@ function tidyDeltaPrimaryPill(s: DreamSuggestionView): string {
   return parts.length ? parts.join(' + ') : s.kind === 'tidy' ? '规范调整' : '更新内容'
 }
 
-function tidyDeltaSubText(s: DreamSuggestionView): { text: string; warn: boolean } | null {
+function tidyDeltaSubText(s: DreamSuggestionView): {
+  text: string
+  warn: boolean
+  icon?: string
+} | null {
   const integ = computeIntegrityOf(s)
   if (integ && (integ.missingLinks.length > 0 || integ.missingCreds.length > 0)) {
-    return { text: '存在引用缺失，请展开核对后再应用', warn: true }
+    return { text: '存在引用缺失，请展开核对后再应用', warn: true, icon: icons.shieldAlert }
   }
   const body = contentDeltaInfo(s)
   if (integ?.severeShrink) {
     return {
       text: `正文缩减 ${Math.abs(body.pct)}%，请展开核对变更与归档说明`,
       warn: true,
+      icon: icons.warning,
     }
   }
   const bits: string[] = []
@@ -656,12 +670,14 @@ async function onApply(id: string, body: ApplySuggestionRequest) {
         actions: [
           {
             label: '查看记忆',
+            icon: icons.promote,
             color: 'neutral',
             variant: 'outline',
             onClick: () => void router.push(entryRoute(shortId)),
           },
           {
             label: '撤销',
+            icon: icons.undelete,
             color: 'neutral',
             variant: 'outline',
             onClick: () => void undoAppliedSuggestion(shortId, previousVersion!, version!, title),
@@ -853,7 +869,7 @@ async function batchDismissSelected() {
             >
               <template v-if="state?.running">
                 <span class="status-chunk status-running">
-                  <UIcon :name="icons.sparkles" class="status-inline-icon" aria-hidden="true" />
+                  <UIcon :name="runningModeIcon" class="status-inline-icon" aria-hidden="true" />
                   <span>{{ runningStageLabel }}</span>
                 </span>
                 <template v-if="progress && progress.total > 0">
@@ -880,7 +896,11 @@ async function batchDismissSelected() {
                 <span v-else>尚未整理</span>
                 <span class="hair-sep" aria-hidden="true" />
                 <span class="status-chunk">
-                  <UIcon :name="icons.clock" class="status-inline-icon" aria-hidden="true" />
+                  <UIcon
+                    :name="icons.calendarClock"
+                    class="status-inline-icon"
+                    aria-hidden="true"
+                  />
                   <span>{{ scheduleSummaryText }}</span>
                 </span>
               </template>
@@ -947,9 +967,16 @@ async function batchDismissSelected() {
                   class="popover-error"
                   :class="{ 'is-partial': state.lastOutcome === 'partial' }"
                 >
-                  {{
-                    state.lastOutcome === 'partial' ? state.lastError : `错误：${state.lastError}`
-                  }}
+                  <UIcon
+                    :name="state.lastOutcome === 'partial' ? icons.warning : icons.error"
+                    class="popover-error-icon"
+                    aria-hidden="true"
+                  />
+                  <span>
+                    {{
+                      state.lastOutcome === 'partial' ? state.lastError : `错误：${state.lastError}`
+                    }}
+                  </span>
                 </p>
 
                 <div
@@ -964,6 +991,11 @@ async function batchDismissSelected() {
                       :aria-expanded="failedDetailsOpen"
                       @click="failedDetailsOpen = !failedDetailsOpen"
                     >
+                      <UIcon
+                        :name="failedDetailsOpen ? icons.chevronDown : icons.chevronRight"
+                        class="failures-toggle-icon"
+                        aria-hidden="true"
+                      />
                       <span>{{ failedDetailsOpen ? '收起' : '展开' }}</span>
                     </button>
                   </div>
@@ -1009,10 +1041,11 @@ async function batchDismissSelected() {
                   <span>确认后才写入记忆</span>
                   <RouterLink
                     :to="settingsRoute('models')"
-                    class="text-primary"
+                    class="popover-foot-link text-primary"
                     @click="statusPopoverOpen = false"
                   >
-                    前往模型设置
+                    <UIcon :name="icons.models" class="popover-foot-icon" aria-hidden="true" />
+                    <span>前往模型设置</span>
                   </RouterLink>
                 </div>
               </div>
@@ -1072,7 +1105,13 @@ async function batchDismissSelected() {
         <NoteLine v-if="me.data.value && !hasChatModel" tone="warning">
           尚未配置对话与整理模型，智能整理未启用；仍可执行结构检查。
           <template #actions>
-            <UButton size="sm" color="neutral" variant="outline" :to="settingsRoute('models')">
+            <UButton
+              size="sm"
+              color="neutral"
+              variant="outline"
+              :icon="icons.models"
+              :to="settingsRoute('models')"
+            >
               前往模型设置
             </UButton>
           </template>
@@ -1081,7 +1120,7 @@ async function batchDismissSelected() {
         <!-- 运行中实时进度条 -->
         <div v-if="state?.running" class="run-banner tabular-nums" role="status" aria-live="polite">
           <div class="run-banner-left">
-            <UIcon :name="icons.sparkles" class="banner-icon" aria-hidden="true" />
+            <UIcon :name="runningModeIcon" class="banner-icon" aria-hidden="true" />
             <span class="run-banner-title">{{ runningStageLabel }}</span>
             <span v-if="progress" class="run-banner-meta">
               已生成 {{ progress.suggested }} 条建议<template v-if="progress.failed > 0"
@@ -1114,7 +1153,11 @@ async function batchDismissSelected() {
         >
           <div class="failure-banner-head">
             <div class="failure-banner-msg">
-              <UIcon :name="icons.warning" class="banner-icon" aria-hidden="true" />
+              <UIcon
+                :name="state?.lastOutcome === 'partial' ? icons.warning : icons.error"
+                class="banner-icon"
+                aria-hidden="true"
+              />
               <span v-if="latestFailedItems.length > 0" class="tabular-nums">
                 上次整理有 {{ latestFailedItems.length }} 条记忆处理失败
                 <template v-if="state?.lastError">（{{ state.lastError }}）</template>
@@ -1127,6 +1170,7 @@ async function batchDismissSelected() {
                 size="xs"
                 color="neutral"
                 variant="ghost"
+                :icon="failedDetailsOpen ? icons.chevronDown : icons.chevronRight"
                 :aria-expanded="failedDetailsOpen"
                 @click="failedDetailsOpen = !failedDetailsOpen"
               >
@@ -1218,12 +1262,16 @@ async function batchDismissSelected() {
                   size="xs"
                   color="neutral"
                   variant="ghost"
+                  :icon="icons.undelete"
                   :disabled="batchBusy || batchDismissBusy"
                   @click="clearSelection"
                 >
                   取消选择
                 </UButton>
-                <span v-if="hasUnsafeSelected" class="quiet-hint">高风险项须展开核对</span>
+                <span v-if="hasUnsafeSelected" class="quiet-hint">
+                  <UIcon :name="icons.shieldAlert" class="quiet-hint-icon" aria-hidden="true" />
+                  <span>高风险项须展开核对</span>
+                </span>
               </template>
               <UButton
                 v-else-if="filteredItems.length > 0"
@@ -1308,7 +1356,12 @@ async function batchDismissSelected() {
                               v-if="s.kind === 'merge_duplicates' && s.entries.length > 1"
                               class="tiny-cue tabular-nums"
                             >
-                              等 {{ s.entries.length }} 条
+                              <UIcon
+                                :name="icons.layers"
+                                class="tiny-cue-icon"
+                                aria-hidden="true"
+                              />
+                              <span>等 {{ s.entries.length }} 条</span>
                             </span>
                           </span>
                         </div>
@@ -1323,13 +1376,34 @@ async function batchDismissSelected() {
                       >
                         <div class="delta-primary">
                           <span class="delta-pill delta-pill-old">
-                            {{ bootModeLabels[effectiveBootMode(baseEntryOf(s)!)] }}
+                            <UIcon
+                              :name="bootModeIcons[effectiveBootMode(baseEntryOf(s)!)]"
+                              class="delta-pill-icon"
+                              aria-hidden="true"
+                            />
+                            <span>{{ bootModeLabels[effectiveBootMode(baseEntryOf(s)!)] }}</span>
                           </span>
-                          <span class="delta-arrow" aria-hidden="true">──▶</span>
+                          <UIcon
+                            :name="icons.arrowRight"
+                            class="delta-arrow-icon"
+                            aria-hidden="true"
+                          />
                           <span class="delta-pill delta-pill-ochre">
-                            {{ bootModeLabels[s.proposedBootMode] }}
+                            <UIcon
+                              :name="bootModeIcons[s.proposedBootMode]"
+                              class="delta-pill-icon"
+                              aria-hidden="true"
+                            />
+                            <span>{{ bootModeLabels[s.proposedBootMode] }}</span>
                           </span>
-                          <span v-if="hasSummaryDiff(s)" class="delta-pill">+ 补概要</span>
+                          <span v-if="hasSummaryDiff(s)" class="delta-pill">
+                            <UIcon
+                              :name="icons.summary"
+                              class="delta-pill-icon"
+                              aria-hidden="true"
+                            />
+                            <span>+ 补概要</span>
+                          </span>
                         </div>
                         <div class="delta-sub tabular-nums">
                           <template
@@ -1350,10 +1424,15 @@ async function batchDismissSelected() {
                       <template v-else-if="s.kind === 'link_entries'">
                         <div class="delta-primary">
                           <span class="delta-pill delta-pill-lake tabular-nums">
-                            +{{ s.proposedLinks?.length ?? 0 }} 双链
+                            <UIcon :name="icons.links" class="delta-pill-icon" aria-hidden="true" />
+                            <span>+{{ s.proposedLinks?.length ?? 0 }} 双链</span>
                           </span>
                           <template v-if="s.proposedLinks?.length">
-                            <span class="delta-arrow" aria-hidden="true">→</span>
+                            <UIcon
+                              :name="icons.arrowRight"
+                              class="delta-arrow-icon"
+                              aria-hidden="true"
+                            />
                             <span class="delta-target-name">
                               {{
                                 s.proposedLinks[0]!.targetTitle ||
@@ -1376,9 +1455,14 @@ async function batchDismissSelected() {
                       <template v-else-if="s.kind === 'merge_duplicates'">
                         <div class="delta-primary">
                           <span class="delta-pill delta-pill-new tabular-nums">
-                            合并 {{ s.entries.length }} 条
+                            <UIcon :name="icons.merge" class="delta-pill-icon" aria-hidden="true" />
+                            <span>合并 {{ s.entries.length }} 条</span>
                           </span>
-                          <span class="delta-arrow" aria-hidden="true">→</span>
+                          <UIcon
+                            :name="icons.arrowRight"
+                            class="delta-arrow-icon"
+                            aria-hidden="true"
+                          />
                           <span class="delta-target-name">
                             {{ s.proposedTitle?.trim() || baseEntryOf(s)?.title }}
                           </span>
@@ -1388,7 +1472,14 @@ async function batchDismissSelected() {
                           :class="{ 'delta-sub-warn': (s.affectedBacklinkCount ?? 0) > 0 }"
                         >
                           <template v-if="(s.affectedBacklinkCount ?? 0) > 0">
-                            自动重定向 {{ s.affectedBacklinkCount }} 条反链，其余重复项移入回收站
+                            <UIcon
+                              :name="icons.arrowLeftRight"
+                              class="delta-sub-icon"
+                              aria-hidden="true"
+                            />
+                            <span>
+                              自动重定向 {{ s.affectedBacklinkCount }} 条反链，其余重复项移入回收站
+                            </span>
                           </template>
                           <template v-else>保留主词条，其余重复项移入回收站</template>
                         </div>
@@ -1397,9 +1488,20 @@ async function batchDismissSelected() {
                       <!-- 提炼会话摘要 -->
                       <template v-else-if="s.kind === 'distill_episode'">
                         <div class="delta-primary">
-                          <span class="delta-pill delta-pill-moss">提炼为正式记忆</span>
+                          <span class="delta-pill delta-pill-moss">
+                            <UIcon
+                              :name="icons.promote"
+                              class="delta-pill-icon"
+                              aria-hidden="true"
+                            />
+                            <span>提炼为正式记忆</span>
+                          </span>
                           <template v-if="s.proposedTitle?.trim()">
-                            <span class="delta-arrow" aria-hidden="true">→</span>
+                            <UIcon
+                              :name="icons.arrowRight"
+                              class="delta-arrow-icon"
+                              aria-hidden="true"
+                            />
                             <span class="delta-target-name">{{ s.proposedTitle }}</span>
                           </template>
                         </div>
@@ -1414,7 +1516,14 @@ async function batchDismissSelected() {
                       <!-- 标记过时记忆 -->
                       <template v-else-if="s.kind === 'mark_stale'">
                         <div class="delta-primary">
-                          <span class="delta-pill delta-pill-brick">移入回收站</span>
+                          <span class="delta-pill delta-pill-brick">
+                            <UIcon
+                              :name="icons.remove"
+                              class="delta-pill-icon"
+                              aria-hidden="true"
+                            />
+                            <span>移入回收站</span>
+                          </span>
                         </div>
                         <div class="delta-sub line-clamp-1">{{ s.reason }}</div>
                       </template>
@@ -1423,10 +1532,19 @@ async function batchDismissSelected() {
                       <template v-else>
                         <div class="delta-primary">
                           <span class="delta-pill delta-pill-moss tabular-nums">
-                            {{ tidyDeltaPrimaryPill(s) }}
+                            <UIcon
+                              :name="s.kind === 'tidy' ? icons.tidy : icons.updateDoc"
+                              class="delta-pill-icon"
+                              aria-hidden="true"
+                            />
+                            <span>{{ tidyDeltaPrimaryPill(s) }}</span>
                           </span>
                           <template v-if="hasTitleDiff(s) && s.proposedTitle?.trim()">
-                            <span class="delta-arrow" aria-hidden="true">→</span>
+                            <UIcon
+                              :name="icons.arrowRight"
+                              class="delta-arrow-icon"
+                              aria-hidden="true"
+                            />
                             <span class="delta-target-name">{{ s.proposedTitle }}</span>
                           </template>
                         </div>
@@ -1435,7 +1553,13 @@ async function batchDismissSelected() {
                           class="delta-sub tabular-nums"
                           :class="{ 'delta-sub-warn': tidyDeltaSubText(s)!.warn }"
                         >
-                          {{ tidyDeltaSubText(s)!.text }}
+                          <UIcon
+                            v-if="tidyDeltaSubText(s)!.icon"
+                            :name="tidyDeltaSubText(s)!.icon!"
+                            class="delta-sub-icon"
+                            aria-hidden="true"
+                          />
+                          <span>{{ tidyDeltaSubText(s)!.text }}</span>
                         </div>
                       </template>
                     </td>
@@ -1465,7 +1589,7 @@ async function batchDismissSelected() {
                             size="xs"
                             color="neutral"
                             variant="outline"
-                            :icon="icons.compare"
+                            :icon="isExpanded(s.id) ? icons.foldVertical : icons.compare"
                             :aria-expanded="isExpanded(s.id)"
                             @click.stop="toggleExpand(s.id)"
                           >
@@ -1544,13 +1668,18 @@ async function batchDismissSelected() {
               </tbody>
             </table>
 
-            <footer class="ledger-footnote">所有应用均记入版本历史，支持 8 秒内撤销。</footer>
+            <footer class="ledger-footnote">
+              <UIcon :name="icons.history" class="footnote-icon" aria-hidden="true" />
+              <span>所有应用均记入版本历史，支持 8 秒内撤销。</span>
+            </footer>
           </section>
         </template>
 
         <!-- 空态 -->
         <div v-else-if="!inboxQuery.isError.value" class="empty-frame">
           <EmptyState
+            :icon="icons.checkCircle"
+            tone="success"
             title="暂无待处理建议"
             description="会话摘要与记忆变动累积后，定时或手动整理会在此生成建议。"
           >
@@ -1794,6 +1923,9 @@ async function batchDismissSelected() {
   overflow-wrap: anywhere;
 }
 .popover-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
   padding: 6px 8px;
   border: 1px solid var(--ui-error);
   background: var(--ui-bg);
@@ -1801,6 +1933,13 @@ async function batchDismissSelected() {
   line-height: 1.5;
   color: var(--ui-error);
   overflow-wrap: anywhere;
+}
+.popover-error-icon {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin-top: 2px;
 }
 .popover-error.is-partial {
   border-color: var(--ui-warning);
@@ -1822,10 +1961,19 @@ async function batchDismissSelected() {
   color: var(--ui-text-muted);
 }
 .failures-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
   font-size: 12px;
   color: var(--ui-text-highlighted);
   text-decoration: underline;
   cursor: pointer;
+}
+.failures-toggle-icon {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
 }
 .failures-list {
   display: flex;
@@ -1877,6 +2025,17 @@ async function batchDismissSelected() {
   border-top: 1px solid var(--ui-border);
   font-size: 12px;
   color: var(--ui-text-muted);
+}
+.popover-foot-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.popover-foot-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
 }
 
 /* ---- 主区与进度/失败横幅 ---- */
@@ -2061,8 +2220,17 @@ async function batchDismissSelected() {
   color: var(--ui-text-highlighted);
 }
 .quiet-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-size: 12px;
   color: var(--ui-text-muted);
+}
+.quiet-hint-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
 }
 
 /* ---- 四列纸墨速审台账表 ---- */
@@ -2246,12 +2414,19 @@ async function batchDismissSelected() {
 .delta-pill {
   display: inline-flex;
   align-items: center;
+  gap: 4px;
   padding: 1px 7px;
   border: 1px solid var(--ui-border-accented);
   background: var(--ui-bg-bright);
   font-size: 13px;
   font-weight: 500;
   line-height: 1.45;
+}
+.delta-pill-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
 }
 .delta-pill-old {
   border-style: dashed;
@@ -2287,10 +2462,12 @@ async function batchDismissSelected() {
   font-weight: 600;
   color: var(--ui-error);
 }
-.delta-arrow {
-  font-size: 12px;
+.delta-arrow-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
   color: var(--ui-text-muted);
-  user-select: none;
 }
 .delta-target-name {
   font-weight: 600;
@@ -2305,8 +2482,18 @@ async function batchDismissSelected() {
   overflow-wrap: anywhere;
 }
 .delta-sub-warn {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 4px;
   font-weight: 500;
   color: var(--ui-warning);
+}
+.delta-sub-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+  margin-top: 2px;
 }
 
 /* 列 3：性质与时间 */
@@ -2395,9 +2582,18 @@ async function batchDismissSelected() {
 }
 
 .ledger-footnote {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   margin-top: 12px;
   font-size: 12px;
   color: var(--ui-text-muted);
+}
+.footnote-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
 }
 
 .empty-frame {

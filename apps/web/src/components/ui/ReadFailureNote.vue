@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 
 import { readFailure, retryable } from '../../api/client'
+import { icons } from '../../icons'
 import type { ReadState } from '../../query'
 import NoteLine from './NoteLine.vue'
 
@@ -22,6 +23,7 @@ const stale = computed(() => props.query.data.value != null && again.value)
     {{ stale ? '刷新失败：' : '' }}{{ readFailure(query.error.value, fallback) }}
     <template v-if="again" #actions>
       <UButton
+        :icon="icons.refresh"
         :size="size"
         color="neutral"
         variant="outline"

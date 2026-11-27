@@ -591,6 +591,9 @@ export const theme = {
         },
       },
       active: {
+        true: {
+          item: 'data-highlighted:not-data-disabled:text-on-selected data-highlighted:not-data-disabled:before:bg-selected',
+        },
         false: {
           item: 'data-highlighted:not-data-disabled:text-on-selected data-highlighted:not-data-disabled:before:bg-selected',
           itemLeadingIcon: 'group-data-highlighted:not-group-data-disabled:text-on-selected',

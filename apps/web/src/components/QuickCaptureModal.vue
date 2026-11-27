@@ -40,6 +40,14 @@ const PATCH_KIND_LABELS: Record<CapturePatchKind, string> = {
   noop: '无需重复',
 }
 
+const PATCH_KIND_ICONS: Record<CapturePatchKind, string> = {
+  insert_under_heading: icons.listPlus,
+  append: icons.listEnd,
+  replace: icons.updateDoc,
+  create: icons.add,
+  noop: icons.check,
+}
+
 const props = withDefaults(
   defineProps<{
     initialText?: string
@@ -529,12 +537,14 @@ async function confirmMerge() {
       actions: [
         {
           label: '查看记忆',
+          icon: icons.promote,
           color: 'neutral',
           variant: 'outline',
           onClick: () => emit('openEntry', sid),
         },
         {
           label: '撤销',
+          icon: icons.undelete,
           color: 'neutral',
           variant: 'outline',
           onClick: () => void undoMerge(sid, prevVersion, mergedVersion, updated.entry.title),
@@ -580,6 +590,7 @@ async function confirmCreate() {
       actions: [
         {
           label: '查看记忆',
+          icon: icons.promote,
           color: 'neutral',
           variant: 'outline',
           onClick: () => emit('openEntry', detail.entry.shortId),
@@ -680,6 +691,7 @@ onBeforeUnmount(() => {
               size="xs"
               color="neutral"
               variant="outline"
+              :icon="icons.credentials"
               :to="{ name: 'credentials' }"
               @click="open = false"
             >
@@ -693,7 +705,14 @@ onBeforeUnmount(() => {
 
       <!-- 检索与分析加载态 -->
       <div v-else-if="step === 'loading'" class="loading-panel">
-        <p class="loading-title">{{ loadingHint }}</p>
+        <p class="loading-title">
+          <UIcon
+            :name="hasChatModel ? icons.sparkles : icons.search"
+            class="loading-title-icon"
+            aria-hidden="true"
+          />
+          <span>{{ loadingHint }}</span>
+        </p>
         <p class="text-xs text-muted">核对双链与凭据占位符，仅调整命中段落</p>
         <UProgress animation="carousel" size="xs" class="max-w-52" />
       </div>
@@ -717,7 +736,14 @@ onBeforeUnmount(() => {
         >
           <div class="plan-banner-head">
             <div class="flex min-w-0 flex-wrap items-center gap-2">
-              <span class="plan-kind-tag">{{ patchBadgeText }}</span>
+              <span class="plan-kind-tag">
+                <UIcon
+                  :name="PATCH_KIND_ICONS[patchKind]"
+                  class="plan-kind-icon"
+                  aria-hidden="true"
+                />
+                <span>{{ patchBadgeText }}</span>
+              </span>
               <strong v-if="viewAction !== 'create' && targetTitle" class="plan-target-title">
                 {{ targetTitle }}
               </strong>
@@ -826,7 +852,10 @@ onBeforeUnmount(() => {
         <template v-else-if="viewAction === 'noop'">
           <div class="noop-preview">
             <div class="noop-preview-head">
-              <span class="font-medium">原记忆内容</span>
+              <span class="noop-preview-title">
+                <UIcon :name="icons.file" class="noop-preview-icon" aria-hidden="true" />
+                <span>原记忆内容</span>
+              </span>
               <span v-if="targetShortId" class="font-mono text-xs text-muted">{{
                 targetShortId
               }}</span>
@@ -841,7 +870,10 @@ onBeforeUnmount(() => {
         <!-- 分支：修改方案 Diff 预览（主路径） -->
         <template v-else>
           <div v-if="showSectionPicker" class="section-picker-row">
-            <label for="capture-section" class="section-label">插入位置</label>
+            <label for="capture-section" class="section-label section-label-inline">
+              <UIcon :name="icons.listPlus" class="section-label-icon" aria-hidden="true" />
+              <span>插入位置</span>
+            </label>
             <USelect
               id="capture-section"
               name="section"
@@ -899,7 +931,7 @@ onBeforeUnmount(() => {
                 size="xs"
                 color="neutral"
                 variant="ghost"
-                :icon="editingDiff ? icons.file : icons.edit"
+                :icon="editingDiff ? icons.compare : icons.edit"
                 :disabled="applyBusy"
                 @click="editingDiff = !editingDiff"
               >
@@ -954,7 +986,7 @@ onBeforeUnmount(() => {
           <UButton color="neutral" variant="ghost" size="sm" @click="open = false">取消</UButton>
           <UButton
             size="sm"
-            :icon="icons.capture"
+            :icon="hasChatModel ? icons.capture : icons.search"
             :disabled="!rawText.trim()"
             @click="runCapturePlan()"
           >
@@ -1022,13 +1054,21 @@ onBeforeUnmount(() => {
           >
             返回修改
           </UButton>
-          <UButton color="neutral" variant="outline" size="sm" @click="switchToAppend">
+          <UButton
+            color="neutral"
+            variant="outline"
+            size="sm"
+            :icon="icons.listEnd"
+            @click="switchToAppend"
+          >
             仍要追加至文末
           </UButton>
         </div>
         <div class="foot-group">
           <UButton color="neutral" variant="ghost" size="sm" @click="open = false">关闭</UButton>
-          <UButton v-if="targetShortId" size="sm" @click="openOriginalEntry">查看原记忆</UButton>
+          <UButton v-if="targetShortId" size="sm" :icon="icons.promote" @click="openOriginalEntry">
+            查看原记忆
+          </UButton>
         </div>
       </div>
 
@@ -1050,6 +1090,7 @@ onBeforeUnmount(() => {
             color="neutral"
             variant="outline"
             size="sm"
+            :icon="icons.listEnd"
             :disabled="applyBusy"
             @click="switchToAppend"
           >
@@ -1096,9 +1137,19 @@ onBeforeUnmount(() => {
   text-align: center;
 }
 .loading-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 14px;
   font-weight: 500;
   color: var(--ui-text-highlighted);
+}
+.loading-title-icon {
+  display: inline-block;
+  flex: none;
+  width: 15px;
+  height: 15px;
+  color: var(--ui-text-muted);
 }
 .plan-banner {
   display: flex;
@@ -1125,6 +1176,9 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 .plan-kind-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   flex: none;
   padding: 1px 6px;
   border: 1px solid var(--ui-rule);
@@ -1133,6 +1187,12 @@ onBeforeUnmount(() => {
   font-weight: 600;
   line-height: 1.45;
   color: var(--ui-text-highlighted);
+}
+.plan-kind-icon {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
 }
 .plan-target-title {
   font-size: 14px;
@@ -1155,6 +1215,17 @@ onBeforeUnmount(() => {
   font-size: 12px;
   font-weight: 500;
   color: var(--ui-text-muted);
+}
+.section-label-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.section-label-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
 }
 .candidate-bar {
   display: flex;
@@ -1278,6 +1349,19 @@ onBeforeUnmount(() => {
   padding: 8px 12px;
   border-bottom: 1px solid var(--ui-border);
   font-size: 13px;
+}
+.noop-preview-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 500;
+}
+.noop-preview-icon {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--ui-text-muted);
 }
 .noop-preview-scroll {
   max-height: 18rem;

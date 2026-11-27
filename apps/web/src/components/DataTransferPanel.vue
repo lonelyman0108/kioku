@@ -356,24 +356,29 @@ async function runApply() {
 const sourceTabOptions = computed(() => {
   const disabled = previewBusy.value || applyBusy.value
   return [
-    { value: 'kioku' as const, label: 'Kioku 备份', disabled },
-    { value: 'lore' as const, label: '外部导入 · Lore', disabled },
+    { value: 'kioku' as const, label: 'Kioku 备份', icon: icons.database, disabled },
+    { value: 'lore' as const, label: '外部导入 · Lore', icon: icons.externalImport, disabled },
   ]
 })
 
 const loreModeOptions = computed(() => {
   const disabled = previewBusy.value
   return [
-    { value: 'file' as const, label: '上传导出文件', disabled },
-    { value: 'url' as const, label: '从地址拉取', disabled },
+    { value: 'file' as const, label: '上传导出文件', icon: icons.upload, disabled },
+    { value: 'url' as const, label: '从地址拉取', icon: icons.globe, disabled },
   ]
 })
 
 const conflictOptions = computed(() => {
   const disabled = applyBusy.value
   return [
-    { value: 'skip' as const, label: '跳过已存在', disabled },
-    { value: 'reallocate' as const, label: '分配新短 ID（自动改写双链）', disabled },
+    { value: 'skip' as const, label: '跳过已存在', icon: icons.skip, disabled },
+    {
+      value: 'reallocate' as const,
+      label: '分配新短 ID（自动改写双链）',
+      icon: icons.links,
+      disabled,
+    },
   ]
 })
 
@@ -383,9 +388,21 @@ const previewIssueCount = computed(
 )
 
 const previewFilterOptions = computed(() => [
-  { value: 'all' as const, label: `全部（${preview.value?.items.length ?? 0}）` },
-  { value: 'importable' as const, label: `可导入（${willImportEntriesCount.value}）` },
-  { value: 'issues' as const, label: `冲突或跳过（${previewIssueCount.value}）` },
+  {
+    value: 'all' as const,
+    label: `全部（${preview.value?.items.length ?? 0}）`,
+    icon: icons.layers,
+  },
+  {
+    value: 'importable' as const,
+    label: `可导入（${willImportEntriesCount.value}）`,
+    icon: icons.check,
+  },
+  {
+    value: 'issues' as const,
+    label: `冲突或跳过（${previewIssueCount.value}）`,
+    icon: icons.warning,
+  },
 ])
 
 const filteredPreviewItems = computed(() => {
@@ -409,7 +426,10 @@ const filteredPreviewItems = computed(() => {
     <!-- 导出 -->
     <div class="transfer-box space-y-3">
       <div class="space-y-1">
-        <p class="text-sm font-medium">导出备份</p>
+        <p class="box-heading">
+          <UIcon :name="icons.fileDown" class="box-heading-icon" aria-hidden="true" />
+          <span>导出备份</span>
+        </p>
         <p class="text-xs text-muted">导出全部未删除记忆，可选附带口令加密的托管凭据。</p>
       </div>
 
@@ -450,7 +470,7 @@ const filteredPreviewItems = computed(() => {
           size="sm"
           color="neutral"
           variant="outline"
-          :icon="icons.download"
+          :icon="includeExportCreds ? icons.fileLock : icons.download"
           :loading="exporting === 'json'"
           :disabled="
             (exporting !== null && exporting !== 'json') ||
@@ -478,7 +498,10 @@ const filteredPreviewItems = computed(() => {
     <div class="transfer-box space-y-4">
       <div class="flex flex-wrap items-center justify-between gap-2">
         <div class="space-y-0.5">
-          <p class="text-sm font-medium">导入数据</p>
+          <p class="box-heading">
+            <UIcon :name="icons.fileUp" class="box-heading-icon" aria-hidden="true" />
+            <span>导入数据</span>
+          </p>
           <p class="text-xs text-muted">预览确认后再写入，不覆盖现有数据。</p>
         </div>
         <SegmentedChoice v-model="importTab" :items="sourceTabOptions" label="导入来源" />
@@ -506,11 +529,17 @@ const filteredPreviewItems = computed(() => {
             >
               选择 Kioku 导出文件
             </UButton>
-            <span v-if="kiokuFileName && kiokuBundle" class="text-xs text-muted">
-              已选 <code class="font-mono">{{ kiokuFileName }}</code> · 共
-              {{ kiokuBundle.entries.length }} 条记忆{{
-                kiokuHasEncryptedCreds ? ' · 含加密凭据' : ''
-              }}
+            <span v-if="kiokuFileName && kiokuBundle" class="file-info">
+              <UIcon :name="icons.file" class="file-info-icon" aria-hidden="true" />
+              <span>
+                已选 <code class="font-mono">{{ kiokuFileName }}</code> · 共
+                {{ kiokuBundle.entries.length }} 条记忆
+              </span>
+              <span v-if="kiokuHasEncryptedCreds" class="file-info-creds">
+                ·
+                <UIcon :name="icons.lock" class="file-info-icon" aria-hidden="true" />
+                <span>含加密凭据</span>
+              </span>
             </span>
           </div>
 
@@ -564,8 +593,11 @@ const filteredPreviewItems = computed(() => {
               >
                 选择 Lore 导出文件
               </UButton>
-              <span v-if="loreFileName && loreBackup" class="text-xs text-muted">
-                已选 <code class="font-mono">{{ loreFileName }}</code>
+              <span v-if="loreFileName && loreBackup" class="file-info">
+                <UIcon :name="icons.file" class="file-info-icon" aria-hidden="true" />
+                <span>
+                  已选 <code class="font-mono">{{ loreFileName }}</code>
+                </span>
               </span>
             </div>
             <p class="text-xs text-muted">支持 Lore JSON 导出，仅读取记忆内容。</p>
@@ -661,6 +693,7 @@ const filteredPreviewItems = computed(() => {
                 size="xs"
                 color="neutral"
                 variant="ghost"
+                :icon="icons.listChecks"
                 :disabled="applyBusy"
                 @click="toggleAllItems(true)"
               >
@@ -670,6 +703,7 @@ const filteredPreviewItems = computed(() => {
                 size="xs"
                 color="neutral"
                 variant="ghost"
+                :icon="icons.cancel"
                 :disabled="applyBusy"
                 @click="toggleAllItems(false)"
               >
@@ -697,24 +731,38 @@ const filteredPreviewItems = computed(() => {
                     <span class="font-medium">{{ item.title }}</span>
                     <code class="font-mono text-xs text-muted">{{ item.sourceRef }}</code>
                     <span v-if="effectiveBootMode(item) !== 'none'" class="meta-pill pinned">
-                      {{ bootModeLabels[effectiveBootMode(item)] }}
+                      <UIcon
+                        :name="effectiveBootMode(item) === 'full' ? icons.pin : icons.bookmark"
+                        class="pill-icon"
+                        aria-hidden="true"
+                      />
+                      <span>{{ bootModeLabels[effectiveBootMode(item)] }}</span>
                     </span>
-                    <span v-if="item.kind === 'episode'" class="meta-pill">近期摘要</span>
+                    <span v-if="item.kind === 'episode'" class="meta-pill">
+                      <UIcon :name="icons.messageSquare" class="pill-icon" aria-hidden="true" />
+                      <span>近期摘要</span>
+                    </span>
                     <span v-if="item.skippedReason" class="meta-pill warn">
-                      跳过：{{ item.skippedReason }}
+                      <UIcon :name="icons.revoked" class="pill-icon" aria-hidden="true" />
+                      <span>跳过：{{ item.skippedReason }}</span>
                     </span>
                     <span v-else-if="item.conflict === 'short_id_exists'" class="meta-pill warn">
-                      {{
-                        conflictStrategy === 'skip'
-                          ? '短 ID 已存在（将跳过）'
-                          : '短 ID 已存在（将重分配）'
-                      }}
+                      <UIcon :name="icons.warning" class="pill-icon" aria-hidden="true" />
+                      <span>
+                        {{
+                          conflictStrategy === 'skip'
+                            ? '短 ID 已存在（将跳过）'
+                            : '短 ID 已存在（将重分配）'
+                        }}
+                      </span>
                     </span>
                     <span v-else-if="item.conflict === 'same_title_exists'" class="meta-pill warn">
-                      已有同名记忆
+                      <UIcon :name="icons.warning" class="pill-icon" aria-hidden="true" />
+                      <span>已有同名记忆</span>
                     </span>
                     <span v-if="item.secretHintLabels.length" class="meta-pill warn">
-                      疑似含{{ item.secretHintLabels.join('、') }}
+                      <UIcon :name="icons.shieldAlert" class="pill-icon" aria-hidden="true" />
+                      <span>疑似含{{ item.secretHintLabels.join('、') }}</span>
                     </span>
                   </div>
                   <div
@@ -755,7 +803,10 @@ const filteredPreviewItems = computed(() => {
 
         <!-- 凭据元数据预览（绝不显示明文） -->
         <div v-if="preview.credentials.length" class="space-y-2 border-t border-default pt-3">
-          <p class="text-xs text-muted">加密凭据预览（仅显示元数据，已存在项自动跳过）</p>
+          <p class="cred-preview-heading">
+            <UIcon :name="icons.credentials" class="cred-preview-icon" aria-hidden="true" />
+            <span>加密凭据预览（仅显示元数据，已存在项自动跳过）</span>
+          </p>
           <ul class="preview-list">
             <li
               v-for="cred in preview.credentials"
@@ -774,8 +825,14 @@ const filteredPreviewItems = computed(() => {
                   <div class="flex flex-wrap items-center gap-2">
                     <code class="font-mono text-xs font-medium">{{ cred.slug }}</code>
                     <span class="text-sm">{{ cred.label }}</span>
-                    <span v-if="cred.exists" class="meta-pill warn">已存在（将跳过）</span>
-                    <span v-else class="meta-pill">将重封写入</span>
+                    <span v-if="cred.exists" class="meta-pill warn">
+                      <UIcon :name="icons.revoked" class="pill-icon" aria-hidden="true" />
+                      <span>已存在（将跳过）</span>
+                    </span>
+                    <span v-else class="meta-pill">
+                      <UIcon :name="icons.lock" class="pill-icon" aria-hidden="true" />
+                      <span>将重封写入</span>
+                    </span>
                     <span v-for="r in cred.allowedRealms ?? []" :key="r" class="meta-pill">
                       场域:{{ r }}
                     </span>
@@ -823,6 +880,52 @@ const filteredPreviewItems = computed(() => {
   border: 1px solid var(--ui-border);
   background: var(--ui-bg-muted);
 }
+.box-heading {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 500;
+}
+.box-heading-icon {
+  display: inline-block;
+  flex: none;
+  width: 15px;
+  height: 15px;
+  color: var(--ui-text-muted);
+}
+.file-info {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.file-info-creds {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.file-info-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+}
+.cred-preview-heading {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.cred-preview-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+}
 .summary-bar {
   display: flex;
   flex-wrap: wrap;
@@ -869,11 +972,20 @@ const filteredPreviewItems = computed(() => {
   flex: none;
 }
 .meta-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   padding: 0 5px;
   border: 1px solid var(--ui-border-accented);
   font-size: 12px;
   line-height: 1.4;
   white-space: nowrap;
+}
+.pill-icon {
+  display: inline-block;
+  flex: none;
+  width: 11px;
+  height: 11px;
 }
 .meta-pill.pinned {
   border-color: var(--ui-rule);

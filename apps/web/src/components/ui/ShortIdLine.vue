@@ -21,7 +21,8 @@ const copy = useCopy()
         variant="ghost"
         :aria-label="`复制${label}`"
         @click="copy(value)"
-      />
+        >复制</UButton
+      >
     </div>
   </footer>
 </template>
