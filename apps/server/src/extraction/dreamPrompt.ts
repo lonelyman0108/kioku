@@ -13,6 +13,10 @@ import {
   extractMarkdownOutline,
   normalizeShortId,
   normalizeSlugList,
+  SCENE_TAGS_MAX,
+  SceneSlug,
+  TOPICS_MAX,
+  TopicTag,
   type ArchivedHistoryNote,
   type BootMode,
   type DreamSuggestionKind,
@@ -83,8 +87,8 @@ const SYSTEM_PROMPT = [
   '只输出 JSON：{"suggestions":[...]}，没有建议时输出 {"suggestions":[]}。',
   '',
   '允许以下 6 种整理建议类型（kind）：',
-  '1. "distill_episode"：把 1 条或多条有长期价值的会话摘要（episode）提炼为一条永久正式记忆。须提供 target_short_ids、title（简短稳定、禁日期）、content、reason，推荐提供 summary（1–2 句现行结论）、change_summary、disclosure、topics、envs、realms、projects、runtimes。',
-  '2. "merge_duplicates"：合并 2 条以上内容高度重叠且 realms 一致的正式记忆（entry）。须提供 target_short_ids、keep_short_id、title、content、reason，推荐提供 summary、change_summary、disclosure、topics、envs、realms、projects、runtimes。不得合并被截断或仅互补的独立主题页。',
+  '1. "distill_episode"：把 1 条或多条有长期价值的会话摘要（episode）提炼为一条永久正式记忆。须提供 target_short_ids、title（简短稳定、禁日期）、content、reason，推荐提供 summary（1–2 句现行结论）、change_summary、disclosure、topics（1–5 个简洁粗粒度分类标签）、envs、realms、projects、runtimes；若属跨项目的通用规则可显式传 projects: []（跨环境可传 envs: []），但严禁放宽 realms；仅当属简短、高频生效的核心工作流铁律时可额外提供 proposed_boot_mode: "full"（其余省略或 "none"）。',
+  '2. "merge_duplicates"：合并 2 条以上内容高度重叠且 realms 一致的正式记忆（entry）。须提供 target_short_ids、keep_short_id、title、content、reason，推荐提供 summary、change_summary、disclosure、topics（主动收敛为 1–5 个核心分类标签，不要把旧标签全数堆砌）、envs、realms、projects、runtimes。不得合并被截断或仅互补的独立主题页。',
   '3. "mark_stale"：某条正式记忆已被更新的记忆推翻或明显过时失效。须提供 target_short_ids（1 条）与 reason。',
   '4. "update"：根据更新的会话摘要或关联邻居记忆（含双链邻居间的事实矛盾），对某条现有正式记忆做具体事实补充或修正。须提供 target_short_ids（1 条）、content、reason，推荐提供 title、summary、change_summary、disclosure、topics、envs、realms、projects、runtimes。',
   '5. "link_entries"：为互补主题或存在明显上下游依赖、却尚未互链的正式记忆补充双链。须提供 target_short_ids（1 条待追加双链的词条）、links（数组，每项含 target_short_id、relation、可选 anchor_heading、可选 reason）与 reason。',
@@ -97,6 +101,7 @@ const SYSTEM_PROMPT = [
   '- 标题必须简短稳定，不夹带日期、版本号或改动日志；正文维护现行有效状态，不在首行重复标题。',
   '- 严禁编造任何密码、API Key 或令牌；原文中的 [[m-xxxxxx]] 双链与 {{cred:...}} 占位符必须完整保留。',
   '- target_short_ids 与 links[].target_short_id 必须全部取自下方提供的列表。',
+  '- 不需要调整 envs、projects、runtimes、topics 时请直接省略对应字段，勿填占位空数组；仅在明确要放宽为跨项目、跨环境或跨客户端时才显式传 []（realms 严禁放宽）。',
 ].join('\n')
 
 const CLUSTER_AUDIT_SYSTEM_PROMPT = [
@@ -104,12 +109,12 @@ const CLUSTER_AUDIT_SYSTEM_PROMPT = [
   '只输出 JSON：{"suggestions":[...]}，若各自独立清晰且无需调整则输出 {"suggestions":[]}。',
   '',
   '允许输出的 kind：',
-  '- "merge_duplicates"：仅当 2 条及以上词条表述同一主题、内容高度重叠且 realms 一致、未被截断时才合并；须给 target_short_ids、keep_short_id、title、summary、content、change_summary、reason，且必须完整保留全部被合并词条中的外部 [[m-xxxxxx]] 双链与 {{cred:...}} 凭据占位符。',
+  '- "merge_duplicates"：仅当 2 条及以上词条表述同一主题、内容高度重叠且 realms 一致、未被截断时才合并；须给 target_short_ids、keep_short_id、title、summary、content、change_summary、reason，推荐同时将 topics 收敛为 1–5 个核心分类标签，且必须完整保留全部被合并词条中的外部 [[m-xxxxxx]] 双链与 {{cred:...}} 凭据占位符。',
   '- "link_entries"：若词条属于互补的独立主题页（例如架构与排错、服务端与客户端），绝不硬揉合并，而是输出 link_entries 建议（target_short_ids=[1条]、links=[{target_short_id, relation, anchor_heading?, reason}]、reason）。',
   '- "update"：若一条较新词条明确推翻或修正了另一条的旧配置/旧路径，对旧词条输出 update（须保留所有原有双链与凭据占位符）。',
   '- "mark_stale"：若某条已完全被另一条替代且无独立价值，输出 mark_stale。',
   '',
-  '反膨胀守卫：合并或更新后的正文应提炼抽象规则、决策结论与防踩坑依据，去掉重复段落，不得无故拉长或引入日志流水。',
+  '反膨胀守卫：合并或更新后的正文应提炼抽象规则、决策结论与防踩坑依据，去掉重复段落，不得无故拉长或引入日志流水。不需要调整作用域或主题时直接省略对应字段，勿填占位空数组 []。',
 ].join('\n')
 
 const LINK_AUDIT_SYSTEM_PROMPT = [
@@ -126,11 +131,11 @@ const LINK_AUDIT_SYSTEM_PROMPT = [
 const EPISODE_RECONCILE_SYSTEM_PROMPT = [
   '你是 Kioku 会话摘要对账助手。给定一条近期会话摘要（episode）以及最相关的既有正式记忆（优先含常驻记忆），请判断：',
   '1. 会话中的新结论是否推翻、修正或补充了某条既有正式记忆？若是，优先输出 "update" 更新该既有词条（并可带 source_short_id 标明摘要短 ID），严禁丢失原有双链与 {{cred:...}} 凭据占位符。',
-  '2. 若摘要包含值得长期沉淀的独立经验且不应揉进任何已有词条，则输出 "distill_episode" 提炼为新正式记忆。',
+  '2. 若摘要包含值得长期沉淀的独立经验且不应揉进任何已有词条，则输出 "distill_episode" 提炼为新正式记忆；跨项目通用规则可显式传 projects: []（跨环境可传 envs: []，但绝不放宽 realms），简短高频工作流铁律可附 proposed_boot_mode: "full"（其余省略或 "none"）。',
   '3. 若摘要仅为一次性临时排错且未推翻既有记忆，输出 {"suggestions":[]}。',
   '4. 禁止将特定机器、局域网主机、本机路径/端口或单次环境特例泛化为全局或整个操作系统规则；提炼与更新时必须在 title、summary、disclosure 与正文中明确保留适用机器与前提条件，并在 envs 中避免给单机特例盲目打上过于宽泛的通用标签。',
   '',
-  '只输出 JSON：{"suggestions":[...]}。所有结论须提炼为稳定规则与防踩坑原因，严禁写入逐轮对话流水账。',
+  '只输出 JSON：{"suggestions":[...]}。所有结论须提炼为稳定规则与防踩坑原因，严禁写入逐轮对话流水账；不调整作用域或主题时直接省略对应字段，勿填占位空数组 []。',
 ].join('\n')
 
 const BOOT_AUDIT_SYSTEM_PROMPT = [
@@ -144,10 +149,10 @@ const BOOT_AUDIT_SYSTEM_PROMPT = [
 ].join('\n')
 
 const TIDY_SYSTEM_PROMPT = [
-  '你是 Kioku 记忆结构规范化助手。给定一条完整记忆词条，请将其重构为「稳定短标题 + 现行概要 + 干净常青正文 + 独立归档历史说明」。',
+  '你是 Kioku 记忆结构规范化助手。给定一条完整记忆词条，请将其重构为「稳定短标题 + 现行概要 + 干净常青正文 + 独立归档历史说明 + 简洁主题与触发场景」。',
   '只输出单个 JSON 对象：',
-  '{"needed":true|false,"title":"简短稳定主题名","summary":"1-2句现行结论","content":"重构后的Markdown正文","change_summary":"本次规范整理说明","archived_notes":[{"occurred_at":"YYYY-MM-DDTHH:mm:ssZ或null","note":"剥离出的单条历史变更说明"}],"reason":"为什么建议规范此条"}',
-  '若该词条标题干净、已有合适概要且正文不含明显冗余历史流水账，直接输出 {"needed":false}。',
+  '{"needed":true|false,"title":"简短稳定主题名","summary":"1-2句现行结论","content":"重构后的Markdown正文","topics":["可选1-5个简洁分类标签"],"disclosure":"可选触发场景(≤120字，仅none/index词条缺失或模糊时补充)","change_summary":"本次规范整理说明","archived_notes":[{"occurred_at":"YYYY-MM-DDTHH:mm:ssZ或null","note":"剥离出的单条历史变更说明"}],"reason":"为什么建议规范此条"}',
+  '若该词条标题干净、已有合适概要、正文不含明显冗余历史流水账、主题已精简（≤5 个且无杂乱脏词）且触发场景清晰，直接输出 {"needed":false}。',
   '',
   '强制规则：',
   '1. title：名词短语主题名，建议 ≤24 字（绝不超 80 字），彻底去掉日期、括号里的更新日志、PR/commit 编号和过渡状态。',
@@ -157,7 +162,9 @@ const TIDY_SYSTEM_PROMPT = [
   '   - 必须保留所有仍在生效的配置、端口、地址、规则以及「防踩坑原因/禁令（Rationale）」——未来不知道会导致改坏系统的原因绝不能删！',
   '   - 将已退役组件、已停用旧流程、逐日迁移/排障过程流水账从正文剥离，压缩为简明条目放入 archived_notes（保留对应日期）。',
   '   - 原文出现的所有 [[m-xxxxxx]] 双链与 {{cred:...}} 凭据占位符必须 100% 完整保留，严禁丢失或改写格式。',
-  '4. archived_notes：每条只写精炼单行（≤200 字），日期已知时填 ISO 8601（如 2026-10-21T00:00:00Z），未知填 null；无剥离历史时给 []。',
+  '4. topics（可选）：将膨胀、杂乱、同义重复或含路径/句子的旧主题收敛为 1–5 个粗粒度小写分类标签（优先复用下方给出的库内高频主题参考，避免新造同义词；无须改动时可省略该字段）。',
+  '5. disclosure（可选）：对于按需召回（boot_mode=none）或目录常驻（boot_mode=index）词条，若当前缺少触发场景或过于笼统，用 1 句简明描述「何时需要召回此记忆」（≤120 字）；已有清晰触发场景或全文常驻（boot_mode=full）词条可省略或填 null。',
+  '6. archived_notes：每条只写精炼单行（≤200 字），日期已知时填 ISO 8601（如 2026-10-21T00:00:00Z），未知填 null；无剥离历史时给 []。',
 ].join('\n')
 
 export function sameRealms(a: readonly string[], b: readonly string[]): boolean {
@@ -299,17 +306,66 @@ export function buildBootAuditMessages(pinnedItems: readonly DreamPromptItem[]):
   ]
 }
 
-export function buildTidyMessages(item: DreamPromptItem): ChatMessage[] {
+export function buildTidyMessages(
+  item: DreamPromptItem,
+  frequentTopics: readonly string[] = [],
+): ChatMessage[] {
+  const sections = [formatItem(item)]
+  if (frequentTopics.length) {
+    sections.push(
+      `## 库内高频主题参考（优先复用已有稳定标签，避免新造同义词）\n${frequentTopics.join('、')}`,
+    )
+  }
   return [
     { role: 'system', content: TIDY_SYSTEM_PROMPT },
-    { role: 'user', content: formatItem(item) },
+    { role: 'user', content: sections.join('\n\n') },
   ]
 }
 
+// 仅用于 realms（严格 fail-closed：空数组一律视为未提供，绝不放宽场域边界）
 function asNonEmptyStringArray(value: unknown): string[] | null {
   if (!Array.isArray(value)) return null
-  const items = normalizeSlugList(value.filter((v): v is string => typeof v === 'string'))
+  const valid: string[] = []
+  for (const item of value) {
+    if (typeof item !== 'string') continue
+    const parsed = SceneSlug.safeParse(item)
+    if (parsed.success) valid.push(parsed.data)
+  }
+  const items = normalizeSlugList(valid).slice(0, SCENE_TAGS_MAX)
   return items.length ? items : null
+}
+
+// 区分省略（null，沿用原值/回退）与显式空数组（[]，模型主动建议放宽或清空该维度）
+function asOptionalSlugArray(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null
+  if (value.length === 0) return []
+  const valid: string[] = []
+  for (const item of value) {
+    if (typeof item !== 'string') continue
+    const parsed = SceneSlug.safeParse(item)
+    if (parsed.success) valid.push(parsed.data)
+  }
+  if (!valid.length) return null
+  return normalizeSlugList(valid).slice(0, SCENE_TAGS_MAX)
+}
+
+// 主题标签始终要求非空覆盖，防止模型在 update 等提案中输出占位 topics: [] 意外清空原有标签
+function asNonEmptyTopicArray(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null
+  const valid: string[] = []
+  for (const item of value) {
+    if (typeof item !== 'string') continue
+    const parsed = TopicTag.safeParse(item)
+    if (parsed.success) valid.push(parsed.data)
+  }
+  if (!valid.length) return null
+  return normalizeSlugList(valid).slice(0, TOPICS_MAX)
+}
+
+function sameSlugList(a: readonly string[], b: readonly string[]): boolean {
+  const left = normalizeSlugList(a)
+  const right = normalizeSlugList(b)
+  return left.length === right.length && left.every((v, i) => v === right[i])
 }
 
 // 组装单轮干净修复提示词，避免多轮透传缺失 reasoning_content 导致部分推理模型网关报 400
@@ -501,6 +557,10 @@ export function evaluateDreamResponse(
       }
       const effectiveRealms = proposedRealms ?? fallbackRealms
       if (!resolved.every((ep) => canFlowRealmInto(effectiveRealms, ep.realms))) continue
+      const rawDistillMode = rec.proposed_boot_mode ?? rec.proposedBootMode ?? rec.boot_mode
+      if (typeof rawDistillMode === 'string' && BOOT_MODE_SET.has(rawDistillMode)) {
+        proposedBootMode = rawDistillMode === 'none' ? null : (rawDistillMode as BootMode)
+      }
     } else if (kind === 'merge_duplicates') {
       if (resolved.length < 2 || !proposedContent) continue
       if (resolved.some((r) => r.kind !== 'entry' || r.truncated)) continue
@@ -588,6 +648,12 @@ export function evaluateDreamResponse(
       keepId = keepItem && seenIds.has(keepItem.id) ? keepItem.id : resolved[0]!.id
     }
 
+    // 仅 distill_episode 允许模型用显式 [] 放宽单会话来源的 envs/projects/runtimes；
+    // update 与 merge_duplicates 面向已定型正式记忆，占位 [] 一律视为未改动（null），防止静默泛化为全局
+    const parseScopeList = kind === 'distill_episode' ? asOptionalSlugArray : asNonEmptyStringArray
+    const allowMetaFields =
+      kind === 'distill_episode' || kind === 'merge_duplicates' || kind === 'update'
+
     proposals.push({
       kind,
       entryIds: resolved.map((r) => r.id),
@@ -598,11 +664,11 @@ export function evaluateDreamResponse(
       proposedDisclosure,
       proposedChangeSummary,
       archivedNotes: null,
-      proposedTopics: asNonEmptyStringArray(rec.topics),
-      proposedEnvs: asNonEmptyStringArray(rec.envs),
-      proposedRealms,
-      proposedProjects: asNonEmptyStringArray(rec.projects),
-      proposedRuntimes: asNonEmptyStringArray(rec.runtimes),
+      proposedTopics: allowMetaFields ? asNonEmptyTopicArray(rec.topics) : null,
+      proposedEnvs: allowMetaFields ? parseScopeList(rec.envs) : null,
+      proposedRealms: allowMetaFields ? proposedRealms : null,
+      proposedProjects: allowMetaFields ? parseScopeList(rec.projects) : null,
+      proposedRuntimes: allowMetaFields ? parseScopeList(rec.runtimes) : null,
       proposedLinks,
       proposedBootMode,
       ...(actionDiscriminator ? { actionDiscriminator } : {}),
@@ -637,7 +703,9 @@ export function evaluateTidyResponse(raw: string, target: DreamPromptItem): Tidy
   const hasPayloadFields =
     (typeof rec.title === 'string' && rec.title.trim().length > 0) ||
     (typeof rec.summary === 'string' && rec.summary.trim().length > 0) ||
-    (typeof rec.content === 'string' && rec.content.trim().length > 0)
+    (typeof rec.content === 'string' && rec.content.trim().length > 0) ||
+    Array.isArray(rec.topics) ||
+    (typeof rec.disclosure === 'string' && rec.disclosure.trim().length > 0)
   if (typeof rec.needed !== 'boolean' && !hasPayloadFields) {
     return { status: 'invalid', reason: '模型输出缺少 needed 布尔字段' }
   }
@@ -648,6 +716,13 @@ export function evaluateTidyResponse(raw: string, target: DreamPromptItem): Tidy
     typeof rec.content === 'string' && rec.content.trim()
       ? clipChars(rec.content.trim(), ENTRY_CONTENT_MAX)
       : target.content
+  const parsedTopics = asNonEmptyTopicArray(rec.topics)
+  const proposedTopics =
+    parsedTopics !== null && !sameSlugList(parsedTopics, target.topics) ? parsedTopics : null
+  const parsedDisclosure = sanitizeDreamPlainField(rec.disclosure, DISCLOSURE_MAX) || null
+  const currentDisclosure = target.disclosure?.trim() || null
+  const proposedDisclosure =
+    parsedDisclosure && parsedDisclosure !== currentDisclosure ? parsedDisclosure : null
   const proposedChangeSummary =
     sanitizeDreamPlainField(rec.change_summary, CHANGE_SUMMARY_MAX) ||
     '规范标题与正文结构，剥离历史流水账'
@@ -659,7 +734,9 @@ export function evaluateTidyResponse(raw: string, target: DreamPromptItem): Tidy
   const unchanged =
     proposedTitle === target.title &&
     proposedContent === target.content &&
-    effectiveSummary === (target.summary ?? null)
+    effectiveSummary === (target.summary ?? null) &&
+    proposedTopics === null &&
+    proposedDisclosure === null
   if (unchanged) return { status: 'not_needed' }
 
   // 严格完整性守卫：规范精简允许安全压缩历史篇幅，但绝不允许丢失任一既有双链或凭据占位符
@@ -682,10 +759,10 @@ export function evaluateTidyResponse(raw: string, target: DreamPromptItem): Tidy
       proposedTitle,
       proposedSummary,
       proposedContent,
-      proposedDisclosure: null,
+      proposedDisclosure,
       proposedChangeSummary,
       archivedNotes: archivedNotes.length ? archivedNotes : null,
-      proposedTopics: null,
+      proposedTopics,
       proposedEnvs: null,
       proposedRealms: null,
       proposedProjects: null,

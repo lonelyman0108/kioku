@@ -10,6 +10,7 @@ import {
   extractMarkdownHeadings,
   extractTargetShortIds,
   lintEntryHygiene,
+  mergeFallbackTopics,
   normalizeShortId,
   normalizeSlugList,
   redirectWikiLinksInContent,
@@ -1491,10 +1492,7 @@ export class EntryService {
           overrides.summary !== undefined
             ? cleanOptionalText(overrides.summary)
             : cleanOptionalText(suggestion.proposedSummary)
-        const envs =
-          overrides.envs ??
-          (suggestion.proposedEnvs?.length ? suggestion.proposedEnvs : null) ??
-          firstSource.envs
+        const envs = overrides.envs ?? suggestion.proposedEnvs ?? firstSource.envs
         const safeProposedRealms =
           suggestion.proposedRealms?.length &&
           targetRows.every((src) => canFlowRealmInto(suggestion.proposedRealms!, src.realms))
@@ -1505,18 +1503,9 @@ export class EntryService {
             ? firstSource.realms
             : normalizeSlugList(targetRows.flatMap((r) => r.realms))
         const realms = overrides.realms ?? safeProposedRealms ?? fallbackRealms
-        const projects =
-          overrides.projects ??
-          (suggestion.proposedProjects?.length ? suggestion.proposedProjects : null) ??
-          firstSource.projects
-        const runtimes =
-          overrides.runtimes ??
-          (suggestion.proposedRuntimes?.length ? suggestion.proposedRuntimes : null) ??
-          []
-        const topics =
-          overrides.topics ??
-          (suggestion.proposedTopics?.length ? suggestion.proposedTopics : null) ??
-          []
+        const projects = overrides.projects ?? suggestion.proposedProjects ?? firstSource.projects
+        const runtimes = overrides.runtimes ?? suggestion.proposedRuntimes ?? []
+        const topics = overrides.topics ?? suggestion.proposedTopics ?? []
         const disclosure =
           overrides.disclosure !== undefined
             ? cleanOptionalText(overrides.disclosure)
@@ -1527,7 +1516,7 @@ export class EntryService {
           '由会话摘要提炼为正式记忆'
         const bootMode = resolveBootMode(
           { bootMode: overrides.bootMode, isPinned: overrides.isPinned },
-          'none',
+          suggestion.proposedBootMode ?? 'none',
         )
         const isPinned = bootModeToPinned(bootMode)
 
@@ -1662,21 +1651,24 @@ export class EntryService {
           '合并重复记忆'
         const topics =
           overrides.topics ??
-          (suggestion.proposedTopics?.length ? suggestion.proposedTopics : null) ??
-          normalizeSlugList(targetRows.flatMap((r) => r.topics))
+          suggestion.proposedTopics ??
+          mergeFallbackTopics(
+            keep.topics,
+            targetRows.map((r) => r.topics),
+          )
         const envs =
           overrides.envs ??
-          (suggestion.proposedEnvs?.length ? suggestion.proposedEnvs : null) ??
+          suggestion.proposedEnvs ??
           normalizeSlugList(targetRows.flatMap((r) => r.envs))
         // 合并重复若无人工显式覆盖，严格沿用已校验一致的 keep.realms，防止模型静默放宽场域边界
         const realms = overrides.realms ?? keep.realms
         const projects =
           overrides.projects ??
-          (suggestion.proposedProjects?.length ? suggestion.proposedProjects : null) ??
+          suggestion.proposedProjects ??
           normalizeSlugList(targetRows.flatMap((r) => r.projects))
         const runtimes =
           overrides.runtimes ??
-          (suggestion.proposedRuntimes?.length ? suggestion.proposedRuntimes : null) ??
+          suggestion.proposedRuntimes ??
           normalizeSlugList(targetRows.flatMap((r) => r.runtimes))
         const bootRank: Record<BootMode, number> = { none: 0, index: 1, full: 2 }
         const highestMergedBoot = targetRows.reduce<BootMode>(
@@ -2128,28 +2120,16 @@ export class EntryService {
           cleanOptionalText(overrides.changeSummary) ??
           cleanOptionalText(suggestion.proposedChangeSummary) ??
           (suggestion.kind === 'tidy' ? '规范标题与结构并归档历史说明' : '根据整理建议更新内容')
-        const topics =
-          overrides.topics ??
-          (suggestion.proposedTopics?.length ? suggestion.proposedTopics : null) ??
-          target.topics
-        const envs =
-          overrides.envs ??
-          (suggestion.proposedEnvs?.length ? suggestion.proposedEnvs : null) ??
-          target.envs
+        const topics = overrides.topics ?? suggestion.proposedTopics ?? target.topics
+        const envs = overrides.envs ?? suggestion.proposedEnvs ?? target.envs
         const safeProposedRealms =
           suggestion.proposedRealms?.length &&
           canFlowRealmInto(suggestion.proposedRealms, target.realms)
             ? suggestion.proposedRealms
             : null
         const realms = overrides.realms ?? safeProposedRealms ?? target.realms
-        const projects =
-          overrides.projects ??
-          (suggestion.proposedProjects?.length ? suggestion.proposedProjects : null) ??
-          target.projects
-        const runtimes =
-          overrides.runtimes ??
-          (suggestion.proposedRuntimes?.length ? suggestion.proposedRuntimes : null) ??
-          target.runtimes
+        const projects = overrides.projects ?? suggestion.proposedProjects ?? target.projects
+        const runtimes = overrides.runtimes ?? suggestion.proposedRuntimes ?? target.runtimes
         const bootMode: BootMode =
           target.kind === 'episode'
             ? 'none'
@@ -2336,9 +2316,20 @@ export class EntryService {
       const nextTitle = deriveEntryTitle(input.title, input.content, existing.shortId)
       const nextSummary = cleanOptionalText(input.summary)
       const nextContent = input.content
+      const nextTopics =
+        input.topics !== undefined ? normalizeSlugList(input.topics) : existing.topics
+      const nextDisclosure =
+        input.disclosure !== undefined ? cleanOptionalText(input.disclosure) : existing.disclosure
       const changeSummary =
         cleanOptionalText(input.changeSummary) ?? '主动规范标题与结构并归档历史说明'
       const archivedNotes = input.archivedNotes ?? []
+
+      const existingTopicsNorm = normalizeSlugList(existing.topics)
+      const topicsChanged =
+        nextTopics.length !== existingTopicsNorm.length ||
+        nextTopics.some((v, i) => v !== existingTopicsNorm[i])
+      const stagedTopics = topicsChanged ? nextTopics : null
+      const stagedDisclosure = nextDisclosure !== existing.disclosure ? nextDisclosure : null
 
       if (input.stageToInbox) {
         // 复用标准 tidy 指纹并支持同版本重复暂存平滑覆盖，避免唯一键冲突或与批量规范重复入队
@@ -2354,10 +2345,10 @@ export class EntryService {
             proposedTitle: nextTitle,
             proposedSummary: nextSummary,
             proposedContent: nextContent,
-            proposedDisclosure: null,
+            proposedDisclosure: stagedDisclosure,
             proposedChangeSummary: changeSummary,
             archivedNotes: archivedNotes.length ? archivedNotes : null,
-            proposedTopics: null,
+            proposedTopics: stagedTopics,
             proposedEnvs: null,
             proposedRealms: null,
             proposedProjects: null,
@@ -2375,8 +2366,10 @@ export class EntryService {
               proposedTitle: nextTitle,
               proposedSummary: nextSummary,
               proposedContent: nextContent,
+              proposedDisclosure: stagedDisclosure,
               proposedChangeSummary: changeSummary,
               archivedNotes: archivedNotes.length ? archivedNotes : null,
+              proposedTopics: stagedTopics,
               reason: stagedReason,
               status: 'pending',
               decidedAt: null,
@@ -2393,19 +2386,28 @@ export class EntryService {
         }
       }
 
+      const searchTags = buildSearchTags({
+        shortId: existing.shortId,
+        topics: nextTopics,
+        envs: existing.envs,
+        realms: existing.realms,
+        projects: existing.projects,
+        runtimes: existing.runtimes,
+      })
+
       const diffMeta = computeDiffMeta(existing, {
         kind: existing.kind,
         title: nextTitle,
         summary: nextSummary,
         content: nextContent,
-        disclosure: existing.disclosure,
+        disclosure: nextDisclosure,
         isPinned: existing.isPinned,
         bootMode: existing.bootMode,
         envs: existing.envs,
         realms: existing.realms,
         projects: existing.projects,
         runtimes: existing.runtimes,
-        topics: existing.topics,
+        topics: nextTopics,
         validTo: existing.validTo,
       })
 
@@ -2433,6 +2435,9 @@ export class EntryService {
           title: nextTitle,
           summary: nextSummary,
           content: nextContent,
+          disclosure: nextDisclosure,
+          topics: nextTopics,
+          searchTags,
           lastChangeSummary: changeSummary,
           version: existing.version + 1,
           updatedAt: now,

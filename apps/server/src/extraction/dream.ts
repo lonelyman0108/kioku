@@ -628,8 +628,30 @@ interface TidyCandidateSelection {
   tidyChecked: Record<string, number>
 }
 
-// 规范整理不调整常驻层级，且当前版本尚未改写主题列表；暂忽略对应提醒避免反复无效排队
-const TIDY_IGNORED_HYGIENE_CODES = new Set(['pinned_oversized', 'topics_too_many'])
+// 规范整理不调整常驻层级；忽略 pinned_oversized 避免仅因篇幅偏长反复排队
+const TIDY_IGNORED_HYGIENE_CODES = new Set(['pinned_oversized'])
+
+const FREQUENT_TOPICS_MIN_COUNT = 2
+const FREQUENT_TOPICS_LIMIT = 40
+
+// 汇总库内出现 ≥ 2 次的高频主题标签（Top 40），供规范整理收敛主题时优先复用
+export async function loadFrequentTopics(db: Db, limit = FREQUENT_TOPICS_LIMIT): Promise<string[]> {
+  const rows = await db.execute<{ topic: string }>(sql`
+    select norm.topic
+    from entries
+    cross join lateral unnest(${entries.topics}) as raw(t)
+    cross join lateral (select btrim(lower(raw.t)) as topic) as norm
+    where ${entries.deletedAt} is null
+      and ${entries.kind} = 'entry'
+      and ${stillValidSql()}
+      and norm.topic <> ''
+    group by norm.topic
+    having count(distinct ${entries.id}) >= ${FREQUENT_TOPICS_MIN_COUNT}
+    order by count(distinct ${entries.id}) desc, norm.topic asc
+    limit ${limit}
+  `)
+  return [...rows].map((r) => r.topic).filter(Boolean)
+}
 
 function isTidyCandidate(
   row: {
@@ -898,6 +920,7 @@ export async function runDream(
       }
 
       const tidyChecked = selection.tidyChecked
+      const frequentTopics = await loadFrequentTopics(db)
       let tidyCheckedDirty = false
       let processed = 0
       let succeededCount = 0
@@ -938,7 +961,7 @@ export async function runDream(
             totalConsidered++
             try {
               const promptItem = toPromptItem(row, TIDY_CONTENT_LIMIT)
-              const tidyMessages = buildTidyMessages(promptItem)
+              const tidyMessages = buildTidyMessages(promptItem, frequentTopics)
               const tidyMaxTokens = computeDynamicOutputTokens(promptItem.content.length, {
                 min: TIDY_OUTPUT_TOKENS_MIN,
                 max: TIDY_OUTPUT_TOKENS_MAX,

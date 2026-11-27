@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import {
+  normalizeSlugList,
   type ApplySuggestionRequest,
   type EntryDetailResponse,
   type SingleCrossCheckResponse,
@@ -48,6 +49,8 @@ const cardBusyId = ref<string | null>(null)
 const parts = reactive({
   title: true,
   summary: true,
+  topics: true,
+  disclosure: true,
   content: true,
   archivedNotes: true,
 })
@@ -68,6 +71,8 @@ function resetState() {
   stageMessage.value = ''
   parts.title = true
   parts.summary = true
+  parts.topics = true
+  parts.disclosure = true
   parts.content = true
   parts.archivedNotes = true
 }
@@ -139,6 +144,18 @@ const hasSummaryChange = computed(
     Boolean(tidyResult.value) &&
     (tidyResult.value!.proposed.summary ?? '') !== (tidyResult.value!.before.summary ?? ''),
 )
+const hasTopicsChange = computed(() => {
+  if (!tidyResult.value) return false
+  const before = normalizeSlugList(tidyResult.value.before.topics)
+  const proposed = normalizeSlugList(tidyResult.value.proposed.topics)
+  return before.length !== proposed.length || before.some((v, i) => v !== proposed[i])
+})
+const hasDisclosureChange = computed(
+  () =>
+    Boolean(tidyResult.value) &&
+    (tidyResult.value!.proposed.disclosure?.trim() ?? '') !==
+      (tidyResult.value!.before.disclosure?.trim() ?? ''),
+)
 const hasContentChange = computed(
   () =>
     Boolean(tidyResult.value) &&
@@ -150,6 +167,8 @@ const anySelected = computed(
   () =>
     (hasTitleChange.value && parts.title) ||
     (hasSummaryChange.value && parts.summary) ||
+    (hasTopicsChange.value && parts.topics) ||
+    (hasDisclosureChange.value && parts.disclosure) ||
     (hasContentChange.value && parts.content) ||
     (hasArchivedNotes.value && parts.content && parts.archivedNotes),
 )
@@ -209,6 +228,8 @@ async function submitSingleTidy(stageToInbox: boolean) {
   try {
     const applyTitle = hasTitleChange.value && parts.title
     const applySummary = hasSummaryChange.value && parts.summary
+    const applyTopics = hasTopicsChange.value && parts.topics
+    const applyDisclosure = hasDisclosureChange.value && parts.disclosure
     const applyContent = hasContentChange.value && parts.content
     const nextTitle = applyTitle ? res.proposed.title : res.before.title
     const nextSummary = applySummary ? res.proposed.summary : res.before.summary
@@ -216,7 +237,12 @@ async function submitSingleTidy(stageToInbox: boolean) {
     const applyArchived = parts.content && parts.archivedNotes && hasArchivedNotes.value
     const effectiveChangeSummary = applyContent
       ? res.proposed.changeSummary || '主动规范标题与结构'
-      : [applyTitle ? '规范标题' : '', applySummary ? '更新现行概要' : '']
+      : [
+          applyTitle ? '规范标题' : '',
+          applySummary ? '更新现行概要' : '',
+          applyTopics ? '收敛主题' : '',
+          applyDisclosure ? '更新触发场景' : '',
+        ]
           .filter(Boolean)
           .join('并') || '主动规范记忆'
     const out = await api.applySingleTidy(props.shortId, {
@@ -224,6 +250,8 @@ async function submitSingleTidy(stageToInbox: boolean) {
       title: nextTitle,
       summary: nextSummary,
       content: nextContent,
+      ...(applyTopics ? { topics: res.proposed.topics } : {}),
+      ...(applyDisclosure ? { disclosure: res.proposed.disclosure } : {}),
       changeSummary: effectiveChangeSummary,
       archivedNotes: applyArchived ? res.proposed.archivedNotes : [],
       applyArchivedNotes: applyArchived,
@@ -427,6 +455,18 @@ const drawerDescription = computed(() =>
                   <input v-model="parts.summary" type="checkbox" :disabled="applying || staging" />
                   <span>更新现行概要</span>
                 </label>
+                <label v-if="hasTopicsChange" class="part-check">
+                  <input v-model="parts.topics" type="checkbox" :disabled="applying || staging" />
+                  <span>收敛主题</span>
+                </label>
+                <label v-if="hasDisclosureChange" class="part-check">
+                  <input
+                    v-model="parts.disclosure"
+                    type="checkbox"
+                    :disabled="applying || staging"
+                  />
+                  <span>更新触发场景</span>
+                </label>
                 <label v-if="hasContentChange" class="part-check">
                   <input v-model="parts.content" type="checkbox" :disabled="applying || staging" />
                   <span>规范正文</span>
@@ -461,6 +501,37 @@ const drawerDescription = computed(() =>
                 <span>建议现行概要</span>
               </span>
               <p class="summary-text">{{ tidyResult.proposed.summary }}</p>
+            </div>
+
+            <div v-if="hasTopicsChange && parts.topics" class="title-compare">
+              <span class="strip-label">
+                <UIcon :name="icons.topic" class="strip-label-icon" aria-hidden="true" />
+                <span>主题收敛</span>
+              </span>
+              <span class="compare-old">
+                {{
+                  tidyResult.before.topics.length ? tidyResult.before.topics.join('、') : '未设主题'
+                }}
+              </span>
+              <UIcon :name="icons.inherits" class="compare-arrow" aria-hidden="true" />
+              <span class="compare-new">
+                {{
+                  tidyResult.proposed.topics.length
+                    ? tidyResult.proposed.topics.join('、')
+                    : '清空主题'
+                }}
+              </span>
+            </div>
+
+            <div
+              v-if="hasDisclosureChange && parts.disclosure && tidyResult.proposed.disclosure"
+              class="summary-box"
+            >
+              <span class="strip-label">
+                <UIcon :name="icons.trigger" class="strip-label-icon" aria-hidden="true" />
+                <span>建议触发场景</span>
+              </span>
+              <p class="summary-text">{{ tidyResult.proposed.disclosure }}</p>
             </div>
 
             <div

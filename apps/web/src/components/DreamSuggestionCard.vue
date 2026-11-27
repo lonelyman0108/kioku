@@ -13,6 +13,7 @@ import {
   EntryTitle,
   extractCredentialPlaceholders,
   extractTargetShortIds,
+  mergeFallbackTopics,
   normalizeSlugList,
   REVISABLE_DREAM_KINDS,
   REVISE_INSTRUCTION_MAX,
@@ -126,6 +127,8 @@ const knownTitles = computed<ReadonlyMap<string, { title: string }> | null>(() =
 const parts = reactive({
   title: true,
   summary: true,
+  topics: true,
+  disclosure: true,
   content: true,
 })
 
@@ -138,6 +141,8 @@ watch(
     abortRevise()
     parts.title = true
     parts.summary = true
+    parts.topics = true
+    parts.disclosure = true
     parts.content = true
     selectedLinkShortIds.value = (props.suggestion.proposedLinks ?? []).map((l) => l.targetShortId)
     editing.value = false
@@ -158,7 +163,7 @@ const isMarkStale = computed(() => props.suggestion.kind === 'mark_stale')
 const isDistillEpisode = computed(() => props.suggestion.kind === 'distill_episode')
 const isUpdate = computed(() => props.suggestion.kind === 'update')
 
-// 计算直接应用时实际落库的适用场景，与服务端应用时的继承回退口径一致
+// 计算直接应用时实际落库的适用场景，与服务端应用时的继承回退口径一致（显式 [] 表示主动放宽该维度）
 const effectiveScope = computed<SceneScopeValue>(() => {
   const s = props.suggestion
   const base = baseEntry.value
@@ -167,32 +172,35 @@ const effectiveScope = computed<SceneScopeValue>(() => {
       ? base.realms
       : normalizeSlugList(s.entries.flatMap((e) => e.realms))
     return {
-      envs: s.proposedEnvs?.length ? [...s.proposedEnvs] : [...(base?.envs ?? [])],
+      envs: s.proposedEnvs !== null ? [...s.proposedEnvs] : [...(base?.envs ?? [])],
       realms: s.proposedRealms?.length ? [...s.proposedRealms] : [...fallbackRealms],
-      projects: s.proposedProjects?.length ? [...s.proposedProjects] : [...(base?.projects ?? [])],
-      runtimes: s.proposedRuntimes?.length ? [...s.proposedRuntimes] : [],
+      projects: s.proposedProjects !== null ? [...s.proposedProjects] : [...(base?.projects ?? [])],
+      runtimes: s.proposedRuntimes !== null ? [...s.proposedRuntimes] : [],
     }
   }
   if (s.kind === 'merge_duplicates') {
     return {
-      envs: s.proposedEnvs?.length
-        ? [...s.proposedEnvs]
-        : normalizeSlugList(s.entries.flatMap((e) => e.envs)),
+      envs:
+        s.proposedEnvs !== null
+          ? [...s.proposedEnvs]
+          : normalizeSlugList(s.entries.flatMap((e) => e.envs)),
       realms: [...(base?.realms ?? [])],
-      projects: s.proposedProjects?.length
-        ? [...s.proposedProjects]
-        : normalizeSlugList(s.entries.flatMap((e) => e.projects)),
-      runtimes: s.proposedRuntimes?.length
-        ? [...s.proposedRuntimes]
-        : normalizeSlugList(s.entries.flatMap((e) => e.runtimes)),
+      projects:
+        s.proposedProjects !== null
+          ? [...s.proposedProjects]
+          : normalizeSlugList(s.entries.flatMap((e) => e.projects)),
+      runtimes:
+        s.proposedRuntimes !== null
+          ? [...s.proposedRuntimes]
+          : normalizeSlugList(s.entries.flatMap((e) => e.runtimes)),
     }
   }
   if (s.kind === 'update' || s.kind === 'tidy') {
     return {
-      envs: s.proposedEnvs?.length ? [...s.proposedEnvs] : [...(base?.envs ?? [])],
+      envs: s.proposedEnvs !== null ? [...s.proposedEnvs] : [...(base?.envs ?? [])],
       realms: s.proposedRealms?.length ? [...s.proposedRealms] : [...(base?.realms ?? [])],
-      projects: s.proposedProjects?.length ? [...s.proposedProjects] : [...(base?.projects ?? [])],
-      runtimes: s.proposedRuntimes?.length ? [...s.proposedRuntimes] : [...(base?.runtimes ?? [])],
+      projects: s.proposedProjects !== null ? [...s.proposedProjects] : [...(base?.projects ?? [])],
+      runtimes: s.proposedRuntimes !== null ? [...s.proposedRuntimes] : [...(base?.runtimes ?? [])],
     }
   }
   return {
@@ -201,6 +209,60 @@ const effectiveScope = computed<SceneScopeValue>(() => {
     projects: [...(base?.projects ?? [])],
     runtimes: [...(base?.runtimes ?? [])],
   }
+})
+
+const effectiveTopics = computed<string[]>(() => {
+  const s = props.suggestion
+  const base = baseEntry.value
+  if (s.proposedTopics !== null) return [...s.proposedTopics]
+  if (s.kind === 'distill_episode') return []
+  if (s.kind === 'merge_duplicates') {
+    return mergeFallbackTopics(
+      base?.topics ?? [],
+      s.entries.map((e) => e.topics),
+    )
+  }
+  return [...(base?.topics ?? [])]
+})
+
+const hasTopicsChange = computed(() => {
+  const s = props.suggestion
+  if (s.kind === 'distill_episode' || s.proposedTopics === null || !baseEntry.value) return false
+  const before = normalizeSlugList(baseEntry.value.topics)
+  const proposed = normalizeSlugList(s.proposedTopics)
+  return before.length !== proposed.length || before.some((v, i) => v !== proposed[i])
+})
+
+const widenedScopeLabels = computed<string[]>(() => {
+  const s = props.suggestion
+  const base = baseEntry.value
+  if (!base || isMarkStale.value || isLinkEntries.value || isAdjustBootMode.value) return []
+  const labels: string[] = []
+  const baseProjects = isMergeDuplicates.value
+    ? normalizeSlugList(s.entries.flatMap((e) => e.projects))
+    : base.projects
+  const baseEnvs = isMergeDuplicates.value
+    ? normalizeSlugList(s.entries.flatMap((e) => e.envs))
+    : base.envs
+  const baseRuntimes = isMergeDuplicates.value
+    ? normalizeSlugList(s.entries.flatMap((e) => e.runtimes))
+    : base.runtimes
+  if (s.proposedProjects !== null && s.proposedProjects.length === 0 && baseProjects.length > 0) {
+    labels.push('已放宽：不限项目')
+  }
+  if (s.proposedEnvs !== null && s.proposedEnvs.length === 0 && baseEnvs.length > 0) {
+    labels.push('已放宽：不限环境')
+  }
+  if (s.proposedRuntimes !== null && s.proposedRuntimes.length === 0 && baseRuntimes.length > 0) {
+    labels.push('已放宽：不限客户端')
+  }
+  return labels
+})
+
+const distillBootMode = computed<BootMode | null>(() => {
+  if (!isDistillEpisode.value) return null
+  const mode = props.suggestion.proposedBootMode
+  return mode && mode !== 'none' ? mode : null
 })
 
 const effectiveDisclosure = computed<string | null>(() => {
@@ -279,11 +341,13 @@ const scopeTagGroups = computed<ScopeTagGroup[]>(() => {
 
 const hasProposedMeta = computed(() =>
   Boolean(
-    props.suggestion.proposedEnvs?.length ||
+    props.suggestion.proposedEnvs !== null ||
     props.suggestion.proposedRealms?.length ||
-    props.suggestion.proposedProjects?.length ||
-    props.suggestion.proposedRuntimes?.length ||
-    props.suggestion.proposedDisclosure?.trim(),
+    props.suggestion.proposedProjects !== null ||
+    props.suggestion.proposedRuntimes !== null ||
+    (isDistillEpisode.value && props.suggestion.proposedTopics?.length) ||
+    (props.suggestion.proposedDisclosure?.trim() && (!isTidy.value || parts.disclosure)) ||
+    distillBootMode.value,
   ),
 )
 
@@ -345,6 +409,8 @@ const showPartialChecks = computed(
     Boolean(baseEntry.value) &&
     (hasTitleChange.value ||
       hasSummaryChange.value ||
+      hasTopicsChange.value ||
+      isProposedDisclosureNew.value ||
       hasContentChange.value ||
       hasArchivedNotes.value),
 )
@@ -355,6 +421,8 @@ const anyPartSelected = computed(() => {
   return (
     (hasTitleChange.value && parts.title) ||
     (hasSummaryChange.value && parts.summary) ||
+    (hasTopicsChange.value && parts.topics) ||
+    (isProposedDisclosureNew.value && parts.disclosure) ||
     ((hasContentChange.value || hasArchivedNotes.value) && parts.content)
   )
 })
@@ -380,7 +448,7 @@ function openEditor() {
   draft.disclosure = effectiveDisclosure.value ?? ''
   draft.changeSummary = s.proposedChangeSummary ?? ''
   draft.applyArchivedNotes = Boolean(s.archivedNotes?.length)
-  draft.topics = [...(s.proposedTopics ?? base?.topics ?? [])]
+  draft.topics = [...effectiveTopics.value]
   draft.bootMode = s.proposedBootMode ?? (base ? effectiveBootMode(base) : 'none')
   draftScope.value = {
     envs: [...effectiveScope.value.envs],
@@ -681,6 +749,9 @@ const nonContentImpactNote = computed<string | null>(() => {
     return '移入回收站后不再参与召回，可随时从回收站恢复'
   }
   if (isDistillEpisode.value) {
+    if (distillBootMode.value) {
+      return `新建 1 条${bootModeLabels[distillBootMode.value]}正式记忆，原会话摘要将移入回收站（可随时恢复）`
+    }
     return '新建 1 条正式记忆，原会话摘要将移入回收站（可随时恢复）'
   }
   return null
@@ -697,10 +768,14 @@ function applyDirect() {
     const allChecked =
       (!hasTitleChange.value || parts.title) &&
       (!hasSummaryChange.value || parts.summary) &&
+      (!hasTopicsChange.value || parts.topics) &&
+      (!isProposedDisclosureNew.value || parts.disclosure) &&
       (!(hasContentChange.value || hasArchivedNotes.value) || parts.content)
     if (!allChecked) {
       const applyTitle = hasTitleChange.value && parts.title && Boolean(s.proposedTitle?.trim())
       const applySummary = hasSummaryChange.value && parts.summary
+      const applyTopics = hasTopicsChange.value && parts.topics
+      const applyDisclosure = isProposedDisclosureNew.value && parts.disclosure
       const applyContent = (hasContentChange.value || hasArchivedNotes.value) && parts.content
       let changeSummary: string | undefined
       if (applyContent && s.proposedChangeSummary?.trim()) {
@@ -709,11 +784,23 @@ function applyDirect() {
         const appliedLabels: string[] = []
         if (applyTitle) appliedLabels.push('规范标题')
         if (applySummary) appliedLabels.push('更新现行概要')
+        if (applyTopics) appliedLabels.push('收敛主题')
+        if (applyDisclosure) appliedLabels.push('更新触发场景')
         if (appliedLabels.length) changeSummary = appliedLabels.join('并')
       }
       const body: ApplySuggestionRequest = {
         title: applyTitle ? s.proposedTitle!.trim() : base.title,
         summary: applySummary ? s.proposedSummary?.trim() || null : (base.summary ?? null),
+        ...(hasTopicsChange.value
+          ? { topics: applyTopics ? [...(s.proposedTopics ?? base.topics)] : [...base.topics] }
+          : {}),
+        ...(isProposedDisclosureNew.value
+          ? {
+              disclosure: applyDisclosure
+                ? s.proposedDisclosure?.trim() || null
+                : (base.disclosure ?? null),
+            }
+          : {}),
         content: applyContent && s.proposedContent ? s.proposedContent : base.content,
         applyArchivedNotes: applyContent && hasArchivedNotes.value,
         ...(changeSummary ? { changeSummary } : {}),
@@ -1098,6 +1185,17 @@ function applyEdited() {
           <span class="compare-new">{{ suggestion.proposedTitle }}</span>
         </div>
 
+        <div v-if="hasTopicsChange && baseEntry" class="title-compare">
+          <span class="compare-label">主题收敛</span>
+          <span class="compare-old">
+            {{ baseEntry.topics.length ? baseEntry.topics.join('、') : '未设主题' }}
+          </span>
+          <UIcon :name="icons.inherits" class="compare-arrow" aria-hidden="true" />
+          <span class="compare-new">
+            {{ effectiveTopics.length ? effectiveTopics.join('、') : '清空主题' }}
+          </span>
+        </div>
+
         <div v-if="suggestion.proposedSummary?.trim()" class="summary-preview">
           <span class="summary-preview-label">
             <UIcon :name="icons.summary" class="summary-preview-icon" aria-hidden="true" />
@@ -1134,6 +1232,14 @@ function applyEdited() {
               <span v-else class="scope-chip is-universal">
                 <UIcon :name="icons.globe" class="scope-chip-icon" aria-hidden="true" />
                 <span>所有环境（未限定场景）</span>
+              </span>
+              <span
+                v-for="label in widenedScopeLabels"
+                :key="`widen:${label}`"
+                class="scope-chip is-widened"
+              >
+                <UIcon :name="icons.globe" class="scope-chip-icon" aria-hidden="true" />
+                <span>{{ label }}</span>
               </span>
               <span
                 v-for="dev in sourceDeviceKeys"
@@ -1208,6 +1314,14 @@ function applyEdited() {
                 <span>所有环境（未限定场景）</span>
               </span>
               <span
+                v-for="label in widenedScopeLabels"
+                :key="`widen:${label}`"
+                class="scope-chip is-widened"
+              >
+                <UIcon :name="icons.globe" class="scope-chip-icon" aria-hidden="true" />
+                <span>{{ label }}</span>
+              </span>
+              <span
                 v-for="dev in sourceDeviceKeys"
                 :key="`dev:${dev}`"
                 class="scope-chip is-device"
@@ -1218,7 +1332,32 @@ function applyEdited() {
               </span>
             </div>
           </div>
-          <div v-if="effectiveDisclosure" class="scope-review-row">
+          <div v-if="distillBootMode" class="scope-review-row">
+            <span class="scope-review-label">
+              <UIcon :name="icons.pin" class="scope-review-icon" aria-hidden="true" />
+              <span>建议启动加载</span>
+            </span>
+            <span class="scope-chip is-boot">
+              <UIcon
+                :name="bootModeIcons[distillBootMode]"
+                class="scope-chip-icon"
+                aria-hidden="true"
+              />
+              <span>{{ bootModeLabels[distillBootMode] }}</span>
+            </span>
+          </div>
+          <div v-if="isDistillEpisode && effectiveTopics.length" class="scope-review-row">
+            <span class="scope-review-label">
+              <UIcon :name="icons.topic" class="scope-review-icon" aria-hidden="true" />
+              <span>主题</span>
+            </span>
+            <div class="scope-review-chips">
+              <span v-for="tag in effectiveTopics" :key="`topic:${tag}`" class="scope-chip">
+                {{ tag }}
+              </span>
+            </div>
+          </div>
+          <div v-if="effectiveDisclosure && (!isTidy || parts.disclosure)" class="scope-review-row">
             <span class="scope-review-label">
               <UIcon :name="icons.trigger" class="scope-review-icon" aria-hidden="true" />
               <span>{{ isProposedDisclosureNew ? '建议触发场景' : '触发场景' }}</span>
@@ -1269,6 +1408,19 @@ function applyEdited() {
             <input v-model="parts.summary" type="checkbox" class="square-check" :disabled="busy" />
             <span>更新现行概要</span>
           </label>
+          <label v-if="hasTopicsChange" class="part-check">
+            <input v-model="parts.topics" type="checkbox" class="square-check" :disabled="busy" />
+            <span>收敛主题</span>
+          </label>
+          <label v-if="isProposedDisclosureNew" class="part-check">
+            <input
+              v-model="parts.disclosure"
+              type="checkbox"
+              class="square-check"
+              :disabled="busy"
+            />
+            <span>更新触发场景</span>
+          </label>
           <label v-if="hasContentChange || hasArchivedNotes" class="part-check">
             <input v-model="parts.content" type="checkbox" class="square-check" :disabled="busy" />
             <span>{{ hasArchivedNotes ? '精简正文并归档历史说明' : '精简正文' }}</span>
@@ -1280,6 +1432,17 @@ function applyEdited() {
           <span class="compare-old">{{ baseEntry.title }}</span>
           <UIcon :name="icons.inherits" class="compare-arrow" aria-hidden="true" />
           <span class="compare-new">{{ suggestion.proposedTitle }}</span>
+        </div>
+
+        <div v-if="hasTopicsChange && baseEntry && (!isTidy || parts.topics)" class="title-compare">
+          <span class="compare-label">主题收敛</span>
+          <span class="compare-old">
+            {{ baseEntry.topics.length ? baseEntry.topics.join('、') : '未设主题' }}
+          </span>
+          <UIcon :name="icons.inherits" class="compare-arrow" aria-hidden="true" />
+          <span class="compare-new">
+            {{ effectiveTopics.length ? effectiveTopics.join('、') : '清空主题' }}
+          </span>
         </div>
 
         <div
@@ -1323,6 +1486,14 @@ function applyEdited() {
                 <span>所有环境（未限定场景）</span>
               </span>
               <span
+                v-for="label in widenedScopeLabels"
+                :key="`widen:${label}`"
+                class="scope-chip is-widened"
+              >
+                <UIcon :name="icons.globe" class="scope-chip-icon" aria-hidden="true" />
+                <span>{{ label }}</span>
+              </span>
+              <span
                 v-for="dev in sourceDeviceKeys"
                 :key="`dev:${dev}`"
                 class="scope-chip is-device"
@@ -1333,7 +1504,7 @@ function applyEdited() {
               </span>
             </div>
           </div>
-          <div v-if="effectiveDisclosure" class="scope-review-row">
+          <div v-if="effectiveDisclosure && (!isTidy || parts.disclosure)" class="scope-review-row">
             <span class="scope-review-label">
               <UIcon :name="icons.trigger" class="scope-review-icon" aria-hidden="true" />
               <span>{{ isProposedDisclosureNew ? '建议触发场景' : '触发场景' }}</span>
@@ -1840,6 +2011,19 @@ function applyEdited() {
             <input v-model="parts.summary" type="checkbox" class="square-check" :disabled="busy" />
             <span>更新现行概要</span>
           </label>
+          <label v-if="hasTopicsChange" class="part-check">
+            <input v-model="parts.topics" type="checkbox" class="square-check" :disabled="busy" />
+            <span>收敛主题</span>
+          </label>
+          <label v-if="isProposedDisclosureNew" class="part-check">
+            <input
+              v-model="parts.disclosure"
+              type="checkbox"
+              class="square-check"
+              :disabled="busy"
+            />
+            <span>更新触发场景</span>
+          </label>
           <label v-if="hasContentChange || hasArchivedNotes" class="part-check">
             <input v-model="parts.content" type="checkbox" class="square-check" :disabled="busy" />
             <span>{{ hasArchivedNotes ? '精简正文并归档历史说明' : '精简正文' }}</span>
@@ -1852,6 +2036,17 @@ function applyEdited() {
           <span class="compare-old">{{ baseEntry.title }}</span>
           <UIcon :name="icons.inherits" class="compare-arrow" aria-hidden="true" />
           <span class="compare-new">{{ suggestion.proposedTitle }}</span>
+        </div>
+
+        <div v-if="hasTopicsChange && baseEntry && (!isTidy || parts.topics)" class="title-compare">
+          <span class="compare-label">主题收敛</span>
+          <span class="compare-old">
+            {{ baseEntry.topics.length ? baseEntry.topics.join('、') : '未设主题' }}
+          </span>
+          <UIcon :name="icons.inherits" class="compare-arrow" aria-hidden="true" />
+          <span class="compare-new">
+            {{ effectiveTopics.length ? effectiveTopics.join('、') : '清空主题' }}
+          </span>
         </div>
 
         <!-- 建议现行概要预览 -->
@@ -1897,6 +2092,14 @@ function applyEdited() {
                 <span>所有环境（未限定场景）</span>
               </span>
               <span
+                v-for="label in widenedScopeLabels"
+                :key="`widen:${label}`"
+                class="scope-chip is-widened"
+              >
+                <UIcon :name="icons.globe" class="scope-chip-icon" aria-hidden="true" />
+                <span>{{ label }}</span>
+              </span>
+              <span
                 v-for="dev in sourceDeviceKeys"
                 :key="`dev:${dev}`"
                 class="scope-chip is-device"
@@ -1907,7 +2110,32 @@ function applyEdited() {
               </span>
             </div>
           </div>
-          <div v-if="effectiveDisclosure" class="scope-review-row">
+          <div v-if="distillBootMode" class="scope-review-row">
+            <span class="scope-review-label">
+              <UIcon :name="icons.pin" class="scope-review-icon" aria-hidden="true" />
+              <span>建议启动加载</span>
+            </span>
+            <span class="scope-chip is-boot">
+              <UIcon
+                :name="bootModeIcons[distillBootMode]"
+                class="scope-chip-icon"
+                aria-hidden="true"
+              />
+              <span>{{ bootModeLabels[distillBootMode] }}</span>
+            </span>
+          </div>
+          <div v-if="isDistillEpisode && effectiveTopics.length" class="scope-review-row">
+            <span class="scope-review-label">
+              <UIcon :name="icons.topic" class="scope-review-icon" aria-hidden="true" />
+              <span>主题</span>
+            </span>
+            <div class="scope-review-chips">
+              <span v-for="tag in effectiveTopics" :key="`topic:${tag}`" class="scope-chip">
+                {{ tag }}
+              </span>
+            </div>
+          </div>
+          <div v-if="effectiveDisclosure && (!isTidy || parts.disclosure)" class="scope-review-row">
             <span class="scope-review-label">
               <UIcon :name="icons.trigger" class="scope-review-icon" aria-hidden="true" />
               <span>{{ isProposedDisclosureNew ? '建议触发场景' : '触发场景' }}</span>
@@ -2585,6 +2813,16 @@ function applyEdited() {
   border-color: var(--ui-info);
   background: color-mix(in srgb, var(--ui-info) 8%, var(--ui-bg-bright));
   color: var(--ui-info);
+}
+.scope-chip.is-widened {
+  border-color: var(--ui-warning);
+  background: color-mix(in srgb, var(--ui-warning) 10%, var(--ui-bg-bright));
+  color: var(--ui-warning);
+}
+.scope-chip.is-boot {
+  border-color: var(--ui-success);
+  background: color-mix(in srgb, var(--ui-success) 10%, var(--ui-bg-bright));
+  color: var(--ui-success);
 }
 .scope-chip-icon {
   display: inline-block;

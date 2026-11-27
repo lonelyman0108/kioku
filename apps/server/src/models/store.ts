@@ -66,6 +66,7 @@ export interface StoredModeSchedule {
 export interface StoredDreamState {
   enabled: boolean
   intervalHours: number
+  configuredByUser?: boolean | undefined
   schedules: {
     standard: StoredModeSchedule
     crossMemory: StoredModeSchedule
@@ -439,9 +440,11 @@ function parseStoredDreamState(raw: unknown): StoredDreamState {
   const tidySchedule = parseModeSchedule(rawSchedules?.tidy, {
     ...DEFAULT_DREAM_STATE.schedules.tidy,
   })
+  const configuredByUser = typeof r.configuredByUser === 'boolean' ? r.configuredByUser : undefined
   return {
     enabled,
     intervalHours: interval,
+    ...(configuredByUser !== undefined ? { configuredByUser } : {}),
     schedules: {
       standard: standardSchedule,
       crossMemory: crossMemorySchedule,
@@ -461,6 +464,33 @@ function parseStoredDreamState(raw: unknown): StoredDreamState {
   }
 }
 
+// 判断首次启用对话模型时是否应联动开启默认增量整理（兼容老库无 configuredByUser 标记的既有配置）
+export async function shouldAutoEnableDream(
+  db: Db | Tx,
+  hadPreviousChatLlm: boolean,
+): Promise<boolean> {
+  const [row] = await db
+    .select()
+    .from(settings)
+    .where(eq(settings.key, DREAM_STATE_SETTING_KEY))
+    .limit(1)
+  if (!row) return true
+  const stored = parseStoredDreamState(row.value)
+  if (stored.configuredByUser === true) return false
+  const hasNonDefaultSchedule =
+    stored.enabled ||
+    stored.intervalHours !== DEFAULT_DREAM_INTERVAL_HOURS ||
+    stored.schedules.crossMemory.enabled ||
+    stored.schedules.crossMemory.intervalHours !== DEFAULT_CROSS_MEMORY_INTERVAL_HOURS ||
+    stored.schedules.tidy.enabled ||
+    stored.schedules.tidy.intervalHours !== DEFAULT_TIDY_INTERVAL_HOURS
+  if (hasNonDefaultSchedule || stored.lastRunAt !== null || stored.recentRuns.length > 0) {
+    return false
+  }
+  // 老库若同时已有历史 chat_llm 与历史 dream_state 行，视为旧版已保存过定时整理设置，不覆写用户意愿
+  return !hadPreviousChatLlm
+}
+
 export async function loadDreamState(
   db: Db | Tx,
   running = false,
@@ -471,12 +501,24 @@ export async function loadDreamState(
     .from(settings)
     .where(eq(settings.key, DREAM_STATE_SETTING_KEY))
     .limit(1)
-  return { ...parseStoredDreamState(row?.value), running, progress: running ? progress : null }
+  const stored = parseStoredDreamState(row?.value)
+  return {
+    enabled: stored.enabled,
+    intervalHours: stored.intervalHours,
+    schedules: stored.schedules,
+    lastRunAt: stored.lastRunAt,
+    lastOutcome: stored.lastOutcome,
+    lastError: stored.lastError,
+    recentRuns: stored.recentRuns,
+    running,
+    progress: running ? progress : null,
+  }
 }
 
 export async function updateDreamConfig(
   db: Db | Tx,
   patch: UpdateDreamSettingsInput,
+  options: { markConfiguredByUser?: boolean | undefined } = {},
 ): Promise<StoredDreamState> {
   const current = parseStoredDreamState(
     (await db.select().from(settings).where(eq(settings.key, DREAM_STATE_SETTING_KEY)).limit(1))[0]
@@ -485,10 +527,13 @@ export async function updateDreamConfig(
   const nextEnabled = patch.enabled !== undefined ? patch.enabled : current.enabled
   const nextInterval =
     patch.intervalHours !== undefined ? patch.intervalHours : current.intervalHours
+  const nextConfiguredByUser =
+    options.markConfiguredByUser === false ? current.configuredByUser : true
   const next: StoredDreamState = {
     ...current,
     enabled: nextEnabled,
     intervalHours: nextInterval,
+    ...(nextConfiguredByUser !== undefined ? { configuredByUser: nextConfiguredByUser } : {}),
     schedules: {
       standard: {
         ...current.schedules.standard,

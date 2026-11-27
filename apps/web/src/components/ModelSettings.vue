@@ -285,6 +285,24 @@ function chatEndpointChanged(
   )
 }
 
+const dreamDirty = computed(() => {
+  const saved = settingsQuery.data.value
+  if (!saved) return false
+  const savedCrossEnabled = saved.dream.crossMemory?.enabled ?? false
+  const savedCrossInterval =
+    saved.dream.crossMemory?.intervalHours ?? DEFAULT_CROSS_MEMORY_INTERVAL_HOURS
+  const savedTidyEnabled = saved.dream.tidy?.enabled ?? false
+  const savedTidyInterval = saved.dream.tidy?.intervalHours ?? DEFAULT_TIDY_INTERVAL_HOURS
+  return (
+    form.dream.standard.enabled !== saved.dream.enabled ||
+    form.dream.standard.intervalHours !== saved.dream.intervalHours ||
+    form.dream.crossMemory.enabled !== savedCrossEnabled ||
+    form.dream.crossMemory.intervalHours !== savedCrossInterval ||
+    form.dream.tidy.enabled !== savedTidyEnabled ||
+    form.dream.tidy.intervalHours !== savedTidyInterval
+  )
+})
+
 const dirtyCount = computed(() => {
   const saved = settingsQuery.data.value
   if (!saved) return 0
@@ -383,28 +401,40 @@ const saving = ref(false)
 async function save() {
   if (saving.value || !dirtyCount.value || validationProblem.value) return
   saving.value = true
+  const wasDreamEnabled = settingsQuery.data.value?.dream.enabled ?? false
+  const includeDream = dreamDirty.value
   try {
     const saved = await api.saveModelsSettings({
       embedding: buildEndpointPayload(form.embedding),
       chatLlm: buildChatPayload(form.chatLlm),
-      dream: {
-        enabled: form.dream.standard.enabled,
-        intervalHours: Number(form.dream.standard.intervalHours),
-        crossMemory: {
-          enabled: form.dream.crossMemory.enabled,
-          intervalHours: Number(form.dream.crossMemory.intervalHours),
-        },
-        tidy: {
-          enabled: form.dream.tidy.enabled,
-          intervalHours: Number(form.dream.tidy.intervalHours),
-        },
-      },
+      ...(includeDream
+        ? {
+            dream: {
+              enabled: form.dream.standard.enabled,
+              intervalHours: Number(form.dream.standard.intervalHours),
+              crossMemory: {
+                enabled: form.dream.crossMemory.enabled,
+                intervalHours: Number(form.dream.crossMemory.intervalHours),
+              },
+              tidy: {
+                enabled: form.dream.tidy.enabled,
+                intervalHours: Number(form.dream.tidy.intervalHours),
+              },
+            },
+          }
+        : {}),
     })
     queryClient.setQueryData(['models-settings'], saved)
     syncFromSaved(saved)
     void queryClient.invalidateQueries({ queryKey: ME_KEY })
     void queryClient.invalidateQueries({ queryKey: ['inbox'] })
-    toast.add({ title: '模型与整理设置已保存', color: 'success' })
+    toast.add({
+      title:
+        !includeDream && !wasDreamEnabled && saved.dream.enabled
+          ? '模型与整理设置已保存，已自动开启增量整理'
+          : '模型与整理设置已保存',
+      color: 'success',
+    })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '保存失败', color: 'error' })
   } finally {

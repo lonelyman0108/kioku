@@ -8,7 +8,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { CredentialService } from '../../credential/service'
 import type { Database } from '../../db/client'
-import { deviceGrants, entries, entryEmbeddings, sessions } from '../../db/schema'
+import { deviceGrants, entries, entryEmbeddings, sessions, settings } from '../../db/schema'
 import { embedEntryIds } from '../../embedding/worker'
 import { getDueScheduledDreamModes } from '../../extraction/dream'
 import { cleanupExpired } from '../../jobs/cleanup'
@@ -320,5 +320,105 @@ describe.skipIf(!testDatabaseUrl)('模型设置、向量回填、数据导出与
       .from(entries)
       .where(sql`true`)
     expect(remaining.map((r) => r.shortId)).toEqual(['m-def222'])
+  })
+
+  it('首次启用对话模型时联动默认开启增量整理，且尊重用户后续显式关闭', async () => {
+    const masterKey = testMasterKey()
+    const app = createTestApp(database, { masterKey })
+    const { cookie } = await createOwnerSession(database)
+
+    // 1. 仅保存启用 chatLlm（未携带 dream）：应自动开启 standard 增量整理（24h）
+    const enableRes = await app.request('/v1/console/settings/models', {
+      method: 'PUT',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({
+        chatLlm: {
+          baseUrl: fakeAi.baseUrl,
+          model: 'chat-model-first',
+          apiKey: 'sk-first',
+          enabled: true,
+        },
+      }),
+    })
+    expect(enableRes.status).toBe(200)
+    const afterFirstEnable = ModelsSettingsResponse.parse(await enableRes.json())
+    expect(afterFirstEnable.dream.enabled).toBe(true)
+    expect(afterFirstEnable.dream.intervalHours).toBe(24)
+
+    // 2. 用户显式关闭增量整理
+    const disableDreamRes = await app.request('/v1/console/settings/models', {
+      method: 'PUT',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({
+        dream: { enabled: false, intervalHours: 24 },
+      }),
+    })
+    expect(disableDreamRes.status).toBe(200)
+    expect(ModelsSettingsResponse.parse(await disableDreamRes.json()).dream.enabled).toBe(false)
+
+    // 3. 之后停用再重新启用 chatLlm（不带 dream）：不得违背用户显式关闭设置
+    await app.request('/v1/console/settings/models', {
+      method: 'PUT',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({
+        chatLlm: {
+          baseUrl: fakeAi.baseUrl,
+          model: 'chat-model-first',
+          enabled: false,
+        },
+      }),
+    })
+    const reEnableRes = await app.request('/v1/console/settings/models', {
+      method: 'PUT',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({
+        chatLlm: {
+          baseUrl: fakeAi.baseUrl,
+          model: 'chat-model-first',
+          enabled: true,
+        },
+      }),
+    })
+    expect(reEnableRes.status).toBe(200)
+    expect(ModelsSettingsResponse.parse(await reEnableRes.json()).dream.enabled).toBe(false)
+
+    // 4. 模拟升级前老库：已有无 configuredByUser 的 dream_state 行且之前已配置过 chat_llm（处于关闭态）
+    await resetDatabase(database)
+    const { cookie: legacyCookie } = await createOwnerSession(database)
+    await database.db.insert(settings).values([
+      {
+        key: 'chat_llm',
+        value: {
+          baseUrl: fakeAi.baseUrl,
+          model: 'legacy-chat',
+          enabled: false,
+          apiKey: null,
+        },
+      },
+      {
+        key: 'dream_state',
+        value: {
+          enabled: false,
+          intervalHours: 24,
+          lastRunAt: null,
+          lastOutcome: null,
+          lastError: null,
+          recentRuns: [],
+        },
+      },
+    ])
+    const legacyReEnable = await app.request('/v1/console/settings/models', {
+      method: 'PUT',
+      headers: consoleHeaders(legacyCookie, true),
+      body: JSON.stringify({
+        chatLlm: {
+          baseUrl: fakeAi.baseUrl,
+          model: 'legacy-chat',
+          enabled: true,
+        },
+      }),
+    })
+    expect(legacyReEnable.status).toBe(200)
+    expect(ModelsSettingsResponse.parse(await legacyReEnable.json()).dream.enabled).toBe(false)
   })
 })
