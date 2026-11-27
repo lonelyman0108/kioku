@@ -48,6 +48,7 @@ type Query = Record<string, string | number | undefined>
 interface RequestOptions<T> {
   query?: Query
   body?: unknown
+  headers?: Record<string, string>
   // 有 schema 时按它校验响应，契约与后端不一致会立刻暴露
   schema?: z.ZodType<T>
   // 取消请求：等得久的请求（请求模型）可以中途停下，这时 fetch 抛 AbortError，不是 ApiError
@@ -79,9 +80,13 @@ async function send(method: string, path: string, options: RequestOptions<unknow
   const url = `/v1${path}${query ? `?${query}` : ''}`
   const form = options.body instanceof FormData
   // 请求先在外面拼好：序列化请求体出的错是程序的问题，不能算成网络错误
+  const headers: Record<string, string> = { ...(options.headers ?? {}) }
+  if (options.body !== undefined && !form && !('content-type' in headers)) {
+    headers['content-type'] = 'application/json'
+  }
   const init: RequestInit = {
     method,
-    headers: options.body === undefined || form ? {} : { 'content-type': 'application/json' },
+    headers,
     body:
       options.body === undefined
         ? undefined
@@ -105,6 +110,14 @@ async function send(method: string, path: string, options: RequestOptions<unknow
     throw new ApiError(res.status, payload?.error ?? `请求失败：HTTP ${res.status}`, payload)
   }
   return res
+}
+
+export async function requestRaw(
+  method: string,
+  path: string,
+  options: Omit<RequestOptions<unknown>, 'schema'> = {},
+): Promise<Response> {
+  return send(method, path, options)
 }
 
 export async function request<T = void>(

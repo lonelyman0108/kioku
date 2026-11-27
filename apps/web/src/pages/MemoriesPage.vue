@@ -6,10 +6,12 @@ import {
   type EntryTab,
   type ProjectScope,
 } from '@kioku/contracts'
+import { useToast } from '@nuxt/ui/composables'
 import { keepPreviousData, useInfiniteQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
+import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import BootPreviewDrawer from '../components/BootPreviewDrawer.vue'
 import CreateMemoryModal from '../components/CreateMemoryModal.vue'
@@ -17,13 +19,18 @@ import MemoryEditor from '../components/MemoryEditor.vue'
 import MemoryList from '../components/MemoryList.vue'
 import QuickCaptureModal from '../components/QuickCaptureModal.vue'
 import { useDebounced } from '../composables/useDebounced'
+import { useSession } from '../composables/useSession'
 import { useViewport } from '../composables/useViewport'
 import { icons } from '../icons'
 import { entryRoute } from '../routes'
 
 const route = useRoute()
 const router = useRouter()
+const toast = useToast()
 const queryClient = useQueryClient()
+const { me } = useSession()
+const hasChatModel = computed(() => Boolean(me.data.value?.hasChatModel))
+const batchBusy = ref(false)
 
 function textQuery(key: string): string | null {
   const v = route.query[key]
@@ -290,6 +297,36 @@ function invalidateEntries() {
   void queryClient.invalidateQueries({ queryKey: ['boot-preview'] })
 }
 
+async function onBatchOrganize(mode: 'tidy' | 'cross_memory', shortIds: string[]) {
+  if (batchBusy.value || shortIds.length < 2) return
+  batchBusy.value = true
+  try {
+    const res = await api.runDream({ mode, targetShortIds: shortIds })
+    if (res.started) {
+      const label = mode === 'tidy' ? '规范整理' : '查重与关联'
+      toast.add({
+        title: `已发起所选 ${shortIds.length} 条记忆的${label}任务`,
+        color: 'success',
+        actions: [
+          {
+            label: '前往待处理',
+            color: 'neutral',
+            variant: 'outline',
+            onClick: () => void router.push({ name: 'inbox' }),
+          },
+        ],
+      })
+      void queryClient.invalidateQueries({ queryKey: ['inbox'] })
+    } else {
+      toast.add({ title: res.reason ?? '已有整理任务在执行中', color: 'neutral' })
+    }
+  } catch (err) {
+    toast.add({ title: err instanceof ApiError ? err.message : '发起批量整理失败', color: 'error' })
+  } finally {
+    batchBusy.value = false
+  }
+}
+
 function onCreated(detail: EntryDetailResponse) {
   queryClient.setQueryData(['entry', detail.entry.shortId], detail)
   invalidateEntries()
@@ -437,6 +474,8 @@ onBeforeUnmount(() => {
       :query="entriesQuery"
       :has-next-page="Boolean(entriesQuery.hasNextPage.value)"
       :fetching-next-page="entriesQuery.isFetchingNextPage.value"
+      :has-chat-model="hasChatModel"
+      :batch-busy="batchBusy"
       @update:tab="setTab"
       @update:search="(v) => (searchInput = v)"
       @update:env="(v) => setFilter('env', v)"
@@ -452,6 +491,7 @@ onBeforeUnmount(() => {
       @load-more="entriesQuery.fetchNextPage()"
       @clear-filters="clearFilters"
       @preview-boot="bootPreviewOpen = true"
+      @batch-organize="onBatchOrganize"
     />
 
     <Transition name="detail-reveal">

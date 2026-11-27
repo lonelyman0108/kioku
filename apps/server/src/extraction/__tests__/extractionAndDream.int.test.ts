@@ -1,10 +1,24 @@
-import { ApplySuggestionResponse, InboxResponse } from '@kioku/contracts'
+import {
+  ApplySuggestionResponse,
+  EntryDetailResponse,
+  InboxResponse,
+  SingleCrossCheckResponse,
+  SingleTidyApplyResponse,
+  SingleTidyPreviewResponse,
+} from '@kioku/contracts'
 import { eq, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { CredentialService } from '../../credential/service'
 import type { Database } from '../../db/client'
-import { apiKeys, entries, turnBuffer } from '../../db/schema'
+import {
+  apiKeys,
+  dreamSuggestions,
+  EMBEDDING_DIMENSIONS,
+  entries,
+  entryEmbeddings,
+  turnBuffer,
+} from '../../db/schema'
 import type { Deps, KeyPrincipal } from '../../http/env'
 import { EntryService } from '../../memory/service'
 import { CHAT_LLM_SETTING_KEY, saveModelEndpoint } from '../../models/store'
@@ -982,5 +996,723 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
     )
     const inboxMissingSummary = await loadInbox(database.db, false)
     expect(inboxMissingSummary.tidyPendingCount).toBe(1)
+  })
+
+  it('跨记忆四阶段整理覆盖长文查重、反链自动重定向、场域硬边界、补全双链、会话对账与启动降级', async () => {
+    const masterKey = testMasterKey()
+    await saveModelEndpoint(database.db, masterKey, CHAT_LLM_SETTING_KEY, {
+      baseUrl: fakeAi.baseUrl,
+      model: 'fake-chat',
+      apiKey: 'sk-chat',
+      enabled: true,
+    })
+
+    const app = createTestApp(database, { masterKey })
+    const { cookie } = await createOwnerSession(database)
+    const credSvc = new CredentialService(database.db, masterKey)
+    const entrySvc = new EntryService(database.db, masterKey, credSvc, null)
+    const consoleScope = { kind: 'console' as const, accountId: 'acc', sessionId: 'sess' }
+
+    const unitVec = (a: number, b: number, c = 0): number[] => {
+      const vec = new Array<number>(EMBEDDING_DIMENSIONS).fill(0)
+      const norm = Math.hypot(a, b, c) || 1
+      vec[0] = a / norm
+      vec[1] = b / norm
+      vec[2] = c / norm
+      return vec
+    }
+
+    const tailMarker = '长文尾部关键细节-不得在查重时被截断'
+    const dupLongA = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '网关部署规范 A',
+        content: `使用 {{cred:ops-a}} 登录网关节点。\n${'标准部署说明段落。'.repeat(210)}`,
+        realms: ['work'],
+        topics: ['gateway'],
+        bootMode: 'index',
+        summary: '网关部署核心说明。',
+      }),
+    )
+    const dupLongB = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '网关部署规范 B',
+        content: `使用 {{cred:ops-b}} 发布网关。\n${'标准部署说明段落。'.repeat(210)}\n${tailMarker}`,
+        realms: ['work'],
+        topics: ['docker'],
+        bootMode: 'full',
+      }),
+    )
+    // 同向量但不同场域：禁止与 work 词条合并，也不允许被通用词条引用
+    const personalClone = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '个人网关笔记',
+        content: '个人环境家庭网关配置。',
+        realms: ['personal'],
+      }),
+    )
+    // 引用 dupLongB 的外部记忆（含行内代码保护）
+    const refDoc = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '发布检查清单',
+        content: `部署前先核对 [[${dupLongB.entry.shortId}|旧网关规范]]，示例代码 \`[[${dupLongB.entry.shortId}]]\` 保持原样。`,
+        realms: ['work'],
+      }),
+    )
+    // 通用词条对：用于验证 0.70-0.84 补全双链及场域流向过滤
+    const uniEntry = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '数据库备份手册',
+        content: '## 备份步骤\n每日凌晨执行全量备份。',
+        topics: ['postgres'],
+      }),
+    )
+    const linkTarget = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '数据库恢复演练指南',
+        summary: '说明从归档恢复实例的步骤。',
+        content: '演练恢复流程与校验脚本。',
+        topics: ['postgres'],
+      }),
+    )
+    // 超长全局全文常驻词条：触发启动加载降级巡检
+    const oversizedFull = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '超大参考词典',
+        content: '详细历史参考资料与对照表。'.repeat(220),
+        bootMode: 'full',
+      }),
+    )
+    // 同项目会话摘要 + 正式词条：触发会话反向对账
+    const formalTarget = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '缓存端口配置',
+        content: '当前缓存服务运行在 6379 端口。',
+        projects: ['alpha-app'],
+      }),
+    )
+    await entrySvc.writeEpisode({
+      title: '缓存端口变更记录',
+      content: '已将 alpha-app 缓存端口迁移至 6380。',
+      deviceKey: 'dev-1',
+      projectSlug: 'alpha-app',
+      ttlDays: 7,
+    })
+
+    // 写入 1024 维向量：dupLongA/dupLongB/personalClone 余弦=1.0；uniEntry/linkTarget 余弦≈0.78
+    const insertVec = async (entryId: string, vec: number[]) => {
+      await database.db.insert(entryEmbeddings).values({
+        entryId,
+        model: 'fake-embed',
+        contentHash: `hash-${entryId}`,
+        embedding: vec,
+      })
+    }
+    await insertVec(dupLongA.entry.id, unitVec(1, 0, 0))
+    await insertVec(dupLongB.entry.id, unitVec(1, 0, 0))
+    await insertVec(personalClone.entry.id, unitVec(1, 0, 0))
+    await insertVec(uniEntry.entry.id, unitVec(0, 1, 0))
+    await insertVec(linkTarget.entry.id, unitVec(0, 0.78, Math.sqrt(1 - 0.78 * 0.78)))
+
+    let sawClusterFullTail = false
+    let clusterIncludedPersonal = false
+    fakeAi.setChatHandler((messages) => {
+      const userText = messages.find((m) => m.role === 'user')?.content ?? ''
+      if (userText.includes('## 高相似记忆簇')) {
+        if (userText.includes(tailMarker)) sawClusterFullTail = true
+        if (userText.includes(personalClone.entry.shortId)) clusterIncludedPersonal = true
+        return JSON.stringify({
+          suggestions: [
+            {
+              kind: 'merge_duplicates',
+              target_short_ids: [dupLongA.entry.shortId, dupLongB.entry.shortId],
+              keep_short_id: dupLongA.entry.shortId,
+              title: '网关部署统一规范',
+              summary: '合并网关登录与发布流程。',
+              content:
+                '统一部署规范：登录使用 {{cred:ops-a}}，发布使用 {{cred:ops-b}}，详见变更记录。',
+              reason: '两条工作场域网关部署文档高度重合，合并避免双份漂移',
+            },
+          ],
+        })
+      }
+      if (
+        userText.includes('## 尚未互链的相关候选记忆') &&
+        userText.includes(uniEntry.entry.shortId)
+      ) {
+        return JSON.stringify({
+          suggestions: [
+            {
+              kind: 'link_entries',
+              target_short_ids: [uniEntry.entry.shortId],
+              proposed_links: [
+                {
+                  target_short_id: linkTarget.entry.shortId,
+                  relation: '配套恢复演练',
+                  reason: '备份与恢复互为前置后置文档',
+                },
+                {
+                  // 故意塞入一条窄场域目标，校验服务端场域流向守卫会将其拦截丢弃
+                  target_short_id: dupLongA.entry.shortId,
+                  relation: '非法越权引用',
+                  reason: '测试过滤',
+                },
+              ],
+              reason: '补全备份与恢复手册的双链关联',
+            },
+          ],
+        })
+      }
+      if (userText.includes('## 近期会话摘要（待对账）')) {
+        return JSON.stringify({
+          suggestions: [
+            {
+              kind: 'update',
+              target_short_ids: [formalTarget.entry.shortId],
+              title: '缓存端口配置',
+              content: '当前缓存服务运行在 6380 端口。',
+              change_summary: '依据近期会话同步端口变更',
+              reason: '会话摘要显示缓存端口已改为 6380',
+            },
+          ],
+        })
+      }
+      if (userText.includes('## 待审阅的全文常驻记忆')) {
+        return JSON.stringify({
+          suggestions: [
+            {
+              kind: 'adjust_boot_mode',
+              target_short_ids: [oversizedFull.entry.shortId],
+              proposed_boot_mode: 'index',
+              summary: '大型历史参考词典，按需查阅。',
+              reason: '全局全文常驻篇幅过大，建议改为目录常驻',
+            },
+          ],
+        })
+      }
+      return JSON.stringify({ suggestions: [] })
+    })
+
+    const run = await runDream(database.db, masterKey, {
+      runId: 'cross-full-1',
+      trigger: 'manual',
+      mode: 'cross_memory',
+      scope: 'full_corpus',
+    })
+    expect(run.outcome).toBe('ok')
+    expect(sawClusterFullTail).toBe(true)
+    expect(clusterIncludedPersonal).toBe(false)
+    expect(run.suggested).toBeGreaterThanOrEqual(4)
+
+    const inbox = InboxResponse.parse(
+      await (await app.request('/v1/console/inbox', { headers: { cookie } })).json(),
+    )
+
+    // 1) 验证 merge_duplicates 展示反链数、拦截丢凭据编辑、应用后继承最高 bootMode 并自动重定向反链
+    const mergeCard = inbox.items.find((i) => i.kind === 'merge_duplicates')!
+    expect(mergeCard).toBeTruthy()
+    expect(mergeCard.affectedBacklinkCount).toBe(1)
+
+    // 服务端完整性守卫：若合并结果遗漏了被合并词条 dupLongB 的 {{cred:ops-b}}，必须拒收 400
+    const badMergeRes = await app.request(`/v1/console/inbox/${mergeCard.id}/apply`, {
+      method: 'POST',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({
+        content: '只保留了 {{cred:ops-a}}，遗漏了另一条凭据。',
+      }),
+    })
+    expect(badMergeRes.status).toBe(400)
+
+    const okMergeRes = await app.request(`/v1/console/inbox/${mergeCard.id}/apply`, {
+      method: 'POST',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({}),
+    })
+    expect(okMergeRes.status).toBe(200)
+    const mergeOut = ApplySuggestionResponse.parse(await okMergeRes.json())
+    expect(mergeOut.redirectedBacklinkCount).toBe(1)
+
+    const keptAfter = EntryDetailResponse.parse(
+      await (
+        await app.request(`/v1/console/entries/${dupLongA.entry.shortId}`, { headers: { cookie } })
+      ).json(),
+    )
+    expect(keptAfter.entry.bootMode).toBe('full')
+    expect(keptAfter.entry.topics).toEqual(expect.arrayContaining(['gateway', 'docker']))
+
+    const refAfter = EntryDetailResponse.parse(
+      await (
+        await app.request(`/v1/console/entries/${refDoc.entry.shortId}`, { headers: { cookie } })
+      ).json(),
+    )
+    expect(refAfter.entry.version).toBe(2)
+    expect(refAfter.entry.content).toContain(`[[${dupLongA.entry.shortId}|旧网关规范]]`)
+    expect(refAfter.entry.content).toContain(`\`[[${dupLongB.entry.shortId}]]\``)
+    expect(refAfter.outboundLinks.map((l) => l.shortId)).toEqual([dupLongA.entry.shortId])
+
+    // 2) 验证 link_entries 已过滤非法窄场域引用，且确定性追加到正文并同步 entry_links
+    const linkCard = inbox.items.find((i) => i.kind === 'link_entries')!
+    expect(linkCard).toBeTruthy()
+    expect(linkCard.proposedLinks).toHaveLength(1)
+    expect(linkCard.proposedLinks?.[0]?.targetShortId).toBe(linkTarget.entry.shortId)
+
+    const linkApplyRes = await app.request(`/v1/console/inbox/${linkCard.id}/apply`, {
+      method: 'POST',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({}),
+    })
+    expect(linkApplyRes.status).toBe(200)
+    const uniAfter = EntryDetailResponse.parse(
+      await (
+        await app.request(`/v1/console/entries/${uniEntry.entry.shortId}`, { headers: { cookie } })
+      ).json(),
+    )
+    expect(uniAfter.entry.content).toContain(`[[${linkTarget.entry.shortId}|配套恢复演练]]`)
+    expect(uniAfter.outboundLinks.map((l) => l.shortId)).toContain(linkTarget.entry.shortId)
+
+    // 3) 验证 adjust_boot_mode 更新为目录常驻并写回现行概要
+    const bootCard = inbox.items.find((i) => i.kind === 'adjust_boot_mode')!
+    expect(bootCard).toBeTruthy()
+    expect(bootCard.proposedBootMode).toBe('index')
+    const bootApplyRes = await app.request(`/v1/console/inbox/${bootCard.id}/apply`, {
+      method: 'POST',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({}),
+    })
+    expect(bootApplyRes.status).toBe(200)
+    const oversizedAfter = EntryDetailResponse.parse(
+      await (
+        await app.request(`/v1/console/entries/${oversizedFull.entry.shortId}`, {
+          headers: { cookie },
+        })
+      ).json(),
+    )
+    expect(oversizedAfter.entry.bootMode).toBe('index')
+    expect(oversizedAfter.entry.isPinned).toBe(true)
+    expect(oversizedAfter.entry.summary).toBe('大型历史参考词典，按需查阅。')
+
+    // 4) 验证会话反向对账产出了 formalTarget 的 update 建议
+    expect(
+      inbox.items.some(
+        (i) =>
+          i.kind === 'update' && i.entries.some((e) => e.shortId === formalTarget.entry.shortId),
+      ),
+    ).toBe(true)
+  })
+
+  it('编辑页单条主动规范整理支持 SSE 与 JSON 预览、乐观锁 409、转存待处理与直接应用', async () => {
+    const masterKey = testMasterKey()
+    await saveModelEndpoint(database.db, masterKey, CHAT_LLM_SETTING_KEY, {
+      baseUrl: fakeAi.baseUrl,
+      model: 'fake-chat',
+      apiKey: 'sk-chat',
+      enabled: true,
+    })
+
+    const app = createTestApp(database, { masterKey })
+    const { cookie } = await createOwnerSession(database)
+    const credSvc = new CredentialService(database.db, masterKey)
+    const entrySvc = new EntryService(database.db, masterKey, credSvc, null)
+    const consoleScope = { kind: 'console' as const, accountId: 'acc', sessionId: 'sess' }
+
+    const ref = await entrySvc.create(
+      consoleScope,
+      entryInput({ title: '关联规范', content: '基础规范说明。' }),
+    )
+    const target = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '单条整理目标（2026-10-08 变更）',
+        content: [
+          '# 单条整理目标（2026-10-08 变更）',
+          '',
+          `服务依赖 {{cred:svc-key}} 与 [[${ref.entry.shortId}]]。`,
+          '',
+          'Glossary keywords: deploy, service',
+        ].join('\n'),
+      }),
+    )
+
+    fakeAi.setChatHandler(() =>
+      JSON.stringify({
+        needed: true,
+        title: '单条整理目标',
+        summary: '记录核心服务依赖与凭据引用。',
+        content: `## 服务依赖\n- 凭据：{{cred:svc-key}}\n- 规范：[[${ref.entry.shortId}|关联规范]]`,
+        change_summary: '规范标题并去除冗余片段',
+        archived_notes: [{ occurred_at: '2026-10-08', note: '完成旧版依赖迁移' }],
+        reason: '标题带日期且正文含冗余标题行与词汇表尾注',
+      }),
+    )
+
+    // 1) SSE 模式预览：返回 stage + result 事件并包含确定性预清洗项
+    const sseRes = await app.request(`/v1/console/entries/${target.entry.shortId}/tidy/preview`, {
+      method: 'POST',
+      headers: { ...consoleHeaders(cookie), accept: 'text/event-stream' },
+    })
+    expect(sseRes.status).toBe(200)
+    expect(sseRes.headers.get('content-type')).toContain('text/event-stream')
+    const sseText = await sseRes.text()
+    expect(sseText).toContain('event: stage')
+    expect(sseText).toContain('event: result')
+    const resultBlock = sseText.split('\n\n').find((chunk) => chunk.includes('event: result'))
+    const resultJson = resultBlock
+      ?.split('\n')
+      .find((line) => line.startsWith('data:'))
+      ?.slice(5)
+      .trim()
+    const ssePreview = SingleTidyPreviewResponse.parse(JSON.parse(resultJson!))
+    expect(ssePreview.needed).toBe(true)
+    expect(ssePreview.preCleanedFixes).toEqual(
+      expect.arrayContaining(['strip_duplicate_heading', 'strip_legacy_glossary']),
+    )
+    expect(ssePreview.integrity.intact).toBe(true)
+
+    // 2) JSON 模式预览
+    const jsonRes = await app.request(`/v1/console/entries/${target.entry.shortId}/tidy/preview`, {
+      method: 'POST',
+      headers: consoleHeaders(cookie),
+    })
+    expect(jsonRes.status).toBe(200)
+    const jsonPreview = SingleTidyPreviewResponse.parse(await jsonRes.json())
+    expect(jsonPreview.proposed.title).toBe('单条整理目标')
+
+    // 3) 转存待处理逃生舱：不改原词条版本，写入 pending 建议并反映在详情 pendingSuggestionCount
+    const stageRes = await app.request(`/v1/console/entries/${target.entry.shortId}/tidy/apply`, {
+      method: 'POST',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({
+        expectedVersion: jsonPreview.baseVersion,
+        title: jsonPreview.proposed.title,
+        summary: jsonPreview.proposed.summary,
+        content: jsonPreview.proposed.content,
+        changeSummary: jsonPreview.proposed.changeSummary,
+        archivedNotes: jsonPreview.proposed.archivedNotes,
+        stageToInbox: true,
+        reason: jsonPreview.reason,
+      }),
+    })
+    expect(stageRes.status).toBe(200)
+    const staged = SingleTidyApplyResponse.parse(await stageRes.json())
+    expect(staged.stagedSuggestionId).toBeTruthy()
+    expect(staged.entry).toBeNull()
+
+    const detailWithPending = EntryDetailResponse.parse(
+      await (
+        await app.request(`/v1/console/entries/${target.entry.shortId}`, { headers: { cookie } })
+      ).json(),
+    )
+    expect(detailWithPending.entry.version).toBe(1)
+    expect(detailWithPending.pendingSuggestionCount).toBe(1)
+
+    // 4) 乐观锁校验：版本不匹配返回 409
+    const staleApply = await app.request(`/v1/console/entries/${target.entry.shortId}/tidy/apply`, {
+      method: 'POST',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({
+        expectedVersion: 99,
+        title: jsonPreview.proposed.title,
+        summary: jsonPreview.proposed.summary,
+        content: jsonPreview.proposed.content,
+      }),
+    })
+    expect(staleApply.status).toBe(409)
+
+    // 5) 直接应用并附带历史里程碑归档
+    const directRes = await app.request(`/v1/console/entries/${target.entry.shortId}/tidy/apply`, {
+      method: 'POST',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({
+        expectedVersion: 1,
+        title: jsonPreview.proposed.title,
+        summary: jsonPreview.proposed.summary,
+        content: jsonPreview.proposed.content,
+        changeSummary: jsonPreview.proposed.changeSummary,
+        archivedNotes: jsonPreview.proposed.archivedNotes,
+        applyArchivedNotes: true,
+      }),
+    })
+    expect(directRes.status).toBe(200)
+    const directOut = SingleTidyApplyResponse.parse(await directRes.json())
+    expect(directOut.stagedSuggestionId).toBeNull()
+    expect(directOut.entry?.entry.version).toBe(2)
+    expect(directOut.entry?.entry.title).toBe('单条整理目标')
+
+    const history = await entrySvc.history(consoleScope, target.entry.shortId)
+    expect(history.items.some((i) => i.eventType === 'archive_note')).toBe(true)
+  })
+
+  it('单条查重与关联端点以当前记忆为锚点并返回可即时审核的建议', async () => {
+    const masterKey = testMasterKey()
+    await saveModelEndpoint(database.db, masterKey, CHAT_LLM_SETTING_KEY, {
+      baseUrl: fakeAi.baseUrl,
+      model: 'fake-chat',
+      apiKey: 'sk-chat',
+      enabled: true,
+    })
+
+    const app = createTestApp(database, { masterKey })
+    const { cookie } = await createOwnerSession(database)
+    const credSvc = new CredentialService(database.db, masterKey)
+    const entrySvc = new EntryService(database.db, masterKey, credSvc, null)
+    const consoleScope = { kind: 'console' as const, accountId: 'acc', sessionId: 'sess' }
+
+    const anchor = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '容器构建加速方案',
+        content: '通过缓存层目录显著提升镜像构建速度。',
+        topics: ['docker'],
+      }),
+    )
+    const neighbor = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: 'Docker 构建缓存指南',
+        content: '利用 BuildKit 挂载目录缓存包管理器下载。',
+        topics: ['docker'],
+      }),
+    )
+
+    const vecA = new Array<number>(EMBEDDING_DIMENSIONS).fill(0)
+    const vecB = new Array<number>(EMBEDDING_DIMENSIONS).fill(0)
+    vecA[0] = 1
+    vecB[0] = 0.78
+    vecB[1] = Math.sqrt(1 - 0.78 * 0.78)
+    await database.db.insert(entryEmbeddings).values([
+      { entryId: anchor.entry.id, model: 'fake-embed', contentHash: 'h-a', embedding: vecA },
+      { entryId: neighbor.entry.id, model: 'fake-embed', contentHash: 'h-b', embedding: vecB },
+    ])
+
+    fakeAi.setChatHandler(() =>
+      JSON.stringify({
+        suggestions: [
+          {
+            kind: 'link_entries',
+            target_short_ids: [anchor.entry.shortId],
+            proposed_links: [
+              {
+                target_short_id: neighbor.entry.shortId,
+                relation: '补充缓存配置',
+                reason: '互补的容器构建加速文档',
+              },
+            ],
+            reason: '关联互补的容器缓存指南',
+          },
+        ],
+      }),
+    )
+
+    const res = await app.request(`/v1/console/entries/${anchor.entry.shortId}/cross-check`, {
+      method: 'POST',
+      headers: consoleHeaders(cookie),
+    })
+    expect(res.status).toBe(200)
+    const body = SingleCrossCheckResponse.parse(await res.json())
+    expect(body.shortId).toBe(anchor.entry.shortId)
+    expect(body.consideredNeighbors).toBeGreaterThanOrEqual(1)
+    expect(body.createdCount).toBe(1)
+    expect(body.suggestions).toHaveLength(1)
+    expect(body.suggestions[0]?.kind).toBe('link_entries')
+    expect(body.suggestions[0]?.proposedLinks?.[0]?.targetShortId).toBe(neighbor.entry.shortId)
+  })
+
+  it('审查回归：阻断模型空 realms 放宽场域、截断词条整篇覆写、跨场域合并事务防线，并支持 adjust_boot_mode 编辑覆盖与同版本重复暂存', async () => {
+    const masterKey = testMasterKey()
+    await saveModelEndpoint(database.db, masterKey, CHAT_LLM_SETTING_KEY, {
+      baseUrl: fakeAi.baseUrl,
+      model: 'fake-chat',
+      apiKey: 'sk-chat',
+      enabled: true,
+    })
+
+    const app = createTestApp(database, { masterKey })
+    const { cookie } = await createOwnerSession(database)
+    const credSvc = new CredentialService(database.db, masterKey)
+    const entrySvc = new EntryService(database.db, masterKey, credSvc, null)
+    const consoleScope = { kind: 'console' as const, accountId: 'acc', sessionId: 'sess' }
+
+    const workEntry = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '工作场域内部规范',
+        content: '内部网关地址 127.0.0.1，仅限工作场域。',
+        realms: ['work'],
+        topics: ['gateway'],
+        bootMode: 'full',
+      }),
+    )
+    const personalEntry = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '个人场域备忘',
+        content: '家庭网络说明。',
+        realms: ['personal'],
+      }),
+    )
+
+    // 1) 模型对 work 词条输出 realms: [] 与 topics: [] 时，严禁放宽为通用或清空原标签
+    fakeAi.setChatHandler(() =>
+      JSON.stringify({
+        suggestions: [
+          {
+            kind: 'update',
+            target_short_ids: [workEntry.entry.shortId],
+            title: '工作场域内部规范',
+            content: '内部网关地址 127.0.0.1，端口 8080。',
+            realms: [],
+            topics: [],
+            reason: '补充端口说明',
+          },
+          {
+            kind: 'adjust_boot_mode',
+            target_short_ids: [workEntry.entry.shortId],
+            proposed_boot_mode: 'index',
+            summary: '工作场域网关端口与访问规范。',
+            reason: '降级为目录常驻',
+          },
+        ],
+      }),
+    )
+    const run = await runDream(database.db, masterKey, {
+      runId: 'sec-realm-guard',
+      trigger: 'manual',
+      mode: 'standard',
+    })
+    expect(run.suggested).toBe(2)
+
+    const inbox = InboxResponse.parse(
+      await (await app.request('/v1/console/inbox', { headers: { cookie } })).json(),
+    )
+    const updateCard = inbox.items.find((i) => i.kind === 'update')!
+    expect(updateCard.proposedRealms).toBeNull()
+    expect(updateCard.proposedTopics).toBeNull()
+
+    const applyUpdateRes = await app.request(`/v1/console/inbox/${updateCard.id}/apply`, {
+      method: 'POST',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({}),
+    })
+    expect(applyUpdateRes.status).toBe(200)
+    const afterUpdate = EntryDetailResponse.parse(
+      await (
+        await app.request(`/v1/console/entries/${workEntry.entry.shortId}`, {
+          headers: { cookie },
+        })
+      ).json(),
+    )
+    expect(afterUpdate.entry.realms).toEqual(['work'])
+    expect(afterUpdate.entry.topics).toEqual(['gateway'])
+
+    // 2) adjust_boot_mode 编辑后应用支持保留用户补充的场景范围（projects）而非静默丢弃
+    const bootEntry = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '待限定范围常驻规范',
+        content: '仅适用于 sample-app 项目的构建命令。',
+        bootMode: 'full',
+      }),
+    )
+    fakeAi.setChatHandler(() =>
+      JSON.stringify({
+        suggestions: [
+          {
+            kind: 'adjust_boot_mode',
+            target_short_ids: [bootEntry.entry.shortId],
+            proposed_boot_mode: 'index',
+            summary: 'sample-app 构建命令摘要。',
+            reason: '篇幅偏长建议降级',
+          },
+        ],
+      }),
+    )
+    await runDream(database.db, masterKey, {
+      runId: 'boot-edit-override',
+      trigger: 'manual',
+      mode: 'standard',
+    })
+    const inbox2 = InboxResponse.parse(
+      await (await app.request('/v1/console/inbox', { headers: { cookie } })).json(),
+    )
+    const bootCard = inbox2.items.find(
+      (i) => i.kind === 'adjust_boot_mode' && i.entries[0]?.shortId === bootEntry.entry.shortId,
+    )!
+    const editBootRes = await app.request(`/v1/console/inbox/${bootCard.id}/apply`, {
+      method: 'POST',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({
+        bootMode: 'full',
+        projects: ['sample-app'],
+        summary: 'sample-app 专属构建规范。',
+      }),
+    })
+    expect(editBootRes.status).toBe(200)
+    const afterBootEdit = EntryDetailResponse.parse(
+      await (
+        await app.request(`/v1/console/entries/${bootEntry.entry.shortId}`, {
+          headers: { cookie },
+        })
+      ).json(),
+    )
+    expect(afterBootEdit.entry.bootMode).toBe('full')
+    expect(afterBootEdit.entry.projects).toEqual(['sample-app'])
+    expect(afterBootEdit.entry.summary).toBe('sample-app 专属构建规范。')
+
+    // 3) 事务内防线：即使库里存在脏跨场域 merge_duplicates 建议，apply 也必须以 400 拒绝
+    const [dirtyMerge] = await database.db
+      .insert(dreamSuggestions)
+      .values({
+        kind: 'merge_duplicates',
+        entryIds: [workEntry.entry.id, personalEntry.entry.id],
+        entryVersions: [afterUpdate.entry.version, personalEntry.entry.version],
+        keepId: workEntry.entry.id,
+        proposedTitle: '非法跨场域合并',
+        proposedContent: '内部网关地址 127.0.0.1，端口 8080。家庭网络说明。',
+        reason: '脏数据测试',
+        fingerprint: 'dirty-cross-realm-merge-test',
+        status: 'pending',
+      })
+      .returning({ id: dreamSuggestions.id })
+    const dirtyRes = await app.request(`/v1/console/inbox/${dirtyMerge!.id}/apply`, {
+      method: 'POST',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({}),
+    })
+    expect(dirtyRes.status).toBe(400)
+
+    // 4) 同版本连续两次 stageToInbox 平滑覆盖复用同一指纹，不会触发 500 或产生重复卡片
+    const stagePayload = {
+      expectedVersion: bootEntry.entry.version + 1,
+      title: 'sample-app 构建命令',
+      summary: '第一次暂存概要',
+      content: '仅适用于 sample-app 项目的构建命令。',
+      stageToInbox: true,
+    }
+    const stage1 = SingleTidyApplyResponse.parse(
+      await (
+        await app.request(`/v1/console/entries/${bootEntry.entry.shortId}/tidy/apply`, {
+          method: 'POST',
+          headers: consoleHeaders(cookie, true),
+          body: JSON.stringify(stagePayload),
+        })
+      ).json(),
+    )
+    const stage2 = SingleTidyApplyResponse.parse(
+      await (
+        await app.request(`/v1/console/entries/${bootEntry.entry.shortId}/tidy/apply`, {
+          method: 'POST',
+          headers: consoleHeaders(cookie, true),
+          body: JSON.stringify({ ...stagePayload, summary: '第二次暂存更新概要' }),
+        })
+      ).json(),
+    )
+    expect(stage2.stagedSuggestionId).toBe(stage1.stagedSuggestionId)
   })
 })

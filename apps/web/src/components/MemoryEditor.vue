@@ -21,6 +21,7 @@ import {
   type EntryDetailResponse,
   type EntryFacetsSummary,
 } from '@kioku/contracts'
+import type { DropdownMenuItem } from '@nuxt/ui'
 import { useKbd, useToast } from '@nuxt/ui/composables'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
@@ -36,6 +37,7 @@ import {
 import { useDebounced } from '../composables/useDebounced'
 import { useMarkdownSyncScroll } from '../composables/useMarkdownSyncScroll'
 import { useNow } from '../composables/useNow'
+import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
 import {
   bootModeDescriptions,
@@ -67,6 +69,7 @@ import MemoryContent from './MemoryContent.vue'
 import MemoryHistoryDrawer from './MemoryHistoryDrawer.vue'
 import SceneScopePicker, { type SceneScopeValue } from './SceneScopePicker.vue'
 import SegmentedChoice from './SegmentedChoice.vue'
+import SingleTidyDrawer, { type SingleOrganizeMode } from './SingleTidyDrawer.vue'
 import DiffViewer from './ui/DiffViewer.vue'
 import NoteLine from './ui/NoteLine.vue'
 import ReadFailureNote from './ui/ReadFailureNote.vue'
@@ -347,6 +350,7 @@ const validationProblem = computed(() => {
 function startEditing() {
   if (!entry.value || isDeleted.value) return
   pinPopoverOpen.value = false
+  organizeOpen.value = false
   minValidTo.value = earliestValidTo()
   attrsOpen.value = false
   form.changeSummary = ''
@@ -593,6 +597,7 @@ const restoring = ref(false)
 async function restoreFromTrash() {
   const current = entry.value
   if (!current || restoring.value) return
+  organizeOpen.value = false
   restoring.value = true
   try {
     const updated = await api.restoreEntry(current.shortId, {})
@@ -722,6 +727,52 @@ const hasLinks = computed(
 const hasSideRail = computed(
   () => outline.value.length > 0 || recentHistory.value.length > 0 || hasLinks.value,
 )
+
+const { me } = useSession()
+const hasChatModel = computed(() => Boolean(me.data.value?.hasChatModel))
+const pendingSuggestionCount = computed(() => detail.value?.pendingSuggestionCount ?? 0)
+const organizeOpen = ref(false)
+const organizeMode = ref<SingleOrganizeMode>('tidy')
+
+watch(isDeleted, (deleted) => {
+  if (deleted) organizeOpen.value = false
+})
+
+function openOrganize(targetMode: SingleOrganizeMode) {
+  if (!hasChatModel.value || !entry.value || isDeleted.value || entry.value.kind !== 'entry') return
+  organizeMode.value = targetMode
+  organizeOpen.value = true
+}
+
+const organizeMenuItems = computed<DropdownMenuItem[][]>(() => {
+  if (!hasChatModel.value) {
+    return [[{ type: 'label', label: '请先在设置中配置对话模型' }]]
+  }
+  return [
+    [
+      {
+        label: '规范此条',
+        icon: icons.tidy,
+        onSelect: () => openOrganize('tidy'),
+      },
+      {
+        label: '查找重复与关联',
+        icon: icons.links,
+        onSelect: () => openOrganize('cross_check'),
+      },
+    ],
+  ]
+})
+
+function onSingleTidyApplied(updated: EntryDetailResponse) {
+  queryClient.setQueryData(queryKey.value, updated)
+  loadDetail(updated)
+  emit('changed', updated)
+}
+
+function onSingleTidyStaged() {
+  void detailQuery.refetch()
+}
 
 function jumpToSection(heading: string, index: number) {
   readContentRef.value?.scrollToHeading(heading, index)
@@ -890,6 +941,12 @@ defineExpose({
                 >
                   查看历史
                 </button>
+                <template v-if="pendingSuggestionCount > 0">
+                  <span class="status-sep" aria-hidden="true">·</span>
+                  <RouterLink :to="{ name: 'inbox' }" class="text-primary status-history-link">
+                    待处理建议（{{ pendingSuggestionCount }}）
+                  </RouterLink>
+                </template>
               </template>
             </div>
           </div>
@@ -1028,6 +1085,26 @@ defineExpose({
                   </div>
                 </template>
               </UPopover>
+              <UDropdownMenu
+                v-if="!isDeleted && entry.kind === 'entry'"
+                :items="organizeMenuItems"
+                :content="{ align: 'end' }"
+                :ui="{ content: 'min-w-44' }"
+              >
+                <UButton
+                  size="sm"
+                  color="neutral"
+                  variant="outline"
+                  :icon="icons.tidy"
+                  :trailing-icon="icons.chevronDown"
+                  :disabled="!hasChatModel"
+                  :title="
+                    hasChatModel ? '主动规范此条或查找重复与关联记忆' : '请先在设置中配置对话模型'
+                  "
+                >
+                  整理
+                </UButton>
+              </UDropdownMenu>
               <UButton
                 size="sm"
                 color="neutral"
@@ -1576,6 +1653,16 @@ defineExpose({
         :is-deleted="isDeleted"
         :focus-event-id="focusedHistoryEventId"
         @restored="onHistoryRestored"
+      />
+
+      <SingleTidyDrawer
+        v-if="!isDeleted && entry.kind === 'entry'"
+        v-model:open="organizeOpen"
+        :short-id="entry.shortId"
+        :entry-title="entry.title"
+        :mode="organizeMode"
+        @applied="onSingleTidyApplied"
+        @staged="onSingleTidyStaged"
       />
 
       <ConsequenceModal

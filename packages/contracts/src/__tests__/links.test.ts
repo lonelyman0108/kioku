@@ -9,6 +9,7 @@ import {
   extractWikiLinks,
   isShortId,
   normalizeShortId,
+  redirectWikiLinksInContent,
   SHORT_ID_RE,
   ShortId,
 } from '../links'
@@ -67,5 +68,49 @@ describe('links & placeholders', () => {
       { slug: 'pg-main', field: null },
     ])
     expect(extractCredentialSlugs(content)).toEqual(['pg-main', 'github_pat'])
+  })
+
+  it('redirects wiki links while preserving aliases and skipping code blocks and inline code', () => {
+    const upperOld = 'm-234abc'.toUpperCase()
+    const input = [
+      `正文引用 [[${upperOld}]] 与 [[m-234abc|部署说明]]，保留 [[m-777def]]。`,
+      '行内代码 `[[m-234abc]]` 和 `[[m-234abc|别名]]` 不得替换。',
+      '```markdown',
+      '代码块中的 [[m-234abc]] 与 [[m-234abc|示例]] 不得替换。',
+      '```',
+      '块后再次引用 [[m-234abc|收尾说明]]。',
+    ].join('\n')
+
+    const map = new Map([['m-234abc', 'm-999xyz']])
+    const out = redirectWikiLinksInContent(input, map)
+    expect(out.replacedCount).toBe(3)
+    expect(out.redirectedTargets).toEqual(['m-234abc'])
+    expect(out.content).toBe(
+      [
+        '正文引用 [[m-999xyz]] 与 [[m-999xyz|部署说明]]，保留 [[m-777def]]。',
+        '行内代码 `[[m-234abc]]` 和 `[[m-234abc|别名]]` 不得替换。',
+        '```markdown',
+        '代码块中的 [[m-234abc]] 与 [[m-234abc|示例]] 不得替换。',
+        '```',
+        '块后再次引用 [[m-999xyz|收尾说明]]。',
+      ].join('\n'),
+    )
+
+    // 无命中映射时原样返回
+    const noop = redirectWikiLinksInContent('普通文本 [[m-777def]]', map)
+    expect(noop).toEqual({
+      content: '普通文本 [[m-777def]]',
+      replacedCount: 0,
+      redirectedTargets: [],
+    })
+
+    // CommonMark 多反引号行内代码、未闭合反引号与 CRLF 边界
+    const complex =
+      '双反引号 ``use `[[m-234abc]]` here`` 后接正文 [[m-234abc|外链]]\r\n空双反引号 `` 后接 [[m-234abc]] 与 `code`\r\n孤立反引号 ` [[m-234abc]]'
+    const complexOut = redirectWikiLinksInContent(complex, map)
+    expect(complexOut.replacedCount).toBe(3)
+    expect(complexOut.content).toBe(
+      '双反引号 ``use `[[m-234abc]]` here`` 后接正文 [[m-999xyz|外链]]\r\n空双反引号 `` 后接 [[m-999xyz]] 与 `code`\r\n孤立反引号 ` [[m-999xyz]]',
+    )
   })
 })

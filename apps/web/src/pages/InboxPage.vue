@@ -4,6 +4,7 @@ import {
   hasDuplicateLeadingHeading,
   stripDuplicateLeadingHeading,
   type ApplySuggestionRequest,
+  type DreamMode,
   type DreamSuggestionKind,
   type DreamSuggestionView,
   type TriggerDreamRequest,
@@ -33,8 +34,10 @@ type KindFilter = 'all' | DreamSuggestionKind
 
 const FILTER_ORDER: readonly DreamSuggestionKind[] = [
   'tidy',
-  'distill_episode',
   'merge_duplicates',
+  'link_entries',
+  'adjust_boot_mode',
+  'distill_episode',
   'update',
   'mark_stale',
 ]
@@ -60,9 +63,14 @@ const latestFailedItems = computed(() => latestRun.value?.failedItems ?? [])
 const latestRetryableShortIds = computed(() => [
   ...new Set(latestFailedItems.value.map((item) => item.shortId)),
 ])
-const latestRunMode = computed<'standard' | 'tidy'>(
+const latestRunMode = computed<DreamMode>(
   () =>
-    latestRun.value?.mode ?? (latestFailedItems.value[0]?.kind === 'tidy' ? 'tidy' : 'standard'),
+    latestRun.value?.mode ??
+    (latestFailedItems.value[0]?.kind === 'tidy'
+      ? 'tidy'
+      : latestFailedItems.value[0]?.kind === 'cross_memory'
+        ? 'cross_memory'
+        : 'standard'),
 )
 const failedDetailsOpen = ref(false)
 const progressPercent = computed(() =>
@@ -83,8 +91,10 @@ const kindCounts = computed(() => {
   const counts: Record<KindFilter, number> = {
     all: items.value.length,
     tidy: 0,
-    distill_episode: 0,
     merge_duplicates: 0,
+    link_entries: 0,
+    adjust_boot_mode: 0,
+    distill_episode: 0,
     mark_stale: 0,
     update: 0,
   }
@@ -176,16 +186,23 @@ function baseEntryOf(suggestion: DreamSuggestionView) {
   return suggestion.entries[0] ?? null
 }
 
-const triggeringMode = ref<'standard' | 'tidy' | 'retry' | null>(null)
+const triggeringMode = ref<DreamMode | 'retry' | null>(null)
 const tidyBusy = computed(
   () =>
     triggeringMode.value === 'tidy' ||
     (Boolean(state.value?.running) && progress.value?.mode === 'tidy'),
 )
+const crossMemoryBusy = computed(
+  () =>
+    triggeringMode.value === 'cross_memory' ||
+    (Boolean(state.value?.running) && progress.value?.mode === 'cross_memory'),
+)
 const standardBusy = computed(
   () =>
     triggeringMode.value === 'standard' ||
-    (Boolean(state.value?.running) && progress.value?.mode !== 'tidy'),
+    (Boolean(state.value?.running) &&
+      progress.value?.mode !== 'tidy' &&
+      progress.value?.mode !== 'cross_memory'),
 )
 const retryFailedBusy = computed(() => triggeringMode.value === 'retry')
 const tidyDisabled = computed(
@@ -198,7 +215,7 @@ const tidyDisabled = computed(
 
 async function triggerDream(req: Partial<TriggerDreamRequest>) {
   if (triggeringMode.value || state.value?.running) return
-  const mode = req.mode === 'tidy' ? 'tidy' : 'standard'
+  const mode: DreamMode = req.mode === 'tidy' || req.mode === 'cross_memory' ? req.mode : 'standard'
   const isRetry = Boolean(req.targetShortIds?.length)
   triggeringMode.value = isRetry ? 'retry' : mode
   try {
@@ -206,11 +223,13 @@ async function triggerDream(req: Partial<TriggerDreamRequest>) {
     if (res.started) {
       const title = isRetry
         ? `已发起失败项重试（${req.targetShortIds!.length} 条）`
-        : mode === 'tidy'
-          ? req.all
-            ? '已发起全部存量规范整理任务'
-            : `已发起存量规范整理（本批 ${req.limit ?? 10} 条）`
-          : '已发起整理任务'
+        : mode === 'cross_memory'
+          ? '已发起全库查重与关联整理'
+          : mode === 'tidy'
+            ? req.all
+              ? '已发起全部存量规范整理任务'
+              : `已发起存量规范整理（本批 ${req.limit ?? 10} 条）`
+            : '已发起整理任务'
       toast.add({ title, color: 'success' })
     } else {
       toast.add({ title: res.reason ?? '当前无需重复整理', color: 'neutral' })
@@ -271,6 +290,7 @@ async function undoAppliedSuggestion(
       queryClient.invalidateQueries({ queryKey: ['entries'] }),
       queryClient.invalidateQueries({ queryKey: ['entry-history', shortId] }),
       queryClient.invalidateQueries({ queryKey: ['inbox'] }),
+      queryClient.invalidateQueries({ queryKey: ['boot-preview'] }),
     ])
     toast.add({
       title: `已撤销对「${title}」的应用，恢复至版本 ${previousVersion}`,
@@ -327,22 +347,35 @@ async function onApply(id: string, body: ApplySuggestionRequest) {
         ],
       })
     } else {
+      const redirectSuffix = res.redirectedBacklinkCount
+        ? `，并自动重定向 ${res.redirectedBacklinkCount} 条引用双链`
+        : ''
       toast.add({
-        title: applied ? `已应用到「${applied.title}」` : '已应用整理建议',
+        title: applied
+          ? `已应用到「${applied.title}」${redirectSuffix}`
+          : `已应用整理建议${redirectSuffix}`,
         color: 'success',
       })
     }
     const affectedShortIds = new Set<string>([
       ...(applied ? [applied.shortId] : []),
       ...(suggestion?.entries.map((e) => e.shortId) ?? []),
+      ...(suggestion?.proposedLinks?.map((l) => l.targetShortId) ?? []),
     ])
+    const redirectedAny = (res.redirectedBacklinkCount ?? 0) > 0
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ['inbox'] }),
       queryClient.invalidateQueries({ queryKey: ['entries'] }),
-      ...[...affectedShortIds].flatMap((sid) => [
-        queryClient.invalidateQueries({ queryKey: ['entry', sid] }),
-        queryClient.invalidateQueries({ queryKey: ['entry-history', sid] }),
-      ]),
+      queryClient.invalidateQueries({ queryKey: ['boot-preview'] }),
+      ...(redirectedAny
+        ? [
+            queryClient.invalidateQueries({ queryKey: ['entry'] }),
+            queryClient.invalidateQueries({ queryKey: ['entry-history'] }),
+          ]
+        : [...affectedShortIds].flatMap((sid) => [
+            queryClient.invalidateQueries({ queryKey: ['entry', sid] }),
+            queryClient.invalidateQueries({ queryKey: ['entry-history', sid] }),
+          ])),
     ])
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '应用失败', color: 'error' })
@@ -414,6 +447,7 @@ async function applyQuickTableSelected() {
   await Promise.all([
     queryClient.invalidateQueries({ queryKey: ['inbox'] }),
     queryClient.invalidateQueries({ queryKey: ['entries'] }),
+    queryClient.invalidateQueries({ queryKey: ['boot-preview'] }),
     ...[...touchedShortIds].flatMap((sid) => [
       queryClient.invalidateQueries({ queryKey: ['entry', sid] }),
       queryClient.invalidateQueries({ queryKey: ['entry-history', sid] }),
@@ -439,7 +473,7 @@ async function applyQuickTableSelected() {
     <div class="inbox-shell">
       <PageHead title="待处理">
         <template #note>
-          整理任务提出的规范与精简、提炼摘要、合并重复、标记过时与更新建议，确认后才会写入记忆。
+          整理任务提出的规范与精简、合并重复、补全双链、调整启动加载、提炼摘要、标记过时与更新建议，确认后才会写入记忆。
         </template>
         <template #actions>
           <UButton
@@ -460,6 +494,17 @@ async function applyQuickTableSelected() {
             @click="sweepOpen = true"
           >
             结构体检与预清洗
+          </UButton>
+          <UButton
+            :icon="icons.links"
+            size="sm"
+            color="neutral"
+            variant="outline"
+            :loading="crossMemoryBusy"
+            :disabled="tidyDisabled"
+            @click="triggerDream({ mode: 'cross_memory', scope: 'full_corpus' })"
+          >
+            全库查重与关联
           </UButton>
           <UDropdownMenu
             :items="tidyMenuItems"
@@ -563,7 +608,17 @@ async function applyQuickTableSelected() {
 
               <div v-if="state?.running" class="rail-progress" role="status" aria-live="polite">
                 <div class="rail-progress-head">
-                  <span>{{ progress?.mode === 'tidy' ? '存量规范整理中' : '后台整理中' }}</span>
+                  <span>
+                    {{
+                      progress?.stage
+                        ? `${progress.stage}中`
+                        : progress?.mode === 'tidy'
+                          ? '存量规范整理中'
+                          : progress?.mode === 'cross_memory'
+                            ? '全库查重与关联中'
+                            : '后台整理中'
+                    }}
+                  </span>
                   <span v-if="progress && progress.total > 0" class="tabular-nums">
                     {{ progress.processed }} / {{ progress.total }} 条
                   </span>
