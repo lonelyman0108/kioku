@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import {
+  BOOT_MODES,
   CHANGE_SUMMARY_MAX,
   ChangeSummary,
   checkCaptureIntegrity,
   DISCLOSURE_MAX,
   Disclosure,
+  effectiveBootMode,
   ENTRY_SUMMARY_MAX,
   ENTRY_TITLE_MAX,
   EntrySummary,
@@ -12,17 +14,19 @@ import {
   extractCredentialPlaceholders,
   extractTargetShortIds,
   type ApplySuggestionRequest,
+  type BootMode,
   type CaptureIntegrity,
   type DreamSuggestionView,
 } from '@kioku/contracts'
 import { computed, reactive, ref, watch } from 'vue'
 
 import { icons } from '../icons'
-import { dreamKindLabels, entryKindLabels } from '../labels'
+import { bootModeLabels, dreamKindLabels, entryKindLabels } from '../labels'
 import { entryRoute } from '../routes'
 import { detectSecretPrefixes } from '../secretHint'
 import { formatRelative, formatShort, formatTime } from '../time'
 import SceneScopePicker, { type SceneScopeValue } from './SceneScopePicker.vue'
+import SegmentedChoice from './SegmentedChoice.vue'
 import DiffViewer from './ui/DiffViewer.vue'
 import NoteLine from './ui/NoteLine.vue'
 
@@ -60,17 +64,33 @@ const parts = reactive({
   content: true,
 })
 
+// 补全双链建议的逐条勾选列表
+const selectedLinkShortIds = ref<string[]>([])
+
 watch(
   () => props.suggestion.id,
   () => {
     parts.title = true
     parts.summary = true
     parts.content = true
+    selectedLinkShortIds.value = (props.suggestion.proposedLinks ?? []).map((l) => l.targetShortId)
     editing.value = false
   },
+  { immediate: true },
 )
 
 const isTidy = computed(() => props.suggestion.kind === 'tidy')
+const isLinkEntries = computed(() => props.suggestion.kind === 'link_entries')
+const isAdjustBootMode = computed(() => props.suggestion.kind === 'adjust_boot_mode')
+const bootModeChoices = BOOT_MODES.map((value) => ({ value, label: bootModeLabels[value] }))
+
+function toggleProposedLink(shortId: string) {
+  if (selectedLinkShortIds.value.includes(shortId)) {
+    selectedLinkShortIds.value = selectedLinkShortIds.value.filter((s) => s !== shortId)
+  } else {
+    selectedLinkShortIds.value = [...selectedLinkShortIds.value, shortId]
+  }
+}
 
 const hasTitleChange = computed(() => {
   if (props.suggestion.kind === 'distill_episode') return false
@@ -105,6 +125,7 @@ const showPartialChecks = computed(
 )
 
 const anyPartSelected = computed(() => {
+  if (isLinkEntries.value) return selectedLinkShortIds.value.length > 0
   if (!showPartialChecks.value) return true
   return (
     (hasTitleChange.value && parts.title) ||
@@ -121,7 +142,7 @@ const draft = reactive({
   changeSummary: '',
   applyArchivedNotes: true,
   topics: [] as string[],
-  isPinned: false,
+  bootMode: 'none' as BootMode,
 })
 const draftScope = ref<SceneScopeValue>({ envs: [], realms: [], projects: [], runtimes: [] })
 
@@ -135,7 +156,7 @@ function openEditor() {
   draft.changeSummary = s.proposedChangeSummary ?? ''
   draft.applyArchivedNotes = Boolean(s.archivedNotes?.length)
   draft.topics = [...(s.proposedTopics ?? base?.topics ?? [])]
-  draft.isPinned = base?.isPinned ?? false
+  draft.bootMode = s.proposedBootMode ?? (base ? effectiveBootMode(base) : 'none')
   draftScope.value = {
     envs: [...(s.proposedEnvs ?? base?.envs ?? [])],
     realms: [...(s.proposedRealms ?? base?.realms ?? [])],
@@ -147,7 +168,14 @@ function openEditor() {
 
 const effectiveProposedContent = computed<string | null>(() => {
   const s = props.suggestion
-  if (s.kind === 'distill_episode' || s.kind === 'mark_stale') return null
+  if (
+    s.kind === 'distill_episode' ||
+    s.kind === 'mark_stale' ||
+    s.kind === 'link_entries' ||
+    s.kind === 'adjust_boot_mode'
+  ) {
+    return null
+  }
   if (editing.value) return draft.content
   if (isTidy.value && !parts.content) return null
   return s.proposedContent
@@ -266,6 +294,13 @@ const hasDiffChanges = computed(() => {
 function applyDirect() {
   const s = props.suggestion
   const base = baseEntry.value
+  if (isLinkEntries.value) {
+    const chosen = (s.proposedLinks ?? []).filter((l) =>
+      selectedLinkShortIds.value.includes(l.targetShortId),
+    )
+    emit('apply', s.id, { proposedLinks: chosen })
+    return
+  }
   if (showPartialChecks.value && base) {
     const allChecked =
       (!hasTitleChange.value || parts.title) &&
@@ -313,7 +348,8 @@ function applyEdited() {
     realms: draftScope.value.realms,
     projects: draftScope.value.projects,
     runtimes: draftScope.value.runtimes,
-    isPinned: draft.isPinned,
+    bootMode: draft.bootMode,
+    isPinned: draft.bootMode !== 'none',
   }
   emit('apply', props.suggestion.id, body)
 }
@@ -358,6 +394,60 @@ function applyEdited() {
           <span class="text-xs text-muted">{{ entryKindLabels[entry.kind] }}</span>
           <span v-if="entry.isPinned" class="keep-tag">常驻</span>
           <span v-if="entry.id === suggestion.keepId" class="keep-tag">保留目标</span>
+        </li>
+      </ul>
+    </div>
+
+    <!-- 合并重复时的全库反链自动重定向提示 -->
+    <NoteLine
+      v-if="suggestion.kind === 'merge_duplicates' && (suggestion.affectedBacklinkCount ?? 0) > 0"
+      tone="neutral"
+      flush
+    >
+      另有
+      {{ suggestion.affectedBacklinkCount }}
+      条其他记忆引用了待合并词条，应用合并时将自动把它们的双链重定向至保留目标。
+    </NoteLine>
+
+    <!-- 调整启动加载前后对比 -->
+    <div
+      v-if="!editing && isAdjustBootMode && baseEntry && suggestion.proposedBootMode"
+      class="title-compare"
+    >
+      <span class="compare-label">启动加载调整</span>
+      <span class="compare-old">{{ bootModeLabels[effectiveBootMode(baseEntry)] }}</span>
+      <UIcon :name="icons.inherits" class="compare-arrow" aria-hidden="true" />
+      <span class="compare-new">{{ bootModeLabels[suggestion.proposedBootMode] }}</span>
+    </div>
+
+    <!-- 补全双链清单（支持逐条勾选） -->
+    <div v-if="!editing && isLinkEntries && suggestion.proposedLinks?.length" class="links-preview">
+      <span class="affected-label">建议追加的双链（将确定性写入指定小节或「相关记忆」小节）</span>
+      <ul class="links-check-list">
+        <li
+          v-for="link in suggestion.proposedLinks"
+          :key="link.targetShortId"
+          class="link-check-row"
+        >
+          <label class="link-check-label">
+            <input
+              type="checkbox"
+              :checked="selectedLinkShortIds.includes(link.targetShortId)"
+              :disabled="busy"
+              @change="toggleProposedLink(link.targetShortId)"
+            />
+            <span class="link-check-main">
+              <RouterLink :to="entryRoute(link.targetShortId)" class="text-primary font-medium">
+                {{ link.targetTitle || link.targetShortId }}
+              </RouterLink>
+              <span class="font-mono text-xs text-muted">{{ link.targetShortId }}</span>
+              <span v-if="link.relation" class="keep-tag">{{ link.relation }}</span>
+              <span v-if="link.anchorHeading" class="text-xs text-muted">
+                小节：{{ link.anchorHeading }}
+              </span>
+              <span v-if="link.reason" class="link-reason">{{ link.reason }}</span>
+            </span>
+          </label>
         </li>
       </ul>
     </div>
@@ -483,7 +573,14 @@ function applyEdited() {
         <SceneScopePicker v-model="draftScope" />
       </UFormField>
       <div class="flex flex-wrap items-center gap-6">
-        <USwitch v-model="draft.isPinned" label="设为启动加载" />
+        <UFormField label="启动加载方式">
+          <SegmentedChoice
+            v-model="draft.bootMode"
+            :items="bootModeChoices"
+            label="选择启动加载方式"
+            compact
+          />
+        </UFormField>
         <USwitch
           v-if="hasArchivedNotes"
           v-model="draft.applyArchivedNotes"
@@ -529,7 +626,7 @@ function applyEdited() {
           {{ suggestion.kind === 'mark_stale' ? '确认移入回收站' : '应用' }}
         </UButton>
         <UButton
-          v-if="suggestion.kind !== 'mark_stale'"
+          v-if="suggestion.kind !== 'mark_stale' && !isLinkEntries"
           size="sm"
           color="neutral"
           variant="outline"
@@ -660,6 +757,43 @@ function applyEdited() {
 .keep-tag {
   padding: 0 5px;
   border: 1px solid var(--ui-border-accented);
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.links-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--ui-border);
+  background: var(--ui-bg-muted);
+}
+.links-check-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.link-check-label {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.link-check-label input[type='checkbox'] {
+  margin-top: 3px;
+  flex: none;
+  accent-color: var(--ui-primary);
+}
+.link-check-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  min-width: 0;
+}
+.link-reason {
+  width: 100%;
   font-size: 12px;
   color: var(--ui-text-muted);
 }

@@ -1,4 +1,4 @@
-import type { DreamProgress, DreamTrigger } from '@kioku/contracts'
+import type { DreamMode, DreamProgress, DreamScope, DreamTrigger } from '@kioku/contracts'
 import { PgBoss } from 'pg-boss'
 import postgres from 'postgres'
 
@@ -71,7 +71,8 @@ export async function pgBossConnection(url: string): Promise<PgBossConnection> {
 }
 
 export interface DreamEnqueueOptions {
-  mode?: 'standard' | 'tidy' | undefined
+  mode?: DreamMode | undefined
+  scope?: DreamScope | undefined
   limit?: number | undefined
   all?: boolean | undefined
   pinnedFirst?: boolean | undefined
@@ -90,7 +91,8 @@ export interface Jobs {
 
 interface DreamJobData {
   trigger: DreamTrigger
-  mode?: 'standard' | 'tidy' | undefined
+  mode?: DreamMode | undefined
+  scope?: DreamScope | undefined
   limit?: number | undefined
   all?: boolean | undefined
   pinnedFirst?: boolean | undefined
@@ -161,6 +163,7 @@ export async function startJobs(options: {
         const data: DreamJobData = {
           trigger: 'manual',
           ...(opts?.mode ? { mode: opts.mode } : {}),
+          ...(opts?.scope ? { scope: opts.scope } : {}),
           ...(opts?.limit !== undefined ? { limit: opts.limit } : {}),
           ...(opts?.all !== undefined ? { all: opts.all } : {}),
           ...(opts?.pinnedFirst !== undefined ? { pinnedFirst: opts.pinnedFirst } : {}),
@@ -239,6 +242,7 @@ export async function startJobs(options: {
         runId: job.id,
         trigger,
         mode: job.data?.mode,
+        scope: job.data?.scope,
         limit: job.data?.limit,
         all: job.data?.all,
         pinnedFirst: job.data?.pinnedFirst,

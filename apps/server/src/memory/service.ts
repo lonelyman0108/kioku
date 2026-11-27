@@ -1,11 +1,18 @@
 import {
   applyCapturePatch,
+  applyMarkdownAppend,
   bootModeToPinned,
   buildSearchTags,
   deriveEntryTitle,
   effectiveBootMode,
+  ENTRY_CONTENT_MAX,
+  extractCredentialPlaceholders,
+  extractMarkdownHeadings,
+  extractTargetShortIds,
   lintEntryHygiene,
+  normalizeShortId,
   normalizeSlugList,
+  redirectWikiLinksInContent,
   resolveBootMode,
   type ApplySuggestionRequest,
   type ApplySuggestionResponse,
@@ -34,6 +41,10 @@ import {
   type EntryView,
   type HygieneWarning,
   type RestoreEntryRequest,
+  type SingleCrossCheckResponse,
+  type SingleTidyApplyRequest,
+  type SingleTidyApplyResponse,
+  type SingleTidyPreviewResponse,
   type UpdateEntryRequest,
 } from '@kioku/contracts'
 import {
@@ -71,8 +82,22 @@ import {
   microsOf,
   UUID,
 } from '../db/paging'
-import { apiKeys, dreamSuggestions, entries, entryEmbeddings, entryEvents } from '../db/schema'
+import {
+  apiKeys,
+  dreamSuggestions,
+  entries,
+  entryEmbeddings,
+  entryEvents,
+  entryLinks,
+} from '../db/schema'
 import { planCapture as planQuickCapture, type PlanCaptureOptions } from '../extraction/capture'
+import { runSingleCrossCheck } from '../extraction/crossMemory'
+import { suggestionFingerprint } from '../extraction/dream'
+import { canFlowRealmInto, sameRealms } from '../extraction/dreamPrompt'
+import {
+  previewSingleTidy as runPreviewSingleTidy,
+  type PreviewSingleTidyOptions,
+} from '../extraction/singleTidy'
 import type { KeyPrincipal } from '../http/env'
 import type { Jobs } from '../jobs/queue'
 import { CONTEXT_RESERVE, GUIDANCE, HOST_CONTEXT_LIMIT } from '../lifecycle/lifecycle'
@@ -309,11 +334,24 @@ export class EntryService {
     row: EntryRow,
     warnings?: HygieneWarning[],
   ): Promise<EntryDetailResponse> {
-    const [{ outboundLinks, backlinks }, credentialRefs, recentHistory] = await Promise.all([
-      loadEntryLinks(tx, scope, row.id, row.shortId),
-      this.credentials.placeholderStatuses(tx, scope, row.content),
-      this.loadRecentHistory(tx, scope, row.id),
-    ])
+    const [{ outboundLinks, backlinks }, credentialRefs, recentHistory, pendingCountRow] =
+      await Promise.all([
+        loadEntryLinks(tx, scope, row.id, row.shortId),
+        this.credentials.placeholderStatuses(tx, scope, row.content),
+        this.loadRecentHistory(tx, scope, row.id),
+        scope.kind === 'console'
+          ? tx
+              .select({ count: sql<number>`count(*)::int` })
+              .from(dreamSuggestions)
+              .where(
+                and(
+                  eq(dreamSuggestions.status, 'pending'),
+                  sql`${row.id}::uuid = any(${dreamSuggestions.entryIds})`,
+                ),
+              )
+              .then((rows) => rows[0]?.count ?? 0)
+          : Promise.resolve(0),
+      ])
     return {
       entry: toEntryView(row),
       outboundLinks,
@@ -321,6 +359,7 @@ export class EntryService {
       credentialRefs,
       recentHistory,
       ...(warnings?.length ? { warnings } : {}),
+      ...(pendingCountRow > 0 ? { pendingSuggestionCount: pendingCountRow } : {}),
     }
   }
 
@@ -1361,7 +1400,8 @@ export class EntryService {
       }
 
       let resulting: ApplySuggestionResponse['entry']
-      let embedId: string | null = null
+      const embedIds: string[] = []
+      let redirectedBacklinkCount = 0
 
       if (suggestion.kind === 'distill_episode') {
         const firstSource = byId.get(suggestion.entryIds[0]!)!
@@ -1370,11 +1410,32 @@ export class EntryService {
           overrides.summary !== undefined
             ? cleanOptionalText(overrides.summary)
             : cleanOptionalText(suggestion.proposedSummary)
-        const envs = overrides.envs ?? suggestion.proposedEnvs ?? firstSource.envs
-        const realms = overrides.realms ?? suggestion.proposedRealms ?? firstSource.realms
-        const projects = overrides.projects ?? suggestion.proposedProjects ?? firstSource.projects
-        const runtimes = overrides.runtimes ?? suggestion.proposedRuntimes ?? []
-        const topics = overrides.topics ?? suggestion.proposedTopics ?? []
+        const envs =
+          overrides.envs ??
+          (suggestion.proposedEnvs?.length ? suggestion.proposedEnvs : null) ??
+          firstSource.envs
+        const safeProposedRealms =
+          suggestion.proposedRealms?.length &&
+          targetRows.every((src) => canFlowRealmInto(suggestion.proposedRealms!, src.realms))
+            ? suggestion.proposedRealms
+            : null
+        const fallbackRealms =
+          firstSource.realms.length > 0
+            ? firstSource.realms
+            : normalizeSlugList(targetRows.flatMap((r) => r.realms))
+        const realms = overrides.realms ?? safeProposedRealms ?? fallbackRealms
+        const projects =
+          overrides.projects ??
+          (suggestion.proposedProjects?.length ? suggestion.proposedProjects : null) ??
+          firstSource.projects
+        const runtimes =
+          overrides.runtimes ??
+          (suggestion.proposedRuntimes?.length ? suggestion.proposedRuntimes : null) ??
+          []
+        const topics =
+          overrides.topics ??
+          (suggestion.proposedTopics?.length ? suggestion.proposedTopics : null) ??
+          []
         const disclosure =
           overrides.disclosure !== undefined
             ? cleanOptionalText(overrides.disclosure)
@@ -1455,14 +1516,52 @@ export class EntryService {
           title: created.title,
           version: created.version,
         }
-        embedId = created.id
+        embedIds.push(created.id)
       } else if (suggestion.kind === 'merge_duplicates') {
+        if (targetRows.length < 2) {
+          throw new MemoryError(400, '合并重复建议至少需要两条活跃记忆')
+        }
+        if (targetRows.some((r) => r.kind !== 'entry')) {
+          throw new MemoryError(400, '会话摘要不支持合并重复操作')
+        }
         const keepId =
           suggestion.keepId && byId.has(suggestion.keepId)
             ? suggestion.keepId
             : suggestion.entryIds[0]!
         const keep = byId.get(keepId)!
+        if (targetRows.some((r) => !sameRealms(r.realms, keep.realms))) {
+          throw new MemoryError(400, '不同场域的记忆禁止合并，请分别维护')
+        }
         const content = overrides.content ?? suggestion.proposedContent ?? keep.content
+
+        // 合并完整性强校验：确认合并后正文保留了全部被合并词条中的外部双链与凭据占位符并集
+        const mergedShortIds = new Set(targetRows.map((r) => r.shortId))
+        const requiredLinks = new Set<string>()
+        const requiredCreds = new Set<string>()
+        const credKey = (p: { slug: string; field: string | null }) =>
+          p.field ? `${p.slug}#${p.field}` : p.slug
+        for (const row of targetRows) {
+          for (const sid of extractTargetShortIds(row.content)) {
+            if (!mergedShortIds.has(sid)) requiredLinks.add(sid)
+          }
+          for (const cred of extractCredentialPlaceholders(row.content)) {
+            requiredCreds.add(credKey(cred))
+          }
+        }
+        const afterLinks = new Set(extractTargetShortIds(content))
+        const afterCreds = new Set(extractCredentialPlaceholders(content).map(credKey))
+        const missingLinks = [...requiredLinks].filter((id) => !afterLinks.has(id))
+        const missingCreds = [...requiredCreds].filter((k) => !afterCreds.has(k))
+        if (missingLinks.length > 0 || missingCreds.length > 0) {
+          const parts: string[] = []
+          if (missingLinks.length) parts.push(`双链 ${missingLinks.join('、')}`)
+          if (missingCreds.length) parts.push(`凭据占位符 ${missingCreds.join('、')}`)
+          throw new MemoryError(
+            400,
+            `合并后正文遗漏了原有引用（${parts.join('；')}），请编辑补回后再应用`,
+          )
+        }
+
         const summary =
           overrides.summary !== undefined
             ? cleanOptionalText(overrides.summary)
@@ -1480,11 +1579,29 @@ export class EntryService {
           cleanOptionalText(overrides.changeSummary) ??
           cleanOptionalText(suggestion.proposedChangeSummary) ??
           '合并重复记忆'
-        const topics = overrides.topics ?? suggestion.proposedTopics ?? keep.topics
-        const envs = overrides.envs ?? suggestion.proposedEnvs ?? keep.envs
-        const realms = overrides.realms ?? suggestion.proposedRealms ?? keep.realms
-        const projects = overrides.projects ?? suggestion.proposedProjects ?? keep.projects
-        const runtimes = overrides.runtimes ?? suggestion.proposedRuntimes ?? keep.runtimes
+        const topics =
+          overrides.topics ??
+          (suggestion.proposedTopics?.length ? suggestion.proposedTopics : null) ??
+          normalizeSlugList(targetRows.flatMap((r) => r.topics))
+        const envs =
+          overrides.envs ??
+          (suggestion.proposedEnvs?.length ? suggestion.proposedEnvs : null) ??
+          normalizeSlugList(targetRows.flatMap((r) => r.envs))
+        // 合并重复若无人工显式覆盖，严格沿用已校验一致的 keep.realms，防止模型静默放宽场域边界
+        const realms = overrides.realms ?? keep.realms
+        const projects =
+          overrides.projects ??
+          (suggestion.proposedProjects?.length ? suggestion.proposedProjects : null) ??
+          normalizeSlugList(targetRows.flatMap((r) => r.projects))
+        const runtimes =
+          overrides.runtimes ??
+          (suggestion.proposedRuntimes?.length ? suggestion.proposedRuntimes : null) ??
+          normalizeSlugList(targetRows.flatMap((r) => r.runtimes))
+        const bootRank: Record<BootMode, number> = { none: 0, index: 1, full: 2 }
+        const highestMergedBoot = targetRows.reduce<BootMode>(
+          (best, r) => (bootRank[r.bootMode] > bootRank[best] ? r.bootMode : best),
+          keep.bootMode,
+        )
         const bootMode: BootMode =
           keep.kind === 'episode'
             ? 'none'
@@ -1492,11 +1609,11 @@ export class EntryService {
               ? overrides.bootMode
               : overrides.isPinned !== undefined
                 ? overrides.isPinned
-                  ? keep.bootMode === 'none'
+                  ? highestMergedBoot === 'none'
                     ? 'full'
-                    : keep.bootMode
+                    : highestMergedBoot
                   : 'none'
-                : keep.bootMode
+                : highestMergedBoot
         const isPinned = bootModeToPinned(bootMode)
         const searchTags = buildSearchTags({
           shortId: keep.shortId,
@@ -1556,8 +1673,10 @@ export class EntryService {
           createdAt: now,
         })
 
+        const deletedShortIds: string[] = []
         for (const other of targetRows) {
           if (other.id === keep.id) continue
+          deletedShortIds.push(other.shortId)
           const [removed] = await tx
             .update(entries)
             .set({ deletedAt: now, updatedAt: now, version: other.version + 1 })
@@ -1574,6 +1693,72 @@ export class EntryService {
           })
         }
 
+        // 事务内反链自动重定向：将全库活跃词条指向被删重复项的 [[old]] 确定性改写为 [[keep]]
+        if (deletedShortIds.length) {
+          const redirectMap = new Map(deletedShortIds.map((sid) => [sid, keep.shortId]))
+          const mergedIdSet = new Set(targetRows.map((r) => r.id))
+          const incomingLinks = await tx
+            .select({ sourceEntryId: entryLinks.sourceEntryId })
+            .from(entryLinks)
+            .where(inArray(entryLinks.targetShortId, deletedShortIds))
+          const refIds = [
+            ...new Set(
+              incomingLinks.map((l) => l.sourceEntryId).filter((id) => !mergedIdSet.has(id)),
+            ),
+          ]
+          if (refIds.length) {
+            const refRows = await tx
+              .select()
+              .from(entries)
+              .where(
+                and(
+                  inArray(entries.id, refIds),
+                  isNull(entries.deletedAt),
+                  eq(entries.kind, 'entry'),
+                ),
+              )
+            for (const refRow of refRows) {
+              const rewritten = redirectWikiLinksInContent(refRow.content, redirectMap)
+              if (
+                rewritten.replacedCount === 0 ||
+                rewritten.content === refRow.content ||
+                rewritten.content.length > ENTRY_CONTENT_MAX
+              ) {
+                continue
+              }
+              const redirectNote = `合并重定向：${rewritten.redirectedTargets.map((s) => `[[${s}]]`).join('、')} → [[${keep.shortId}]]`
+              const refDiff: EntryDiffMeta = {
+                changedFields: ['content'],
+                contentCharsBefore: refRow.content.length,
+                contentCharsAfter: rewritten.content.length,
+              }
+              const [updatedRef] = await tx
+                .update(entries)
+                .set({
+                  content: rewritten.content,
+                  lastChangeSummary: redirectNote,
+                  version: refRow.version + 1,
+                  updatedAt: now,
+                })
+                .where(and(eq(entries.id, refRow.id), eq(entries.version, refRow.version)))
+                .returning()
+              if (!updatedRef) continue
+              await syncEntryLinks(tx, updatedRef.id, updatedRef.shortId, updatedRef.content)
+              await tx.insert(entryEvents).values({
+                entryId: updatedRef.id,
+                eventType: 'update',
+                actor: 'dream',
+                changeSummary: redirectNote,
+                diffMeta: refDiff,
+                snapshot: toSnapshot(updatedRef),
+                createdAt: now,
+              })
+              embedIds.push(updatedRef.id)
+              redirectedBacklinkCount++
+            }
+          }
+        }
+
         resulting = {
           id: updated!.id,
           shortId: updated!.shortId,
@@ -1581,7 +1766,7 @@ export class EntryService {
           version: updated!.version,
           previousVersion: keep.version,
         }
-        embedId = updated!.id
+        embedIds.push(updated!.id)
       } else if (suggestion.kind === 'mark_stale') {
         const target = byId.get(suggestion.entryIds[0]!)!
         const changeSummary =
@@ -1608,6 +1793,239 @@ export class EntryService {
           createdAt: now,
         })
         resulting = null
+      } else if (suggestion.kind === 'link_entries') {
+        const target = byId.get(suggestion.entryIds[0]!)!
+        const rawLinks = overrides.proposedLinks ?? suggestion.proposedLinks ?? []
+        if (!rawLinks.length) {
+          throw new MemoryError(400, '补全双链建议未包含有效目标链接')
+        }
+        const targetShorts = [...new Set(rawLinks.map((l) => normalizeShortId(l.targetShortId)))]
+        const linkTargetRows = await tx
+          .select({
+            shortId: entries.shortId,
+            title: entries.title,
+            realms: entries.realms,
+            deletedAt: entries.deletedAt,
+            kind: entries.kind,
+          })
+          .from(entries)
+          .where(inArray(entries.shortId, targetShorts))
+        const linkTargetMap = new Map(linkTargetRows.map((r) => [r.shortId, r]))
+
+        const existingTargets = new Set(extractTargetShortIds(target.content))
+        let nextContent = target.content
+        const addedShortIds: string[] = []
+
+        for (const item of rawLinks) {
+          const sid = normalizeShortId(item.targetShortId)
+          if (!sid || sid === target.shortId || existingTargets.has(sid)) continue
+          const linkTarget = linkTargetMap.get(sid)
+          if (!linkTarget || linkTarget.deletedAt !== null || linkTarget.kind !== 'entry') continue
+          if (!canFlowRealmInto(target.realms, linkTarget.realms)) continue
+
+          const rawLabel = (item.relation?.trim() || linkTarget.title.trim())
+            .replace(/[[\]|\r\n]+/g, ' ')
+            .trim()
+          const wiki = rawLabel ? `[[${sid}|${rawLabel}]]` : `[[${sid}]]`
+          const reasonSuffix = item.reason?.trim() ? `：${item.reason.trim()}` : ''
+          const line = `- ${wiki}${reasonSuffix}`
+
+          const headings = extractMarkdownHeadings(nextContent)
+          const wantedHeading = item.anchorHeading?.replace(/^#{1,6}[ \t]+/, '').trim()
+          const matchedExplicit = wantedHeading
+            ? headings.find((h) => h.toLowerCase() === wantedHeading.toLowerCase())
+            : undefined
+          const relatedHeading = headings.find((h) => h === '相关记忆')
+
+          if (matchedExplicit) {
+            nextContent = applyMarkdownAppend(nextContent, line, matchedExplicit).content
+          } else if (relatedHeading) {
+            nextContent = applyMarkdownAppend(nextContent, line, relatedHeading).content
+          } else {
+            const base = nextContent.trimEnd()
+            nextContent = base ? `${base}\n\n## 相关记忆\n${line}` : `## 相关记忆\n${line}`
+          }
+          existingTargets.add(sid)
+          addedShortIds.push(sid)
+        }
+
+        if (!addedShortIds.length) {
+          throw new MemoryError(409, '建议的双链目标已存在、不可见或已被删除，无需重复追加')
+        }
+        if (nextContent.length > ENTRY_CONTENT_MAX) {
+          throw new MemoryError(400, `追加双链后正文超过 ${ENTRY_CONTENT_MAX} 字符上限`)
+        }
+
+        const changeSummary =
+          cleanOptionalText(overrides.changeSummary) ??
+          cleanOptionalText(suggestion.proposedChangeSummary) ??
+          `补全双链：${addedShortIds.map((s) => `[[${s}]]`).join('、')}`
+        const diffMeta = computeDiffMeta(target, {
+          kind: target.kind,
+          title: target.title,
+          summary: target.summary,
+          content: nextContent,
+          disclosure: target.disclosure,
+          isPinned: target.isPinned,
+          bootMode: target.bootMode,
+          envs: target.envs,
+          realms: target.realms,
+          projects: target.projects,
+          runtimes: target.runtimes,
+          topics: target.topics,
+          validTo: target.validTo,
+        })
+
+        const [updated] = await tx
+          .update(entries)
+          .set({
+            content: nextContent,
+            lastChangeSummary: changeSummary,
+            version: target.version + 1,
+            updatedAt: now,
+          })
+          .where(eq(entries.id, target.id))
+          .returning()
+
+        await syncEntryLinks(tx, updated!.id, updated!.shortId, updated!.content)
+        await tx.insert(entryEvents).values({
+          entryId: updated!.id,
+          eventType: 'update',
+          actor: 'dream',
+          changeSummary,
+          diffMeta,
+          snapshot: toSnapshot(updated!),
+          createdAt: now,
+        })
+
+        resulting = {
+          id: updated!.id,
+          shortId: updated!.shortId,
+          title: updated!.title,
+          version: updated!.version,
+          previousVersion: target.version,
+        }
+        embedIds.push(updated!.id)
+      } else if (suggestion.kind === 'adjust_boot_mode') {
+        const target = byId.get(suggestion.entryIds[0]!)!
+        const nextBootMode: BootMode =
+          target.kind === 'episode'
+            ? 'none'
+            : overrides.bootMode !== undefined
+              ? overrides.bootMode
+              : overrides.isPinned !== undefined
+                ? overrides.isPinned
+                  ? suggestion.proposedBootMode && suggestion.proposedBootMode !== 'none'
+                    ? suggestion.proposedBootMode
+                    : target.bootMode !== 'none'
+                      ? target.bootMode
+                      : 'full'
+                  : 'none'
+                : (suggestion.proposedBootMode ?? target.bootMode)
+        const nextIsPinned = bootModeToPinned(nextBootMode)
+        const nextContent = overrides.content ?? target.content
+        const nextTitle = deriveEntryTitle(
+          overrides.title ?? target.title,
+          nextContent,
+          target.shortId,
+        )
+        const nextSummary =
+          overrides.summary !== undefined
+            ? cleanOptionalText(overrides.summary)
+            : (cleanOptionalText(suggestion.proposedSummary) ?? target.summary)
+        const nextDisclosure =
+          overrides.disclosure !== undefined
+            ? cleanOptionalText(overrides.disclosure)
+            : target.disclosure
+        const nextTopics = overrides.topics ?? target.topics
+        const nextEnvs = overrides.envs ?? target.envs
+        const nextRealms = overrides.realms ?? target.realms
+        const nextProjects = overrides.projects ?? target.projects
+        const nextRuntimes = overrides.runtimes ?? target.runtimes
+        const searchTags = buildSearchTags({
+          shortId: target.shortId,
+          topics: nextTopics,
+          envs: nextEnvs,
+          realms: nextRealms,
+          projects: nextProjects,
+          runtimes: nextRuntimes,
+        })
+        const modeName: Record<BootMode, string> = {
+          none: '按需召回',
+          index: '目录常驻',
+          full: '全文常驻',
+        }
+        const changeSummary =
+          cleanOptionalText(overrides.changeSummary) ??
+          cleanOptionalText(suggestion.proposedChangeSummary) ??
+          `调整启动加载为${modeName[nextBootMode]}`
+        const diffMeta = computeDiffMeta(target, {
+          kind: target.kind,
+          title: nextTitle,
+          summary: nextSummary,
+          content: nextContent,
+          disclosure: nextDisclosure,
+          isPinned: nextIsPinned,
+          bootMode: nextBootMode,
+          envs: nextEnvs,
+          realms: nextRealms,
+          projects: nextProjects,
+          runtimes: nextRuntimes,
+          topics: nextTopics,
+          validTo: target.validTo,
+        })
+
+        const [updated] = await tx
+          .update(entries)
+          .set({
+            title: nextTitle,
+            summary: nextSummary,
+            content: nextContent,
+            disclosure: nextDisclosure,
+            bootMode: nextBootMode,
+            isPinned: nextIsPinned,
+            topics: nextTopics,
+            envs: nextEnvs,
+            realms: nextRealms,
+            projects: nextProjects,
+            runtimes: nextRuntimes,
+            searchTags,
+            lastChangeSummary: changeSummary,
+            version: target.version + 1,
+            updatedAt: now,
+          })
+          .where(eq(entries.id, target.id))
+          .returning()
+
+        if (nextContent !== target.content) {
+          await syncEntryLinks(tx, updated!.id, updated!.shortId, updated!.content)
+        }
+        await tx.insert(entryEvents).values({
+          entryId: updated!.id,
+          eventType: 'update',
+          actor: 'dream',
+          changeSummary,
+          diffMeta,
+          snapshot: toSnapshot(updated!),
+          createdAt: now,
+        })
+
+        resulting = {
+          id: updated!.id,
+          shortId: updated!.shortId,
+          title: updated!.title,
+          version: updated!.version,
+          previousVersion: target.version,
+        }
+        if (
+          nextTitle !== target.title ||
+          (nextSummary ?? null) !== (target.summary ?? null) ||
+          nextContent !== target.content ||
+          (nextDisclosure ?? null) !== (target.disclosure ?? null) ||
+          searchTags !== target.searchTags
+        ) {
+          embedIds.push(updated!.id)
+        }
       } else {
         // 同时处理 update 与 tidy（规范与精简）
         const target = byId.get(suggestion.entryIds[0]!)!
@@ -1629,11 +2047,28 @@ export class EntryService {
           cleanOptionalText(overrides.changeSummary) ??
           cleanOptionalText(suggestion.proposedChangeSummary) ??
           (suggestion.kind === 'tidy' ? '规范标题与结构并归档历史说明' : '根据整理建议更新内容')
-        const topics = overrides.topics ?? suggestion.proposedTopics ?? target.topics
-        const envs = overrides.envs ?? suggestion.proposedEnvs ?? target.envs
-        const realms = overrides.realms ?? suggestion.proposedRealms ?? target.realms
-        const projects = overrides.projects ?? suggestion.proposedProjects ?? target.projects
-        const runtimes = overrides.runtimes ?? suggestion.proposedRuntimes ?? target.runtimes
+        const topics =
+          overrides.topics ??
+          (suggestion.proposedTopics?.length ? suggestion.proposedTopics : null) ??
+          target.topics
+        const envs =
+          overrides.envs ??
+          (suggestion.proposedEnvs?.length ? suggestion.proposedEnvs : null) ??
+          target.envs
+        const safeProposedRealms =
+          suggestion.proposedRealms?.length &&
+          canFlowRealmInto(suggestion.proposedRealms, target.realms)
+            ? suggestion.proposedRealms
+            : null
+        const realms = overrides.realms ?? safeProposedRealms ?? target.realms
+        const projects =
+          overrides.projects ??
+          (suggestion.proposedProjects?.length ? suggestion.proposedProjects : null) ??
+          target.projects
+        const runtimes =
+          overrides.runtimes ??
+          (suggestion.proposedRuntimes?.length ? suggestion.proposedRuntimes : null) ??
+          target.runtimes
         const bootMode: BootMode =
           target.kind === 'episode'
             ? 'none'
@@ -1735,7 +2170,7 @@ export class EntryService {
           version: updated!.version,
           previousVersion: target.version,
         }
-        embedId = updated!.kind === 'entry' ? updated!.id : null
+        if (updated!.kind === 'entry') embedIds.push(updated!.id)
       }
 
       await tx
@@ -1743,11 +2178,17 @@ export class EntryService {
         .set({ status: 'applied', decidedAt: now })
         .where(eq(dreamSuggestions.id, suggestion.id))
 
-      return { response: { entry: resulting }, embedId }
+      return {
+        response: {
+          entry: resulting,
+          ...(redirectedBacklinkCount > 0 ? { redirectedBacklinkCount } : {}),
+        },
+        embedIds,
+      }
     })
 
-    if (result.embedId) {
-      this.jobs?.enqueueEmbed(result.embedId)
+    for (const id of result.embedIds) {
+      this.jobs?.enqueueEmbed(id)
     }
     return result.response
   }
@@ -1783,6 +2224,171 @@ export class EntryService {
 
   async applyHygieneSweep(request: { shortIds?: string[] | undefined } = {}) {
     return runHygieneSweepApply(this.db, this.jobs, request)
+  }
+
+  async previewSingleTidy(
+    shortId: string,
+    options?: PreviewSingleTidyOptions,
+  ): Promise<SingleTidyPreviewResponse> {
+    return runPreviewSingleTidy(this.db, this.masterKey, shortId, options)
+  }
+
+  async applySingleTidy(
+    scope: AccessScope,
+    shortId: string,
+    input: SingleTidyApplyRequest,
+  ): Promise<SingleTidyApplyResponse> {
+    const outcome = await withTx(this.db, async (tx, now) => {
+      const existing = await this.findByIdOrTitle(tx, scope, shortId)
+      if (!existing) throw new MemoryError(404, '词条不存在或不可见')
+      if (existing.kind !== 'entry') {
+        throw new MemoryError(400, '会话摘要不支持直接规范整理')
+      }
+      if (existing.version !== input.expectedVersion) {
+        throw new MemoryError(
+          409,
+          `版本冲突：当前版本为 ${existing.version}，请重新生成规范预览后再应用`,
+          'version_conflict',
+        )
+      }
+
+      const nextTitle = deriveEntryTitle(input.title, input.content, existing.shortId)
+      const nextSummary = cleanOptionalText(input.summary)
+      const nextContent = input.content
+      const changeSummary =
+        cleanOptionalText(input.changeSummary) ?? '主动规范标题与结构并归档历史说明'
+      const archivedNotes = input.archivedNotes ?? []
+
+      if (input.stageToInbox) {
+        // 复用标准 tidy 指纹并支持同版本重复暂存平滑覆盖，避免唯一键冲突或与批量规范重复入队
+        const fingerprint = suggestionFingerprint('tidy', [existing.id], [existing.version])
+        const stagedReason = cleanOptionalText(input.reason) ?? '由编辑页主动规范暂存至待处理'
+        const [staged] = await tx
+          .insert(dreamSuggestions)
+          .values({
+            kind: 'tidy',
+            entryIds: [existing.id],
+            entryVersions: [existing.version],
+            keepId: null,
+            proposedTitle: nextTitle,
+            proposedSummary: nextSummary,
+            proposedContent: nextContent,
+            proposedDisclosure: null,
+            proposedChangeSummary: changeSummary,
+            archivedNotes: archivedNotes.length ? archivedNotes : null,
+            proposedTopics: null,
+            proposedEnvs: null,
+            proposedRealms: null,
+            proposedProjects: null,
+            proposedRuntimes: null,
+            proposedLinks: null,
+            proposedBootMode: null,
+            reason: stagedReason,
+            fingerprint,
+            status: 'pending',
+            createdAt: now,
+          })
+          .onConflictDoUpdate({
+            target: dreamSuggestions.fingerprint,
+            set: {
+              proposedTitle: nextTitle,
+              proposedSummary: nextSummary,
+              proposedContent: nextContent,
+              proposedChangeSummary: changeSummary,
+              archivedNotes: archivedNotes.length ? archivedNotes : null,
+              reason: stagedReason,
+              status: 'pending',
+              decidedAt: null,
+              createdAt: now,
+            },
+          })
+          .returning({ id: dreamSuggestions.id })
+        return {
+          response: {
+            stagedSuggestionId: staged!.id,
+            entry: null,
+          } satisfies SingleTidyApplyResponse,
+          embedId: null as string | null,
+        }
+      }
+
+      const diffMeta = computeDiffMeta(existing, {
+        kind: existing.kind,
+        title: nextTitle,
+        summary: nextSummary,
+        content: nextContent,
+        disclosure: existing.disclosure,
+        isPinned: existing.isPinned,
+        bootMode: existing.bootMode,
+        envs: existing.envs,
+        realms: existing.realms,
+        projects: existing.projects,
+        runtimes: existing.runtimes,
+        topics: existing.topics,
+        validTo: existing.validTo,
+      })
+
+      if (input.applyArchivedNotes !== false && archivedNotes.length) {
+        const beforeSnap = toSnapshot(existing)
+        for (const item of archivedNotes) {
+          const noteText = item.note.trim()
+          if (!noteText) continue
+          const occurredAt = item.occurredAt ? new Date(item.occurredAt) : null
+          await tx.insert(entryEvents).values({
+            entryId: existing.id,
+            eventType: 'archive_note',
+            actor: actorLabel(scope),
+            changeSummary: noteText,
+            occurredAt: occurredAt && !Number.isNaN(occurredAt.getTime()) ? occurredAt : null,
+            snapshot: beforeSnap,
+            createdAt: now,
+          })
+        }
+      }
+
+      const [updated] = await tx
+        .update(entries)
+        .set({
+          title: nextTitle,
+          summary: nextSummary,
+          content: nextContent,
+          lastChangeSummary: changeSummary,
+          version: existing.version + 1,
+          updatedAt: now,
+        })
+        .where(and(eq(entries.id, existing.id), eq(entries.version, existing.version)))
+        .returning()
+      if (!updated) {
+        throw new MemoryError(409, '版本冲突：词条已被并发修改，请刷新后再试', 'version_conflict')
+      }
+
+      await syncEntryLinks(tx, updated.id, updated.shortId, updated.content)
+      await tx.insert(entryEvents).values({
+        entryId: updated.id,
+        eventType: 'update',
+        actor: actorLabel(scope),
+        changeSummary,
+        diffMeta,
+        snapshot: toSnapshot(updated),
+        createdAt: now,
+      })
+
+      const detail = await this.hydrateDetail(tx, scope, updated)
+      return {
+        response: { stagedSuggestionId: null, entry: detail } satisfies SingleTidyApplyResponse,
+        embedId: updated.id,
+      }
+    })
+
+    if (outcome.embedId) this.jobs?.enqueueEmbed(outcome.embedId)
+    return outcome.response
+  }
+
+  async crossCheckEntry(
+    shortId: string,
+    options?: { signal?: AbortSignal | undefined },
+  ): Promise<SingleCrossCheckResponse> {
+    return runSingleCrossCheck(this.db, this.masterKey, shortId, options)
   }
 
   async previewBoot(input: BootPreviewRequest): Promise<BootPreviewResponse> {

@@ -7,6 +7,7 @@ import type {
   EntryEventType,
   EntryKind,
   EntrySnapshot,
+  ProposedLinkItem,
   RuntimeFamily,
 } from '@kioku/contracts'
 import { sql } from 'drizzle-orm'
@@ -333,6 +334,8 @@ export const dreamSuggestions = pgTable(
     proposedRealms: text().array(),
     proposedProjects: text().array(),
     proposedRuntimes: text().array(),
+    proposedLinks: jsonb().$type<ProposedLinkItem[] | null>(),
+    proposedBootMode: text().$type<BootMode | null>(),
     reason: text().notNull(),
     fingerprint: text().notNull().unique(),
     status: text().$type<DreamSuggestionStatus>().notNull().default('pending'),
@@ -343,7 +346,11 @@ export const dreamSuggestions = pgTable(
     index('dream_suggestions_status_idx').on(t.status, t.createdAt),
     check(
       'dream_suggestions_kind_check',
-      sql`${t.kind} in ('distill_episode', 'merge_duplicates', 'mark_stale', 'update', 'tidy')`,
+      sql`${t.kind} in ('distill_episode', 'merge_duplicates', 'mark_stale', 'update', 'tidy', 'link_entries', 'adjust_boot_mode')`,
+    ),
+    check(
+      'dream_suggestions_boot_mode_check',
+      sql`${t.proposedBootMode} is null or ${t.proposedBootMode} in ('none', 'index', 'full')`,
     ),
     check('dream_suggestions_status_check', sql`${t.status} in ('pending', 'applied', 'rejected')`),
     check(

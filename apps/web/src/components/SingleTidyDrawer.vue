@@ -1,0 +1,746 @@
+<script setup lang="ts">
+import {
+  type ApplySuggestionRequest,
+  type EntryDetailResponse,
+  type SingleCrossCheckResponse,
+  type SingleTidyPreviewResponse,
+} from '@kioku/contracts'
+import { useToast } from '@nuxt/ui/composables'
+import { useQueryClient } from '@tanstack/vue-query'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+
+import { ApiError } from '../api/client'
+import { api } from '../api/endpoints'
+import { icons } from '../icons'
+import { hygieneFixLabels } from '../labels'
+import { formatShort } from '../time'
+import DreamSuggestionCard from './DreamSuggestionCard.vue'
+import DiffViewer from './ui/DiffViewer.vue'
+import EmptyState from './ui/EmptyState.vue'
+import NoteLine from './ui/NoteLine.vue'
+
+export type SingleOrganizeMode = 'tidy' | 'cross_check'
+
+const props = defineProps<{
+  shortId: string
+  entryTitle: string
+  mode: SingleOrganizeMode
+}>()
+
+const open = defineModel<boolean>('open', { required: true })
+const emit = defineEmits<{
+  applied: [detail: EntryDetailResponse]
+  staged: []
+}>()
+
+const toast = useToast()
+const queryClient = useQueryClient()
+
+const loading = ref(false)
+const stageMessage = ref('')
+const error = ref<string | null>(null)
+const tidyResult = ref<SingleTidyPreviewResponse | null>(null)
+const crossResult = ref<SingleCrossCheckResponse | null>(null)
+const applying = ref(false)
+const staging = ref(false)
+const cardBusyId = ref<string | null>(null)
+
+const parts = reactive({
+  title: true,
+  summary: true,
+  content: true,
+  archivedNotes: true,
+})
+
+let controller: AbortController | null = null
+
+function abortInFlight() {
+  if (controller) {
+    controller.abort()
+    controller = null
+  }
+}
+
+function resetState() {
+  error.value = null
+  tidyResult.value = null
+  crossResult.value = null
+  stageMessage.value = ''
+  parts.title = true
+  parts.summary = true
+  parts.content = true
+  parts.archivedNotes = true
+}
+
+async function runAction() {
+  abortInFlight()
+  resetState()
+  loading.value = true
+  controller = new AbortController()
+  const signal = controller.signal
+
+  try {
+    if (props.mode === 'tidy') {
+      stageMessage.value = '正在准备规范整理…'
+      const res = await api.previewSingleTidy(props.shortId, {
+        signal,
+        onStage: (_stage, msg) => {
+          stageMessage.value = msg
+        },
+      })
+      if (!signal.aborted) tidyResult.value = res
+    } else {
+      stageMessage.value = '正在检索相似记忆、双链邻居与断链并交由模型核查…'
+      const res = await api.crossCheckEntry(props.shortId, signal)
+      if (!signal.aborted) {
+        crossResult.value = res
+        void queryClient.invalidateQueries({ queryKey: ['inbox'] })
+        void queryClient.invalidateQueries({ queryKey: ['entry', props.shortId] })
+      }
+    }
+  } catch (err) {
+    if (signal.aborted || (err instanceof Error && err.name === 'AbortError')) return
+    error.value = err instanceof ApiError ? err.message : '执行整理失败，请稍后重试'
+  } finally {
+    if (controller?.signal === signal) {
+      controller = null
+      loading.value = false
+    }
+  }
+}
+
+watch(
+  [open, () => props.shortId, () => props.mode],
+  ([isOpen]) => {
+    if (isOpen) {
+      void runAction()
+    } else {
+      abortInFlight()
+    }
+  },
+  { immediate: true },
+)
+
+onBeforeUnmount(() => abortInFlight())
+
+function cancelRun() {
+  abortInFlight()
+  loading.value = false
+  open.value = false
+}
+
+const hasTitleChange = computed(
+  () =>
+    Boolean(tidyResult.value) &&
+    tidyResult.value!.proposed.title !== tidyResult.value!.before.title,
+)
+const hasSummaryChange = computed(
+  () =>
+    Boolean(tidyResult.value) &&
+    (tidyResult.value!.proposed.summary ?? '') !== (tidyResult.value!.before.summary ?? ''),
+)
+const hasContentChange = computed(
+  () =>
+    Boolean(tidyResult.value) &&
+    tidyResult.value!.proposed.content !== tidyResult.value!.before.content,
+)
+const hasArchivedNotes = computed(() => Boolean(tidyResult.value?.proposed.archivedNotes.length))
+
+const anySelected = computed(
+  () =>
+    (hasTitleChange.value && parts.title) ||
+    (hasSummaryChange.value && parts.summary) ||
+    (hasContentChange.value && parts.content) ||
+    (hasArchivedNotes.value && parts.content && parts.archivedNotes),
+)
+
+const lengthDelta = computed(() => {
+  const res = tidyResult.value
+  if (!res) return null
+  const before = res.before.content.length
+  const after = parts.content ? res.proposed.content.length : before
+  const diff = after - before
+  const pct = before > 0 ? Math.round((diff / before) * 100) : 0
+  const sign = diff > 0 ? '+' : diff < 0 ? '−' : ''
+  return { before, after, text: `${sign}${Math.abs(pct)}%` }
+})
+
+async function submitSingleTidy(stageToInbox: boolean) {
+  const res = tidyResult.value
+  if (!res || applying.value || staging.value || !anySelected.value) return
+  if (stageToInbox) staging.value = true
+  else applying.value = true
+  error.value = null
+  try {
+    const applyTitle = hasTitleChange.value && parts.title
+    const applySummary = hasSummaryChange.value && parts.summary
+    const applyContent = hasContentChange.value && parts.content
+    const nextTitle = applyTitle ? res.proposed.title : res.before.title
+    const nextSummary = applySummary ? res.proposed.summary : res.before.summary
+    const nextContent = applyContent ? res.proposed.content : res.before.content
+    const applyArchived = parts.content && parts.archivedNotes && hasArchivedNotes.value
+    const effectiveChangeSummary = applyContent
+      ? res.proposed.changeSummary || '主动规范标题与结构'
+      : [applyTitle ? '规范标题' : '', applySummary ? '更新现行概要' : '']
+          .filter(Boolean)
+          .join('并') || '主动规范记忆'
+    const out = await api.applySingleTidy(props.shortId, {
+      expectedVersion: res.baseVersion,
+      title: nextTitle,
+      summary: nextSummary,
+      content: nextContent,
+      changeSummary: effectiveChangeSummary,
+      archivedNotes: applyArchived ? res.proposed.archivedNotes : [],
+      applyArchivedNotes: applyArchived,
+      stageToInbox,
+      reason: res.reason,
+    })
+    if (stageToInbox) {
+      toast.add({ title: '已暂存至待处理，可稍后统一审阅', color: 'success' })
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['inbox'] }),
+        queryClient.invalidateQueries({ queryKey: ['entry', props.shortId] }),
+      ])
+      emit('staged')
+      open.value = false
+    } else if (out.entry) {
+      toast.add({ title: '已应用规范整理并保留原版本历史', color: 'success' })
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['entries'] }),
+        queryClient.invalidateQueries({ queryKey: ['entry-history', props.shortId] }),
+        queryClient.invalidateQueries({ queryKey: ['inbox'] }),
+        queryClient.invalidateQueries({ queryKey: ['boot-preview'] }),
+      ])
+      emit('applied', out.entry)
+      open.value = false
+    }
+  } catch (err) {
+    error.value = err instanceof ApiError ? err.message : '应用失败，请重试'
+  } finally {
+    applying.value = false
+    staging.value = false
+  }
+}
+
+async function onApplyCrossSuggestion(id: string, body: ApplySuggestionRequest) {
+  if (cardBusyId.value) return
+  const suggestion = crossResult.value?.suggestions.find((s) => s.id === id)
+  cardBusyId.value = id
+  try {
+    const res = await api.applySuggestion(id, body)
+    const redirectSuffix = res.redirectedBacklinkCount
+      ? `，并自动重定向 ${res.redirectedBacklinkCount} 条引用双链`
+      : ''
+    toast.add({
+      title: res.entry
+        ? `已应用到「${res.entry.title}」${redirectSuffix}`
+        : `已应用建议${redirectSuffix}`,
+      color: 'success',
+    })
+    if (crossResult.value) {
+      crossResult.value = {
+        ...crossResult.value,
+        suggestions: crossResult.value.suggestions.filter((s) => s.id !== id),
+      }
+    }
+    const affectedShortIds = new Set<string>([
+      props.shortId,
+      ...(res.entry ? [res.entry.shortId] : []),
+      ...(suggestion?.entries.map((e) => e.shortId) ?? []),
+      ...(suggestion?.proposedLinks?.map((l) => l.targetShortId) ?? []),
+    ])
+    const redirectedAny = (res.redirectedBacklinkCount ?? 0) > 0
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['inbox'] }),
+      queryClient.invalidateQueries({ queryKey: ['entries'] }),
+      queryClient.invalidateQueries({ queryKey: ['boot-preview'] }),
+      ...(redirectedAny
+        ? [
+            queryClient.invalidateQueries({ queryKey: ['entry'] }),
+            queryClient.invalidateQueries({ queryKey: ['entry-history'] }),
+          ]
+        : [...affectedShortIds].flatMap((sid) => [
+            queryClient.invalidateQueries({ queryKey: ['entry', sid] }),
+            queryClient.invalidateQueries({ queryKey: ['entry-history', sid] }),
+          ])),
+    ])
+  } catch (err) {
+    toast.add({ title: err instanceof ApiError ? err.message : '应用失败', color: 'error' })
+  } finally {
+    cardBusyId.value = null
+  }
+}
+
+async function onDismissCrossSuggestion(id: string) {
+  if (cardBusyId.value) return
+  cardBusyId.value = id
+  try {
+    await api.dismissSuggestion(id)
+    toast.add({ title: '已忽略建议', color: 'neutral' })
+    if (crossResult.value) {
+      crossResult.value = {
+        ...crossResult.value,
+        suggestions: crossResult.value.suggestions.filter((s) => s.id !== id),
+      }
+    }
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['inbox'] }),
+      queryClient.invalidateQueries({ queryKey: ['entry', props.shortId] }),
+    ])
+  } catch (err) {
+    toast.add({ title: err instanceof ApiError ? err.message : '忽略失败', color: 'error' })
+  } finally {
+    cardBusyId.value = null
+  }
+}
+
+const drawerTitle = computed(() => (props.mode === 'tidy' ? '规范此条记忆' : '查找重复与关联记忆'))
+const drawerDescription = computed(() =>
+  props.mode === 'tidy'
+    ? `对「${props.entryTitle}」执行确定性预清洗与单条规范重构，确认后才写入记忆`
+    : `以「${props.entryTitle}」为锚点检视相似重复、事实冲突与缺失双链`,
+)
+</script>
+
+<template>
+  <USlideover
+    :open="open"
+    side="right"
+    :title="drawerTitle"
+    :description="drawerDescription"
+    :dismissible="!applying && !staging"
+    :close="!applying && !staging"
+    :ui="{ content: 'w-[min(94vw,960px)] max-w-[960px] sm:max-w-[960px] ring-2 ring-rule' }"
+    @update:open="(v) => !applying && !staging && (open = v)"
+  >
+    <template #body>
+      <div class="drawer-body">
+        <div v-if="loading" class="progress-panel" role="status" aria-live="polite">
+          <div class="progress-head">
+            <span class="progress-title">{{ stageMessage || '正在执行整理…' }}</span>
+            <UButton
+              size="xs"
+              color="neutral"
+              variant="outline"
+              :icon="icons.cancel"
+              @click="cancelRun"
+            >
+              取消
+            </UButton>
+          </div>
+          <USkeleton class="h-10 w-full" />
+          <USkeleton class="h-44 w-full" />
+        </div>
+
+        <NoteLine v-else-if="error" tone="error">
+          {{ error }}
+          <template #actions>
+            <UButton
+              size="xs"
+              color="neutral"
+              variant="outline"
+              :icon="icons.refresh"
+              @click="runAction"
+            >
+              重试
+            </UButton>
+          </template>
+        </NoteLine>
+
+        <!-- 模式 1：单条快速规范 -->
+        <template v-else-if="mode === 'tidy' && tidyResult">
+          <EmptyState
+            v-if="!tidyResult.needed"
+            title="当前记忆结构良好"
+            :description="tidyResult.reason"
+          />
+
+          <template v-else>
+            <p class="reason-line">{{ tidyResult.reason }}</p>
+
+            <div v-if="tidyResult.preCleanedFixes.length" class="fix-strip">
+              <span class="strip-label">已叠加确定性预清洗</span>
+              <span v-for="fix in tidyResult.preCleanedFixes" :key="fix" class="fix-pill">
+                {{ hygieneFixLabels[fix] }}
+              </span>
+            </div>
+
+            <div class="partial-bar" role="group" aria-label="选择要应用的规范改动">
+              <span class="strip-label">勾选需要应用的改动</span>
+              <div class="partial-checks">
+                <label v-if="hasTitleChange" class="part-check">
+                  <input v-model="parts.title" type="checkbox" :disabled="applying || staging" />
+                  <span>规范标题</span>
+                </label>
+                <label v-if="hasSummaryChange" class="part-check">
+                  <input v-model="parts.summary" type="checkbox" :disabled="applying || staging" />
+                  <span>更新现行概要</span>
+                </label>
+                <label v-if="hasContentChange" class="part-check">
+                  <input v-model="parts.content" type="checkbox" :disabled="applying || staging" />
+                  <span>规范正文</span>
+                </label>
+                <label v-if="hasArchivedNotes && parts.content" class="part-check">
+                  <input
+                    v-model="parts.archivedNotes"
+                    type="checkbox"
+                    :disabled="applying || staging"
+                  />
+                  <span
+                    >将剥离的
+                    {{ tidyResult.proposed.archivedNotes.length }} 条历史说明记入版本历史</span
+                  >
+                </label>
+              </div>
+            </div>
+
+            <div v-if="hasTitleChange && parts.title" class="title-compare">
+              <span class="strip-label">标题调整</span>
+              <span class="compare-old">{{ tidyResult.before.title }}</span>
+              <UIcon :name="icons.inherits" class="compare-arrow" aria-hidden="true" />
+              <span class="compare-new">{{ tidyResult.proposed.title }}</span>
+            </div>
+
+            <div
+              v-if="hasSummaryChange && parts.summary && tidyResult.proposed.summary"
+              class="summary-box"
+            >
+              <span class="strip-label">建议现行概要</span>
+              <p class="summary-text">{{ tidyResult.proposed.summary }}</p>
+            </div>
+
+            <div
+              class="guard-strip tabular-nums"
+              :class="{
+                'is-alert':
+                  tidyResult.integrity.missingLinks.length > 0 ||
+                  tidyResult.integrity.missingCreds.length > 0,
+                'is-warn': tidyResult.integrity.severeShrink,
+              }"
+            >
+              <span class="guard-status">
+                <UIcon
+                  :name="tidyResult.integrity.severeShrink ? icons.warning : icons.check"
+                  class="guard-icon"
+                  aria-hidden="true"
+                />
+                {{
+                  tidyResult.integrity.severeShrink
+                    ? '正文篇幅缩减较大，请核对已归档历史说明与下方对比'
+                    : '双链与凭据占位符完整'
+                }}
+              </span>
+              <span class="guard-meta">
+                双链 {{ tidyResult.integrity.linksBefore }} → {{ tidyResult.integrity.linksAfter }}
+              </span>
+              <span class="guard-meta">
+                凭据 {{ tidyResult.integrity.credsBefore }} → {{ tidyResult.integrity.credsAfter }}
+              </span>
+              <span v-if="lengthDelta" class="guard-meta">
+                篇幅 {{ lengthDelta.before.toLocaleString() }} →
+                {{ lengthDelta.after.toLocaleString() }} 字（{{ lengthDelta.text }}）
+              </span>
+            </div>
+
+            <DiffViewer
+              v-if="hasContentChange && parts.content"
+              :before="tidyResult.before.content"
+              :after="tidyResult.proposed.content"
+              :context="3"
+              :expand-step="10"
+              max-height="26rem"
+            />
+
+            <details
+              v-if="hasArchivedNotes && parts.content && parts.archivedNotes"
+              class="archived-box"
+            >
+              <summary class="archived-head">
+                将写入版本历史的归档说明（{{ tidyResult.proposed.archivedNotes.length }} 条）
+              </summary>
+              <ul class="archived-list">
+                <li v-for="(item, idx) in tidyResult.proposed.archivedNotes" :key="idx">
+                  <span v-if="item.occurredAt" class="archived-date font-mono">
+                    {{ formatShort(item.occurredAt) }}
+                  </span>
+                  <span>{{ item.note }}</span>
+                </li>
+              </ul>
+            </details>
+
+            <p class="text-xs text-muted">
+              原有完整内容会保留在版本历史中，可随时恢复；应用前会校验版本
+              {{ tidyResult.baseVersion }} 防止并发覆盖。
+            </p>
+          </template>
+        </template>
+
+        <!-- 模式 2：单条深度查重与关联 -->
+        <template v-else-if="mode === 'cross_check' && crossResult">
+          <div class="cross-meta tabular-nums">
+            <span>
+              已比对 {{ crossResult.consideredNeighbors }} 条相邻记忆，本次新发现
+              {{ crossResult.createdCount }} 条建议
+            </span>
+            <UButton
+              size="xs"
+              color="neutral"
+              variant="ghost"
+              :icon="icons.refresh"
+              @click="runAction"
+            >
+              重新扫描
+            </UButton>
+          </div>
+
+          <EmptyState
+            v-if="!crossResult.suggestions.length"
+            title="未发现需要处理的重复或缺失关联"
+            description="该记忆与相邻记忆界限清晰，暂无需合并、更新或补全双链。"
+          />
+
+          <div v-else class="space-y-4">
+            <DreamSuggestionCard
+              v-for="item in crossResult.suggestions"
+              :key="item.id"
+              :suggestion="item"
+              :busy="cardBusyId === item.id"
+              :disabled="cardBusyId !== null && cardBusyId !== item.id"
+              @apply="onApplyCrossSuggestion"
+              @dismiss="onDismissCrossSuggestion"
+            />
+          </div>
+        </template>
+      </div>
+    </template>
+
+    <template v-if="mode === 'tidy' && tidyResult?.needed && !loading" #footer>
+      <div class="drawer-foot">
+        <UButton
+          size="sm"
+          color="neutral"
+          variant="ghost"
+          :icon="icons.refresh"
+          :disabled="applying || staging"
+          @click="runAction"
+        >
+          重新生成
+        </UButton>
+        <div class="foot-actions">
+          <UButton
+            size="sm"
+            color="neutral"
+            variant="outline"
+            :loading="staging"
+            :disabled="applying || !anySelected"
+            @click="submitSingleTidy(true)"
+          >
+            暂存至待处理
+          </UButton>
+          <UButton
+            size="sm"
+            :icon="icons.check"
+            :loading="applying"
+            :disabled="staging || !anySelected"
+            @click="submitSingleTidy(false)"
+          >
+            应用改动
+          </UButton>
+        </div>
+      </div>
+    </template>
+  </USlideover>
+</template>
+
+<style scoped>
+.drawer-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.progress-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--ui-border-accented);
+  background: var(--ui-bg-muted);
+}
+.progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.progress-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ui-text-highlighted);
+}
+.reason-line {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--ui-text);
+}
+.fix-strip,
+.partial-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--ui-border);
+  background: var(--ui-bg-muted);
+  font-size: 13px;
+}
+.strip-label {
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.fix-pill {
+  padding: 1px 6px;
+  border: 1px solid var(--ui-border-accented);
+  background: var(--ui-bg);
+  font-size: 12px;
+  color: var(--ui-text-toned);
+}
+.partial-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+}
+.part-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+.part-check input[type='checkbox'] {
+  accent-color: var(--ui-primary);
+}
+.title-compare {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 8px;
+  padding: 8px 12px;
+  border-left: 3px solid var(--ui-rule);
+  background: var(--ui-bg-muted);
+  font-size: 14px;
+}
+.compare-old {
+  color: var(--ui-text-muted);
+  text-decoration: line-through;
+}
+.compare-arrow {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  color: var(--ui-text-dimmed);
+}
+.compare-new {
+  font-weight: 600;
+  color: var(--ui-text-highlighted);
+}
+.summary-box {
+  padding: 8px 12px;
+  border-left: 3px solid var(--ui-rule);
+  background: var(--ui-bg-muted);
+}
+.summary-text {
+  margin-top: 2px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ui-text-highlighted);
+}
+.guard-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+  padding: 6px 10px;
+  border: 1px solid var(--ui-border-accented);
+  background: var(--ui-bg);
+  font-size: 12px;
+}
+.guard-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 500;
+  color: var(--ui-success);
+}
+.guard-meta {
+  color: var(--ui-text-muted);
+}
+.guard-strip.is-warn {
+  border-color: var(--ui-warning);
+  background: color-mix(in srgb, var(--ui-warning) 6%, var(--ui-bg));
+}
+.guard-strip.is-warn .guard-status {
+  color: var(--ui-warning);
+}
+.guard-strip.is-alert {
+  border-color: var(--ui-error);
+  background: color-mix(in srgb, var(--ui-error) 6%, var(--ui-bg));
+}
+.guard-strip.is-alert .guard-status,
+.guard-strip.is-alert .guard-meta {
+  color: var(--ui-error);
+}
+.guard-icon {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+}
+.archived-box {
+  border: 1px solid var(--ui-border);
+  background: var(--ui-bg-muted);
+  font-size: 13px;
+}
+.archived-head {
+  padding: 7px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ui-text-toned);
+  cursor: pointer;
+}
+.archived-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px 10px;
+  border-top: 1px solid var(--ui-border);
+  background: var(--ui-bg);
+}
+.archived-date {
+  margin-right: 8px;
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.cross-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--ui-border);
+  background: var(--ui-bg-muted);
+  font-size: 13px;
+  color: var(--ui-text-toned);
+}
+.drawer-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+}
+.foot-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+</style>

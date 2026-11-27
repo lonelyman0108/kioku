@@ -38,6 +38,7 @@ const candidates = computed<HygieneSweepCandidate[]>(
 )
 const suspectTruncated = computed(() => report.value?.suspectTruncated ?? [])
 const suspectObsolete = computed(() => report.value?.suspectObsolete ?? [])
+const brokenLinks = computed(() => report.value?.brokenLinks ?? [])
 
 const selectedShortIds = ref<string[]>([])
 const selectionInitialized = ref(false)
@@ -50,6 +51,7 @@ const previewErrors = ref<Record<string, string>>({})
 const candidatesSectionRef = ref<HTMLElement | null>(null)
 const truncatedSectionRef = ref<HTMLElement | null>(null)
 const obsoleteSectionRef = ref<HTMLElement | null>(null)
+const brokenLinksSectionRef = ref<HTMLElement | null>(null)
 let previewEpoch = 0
 
 function resetPreviewCache() {
@@ -206,7 +208,8 @@ const isClean = computed(
     Boolean(report.value) &&
     candidates.value.length === 0 &&
     suspectTruncated.value.length === 0 &&
-    suspectObsolete.value.length === 0,
+    suspectObsolete.value.length === 0 &&
+    brokenLinks.value.length === 0,
 )
 
 async function applySelected() {
@@ -305,6 +308,19 @@ async function applySelected() {
           </button>
           <div v-else class="stat-cell">
             <span class="stat-label">异常标注</span>
+            <span class="stat-val">0 条</span>
+          </div>
+          <button
+            v-if="brokenLinks.length"
+            type="button"
+            class="stat-cell is-clickable"
+            @click="jumpToSection(brokenLinksSectionRef)"
+          >
+            <span class="stat-label">悬空断链</span>
+            <span class="stat-val text-warning">{{ brokenLinks.length }} 条</span>
+          </button>
+          <div v-else class="stat-cell">
+            <span class="stat-label">悬空断链</span>
             <span class="stat-val">0 条</span>
           </div>
         </div>
@@ -489,6 +505,41 @@ async function applySelected() {
                 </span>
               </div>
               <p class="flag-reason">{{ flag.reason }}</p>
+            </li>
+          </ul>
+        </section>
+        <!-- 悬空断链记忆 -->
+        <section v-if="brokenLinks.length" ref="brokenLinksSectionRef" class="sweep-section">
+          <SectionHeading title="悬空断链记忆" :level="3" />
+          <p class="text-xs text-muted">
+            以下记忆中的双链指向已移入回收站或不存在的目标，可前往编辑移除或通过「全库查重与关联」建议重连。
+          </p>
+          <ul class="flag-list">
+            <li v-for="item in brokenLinks" :key="item.shortId" class="flag-item is-warning">
+              <div class="flag-head">
+                <RouterLink
+                  :to="entryRoute(item.shortId)"
+                  class="text-primary font-medium"
+                  @click="open = false"
+                >
+                  {{ item.title }}
+                </RouterLink>
+                <span class="sweep-meta tabular-nums">
+                  <span class="font-mono">{{ item.shortId }}</span>
+                  <span v-if="item.isPinned" class="mini-pill">常驻</span>
+                  <span>{{ item.targets.length }} 处断链</span>
+                </span>
+              </div>
+              <p class="flag-reason font-mono">
+                {{
+                  item.targets
+                    .map(
+                      (t) =>
+                        `[[${t.targetShortId}]]（${t.status === 'deleted' ? `已删除：${t.targetTitle ?? ''}` : '不存在'}）`,
+                    )
+                    .join('；')
+                }}
+              </p>
             </li>
           </ul>
         </section>

@@ -11,6 +11,7 @@ import memoryHistoryDrawer from '../components/MemoryHistoryDrawer.vue?raw'
 import memoryList from '../components/MemoryList.vue?raw'
 import quickCaptureModal from '../components/QuickCaptureModal.vue?raw'
 import sceneScopePicker from '../components/SceneScopePicker.vue?raw'
+import singleTidyDrawer from '../components/SingleTidyDrawer.vue?raw'
 import diffViewer from '../components/ui/DiffViewer.vue?raw'
 import consoleSearch from '../composables/useConsoleSearch.ts?raw'
 import { icons } from '../icons'
@@ -203,6 +204,38 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(hygieneSweepDrawer).toContain('api.applyHygieneSweep')
     expect(hygieneSweepDrawer).toContain('疑似残缺记忆')
     expect(hygieneSweepDrawer).toContain('疑似过时记忆')
+    expect(hygieneSweepDrawer).toContain('悬空断链')
+    expect(hygieneSweepDrawer).toContain('brokenLinks')
+  })
+
+  it('具备跨记忆全库查重与关联、反链提示、单条主动整理抽屉与列表轻量批量整理', () => {
+    expect(inboxPage).toContain('全库查重与关联')
+    expect(inboxPage).toContain("mode: 'cross_memory'")
+    expect(inboxPage).toContain('redirectedBacklinkCount')
+    expect(inboxPage).toContain('link_entries')
+    expect(inboxPage).toContain('adjust_boot_mode')
+
+    expect(dreamSuggestionCard).toContain('affectedBacklinkCount')
+    expect(dreamSuggestionCard).toContain('proposedLinks')
+    expect(dreamSuggestionCard).toContain('proposedBootMode')
+    expect(dreamSuggestionCard).toContain('重定向至保留目标')
+
+    expect(memoryEditor).toContain('<SingleTidyDrawer')
+    expect(memoryEditor).toContain('规范此条')
+    expect(memoryEditor).toContain('查找重复与关联')
+    expect(memoryEditor).toContain('pendingSuggestionCount')
+
+    expect(singleTidyDrawer).toContain('api.previewSingleTidy')
+    expect(singleTidyDrawer).toContain('api.applySingleTidy')
+    expect(singleTidyDrawer).toContain('api.crossCheckEntry')
+    expect(singleTidyDrawer).toContain('stageToInbox')
+    expect(singleTidyDrawer).toContain('<DiffViewer')
+    expect(singleTidyDrawer).toContain('<DreamSuggestionCard')
+
+    expect(memoryList).toContain('批量整理')
+    expect(memoryList).toContain('规范所选')
+    expect(memoryList).toContain('查重与关联')
+    expect(memoriesPage).toContain('onBatchOrganize')
   })
 
   it('界面中引用的全部 icons.* 均已在 icons.ts 注册，且没有直接写死未打包的 i-lucide-*', () => {

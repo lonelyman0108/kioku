@@ -94,6 +94,32 @@ describe.skipIf(!testDatabaseUrl)('数据库迁移与探针', () => {
     ])
   })
 
+  it('增量迁移新增了跨记忆整理建议列与补全双链、调整启动加载约束', async () => {
+    const cols = await database.db.execute<{ table_name: string; column_name: string }>(sql`
+      select table_name, column_name
+      from information_schema.columns
+      where table_schema = 'public'
+        and table_name = 'dream_suggestions'
+        and column_name in ('proposed_links', 'proposed_boot_mode')
+    `)
+    expect([...cols]).toHaveLength(2)
+
+    const checks = await database.db.execute<{ conname: string; def: string }>(sql`
+      select conname, pg_get_constraintdef(oid) as def
+      from pg_constraint
+      where conname in ('dream_suggestions_kind_check', 'dream_suggestions_boot_mode_check')
+      order by conname
+    `)
+    const list = [...checks]
+    expect(list.map((r) => r.conname)).toEqual([
+      'dream_suggestions_boot_mode_check',
+      'dream_suggestions_kind_check',
+    ])
+    const kindDef = list.find((r) => r.conname === 'dream_suggestions_kind_check')?.def ?? ''
+    expect(kindDef).toContain('link_entries')
+    expect(kindDef).toContain('adjust_boot_mode')
+  })
+
   it('probeDatabase 对已迁移的库返回 ready 且允许超级用户或普通角色接入', async () => {
     const result = await probeDatabase(testDatabaseUrl!, migrationsFolder)
     expect(result.ready).toBe(true)

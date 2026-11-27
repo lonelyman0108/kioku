@@ -12,16 +12,17 @@ import {
   type EntrySnapshot,
   type HygieneSweepApplyRequest,
   type HygieneSweepApplyResponse,
+  type HygieneSweepBrokenLink,
   type HygieneSweepCandidate,
   type HygieneSweepFixKind,
   type HygieneSweepFlag,
   type HygieneSweepPreviewResponse,
   type HygieneSweepRewrite,
 } from '@kioku/contracts'
-import { and, asc, eq, isNull } from 'drizzle-orm'
+import { and, asc, eq, inArray, isNull } from 'drizzle-orm'
 
 import { withTx, type Db } from '../db/client'
-import { entries, entryEvents } from '../db/schema'
+import { entries, entryEvents, entryLinks } from '../db/schema'
 import type { Jobs } from '../jobs/queue'
 import { clipChars } from '../recall/text'
 import { syncEntryLinks } from './links'
@@ -33,7 +34,7 @@ const INLINE_CODE_SPLIT_RE = /(`+[^`\r\n]*?`+)/g
 const OBSOLETE_TITLE_RE =
   /(?:已于\s*20\d{2}[^）)]*(?:卸载|退役|下线|停用)|已卸载|已退役|已下线|阶段\s*\d|开发完成|收尾完成|已合并并上线|合进\s*main)/i
 
-interface TargetEntry {
+export interface TargetEntry {
   id: string
   shortId: string
   title: string
@@ -77,7 +78,7 @@ function canRewriteTargetIntoSource(
 }
 
 // 为旧路径最后一段或非短 ID 双链建立无歧义映射（仅命中唯一目标时才允许自动替换）
-function buildUniqueSlugIndex(rows: readonly TargetEntry[]): Map<string, TargetEntry> {
+export function buildUniqueSlugIndex(rows: readonly TargetEntry[]): Map<string, TargetEntry> {
   const buckets = new Map<string, Map<string, TargetEntry>>()
   const register = (rawKey: string, entry: TargetEntry) => {
     const key = normalizeLookupKey(rawKey)
@@ -217,12 +218,12 @@ function rewriteLegacyRefsInContent(
   }
 }
 
-interface ComputedSweep {
+export interface ComputedSweep {
   candidate: HygieneSweepCandidate
   nextContent: string
 }
 
-function computeDeterministicFixes(
+export function computeDeterministicFixes(
   row: EntryRow,
   index: ReadonlyMap<string, TargetEntry>,
 ): ComputedSweep | null {
@@ -341,12 +342,66 @@ export async function previewHygieneSweep(db: Db): Promise<HygieneSweepPreviewRe
     }
   }
 
+  // 零 LLM 扫描全库悬空断链：出链目标不存在或已被移入回收站
+  const activeIds = rows.map((r) => r.id)
+  const brokenLinks: HygieneSweepBrokenLink[] = []
+  if (activeIds.length) {
+    const linkRows = await db
+      .select({
+        sourceEntryId: entryLinks.sourceEntryId,
+        targetShortId: entryLinks.targetShortId,
+      })
+      .from(entryLinks)
+      .where(inArray(entryLinks.sourceEntryId, activeIds))
+
+    if (linkRows.length) {
+      const targetShorts = [...new Set(linkRows.map((l) => l.targetShortId))]
+      const targetRows = await db
+        .select({
+          shortId: entries.shortId,
+          title: entries.title,
+          deletedAt: entries.deletedAt,
+        })
+        .from(entries)
+        .where(inArray(entries.shortId, targetShorts))
+      const targetByShort = new Map(targetRows.map((t) => [t.shortId, t]))
+      const rowById = new Map(rows.map((r) => [r.id, r]))
+      const brokenBySource = new Map<string, HygieneSweepBrokenLink['targets']>()
+
+      for (const link of linkRows) {
+        const target = targetByShort.get(link.targetShortId)
+        if (target && target.deletedAt === null) continue
+        const list = brokenBySource.get(link.sourceEntryId) ?? []
+        list.push({
+          targetShortId: link.targetShortId,
+          status: target ? 'deleted' : 'missing',
+          targetTitle: target ? target.title : null,
+        })
+        brokenBySource.set(link.sourceEntryId, list)
+      }
+
+      for (const [sourceId, targets] of brokenBySource.entries()) {
+        const src = rowById.get(sourceId)
+        if (!src) continue
+        brokenLinks.push({
+          id: src.id,
+          shortId: src.shortId,
+          title: src.title,
+          isPinned: src.isPinned,
+          targets: targets.sort((a, b) => a.targetShortId.localeCompare(b.targetShortId)),
+        })
+      }
+      brokenLinks.sort((a, b) => a.shortId.localeCompare(b.shortId))
+    }
+  }
+
   return {
     totalScanned: rows.length,
     dirtyTitleCount,
     deterministicCandidates,
     suspectTruncated,
     suspectObsolete,
+    brokenLinks,
   }
 }
 

@@ -131,6 +131,8 @@ describe('wire-compatible contracts', () => {
       'mark_stale',
       'update',
       'tidy',
+      'link_entries',
+      'adjust_boot_mode',
     ])
 
     expect(

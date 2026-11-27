@@ -14,29 +14,29 @@ Kioku 提供一套极简、自托管的单人服务端闭环：
 
 1. **扁平词条，信封强结构、信纸自由化**：每条记忆由服务端自动分配不可变 Base30 短 ID（`m-xxxxxx`），信封维护稳定短标题、可选现行概要（`summary`）、触发场景（`disclosure`）、四维场景标签（`envs`、`realms`、`projects`、`runtimes`）、主题标签（`topics`）、事实核实时间（`verified_at`）与最近变更说明（`last_change_summary`）；正文保持自由 Markdown 并用 `[[m-xxxxxx]]` / `[[m-xxxxxx|语境]]` 建立语境双链，演进历史独立沉入语义化 `entry_events`。
 2. **服务端静态硬边界**：访问密钥携带静态 `allowed_realms` 与能力开关（`can_write`、`can_resolve_credentials`），在检索、历史查阅与取值前于服务端 JS 与 SQL 双重裁决；凭据执行失败即拒绝（fail-closed）。
-3. **在场引擎（Presence Engine）**：会话启动采用两遍渐进式编译（先为全部场景命中常驻预留带概要的紧凑目录槽，再按精准度与短篇优先原地展开全文，彻底消灭裸短 ID 挤出盲盒），并附带同设备同项目的近期会话摘要；每轮召回融合结构化去噪向量语义、PostgreSQL 原生权重 BM25F、场景亲和加减分与一跳双向语境双链扩散。
+3. **在场引擎（Presence Engine）**：会话启动采用三态常驻分层（`boot_mode: 'none' | 'index' | 'full'`，保持 `is_pinned = (boot_mode <> 'none')` 向后兼容）与精准场景分桶编译：默认 7,000 字全文展开预算 + 3,000 字独立目录槽，`index` 固定占单行摘要目录槽永不抢占全文预算，`full` 按「项目/客户端精准匹配 > 环境/场域匹配 > 全局（占全文预算 ≤ 50%）」分桶展开，并附带场景去冲突后的近期会话摘要与当前项目目录；每轮召回融合结构化去噪向量语义、PostgreSQL 原生权重 BM25F、场景亲和加减分与一跳双向语境双链扩散。
 4. **Muse 风格加密托管凭据**：正文只写 `{{cred:<slug>}}` 或 `{{cred:<slug>#<field>}}`，明文用 AES-256-GCM 信封加密独立保管，经 `kioku run` 一次性原子注入子进程环境变量，绝不进入模型上下文。
-5. **自动摘要、规范整理与确定性预清洗**：后台从 `turn.end` 提炼会话摘要，定期巡检或按需触发生成 5 类待处理建议（含 `tidy` 规范与精简，不截断长文并经完整性守卫校验），配合零成本确定性结构预清洗预览/应用，所有改动经人工确认才落库并留存完整快照与 `archive_note` 历史。
+5. **自动摘要、四阶段跨记忆整理与主动单条规范**：对话模型支持全局与按任务（快速任务 / 整理任务）思考等级（`reasoning_effort`）及结构化分层重试；后台从 `turn.end` 提炼会话摘要，定期或按需运行常规 / 规范（`tidy`）/ 跨记忆四阶段漏斗（`cross_memory`）整理，生成 7 类待处理建议（含 `link_entries` 补全双链、`adjust_boot_mode` 调整启动加载，合并重复时事务内自动重定向全库反链）；配合零成本确定性结构预清洗与断链扫描、编辑页 SSE 单条主动规范/深度查重与列表多选批量整理，所有改动经人工确认与乐观锁校验才落库并留存完整快照与 `archive_note` 历史。
 6. **自托管零外联**：服务端 + PostgreSQL（`pgvector` + `zhparser`）两个容器，管理界面不向第三方请求字体或图标。
 
 ## 2. 数据模型（12 张扁平表，无 RLS）
 
-单人自托管不启用 PostgreSQL 行级安全（RLS），表结构集中在 `apps/server/src/db/schema.ts`，由基线迁移 `apps/server/migrations/0000_baseline.sql`（`_journal.json` 时间戳 `when = 1796000000000`）与后续纯增量迁移（如 `0001_entry_structure_and_history.sql`）维护；遇到更早旧架构时间戳的数据库时，`db/migrate.ts` 拒绝自动迁移并提示使用空库重新初始化。
+单人自托管不启用 PostgreSQL 行级安全（RLS），表结构集中在 `apps/server/src/db/schema.ts`，由基线迁移 `apps/server/migrations/0000_baseline.sql`（`_journal.json` 时间戳 `when = 1796000000000`）与后续纯增量迁移（`0001_entry_structure_and_history.sql`、`0002_boot_mode_and_focus.sql`、`0003_cross_memory_dream.sql`）维护；遇到更早旧架构时间戳的数据库时，`db/migrate.ts` 拒绝自动迁移并提示使用空库重新初始化。
 
 | 分组 | 表名 | 职责与核心约束 |
 |---|---|---|
 | 账号与配置 | `accounts` | 唯一实例所有者（`username`、`display_name`、`password_hash`） |
 | | `sessions` | 控制台登录会话（`token_hash` 唯一，30 天有效，`last_active_at` 最多每 5 分钟刷新） |
-| | `settings` | 实例配置 KV（`embedding` / `chat_llm` 端点与加密 API Key、`dream_state`、`device_cookie_secret`） |
-| 终端与授权 | `api_keys` | 终端访问密钥（`kioku_<12位前缀>_<40位密钥>`，存 SHA-256 哈希，承载 `runtime_family`、`envs`、`allowed_realms`、`can_write`、`can_resolve_credentials`、`revoked_at`） |
-| | `device_grants` | 浏览器授权临时申请（`device_hash` 与 8 位 `user_hash` 均存哈希，支持单平台 `runtime_family` 或多平台 `platforms`，审批后 60 秒惰性签发窗口） |
-| 核心记忆 | `entries` | 扁平记忆与会话摘要（`short_id` 全局唯一含软删除行、`kind`: `entry \| episode`、`title`、`summary`、`content`、`disclosure`、`is_pinned`、`envs`/`realms`/`projects`/`runtimes`/`topics`、`device_key`/`project_slug`、`search_tags`、`valid_to`、`verified_at`、`last_change_summary`、`version`、`dream_checked_version`、`deleted_at`、带 `setweight` 权重的 `fts` 生成列） |
+| | `settings` | 实例配置 KV（`embedding` / `chat_llm` 端点、思考等级 `reasoningEffort` / `taskReasoningEffort` 与加密 API Key、`dream_state`、`device_cookie_secret`） |
+| 终端与授权 | `api_keys` | 终端访问密钥（`kioku_<12位前缀>_<40位密钥>`，存 SHA-256 哈希，承载 `runtime_family`、`envs`、`allowed_realms`、`focus_realms`、`can_write`、`can_resolve_credentials`、`revoked_at`） |
+| | `device_grants` | 浏览器授权临时申请（`device_hash` 与 8 位 `user_hash` 均存哈希，支持单平台 `runtime_family` 或多平台 `platforms`，含可选 `focus_realms`，审批后 60 秒惰性签发窗口） |
+| 核心记忆 | `entries` | 扁平记忆与会话摘要（`short_id` 全局唯一含软删除行、`kind`: `entry \| episode`、`title`、`summary`、`content`、`disclosure`、`boot_mode`: `none \| index \| full`、`is_pinned`（CHECK 同步 `boot_mode <> 'none'`）、`envs`/`realms`/`projects`/`runtimes`（接受任意合法 `SceneSlug`）/`topics`、`device_key`/`project_slug`、`search_tags`、`valid_to`、`verified_at`、`last_change_summary`、`version`、`dream_checked_version`、`deleted_at`、带 `setweight` 权重的 `fts` 生成列） |
 | | `entry_embeddings` | 1024 维 pgvector 向量表（主键 `(entry_id, model)`，HNSW `vector_cosine_ops` 索引，含 `content_hash` 增量跳过） |
 | | `entry_links` | 正文 `[[m-xxxxxx]]` / `[[m-xxxxxx\|语境]]` 出链边表（主键 `(source_entry_id, target_short_id)`，含可选 `relation`、`context_snippet`，`target_short_id` 索引支持反链与跨软删恢复） |
 | | `entry_events` | 单条词条语义化变更历史与版本快照（`create` / `update` / `delete` / `undelete` / `restore` / `archive_note`，记录 `actor`、`change_summary`、`diff_meta`、`occurred_at` 与完整 `EntrySnapshot`） |
 | 托管凭据 | `credentials` | AES-256-GCM 信封加密凭据（`slug` 唯一、`label`、`description`、`allowed_realms`、`ciphertext`、`wrapped_key`、`key_id`） |
 | 抽取与整理 | `turn_buffer` | `turn.end` 对话轮次缓冲（按 `(device_key, project_slug)` 分桶，单桶最多留最新 100 轮） |
-| | `dream_suggestions` | 后台整理生成的 5 类待处理建议（`distill_episode` / `merge_duplicates` / `mark_stale` / `update` / `tidy`，含 `proposed_summary`、`proposed_change_summary`、`archived_notes`，`fingerprint` 唯一去重，`entry_ids` + `entry_versions` 乐观锁版本对齐） |
+| | `dream_suggestions` | 后台整理生成的 7 类待处理建议（`distill_episode` / `merge_duplicates` / `mark_stale` / `update` / `tidy` / `link_entries` / `adjust_boot_mode`，含 `proposed_summary`、`proposed_change_summary`、`archived_notes`、`proposed_links`、`proposed_boot_mode`，`fingerprint` 唯一去重，`entry_ids` + `entry_versions` 乐观锁版本对齐） |
 
 关键不变量：
 
@@ -72,20 +72,20 @@ Kioku 提供一套极简、自托管的单人服务端闭环：
 在场焦点 `SceneFocus` 包含四个内置维度：`envs`、`realms`、`projects`、`runtimes`：
 
 - `envs`：优先取请求显式覆盖，否则取访问密钥配置的 `envs`（内置建议 `mac` / `linux` / `win`，也支持自定义设备/环境标签）；
-- `realms`：优先取请求覆盖，否则取访问密钥的 `allowed_realms`（仅用于排序聚焦，**绝不放宽静态安全边界**）；
-- `runtimes`：优先取请求覆盖，否则取访问密钥的编码 Agent 家族（`claudecode`、`codex`、`gemini`、`agy`、`openclaw`、`hermes`、`opencode`、`pi`、`dsh`）；
-- `projects`：从请求 `project`（字符串或 `{ repoName, dirName }`）经 `normalizeProjectSlug` 归一化得到。
+- `realms`：优先取请求覆盖，其次取访问密钥的 `focus_realms`（启动聚焦场域），最后回退 `allowed_realms`（仅用于启动聚焦与排序，**绝不放宽静态安全边界**）；
+- `runtimes`：优先取请求覆盖（支持任意合法 `SceneSlug` 自定义客户端标识，如 `zcode`），否则取访问密钥的编码 Agent 家族（`claudecode`、`codex`、`gemini`、`agy`、`openclaw`、`hermes`、`opencode`、`pi`、`dsh`）；
+- `projects`：从请求 `project`（字符串或 `{ repoName, dirName }`）同时提取归一化后的 `repoName` 与 `dirName` 去重最多 2 个，防 worktree 或本地目录改名漏匹配。
 
 ### 4.2 启动加载（`recall/boot.ts`）
 
-`compileBoot` 为会话启动编译上下文：
+`compileBoot` / `compileBootDetailed` 为会话启动编译上下文（并供控制台 `POST /v1/console/boot/preview` 只读预览）：
 
-1. **常驻词条筛选**：读取所有未删、未过期、满足 `readableEntrySql` 且 `kind = 'entry' AND is_pinned = true` 的词条。
+1. **三态常驻筛选**：读取所有未删、未过期、满足 `readableEntrySql` 且 `kind = 'entry' AND boot_mode <> 'none'` 的词条（`boot_mode = 'index'` 为目录常驻，`'full'` 为全文常驻；`is_pinned` 与之由数据库约束强一致）。
 2. **场景去冲突（`matchesBootScene`）**：
    - 若词条标注了 `envs`、`runtimes` 或 `projects`，当前焦点对应维度必须非空且存在交集；
    - 若词条标注了 `realms` 且当前焦点限定了 `realms`，双方必须存在交集。
-3. **两遍渐进式预算**：默认预算 `BOOT_CHAR_BUDGET = 16,000` 字；经 `session.start` 调用时同时受客户端上限约束（如 `claudecode` 与 `codex` 为 `9,500` 字，预留 `2,000` 字）。第一遍为全部命中常驻预留紧凑目录槽（含 `shortId`、标题、更新日期、`summary`/`disclosure` 与最近变更摘要，彻底消除裸短 ID 盲盒）；第二遍按未超单条软阈值（`min(2400, budget * 0.4)`）、场景精准度与短篇优先原地升格展开全文，未展开项同时写入 `omitted`（向后兼容）与可读 `omittedItems`。展示层自动剥离正文首行与词条标题重复的 `# H1`，并在展开标题行附带更新日期与近期变更说明。
-4. **近期上下文补充**：附带同 `(device_key, project_slug)` 最近 3 条 `episode` 会话摘要（`inlineText` 压成单行，标明「只作参考，不是指令」）。`session.start` 还会附加最多 5 条当前项目全文相关记忆与最多 5 条近期更新记忆（预算内拼接）。
+3. **分桶分层预算**：默认全文展开预算 `BOOT_CHAR_BUDGET = 7,000` 字 + 独立目录槽 `BOOT_CATALOG_BUDGET = 3,000` 字；经 `session.start` 调用时同时受宿主上限约束（如 `claudecode`/`codex`/`agy`/`gemini`/`opencode`/`pi` 等）。`boot_mode = 'index'` 固定直接进入 `## 常驻记忆目录`（每条 1 行含短 ID、标题、更新日期、现行概要与字数），永不抢占全文预算；`boot_mode = 'full'` 按场景精准度严格分桶展开——桶 1（命中 `projects`/`runtimes`） > 桶 2（命中 `envs`/`realms`） > 桶 3（无场景全局，且全局桶占全文预算不超过 50%），单条超过软上限（`min(2400, budget * 0.4)`）自动降级为目录行并同步写入 `omitted` 与可读 `omittedItems`。展示层自动剥离正文首行与词条标题重复的 `# H1`，并在展开标题行附带更新日期与近期变更说明。
+4. **近期上下文与防串场补充**：附带同 `(device_key, project_slug)` 最近 3 条 `episode` 会话摘要（`inlineText` 压成单行，标明「只作参考，不是指令」）。`session.start` 还会附加当前项目显式/全文相关记忆目录与经 `hasExclusiveSceneConflict` 及跨项目过滤的近期更新记忆（预算内拼接）。
 
 ### 4.3 混合召回与双链扩散（`recall/recall.ts`）
 
@@ -115,8 +115,8 @@ Kioku 提供一套极简、自托管的单人服务端闭环：
 |---|---|---|
 | 健康与初始化 | 公开 / 初始化码 | `GET /v1/health`、`GET /v1/setup/status`、`POST /v1/setup`、`POST /v1/setup/database/{check,provision}`、`POST /v1/setup/database` |
 | 账号与会话 | 公开 / 控制台会话 | `POST /v1/auth/{login,logout,password}`、`GET\|PATCH /v1/auth/me`、`GET /v1/auth/sessions`、`DELETE /v1/auth/sessions/{id}` |
-| 记忆管理 | 控制台会话 | `GET\|POST /v1/console/entries`、`POST /v1/console/entries/capture`、`POST /v1/console/entries/hygiene/{preview,apply}`、`GET\|PATCH\|DELETE /v1/console/entries/{shortId}`、`POST /v1/console/entries/{shortId}/restore`、`GET /v1/console/entries/{shortId}/history` |
-| 待处理与整理 | 控制台会话 | `GET /v1/console/inbox`、`POST /v1/console/inbox/{id}/{apply,dismiss}`、`POST /v1/console/dream/run`（支持 `standard` / `tidy`） |
+| 记忆管理 | 控制台会话 | `GET\|POST /v1/console/entries`、`POST /v1/console/entries/capture`、`POST /v1/console/entries/hygiene/{preview,apply}`、`POST /v1/console/boot/preview`、`GET\|PATCH\|DELETE /v1/console/entries/{shortId}`、`POST /v1/console/entries/{shortId}/restore`、`GET /v1/console/entries/{shortId}/history`、`POST /v1/console/entries/{shortId}/tidy/{preview,apply}`、`POST /v1/console/entries/{shortId}/cross-check` |
+| 待处理与整理 | 控制台会话 | `GET /v1/console/inbox`、`POST /v1/console/inbox/{id}/{apply,dismiss}`、`POST /v1/console/dream/run`（支持 `standard` / `tidy` / `cross_memory` 与 `targetShortIds` / `scope`） |
 | 托管凭据 | 控制台会话 / Bearer | `GET\|POST /v1/console/credentials`、`PATCH\|DELETE /v1/console/credentials/{id}`、`POST /v1/console/credentials/{id}/reveal`、`POST /v1/credentials/resolve`（Bearer） |
 | 访问密钥 | 控制台会话 | `GET\|POST /v1/console/keys`、`PATCH\|DELETE /v1/console/keys/{id}`、`POST /v1/console/keys/{id}/rotate` |
 | 模型与数据 | 控制台会话 | `GET\|PUT /v1/console/settings/models`、`POST /v1/console/settings/models/test`、`POST /v1/console/settings/embedding/backfill`、`GET\|POST /v1/console/export`、`POST /v1/console/import/{preview,apply}` |
@@ -146,17 +146,19 @@ MCP 采用无状态 Streamable HTTP（拒绝 `GET` 订阅返回 405，避免客�
 
 ## 7. 自动摘要、记忆整理与后台任务
 
-实例在「设置 › 模型」中配置至多两个 OpenAI 兼容端点：一个嵌入模型（1024 维，更换或停用时清空旧模型向量并触发后台补齐）和一个对话模型（同时驱动会话摘要抽取与记忆整理）。
+实例在「设置 › 模型」中配置至多两个 OpenAI 兼容端点：一个嵌入模型（1024 维，更换或停用时清空旧模型向量并触发后台补齐）和一个对话模型（同时驱动随手记、会话摘要抽取与记忆整理）。对话模型支持配置思考等级（`reasoningEffort: 'default' | 'off' | 'low' | 'medium' | 'high'`，默认 `default` 不注入字段，兼容非推理模型）及按任务覆盖（`fast` 快速任务 / `organize` 整理任务），开启思考时自动按档位补偿 `max_tokens`，并在 `models/client.ts` 实现结构化 `ModelClientError` 分层重试（`408/429/5xx/520–524`、断连、45s SSE 空闲僵死与未见 `[DONE]` 截断走指数退避 + Full Jitter + `Retry-After`；鉴权/配额/上下文超长/`finish_reason=length` 立即失败；遇 `reasoning_effort` 或 `temperature` 不兼容 400 自动剥离降级并缓存 1h；解析前确定性剥离 `<think>` 块）。
 
 pg-boss 运行 5 个队列（`jobs/queue.ts`，通过 `pgBossSsl` 将 `sslmode=require` 统一映射为 `{ rejectUnauthorized: false }`）：
 
 | 队列 | 策略与调度 | 职责 |
 |---|---|---|
-| `embed-entry` | 批量消费（`EMBED_BATCH`） | 词条新建或更新后异步计算 1024 维向量并写入 `entry_embeddings` |
+| `embed-entry` | 批量消费（`EMBED_BATCH`） | 词条新建或更新后异步计算 1024 维向量并写入 `entry_embeddings`（HTTP 重试 1 次） |
 | `embed-backfill` | `singleton` | 启动时或换嵌入模型后补齐缺失向量 |
-| `extract-episode` | `stately`，按 `deviceKey\|projectSlug` 去重 | `turn.end` 满 10 轮立即触发或空闲 10 分钟触发，调用对话模型生成 14 天有效期的 `episode` 摘要并清理已消费缓冲 |
-| `dream` | `singleton`，每小时 41 分巡检（按 `intervalHours`）或手动触发（支持 `standard` / `tidy`） | 常规模式扫描 `version > dream_checked_version` 的活跃词条与摘要，结合 `entry_links` 双链邻居与全文邻居调用对话模型生成待处理建议：`distill_episode`（提炼会话摘要）、`merge_duplicates`（合并重复记忆）、`mark_stale`（标记过时记忆）、`update`（更新记忆内容）；`tidy`（规范与精简）模式按完整正文（上限 16,000 字）批量规范脏标题、提炼概要并剥离旧日志至 `archived_notes`，经 `checkCaptureIntegrity` 拦截丢失双链或凭据的草案。所有建议按 `fingerprint` 去重落库，人工在待处理页分项勾选或编辑草稿后校验版本号应用，并留存完整旧快照与 `archive_note` |
+| `extract-episode` | `stately`，按 `deviceKey\|projectSlug` 去重 | `turn.end` 满 10 轮立即触发或空闲 10 分钟触发，调用对话模型生成 14 天有效期的 `episode` 摘要；坏 JSON 不删除 `turn_buffer` 并支持 1 次定向语义纠错 |
+| `dream` | `singleton`，每小时 41 分巡检（按 `intervalHours`）或手动触发（支持 `standard` / `tidy` / `cross_memory` 与 `targetShortIds`） | `standard` 模式结合 `entry_links`、pgvector 余弦近邻与全文近邻审阅新增/变动记录；`tidy` 模式 3 路受控并发（共享 429 冷却降并发、鉴权/配额熔断、记录结构化失败明细 `failedItems` 供一键重试）按完整正文规范脏标题与历史流水；`cross_memory` 模式走四阶段漏斗（Stage 0 场域硬边界 → Stage 1 零 LLM 向量聚类/中相似补链/同项目主题/相关性 FTS/断链候选图 → Stage 2 按优先级拆分查重簇、会话反向对账、缺失双链、常驻减肥 4 类 Micro-Task → Stage 3 去重入收件箱），产出全部 7 类建议。所有建议按 `fingerprint` 去重落库，人工审阅并校验版本号应用；合并重复在事务内强制检查全部被合并词条双链/凭据并集、同场域防线与最高 `boot_mode` 继承，并自动将全库活跃记忆的 `[[old]]` 反链重定向至保留目标（跳过代码块与 CommonMark 行内代码） |
 | `cleanup-expired` | `singleton`，每小时 17 分 | 清理过期 `sessions`、过期 `device_grants`、闲置超 24 小时的 `turn_buffer`、软删除超 30 天的回收站词条，以及已处理超 30 天的 `dream_suggestions` |
+
+除后台队列外，编辑页还提供**不占全局 `dream` 锁**的单条主动整理接口：`POST /v1/console/entries/{shortId}/tidy/preview`（SSE 阶段进度 + 5s 心跳 + 中止取消，先做确定性预清洗再完整正文规范并校验完整性）与 `/tidy/apply`（强校 `expectedVersion` 乐观锁，支持一键应用或暂存至待处理）、以及 `POST /v1/console/entries/{shortId}/cross-check`（以当前记忆为锚点跑 Stage 1 + 查重/补链并返回可即时审阅的建议列表）。
 
 ## 8. 管理界面（3+1 工作台）与界面用语
 
@@ -164,10 +166,10 @@ pg-boss 运行 5 个队列（`jobs/queue.ts`，通过 `pgBossSsl` 将 `sslmode=r
 
 主导航包含 4 个顶级入口（辅以全局命令面板 `⌘K`）：
 
-- **记忆（`/memories`）**：左栏支持按「全部 / 常驻 / 近期摘要 / 回收站」分段及关键词、项目、环境、场域筛选，各宽度均保留 1 行近改/摘要副行，「常驻」顶栏显示只读启动加载字数水位；右栏短标题下附动态状态行，阅读态提供 3px 墨线「现行概要」、重复首行 H1 抑制、默认折叠「近期演进」及宽屏 240px 辅助轨（小节目录 + 演进 + 语境双链），编辑态支持标题轻提醒与一键拆出至粘性底栏变更说明、轻量明文前缀提示（`secretHint.ts`）、`[[m-xxxxxx]]` 补全与跳转、`{{cred:...}}` 占位符跳转、会话摘要一键提炼，以及支持关键词搜索、来源筛选、属性变动表与任意两版对比的语义化版本历史抽屉。
-- **待处理（`/inbox`）**：展示整理任务状态、5 类建议分段筛选与卡片（含新旧标题对照、完整性护栏、分项勾选应用、应用后 8 秒撤销与纯标题速审表），支持手动触发常规整理或存量规范整理，并提供零成本「结构体检与预清洗」预览/应用抽屉。
+- **记忆（`/memories`）**：左栏支持按「全部 / 常驻 / 按需 / 近期摘要 / 回收站」分段及关键词、项目、环境、场域、客户端筛选，支持轻量批量整理模式（选 2–20 条规范所选或查重关联），「常驻」顶栏显示全局全文 / 场景全文 / 目录常驻真实分层水位及「预览终端加载」只读抽屉；右栏阅读态提供一步切换三态常驻与适用场景的 Popover、「整理」下拉菜单（规范此条 SSE Diff 抽屉 / 查找重复与关联内联审阅抽屉）、待处理建议直达链接、3px 墨线「现行概要」、重复首行 H1 抑制与宽屏 240px 辅助轨；编辑态支持标题轻提醒与拆出至变更说明、常驻软提醒、明文前缀提示（`secretHint.ts`）、`[[m-xxxxxx]]` 与 `{{cred:...}}` 补全跳转及语义化版本历史抽屉。
+- **待处理（`/inbox`）**：展示整理任务状态、失败明细与「仅重试失败项」、7 类建议分段筛选与卡片（含补全双链勾选清单、调整启动加载前后对照、合并重复全库反链重定向提示、新旧标题对照、完整性护栏、分项勾选应用、应用后 8 秒撤销与纯标题速审表），支持手动触发常规整理、「全库查重与关联」或存量规范整理，并提供零成本「结构体检与预清洗」抽屉（同步报告全库悬空断链）。
 - **凭据（`/credentials`）**：管理加密托管凭据元数据与允许场域，一键复制占位符；点击「查看与更新值」时明文仅存局部组件状态、关闭即清空，支持原地轮换值与删除确认。
-- **设置（`/settings/:tab`）**：三个标签页——**连接与终端**（MCP 地址、一键登录命令、访问密钥签发/编辑/轮换/吊销）、**模型**（嵌入与对话模型端点、连通测试、向量覆盖率与补齐、定时整理开关与周期）、**账号与数据**（显示名、改密、活跃登录设备下线、导出 JSON / Markdown）。
+- **设置（`/settings/:tab`）**：三个标签页——**连接与终端**（MCP 地址、一键登录命令、访问密钥签发/编辑/轮换/吊销，支持配置启动默认场域）、**模型**（嵌入与对话模型端点、思考等级与按任务覆盖、连通测试、向量覆盖率与补齐、定时整理开关与周期）、**账号与数据**（显示名、改密、活跃登录设备下线、导出 JSON / Markdown 及两步导入）。
 
 ### 8.1 界面用语
 
@@ -177,7 +179,7 @@ pg-boss 运行 5 个队列（`jobs/queue.ts`，通过 `pgBossSsl` 将 `sslmode=r
 |---|---|---|
 | 记忆、正式记忆、会话摘要 | 策展、情节、画像、分区、节点、URI | `entry` 称「正式记忆」，`episode` 称「会话摘要」；界面正文不出现 `URI` |
 | 短 ID | 坐标、路径 | `m-xxxxxx` 不可变标识，等宽字体展示 |
-| 常驻、启动加载 | boot、启动上下文、启动节点、priority | `is_pinned` 称「常驻」，会话启动注入称「启动加载」 |
+| 常驻、启动加载、按需召回、目录常驻、全文常驻 | boot、启动上下文、启动节点、priority | `boot_mode` 三态对应「按需召回 / 目录常驻 / 全文常驻」，`is_pinned` 称「常驻」，会话启动注入称「启动加载」 |
 | 触发场景 | disclosure | `disclosure` 字段，何时该想起这条记忆 |
 | 有效期 | 有效到 | `valid_to` 字段 |
 | 待处理 | 待审、待审队列 | `/inbox` 页面及导航名称 |
