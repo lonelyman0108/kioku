@@ -1752,6 +1752,7 @@ defineExpose({
                 <EntryLinksPanel
                   :outbound-links="detail?.outboundLinks ?? []"
                   :backlinks="detail?.backlinks ?? []"
+                  :titles="resolvedTitles"
                   @open="(sid) => emit('open', sid)"
                 />
               </div>
@@ -1833,6 +1834,7 @@ defineExpose({
                 compact
                 :outbound-links="detail?.outboundLinks ?? []"
                 :backlinks="detail?.backlinks ?? []"
+                :titles="resolvedTitles"
                 @open="(sid) => emit('open', sid)"
               />
             </aside>

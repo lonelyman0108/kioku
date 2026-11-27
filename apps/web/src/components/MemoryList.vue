@@ -67,6 +67,7 @@ const emit = defineEmits<{
   refresh: []
   loadMore: []
   clearFilters: []
+  resetFilters: []
   previewBoot: []
   batchOrganize: [mode: 'tidy' | 'cross_memory', shortIds: string[]]
 }>()
@@ -216,7 +217,7 @@ function entryBootChars(item: EntryListItem): number {
 }
 
 const displayItems = computed<readonly EntryListItem[]>(() => {
-  if (props.tab === 'pinned' && props.pinnedGroup === 'global_full') {
+  if (props.tab === 'pinned' && props.pinnedGroup === 'global_full' && !props.search.trim()) {
     return [...props.items].sort((a, b) => entryBootChars(b) - entryBootChars(a))
   }
   return props.items
@@ -312,7 +313,7 @@ watch(
   async (sid) => {
     if (!sid) return
     await nextTick()
-    const rows = listScrollRef.value?.querySelectorAll<HTMLElement>('[data-short-id]')
+    const rows = listScrollRef.value?.querySelectorAll<HTMLElement>('.entry-row[data-short-id]')
     if (!rows) return
     for (const row of rows) {
       if (row.dataset.shortId === sid) {
@@ -900,9 +901,7 @@ defineExpose({ filterOpen, exitBatchMode, displayItems })
               color="neutral"
               variant="outline"
               :icon="icons.restore"
-              @click="
-                (emit('clearFilters'), emit('update:search', ''), emit('update:pinnedGroup', null))
-              "
+              @click="emit('resetFilters')"
             >
               重置筛选
             </UButton>
@@ -1442,6 +1441,14 @@ defineExpose({ filterOpen, exitBatchMode, displayItems })
   background: var(--ui-selected);
   color: var(--ui-on-selected);
   border-bottom-color: var(--ui-selected);
+  --wiki-chip-bg: transparent;
+  --wiki-chip-fg: var(--ui-on-selected);
+  --wiki-chip-border: var(--ui-on-selected-muted);
+  --wiki-chip-icon: var(--ui-on-selected-muted);
+  --wiki-chip-hover-border: var(--ui-on-selected);
+  --wiki-chip-hover-bg: transparent;
+  --wiki-chip-hover-icon: var(--ui-on-selected);
+  --wiki-chip-missing-fg: var(--ui-on-selected-muted);
 }
 .entry-row.selected.is-pinned::before {
   background: var(--ui-on-selected);
@@ -1548,7 +1555,7 @@ defineExpose({ filterOpen, exitBatchMode, displayItems })
 .row-disclosure {
   flex: 1 1 auto;
   min-width: 0;
-  overflow: hidden;
+  overflow: clip;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1615,15 +1622,15 @@ defineExpose({ filterOpen, exitBatchMode, displayItems })
 .entry-row.selected .row-tag.is-topic {
   border-style: dashed;
 }
-/* 抽屉收窄（compact）态：标题与单行副行均保持可读，时间与标签转至底部一行 */
+/* 抽屉收窄（compact）态：副行换行以保障双链芯片可见，时间与标签转至底部一行 */
 .list-pane.is-compact .list-meta-bar {
-  padding: 5px 16px;
+  padding: 6px 16px;
+}
+.list-pane.is-compact .meta-right {
+  margin-left: 0;
 }
 .list-pane.is-compact .pinned-overcap-wrap {
   padding: 8px 16px;
-}
-.list-pane.is-compact :deep(.wiki-chip.is-compact .wiki-chip-label) {
-  max-width: 11em;
 }
 .list-pane.is-compact .entry-row {
   grid-template-columns: minmax(0, 1fr);
@@ -1641,7 +1648,17 @@ defineExpose({ filterOpen, exitBatchMode, displayItems })
   font-size: 14px;
 }
 .list-pane.is-compact .row-sub {
+  flex-wrap: wrap;
+  row-gap: 3px;
   font-size: 12px;
+  --wiki-chip-max-width: 11em;
+}
+.list-pane.is-compact .sub-disclosure-sep {
+  display: none;
+}
+.list-pane.is-compact .row-disclosure {
+  flex: 1 0 100%;
+  width: 100%;
 }
 .list-pane.is-compact .row-aside {
   flex-direction: row-reverse;

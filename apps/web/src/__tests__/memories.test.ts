@@ -309,16 +309,21 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(memoriesPage).toContain('PINNED_GROUPS')
     expect(memoriesPage).toContain('pinnedGroup')
     expect(memoriesPage).toContain('linkedTitles')
+    expect(memoriesPage).toContain('resetAllFilters')
 
     expect(memoryList).toContain('global_full')
     expect(memoryList).toContain('scoped_full')
     expect(memoryList).toContain('全局全文')
     expect(memoryList).toContain('场景全文')
     expect(memoryList).toContain('<WikiText')
+    expect(memoryList).toContain('.entry-row[data-short-id]')
+    expect(memoryList).toContain('--wiki-chip-bg')
     expect(memoryList).not.toContain('class="row-id"')
 
     expect(wikiText).toContain('icons.linkChain')
     expect(wikiText).toContain('wiki-chip')
+    expect(wikiText).toContain('markMissing')
+    expect(wikiText).not.toContain(':global(.entry-row.selected)')
     expect(memoryContent).toContain('kioku-wikilink-icon')
 
     expect(memoryEditor).toContain('<WikiText')
@@ -328,9 +333,12 @@ describe('记忆布局、随手记与图标清单', () => {
 
     expect(memoryHistoryDrawer).toContain('entryTitle')
     expect(memoryHistoryDrawer).toContain('<WikiText')
+    expect(memoryHistoryDrawer).toContain('snapshotWikiLinks')
     expect(memoryHistoryDrawer).not.toContain('`版本历史 · ${shortId}`')
 
     expect(dreamSuggestionCard).toContain('<WikiText')
+    expect(dreamSuggestionCard).not.toContain('<label class="link-check-label">')
+    expect(entryLinksPanel).toContain('<WikiText')
     expect(entryLinksPanel).not.toContain('{{ item.shortId }}')
     expect(bootPreviewDrawer).not.toContain('class="item-id')
   })

@@ -367,7 +367,7 @@ export class EntryService {
         and(
           inArray(entries.shortId, [...idSet]),
           isNull(entries.deletedAt),
-          readableEntrySql(scope),
+          readableEntrySql(scope, { includeExpired: scope.kind === 'console' }),
         ),
       )
 
@@ -406,6 +406,8 @@ export class EntryService {
       row.lastChangeSummary,
       row.summary,
       ...recentHistory.map((h) => h.changeSummary),
+      ...outboundLinks.map((l) => l.contextSnippet),
+      ...backlinks.map((l) => l.contextSnippet),
     ])
     return {
       entry: toEntryView(row),
@@ -1006,7 +1008,10 @@ export class EntryService {
     const linkedTitles = await this.resolveLinkedTitles(
       this.db,
       scope,
-      items.map((item) => item.changeSummary),
+      items.flatMap((item) => [
+        item.changeSummary,
+        ...(item.snapshot ? [item.snapshot.summary, item.snapshot.content] : []),
+      ]),
     )
     return {
       items,
@@ -1263,22 +1268,47 @@ export class EntryService {
 
     const decoded = decodeTimeCursor(query.cursor, UUID)
     if (decoded === 'invalid') throw new MemoryError(400, INVALID_CURSOR)
+    const sortByBootChars = query.tab === 'pinned' && query.pinnedGroup === 'global_full' && !q
+    const bootCharsExpr = sql<number>`(char_length(${entries.content}) + char_length(${entries.title}))::int`
     const timeCol = query.tab === 'trash' ? entries.deletedAt : entries.updatedAt
     if (decoded) {
-      const [cursorMicros, cursorId] = decoded
-      const cursorTs = fromMicros(cursorMicros)
-      filters.push(or(lt(timeCol, cursorTs), and(eq(timeCol, cursorTs), lt(entries.id, cursorId)))!)
+      const [cursorKey, cursorId] = decoded
+      if (sortByBootChars) {
+        const cursorChars = Number(cursorKey)
+        if (!Number.isSafeInteger(cursorChars)) throw new MemoryError(400, INVALID_CURSOR)
+        filters.push(
+          or(
+            lt(bootCharsExpr, cursorChars),
+            and(eq(bootCharsExpr, cursorChars), lt(entries.id, cursorId)),
+          )!,
+        )
+      } else {
+        const cursorTs = fromMicros(cursorKey)
+        filters.push(
+          or(lt(timeCol, cursorTs), and(eq(timeCol, cursorTs), lt(entries.id, cursorId)))!,
+        )
+      }
     }
 
-    const rows = await this.db
-      .select({
-        row: entries,
-        micros: microsOf(timeCol).mapWith(String),
-      })
-      .from(entries)
-      .where(and(...filters))
-      .orderBy(desc(timeCol), desc(entries.id))
-      .limit(query.limit + 1)
+    const rows = sortByBootChars
+      ? await this.db
+          .select({
+            row: entries,
+            cursorKey: sql<string>`(${bootCharsExpr})::text`,
+          })
+          .from(entries)
+          .where(and(...filters))
+          .orderBy(desc(bootCharsExpr), desc(entries.id))
+          .limit(query.limit + 1)
+      : await this.db
+          .select({
+            row: entries,
+            cursorKey: microsOf(timeCol).mapWith(String),
+          })
+          .from(entries)
+          .where(and(...filters))
+          .orderBy(desc(timeCol), desc(entries.id))
+          .limit(query.limit + 1)
 
     const hasMore = rows.length > query.limit
     const page = hasMore ? rows.slice(0, query.limit) : rows
@@ -1291,7 +1321,7 @@ export class EntryService {
     )
     return {
       items,
-      nextCursor: hasMore && last ? encodeTimeCursor(last.micros, last.row.id) : null,
+      nextCursor: hasMore && last ? encodeTimeCursor(last.cursorKey, last.row.id) : null,
       facets,
       counts,
       ...(Object.keys(linkedTitles).length ? { linkedTitles } : {}),

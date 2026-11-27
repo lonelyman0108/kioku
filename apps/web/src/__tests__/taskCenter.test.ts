@@ -307,7 +307,7 @@ describe('taskCenter', () => {
 
     const item2 = merged.find((item) => item.id === 'p-2')
     expect(item2?.summary).toBe('新增 2 条建议 · 核查 5 条 · 失败 1 条')
-    expect(item2?.errorDetail).toBe('m-234abc：对话模型输出达到长度上限被截断')
+    expect(item2?.errorDetail).toBe('测试词条：对话模型输出达到长度上限被截断')
 
     const item3 = merged.find((item) => item.id === 'p-3')
     expect(item3?.summary).toBe('新增 1 条建议 · 核查 6 条')

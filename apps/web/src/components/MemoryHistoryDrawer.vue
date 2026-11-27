@@ -9,6 +9,7 @@ import {
 import { useToast } from '@nuxt/ui/composables'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, nextTick, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
@@ -28,7 +29,8 @@ import {
   resolveActorDisplay,
   type ActorFilterGroup,
 } from '../labels'
-import { splitWikiLinks } from '../markdown'
+import { splitWikiLinks, type WikiLinkTargets } from '../markdown'
+import { entryRoute } from '../routes'
 import { formatRelative, formatShort, formatTime } from '../time'
 import { readStoredEnum, UI_STORAGE_KEYS, writeStoredString } from '../uiState'
 import ConsequenceModal from './ConsequenceModal.vue'
@@ -85,6 +87,7 @@ function openLinkedEntry(shortId: string) {
   emit('open', shortId)
 }
 
+const router = useRouter()
 const toast = useToast()
 const queryClient = useQueryClient()
 
@@ -98,7 +101,19 @@ const DIFF_LAYOUT_MODES: readonly DiffLayoutMode[] = ['unified', 'split']
 const DIFF_CONTEXT_MODES: readonly DiffContextMode[] = ['folded', 'full']
 
 const items = computed(() => history.data.value?.items ?? [])
-const linkedTitles = computed(() => history.data.value?.linkedTitles ?? null)
+const linkedTitles = computed(() =>
+  history.data.value ? (history.data.value.linkedTitles ?? {}) : null,
+)
+const snapshotWikiLinks = computed<WikiLinkTargets>(() => {
+  const byShortId = new Map<string, { title: string }>()
+  for (const [sid, title] of Object.entries(linkedTitles.value ?? {})) {
+    if (title) byShortId.set(sid, { title })
+  }
+  return {
+    byShortId,
+    href: (sid) => router.resolve(entryRoute(sid)).href,
+  }
+})
 const searchInput = ref('')
 const sourceFilter = ref<SourceFilter>('all')
 const activeItemId = ref<number | null>(null)
@@ -888,7 +903,13 @@ async function confirmRestore() {
                     <UIcon :name="icons.summary" class="snapshot-summary-icon" aria-hidden="true" />
                     <span>现行概要</span>
                   </span>
-                  <p>{{ inspectorSnapshot.summary }}</p>
+                  <p>
+                    <WikiText
+                      :text="inspectorSnapshot.summary"
+                      :titles="linkedTitles"
+                      @open="openLinkedEntry"
+                    />
+                  </p>
                 </div>
                 <div class="snapshot-body">
                   <MemoryContent
@@ -899,6 +920,8 @@ async function confirmRestore() {
                         inspectorSnapshot.content,
                       )
                     "
+                    :wiki-links="snapshotWikiLinks"
+                    @open="openLinkedEntry"
                   />
                 </div>
               </div>

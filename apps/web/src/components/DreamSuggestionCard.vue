@@ -785,7 +785,7 @@ function applyEdited() {
             </UButton>
           </div>
           <p class="revise-preview-reason">
-            <WikiText :text="revisedReason" :titles="knownTitles" compact />
+            <WikiText :text="revisedReason" :titles="knownTitles" :mark-missing="false" compact />
           </p>
           <NoteLine v-if="hasLostRefs || integrity?.severeShrink" tone="warning" flush>
             {{ integrityMessage }}
@@ -965,6 +965,7 @@ function applyEdited() {
                   v-if="baseEntry.summary?.trim()"
                   :text="baseEntry.summary.trim()"
                   :titles="knownTitles"
+                  :mark-missing="false"
                   compact
                 />
                 <template v-else>暂无</template>
@@ -973,7 +974,12 @@ function applyEdited() {
             <div class="summary-row">
               <span class="summary-tag">建议概要</span>
               <span class="summary-new">
-                <WikiText :text="suggestion.proposedSummary ?? ''" :titles="knownTitles" compact />
+                <WikiText
+                  :text="suggestion.proposedSummary ?? ''"
+                  :titles="knownTitles"
+                  :mark-missing="false"
+                  compact
+                />
               </span>
             </div>
           </div>
@@ -991,7 +997,11 @@ function applyEdited() {
             <strong class="index-preview-title">{{ baseEntry.title }}</strong>
             <span>（{{ baseEntry.content.length.toLocaleString() }} 字）</span>
             <template v-if="indexPreviewSummary"
-              >：<WikiText :text="indexPreviewSummary" :titles="knownTitles" compact
+              >：<WikiText
+                :text="indexPreviewSummary"
+                :titles="knownTitles"
+                :mark-missing="false"
+                compact
             /></template>
           </div>
         </div>
@@ -1005,10 +1015,11 @@ function applyEdited() {
             :key="link.targetShortId"
             class="link-check-item"
           >
-            <label class="link-check-label">
+            <div class="link-check-label">
               <input
                 type="checkbox"
                 class="square-check"
+                :aria-label="`选择关联「${link.targetTitle || link.targetShortId}」`"
                 :checked="selectedLinkShortIds.includes(link.targetShortId)"
                 :disabled="busy"
                 @change="toggleProposedLink(link.targetShortId)"
@@ -1032,10 +1043,15 @@ function applyEdited() {
                   </span>
                 </span>
                 <p v-if="link.reason" class="link-reason">
-                  <WikiText :text="link.reason" :titles="knownTitles" compact />
+                  <WikiText
+                    :text="link.reason"
+                    :titles="knownTitles"
+                    :mark-missing="false"
+                    compact
+                  />
                 </p>
               </span>
-            </label>
+            </div>
           </li>
         </ul>
 
@@ -1088,7 +1104,12 @@ function applyEdited() {
             <span>建议现行概要</span>
           </span>
           <p class="summary-preview-text">
-            <WikiText :text="suggestion.proposedSummary ?? ''" :titles="knownTitles" compact />
+            <WikiText
+              :text="suggestion.proposedSummary ?? ''"
+              :titles="knownTitles"
+              :mark-missing="false"
+              compact
+            />
           </p>
         </div>
 
@@ -1156,7 +1177,12 @@ function applyEdited() {
             <span>建议现行概要</span>
           </span>
           <p class="summary-preview-text">
-            <WikiText :text="suggestion.proposedSummary ?? ''" :titles="knownTitles" compact />
+            <WikiText
+              :text="suggestion.proposedSummary ?? ''"
+              :titles="knownTitles"
+              :mark-missing="false"
+              compact
+            />
           </p>
         </div>
         <div v-if="showScopeReview" class="scope-review">
@@ -1265,7 +1291,12 @@ function applyEdited() {
             <span>建议现行概要</span>
           </span>
           <p class="summary-preview-text">
-            <WikiText :text="suggestion.proposedSummary ?? ''" :titles="knownTitles" compact />
+            <WikiText
+              :text="suggestion.proposedSummary ?? ''"
+              :titles="knownTitles"
+              :mark-missing="false"
+              compact
+            />
           </p>
         </div>
 
@@ -1339,7 +1370,7 @@ function applyEdited() {
             <span v-if="item.occurredAt" class="archived-date font-mono">
               {{ formatShort(item.occurredAt) }}
             </span>
-            <WikiText :text="item.note" :titles="knownTitles" compact />
+            <WikiText :text="item.note" :titles="knownTitles" :mark-missing="false" compact />
           </li>
         </ul>
       </details>
@@ -1381,7 +1412,7 @@ function applyEdited() {
           <span>整理依据</span>
         </h3>
         <p class="side-reason">
-          <WikiText :text="suggestion.reason" :titles="knownTitles" compact />
+          <WikiText :text="suggestion.reason" :titles="knownTitles" :mark-missing="false" compact />
         </p>
       </div>
 
@@ -1590,7 +1621,7 @@ function applyEdited() {
             </UButton>
           </div>
           <p class="revise-preview-reason">
-            <WikiText :text="revisedReason" :titles="knownTitles" compact />
+            <WikiText :text="revisedReason" :titles="knownTitles" :mark-missing="false" compact />
           </p>
           <NoteLine v-if="hasLostRefs || integrity?.severeShrink" tone="warning" flush>
             {{ integrityMessage }}
@@ -1754,10 +1785,11 @@ function applyEdited() {
               :key="link.targetShortId"
               class="link-check-item"
             >
-              <label class="link-check-label">
+              <div class="link-check-label">
                 <input
                   type="checkbox"
                   class="square-check"
+                  :aria-label="`选择关联「${link.targetTitle || link.targetShortId}」`"
                   :checked="selectedLinkShortIds.includes(link.targetShortId)"
                   :disabled="busy"
                   @change="toggleProposedLink(link.targetShortId)"
@@ -1781,10 +1813,15 @@ function applyEdited() {
                     </span>
                   </span>
                   <p v-if="link.reason" class="link-reason">
-                    <WikiText :text="link.reason" :titles="knownTitles" compact />
+                    <WikiText
+                      :text="link.reason"
+                      :titles="knownTitles"
+                      :mark-missing="false"
+                      compact
+                    />
                   </p>
                 </span>
-              </label>
+              </div>
             </li>
           </ul>
         </div>
@@ -1827,7 +1864,12 @@ function applyEdited() {
             <span>建议现行概要</span>
           </span>
           <p class="summary-preview-text">
-            <WikiText :text="suggestion.proposedSummary ?? ''" :titles="knownTitles" compact />
+            <WikiText
+              :text="suggestion.proposedSummary ?? ''"
+              :titles="knownTitles"
+              :mark-missing="false"
+              compact
+            />
           </p>
         </div>
 
@@ -1905,7 +1947,7 @@ function applyEdited() {
             <span v-if="item.occurredAt" class="archived-date font-mono">
               {{ formatShort(item.occurredAt) }}
             </span>
-            <WikiText :text="item.note" :titles="knownTitles" compact />
+            <WikiText :text="item.note" :titles="knownTitles" :mark-missing="false" compact />
           </li>
         </ul>
       </details>
@@ -1945,7 +1987,7 @@ function applyEdited() {
         <UIcon :name="icons.lightbulb" class="card-reason-icon" aria-hidden="true" />
         <span>整理依据：</span>
       </span>
-      <WikiText :text="suggestion.reason" :titles="knownTitles" compact />
+      <WikiText :text="suggestion.reason" :titles="knownTitles" :mark-missing="false" compact />
     </p>
 
     <div v-if="suggestion.entries.length > 1" class="card-affected">
@@ -2276,10 +2318,10 @@ function applyEdited() {
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  cursor: pointer;
 }
 .link-check-label .square-check {
   margin-top: 4px;
+  cursor: pointer;
 }
 .link-check-body {
   display: flex;

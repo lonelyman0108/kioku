@@ -43,7 +43,8 @@ function resolveDreamErrorDetail(run: DreamState['recentRuns'][number]): string 
   if (rawError) return rawError
   const firstFailed = run.failedItems?.find((item) => item.reason.trim().length > 0)
   if (firstFailed) {
-    return `${firstFailed.shortId}：${firstFailed.reason.trim()}`
+    const label = firstFailed.title.trim() || firstFailed.shortId
+    return `${label}：${firstFailed.reason.trim()}`
   }
   if (isTaskIssueOutcome(run.outcome)) {
     return run.abortedReason?.trim() || null

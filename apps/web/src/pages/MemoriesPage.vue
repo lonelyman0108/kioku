@@ -88,6 +88,7 @@ const entriesQuery = useInfiniteQuery({
         {
           tab: tab.value,
           pinnedGroup: tab.value === 'pinned' ? (pinnedGroup.value ?? undefined) : undefined,
+          limit: tab.value === 'pinned' && pinnedGroup.value === 'global_full' ? 100 : undefined,
           q: routeSearch.value || undefined,
           env: env.value ?? undefined,
           realm: realm.value ?? undefined,
@@ -331,6 +332,22 @@ function clearFilters() {
   )
 }
 
+function resetAllFilters() {
+  searchInput.value = ''
+  void router.replace(
+    withQuery({
+      q: null,
+      pinnedGroup: null,
+      env: null,
+      realm: null,
+      project: null,
+      runtime: null,
+      topic: null,
+      projectScope: null,
+    }),
+  )
+}
+
 function invalidateEntries() {
   void queryClient.invalidateQueries({ queryKey: ['entries'] })
   void queryClient.invalidateQueries({ queryKey: ['boot-preview'] })
@@ -551,6 +568,7 @@ onBeforeUnmount(() => {
       @refresh="entriesQuery.refetch()"
       @load-more="entriesQuery.fetchNextPage()"
       @clear-filters="clearFilters"
+      @reset-filters="resetAllFilters"
       @preview-boot="bootPreviewOpen = true"
       @batch-organize="onBatchOrganize"
     />

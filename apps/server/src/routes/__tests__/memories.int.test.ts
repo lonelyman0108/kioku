@@ -884,6 +884,46 @@ describe.skipIf(!testDatabaseUrl)('扁平记忆 CRUD、双链、筛选、回收�
     )
     expect(nonPinnedTab.items.map((i) => i.shortId)).toContain(regularEntry.entry.shortId)
     expect(nonPinnedTab.items.map((i) => i.shortId)).toContain(globalFull.entry.shortId)
+
+    // global_full 无搜索词时在 SQL 层按启动字数（标题+正文）降序排列并支持游标翻页
+    const globalFullLong = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '全局全文超长手册',
+        content: '长'.repeat(600),
+        bootMode: 'full',
+      }),
+    )
+    const globalFullShort = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '短条',
+        content: '极短',
+        bootMode: 'full',
+      }),
+    )
+    const page1 = EntryListResponse.parse(
+      await (
+        await app.request('/v1/console/entries?tab=pinned&pinnedGroup=global_full&limit=2', {
+          headers: { cookie },
+        })
+      ).json(),
+    )
+    expect(page1.items.map((i) => i.shortId)).toEqual([
+      globalFullLong.entry.shortId,
+      globalFull.entry.shortId,
+    ])
+    expect(page1.nextCursor).toBeTruthy()
+    const page2 = EntryListResponse.parse(
+      await (
+        await app.request(
+          `/v1/console/entries?tab=pinned&pinnedGroup=global_full&limit=2&cursor=${encodeURIComponent(page1.nextCursor!)}`,
+          { headers: { cookie } },
+        )
+      ).json(),
+    )
+    expect(page2.items.map((i) => i.shortId)).toEqual([globalFullShort.entry.shortId])
+    expect(page2.nextCursor).toBeNull()
   })
 
   it('列表、详情与历史接口批量解析双链标题并过滤已删除目标，无引用时省略 linkedTitles', async () => {

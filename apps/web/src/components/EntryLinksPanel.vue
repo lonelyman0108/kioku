@@ -1,20 +1,43 @@
 <script setup lang="ts">
 import type { EntryLinkNeighbor } from '@kioku/contracts'
+import { computed } from 'vue'
 
 import { icons } from '../icons'
 import { entryKindLabels } from '../labels'
 import SectionHeading from './ui/SectionHeading.vue'
+import WikiText from './ui/WikiText.vue'
 
-withDefaults(
+type TitleSource =
+  Readonly<Record<string, string>> | ReadonlyMap<string, { title: string } | string>
+
+const props = withDefaults(
   defineProps<{
     outboundLinks: readonly EntryLinkNeighbor[]
     backlinks: readonly EntryLinkNeighbor[]
+    titles?: TitleSource | null
     compact?: boolean
   }>(),
-  { compact: false },
+  { titles: null, compact: false },
 )
 
 const emit = defineEmits<{ open: [shortId: string] }>()
+
+const resolvedTitles = computed<Map<string, { title: string }>>(() => {
+  const map = new Map<string, { title: string }>()
+  if (props.titles instanceof Map) {
+    for (const [sid, val] of props.titles.entries()) {
+      const title = typeof val === 'string' ? val : val.title
+      if (title) map.set(sid, { title })
+    }
+  } else if (props.titles) {
+    for (const [sid, title] of Object.entries(props.titles)) {
+      if (title) map.set(sid, { title })
+    }
+  }
+  for (const item of props.outboundLinks) map.set(item.shortId, { title: item.title })
+  for (const item of props.backlinks) map.set(item.shortId, { title: item.title })
+  return map
+})
 </script>
 
 <template>
@@ -36,7 +59,14 @@ const emit = defineEmits<{ open: [shortId: string] }>()
             <span v-if="item.relation || item.contextSnippet" class="link-context">
               <span v-if="item.relation" class="link-relation">{{ item.relation }}</span>
               <span v-if="item.relation && item.contextSnippet" aria-hidden="true"> · </span>
-              <span v-if="item.contextSnippet">{{ item.contextSnippet }}</span>
+              <WikiText
+                v-if="item.contextSnippet"
+                :text="item.contextSnippet"
+                :titles="resolvedTitles"
+                :interactive="false"
+                :mark-missing="false"
+                compact
+              />
             </span>
           </button>
         </li>
@@ -60,7 +90,14 @@ const emit = defineEmits<{ open: [shortId: string] }>()
             <span v-if="item.relation || item.contextSnippet" class="link-context">
               <span v-if="item.relation" class="link-relation">{{ item.relation }}</span>
               <span v-if="item.relation && item.contextSnippet" aria-hidden="true"> · </span>
-              <span v-if="item.contextSnippet">{{ item.contextSnippet }}</span>
+              <WikiText
+                v-if="item.contextSnippet"
+                :text="item.contextSnippet"
+                :titles="resolvedTitles"
+                :interactive="false"
+                :mark-missing="false"
+                compact
+              />
             </span>
           </button>
         </li>

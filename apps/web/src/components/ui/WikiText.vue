@@ -26,11 +26,13 @@ const props = withDefaults(
     titles?: WikiTitleSource | null
     interactive?: boolean
     compact?: boolean
+    markMissing?: boolean
   }>(),
   {
     titles: null,
     interactive: true,
     compact: false,
+    markMissing: true,
   },
 )
 
@@ -63,7 +65,7 @@ const segments = computed<RenderedSegment[]>(() => {
         shortId,
         label: alias ?? resolvedTitle ?? shortId,
         tooltip: resolvedTitle ? `${resolvedTitle}（${shortId}）` : shortId,
-        missing: hasTitles && !resolvedTitle,
+        missing: props.markMissing && hasTitles && !resolvedTitle,
       },
     }
   })
@@ -144,8 +146,8 @@ a.wiki-chip {
   cursor: pointer;
 }
 a.wiki-chip:hover {
-  border-color: var(--ui-rule);
-  background: var(--ui-bg-elevated);
+  border-color: var(--wiki-chip-hover-border, var(--ui-rule));
+  background: var(--wiki-chip-hover-bg, var(--ui-bg-elevated));
 }
 .wiki-chip.is-static {
   cursor: inherit;
@@ -158,7 +160,7 @@ a.wiki-chip:hover {
 }
 .wiki-chip.is-missing {
   border-style: dashed;
-  color: var(--ui-text-muted);
+  color: var(--wiki-chip-missing-fg, var(--ui-text-muted));
 }
 .wiki-chip-icon {
   display: inline-block;
@@ -168,37 +170,19 @@ a.wiki-chip:hover {
   color: var(--wiki-chip-icon, var(--ui-text-muted));
 }
 a.wiki-chip:hover .wiki-chip-icon {
-  color: var(--ui-text-highlighted);
+  color: var(--wiki-chip-hover-icon, var(--ui-text-highlighted));
 }
 a.wiki-chip.is-missing:hover .wiki-chip-icon {
-  color: var(--ui-text-muted);
+  color: var(--wiki-chip-missing-fg, var(--ui-text-muted));
 }
 .wiki-chip-label {
   min-width: 0;
   overflow-wrap: anywhere;
 }
 .wiki-chip.is-compact .wiki-chip-label {
-  max-width: 16em;
+  max-width: var(--wiki-chip-max-width, 16em);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-:global(.entry-row.selected) .wiki-chip {
-  border-color: var(--ui-on-selected-muted);
-  background: transparent;
-  color: var(--ui-on-selected);
-}
-:global(.entry-row.selected) .wiki-chip-icon {
-  color: var(--ui-on-selected-muted);
-}
-:global(.entry-row.selected) .wiki-chip.is-missing {
-  color: var(--ui-on-selected-muted);
-}
-:global(.entry-row.selected) a.wiki-chip:hover {
-  border-color: var(--ui-on-selected);
-  background: transparent;
-}
-:global(.entry-row.selected) a.wiki-chip:hover .wiki-chip-icon {
-  color: var(--ui-on-selected);
 }
 </style>
