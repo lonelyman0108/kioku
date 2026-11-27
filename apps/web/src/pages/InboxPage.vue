@@ -18,10 +18,11 @@ import type { DropdownMenuItem } from '@nuxt/ui'
 import { useToast } from '@nuxt/ui/composables'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import ConsequenceModal from '../components/ConsequenceModal.vue'
 import DreamSuggestionCard from '../components/DreamSuggestionCard.vue'
 import HygieneSweepDrawer from '../components/HygieneSweepDrawer.vue'
 import EmptyState from '../components/ui/EmptyState.vue'
@@ -53,6 +54,7 @@ const FILTER_ORDER: readonly DreamSuggestionKind[] = [
   'mark_stale',
 ]
 
+const route = useRoute()
 const router = useRouter()
 const toast = useToast()
 const queryClient = useQueryClient()
@@ -61,7 +63,10 @@ const { me } = useSession()
 const inboxQuery = useQuery({
   queryKey: ['inbox'] as const,
   queryFn: () => api.inbox(),
-  refetchInterval: (query) => (query.state.data?.dreamState.running ? 3000 : false),
+  refetchInterval: (query) => {
+    const d = query.state.data
+    return d?.dreamState.running || d?.embeddingBackfill?.running ? 2500 : false
+  },
 })
 
 const data = computed(() => inboxQuery.data.value ?? null)
@@ -168,8 +173,30 @@ function formatScheduleInterval(hours: number): string {
   return `每 ${hours} 小时`
 }
 
-// ---- 分类筛选（仅渲染非零分类） ----
-const kindFilter = ref<KindFilter>('all')
+// ---- 分类筛选（与路由 query.kind 同步，仅渲染非零分类） ----
+function parseKindQuery(raw: unknown): KindFilter {
+  if (typeof raw !== 'string') return 'all'
+  return (DREAM_KINDS as readonly string[]).includes(raw) ? (raw as DreamSuggestionKind) : 'all'
+}
+
+const kindFilter = ref<KindFilter>(parseKindQuery(route.query.kind))
+
+watch(
+  () => route.query.kind,
+  (raw) => {
+    const parsed = parseKindQuery(raw)
+    if (parsed !== kindFilter.value) kindFilter.value = parsed
+  },
+)
+
+watch(kindFilter, (next) => {
+  const current = parseKindQuery(route.query.kind)
+  if (next === current) return
+  const query = { ...route.query }
+  if (next === 'all') delete query.kind
+  else query.kind = next
+  void router.replace({ query })
+})
 
 const kindCounts = computed(() => {
   const counts: Record<KindFilter, number> = {
@@ -200,11 +227,16 @@ const filterTabs = computed<{ value: KindFilter; label: string; icon: string; co
   ],
 )
 
-watch(kindCounts, (counts) => {
-  if (kindFilter.value !== 'all' && counts[kindFilter.value] === 0) {
-    kindFilter.value = 'all'
-  }
-})
+watch(
+  [data, kindCounts, kindFilter],
+  ([loaded, counts, currentKind]) => {
+    if (!loaded) return
+    if (currentKind !== 'all' && counts[currentKind] === 0) {
+      kindFilter.value = 'all'
+    }
+  },
+  { immediate: true },
+)
 
 const filteredItems = computed(() =>
   kindFilter.value === 'all'
@@ -467,8 +499,19 @@ function clearSelection() {
   selectedIds.value = []
 }
 
-// ---- 触发后台整理与指挥条下拉菜单 ----
+// ---- 触发后台整理、分级确认与取消 ----
+interface PendingDreamConfirm {
+  req: Partial<TriggerDreamRequest>
+  title: string
+  action: string
+  icon: string
+  consequences: string[]
+}
+
 const triggeringMode = ref<DreamMode | 'retry' | null>(null)
+const cancellingDream = ref(false)
+const pendingDreamConfirm = ref<PendingDreamConfirm | null>(null)
+const dreamConfirmError = ref<string | null>(null)
 const standardBusy = computed(
   () =>
     triggeringMode.value === 'standard' ||
@@ -485,8 +528,41 @@ const modelRunDisabled = computed(
     Boolean(state.value?.running),
 )
 
-async function triggerDream(req: Partial<TriggerDreamRequest>) {
-  if (triggeringMode.value || state.value?.running) return
+function requestHeavyDreamConfirm(confirm: PendingDreamConfirm) {
+  if (modelRunDisabled.value) return
+  dreamConfirmError.value = null
+  pendingDreamConfirm.value = confirm
+}
+
+function openCrossMemoryConfirm() {
+  requestHeavyDreamConfirm({
+    req: { mode: 'cross_memory', scope: 'full_corpus' },
+    title: '发起全库查重/关联？',
+    action: '开始查重/关联',
+    icon: icons.links,
+    consequences: [
+      '将对全部活跃记忆扫描重复合并、缺失双链与常驻结构，会触发多轮模型调用并耗时数分钟。',
+      '整理结果仅写入待处理建议，不会直接修改现有记忆。',
+      '执行期间可随时在待处理页或顶部导航栏取消。',
+    ],
+  })
+}
+
+async function confirmHeavyDream() {
+  const pending = pendingDreamConfirm.value
+  if (!pending || triggeringMode.value) return
+  dreamConfirmError.value = null
+  const ok = await triggerDream(pending.req, (msg) => {
+    dreamConfirmError.value = msg
+  })
+  if (ok) pendingDreamConfirm.value = null
+}
+
+async function triggerDream(
+  req: Partial<TriggerDreamRequest>,
+  onError?: (message: string) => void,
+): Promise<boolean> {
+  if (triggeringMode.value || state.value?.running) return false
   const mode: DreamMode = req.mode === 'tidy' || req.mode === 'cross_memory' ? req.mode : 'standard'
   const isRetry = Boolean(req.targetShortIds?.length)
   triggeringMode.value = isRetry ? 'retry' : mode
@@ -504,19 +580,56 @@ async function triggerDream(req: Partial<TriggerDreamRequest>) {
             : '已发起增量整理任务'
       toast.add({ title, color: 'success' })
     } else {
-      toast.add({ title: res.reason ?? '当前无需重复整理', color: 'neutral' })
+      const msg = res.reason ?? '当前无需重复整理'
+      if (onError) onError(msg)
+      else toast.add({ title: msg, color: 'neutral' })
+      await queryClient.invalidateQueries({ queryKey: ['inbox'] })
+      return false
+    }
+    await queryClient.invalidateQueries({ queryKey: ['inbox'] })
+    return true
+  } catch (err) {
+    const msg = err instanceof ApiError ? err.message : '触发整理失败'
+    if (onError) onError(msg)
+    else toast.add({ title: msg, color: 'error' })
+    return false
+  } finally {
+    triggeringMode.value = null
+  }
+}
+
+async function cancelDream() {
+  if (cancellingDream.value || !state.value?.running) return
+  cancellingDream.value = true
+  try {
+    const res = await api.cancelDream()
+    if (!res.cancelled) {
+      toast.add({ title: '当前没有可取消的整理任务', color: 'neutral' })
     }
     await queryClient.invalidateQueries({ queryKey: ['inbox'] })
   } catch (err) {
-    toast.add({ title: err instanceof ApiError ? err.message : '触发整理失败', color: 'error' })
+    toast.add({ title: err instanceof ApiError ? err.message : '取消整理失败', color: 'error' })
   } finally {
-    triggeringMode.value = null
+    cancellingDream.value = false
   }
 }
 
 const organizeMenuItems = computed<DropdownMenuItem[][]>(() => {
   const count = tidyPendingCount.value
   const disabledLlm = modelRunDisabled.value
+
+  const openFullTidyConfirm = () =>
+    requestHeavyDreamConfirm({
+      req: { mode: 'tidy', pinnedFirst: true, all: true },
+      title: `发起全量规范整理（${count} 条）？`,
+      action: '开始规范整理',
+      icon: icons.tidy,
+      consequences: [
+        `将逐条对全部 ${count} 条待规范记忆执行标题规范、概要补全与旧日志剥离，会触发多轮模型调用。`,
+        '整理结果仅写入待处理建议，不会直接修改现有记忆。',
+        '执行期间可随时在待处理页或顶部导航栏取消。',
+      ],
+    })
 
   const tidyChildren: DropdownMenuItem[] = []
   if (count > 10) {
@@ -540,7 +653,7 @@ const organizeMenuItems = computed<DropdownMenuItem[][]>(() => {
       label: `全部待规范（${count} 条）`,
       icon: icons.listChecks,
       disabled: disabledLlm,
-      onSelect: () => void triggerDream({ mode: 'tidy', pinnedFirst: true, all: true }),
+      onSelect: openFullTidyConfirm,
     })
   }
 
@@ -558,7 +671,7 @@ const organizeMenuItems = computed<DropdownMenuItem[][]>(() => {
           description: count > 0 ? '逐条规范脏标题、补概要并剥离旧日志' : '当前暂无待规范存量',
           icon: icons.tidy,
           disabled: disabledLlm || count <= 0,
-          onSelect: () => void triggerDream({ mode: 'tidy', pinnedFirst: true, all: true }),
+          onSelect: openFullTidyConfirm,
         }
 
   return [
@@ -575,7 +688,7 @@ const organizeMenuItems = computed<DropdownMenuItem[][]>(() => {
         description: '全库扫描重复合并、补全双链与常驻巡检',
         icon: icons.links,
         disabled: disabledLlm,
-        onSelect: () => void triggerDream({ mode: 'cross_memory', scope: 'full_corpus' }),
+        onSelect: openCrossMemoryConfirm,
       },
       tidyItem,
     ],
@@ -1129,18 +1242,32 @@ async function batchDismissSelected() {
             </span>
             <span v-else class="run-banner-meta">任务已入队，正在准备候选记忆…</span>
           </div>
-          <div v-if="progress && progress.total > 0" class="run-banner-right">
-            <div
-              class="run-progress-track"
-              role="progressbar"
-              aria-label="整理进度"
-              aria-valuemin="0"
-              aria-valuemax="100"
-              :aria-valuenow="progressPercent"
+          <div class="run-banner-right">
+            <template v-if="progress && progress.total > 0">
+              <div
+                class="run-progress-track"
+                role="progressbar"
+                aria-label="整理进度"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                :aria-valuenow="progressPercent"
+              >
+                <div class="run-progress-fill" :style="{ width: `${progressPercent}%` }" />
+              </div>
+              <span class="run-banner-count">
+                {{ progress.processed }} / {{ progress.total }} 条
+              </span>
+            </template>
+            <UButton
+              size="xs"
+              color="neutral"
+              variant="outline"
+              :icon="icons.stop"
+              :loading="cancellingDream"
+              @click="cancelDream"
             >
-              <div class="run-progress-fill" :style="{ width: `${progressPercent}%` }" />
-            </div>
-            <span class="run-banner-count">{{ progress.processed }} / {{ progress.total }} 条</span>
+              取消整理
+            </UButton>
           </div>
         </div>
 
@@ -1148,13 +1275,19 @@ async function batchDismissSelected() {
         <div
           v-if="!state?.running && (latestFailedItems.length > 0 || state?.lastError)"
           class="failure-banner"
-          :class="{ 'is-partial': state?.lastOutcome === 'partial' }"
+          :class="{
+            'is-partial': state?.lastOutcome === 'partial' || state?.lastOutcome === 'cancelled',
+          }"
           role="status"
         >
           <div class="failure-banner-head">
             <div class="failure-banner-msg">
               <UIcon
-                :name="state?.lastOutcome === 'partial' ? icons.warning : icons.error"
+                :name="
+                  state?.lastOutcome === 'partial' || state?.lastOutcome === 'cancelled'
+                    ? icons.warning
+                    : icons.error
+                "
                 class="banner-icon"
                 aria-hidden="true"
               />
@@ -1700,7 +1833,7 @@ async function batchDismissSelected() {
                 variant="outline"
                 :icon="icons.links"
                 :disabled="modelRunDisabled"
-                @click="triggerDream({ mode: 'cross_memory', scope: 'full_corpus' })"
+                @click="openCrossMemoryConfirm"
               >
                 查重/关联
               </UButton>
@@ -1721,6 +1854,19 @@ async function batchDismissSelected() {
     </div>
 
     <HygieneSweepDrawer v-model:open="sweepOpen" />
+    <ConsequenceModal
+      :open="pendingDreamConfirm !== null"
+      tone="primary"
+      :title="pendingDreamConfirm?.title ?? ''"
+      :title-icon="pendingDreamConfirm?.icon"
+      :consequences="pendingDreamConfirm?.consequences ?? []"
+      :action="pendingDreamConfirm?.action ?? '确认'"
+      :action-icon="pendingDreamConfirm?.icon"
+      :busy="triggeringMode !== null"
+      :error="dreamConfirmError"
+      @confirm="confirmHeavyDream"
+      @close="((pendingDreamConfirm = null), (dreamConfirmError = null))"
+    />
   </div>
 </template>
 

@@ -37,12 +37,19 @@ export async function getEmbeddingCoverage(
   return { total, embedded: embRow?.n ?? 0, model: modelCfg.model }
 }
 
+export interface EmbedProgress {
+  processed: number
+  total: number
+  model: string
+}
+
 // 为给定词条批次计算并写入向量；内容哈希未变时跳过请求
 export async function embedEntryIds(
   db: Db,
   masterKey: MasterKey | null,
   entryIds: readonly string[],
   signal?: AbortSignal,
+  onProgress?: (progress: EmbedProgress) => void,
 ): Promise<number> {
   if (!entryIds.length) return 0
   const conn = await loadResolvedModel(db, masterKey, EMBEDDING_SETTING_KEY)
@@ -84,19 +91,28 @@ export async function embedEntryIds(
   }
   if (!pending.length) return 0
 
+  onProgress?.({ processed: 0, total: pending.length, model: conn.model })
+
   let updated = 0
   for (let i = 0; i < pending.length; i += EMBED_BATCH) {
     if (signal?.aborted) break
     const chunk = pending.slice(i, i + EMBED_BATCH)
-    const vectors = await embedTexts(
-      conn,
-      chunk.map((c) => c.text),
-      {
-        maxRetries: 1,
-        ...(signal ? { signal } : {}),
-      },
-    )
+    let vectors: number[][]
+    try {
+      vectors = await embedTexts(
+        conn,
+        chunk.map((c) => c.text),
+        {
+          maxRetries: 1,
+          ...(signal ? { signal } : {}),
+        },
+      )
+    } catch (err) {
+      if (signal?.aborted) break
+      throw err
+    }
     for (let j = 0; j < chunk.length; j++) {
+      if (signal?.aborted) break
       const item = chunk[j]!
       const vector = vectors[j]!
       await db
@@ -118,6 +134,7 @@ export async function embedEntryIds(
         })
       updated++
     }
+    onProgress?.({ processed: updated, total: pending.length, model: conn.model })
   }
   return updated
 }

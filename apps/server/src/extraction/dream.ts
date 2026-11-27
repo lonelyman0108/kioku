@@ -13,6 +13,7 @@ import {
   type DreamSuggestionKind,
   type DreamSuggestionView,
   type DreamTrigger,
+  type EmbeddingBackfillState,
   type InboxResponse,
 } from '@kioku/contracts'
 import { and, asc, desc, eq, gt, inArray, isNull, notInArray, or, sql } from 'drizzle-orm'
@@ -848,6 +849,10 @@ export async function runDream(
                 totalSucceeded++
               }
             } catch (err) {
+              if (options.signal?.aborted) {
+                totalConsidered = Math.max(0, totalConsidered - 1)
+                break
+              }
               guard.recordFailure(err)
               const reason = err instanceof Error ? err.message : String(err)
               failures.push({ shortId: row.shortId, reason })
@@ -858,8 +863,10 @@ export async function runDream(
                 reason,
               })
             } finally {
-              processed++
-              emitProgress()
+              if (!options.signal?.aborted) {
+                processed++
+                emitProgress()
+              }
             }
           }
         }
@@ -878,6 +885,19 @@ export async function runDream(
             await saveTidyCheckedVersions(db, pruned)
           }
         }
+      }
+
+      if (options.signal?.aborted && !guard.isAborted) {
+        return finish({
+          mode: 'tidy',
+          outcome: 'cancelled',
+          considered: totalConsidered,
+          suggested: totalSuggested,
+          error: null,
+          failedItems,
+          retriedCount,
+          abortedReason: '已手动取消',
+        })
       }
 
       const abortedReason = resolveAbortedReason()
@@ -1068,6 +1088,7 @@ export async function runDream(
           totalConsidered += batch.length
         }
       } catch (err) {
+        if (options.signal?.aborted) break
         guard.recordFailure(err)
         const reason = err instanceof Error ? err.message : String(err)
         for (const row of batch) {
@@ -1092,6 +1113,19 @@ export async function runDream(
       })
 
       if (unchecked.length < CHANGED_PER_CALL && batch.length === unchecked.length) break
+    }
+
+    if (options.signal?.aborted && !guard.isAborted) {
+      return finish({
+        mode: 'standard',
+        outcome: 'cancelled',
+        considered: totalConsidered,
+        suggested: totalSuggested,
+        error: null,
+        failedItems,
+        retriedCount,
+        abortedReason: '已手动取消',
+      })
     }
 
     const abortedReason = resolveAbortedReason()
@@ -1133,6 +1167,18 @@ export async function runDream(
       abortedReason,
     })
   } catch (err) {
+    if (options.signal?.aborted && !guard.isAborted) {
+      return finish({
+        mode: runMode,
+        outcome: 'cancelled',
+        considered: totalConsidered,
+        suggested: totalSuggested,
+        error: null,
+        failedItems,
+        retriedCount,
+        abortedReason: '已手动取消',
+      })
+    }
     const message = err instanceof Error ? err.message : String(err)
     const abortedReason = resolveAbortedReason()
     return finish({
@@ -1281,6 +1327,7 @@ export async function loadInbox(
   db: Db,
   running = false,
   progress: DreamProgress | null = null,
+  embeddingBackfill?: EmbeddingBackfillState,
 ): Promise<InboxResponse> {
   const [rows, dreamState, tidyPendingCount] = await Promise.all([
     db
@@ -1300,5 +1347,6 @@ export async function loadInbox(
     pendingCount: items.length,
     tidyPendingCount,
     dreamState,
+    ...(embeddingBackfill ? { embeddingBackfill } : {}),
   }
 }

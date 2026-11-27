@@ -2,6 +2,7 @@ import { createRoute, z } from '@hono/zod-openapi'
 import {
   ApplySuggestionRequest,
   ApplySuggestionResponse,
+  CancelTaskResponse,
   ErrorResponse,
   InboxResponse,
   TriggerDreamRequest,
@@ -64,12 +65,25 @@ const triggerRoute = createRoute({
   responses: { 200: jsonResponse('触发结果', TriggerDreamResponse), ...errors },
 })
 
+const cancelRoute = createRoute({
+  method: 'post',
+  path: '/console/dream/cancel',
+  tags: ['dream'],
+  summary: '取消当前正在排队或执行中的后台记忆整理任务',
+  responses: { 200: jsonResponse('取消结果', CancelTaskResponse), ...errors },
+})
+
 export function dreamRoutes(deps: Deps, entries: EntryService) {
   return router()
     .openapi(inboxRoute, async (c) => {
       const running = (await deps.jobs?.isDreamRunning()) ?? false
       const progress = running ? ((await deps.jobs?.getDreamProgress?.()) ?? null) : null
-      return c.json(await loadInbox(deps.db, running, progress), 200)
+      const embeddingBackfill = deps.jobs?.getEmbeddingBackfillState?.()
+      return c.json(await loadInbox(deps.db, running, progress, embeddingBackfill), 200)
+    })
+    .openapi(cancelRoute, async (c) => {
+      const cancelled = (await deps.jobs?.cancelDream?.()) ?? false
+      return c.json({ cancelled }, 200)
     })
     .openapi(applyRoute, async (c) => {
       const { id } = c.req.valid('param')

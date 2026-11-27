@@ -41,6 +41,14 @@ const settingsQuery = useQuery({
   queryFn: () => api.modelsSettings(),
 })
 
+const inboxQuery = useQuery({
+  queryKey: ['inbox'] as const,
+  queryFn: () => api.inbox(),
+  staleTime: 30_000,
+})
+const backfillState = computed(() => inboxQuery.data.value?.embeddingBackfill ?? null)
+const backfillRunning = computed(() => Boolean(backfillState.value?.running))
+
 const reasoningSelectItems = REASONING_EFFORTS.map((value) => {
   const wire = reasoningEffortWireValues[value]
   return {
@@ -456,17 +464,36 @@ async function runTest(kind: ModelKind) {
 }
 
 const rebuilding = ref(false)
+const cancellingBackfill = ref(false)
 async function rebuildEmbeddings() {
-  if (rebuilding.value) return
+  if (rebuilding.value || backfillRunning.value) return
   rebuilding.value = true
   try {
     const res = await api.backfillEmbeddings()
     toast.add({ title: `已加入向量重建队列（${res.queued} 条）`, color: 'success' })
     void queryClient.invalidateQueries({ queryKey: ['models-settings'] })
+    void queryClient.invalidateQueries({ queryKey: ['inbox'] })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '触发重建失败', color: 'error' })
   } finally {
     rebuilding.value = false
+  }
+}
+
+async function cancelBackfill() {
+  if (cancellingBackfill.value || !backfillRunning.value) return
+  cancellingBackfill.value = true
+  try {
+    const res = await api.cancelEmbeddingBackfill()
+    if (!res.cancelled) {
+      toast.add({ title: '当前没有可取消的向量补齐任务', color: 'neutral' })
+    }
+    void queryClient.invalidateQueries({ queryKey: ['inbox'] })
+    void queryClient.invalidateQueries({ queryKey: ['models-settings'] })
+  } catch (err) {
+    toast.add({ title: err instanceof ApiError ? err.message : '取消补齐失败', color: 'error' })
+  } finally {
+    cancellingBackfill.value = false
   }
 }
 </script>
@@ -580,19 +607,50 @@ async function rebuildEmbeddings() {
           <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
             <span class="coverage-label">
               <UIcon
-                :name="coveragePercent === 100 ? icons.checkCircle : icons.layers"
+                :name="
+                  backfillRunning
+                    ? icons.loader
+                    : coveragePercent === 100
+                      ? icons.checkCircle
+                      : icons.layers
+                "
                 class="coverage-icon"
-                :class="{ 'is-complete': coveragePercent === 100 }"
+                :class="{
+                  'is-complete': !backfillRunning && coveragePercent === 100,
+                  'is-spinning': backfillRunning,
+                }"
                 aria-hidden="true"
               />
               <span>
-                向量索引覆盖：<strong class="tabular-nums">{{ coverage.embedded }}</strong> /
-                <span class="tabular-nums">{{ coverage.total }}</span>
-                <template v-if="coveragePercent !== null">（{{ coveragePercent }}%）</template>
-                <template v-if="coverage.model"> · {{ coverage.model }}</template>
+                <template v-if="backfillRunning">
+                  向量索引补齐中<template v-if="backfillState && backfillState.total > 0"
+                    >：<strong class="tabular-nums">{{ backfillState.processed }}</strong> /
+                    <span class="tabular-nums">{{ backfillState.total }}</span></template
+                  >
+                  <template v-if="backfillState?.model"> · {{ backfillState.model }}</template>
+                </template>
+                <template v-else>
+                  向量索引覆盖：<strong class="tabular-nums">{{ coverage.embedded }}</strong> /
+                  <span class="tabular-nums">{{ coverage.total }}</span>
+                  <template v-if="coveragePercent !== null">（{{ coveragePercent }}%）</template>
+                  <template v-if="coverage.model"> · {{ coverage.model }}</template>
+                </template>
               </span>
             </span>
             <UButton
+              v-if="backfillRunning"
+              type="button"
+              size="xs"
+              color="neutral"
+              variant="outline"
+              :icon="icons.stop"
+              :loading="cancellingBackfill"
+              @click="cancelBackfill"
+            >
+              取消补齐
+            </UButton>
+            <UButton
+              v-else
               type="button"
               size="xs"
               color="neutral"
@@ -908,6 +966,20 @@ async function rebuildEmbeddings() {
 }
 .coverage-icon.is-complete {
   color: var(--ui-success);
+}
+.coverage-icon.is-spinning {
+  color: var(--ui-text-highlighted);
+  animation: model-spin 1.1s linear infinite;
+}
+@keyframes model-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .coverage-icon.is-spinning {
+    animation: none;
+  }
 }
 .meter {
   position: relative;

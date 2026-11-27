@@ -1,5 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi'
 import {
+  CancelTaskResponse,
   ErrorResponse,
   ExportFormat,
   ModelsSettingsResponse,
@@ -64,6 +65,14 @@ const backfillRoute = createRoute({
   responses: { 200: jsonResponse('入队结果', RebuildEmbeddingsResponse), ...errors },
 })
 
+const cancelBackfillRoute = createRoute({
+  method: 'post',
+  path: '/console/settings/embedding/backfill/cancel',
+  tags: ['settings'],
+  summary: '取消当前正在排队或执行中的向量补齐任务',
+  responses: { 200: jsonResponse('取消结果', CancelTaskResponse), ...errors },
+})
+
 const exportRoute = createRoute({
   method: 'get',
   path: '/console/export',
@@ -126,6 +135,7 @@ export function settingsRoutes(deps: Deps) {
           previous?.baseUrl !== next?.baseUrl ||
           previous?.enabled !== next?.enabled
         if (modelChanged) {
+          await deps.jobs?.cancelEmbeddingBackfill?.()
           await purgeStaleEmbeddings(deps.db, next?.enabled ? next.model : null)
           if (next?.enabled) triggerBackfill = true
         }
@@ -168,8 +178,12 @@ export function settingsRoutes(deps: Deps) {
         return c.json({ error: '尚未配置或启用嵌入模型' }, 400)
       }
       const missing = Math.max(0, coverage.total - coverage.embedded)
-      await deps.jobs?.enqueueBackfill()
-      return c.json({ queued: missing }, 200)
+      const enqueued = await deps.jobs?.enqueueBackfill({ total: missing, model: coverage.model })
+      return c.json({ queued: enqueued === false ? 0 : missing }, 200)
+    })
+    .openapi(cancelBackfillRoute, async (c) => {
+      const cancelled = (await deps.jobs?.cancelEmbeddingBackfill?.()) ?? false
+      return c.json({ cancelled }, 200)
     })
     .openapi(exportRoute, async (c) => {
       const { format } = c.req.valid('query')
