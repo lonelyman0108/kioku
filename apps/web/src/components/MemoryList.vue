@@ -205,10 +205,11 @@ const pinnedWatermark = computed(() => {
 
 const isFiltered = computed(() => Boolean(props.search.trim()) || hasFilters.value)
 
-const summaryText = computed(() => {
+const summaryText = computed<string | null>(() => {
   const loaded = props.items.length
   const total = props.counts?.[props.tab]
   if (!isFiltered.value && total !== undefined) {
+    if (props.tab === 'pinned' && pinnedWatermark.value) return null
     return props.tab === 'pinned' ? `共 ${total} 条常驻` : `共 ${total} 条记忆`
   }
   return `当前列表 ${loaded}${props.hasNextPage ? '+' : ''} 条记忆`
@@ -461,9 +462,9 @@ defineExpose({ filterOpen })
     <section class="list-pane" :class="{ 'is-compact': compact }" aria-label="记忆列表">
       <div class="list-meta-bar" :class="{ 'is-pinned-bar': pinnedWatermark !== null }">
         <div class="meta-summary tabular-nums">
-          <span>{{ summaryText }}</span>
+          <span v-if="summaryText">{{ summaryText }}</span>
           <template v-if="pinnedWatermark">
-            <span class="meta-sep" aria-hidden="true">·</span>
+            <span v-if="summaryText" class="meta-sep" aria-hidden="true">·</span>
             <span
               class="pinned-budget"
               :class="{ 'is-over': pinnedWatermark.globalOverCap }"
@@ -506,7 +507,6 @@ defineExpose({ filterOpen })
           <div v-else-if="!compact && !batchMode" class="list-hint" aria-hidden="true">
             <span>↑ ↓ 切换</span>
             <span>Esc 关闭详情</span>
-            <span>{{ captureShortcut }} 随手记</span>
           </div>
         </div>
       </div>

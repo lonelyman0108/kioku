@@ -312,15 +312,32 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onModalKeydown))
           <p class="text-xs text-muted">{{ bootModeDescriptions[form.bootMode] }}</p>
         </div>
 
-        <NoteLine v-for="warn in bootWarnings" :key="warn.code" tone="warning">
-          {{ warn.message }}
-          <template v-if="warn.code === 'pinned_oversized'" #actions>
-            <UButton size="xs" color="neutral" variant="outline" @click="form.bootMode = 'index'">
+        <NoteLine v-if="bootWarnings.length" tone="warning">
+          {{ bootWarnings.map((w) => w.message).join('；') }}
+          <template
+            v-if="
+              bootWarnings.some(
+                (w) => w.code === 'pinned_oversized' || w.code === 'pinned_scope_hint',
+              )
+            "
+            #actions
+          >
+            <UButton
+              v-if="bootWarnings.some((w) => w.code === 'pinned_oversized')"
+              size="xs"
+              color="neutral"
+              variant="outline"
+              @click="form.bootMode = 'index'"
+            >
               改为目录常驻
             </UButton>
-          </template>
-          <template v-else-if="warn.code === 'pinned_scope_hint'" #actions>
-            <UButton size="xs" color="neutral" variant="outline" @click="attrsOpen = true">
+            <UButton
+              v-if="bootWarnings.some((w) => w.code === 'pinned_scope_hint')"
+              size="xs"
+              color="neutral"
+              variant="outline"
+              @click="attrsOpen = true"
+            >
               限定场景
             </UButton>
           </template>
@@ -355,7 +372,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onModalKeydown))
               <UFormField label="触发场景（可选）" help="简述何时需要召回此记忆">
                 <UInput v-model="form.disclosure" :maxlength="DISCLOSURE_MAX" class="w-full" />
               </UFormField>
-              <UFormField label="有效期（可选）" help="留空表示长期有效">
+              <UFormField label="有效期（可选）">
                 <UInput
                   v-model="form.validTo"
                   type="datetime-local"

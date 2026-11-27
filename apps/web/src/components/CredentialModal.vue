@@ -151,10 +151,7 @@ async function save() {
           />
         </UFormField>
 
-        <UFormField
-          :label="editing ? '新的凭据值（留空则保持不变）' : '凭据值'"
-          help="使用主密钥加密保存，Agent 不可直接读取明文"
-        >
+        <UFormField :label="editing ? '新的凭据值（留空则保持不变）' : '凭据值'">
           <UTextarea
             v-model="form.value"
             :rows="3"

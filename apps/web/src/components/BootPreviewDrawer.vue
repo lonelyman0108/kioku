@@ -21,7 +21,6 @@ import {
 } from '../labels'
 import { runtimeName } from '../runtimes'
 import EmptyState from './ui/EmptyState.vue'
-import NoteLine from './ui/NoteLine.vue'
 import ReadFailureNote from './ui/ReadFailureNote.vue'
 
 const NONE_KEY = '__none__'
@@ -160,7 +159,7 @@ function resetOverrides() {
   <UModal
     v-model:open="open"
     title="终端启动加载预览"
-    description="只读模拟指定访问密钥与场景下，会话开始时实际展开、进入目录与被排除的常驻记忆"
+    description="模拟指定终端与场景在会话开始时的常驻加载结果"
     :ui="{
       content: 'w-[94vw] max-w-5xl sm:max-w-5xl max-h-[88vh] ring-2 ring-rule',
       body: 'p-0 sm:p-0 flex-1 min-h-0 overflow-hidden flex flex-col',
@@ -324,7 +323,6 @@ function resetOverrides() {
                   {{ preview.globalUsedChars.toLocaleString() }}
                   <span class="stat-cap">/ {{ preview.globalCapChars.toLocaleString() }} 字</span>
                 </strong>
-                <span class="stat-sub">超出 50% 上限的全局全文常驻将自动降级为目录</span>
               </div>
 
               <div class="stat-cell">
@@ -382,11 +380,6 @@ function resetOverrides() {
                 全部通用（无特定项目、环境或客户端限定）
               </span>
             </div>
-
-            <NoteLine v-if="preview.demoted.length" tone="warning">
-              有 {{ preview.demoted.length }} 条全文常驻因单条超过 2,400
-              字或超出预算被降级为目录行，可点击词条改为目录常驻并完善现行概要。
-            </NoteLine>
 
             <!-- 1. 全文展开清单 -->
             <section class="result-section">
@@ -451,7 +444,6 @@ function resetOverrides() {
                       <span class="item-title">{{ item.title }}</span>
                       <div class="item-sub">
                         <span class="item-id font-mono">{{ item.shortId }}</span>
-                        <span class="item-badge">{{ bootModeLabels[item.bootMode] }}</span>
                         <span v-if="item.summary" class="item-summary">{{ item.summary }}</span>
                         <span v-else class="item-warn">缺少现行概要</span>
                       </div>
@@ -470,7 +462,10 @@ function resetOverrides() {
                 <h3 class="section-title is-warn">
                   超限降级为目录（{{ preview.demoted.length }} 条）
                 </h3>
-                <span class="section-note">原设为全文常驻，本次未展开正文</span>
+                <span class="section-note">
+                  单条超 2,400 字或超出预算与全局 50%
+                  上限时自动降级，点击词条可改为目录常驻并补充概要
+                </span>
               </div>
               <ul class="item-list">
                 <li v-for="item in preview.demoted" :key="item.shortId">
