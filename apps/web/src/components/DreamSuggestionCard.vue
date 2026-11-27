@@ -295,6 +295,21 @@ const sourceDeviceKeys = computed(() => {
   return list
 })
 
+const sourceEpisodeProvenance = computed(() => {
+  const episodes = props.suggestion.entries.filter((e) => e.kind === 'episode')
+  if (episodes.length < 2) return null
+  const projects = normalizeSlugList(episodes.flatMap((e) => e.projects))
+  const dates = episodes.map((e) => formatShort(e.updatedAt)).sort()
+  const first = dates[0] ?? ''
+  const last = dates.at(-1) ?? ''
+  const dateRange = first && last ? (first === last ? first : `${first} – ${last}`) : null
+  return {
+    episodeCount: episodes.length,
+    projects,
+    dateRange,
+  }
+})
+
 interface ScopeTagGroup {
   key: 'envs' | 'projects' | 'realms' | 'runtimes'
   label: string
@@ -1332,6 +1347,23 @@ function applyEdited() {
               </span>
             </div>
           </div>
+          <div v-if="sourceEpisodeProvenance" class="scope-review-row">
+            <span class="scope-review-label">
+              <UIcon :name="icons.history" class="scope-review-icon" aria-hidden="true" />
+              <span>聚合来源</span>
+            </span>
+            <div class="scope-review-chips tabular-nums">
+              <span class="scope-chip">
+                来自 {{ sourceEpisodeProvenance.episodeCount }} 条会话摘要
+              </span>
+              <span v-if="sourceEpisodeProvenance.projects.length" class="scope-chip">
+                涉及项目 {{ sourceEpisodeProvenance.projects.join('、') }}
+              </span>
+              <span v-if="sourceEpisodeProvenance.dateRange" class="scope-chip">
+                {{ sourceEpisodeProvenance.dateRange }}
+              </span>
+            </div>
+          </div>
           <div v-if="distillBootMode" class="scope-review-row">
             <span class="scope-review-label">
               <UIcon :name="icons.pin" class="scope-review-icon" aria-hidden="true" />
@@ -2107,6 +2139,23 @@ function applyEdited() {
                 <UIcon :name="icons.deviceDesktop" class="scope-chip-icon" aria-hidden="true" />
                 <span>来源设备</span>
                 <span class="font-mono">{{ dev }}</span>
+              </span>
+            </div>
+          </div>
+          <div v-if="sourceEpisodeProvenance" class="scope-review-row">
+            <span class="scope-review-label">
+              <UIcon :name="icons.history" class="scope-review-icon" aria-hidden="true" />
+              <span>聚合来源</span>
+            </span>
+            <div class="scope-review-chips tabular-nums">
+              <span class="scope-chip">
+                来自 {{ sourceEpisodeProvenance.episodeCount }} 条会话摘要
+              </span>
+              <span v-if="sourceEpisodeProvenance.projects.length" class="scope-chip">
+                涉及项目 {{ sourceEpisodeProvenance.projects.join('、') }}
+              </span>
+              <span v-if="sourceEpisodeProvenance.dateRange" class="scope-chip">
+                {{ sourceEpisodeProvenance.dateRange }}
               </span>
             </div>
           </div>

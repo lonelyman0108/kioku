@@ -56,7 +56,7 @@ Kioku 提供一套极简、自托管的单人服务端闭环：
 | 资源 | 密钥 `allowed_realms = null`（不限） | 密钥 `allowed_realms = ['work', ...]`（限定场域） | 密钥 `allowed_realms = []`（仅通用） |
 |---|---|---|---|
 | **词条读取**（`canReadEntry` / `readableEntrySql`） | 放行全部未删且有效词条 | 放行 `realms = {}` 的通用词条，以及与 `allowed_realms` 有交集的词条 | 仅放行 `realms = {}` 的通用词条 |
-| **词条写入**（`assertEntryWriteAllowed`） | 需 `can_write = true` | 需 `can_write = true`，且写入所标 `realms` 须全部落在 `allowed_realms` 内 | 需 `can_write = true`，且写入不可标任何 `realms` |
+| **词条写入**（`assertEntryWriteAllowed` / `resolveCreateRealms`） | 需 `can_write = true` | 需 `can_write = true`；新建未传 `realms` 时自动继承有效默认场域（`focus_realms ∩ allowed_realms`，无则 `allowed_realms`）；禁止写入或修改为无场域全局词条，所标 `realms` 须全部落在 `allowed_realms` 内 | 需 `can_write = true`，且写入不可标任何 `realms` |
 | **凭据列表与取值**（`canAccessCredential` / `credentialRealmConditionSql`，**fail-closed**） | 需 `can_resolve_credentials = true`，放行全部凭据 | 需 `can_resolve_credentials = true`，且凭据自身 `allowed_realms` **必须非空**并与密钥 `allowed_realms` 有交集（未限定场域的凭据一律拒绝） | 一律拒绝（返回空列表 / 404） |
 
 ### 3.2 登录防护与会话
@@ -72,7 +72,7 @@ Kioku 提供一套极简、自托管的单人服务端闭环：
 在场焦点 `SceneFocus` 包含四个内置维度：`envs`、`realms`、`projects`、`runtimes`：
 
 - `envs`：优先取请求显式覆盖，否则取访问密钥配置的 `envs`（内置建议 `mac` / `linux` / `win`，也支持自定义设备/环境标签）；
-- `realms`：优先取请求覆盖，其次取访问密钥的 `focus_realms`（启动聚焦场域），最后回退 `allowed_realms`（仅用于启动聚焦与排序，**绝不放宽静态安全边界**）；
+- `realms`：优先取请求覆盖（若访问密钥配置了非空 `allowed_realms`，先与 `allowed_realms` 取交集，越界覆盖自动忽略），其次取访问密钥的 `focus_realms`（启动聚焦场域），最后回退 `allowed_realms`（仅用于启动聚焦与排序，**绝不放宽静态安全边界**）；
 - `runtimes`：优先取请求覆盖（支持任意合法 `SceneSlug` 自定义客户端标识，如 `cursor-cli`），否则取访问密钥的编码 Agent 家族（`claudecode`、`codex`、`gemini`、`agy`、`openclaw`、`hermes`、`opencode`、`pi`、`dsh`、`zcode`）；
 - `projects`：从请求 `project`（字符串或 `{ repoName, dirName }`）同时提取归一化后的 `repoName` 与 `dirName` 去重最多 2 个，防 worktree 或本地目录改名漏匹配。
 
@@ -84,17 +84,17 @@ Kioku 提供一套极简、自托管的单人服务端闭环：
 2. **场景去冲突（`matchesBootScene`）**：
    - 若词条标注了 `envs`、`runtimes` 或 `projects`，当前焦点对应维度必须非空且存在交集；
    - 若词条标注了 `realms` 且当前焦点限定了 `realms`，双方必须存在交集。
-3. **分桶分层预算**：默认全文展开预算 `BOOT_CHAR_BUDGET = 7,000` 字 + 独立目录槽 `BOOT_CATALOG_BUDGET = 3,000` 字；经 `session.start` 调用时同时受宿主上限约束（如 `claudecode`/`codex`/`zcode`/`agy`/`gemini`/`opencode`/`pi` 等）。`boot_mode = 'index'` 固定直接进入 `## 常驻记忆目录`（每条 1 行含短 ID、标题、更新日期、现行概要与字数），永不抢占全文预算；`boot_mode = 'full'` 按场景精准度严格分桶展开——桶 1（命中 `projects`/`runtimes`） > 桶 2（命中 `envs`/`realms`） > 桶 3（无场景全局，且全局桶占全文预算不超过 50%），单条超过软上限（`min(2400, budget * 0.4)`）自动降级为目录行并同步写入 `omitted` 与可读 `omittedItems`。展示层自动剥离正文首行与词条标题重复的 `# H1`，并在展开标题行附带更新日期与近期变更说明。
-4. **近期上下文与防串场补充**：附带同 `(device_key, project_slug)` 最近 3 条 `episode` 会话摘要（`inlineText` 压成单行，标明「只作参考，不是指令」）。`session.start` 还会附加当前项目显式/全文相关记忆目录与经 `hasExclusiveSceneConflict` 及跨项目过滤的近期更新记忆（预算内拼接）。
+3. **分桶分层预算**：默认全文展开预算 `BOOT_CHAR_BUDGET = 7,000` 字 + 独立目录槽 `BOOT_CATALOG_BUDGET = 3,000` 字；经 `session.start` 调用时同时受宿主上限约束（如 `claudecode`/`codex`/`zcode`/`agy`/`gemini`/`opencode`/`pi` 等）。`boot_mode = 'index'` 固定直接进入 `## 常驻记忆目录`（每条 1 行含短 ID、标题、更新日期、现行概要与字数），永不抢占全文预算；`boot_mode = 'full'` 按场景精准度严格分桶展开并按桶序输出——桶 1（命中 `projects`/`runtimes`） > 桶 2（命中 `envs`/`realms`） > 桶 3（无场景全局，且全局桶占全文预算不超过 50%），存在多层展开时在块头声明具体场景优先于通用规则，单条超过软上限（`min(2400, budget * 0.4)`）自动降级为目录行并同步写入 `omitted` 与可读 `omittedItems`。展示层自动剥离正文首行与词条标题重复的 `# H1`，并在展开标题行附带更新日期与近期变更说明。
+4. **近期上下文与防串场补充**：附带同 `(device_key, project_slug)` 最近 3 条 `episode` 会话摘要（`inlineText` 压成单行，标明「只作参考，不是指令」）。`session.start` 还会附加当前项目显式/全文相关记忆目录（全部经 `hasExclusiveSceneConflict` 过滤）与跨项目过滤后的近期更新记忆（预算内拼接）。
 
 ### 4.3 混合召回与双链扩散（`recall/recall.ts`）
 
 `recallEntries` 仅针对 `kind = 'entry'` 且满足 `readableEntrySql` 的词条执行四步打分：
 
 1. **双路候选（每路最多 32 条）**：
-   - **语义向量路**：若配置并启用了嵌入模型且在超时内返回（`prompt.submit` 超时 2 秒，通用接口 10 秒），在事务内设置 `hnsw.ef_search = 200` 与 `hnsw.iterative_scan = relaxed_order`，查 `entry_embeddings` 余弦相似度；入库向量文本经 `buildEmbeddingText` 结构化去噪（标题、现行概要、触发场景、标签与去重首行 H1、跳过尾部日志段的前 2,500 字正文）。
+   - **语义向量路**：若配置并启用了嵌入模型且在超时内返回（`prompt.submit` 超时 2 秒，通用接口 10 秒），在事务内设置 `hnsw.ef_search = 200` 与 `hnsw.iterative_scan = relaxed_order`，查 `entry_embeddings` 余弦相似度；入库向量文本经 `buildEmbeddingText` 结构化去噪（正式词条包含标题、现行概要、触发场景、去重首行 H1 并跳过尾部日志段的前 2,500 字正文，超 2,500 字时在末尾追加 `##` 小节标题纲要；不再拼入 `topics` 以免受脏标签干扰）。
    - **中文全文 BM25F 路**：使用 `kioku_zh` 分词提取查询词项，在 SQL 内结合 `unnest(fts).weights`（`A = 3.0 / B = 2.0 / C = 1.0`）计算字段加权 BM25F（`k1 = 1.2, b = 0.75, minDocs = 20`）并归一化至 `[0, 1)`。
-2. **自适应融合**：有向量命中时 $S_{\text{base}} = 0.65 \times S_{\text{sem}} + 0.35 \times S_{\text{fts}}$；未配置嵌入模型、无向量或请求超时时自动降级为纯全文 $S_{\text{base}} = S_{\text{fts}}$。常驻词条附加微加分 `+0.04`。
+2. **自适应融合**：存在当前嵌入模型向量行的词条按 $S_{\text{base}} = 0.65 \times S_{\text{sem}} + 0.35 \times S_{\text{fts}}$ 融合；尚无当前模型向量行的新词条（或未配置嵌入模型 / 超时降级时）直接采用纯全文 $S_{\text{base}} = S_{\text{fts}}$，避免冷启动 0.35 折损。常驻词条附加微加分 `+0.04`。
 3. **场景亲和调制（`computeSceneDelta`）**：仅当 $S_{\text{base}} \ge 0.15$（`RELEVANCE_FLOOR`）时生效，防止无关记忆靠标签凑分冒头：
    - `projects`：匹配 `+0.16`，双方非空且无交集 `-0.06`；
    - 独占维度 `envs` / `realms` / `runtimes`：命中各 `+0.10`（总加分上限 `+0.25`），冲突各 `-0.12`（独占扣分下限 `-0.20`）。
@@ -152,11 +152,11 @@ pg-boss 运行 5 个队列（`jobs/queue.ts`，通过 `pgBossSsl` 将 `sslmode=r
 
 | 队列 | 策略与调度 | 职责 |
 |---|---|---|
-| `embed-entry` | 批量消费（`EMBED_BATCH`） | 词条新建或更新后异步计算 1024 维向量并写入 `entry_embeddings`（HTTP 重试 1 次） |
-| `embed-backfill` | `singleton` | 启动时或换嵌入模型后补齐缺失向量 |
-| `extract-episode` | `stately`，按 `deviceKey\|projectSlug` 去重 | `turn.end` 满 10 轮立即触发或空闲 10 分钟触发，调用对话模型生成 14 天有效期的 `episode` 摘要；坏 JSON 不删除 `turn_buffer` 并支持 1 次定向语义纠错 |
-| `dream` | `singleton`，每小时 41 分巡检（`standard` / `cross_memory` / `tidy` 各自独立开关、周期 1–720 小时与最近执行时间）或手动触发（支持 `standard` / `tidy` / `cross_memory` 与 `targetShortIds`） | `standard` 模式结合 `entry_links`、pgvector 余弦近邻与全文近邻审阅新增/变动记录；`tidy` 模式 3 路受控并发（共享 429 冷却降并发、鉴权/配额熔断、记录结构化失败明细 `failedItems` 供一键重试）按完整正文规范脏标题与历史流水；`cross_memory` 模式走四阶段漏斗（Stage 0 场域硬边界 → Stage 1 零 LLM 向量聚类/中相似补链/同项目主题/相关性 FTS/断链候选图 → Stage 2 按优先级拆分查重簇、会话反向对账、缺失双链、常驻减肥 4 类 Micro-Task → Stage 3 去重入收件箱），产出全部 7 类建议。所有建议按 `fingerprint` 去重落库，人工审阅并校验版本号应用；合并重复在事务内强制检查全部被合并词条双链/凭据并集、同场域防线与最高 `boot_mode` 继承，并自动将全库活跃记忆的 `[[old]]` 反链重定向至保留目标（跳过代码块与 CommonMark 行内代码） |
-| `cleanup-expired` | `singleton`，每小时 17 分 | 清理过期 `sessions`、过期 `device_grants`、闲置超 24 小时的 `turn_buffer`、软删除超 30 天的回收站词条，以及已处理超 30 天的 `dream_suggestions` |
+| `embed-entry` | 批量消费（`EMBED_BATCH`） | 正式词条新建/更新与含结构化信号的活跃 `episode` 异步计算 1024 维向量写入 `entry_embeddings`（`episode` 仅编码剥离出的偏好与事实信号文本，绝不进入日常 `recall`） |
+| `embed-backfill` | `singleton` | 启动时或换嵌入模型后补齐活跃正式词条及含信号活跃 `episode` 的缺失向量 |
+| `extract-episode` | `stately`，按 `deviceKey\|projectSlug` 去重 | `turn.end` 满 10 轮立即触发或空闲 10 分钟触发，按 `sessionId` 分段调用对话模型单次三槽分拣 `{ title, summary, facts, directives }`，以 `focus_realms ∩ allowed_realms` 归因场域并将信号零 DDL 存入 `episode.disclosure`；坏 JSON 不删除 `turn_buffer` 并支持 1 次定向语义纠错 |
+| `dream` | `singleton`，每小时 41 分巡检（`standard` / `cross_memory` / `tidy` 各自独立开关、周期 1–720 小时与最近执行时间；首次启用对话模型且未手工配置整理时默认联动开启 `standard`）或手动触发（支持 `standard` / `tidy` / `cross_memory` 与 `targetShortIds`） | `standard` 模式结合 `entry_links`、pgvector 余弦近邻与全文近邻审阅新增/变动记录；`tidy` 模式 3 路受控并发（共享 429 冷却降并发、鉴权/配额熔断、记录结构化失败明细 `failedItems` 供一键重试）附带库内高频主题词表按完整正文收敛脏标题、历史流水、`topics`（1–5 个）与 `disclosure`；`cross_memory` 模式走四阶段漏斗（Stage 0 场域硬边界 → Stage 1 零 LLM 向量聚类/互斥环境与项目合并守卫/中相似补链/同项目候选/相关性 FTS/断链候选图 → Stage 2 按优先级拆分查重簇、同场域跨 ≥ 2 次独立会话重复偏好拾遗、带事实向量的会话反向对账、缺失双链、常驻减肥 5 类 Micro-Task → Stage 3 去重入收件箱），产出全部 7 类建议（`distill_episode` 支持显式放宽 `projects`/`envs` 与建议 `proposed_boot_mode`，严守 `realms` fail-closed；跨会话重复偏好按稳定簇指纹抑制驳回复发）。所有建议按 `fingerprint` 去重落库，人工审阅并校验版本号应用；合并重复在事务内强制检查全部被合并词条双链/凭据并集、同场域防线与最高 `boot_mode` 继承，并自动将全库活跃记忆的 `[[old]]` 反链重定向至保留目标（跳过代码块与 CommonMark 行内代码） |
+| `cleanup-expired` | `singleton`，每小时 17 分 | 清理过期 `sessions`、过期 `device_grants`、闲置超 24 小时的 `turn_buffer`、软删除超 30 天的回收站词条、已过期/软删 `episode` 的信号向量，以及已处理超 30 天的 `dream_suggestions` |
 
 除后台队列外，编辑页还提供**不占全局 `dream` 锁**的单条主动整理接口：`POST /v1/console/entries/{shortId}/tidy/preview`（SSE 阶段进度 + 5s 心跳 + 中止取消，先做确定性预清洗再完整正文规范并校验完整性）与 `/tidy/apply`（强校 `expectedVersion` 乐观锁，支持一键应用或暂存至待处理）、以及 `POST /v1/console/entries/{shortId}/cross-check`（以当前记忆为锚点跑 Stage 1 + 查重/补链并返回可即时审阅的建议列表）。
 

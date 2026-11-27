@@ -1,5 +1,9 @@
+import { createHash } from 'node:crypto'
+
 import {
   normalizeShortId,
+  normalizeSlugList,
+  parseEpisodeSignals,
   PINNED_FULL_SOFT_WARN_CHARS,
   type DreamFailedItem,
   type DreamOutcome,
@@ -13,7 +17,7 @@ import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm'
 import { hasOverlap, stillValidSql } from '../access/scope'
 import type { MasterKey } from '../crypto/keyring'
 import { databaseNow, type Db } from '../db/client'
-import { dreamSuggestions, entries, entryLinks } from '../db/schema'
+import { dreamSuggestions, entries, entryEmbeddings, entryLinks } from '../db/schema'
 import { MemoryError } from '../memory/errors'
 import { chatComplete, ModelClientError, type ModelConnection } from '../models/client'
 import { CHAT_LLM_SETTING_KEY, loadResolvedModel } from '../models/store'
@@ -32,6 +36,7 @@ import {
   buildBootAuditMessages,
   buildClusterAuditMessages,
   buildEpisodeReconcileMessages,
+  buildHabitDistillMessages,
   buildLinkAuditMessages,
   buildOutlineSummary,
   buildSemanticRepairMessages,
@@ -40,6 +45,7 @@ import {
   sameRealms,
   type BrokenLinkHint,
   type DreamPromptItem,
+  type HabitDistillProvenance,
   type ParsedDreamProposal,
 } from './dreamPrompt'
 
@@ -53,6 +59,16 @@ const CLUSTER_TOTAL_CHAR_BUDGET = 24_000
 const LINK_SEED_CONTENT_LIMIT = 1_200
 const LINK_CANDIDATES_MAX = 8
 const EPISODE_TARGETS_MAX = 3
+const EPISODE_FACT_VECTOR_MIN_COSINE = 0.62
+const EPISODE_FACT_VECTOR_LIMIT = 6
+const HABIT_COSINE_THRESHOLD = 0.78
+const HABIT_CLUSTER_MAX_SIZE = 6
+const HABIT_CANDIDATES_MAX = 120
+const HABIT_WINDOW_MS = 14 * 24 * 60 * 60 * 1000
+const HABIT_SESSION_GAP_MS = 2 * 60 * 60 * 1000
+const HABIT_MIN_DISTINCT_SESSIONS = 2
+const HABIT_TARGETS_MAX = 3
+const HABIT_TARGET_MIN_COSINE = 0.55
 const BOOT_AUDIT_BATCH_SIZE = 6
 const DEFAULT_MAX_CROSS_CALLS = 12
 const SINGLE_CROSS_MAX_CALLS = 4
@@ -64,7 +80,7 @@ const CROSS_LINKS_MAX_TOKENS = 2_500
 const CROSS_BOOT_TRIM_MAX_TOKENS = 3_000
 
 export function computeCrossMemoryTaskMaxTokens(
-  kind: 'cluster' | 'episode' | 'links' | 'boot_trim',
+  kind: 'cluster' | 'habit' | 'episode' | 'links' | 'boot_trim',
   targetChars = 0,
 ): number {
   if (kind === 'links') return CROSS_LINKS_MAX_TOKENS
@@ -153,9 +169,152 @@ function shareAny(a: readonly string[], b: readonly string[]): number {
   return count
 }
 
-async function loadExistingFingerprints(db: Db): Promise<Set<string>> {
-  const rows = await db.select({ fingerprint: dreamSuggestions.fingerprint }).from(dreamSuggestions)
-  return new Set(rows.map((r) => r.fingerprint))
+interface ExistingSuggestionsIndex {
+  fingerprints: Set<string>
+  distillEntryIdSets: Set<string>[]
+}
+
+async function loadExistingSuggestions(db: Db): Promise<ExistingSuggestionsIndex> {
+  const rows = await db
+    .select({
+      fingerprint: dreamSuggestions.fingerprint,
+      kind: dreamSuggestions.kind,
+      entryIds: dreamSuggestions.entryIds,
+    })
+    .from(dreamSuggestions)
+  const fingerprints = new Set<string>()
+  const distillEntryIdSets: Set<string>[] = []
+  for (const r of rows) {
+    fingerprints.add(r.fingerprint)
+    if (r.kind === 'distill_episode' && r.entryIds.length > 0) {
+      distillEntryIdSets.push(new Set(r.entryIds))
+    }
+  }
+  return { fingerprints, distillEntryIdSets }
+}
+
+// 估算一组会话摘要覆盖的独立会话次数：不同设备或项目直接记为独立会话，同设备同项目需间隔 ≥ 2 小时（避免单次长会话多次落桶误判，也避免跨 UTC 零点误拆）
+export function countDistinctHabitSessions(
+  rows: readonly Pick<EntryRow, 'deviceKey' | 'projectSlug' | 'createdAt'>[],
+): number {
+  if (!rows.length) return 0
+  const byBucket = new Map<string, number[]>()
+  for (const row of rows) {
+    const key = `${row.deviceKey?.trim() ?? ''}\0${row.projectSlug?.trim() ?? ''}`
+    let list = byBucket.get(key)
+    if (!list) {
+      list = []
+      byBucket.set(key, list)
+    }
+    list.push(row.createdAt.getTime())
+  }
+  let total = 0
+  for (const timestamps of byBucket.values()) {
+    timestamps.sort((a, b) => a - b)
+    let anchor = timestamps[0]!
+    total++
+    for (let i = 1; i < timestamps.length; i++) {
+      const ts = timestamps[i]!
+      if (ts - anchor >= HABIT_SESSION_GAP_MS) {
+        total++
+        anchor = ts
+      }
+    }
+  }
+  return total
+}
+
+export function cosineSimilarity(a: readonly number[], b: readonly number[]): number {
+  if (!a.length || a.length !== b.length) return 0
+  let dot = 0
+  let normA = 0
+  let normB = 0
+  for (let i = 0; i < a.length; i++) {
+    const va = a[i]!
+    const vb = b[i]!
+    dot += va * vb
+    normA += va * va
+    normB += vb * vb
+  }
+  const denom = Math.sqrt(normA) * Math.sqrt(normB)
+  return denom > 0 ? dot / denom : 0
+}
+
+export function computeNormalizedCentroid(
+  vectors: readonly (readonly number[])[],
+): number[] | null {
+  if (!vectors.length) return null
+  const dim = vectors[0]!.length
+  if (!dim) return null
+  const sum = new Array<number>(dim).fill(0)
+  let count = 0
+  for (const vec of vectors) {
+    if (vec.length !== dim) continue
+    for (let i = 0; i < dim; i++) sum[i]! += vec[i]!
+    count++
+  }
+  if (!count) return null
+  let norm = 0
+  for (let i = 0; i < dim; i++) norm += sum[i]! * sum[i]!
+  const scale = Math.sqrt(norm)
+  if (!scale) return null
+  return sum.map((v) => v / scale)
+}
+
+export function habitClusterDiscriminator(
+  rows: readonly Pick<EntryRow, 'id' | 'version'>[],
+): string {
+  const key = rows
+    .map((r) => `${r.id}:${r.version}`)
+    .sort()
+    .join(',')
+  return `habit:${createHash('sha256').update(key).digest('hex').slice(0, 16)}`
+}
+
+// 对同场域且带偏好信号的会话摘要边做受限聚类，并强制要求至少跨 HABIT_MIN_DISTINCT_SESSIONS 次独立会话
+export function buildHabitClusters<
+  T extends Pick<EntryRow, 'id' | 'realms' | 'deviceKey' | 'projectSlug' | 'createdAt'>,
+>(episodes: readonly T[], edges: readonly { a: string; b: string; score: number }[]): T[][] {
+  const byId = new Map(episodes.map((ep) => [ep.id, ep]))
+  const sorted = [...edges].sort((x, y) => y.score - x.score)
+  const assigned = new Set<string>()
+  const adj = new Map<string, { id: string; score: number }[]>()
+  for (const e of sorted) {
+    if (e.score < HABIT_COSINE_THRESHOLD) continue
+    const ra = byId.get(e.a)
+    const rb = byId.get(e.b)
+    if (!ra || !rb || ra.id === rb.id) continue
+    if (!sameRealms(ra.realms, rb.realms)) continue
+    if (!adj.has(e.a)) adj.set(e.a, [])
+    if (!adj.has(e.b)) adj.set(e.b, [])
+    adj.get(e.a)!.push({ id: e.b, score: e.score })
+    adj.get(e.b)!.push({ id: e.a, score: e.score })
+  }
+
+  const clusters: { rows: T[]; peak: number }[] = []
+  for (const e of sorted) {
+    if (e.score < HABIT_COSINE_THRESHOLD) continue
+    if (assigned.has(e.a) && assigned.has(e.b)) continue
+    const startId = !assigned.has(e.a) ? e.a : e.b
+    const startRow = byId.get(startId)
+    if (!startRow) continue
+    const members: T[] = [startRow]
+    const memberSet = new Set<string>([startId])
+    const queue = [...(adj.get(startId) ?? [])].sort((x, y) => y.score - x.score)
+    for (const next of queue) {
+      if (members.length >= HABIT_CLUSTER_MAX_SIZE) break
+      if (assigned.has(next.id) || memberSet.has(next.id)) continue
+      const row = byId.get(next.id)
+      if (!row || !sameRealms(startRow.realms, row.realms)) continue
+      members.push(row)
+      memberSet.add(next.id)
+    }
+    if (members.length >= 2 && countDistinctHabitSessions(members) >= HABIT_MIN_DISTINCT_SESSIONS) {
+      for (const m of members) assigned.add(m.id)
+      clusters.push({ rows: members, peak: e.score })
+    }
+  }
+  return clusters.sort((a, b) => b.peak - a.peak).map((c) => c.rows)
 }
 
 async function loadOutboundLinksMap(
@@ -248,6 +407,85 @@ async function findVectorPairsForSeeds(
   return [...rows]
 }
 
+// 查带信号向量的 episode 与活跃正式词条（kind = 'entry'）的余弦近邻，供事实反向对账使用
+async function findEpisodeFormalVectorNeighbors(
+  db: Db,
+  episodeIds: readonly string[],
+  minCosine = EPISODE_FACT_VECTOR_MIN_COSINE,
+  limitPerEpisode = EPISODE_FACT_VECTOR_LIMIT,
+): Promise<Map<string, Map<string, number>>> {
+  const out = new Map<string, Map<string, number>>()
+  if (!episodeIds.length) return out
+  const epArray = sql`array[${sql.join(
+    episodeIds.map((id) => sql`${id}::uuid`),
+    sql`, `,
+  )}]`
+  const rows = await db.execute<{ episode_id: string; formal_id: string; sim: number }>(sql`
+    with ranked as (
+      select
+        a.entry_id::text as episode_id,
+        b.entry_id::text as formal_id,
+        (1 - (a.embedding <=> b.embedding))::float8 as sim,
+        row_number() over (
+          partition by a.entry_id
+          order by (1 - (a.embedding <=> b.embedding)) desc
+        ) as rn
+      from entry_embeddings a
+      join entry_embeddings b
+        on a.model = b.model
+       and a.entry_id <> b.entry_id
+      join entries eb
+        on eb.id = b.entry_id
+       and eb.deleted_at is null
+       and eb.kind = 'entry'
+       and (eb.valid_to is null or eb.valid_to > statement_timestamp())
+      where a.entry_id = any(${epArray})
+        and (1 - (a.embedding <=> b.embedding)) >= ${minCosine}
+    )
+    select episode_id, formal_id, sim
+    from ranked
+    where rn <= ${limitPerEpisode}
+    order by episode_id, sim desc
+  `)
+  for (const r of rows) {
+    let map = out.get(r.episode_id)
+    if (!map) {
+      map = new Map()
+      out.set(r.episode_id, map)
+    }
+    const prev = map.get(r.formal_id) ?? 0
+    if (r.sim > prev) map.set(r.formal_id, r.sim)
+  }
+  return out
+}
+
+// 用习惯聚簇中心向量检索兼容的活跃正式词条，便于优先更新已有习惯/规范而非重复建卡
+async function findFormalTargetsByCentroid(
+  db: Db,
+  model: string,
+  centroid: readonly number[],
+  minCosine = HABIT_TARGET_MIN_COSINE,
+  limit = 12,
+): Promise<{ entryId: string; sim: number }[]> {
+  const literal = `[${centroid.join(',')}]`
+  const rows = await db.execute<{ entry_id: string; sim: number }>(sql`
+    select
+      e.id::text as entry_id,
+      (1 - (ee.embedding <=> ${literal}::vector))::float8 as sim
+    from entry_embeddings ee
+    join entries e
+      on e.id = ee.entry_id
+     and e.deleted_at is null
+     and e.kind = 'entry'
+     and (e.valid_to is null or e.valid_to > statement_timestamp())
+    where ee.model = ${model}
+      and (1 - (ee.embedding <=> ${literal}::vector)) >= ${minCosine}
+    order by ee.embedding <=> ${literal}::vector
+    limit ${limit}
+  `)
+  return [...rows].map((r) => ({ entryId: r.entry_id, sim: r.sim }))
+}
+
 // 按全文检索相关性（ts_rank_cd）为单个种子找 Top-N 邻居，用于未嵌入词条兜底与 episode 反向对账
 async function findRankedFtsCandidates(
   db: Db,
@@ -255,8 +493,10 @@ async function findRankedFtsCandidates(
   excludeIds: ReadonlySet<string>,
   limit = 8,
 ): Promise<string[]> {
+  const factSignalText =
+    seed.kind === 'episode' ? parseEpisodeSignals(seed.disclosure).facts.join(' ') : ''
   const queryText =
-    `${seed.title} ${seed.summary ?? ''} ${seed.topics.join(' ')} ${seed.projects.join(' ')}`
+    `${seed.title} ${seed.summary ?? ''} ${factSignalText} ${seed.topics.join(' ')} ${seed.projects.join(' ')}`
       .trim()
       .slice(0, 600)
   if (!queryText) return []
@@ -358,10 +598,11 @@ function toClusterPromptItem(
 }
 
 const TASK_ALLOWED_KINDS: Record<
-  'cluster' | 'episode' | 'links' | 'boot_trim',
+  'cluster' | 'habit' | 'episode' | 'links' | 'boot_trim',
   ReadonlySet<DreamSuggestionKind>
 > = {
   cluster: new Set(['merge_duplicates', 'link_entries', 'update', 'mark_stale']),
+  habit: new Set(['update', 'distill_episode']),
   episode: new Set(['update', 'distill_episode']),
   links: new Set(['link_entries']),
   boot_trim: new Set(['adjust_boot_mode']),
@@ -461,17 +702,18 @@ export async function runCrossMemoryFunnel(
     ? new Set(options.targetShortIds.map(normalizeShortId))
     : null
 
+  const now = await databaseNow(db)
   const allActive = await db
     .select()
     .from(entries)
-    .where(and(isNull(entries.deletedAt), stillValidSql()))
+    .where(and(isNull(entries.deletedAt), stillValidSql(now)))
     .orderBy(desc(entries.updatedAt))
 
   const formalEntries = allActive.filter((r) => r.kind === 'entry')
   const activeEpisodes = allActive.filter((r) => r.kind === 'episode')
   const byId = new Map(allActive.map((r) => [r.id, r]))
 
-  // Stage 0：确定种子集
+  // Stage 0：确定种子集；跨会话重复偏好拾遗独立于 dreamCheckedVersion 水位，扫描最近 14 天带偏好信号的活跃摘要
   const seedFormal: EntryRow[] = targetShortSet
     ? formalEntries.filter((r) => targetShortSet.has(r.shortId))
     : scope === 'full_corpus'
@@ -481,7 +723,19 @@ export async function runCrossMemoryFunnel(
     ? activeEpisodes.filter((r) => targetShortSet.has(r.shortId))
     : activeEpisodes.filter((r) => scope === 'full_corpus' || r.version > r.dreamCheckedVersion)
 
-  if (!seedFormal.length && !seedEpisodes.length) {
+  const allowHabitDistill = !targetShortSet || targetShortSet.size > 1
+  const habitCutoffMs = now.getTime() - HABIT_WINDOW_MS
+  const habitCandidateEpisodes = allowHabitDistill
+    ? activeEpisodes
+        .filter(
+          (ep) =>
+            ep.createdAt.getTime() >= habitCutoffMs &&
+            parseEpisodeSignals(ep.disclosure).directives.length > 0,
+        )
+        .slice(0, HABIT_CANDIDATES_MAX)
+    : []
+
+  if (!seedFormal.length && !seedEpisodes.length && habitCandidateEpisodes.length < 2) {
     return {
       result: {
         outcome: 'skipped',
@@ -499,14 +753,15 @@ export async function runCrossMemoryFunnel(
 
   // Stage 1：零 LLM 候选图构建
   const seedFormalIds = seedFormal.map((r) => r.id)
-  const [vectorPairs, linkMaps, existingFingerprints] = await Promise.all([
+  const [vectorPairs, linkMaps, existingSuggestions] = await Promise.all([
     findVectorPairsForSeeds(db, seedFormalIds, LINK_COSINE_MIN, 240),
     loadOutboundLinksMap(
       db,
       formalEntries.map((r) => r.id),
     ),
-    loadExistingFingerprints(db),
+    loadExistingSuggestions(db),
   ])
+  const existingFingerprints = existingSuggestions.fingerprints
 
   const highSimEdges: { a: string; b: string; score: number }[] = []
   const mediumNeighborsBySeed = new Map<string, Map<string, number>>()
@@ -575,9 +830,18 @@ export async function runCrossMemoryFunnel(
     }
   }
 
-  // 构建 4 类有序 Micro-Task 队列（优先级：高相似查重簇 > 近期 episode 反向对账 > 缺失双链与断链 > 全文常驻减肥）
+  // 构建 5 类有序 Micro-Task 队列（优先级：高相似查重簇 > 跨会话重复偏好拾遗 > 近期 episode 反向对账 > 缺失双链与断链 > 全文常驻减肥）
   type MicroTask =
     | { kind: 'cluster'; stage: string; rows: EntryRow[] }
+    | {
+        kind: 'habit'
+        stage: string
+        episodes: EntryRow[]
+        targets: EntryRow[]
+        realms: string[]
+        clusterDiscriminator: string
+        provenance: HabitDistillProvenance
+      }
     | { kind: 'episode'; stage: string; episode: EntryRow; targets: EntryRow[] }
     | {
         kind: 'links'
@@ -602,14 +866,179 @@ export async function runCrossMemoryFunnel(
     tasks.push({ kind: 'cluster', stage: '查重与冲突审阅', rows: cluster })
   }
 
-  // Task C：近期 episode 反向对账与吸收
-  for (const ep of seedEpisodes.slice(0, 6)) {
+  // Task E：同场域跨会话重复偏好拾遗（≥ 2 次独立会话触发，优先匹配既有习惯词条，驳回后按稳定簇指纹抑制复发）
+  const habitClusteredEpisodeIds = new Set<string>()
+  if (habitCandidateEpisodes.length >= 2) {
+    const habitEmbRows = await db
+      .select({
+        entryId: entryEmbeddings.entryId,
+        model: entryEmbeddings.model,
+        embedding: entryEmbeddings.embedding,
+      })
+      .from(entryEmbeddings)
+      .where(
+        inArray(
+          entryEmbeddings.entryId,
+          habitCandidateEpisodes.map((ep) => ep.id),
+        ),
+      )
+
+    const byModelRealm = new Map<
+      string,
+      { model: string; items: { row: EntryRow; vec: number[] }[] }
+    >()
+    for (const emb of habitEmbRows) {
+      const row = byId.get(emb.entryId)
+      if (!row || !emb.embedding.length) continue
+      const realmKey = normalizeSlugList(row.realms).join(',')
+      const groupKey = `${emb.model}\0${realmKey}`
+      let bucket = byModelRealm.get(groupKey)
+      if (!bucket) {
+        bucket = { model: emb.model, items: [] }
+        byModelRealm.set(groupKey, bucket)
+      }
+      bucket.items.push({ row, vec: emb.embedding })
+    }
+
+    for (const { model, items } of byModelRealm.values()) {
+      if (items.length < 2) continue
+      const edges: { a: string; b: string; score: number }[] = []
+      const vecById = new Map(items.map((it) => [it.row.id, it.vec]))
+      for (let i = 0; i < items.length; i++) {
+        for (let j = i + 1; j < items.length; j++) {
+          const sim = cosineSimilarity(items[i]!.vec, items[j]!.vec)
+          if (sim >= HABIT_COSINE_THRESHOLD) {
+            edges.push({ a: items[i]!.row.id, b: items[j]!.row.id, score: sim })
+          }
+        }
+      }
+      if (!edges.length) continue
+
+      const habitClusters = buildHabitClusters(
+        items.map((it) => it.row),
+        edges,
+      )
+      for (const clusterRows of habitClusters) {
+        // 无论该簇是否已被历史建议覆盖，均标记已归入习惯簇，防止仅含偏好的已驳回摘要绕回 Task C 重复弹出
+        for (const r of clusterRows) habitClusteredEpisodeIds.add(r.id)
+
+        const clusterDisc = habitClusterDiscriminator(clusterRows)
+        const clusterIds = clusterRows.map((r) => r.id)
+        const clusterVersions = clusterRows.map((r) => r.version)
+        if (
+          existingFingerprints.has(
+            suggestionFingerprint('distill_episode', clusterIds, clusterVersions, clusterDisc),
+          )
+        ) {
+          continue
+        }
+
+        // 若该簇已被某条历史/待处理/已驳回提炼建议覆盖，且剩余未覆盖摘要不足 2 次独立会话，则不再重复弹出
+        const suppressedByExisting = existingSuggestions.distillEntryIdSets.some((idSet) => {
+          const overlap = clusterRows.filter((r) => idSet.has(r.id)).length
+          if (overlap < 2) return false
+          const remaining = clusterRows.filter((r) => !idSet.has(r.id))
+          return countDistinctHabitSessions(remaining) < HABIT_MIN_DISTINCT_SESSIONS
+        })
+        if (suppressedByExisting) continue
+
+        const clusterRealms = normalizeSlugList(clusterRows[0]!.realms)
+        const clusterProjects = normalizeSlugList(
+          clusterRows.flatMap((r) => (r.projectSlug ? [r.projectSlug, ...r.projects] : r.projects)),
+        )
+        const centroid = computeNormalizedCentroid(
+          clusterRows.map((r) => vecById.get(r.id)).filter((v): v is number[] => Boolean(v)),
+        )
+        let scoredTargets: EntryRow[] = []
+        if (centroid) {
+          const rawHits = await findFormalTargetsByCentroid(db, model, centroid)
+          scoredTargets = rawHits
+            .map((hit) => {
+              const entry = byId.get(hit.entryId)
+              if (!entry || entry.kind !== 'entry') return null
+              if (!canFlowRealmInto(entry.realms, clusterRealms)) return null
+              let score = hit.sim
+              if (entry.bootMode === 'full') score += 0.12
+              else if (entry.bootMode === 'index') score += 0.05
+              if (clusterProjects.length && shareAny(entry.projects, clusterProjects) > 0) {
+                score += 0.06
+              }
+              return { entry, score }
+            })
+            .filter((x): x is { entry: EntryRow; score: number } => x !== null)
+            .sort((a, b) => b.score - a.score)
+            .slice(0, HABIT_TARGETS_MAX)
+            .map((x) => x.entry)
+        }
+
+        if (
+          scoredTargets.some((t) =>
+            existingFingerprints.has(
+              suggestionFingerprint('update', [t.id], [t.version], clusterDisc),
+            ),
+          )
+        ) {
+          continue
+        }
+
+        const dates = clusterRows.map((r) => r.createdAt.toISOString().slice(0, 10)).sort()
+        const firstDate = dates[0] ?? null
+        const lastDate = dates.at(-1) ?? null
+        const dateRange =
+          firstDate && lastDate
+            ? firstDate === lastDate
+              ? firstDate
+              : `${firstDate} 至 ${lastDate}`
+            : null
+        const devices = [
+          ...new Set(
+            clusterRows.map((r) => r.deviceKey?.trim()).filter((v): v is string => Boolean(v)),
+          ),
+        ]
+        const distinctSessions = countDistinctHabitSessions(clusterRows)
+
+        for (const t of scoredTargets) consideredNeighborIds.add(t.id)
+        tasks.push({
+          kind: 'habit',
+          stage: '跨会话偏好拾遗',
+          episodes: clusterRows,
+          targets: scoredTargets,
+          realms: clusterRealms,
+          clusterDiscriminator: clusterDisc,
+          provenance: {
+            realms: clusterRealms,
+            episodeCount: clusterRows.length,
+            distinctSessions,
+            projects: clusterProjects,
+            devices,
+            dateRange,
+          },
+        })
+      }
+    }
+  }
+
+  // Task C：近期 episode 反向对账与吸收（带 facts 信号且有向量的摘要优先使用信号向量召回常青目标）
+  const taskCEpisodes = seedEpisodes
+    .filter(
+      (ep) =>
+        !habitClusteredEpisodeIds.has(ep.id) || parseEpisodeSignals(ep.disclosure).facts.length > 0,
+    )
+    .slice(0, 6)
+  const factEpisodeIds = taskCEpisodes
+    .filter((ep) => parseEpisodeSignals(ep.disclosure).facts.length > 0)
+    .map((ep) => ep.id)
+  const episodeVectorNeighbors = await findEpisodeFormalVectorNeighbors(db, factEpisodeIds)
+
+  for (const ep of taskCEpisodes) {
     const sameRealmEntries = formalEntries.filter((e) => canFlowRealmInto(e.realms, ep.realms))
+    const vecMap = episodeVectorNeighbors.get(ep.id)
     const rankedFts = await findRankedFtsCandidates(db, ep, new Set([ep.id]), 8)
     const ftsRank = new Map(rankedFts.map((id, i) => [id, 10 - i]))
     const scoredTargets = sameRealmEntries
       .map((entry) => {
-        let s = ftsRank.get(entry.id) ?? 0
+        const vecSim = vecMap?.get(entry.id) ?? 0
+        let s = (vecSim > 0 ? vecSim * 18 : 0) + (ftsRank.get(entry.id) ?? 0)
         if (ep.projectSlug && entry.projects.includes(ep.projectSlug)) s += 6
         if (entry.bootMode === 'full') s += 2
         else if (entry.bootMode === 'index') s += 1
@@ -753,6 +1182,8 @@ export async function runCrossMemoryFunnel(
     const taskRows: EntryRow[] = []
     if (task.kind === 'cluster') {
       taskRows.push(...task.rows)
+    } else if (task.kind === 'habit') {
+      taskRows.push(...task.episodes, ...task.targets)
     } else if (task.kind === 'episode') {
       taskRows.push(task.episode, ...task.targets)
     } else if (task.kind === 'links') {
@@ -805,7 +1236,19 @@ export async function runCrossMemoryFunnel(
       let messages: ReturnType<typeof buildClusterAuditMessages>
       let maxTokens: number
 
-      if (task.kind === 'episode') {
+      if (task.kind === 'habit') {
+        const epItems = task.episodes.map((r) => toPromptItem(r, 1_500))
+        const targetItems = task.targets.map((r) =>
+          toClusterPromptItem(r, linkMaps.outboundByEntryId.get(r.id), 4_000),
+        )
+        for (const p of epItems) catalog.set(p.shortId, p)
+        for (const p of targetItems) catalog.set(p.shortId, p)
+        messages = buildHabitDistillMessages(epItems, targetItems, task.provenance)
+        const targetChars =
+          epItems.reduce((sum, p) => sum + p.content.length, 0) +
+          targetItems.reduce((sum, p) => sum + p.content.length, 0)
+        maxTokens = computeCrossMemoryTaskMaxTokens('habit', targetChars)
+      } else if (task.kind === 'episode') {
         const epItem = toPromptItem(task.episode, 3_000)
         const targetItems = task.targets.map((r) =>
           toClusterPromptItem(r, linkMaps.outboundByEntryId.get(r.id), 4_000),
@@ -861,7 +1304,25 @@ export async function runCrossMemoryFunnel(
         for (const r of taskRows) appendFailure(r, 'cross_memory', evaluated.reason)
       } else {
         for (const prop of evaluated.proposals) {
-          const id = await insertDreamProposal(db, prop, byId)
+          let normalizedProp = prop
+          if (task.kind === 'habit') {
+            if (prop.kind === 'distill_episode') {
+              const chosenEps = prop.entryIds
+                .map((id) => byId.get(id))
+                .filter((r): r is EntryRow => r !== undefined && r.kind === 'episode')
+              if (
+                chosenEps.length < 2 ||
+                countDistinctHabitSessions(chosenEps) < HABIT_MIN_DISTINCT_SESSIONS
+              ) {
+                continue
+              }
+            } else if (prop.kind === 'update') {
+              const target = prop.entryIds[0] ? byId.get(prop.entryIds[0]) : undefined
+              if (!target || !canFlowRealmInto(target.realms, task.realms)) continue
+            }
+            normalizedProp = { ...prop, actionDiscriminator: task.clusterDiscriminator }
+          }
+          const id = await insertDreamProposal(db, normalizedProp, byId)
           if (id) {
             insertedIds.push(id)
             suggested++

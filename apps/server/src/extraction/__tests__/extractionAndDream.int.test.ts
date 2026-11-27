@@ -38,7 +38,12 @@ import {
   testDatabaseUrl,
   testMasterKey,
 } from '../../testing/db'
-import { FakeHttpError, startFakeOpenAi, type FakeOpenAiServer } from '../../testing/fakeOpenAi'
+import {
+  deterministicVector,
+  FakeHttpError,
+  startFakeOpenAi,
+  type FakeOpenAiServer,
+} from '../../testing/fakeOpenAi'
 import { bufferTurn } from '../buffer'
 import { loadFrequentTopics, loadInbox, runDream } from '../dream'
 import { extractEpisodeBatch } from '../extract'
@@ -2461,5 +2466,331 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
       .select({ entryId: entryEmbeddings.entryId })
       .from(entryEmbeddings)
     expect(embAfterRollback.map((r) => r.entryId)).toEqual([formal.entry.id])
+  })
+
+  it('跨记忆整理支持同场域跨会话重复偏好拾遗、驳回防复发、并入既有习惯与事实向量对账', async () => {
+    const masterKey = testMasterKey()
+    await saveModelEndpoint(database.db, masterKey, CHAT_LLM_SETTING_KEY, {
+      baseUrl: fakeAi.baseUrl,
+      model: 'fake-chat',
+      apiKey: 'sk-chat',
+      enabled: true,
+    })
+    await saveModelEndpoint(database.db, masterKey, EMBEDDING_SETTING_KEY, {
+      baseUrl: fakeAi.baseUrl,
+      model: 'fake-embed-1024',
+      apiKey: 'sk-embed',
+      enabled: true,
+    })
+
+    const credSvc = new CredentialService(database.db, masterKey)
+    const entrySvc = new EntryService(database.db, masterKey, credSvc, null)
+    const consoleScope = { kind: 'console' as const, accountId: 'acc', sessionId: 'sess' }
+
+    const basisVector = (dim: number): number[] => {
+      const vec = new Array<number>(EMBEDDING_DIMENSIONS).fill(0)
+      vec[dim] = 1
+      return vec
+    }
+
+    fakeAi.setEmbedHandler((text) => {
+      if (text.includes('直接提交开发分支')) return basisVector(10)
+      if (text.includes('拆分 PR') || text.includes('个人提交工作流')) return basisVector(20)
+      if (text.includes('镜像仓库地址变更') || text.includes('制品发布基线')) return basisVector(30)
+      return deterministicVector(text)
+    })
+
+    try {
+      // 1. 同一会话内连续两次落桶（间隔 15 分钟）以及跨场域相同措辞均不得触发跨会话习惯拾遗
+      const workEp1 = await entrySvc.writeEpisode({
+        title: '公司仓库提交流程甲',
+        content: '在 repo-a 中确认直接提交开发分支。',
+        deviceKey: 'mac-work',
+        projectSlug: 'repo-a',
+        envs: ['mac'],
+        realms: ['work'],
+        projects: ['repo-a'],
+        directives: ['公司项目直接提交开发分支不提 PR'],
+      })
+      const workEpSameSess = await entrySvc.writeEpisode({
+        title: '公司仓库提交流程同会话补充',
+        content: '同一会话里再次提及直接提交开发分支。',
+        deviceKey: 'mac-work',
+        projectSlug: 'repo-a',
+        envs: ['mac'],
+        realms: ['work'],
+        projects: ['repo-a'],
+        directives: ['公司项目直接提交开发分支不提 PR'],
+      })
+      const personalEp1 = await entrySvc.writeEpisode({
+        title: '个人侧误写同类措辞',
+        content: '测试跨场域绝不串并。',
+        deviceKey: 'mac-home',
+        projectSlug: 'side-proj',
+        envs: ['mac'],
+        realms: ['personal'],
+        projects: ['side-proj'],
+        directives: ['公司项目直接提交开发分支不提 PR'],
+      })
+
+      const tBase = new Date(Date.now() - 48 * 3_600_000)
+      await database.db
+        .update(entries)
+        .set({ createdAt: tBase, dreamCheckedVersion: 1 })
+        .where(eq(entries.id, workEp1.id))
+      await database.db
+        .update(entries)
+        .set({
+          createdAt: new Date(tBase.getTime() + 15 * 60_000),
+          dreamCheckedVersion: 1,
+        })
+        .where(eq(entries.id, workEpSameSess.id))
+      await database.db
+        .update(entries)
+        .set({ createdAt: new Date(tBase.getTime() + 24 * 3_600_000), dreamCheckedVersion: 1 })
+        .where(eq(entries.id, personalEp1.id))
+
+      await embedEntryIds(database.db, masterKey, [workEp1.id, workEpSameSess.id, personalEp1.id])
+
+      let llmCalls = 0
+      fakeAi.setChatHandler(() => {
+        llmCalls++
+        return JSON.stringify({ suggestions: [] })
+      })
+
+      const restrainedRun = await runDream(database.db, masterKey, {
+        runId: 'habit-restrained',
+        trigger: 'manual',
+        mode: 'cross_memory',
+        scope: 'incremental',
+      })
+      expect(restrainedRun.outcome).toBe('skipped')
+      expect(llmCalls).toBe(0)
+
+      // 2. 在 work 场域另一项目 repo-b 新增独立会话摘要（即使 dreamCheckedVersion 已等于 version），增量 cross_memory 独立拾遗并产出跨项目常驻提炼建议
+      const workEp2 = await entrySvc.writeEpisode({
+        title: '公司仓库提交流程乙',
+        content: '在 repo-b 中同样直接提交到开发分支。',
+        deviceKey: 'mac-work',
+        projectSlug: 'repo-b',
+        envs: ['mac'],
+        realms: ['work'],
+        projects: ['repo-b'],
+        directives: ['公司项目直接提交开发分支不提 PR'],
+      })
+      await database.db
+        .update(entries)
+        .set({ createdAt: new Date(tBase.getTime() + 26 * 3_600_000), dreamCheckedVersion: 1 })
+        .where(eq(entries.id, workEp2.id))
+      await embedEntryIds(database.db, masterKey, [workEp2.id])
+
+      let habitPromptSeen = ''
+      fakeAi.setChatHandler((messages) => {
+        llmCalls++
+        habitPromptSeen = messages[1]?.content ?? ''
+        return JSON.stringify({
+          suggestions: [
+            {
+              kind: 'distill_episode',
+              target_short_ids: [workEp1.shortId, workEp2.shortId],
+              title: '公司项目提交流程规范',
+              summary: '公司项目变更直接提交到开发分支，不发起 PR。',
+              content: '## 提交流程\n- 公司项目改动直接提交到对应开发分支，无需提 PR。',
+              topics: ['git', 'workflow'],
+              projects: [],
+              envs: [],
+              proposed_boot_mode: 'full',
+              reason:
+                '近期在 2 次独立会话（涉及项目 repo-a、repo-b）中重复提出，建议沉淀为工作场域常驻规范',
+            },
+          ],
+        })
+      })
+
+      const distillRun = await runDream(database.db, masterKey, {
+        runId: 'habit-distill-work',
+        trigger: 'manual',
+        mode: 'cross_memory',
+        scope: 'incremental',
+      })
+      expect(distillRun.outcome).toBe('ok')
+      expect(distillRun.suggested).toBe(1)
+      expect(llmCalls).toBe(1)
+      expect(habitPromptSeen).toContain('场域：work')
+      expect(habitPromptSeen).toContain('估算独立会话数：2 次')
+      expect(habitPromptSeen).toContain('涉及项目：repo-a、repo-b')
+      expect(habitPromptSeen).not.toContain(personalEp1.shortId)
+
+      const inboxAfterHabit = await loadInbox(database.db, false)
+      const habitCard = inboxAfterHabit.items.find((i) => i.kind === 'distill_episode')!
+      expect(habitCard).toBeTruthy()
+      expect(habitCard.proposedProjects).toEqual([])
+      expect(habitCard.proposedBootMode).toBe('full')
+      expect(habitCard.entries.map((e) => e.shortId).sort()).toEqual(
+        [workEp1.shortId, workEp2.shortId].sort(),
+      )
+
+      // 3. 驳回该跨会话习惯建议后，再次运行 cross_memory 不再重复调用模型或复发弹窗
+      await entrySvc.dismissSuggestion(habitCard.id)
+      const callsBeforeRepeat = llmCalls
+      const repeatRun = await runDream(database.db, masterKey, {
+        runId: 'habit-dismissed-no-resurface',
+        trigger: 'manual',
+        mode: 'cross_memory',
+        scope: 'incremental',
+      })
+      expect(repeatRun.outcome).toBe('skipped')
+      expect(llmCalls).toBe(callsBeforeRepeat)
+
+      // 4. 同场域已存在匹配常驻习惯词条时，向量中心自动召回该正式词条并优先产出 update；驳回后同样不复发
+      const existingHabit = await entrySvc.create(
+        consoleScope,
+        entryInput({
+          title: '个人提交工作流',
+          summary: '个人仓库代码变更保持小步提交。',
+          content: '## 提交流程\n- 个人仓库代码修改保持小步提交。',
+          bootMode: 'full',
+          realms: ['personal'],
+        }),
+      )
+      await database.db
+        .update(entries)
+        .set({ dreamCheckedVersion: existingHabit.entry.version })
+        .where(eq(entries.id, existingHabit.entry.id))
+
+      const pEpA = await entrySvc.writeEpisode({
+        title: '个人项目提 PR 偏好甲',
+        content: '在 kioku 中强调拆分 PR 并清理分支。',
+        deviceKey: 'mac-home',
+        projectSlug: 'kioku',
+        realms: ['personal'],
+        projects: ['kioku'],
+        directives: ['拆分 PR 提交，合并后清理工作区与本地分支'],
+      })
+      const pEpB = await entrySvc.writeEpisode({
+        title: '个人项目提 PR 偏好乙',
+        content: '在 kioku-plugins 中再次要求拆分 PR 并清理分支。',
+        deviceKey: 'mac-home',
+        projectSlug: 'kioku-plugins',
+        realms: ['personal'],
+        projects: ['kioku-plugins'],
+        directives: ['按职责拆分 PR 提交，合完删除分支'],
+      })
+      await database.db
+        .update(entries)
+        .set({ createdAt: new Date(tBase.getTime() + 10 * 3_600_000), dreamCheckedVersion: 1 })
+        .where(eq(entries.id, pEpA.id))
+      await database.db
+        .update(entries)
+        .set({ createdAt: new Date(tBase.getTime() + 30 * 3_600_000), dreamCheckedVersion: 1 })
+        .where(eq(entries.id, pEpB.id))
+
+      await embedEntryIds(database.db, masterKey, [existingHabit.entry.id, pEpA.id, pEpB.id])
+
+      let sawExistingHabitTarget = false
+      fakeAi.setChatHandler((messages) => {
+        llmCalls++
+        const userText = messages[1]?.content ?? ''
+        if (userText.includes(existingHabit.entry.shortId)) {
+          sawExistingHabitTarget = true
+        }
+        return JSON.stringify({
+          suggestions: [
+            {
+              kind: 'update',
+              target_short_ids: [existingHabit.entry.shortId],
+              content:
+                '## 提交流程\n- 个人仓库代码修改按职责拆分 PR 提交，合并后清理工作区与本地分支。',
+              reason:
+                '近期在 2 次会话（涉及项目 kioku、kioku-plugins）中重复提出，建议并入既有习惯记忆',
+            },
+          ],
+        })
+      })
+
+      const updateHabitRun = await runDream(database.db, masterKey, {
+        runId: 'habit-update-existing',
+        trigger: 'manual',
+        mode: 'cross_memory',
+        scope: 'incremental',
+      })
+      expect(updateHabitRun.outcome).toBe('ok')
+      expect(updateHabitRun.suggested).toBe(1)
+      expect(sawExistingHabitTarget).toBe(true)
+
+      const inboxAfterUpdate = await loadInbox(database.db, false)
+      const updateCard = inboxAfterUpdate.items.find(
+        (i) => i.kind === 'update' && i.entries[0]?.shortId === existingHabit.entry.shortId,
+      )!
+      expect(updateCard).toBeTruthy()
+      await entrySvc.dismissSuggestion(updateCard.id)
+
+      const callsBeforeRepeatUpdate = llmCalls
+      const repeatUpdateRun = await runDream(database.db, masterKey, {
+        runId: 'habit-update-dismissed-no-resurface',
+        trigger: 'manual',
+        mode: 'cross_memory',
+        scope: 'incremental',
+      })
+      expect(repeatUpdateRun.outcome).toBe('skipped')
+      expect(llmCalls).toBe(callsBeforeRepeatUpdate)
+
+      // 5. Task C 事实向量对账：摘要标题与正式词条完全无共享关键词时，靠 facts 信号向量命中并送入对账
+      const formalBaseline = await entrySvc.create(
+        consoleScope,
+        entryInput({
+          title: '制品发布基线',
+          summary: '容器构建推送至旧地址。',
+          content: '## 制品发布基线\n- 当前推送至 registry-old.example.com。',
+          realms: ['work'],
+        }),
+      )
+      await database.db
+        .update(entries)
+        .set({ dreamCheckedVersion: formalBaseline.entry.version })
+        .where(eq(entries.id, formalBaseline.entry.id))
+
+      const factEp = await entrySvc.writeEpisode({
+        title: '临时构建排障记录',
+        content: '排查流水线报错后改用新地址。',
+        deviceKey: 'mac-work',
+        projectSlug: 'ops-pipeline',
+        realms: ['work'],
+        projects: ['ops-pipeline'],
+        facts: ['镜像仓库地址变更为 registry-new.example.com'],
+      })
+      await embedEntryIds(database.db, masterKey, [formalBaseline.entry.id, factEp.id])
+
+      let factReconcileSawBaseline = false
+      fakeAi.setChatHandler((messages) => {
+        const userText = messages[1]?.content ?? ''
+        if (userText.includes(factEp.shortId) && userText.includes(formalBaseline.entry.shortId)) {
+          factReconcileSawBaseline = true
+        }
+        return JSON.stringify({
+          suggestions: [
+            {
+              kind: 'update',
+              target_short_ids: [formalBaseline.entry.shortId],
+              source_short_id: factEp.shortId,
+              content: '## 制品发布基线\n- 当前推送至 registry-new.example.com。',
+              reason: '根据会话摘要新确认的事实更新镜像仓库地址',
+            },
+          ],
+        })
+      })
+
+      const factRun = await runDream(database.db, masterKey, {
+        runId: 'task-c-fact-vector-reconcile',
+        trigger: 'manual',
+        mode: 'cross_memory',
+        scope: 'incremental',
+      })
+      expect(factRun.outcome).toBe('ok')
+      expect(factRun.suggested).toBe(1)
+      expect(factReconcileSawBaseline).toBe(true)
+    } finally {
+      fakeAi.setEmbedHandler(deterministicVector)
+    }
   })
 })
