@@ -1207,6 +1207,9 @@ async function confirmRestore() {
   flex-direction: column;
   gap: 14px;
 }
+.ws-body > * {
+  flex-shrink: 0;
+}
 .attr-card {
   border: 1px solid var(--ui-border-accented);
   background: var(--ui-bg-bright);

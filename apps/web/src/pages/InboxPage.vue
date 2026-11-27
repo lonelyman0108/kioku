@@ -2162,6 +2162,9 @@ async function batchDismissSelected() {
   border: 1px solid var(--ui-border);
   background: var(--ui-bg);
 }
+.failures-list > * {
+  flex-shrink: 0;
+}
 .failure-row {
   display: flex;
   flex-direction: column;
