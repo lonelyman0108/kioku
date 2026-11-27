@@ -34,6 +34,7 @@ import {
   hasUnsavedChanges,
   useUnsavedChangesGuard,
 } from '../composables/unsavedChanges'
+import { useCopy } from '../composables/useCopy'
 import { useDebounced } from '../composables/useDebounced'
 import { useMarkdownSyncScroll } from '../composables/useMarkdownSyncScroll'
 import { useNow } from '../composables/useNow'
@@ -48,7 +49,7 @@ import {
   eventTypeLabels,
   formatActorLabel,
 } from '../labels'
-import type { CredentialLinks, WikiLinkTargets } from '../markdown'
+import { splitWikiLinks, type CredentialLinks, type WikiLinkTargets } from '../markdown'
 import { placeholderOf } from '../placeholders'
 import { credentialRoute, entryRoute } from '../routes'
 import { runtimeName } from '../runtimes'
@@ -83,7 +84,7 @@ import DiffViewer from './ui/DiffViewer.vue'
 import NoteLine from './ui/NoteLine.vue'
 import ReadFailureNote from './ui/ReadFailureNote.vue'
 import SaveBar, { type SaveBarChange } from './ui/SaveBar.vue'
-import ShortIdLine from './ui/ShortIdLine.vue'
+import WikiText from './ui/WikiText.vue'
 
 const props = withDefaults(
   defineProps<{
@@ -102,6 +103,21 @@ const emit = defineEmits<{
 
 const router = useRouter()
 const toast = useToast()
+const copy = useCopy()
+const shortIdCopied = ref(false)
+let shortIdCopyTimer: ReturnType<typeof setTimeout> | null = null
+async function copyShortId() {
+  const sid = entry.value?.shortId
+  if (!sid) return
+  const ok = await copy(sid)
+  if (!ok) return
+  shortIdCopied.value = true
+  if (shortIdCopyTimer) clearTimeout(shortIdCopyTimer)
+  shortIdCopyTimer = setTimeout(() => {
+    shortIdCopied.value = false
+    shortIdCopyTimer = null
+  }, 1600)
+}
 const queryClient = useQueryClient()
 const { getKbdKey } = useKbd()
 
@@ -814,16 +830,36 @@ function jumpToSection(heading: string, index: number) {
   readContentRef.value?.scrollToHeading(heading, index)
 }
 
-const wikiLinks = computed<WikiLinkTargets>(() => {
+const resolvedTitles = computed(() => {
   const byShortId = new Map<string, { title: string }>()
+  for (const [sid, title] of Object.entries(detail.value?.linkedTitles ?? {})) {
+    if (title) byShortId.set(sid, { title })
+  }
   for (const link of detail.value?.outboundLinks ?? []) {
     byShortId.set(link.shortId, { title: link.title })
   }
-  return {
-    byShortId,
-    href: (sid) => router.resolve(entryRoute(sid)).href,
+  for (const link of detail.value?.backlinks ?? []) {
+    byShortId.set(link.shortId, { title: link.title })
   }
+  return byShortId
 })
+
+const latestChangePlainText = computed(() => {
+  const raw = latestChangeText.value
+  if (!raw) return ''
+  return splitWikiLinks(raw)
+    .map((seg) => {
+      if (!seg.link) return seg.text
+      const { shortId, alias } = seg.link
+      return alias ?? resolvedTitles.value.get(shortId)?.title ?? shortId
+    })
+    .join('')
+})
+
+const wikiLinks = computed<WikiLinkTargets>(() => ({
+  byShortId: resolvedTitles.value,
+  href: (sid) => router.resolve(entryRoute(sid)).href,
+}))
 
 const credentialLinks = computed<CredentialLinks>(() => {
   const bySlug = new Map<string, { slug: string; label: string | null; available: boolean }>()
@@ -893,7 +929,13 @@ function onEditorKeydown(event: KeyboardEvent) {
 }
 
 onMounted(() => window.addEventListener('keydown', onEditorKeydown))
-onBeforeUnmount(() => window.removeEventListener('keydown', onEditorKeydown))
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onEditorKeydown)
+  if (shortIdCopyTimer) {
+    clearTimeout(shortIdCopyTimer)
+    shortIdCopyTimer = null
+  }
+})
 
 const titleEl = ref<HTMLElement | null>(null)
 defineExpose({
@@ -952,7 +994,7 @@ defineExpose({
               </span>
             </div>
 
-            <!-- 轻量动态状态行：版本、相对更新时间、来源、常驻字数与最新变更摘要 -->
+            <!-- 轻量动态状态行：版本、相对更新时间、来源、常驻字数与低调短 ID 复制入口 -->
             <div class="head-status-line">
               <span class="tabular-nums">版本 {{ entry.version }}</span>
               <span class="status-sep" aria-hidden="true">·</span>
@@ -963,12 +1005,8 @@ defineExpose({
               </time>
               <template v-if="entry.isPinned">
                 <span class="status-sep" aria-hidden="true">·</span>
-                <span class="tabular-nums">约 {{ entry.content.length.toLocaleString() }} 字</span>
-              </template>
-              <template v-if="latestChangeText">
-                <span class="status-sep" aria-hidden="true">·</span>
-                <span class="status-change" :title="latestChangeText">
-                  近改：{{ latestChangeText }}
+                <span class="tabular-nums">
+                  约 {{ (entry.content.length + entry.title.length).toLocaleString() }} 字
                 </span>
               </template>
               <template v-if="mode === 'read' && pendingSuggestionCount > 0">
@@ -978,6 +1016,32 @@ defineExpose({
                   <span>待处理建议（{{ pendingSuggestionCount }}）</span>
                 </RouterLink>
               </template>
+              <span class="status-sep" aria-hidden="true">·</span>
+              <button
+                type="button"
+                class="status-copy-id"
+                :title="`点击复制记忆短 ID：${entry.shortId}`"
+                :aria-label="`复制短 ID ${entry.shortId}`"
+                @click="copyShortId"
+              >
+                <span class="status-id-prefix">ID:</span>
+                <code class="status-id-code font-mono">{{ entry.shortId }}</code>
+                <UIcon
+                  :name="shortIdCopied ? icons.check : icons.copy"
+                  class="status-inline-icon"
+                  :class="{ 'is-copied': shortIdCopied }"
+                  aria-hidden="true"
+                />
+              </button>
+            </div>
+            <div v-if="latestChangeText" class="head-change-line" :title="latestChangePlainText">
+              <span class="status-change-label">近改：</span>
+              <WikiText
+                :text="latestChangeText"
+                :titles="resolvedTitles"
+                compact
+                @open="emit('open', $event)"
+              />
             </div>
           </div>
 
@@ -1416,13 +1480,11 @@ defineExpose({
                       >
                         <button
                           type="button"
-                          class="flex w-full items-baseline justify-between gap-2 px-1.5 py-1.5 text-left hover:bg-elevated"
+                          class="flex w-full items-center gap-2 px-1.5 py-1.5 text-left hover:bg-elevated"
+                          :title="`${item.title}（${item.shortId}）`"
                           @click="insertWikiLink(item.shortId)"
                         >
                           <span class="truncate">{{ item.title }}</span>
-                          <span class="shrink-0 font-mono text-xs text-muted">
-                            {{ item.shortId }}
-                          </span>
                         </button>
                       </li>
                       <li
@@ -1638,7 +1700,13 @@ defineExpose({
                   <UIcon :name="icons.summary" class="summary-label-icon" aria-hidden="true" />
                   <span>现行概要</span>
                 </span>
-                <p class="summary-text">{{ entry.summary }}</p>
+                <p class="summary-text">
+                  <WikiText
+                    :text="entry.summary ?? ''"
+                    :titles="resolvedTitles"
+                    @open="emit('open', $event)"
+                  />
+                </p>
               </section>
 
               <MemoryContent
@@ -1667,7 +1735,14 @@ defineExpose({
                   </summary>
                   <ol class="evolution-list">
                     <li v-for="ev in recentHistory" :key="ev.id">
-                      <button type="button" class="evolution-row" @click="openHistory(ev.id)">
+                      <div
+                        role="button"
+                        tabindex="0"
+                        class="evolution-row"
+                        @click="openHistory(ev.id)"
+                        @keydown.enter.self="openHistory(ev.id)"
+                        @keydown.space.prevent.self="openHistory(ev.id)"
+                      >
                         <span class="evolution-meta">
                           <span v-if="ev.version !== null" class="font-mono">
                             版本 {{ ev.version }}
@@ -1688,10 +1763,15 @@ defineExpose({
                             aria-hidden="true"
                           />
                           <span class="evolution-text">
-                            {{ ev.changeSummary?.trim() || eventTypeLabels[ev.eventType] }}
+                            <WikiText
+                              :text="ev.changeSummary?.trim() || eventTypeLabels[ev.eventType]"
+                              :titles="resolvedTitles"
+                              compact
+                              @open="emit('open', $event)"
+                            />
                           </span>
                         </span>
-                      </button>
+                      </div>
                     </li>
                   </ol>
                 </details>
@@ -1699,6 +1779,7 @@ defineExpose({
                 <EntryLinksPanel
                   :outbound-links="detail?.outboundLinks ?? []"
                   :backlinks="detail?.backlinks ?? []"
+                  :titles="resolvedTitles"
                   @open="(sid) => emit('open', sid)"
                 />
               </div>
@@ -1738,7 +1819,14 @@ defineExpose({
                 </div>
                 <ol class="rail-history-list">
                   <li v-for="ev in railHistory" :key="ev.id">
-                    <button type="button" class="rail-history-btn" @click="openHistory(ev.id)">
+                    <div
+                      role="button"
+                      tabindex="0"
+                      class="rail-history-btn"
+                      @click="openHistory(ev.id)"
+                      @keydown.enter.self="openHistory(ev.id)"
+                      @keydown.space.prevent.self="openHistory(ev.id)"
+                    >
                       <span class="rail-history-meta">
                         <span v-if="ev.version !== null" class="font-mono"
                           >版本 {{ ev.version }}</span
@@ -1755,10 +1843,15 @@ defineExpose({
                           aria-hidden="true"
                         />
                         <span class="rail-history-text">
-                          {{ ev.changeSummary?.trim() || eventTypeLabels[ev.eventType] }}
+                          <WikiText
+                            :text="ev.changeSummary?.trim() || eventTypeLabels[ev.eventType]"
+                            :titles="resolvedTitles"
+                            compact
+                            @open="emit('open', $event)"
+                          />
                         </span>
                       </span>
-                    </button>
+                    </div>
                   </li>
                 </ol>
               </section>
@@ -1768,6 +1861,7 @@ defineExpose({
                 compact
                 :outbound-links="detail?.outboundLinks ?? []"
                 :backlinks="detail?.backlinks ?? []"
+                :titles="resolvedTitles"
                 @open="(sid) => emit('open', sid)"
               />
             </aside>
@@ -1775,15 +1869,15 @@ defineExpose({
         </template>
       </div>
 
-      <ShortIdLine :value="entry.shortId" />
-
       <MemoryHistoryDrawer
         v-model:open="historyOpen"
         :short-id="entry.shortId"
+        :entry-title="entry.title"
         :current-version="entry.version"
         :is-deleted="isDeleted"
         :focus-event-id="focusedHistoryEventId"
         @restored="onHistoryRestored"
+        @open="(sid) => emit('open', sid)"
       />
 
       <SingleTidyDrawer
@@ -1906,12 +2000,14 @@ defineExpose({
 .status-sep {
   color: var(--ui-border-accented);
 }
-.status-change {
-  max-width: 34rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.head-change-line {
+  font-size: 12px;
+  line-height: 1.55;
   color: var(--ui-text-toned);
+  overflow-wrap: anywhere;
+}
+.status-change-label {
+  color: var(--ui-text-muted);
 }
 .status-history-link {
   display: inline-flex;
@@ -1920,11 +2016,38 @@ defineExpose({
   font-size: 12px;
   cursor: pointer;
 }
+.status-copy-id {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 5px;
+  border: 1px solid transparent;
+  background: transparent;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ui-text-dimmed);
+  cursor: pointer;
+}
+.status-copy-id:hover {
+  border-color: var(--ui-border-accented);
+  background: var(--ui-bg-muted);
+  color: var(--ui-text-highlighted);
+}
+.status-id-prefix {
+  color: var(--ui-text-dimmed);
+}
+.status-id-code {
+  font-size: 12px;
+  letter-spacing: 0.01em;
+}
 .status-inline-icon {
   display: inline-block;
   flex: none;
   width: 12px;
   height: 12px;
+}
+.status-inline-icon.is-copied {
+  color: var(--ui-success);
 }
 .pill {
   display: inline-flex;
@@ -2499,12 +2622,14 @@ defineExpose({
   color: var(--ui-text-muted);
 }
 .rail-history-text {
+  min-width: 0;
+  flex: 1;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
   font-size: 12px;
-  line-height: 1.45;
+  line-height: 1.6;
   color: var(--ui-text);
 }
 .meta-strip {
@@ -2663,8 +2788,10 @@ defineExpose({
   color: var(--ui-text-muted);
 }
 .evolution-text {
+  min-width: 0;
+  flex: 1;
   font-size: 13px;
-  line-height: 1.55;
+  line-height: 1.6;
   color: var(--ui-text);
 }
 .edit-toolbar {

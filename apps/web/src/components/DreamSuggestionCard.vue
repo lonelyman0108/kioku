@@ -45,6 +45,7 @@ import SceneScopePicker, { type SceneScopeValue } from './SceneScopePicker.vue'
 import SegmentedChoice from './SegmentedChoice.vue'
 import DiffViewer from './ui/DiffViewer.vue'
 import NoteLine from './ui/NoteLine.vue'
+import WikiText from './ui/WikiText.vue'
 
 const props = withDefaults(
   defineProps<{
@@ -108,6 +109,17 @@ const displayTitle = computed(() => {
     return props.suggestion.proposedTitle?.trim() || baseEntry.value?.title || '未命名记忆'
   }
   return baseEntry.value?.title || props.suggestion.proposedTitle?.trim() || '未命名记忆'
+})
+
+const knownTitles = computed<ReadonlyMap<string, { title: string }> | null>(() => {
+  const map = new Map<string, { title: string }>()
+  for (const entry of props.suggestion.entries) {
+    if (entry.title) map.set(entry.shortId, { title: entry.title })
+  }
+  for (const link of props.suggestion.proposedLinks ?? []) {
+    if (link.targetTitle) map.set(link.targetShortId, { title: link.targetTitle })
+  }
+  return map.size > 0 ? map : null
 })
 
 // 规范与精简建议的分项勾选状态
@@ -772,7 +784,9 @@ function applyEdited() {
               {{ showRevisedDiff ? '收起对比' : '查看对比' }}
             </UButton>
           </div>
-          <p class="revise-preview-reason">{{ revisedReason }}</p>
+          <p class="revise-preview-reason">
+            <WikiText :text="revisedReason" :titles="knownTitles" :mark-missing="false" compact />
+          </p>
           <NoteLine v-if="hasLostRefs || integrity?.severeShrink" tone="warning" flush>
             {{ integrityMessage }}
           </NoteLine>
@@ -946,11 +960,27 @@ function applyEdited() {
           <div class="summary-diff-grid">
             <div class="summary-row">
               <span class="summary-tag">原概要</span>
-              <span class="summary-old">{{ baseEntry.summary?.trim() || '暂无' }}</span>
+              <span class="summary-old">
+                <WikiText
+                  v-if="baseEntry.summary?.trim()"
+                  :text="baseEntry.summary.trim()"
+                  :titles="knownTitles"
+                  :mark-missing="false"
+                  compact
+                />
+                <template v-else>暂无</template>
+              </span>
             </div>
             <div class="summary-row">
               <span class="summary-tag">建议概要</span>
-              <span class="summary-new">{{ suggestion.proposedSummary }}</span>
+              <span class="summary-new">
+                <WikiText
+                  :text="suggestion.proposedSummary ?? ''"
+                  :titles="knownTitles"
+                  :mark-missing="false"
+                  compact
+                />
+              </span>
             </div>
           </div>
         </div>
@@ -960,11 +990,19 @@ function applyEdited() {
             <UIcon :name="icons.bookmark" class="sub-eyebrow-icon" aria-hidden="true" />
             <span>启动目录条目预览</span>
           </span>
-          <div class="index-preview-line tabular-nums">
-            <span class="font-mono text-xs text-muted">{{ baseEntry.shortId }}</span>
+          <div
+            class="index-preview-line tabular-nums"
+            :title="`${baseEntry.title}（${baseEntry.shortId}）`"
+          >
             <strong class="index-preview-title">{{ baseEntry.title }}</strong>
             <span>（{{ baseEntry.content.length.toLocaleString() }} 字）</span>
-            <template v-if="indexPreviewSummary">：{{ indexPreviewSummary }}</template>
+            <template v-if="indexPreviewSummary"
+              >：<WikiText
+                :text="indexPreviewSummary"
+                :titles="knownTitles"
+                :mark-missing="false"
+                compact
+            /></template>
           </div>
         </div>
       </template>
@@ -977,28 +1015,43 @@ function applyEdited() {
             :key="link.targetShortId"
             class="link-check-item"
           >
-            <label class="link-check-label">
+            <div class="link-check-label">
               <input
                 type="checkbox"
                 class="square-check"
+                :aria-label="`选择关联「${link.targetTitle || link.targetShortId}」`"
                 :checked="selectedLinkShortIds.includes(link.targetShortId)"
                 :disabled="busy"
                 @change="toggleProposedLink(link.targetShortId)"
               />
               <span class="link-check-body">
                 <span class="link-check-top">
-                  <RouterLink :to="entryRoute(link.targetShortId)" class="text-primary font-medium">
+                  <RouterLink
+                    :to="entryRoute(link.targetShortId)"
+                    class="text-primary font-medium"
+                    :title="
+                      link.targetTitle
+                        ? `${link.targetTitle}（${link.targetShortId}）`
+                        : link.targetShortId
+                    "
+                  >
                     {{ link.targetTitle || link.targetShortId }}
                   </RouterLink>
-                  <span class="font-mono text-xs text-muted">{{ link.targetShortId }}</span>
                   <span v-if="link.relation" class="link-relation-tag">{{ link.relation }}</span>
                   <span v-if="link.anchorHeading" class="text-xs text-muted">
                     小节：{{ link.anchorHeading }}
                   </span>
                 </span>
-                <p v-if="link.reason" class="link-reason">{{ link.reason }}</p>
+                <p v-if="link.reason" class="link-reason">
+                  <WikiText
+                    :text="link.reason"
+                    :titles="knownTitles"
+                    :mark-missing="false"
+                    compact
+                  />
+                </p>
               </span>
-            </label>
+            </div>
           </li>
         </ul>
 
@@ -1025,14 +1078,16 @@ function applyEdited() {
       <template v-else-if="isMergeDuplicates">
         <div v-if="baseEntry && mergedSourceEntries.length" class="structure-strip">
           <span class="strip-role">保留目标</span>
-          <span class="strip-new">{{ baseEntry.title }}</span>
-          <span class="font-mono text-xs text-muted">{{ baseEntry.shortId }}</span>
+          <span class="strip-new" :title="`${baseEntry.title}（${baseEntry.shortId}）`">
+            {{ baseEntry.title }}
+          </span>
           <UIcon :name="icons.back" class="compare-arrow" aria-hidden="true" />
           <span class="strip-role">并入来源</span>
           <template v-for="(src, idx) in mergedSourceEntries" :key="src.id">
             <span v-if="idx > 0" class="text-muted">、</span>
-            <span class="strip-old">{{ src.title }}</span>
-            <span class="font-mono text-xs text-muted">{{ src.shortId }}</span>
+            <span class="strip-old" :title="`${src.title}（${src.shortId}）`">
+              {{ src.title }}
+            </span>
           </template>
         </div>
 
@@ -1048,7 +1103,14 @@ function applyEdited() {
             <UIcon :name="icons.summary" class="summary-preview-icon" aria-hidden="true" />
             <span>建议现行概要</span>
           </span>
-          <p class="summary-preview-text">{{ suggestion.proposedSummary }}</p>
+          <p class="summary-preview-text">
+            <WikiText
+              :text="suggestion.proposedSummary ?? ''"
+              :titles="knownTitles"
+              :mark-missing="false"
+              compact
+            />
+          </p>
         </div>
 
         <div v-if="showScopeReview" class="scope-review">
@@ -1114,7 +1176,14 @@ function applyEdited() {
             <UIcon :name="icons.summary" class="summary-preview-icon" aria-hidden="true" />
             <span>建议现行概要</span>
           </span>
-          <p class="summary-preview-text">{{ suggestion.proposedSummary }}</p>
+          <p class="summary-preview-text">
+            <WikiText
+              :text="suggestion.proposedSummary ?? ''"
+              :titles="knownTitles"
+              :mark-missing="false"
+              compact
+            />
+          </p>
         </div>
         <div v-if="showScopeReview" class="scope-review">
           <div class="scope-review-row">
@@ -1169,8 +1238,9 @@ function applyEdited() {
             <UIcon :name="icons.remove" class="strip-role-icon is-danger" aria-hidden="true" />
             <span>待移入回收站</span>
           </span>
-          <span class="strip-new">{{ baseEntry.title }}</span>
-          <span class="font-mono text-xs text-muted">{{ baseEntry.shortId }}</span>
+          <span class="strip-new" :title="`${baseEntry.title}（${baseEntry.shortId}）`">
+            {{ baseEntry.title }}
+          </span>
           <span class="text-xs text-muted">{{ baseEntry.content.length.toLocaleString() }} 字</span>
           <span v-if="baseEntry.isPinned" class="keep-tag">
             <UIcon
@@ -1220,7 +1290,14 @@ function applyEdited() {
             <UIcon :name="icons.summary" class="summary-preview-icon" aria-hidden="true" />
             <span>建议现行概要</span>
           </span>
-          <p class="summary-preview-text">{{ suggestion.proposedSummary }}</p>
+          <p class="summary-preview-text">
+            <WikiText
+              :text="suggestion.proposedSummary ?? ''"
+              :titles="knownTitles"
+              :mark-missing="false"
+              compact
+            />
+          </p>
         </div>
 
         <div v-if="showScopeReview" class="scope-review">
@@ -1293,7 +1370,7 @@ function applyEdited() {
             <span v-if="item.occurredAt" class="archived-date font-mono">
               {{ formatShort(item.occurredAt) }}
             </span>
-            <span>{{ item.note }}</span>
+            <WikiText :text="item.note" :titles="knownTitles" :mark-missing="false" compact />
           </li>
         </ul>
       </details>
@@ -1334,7 +1411,9 @@ function applyEdited() {
           <UIcon :name="icons.lightbulb" class="side-heading-icon" aria-hidden="true" />
           <span>整理依据</span>
         </h3>
-        <p class="side-reason">{{ suggestion.reason }}</p>
+        <p class="side-reason">
+          <WikiText :text="suggestion.reason" :titles="knownTitles" :mark-missing="false" compact />
+        </p>
       </div>
 
       <div v-if="suggestion.entries.length" class="side-block">
@@ -1344,11 +1423,14 @@ function applyEdited() {
         </h3>
         <ul class="involved-list">
           <li v-for="entry in suggestion.entries" :key="entry.id" class="involved-item">
-            <RouterLink :to="entryRoute(entry.shortId)" class="text-primary font-medium">
+            <RouterLink
+              :to="entryRoute(entry.shortId)"
+              class="text-primary font-medium"
+              :title="`${entry.title}（${entry.shortId}）`"
+            >
               {{ entry.title }}
             </RouterLink>
             <div class="involved-meta">
-              <span class="font-mono text-xs text-muted">{{ entry.shortId }}</span>
               <span class="text-xs text-muted">{{ entryKindLabels[entry.kind] }}</span>
               <span v-if="entry.deviceKey" class="keep-tag">
                 <UIcon :name="icons.deviceDesktop" class="keep-tag-icon" aria-hidden="true" />
@@ -1495,8 +1577,12 @@ function applyEdited() {
           <UIcon :name="dreamKindIcons[suggestion.kind]" class="kind-tag-icon" aria-hidden="true" />
           <span>{{ dreamKindLabels[suggestion.kind] }}</span>
         </span>
-        <span class="card-target-title">{{ displayTitle }}</span>
-        <span v-if="baseEntry" class="font-mono text-xs text-muted">{{ baseEntry.shortId }}</span>
+        <span
+          class="card-target-title"
+          :title="baseEntry ? `${displayTitle}（${baseEntry.shortId}）` : displayTitle"
+        >
+          {{ displayTitle }}
+        </span>
         <span v-if="baseEntry?.isPinned" class="keep-tag">
           <UIcon
             :name="bootModeIcons[effectiveBootMode(baseEntry)]"
@@ -1534,7 +1620,9 @@ function applyEdited() {
               {{ showRevisedDiff ? '收起对比' : '查看对比' }}
             </UButton>
           </div>
-          <p class="revise-preview-reason">{{ revisedReason }}</p>
+          <p class="revise-preview-reason">
+            <WikiText :text="revisedReason" :titles="knownTitles" :mark-missing="false" compact />
+          </p>
           <NoteLine v-if="hasLostRefs || integrity?.severeShrink" tone="warning" flush>
             {{ integrityMessage }}
           </NoteLine>
@@ -1647,14 +1735,16 @@ function applyEdited() {
           class="structure-strip"
         >
           <span class="strip-role">保留目标</span>
-          <span class="strip-new">{{ baseEntry.title }}</span>
-          <span class="font-mono text-xs text-muted">{{ baseEntry.shortId }}</span>
+          <span class="strip-new" :title="`${baseEntry.title}（${baseEntry.shortId}）`">
+            {{ baseEntry.title }}
+          </span>
           <UIcon :name="icons.back" class="compare-arrow" aria-hidden="true" />
           <span class="strip-role">并入来源</span>
           <template v-for="(src, idx) in mergedSourceEntries" :key="src.id">
             <span v-if="idx > 0" class="text-muted">、</span>
-            <span class="strip-old">{{ src.title }}</span>
-            <span class="font-mono text-xs text-muted">{{ src.shortId }}</span>
+            <span class="strip-old" :title="`${src.title}（${src.shortId}）`">
+              {{ src.title }}
+            </span>
           </template>
         </div>
 
@@ -1695,10 +1785,11 @@ function applyEdited() {
               :key="link.targetShortId"
               class="link-check-item"
             >
-              <label class="link-check-label">
+              <div class="link-check-label">
                 <input
                   type="checkbox"
                   class="square-check"
+                  :aria-label="`选择关联「${link.targetTitle || link.targetShortId}」`"
                   :checked="selectedLinkShortIds.includes(link.targetShortId)"
                   :disabled="busy"
                   @change="toggleProposedLink(link.targetShortId)"
@@ -1708,18 +1799,29 @@ function applyEdited() {
                     <RouterLink
                       :to="entryRoute(link.targetShortId)"
                       class="text-primary font-medium"
+                      :title="
+                        link.targetTitle
+                          ? `${link.targetTitle}（${link.targetShortId}）`
+                          : link.targetShortId
+                      "
                     >
                       {{ link.targetTitle || link.targetShortId }}
                     </RouterLink>
-                    <span class="font-mono text-xs text-muted">{{ link.targetShortId }}</span>
                     <span v-if="link.relation" class="link-relation-tag">{{ link.relation }}</span>
                     <span v-if="link.anchorHeading" class="text-xs text-muted">
                       小节：{{ link.anchorHeading }}
                     </span>
                   </span>
-                  <p v-if="link.reason" class="link-reason">{{ link.reason }}</p>
+                  <p v-if="link.reason" class="link-reason">
+                    <WikiText
+                      :text="link.reason"
+                      :titles="knownTitles"
+                      :mark-missing="false"
+                      compact
+                    />
+                  </p>
                 </span>
-              </label>
+              </div>
             </li>
           </ul>
         </div>
@@ -1761,7 +1863,14 @@ function applyEdited() {
             <UIcon :name="icons.summary" class="summary-preview-icon" aria-hidden="true" />
             <span>建议现行概要</span>
           </span>
-          <p class="summary-preview-text">{{ suggestion.proposedSummary }}</p>
+          <p class="summary-preview-text">
+            <WikiText
+              :text="suggestion.proposedSummary ?? ''"
+              :titles="knownTitles"
+              :mark-missing="false"
+              compact
+            />
+          </p>
         </div>
 
         <!-- 非编辑审阅态适用场景、来源设备与触发场景 -->
@@ -1838,7 +1947,7 @@ function applyEdited() {
             <span v-if="item.occurredAt" class="archived-date font-mono">
               {{ formatShort(item.occurredAt) }}
             </span>
-            <span>{{ item.note }}</span>
+            <WikiText :text="item.note" :titles="knownTitles" :mark-missing="false" compact />
           </li>
         </ul>
       </details>
@@ -1878,7 +1987,7 @@ function applyEdited() {
         <UIcon :name="icons.lightbulb" class="card-reason-icon" aria-hidden="true" />
         <span>整理依据：</span>
       </span>
-      <span>{{ suggestion.reason }}</span>
+      <WikiText :text="suggestion.reason" :titles="knownTitles" :mark-missing="false" compact />
     </p>
 
     <div v-if="suggestion.entries.length > 1" class="card-affected">
@@ -1888,10 +1997,13 @@ function applyEdited() {
       </span>
       <ul class="card-affected-list">
         <li v-for="entry in suggestion.entries" :key="entry.id">
-          <RouterLink :to="entryRoute(entry.shortId)" class="text-primary">
+          <RouterLink
+            :to="entryRoute(entry.shortId)"
+            class="text-primary"
+            :title="`${entry.title}（${entry.shortId}）`"
+          >
             {{ entry.title }}
           </RouterLink>
-          <span class="font-mono text-xs text-muted">{{ entry.shortId }}</span>
           <span class="text-xs text-muted">{{ entryKindLabels[entry.kind] }}</span>
           <span v-if="entry.deviceKey" class="keep-tag">
             <UIcon :name="icons.deviceDesktop" class="keep-tag-icon" aria-hidden="true" />
@@ -2185,7 +2297,6 @@ function applyEdited() {
   overflow-wrap: anywhere;
 }
 .index-preview-title {
-  margin-left: 8px;
   font-weight: 600;
   color: var(--ui-text-highlighted);
 }
@@ -2207,10 +2318,10 @@ function applyEdited() {
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  cursor: pointer;
 }
 .link-check-label .square-check {
   margin-top: 4px;
+  cursor: pointer;
 }
 .link-check-body {
   display: flex;

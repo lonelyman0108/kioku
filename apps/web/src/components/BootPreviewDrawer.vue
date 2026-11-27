@@ -427,11 +427,15 @@ function resetOverrides() {
               />
               <ul v-else class="item-list">
                 <li v-for="item in preview.expanded" :key="item.shortId">
-                  <button type="button" class="item-row" @click="pickEntry(item.shortId)">
+                  <button
+                    type="button"
+                    class="item-row"
+                    :title="`${item.title}（${item.shortId}）`"
+                    @click="pickEntry(item.shortId)"
+                  >
                     <div class="item-main">
                       <span class="item-title">{{ item.title }}</span>
                       <div class="item-sub">
-                        <span class="item-id font-mono">{{ item.shortId }}</span>
                         <span class="item-badge" :class="`is-${item.bucket}`">
                           <UIcon
                             :name="bootBucketIcons[item.bucket]"
@@ -480,11 +484,15 @@ function resetOverrides() {
               </p>
               <ul v-else class="item-list">
                 <li v-for="item in preview.indexed" :key="item.shortId">
-                  <button type="button" class="item-row" @click="pickEntry(item.shortId)">
+                  <button
+                    type="button"
+                    class="item-row"
+                    :title="`${item.title}（${item.shortId}）`"
+                    @click="pickEntry(item.shortId)"
+                  >
                     <div class="item-main">
                       <span class="item-title">{{ item.title }}</span>
                       <div class="item-sub">
-                        <span class="item-id font-mono">{{ item.shortId }}</span>
                         <span v-if="item.summary" class="item-summary">{{ item.summary }}</span>
                         <span v-else class="item-warn">
                           <UIcon :name="icons.warning" class="item-warn-icon" aria-hidden="true" />
@@ -514,11 +522,15 @@ function resetOverrides() {
               </div>
               <ul class="item-list">
                 <li v-for="item in preview.demoted" :key="item.shortId">
-                  <button type="button" class="item-row" @click="pickEntry(item.shortId)">
+                  <button
+                    type="button"
+                    class="item-row"
+                    :title="`${item.title}（${item.shortId}）`"
+                    @click="pickEntry(item.shortId)"
+                  >
                     <div class="item-main">
                       <span class="item-title">{{ item.title }}</span>
                       <div class="item-sub">
-                        <span class="item-id font-mono">{{ item.shortId }}</span>
                         <span class="item-badge is-warn">
                           <UIcon
                             :name="bootOmitReasonIcons[item.reason]"
@@ -557,11 +569,15 @@ function resetOverrides() {
                 </p>
                 <ul v-else class="item-list mt-2">
                   <li v-for="item in preview.excluded" :key="item.shortId">
-                    <button type="button" class="item-row" @click="pickEntry(item.shortId)">
+                    <button
+                      type="button"
+                      class="item-row"
+                      :title="`${item.title}（${item.shortId}）`"
+                      @click="pickEntry(item.shortId)"
+                    >
                       <div class="item-main">
                         <span class="item-title">{{ item.title }}</span>
                         <div class="item-sub">
-                          <span class="item-id font-mono">{{ item.shortId }}</span>
                           <span
                             class="item-badge"
                             :class="item.reason === 'realm_forbidden' ? 'is-error' : ''"
@@ -877,11 +893,6 @@ function resetOverrides() {
   gap: 5px;
   font-size: 12px;
   color: var(--ui-text-muted);
-}
-.item-id {
-  flex: none;
-  white-space: nowrap;
-  color: var(--ui-text-dimmed);
 }
 .item-badge {
   display: inline-flex;

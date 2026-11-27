@@ -40,6 +40,7 @@ import {
   type EntryTabCounts,
   type EntryView,
   type HygieneWarning,
+  type PinnedGroup,
   type RestoreEntryRequest,
   type SingleCrossCheckResponse,
   type SingleTidyApplyRequest,
@@ -261,6 +262,22 @@ function parseValidTo(raw: string | null | undefined, now: Date): Date | null {
   return date
 }
 
+function pinnedGroupFilterSql(group: PinnedGroup): SQL {
+  if (group === 'global_full') {
+    return and(
+      eq(entries.bootMode, 'full'),
+      sql`cardinality(${entries.envs}) = 0 and cardinality(${entries.realms}) = 0 and cardinality(${entries.projects}) = 0 and cardinality(${entries.runtimes}) = 0`,
+    )!
+  }
+  if (group === 'scoped_full') {
+    return and(
+      eq(entries.bootMode, 'full'),
+      sql`(cardinality(${entries.envs}) > 0 or cardinality(${entries.realms}) > 0 or cardinality(${entries.projects}) > 0 or cardinality(${entries.runtimes}) > 0)`,
+    )!
+  }
+  return eq(entries.bootMode, 'index')
+}
+
 export class EntryService {
   constructor(
     private readonly db: Db,
@@ -328,6 +345,39 @@ export class EntryService {
     })
   }
 
+  // 批量解析文本中 [[m-xxxxxx]] 对应的可见活跃词条标题，严格遵守场域硬边界
+  private async resolveLinkedTitles(
+    tx: Db | Tx,
+    scope: AccessScope,
+    texts: readonly (string | null | undefined)[],
+  ): Promise<Record<string, string>> {
+    const idSet = new Set<string>()
+    for (const text of texts) {
+      if (!text) continue
+      for (const shortId of extractTargetShortIds(text)) {
+        idSet.add(shortId)
+      }
+    }
+    if (!idSet.size) return {}
+
+    const rows = await tx
+      .select({ shortId: entries.shortId, title: entries.title })
+      .from(entries)
+      .where(
+        and(
+          inArray(entries.shortId, [...idSet]),
+          isNull(entries.deletedAt),
+          readableEntrySql(scope, { includeExpired: scope.kind === 'console' }),
+        ),
+      )
+
+    const result: Record<string, string> = {}
+    for (const row of rows) {
+      result[row.shortId] = row.title
+    }
+    return result
+  }
+
   private async hydrateDetail(
     tx: Db | Tx,
     scope: AccessScope,
@@ -352,6 +402,13 @@ export class EntryService {
               .then((rows) => rows[0]?.count ?? 0)
           : Promise.resolve(0),
       ])
+    const linkedTitles = await this.resolveLinkedTitles(tx, scope, [
+      row.lastChangeSummary,
+      row.summary,
+      ...recentHistory.map((h) => h.changeSummary),
+      ...outboundLinks.map((l) => l.contextSnippet),
+      ...backlinks.map((l) => l.contextSnippet),
+    ])
     return {
       entry: toEntryView(row),
       outboundLinks,
@@ -360,6 +417,7 @@ export class EntryService {
       recentHistory,
       ...(warnings?.length ? { warnings } : {}),
       ...(pendingCountRow > 0 ? { pendingSuggestionCount: pendingCountRow } : {}),
+      ...(Object.keys(linkedTitles).length ? { linkedTitles } : {}),
     }
   }
 
@@ -947,7 +1005,18 @@ export class EntryService {
         createdAt: r.createdAt.toISOString(),
       }
     })
-    return { items }
+    const linkedTitles = await this.resolveLinkedTitles(
+      this.db,
+      scope,
+      items.flatMap((item) => [
+        item.changeSummary,
+        ...(item.snapshot ? [item.snapshot.summary, item.snapshot.content] : []),
+      ]),
+    )
+    return {
+      items,
+      ...(Object.keys(linkedTitles).length ? { linkedTitles } : {}),
+    }
   }
 
   private async loadCountsAndFacets(): Promise<{
@@ -1056,6 +1125,10 @@ export class EntryService {
       }
     }
 
+    if (query.tab === 'pinned' && query.pinnedGroup) {
+      filters.push(pinnedGroupFilterSql(query.pinnedGroup))
+    }
+
     const q = query.q?.trim() ?? ''
     if (q && query.tab !== 'trash' && query.tab !== 'episodes') {
       const focus = synthesizeFocus(scope, {
@@ -1067,6 +1140,7 @@ export class EntryService {
       const hasNarrowFilter =
         query.tab !== 'all' ||
         Boolean(
+          query.pinnedGroup ||
           query.env ||
           query.realm ||
           query.project ||
@@ -1148,11 +1222,18 @@ export class EntryService {
         items.push(toListItem(r))
       }
 
+      const pageItems = items.slice(0, query.limit)
+      const linkedTitles = await this.resolveLinkedTitles(
+        this.db,
+        scope,
+        pageItems.flatMap((item) => [item.lastChangeSummary, item.summary, item.snippet]),
+      )
       return {
-        items: items.slice(0, query.limit),
+        items: pageItems,
         nextCursor: null,
         facets,
         counts,
+        ...(Object.keys(linkedTitles).length ? { linkedTitles } : {}),
       }
     }
 
@@ -1187,31 +1268,65 @@ export class EntryService {
 
     const decoded = decodeTimeCursor(query.cursor, UUID)
     if (decoded === 'invalid') throw new MemoryError(400, INVALID_CURSOR)
+    const sortByBootChars = query.tab === 'pinned' && query.pinnedGroup === 'global_full' && !q
+    const bootCharsExpr = sql<number>`(char_length(${entries.content}) + char_length(${entries.title}))::int`
     const timeCol = query.tab === 'trash' ? entries.deletedAt : entries.updatedAt
     if (decoded) {
-      const [cursorMicros, cursorId] = decoded
-      const cursorTs = fromMicros(cursorMicros)
-      filters.push(or(lt(timeCol, cursorTs), and(eq(timeCol, cursorTs), lt(entries.id, cursorId)))!)
+      const [cursorKey, cursorId] = decoded
+      if (sortByBootChars) {
+        const cursorChars = Number(cursorKey)
+        if (!Number.isSafeInteger(cursorChars) || cursorChars > 0x7fffffff) {
+          throw new MemoryError(400, INVALID_CURSOR)
+        }
+        filters.push(
+          or(
+            lt(bootCharsExpr, cursorChars),
+            and(eq(bootCharsExpr, cursorChars), lt(entries.id, cursorId)),
+          )!,
+        )
+      } else {
+        const cursorTs = fromMicros(cursorKey)
+        filters.push(
+          or(lt(timeCol, cursorTs), and(eq(timeCol, cursorTs), lt(entries.id, cursorId)))!,
+        )
+      }
     }
 
-    const rows = await this.db
-      .select({
-        row: entries,
-        micros: microsOf(timeCol).mapWith(String),
-      })
-      .from(entries)
-      .where(and(...filters))
-      .orderBy(desc(timeCol), desc(entries.id))
-      .limit(query.limit + 1)
+    const rows = sortByBootChars
+      ? await this.db
+          .select({
+            row: entries,
+            cursorKey: sql<string>`(${bootCharsExpr})::text`,
+          })
+          .from(entries)
+          .where(and(...filters))
+          .orderBy(desc(bootCharsExpr), desc(entries.id))
+          .limit(query.limit + 1)
+      : await this.db
+          .select({
+            row: entries,
+            cursorKey: microsOf(timeCol).mapWith(String),
+          })
+          .from(entries)
+          .where(and(...filters))
+          .orderBy(desc(timeCol), desc(entries.id))
+          .limit(query.limit + 1)
 
     const hasMore = rows.length > query.limit
     const page = hasMore ? rows.slice(0, query.limit) : rows
     const last = page.at(-1)
+    const items = page.map((item) => toListItem(item.row))
+    const linkedTitles = await this.resolveLinkedTitles(
+      this.db,
+      scope,
+      items.flatMap((item) => [item.lastChangeSummary, item.summary, item.snippet]),
+    )
     return {
-      items: page.map((item) => toListItem(item.row)),
-      nextCursor: hasMore && last ? encodeTimeCursor(last.micros, last.row.id) : null,
+      items,
+      nextCursor: hasMore && last ? encodeTimeCursor(last.cursorKey, last.row.id) : null,
       facets,
       counts,
+      ...(Object.keys(linkedTitles).length ? { linkedTitles } : {}),
     }
   }
 

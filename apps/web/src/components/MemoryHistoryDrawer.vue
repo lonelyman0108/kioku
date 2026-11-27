@@ -9,6 +9,7 @@ import {
 import { useToast } from '@nuxt/ui/composables'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, nextTick, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
@@ -28,6 +29,8 @@ import {
   resolveActorDisplay,
   type ActorFilterGroup,
 } from '../labels'
+import { splitWikiLinks, type WikiLinkTargets } from '../markdown'
+import { entryRoute } from '../routes'
 import { formatRelative, formatShort, formatTime } from '../time'
 import { readStoredEnum, UI_STORAGE_KEYS, writeStoredString } from '../uiState'
 import ConsequenceModal from './ConsequenceModal.vue'
@@ -36,6 +39,7 @@ import SegmentedChoice from './SegmentedChoice.vue'
 import DiffViewer, { type DiffContextMode, type DiffLayoutMode } from './ui/DiffViewer.vue'
 import EmptyState from './ui/EmptyState.vue'
 import ReadFailureNote from './ui/ReadFailureNote.vue'
+import WikiText from './ui/WikiText.vue'
 
 type SourceFilter = 'all' | ActorFilterGroup
 type InspectTab = 'diff' | 'snapshot'
@@ -65,15 +69,25 @@ const DIFF_CONTEXT_OPTIONS: { value: DiffContextMode; label: string; icon: strin
 const props = withDefaults(
   defineProps<{
     shortId: string
+    entryTitle?: string
     currentVersion: number
     isDeleted: boolean
     focusEventId?: number | null
   }>(),
-  { focusEventId: null },
+  { entryTitle: '', focusEventId: null },
 )
 const open = defineModel<boolean>('open', { required: true })
-const emit = defineEmits<{ restored: [detail: EntryDetailResponse] }>()
+const emit = defineEmits<{
+  restored: [detail: EntryDetailResponse]
+  open: [shortId: string]
+}>()
 
+function openLinkedEntry(shortId: string) {
+  open.value = false
+  emit('open', shortId)
+}
+
+const router = useRouter()
 const toast = useToast()
 const queryClient = useQueryClient()
 
@@ -87,6 +101,19 @@ const DIFF_LAYOUT_MODES: readonly DiffLayoutMode[] = ['unified', 'split']
 const DIFF_CONTEXT_MODES: readonly DiffContextMode[] = ['folded', 'full']
 
 const items = computed(() => history.data.value?.items ?? [])
+const linkedTitles = computed(() =>
+  history.data.value ? (history.data.value.linkedTitles ?? {}) : null,
+)
+const snapshotWikiLinks = computed<WikiLinkTargets>(() => {
+  const byShortId = new Map<string, { title: string }>()
+  for (const [sid, title] of Object.entries(linkedTitles.value ?? {})) {
+    if (title) byShortId.set(sid, { title })
+  }
+  return {
+    byShortId,
+    href: (sid) => router.resolve(entryRoute(sid)).href,
+  }
+})
 const searchInput = ref('')
 const sourceFilter = ref<SourceFilter>('all')
 const activeItemId = ref<number | null>(null)
@@ -171,6 +198,18 @@ function summaryTextOf(item: EntryHistoryItem): string {
   return eventTypeLabels[item.eventType]
 }
 
+function plainWikiText(text: string): string {
+  const titles = linkedTitles.value
+  return splitWikiLinks(text)
+    .map((seg) => {
+      if (!seg.link) return seg.text
+      const { shortId, alias } = seg.link
+      const resolved = titles && Object.hasOwn(titles, shortId) ? titles[shortId] : null
+      return alias ?? resolved ?? shortId
+    })
+    .join('')
+}
+
 function charDeltaText(item: EntryHistoryItem): string | null {
   const meta = item.diffMeta
   if (!meta) return null
@@ -187,6 +226,9 @@ const filteredItems = computed(() => {
     if (filter !== 'all' && actor.group !== filter) return false
     if (!q) return true
     if (item.changeSummary?.toLowerCase().includes(q)) return true
+    if (item.changeSummary && plainWikiText(item.changeSummary).toLowerCase().includes(q)) {
+      return true
+    }
     if (item.snapshot?.title.toLowerCase().includes(q)) return true
     if (actor.label.toLowerCase().includes(q)) return true
     if (eventTypeLabels[item.eventType].toLowerCase().includes(q)) return true
@@ -278,7 +320,7 @@ const compareBaseOptions = computed<{ value: string; label: string }[]>(() => {
   for (const cand of snapshotItems.value) {
     if (cand.id === curr.id) continue
     if (prevItemId !== null && cand.id === prevItemId) continue
-    const summary = summaryTextOf(cand)
+    const summary = plainWikiText(summaryTextOf(cand))
     const shortSummary = summary.length > 16 ? `${summary.slice(0, 16)}…` : summary
     opts.push({
       value: String(cand.id),
@@ -410,7 +452,7 @@ async function confirmRestore() {
 <template>
   <UModal
     v-model:open="open"
-    :title="`版本历史 · ${shortId}`"
+    :title="props.entryTitle ? `版本历史 · ${props.entryTitle}` : '版本历史'"
     :ui="{
       content: 'w-[95vw] max-w-[1640px] sm:max-w-[1640px] h-[90vh] max-h-[90vh] ring-2 ring-rule',
       body: 'p-0 sm:p-0 flex-1 min-h-0 overflow-hidden flex flex-col',
@@ -512,7 +554,14 @@ async function confirmRestore() {
                   </time>
                 </div>
 
-                <p class="tl-summary">{{ summaryTextOf(item) }}</p>
+                <p class="tl-summary">
+                  <WikiText
+                    :text="summaryTextOf(item)"
+                    :titles="linkedTitles"
+                    :interactive="false"
+                    compact
+                  />
+                </p>
 
                 <div class="tl-foot">
                   <span class="tl-actor">{{ formatActorLabel(item.actor, item.actorMeta) }}</span>
@@ -587,9 +636,12 @@ async function confirmRestore() {
                       版本 {{ customBaseItem.snapshot.version }} → 版本
                       {{ activeItem.snapshot.version }}
                     </template>
-                    <template v-else>
-                      {{ summaryTextOf(activeItem) }}
-                    </template>
+                    <WikiText
+                      v-else
+                      :text="summaryTextOf(activeItem)"
+                      :titles="linkedTitles"
+                      @open="openLinkedEntry"
+                    />
                   </h3>
                 </div>
 
@@ -642,7 +694,14 @@ async function confirmRestore() {
                 <template v-if="customBaseItem && activeItem.snapshot">
                   <span class="font-medium">跨版本累计变动</span>
                   <span>·</span>
-                  <span>目标变更：{{ summaryTextOf(activeItem) }}</span>
+                  <span>
+                    目标变更：<WikiText
+                      :text="summaryTextOf(activeItem)"
+                      :titles="linkedTitles"
+                      compact
+                      @open="openLinkedEntry"
+                    />
+                  </span>
                 </template>
                 <template v-else>
                   <span v-if="itemVersion(activeItem) !== null" class="font-mono font-medium">
@@ -774,7 +833,13 @@ async function confirmRestore() {
                   <UIcon :name="icons.history" class="archive-note-icon" aria-hidden="true" />
                   <span>历史归档记录</span>
                 </div>
-                <p class="archive-note-text">{{ summaryTextOf(activeItem) }}</p>
+                <p class="archive-note-text">
+                  <WikiText
+                    :text="summaryTextOf(activeItem)"
+                    :titles="linkedTitles"
+                    @open="openLinkedEntry"
+                  />
+                </p>
                 <p class="text-xs text-muted">该记录由历史流水账沉淀而来，不含独立正文快照。</p>
               </div>
 
@@ -838,7 +903,13 @@ async function confirmRestore() {
                     <UIcon :name="icons.summary" class="snapshot-summary-icon" aria-hidden="true" />
                     <span>现行概要</span>
                   </span>
-                  <p>{{ inspectorSnapshot.summary }}</p>
+                  <p>
+                    <WikiText
+                      :text="inspectorSnapshot.summary"
+                      :titles="linkedTitles"
+                      @open="openLinkedEntry"
+                    />
+                  </p>
                 </div>
                 <div class="snapshot-body">
                   <MemoryContent
@@ -849,6 +920,8 @@ async function confirmRestore() {
                         inspectorSnapshot.content,
                       )
                     "
+                    :wiki-links="snapshotWikiLinks"
+                    @open="openLinkedEntry"
                   />
                 </div>
               </div>
@@ -1010,7 +1083,7 @@ async function confirmRestore() {
   -webkit-box-orient: vertical;
   overflow: hidden;
   font-size: 13px;
-  line-height: 1.45;
+  line-height: 1.55;
   color: var(--ui-text-highlighted);
 }
 .tl-foot {

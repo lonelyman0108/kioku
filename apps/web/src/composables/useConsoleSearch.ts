@@ -6,8 +6,9 @@ import { useRoute } from 'vue-router'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { icons } from '../icons'
-import { entryKindLabels } from '../labels'
+import { bootModeLabels, entryKindLabels } from '../labels'
 import { captureRoute, createEntryRoute, entryRoute, settingsRoute } from '../routes'
+import { formatRelative } from '../time'
 
 const SEARCH_DELAY_MS = 250
 
@@ -23,6 +24,15 @@ function entrySearchIcon(entry: EntryListItem): string {
   if (mode === 'index') return icons.bookmark
   if (mode === 'full') return icons.pin
   return icons.bookOpen
+}
+
+function entrySearchSuffix(entry: EntryListItem): string {
+  if (entry.disclosure) return entry.disclosure
+  const status =
+    entry.kind === 'episode'
+      ? entryKindLabels[entry.kind]
+      : bootModeLabels[effectiveBootMode(entry)]
+  return `${status} · ${formatRelative(entry.updatedAt)}`
 }
 
 // ⌘K 搜索：页面跳转由搜索框本地过滤，词条经服务端混合检索返回
@@ -101,7 +111,7 @@ export function useConsoleSearch(pages: Ref<CommandPaletteItem[]>) {
       ignoreFilter: true,
       items: items.value.map((entry) => ({
         label: entry.title,
-        suffix: entry.disclosure ?? `${entry.shortId} · ${entryKindLabels[entry.kind]}`,
+        suffix: entrySearchSuffix(entry),
         icon: entrySearchIcon(entry),
         to: entryRoute(entry.shortId),
       })),

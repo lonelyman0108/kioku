@@ -418,13 +418,13 @@ async function applySelected() {
                   <RouterLink
                     :to="entryRoute(item.shortId)"
                     class="text-primary font-medium"
+                    :title="`${item.title}（${item.shortId}）`"
                     @click="open = false"
                   >
                     {{ item.title }}
                   </RouterLink>
                 </div>
                 <span class="sweep-meta tabular-nums">
-                  <span class="font-mono">{{ item.shortId }}</span>
                   <span v-if="item.isPinned" class="mini-pill">
                     <UIcon :name="icons.pin" class="mini-pill-icon" aria-hidden="true" />
                     <span>常驻</span>
@@ -469,11 +469,16 @@ async function applySelected() {
               </div>
 
               <ul v-if="item.rewrites.length" class="rewrite-list">
-                <li v-for="(rw, idx) in item.rewrites" :key="idx">
+                <li
+                  v-for="(rw, idx) in item.rewrites"
+                  :key="idx"
+                  :title="`${rw.raw} → ${rw.replacement}`"
+                >
                   <span class="font-mono text-muted">{{ rw.raw }}</span>
                   <UIcon :name="icons.inherits" class="rewrite-arrow" aria-hidden="true" />
-                  <span class="font-mono text-highlighted">{{ rw.replacement }}</span>
-                  <span class="text-muted">（{{ rw.targetTitle }}）</span>
+                  <span class="font-medium text-highlighted">
+                    {{ rw.targetTitle || rw.replacement }}
+                  </span>
                 </li>
               </ul>
 
@@ -495,12 +500,12 @@ async function applySelected() {
                 <RouterLink
                   :to="entryRoute(flag.shortId)"
                   class="text-primary font-medium"
+                  :title="`${flag.title}（${flag.shortId}）`"
                   @click="open = false"
                 >
                   {{ flag.title }}
                 </RouterLink>
                 <span class="sweep-meta tabular-nums">
-                  <span class="font-mono">{{ flag.shortId }}</span>
                   <span v-if="flag.isPinned" class="mini-pill">
                     <UIcon :name="icons.pin" class="mini-pill-icon" aria-hidden="true" />
                     <span>常驻</span>
@@ -523,12 +528,12 @@ async function applySelected() {
                 <RouterLink
                   :to="entryRoute(flag.shortId)"
                   class="text-primary font-medium"
+                  :title="`${flag.title}（${flag.shortId}）`"
                   @click="open = false"
                 >
                   {{ flag.title }}
                 </RouterLink>
                 <span class="sweep-meta tabular-nums">
-                  <span class="font-mono">{{ flag.shortId }}</span>
                   <span v-if="flag.isPinned" class="mini-pill">
                     <UIcon :name="icons.pin" class="mini-pill-icon" aria-hidden="true" />
                     <span>常驻</span>
@@ -550,12 +555,12 @@ async function applySelected() {
                 <RouterLink
                   :to="entryRoute(item.shortId)"
                   class="text-primary font-medium"
+                  :title="`${item.title}（${item.shortId}）`"
                   @click="open = false"
                 >
                   {{ item.title }}
                 </RouterLink>
                 <span class="sweep-meta tabular-nums">
-                  <span class="font-mono">{{ item.shortId }}</span>
                   <span v-if="item.isPinned" class="mini-pill">
                     <UIcon :name="icons.pin" class="mini-pill-icon" aria-hidden="true" />
                     <span>常驻</span>
@@ -563,12 +568,18 @@ async function applySelected() {
                   <span>{{ item.targets.length }} 处断链</span>
                 </span>
               </div>
-              <p class="flag-reason font-mono">
+              <p
+                class="flag-reason"
+                :title="item.targets.map((t) => `[[${t.targetShortId}]]`).join('；')"
+              >
                 {{
                   item.targets
-                    .map(
-                      (t) =>
-                        `[[${t.targetShortId}]]（${t.status === 'deleted' ? `已删除：${t.targetTitle ?? ''}` : '不存在'}）`,
+                    .map((t) =>
+                      t.status === 'deleted'
+                        ? t.targetTitle
+                          ? `「${t.targetTitle}」（已删除）`
+                          : `已删除目标（${t.targetShortId}）`
+                        : `目标不存在（${t.targetShortId}）`,
                     )
                     .join('；')
                 }}

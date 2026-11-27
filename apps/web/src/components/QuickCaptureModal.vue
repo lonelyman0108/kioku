@@ -230,7 +230,9 @@ const activeCandidate = computed<CaptureCandidate | null>(
   () => plan.value?.candidates.find((c) => c.shortId === targetShortId.value) ?? null,
 )
 
-const targetTitle = computed(() => activeCandidate.value?.title ?? targetShortId.value ?? '')
+const targetTitle = computed(
+  () => activeCandidate.value?.title ?? props.targetEntry?.title ?? targetShortId.value ?? '',
+)
 
 const targetHeadings = computed(() => {
   if (activeCandidate.value) return activeCandidate.value.headings
@@ -897,7 +899,7 @@ onBeforeUnmount(() => {
     :title="isRefineMode ? '按说明微调' : '随手记'"
     :description="
       isRefineMode && targetEntry
-        ? `针对 ${targetEntry.shortId} · ${targetEntry.title} 生成单轮修改方案`
+        ? `针对「${targetEntry.title}」生成单轮修改方案`
         : '自动匹配并归并至既有记忆'
     "
     :dismissible="!applyBusy && step !== 'loading'"
@@ -911,12 +913,15 @@ onBeforeUnmount(() => {
     <template #body>
       <!-- 输入阶段 -->
       <div v-if="step === 'input'" class="space-y-3.5">
-        <div v-if="isRefineMode && targetEntry" class="refine-target-bar">
+        <div
+          v-if="isRefineMode && targetEntry"
+          class="refine-target-bar"
+          :title="`${targetEntry.title}（${targetEntry.shortId}）`"
+        >
           <span class="refine-target-lead">
             <UIcon :name="icons.file" class="refine-target-icon" aria-hidden="true" />
             <strong class="refine-target-title">{{ targetEntry.title }}</strong>
           </span>
-          <span class="plan-meta">{{ targetEntry.shortId }}</span>
         </div>
 
         <UFormField
@@ -1008,13 +1013,20 @@ onBeforeUnmount(() => {
                 />
                 <span>{{ patchBadgeText }}</span>
               </span>
-              <strong v-if="viewAction !== 'create' && targetTitle" class="plan-target-title">
+              <strong
+                v-if="viewAction !== 'create' && targetTitle"
+                class="plan-target-title"
+                :title="targetShortId ? `${targetTitle}（${targetShortId}）` : targetTitle"
+              >
                 {{ targetTitle }}
               </strong>
             </div>
-            <span v-if="viewAction !== 'create' && targetShortId" class="plan-meta">
-              {{ targetShortId
-              }}<template v-if="targetVersion !== null"> · 版本 {{ targetVersion }}</template>
+            <span
+              v-if="viewAction !== 'create' && targetVersion !== null"
+              class="plan-meta tabular-nums"
+              :title="targetShortId ?? undefined"
+            >
+              版本 {{ targetVersion }}
             </span>
           </div>
           <p class="plan-reason">{{ reason }}</p>
@@ -1031,7 +1043,7 @@ onBeforeUnmount(() => {
               class="cand-btn"
               :class="{ active: viewAction !== 'create' && targetShortId === cand.shortId }"
               :disabled="applyBusy"
-              :title="cand.title"
+              :title="`${cand.title}（${cand.shortId}）`"
               @click="selectCandidate(cand)"
             >
               <span class="cand-title">{{ cand.title }}</span>
@@ -1115,14 +1127,15 @@ onBeforeUnmount(() => {
         <!-- 分支：无需重复（noop） -->
         <template v-else-if="viewAction === 'noop'">
           <div class="noop-preview">
-            <div class="noop-preview-head">
+            <div
+              class="noop-preview-head"
+              :title="targetShortId ? `${targetTitle}（${targetShortId}）` : undefined"
+            >
               <span class="noop-preview-title">
                 <UIcon :name="icons.file" class="noop-preview-icon" aria-hidden="true" />
                 <span>原记忆内容</span>
               </span>
-              <span v-if="targetShortId" class="font-mono text-xs text-muted">{{
-                targetShortId
-              }}</span>
+              <span v-if="targetTitle" class="truncate text-xs text-muted">{{ targetTitle }}</span>
             </div>
             <div class="noop-preview-scroll">
               <MemoryContent width="full" :content="beforeContent" />
@@ -1589,7 +1602,6 @@ onBeforeUnmount(() => {
 }
 .plan-meta {
   flex: none;
-  font-family: var(--font-mono);
   font-size: 12px;
   color: var(--ui-text-muted);
 }

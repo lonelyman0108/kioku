@@ -381,12 +381,17 @@ export const EntryListItem = z
   .meta({ id: 'EntryListItem' })
 export type EntryListItem = z.infer<typeof EntryListItem>
 
+export const PINNED_GROUPS = ['global_full', 'scoped_full', 'index'] as const
+export const PinnedGroup = z.enum(PINNED_GROUPS)
+export type PinnedGroup = z.infer<typeof PinnedGroup>
+
 export const PROJECT_SCOPES = ['assigned', 'unassigned'] as const
 export const ProjectScope = z.enum(PROJECT_SCOPES)
 export type ProjectScope = z.infer<typeof ProjectScope>
 
 export const EntryListQuery = z.object({
   tab: EntryTab.default('all'),
+  pinnedGroup: PinnedGroup.optional(),
   q: z.string().trim().max(2000).optional(),
   env: SceneSlug.optional(),
   realm: SceneSlug.optional(),
@@ -428,6 +433,7 @@ export const EntryListResponse = z.object({
   nextCursor: z.string().nullable(),
   facets: EntryFacetsSummary,
   counts: EntryTabCounts,
+  linkedTitles: z.record(z.string(), z.string()).optional(),
 })
 export type EntryListResponse = z.infer<typeof EntryListResponse>
 
@@ -439,6 +445,7 @@ export const EntryDetailResponse = z.object({
   recentHistory: z.array(EntryRecentHistoryItem).optional(),
   warnings: z.array(HygieneWarning).optional(),
   pendingSuggestionCount: z.number().int().min(0).optional(),
+  linkedTitles: z.record(z.string(), z.string()).optional(),
 })
 export type EntryDetailResponse = z.infer<typeof EntryDetailResponse>
 
@@ -549,6 +556,7 @@ export type EntryHistoryItem = z.infer<typeof EntryHistoryItem>
 
 export const EntryHistoryResponse = z.object({
   items: z.array(EntryHistoryItem),
+  linkedTitles: z.record(z.string(), z.string()).optional(),
 })
 export type EntryHistoryResponse = z.infer<typeof EntryHistoryResponse>
 

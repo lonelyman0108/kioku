@@ -54,15 +54,21 @@ function scrollToHeading(heading: string, index?: number) {
 defineExpose({ scrollToHeading })
 
 function onClick(event: MouseEvent) {
-  const target = event.target as HTMLElement | null
+  const target = event.target instanceof Element ? event.target : null
   const credential = target?.closest<HTMLAnchorElement>('a.kioku-cred')
   if (credential?.dataset.credential) {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) {
+      return
+    }
     event.preventDefault()
     emit('credential', credential.dataset.credential)
     return
   }
   const wikilink = target?.closest<HTMLAnchorElement>('a.kioku-wikilink')
   if (wikilink?.dataset.shortId) {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) {
+      return
+    }
     event.preventDefault()
     emit('open', wikilink.dataset.shortId)
   }
@@ -266,18 +272,50 @@ function onClick(event: MouseEvent) {
 .kioku-markdown :deep(details > :last-child) {
   margin-bottom: 0;
 }
-.kioku-markdown :deep(a.kioku-wikilink) {
-  color: inherit;
-  text-decoration: underline solid var(--ui-rule);
-  text-underline-offset: 3px;
+.kioku-markdown :deep(a.kioku-wikilink),
+.kioku-markdown :deep(a.kioku-wikilink[href]) {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  margin: 0 1px;
+  padding: 0 6px;
+  border: 1px solid var(--ui-border-accented);
+  background: var(--ui-bg-muted);
+  color: var(--ui-text-highlighted);
+  font-size: inherit;
+  line-height: 1.45;
+  text-decoration: none;
+  vertical-align: -1px;
   cursor: pointer;
 }
-.kioku-markdown :deep(a.kioku-wikilink:hover) {
-  text-decoration-color: currentColor;
+.kioku-markdown :deep(a.kioku-wikilink:hover),
+.kioku-markdown :deep(a.kioku-wikilink[href]:hover) {
+  border-color: var(--ui-rule);
+  background: var(--ui-bg-elevated);
+  text-decoration: none;
 }
-.kioku-markdown :deep(a.kioku-wikilink-missing) {
+.kioku-markdown :deep(a.kioku-wikilink .kioku-wikilink-icon) {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
   color: var(--ui-text-muted);
-  text-decoration-style: dotted;
+}
+.kioku-markdown :deep(a.kioku-wikilink:hover .kioku-wikilink-icon) {
+  color: var(--ui-text-highlighted);
+}
+.kioku-markdown :deep(a.kioku-wikilink .kioku-wikilink-label) {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.kioku-markdown :deep(a.kioku-wikilink-missing),
+.kioku-markdown :deep(a.kioku-wikilink-missing[href]) {
+  border-style: dashed;
+  color: var(--ui-text-muted);
+}
+.kioku-markdown :deep(a.kioku-wikilink-missing:hover .kioku-wikilink-icon) {
+  color: var(--ui-text-muted);
 }
 .kioku-markdown :deep(.kioku-cred) {
   display: inline-block;
