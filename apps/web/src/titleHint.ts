@@ -37,14 +37,14 @@ export function analyzeTitleHint(
     const hasLong = warnings.some((w) => w.code === 'title_too_long')
     if (mode === 'create') {
       if (hasLog && hasLong) {
-        message = `标题共 ${trimmed.length} 字且含日期或状态说明，建议控制在 ${ENTRY_TITLE_RECOMMENDED_MAX} 字内，保持简短稳定`
+        message = `标题共 ${trimmed.length} 字且包含日期，建议控制在 ${ENTRY_TITLE_RECOMMENDED_MAX} 字内，保持简短稳定`
       } else if (hasLog) {
-        message = '标题包含日期或状态说明，建议保持稳定主题名，正文或后续变更再记录演进'
+        message = '标题包含日期，建议保持稳定主题名，正文或后续变更再记录演进'
       } else {
         message = warnings[0]!.message
       }
     } else if (hasLog && hasLong) {
-      message = `标题共 ${trimmed.length} 字且含日期或变更说明，建议控制在 ${ENTRY_TITLE_RECOMMENDED_MAX} 字内，将变动记录写入变更说明`
+      message = `标题共 ${trimmed.length} 字且包含日期，建议控制在 ${ENTRY_TITLE_RECOMMENDED_MAX} 字内，将变动记录写入变更说明`
     } else {
       message = warnings[0]!.message
     }

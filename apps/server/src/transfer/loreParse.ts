@@ -109,6 +109,8 @@ function truncateSafe(text: string, max: number): string {
   return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut
 }
 
+const LORE_IMPORT_TOPICS_MAX = 5
+
 function cleanTopic(raw: string): string | null {
   const normalized = raw.trim().toLowerCase().replace(/\s+/g, '-')
   if (!normalized || normalized.includes(CREDENTIAL_PLACEHOLDER_PREFIX)) return null
@@ -164,7 +166,7 @@ function mapLoreUri(
   for (const seg of rawTopics) {
     const t = cleanTopic(seg)
     if (t && !topics.includes(t)) topics.push(t)
-    if (topics.length >= TOPICS_MAX) break
+    if (topics.length >= LORE_IMPORT_TOPICS_MAX) break
   }
 
   return {
@@ -212,7 +214,8 @@ export function parseLoreToEntries(raw: unknown): ParsedLoreResult {
     JSON.stringify([p.domain, p.path]),
   )
   const memories = rowsOf('memories', tables.memories, MemoryRow)
-  const keywords = rowsOf('glossary_keywords', tables.glossary_keywords, KeywordRow)
+  // 校验旧版导出表结构兼容性，但不再将无向量时代的 glossary_keywords 灌入 entries.topics
+  rowsOf('glossary_keywords', tables.glossary_keywords, KeywordRow)
 
   const currentByNode = new Map<string, { content: string | null; at: number; id: bigint }>()
   for (const m of memories) {
@@ -222,13 +225,6 @@ export function parseLoreToEntries(raw: unknown): ParsedLoreResult {
     if (!best || candidate.at > best.at || (candidate.at === best.at && candidate.id > best.id)) {
       currentByNode.set(m.node_uuid, candidate)
     }
-  }
-
-  const keywordsByNode = new Map<string, string[]>()
-  for (const k of [...keywords].sort((a, b) => compareText(a.keyword, b.keyword))) {
-    const list = keywordsByNode.get(k.node_uuid) ?? []
-    list.push(k.keyword)
-    keywordsByNode.set(k.node_uuid, list)
   }
 
   const ordered = [...paths.values()]
@@ -248,10 +244,7 @@ export function parseLoreToEntries(raw: unknown): ParsedLoreResult {
     const body = currentByNode.get(node.uuid)
     const content = body?.content ?? ''
     const mapped = mapLoreUri(p.domain, p.path)
-    const kwTopics = (keywordsByNode.get(node.uuid) ?? [])
-      .map(cleanTopic)
-      .filter((t): t is string => t !== null)
-    const mergedTopics = normalizeSlugList([...mapped.topics, ...kwTopics]).slice(0, TOPICS_MAX)
+    const mergedTopics = mapped.topics.slice(0, Math.min(LORE_IMPORT_TOPICS_MAX, TOPICS_MAX))
 
     let skippedReason: string | null = null
     if (!content.trim()) {

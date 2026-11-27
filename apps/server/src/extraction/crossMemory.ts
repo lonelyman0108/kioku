@@ -10,7 +10,7 @@ import {
 } from '@kioku/contracts'
 import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm'
 
-import { stillValidSql } from '../access/scope'
+import { hasOverlap, stillValidSql } from '../access/scope'
 import type { MasterKey } from '../crypto/keyring'
 import { databaseNow, type Db } from '../db/client'
 import { dreamSuggestions, entries, entryLinks } from '../db/schema'
@@ -285,7 +285,20 @@ async function findRankedFtsCandidates(
   return out
 }
 
-// 对高相似且同场域的词条边做受限并查集聚类，严格控制每簇 2–4 条避免上下文爆炸
+function hasDisjointNonEmpty(a: readonly string[], b: readonly string[]): boolean {
+  return a.length > 0 && b.length > 0 && !hasOverlap(a, b)
+}
+
+// 查重合并安全守卫：必须同场域，且不得跨互斥环境、互斥项目或互斥客户端合并（防止合并为污染并集）
+function canClusterEntries(a: EntryRow, b: EntryRow): boolean {
+  if (!sameRealms(a.realms, b.realms)) return false
+  if (hasDisjointNonEmpty(a.envs, b.envs)) return false
+  if (hasDisjointNonEmpty(a.projects, b.projects)) return false
+  if (hasDisjointNonEmpty(a.runtimes, b.runtimes)) return false
+  return true
+}
+
+// 对高相似且场景兼容的词条边做受限并查集聚类，严格控制每簇 2–4 条避免上下文爆炸
 function buildDuplicateClusters(
   edges: readonly { a: string; b: string; score: number }[],
   byId: ReadonlyMap<string, EntryRow>,
@@ -297,7 +310,7 @@ function buildDuplicateClusters(
     const ra = byId.get(e.a)
     const rb = byId.get(e.b)
     if (!ra || !rb) continue
-    if (!sameRealms(ra.realms, rb.realms)) continue
+    if (!canClusterEntries(ra, rb)) continue
     if (!adj.has(e.a)) adj.set(e.a, [])
     if (!adj.has(e.b)) adj.set(e.b, [])
     adj.get(e.a)!.push({ id: e.b, score: e.score })
@@ -317,7 +330,7 @@ function buildDuplicateClusters(
       if (members.length >= CLUSTER_MAX_SIZE) break
       if (assigned.has(next.id) || memberSet.has(next.id)) continue
       const row = byId.get(next.id)
-      if (!row || !sameRealms(row.realms, startRow.realms)) continue
+      if (!row || !members.every((m) => canClusterEntries(m, row))) continue
       members.push(row)
       memberSet.add(next.id)
     }
@@ -434,7 +447,7 @@ interface CrossMemoryRunOutput {
 }
 
 // 四阶段漏斗跨记忆整理引擎：
-// Stage 0 场域与双轨范围 → Stage 1 零 LLM 多路候选图（pgvector + 同项目/主题 + 相关性 FTS + 1 跳邻居 + 断链）
+// Stage 0 场域与双轨范围 → Stage 1 零 LLM 多路候选图（pgvector + 同项目 + 相关性 FTS + 1 跳邻居 + 断链）
 // → Stage 2 按优先级拆分 Micro-Task（查重簇 > 摘要对账 > 缺链与断链 > 常驻减肥）→ Stage 3 去重入收件箱
 export async function runCrossMemoryFunnel(
   db: Db,
@@ -522,12 +535,7 @@ export async function runCrossMemoryFunnel(
     vectorCoveredSeeds.add(pair.entry_a)
     const rowA = byId.get(pair.entry_a)
     const rowB = byId.get(pair.entry_b)
-    if (
-      pair.sim >= CLUSTER_COSINE_THRESHOLD &&
-      rowA &&
-      rowB &&
-      sameRealms(rowA.realms, rowB.realms)
-    ) {
+    if (pair.sim >= CLUSTER_COSINE_THRESHOLD && rowA && rowB && canClusterEntries(rowA, rowB)) {
       highSimEdges.push({ a: pair.entry_a, b: pair.entry_b, score: pair.sim })
       consideredNeighborIds.add(pair.entry_b)
     } else if (pair.sim >= LINK_COSINE_MIN) {
@@ -535,27 +543,15 @@ export async function runCrossMemoryFunnel(
     }
   }
 
-  // 兜底无向量词条与同项目/高重合主题候选（零 LLM）：同项目或 ≥2 共同主题进入候选图
+  // 补充同项目候选进入关联图（不再使用易受主题灌水影响的 sharedTopics >= 2 启发式）
   for (const seed of seedFormal) {
+    if (!seed.projects.length) continue
     for (const other of formalEntries) {
-      if (other.id === seed.id) continue
+      if (other.id === seed.id || !other.projects.length) continue
       const sharedProjects = shareAny(seed.projects, other.projects)
-      const sharedTopics = shareAny(seed.topics, other.topics)
-      if (!sharedProjects && sharedTopics < 2) continue
-
-      const heuristicScore = Math.min(0.83, 0.68 + sharedProjects * 0.06 + sharedTopics * 0.04)
+      if (!sharedProjects) continue
+      const heuristicScore = Math.min(0.8, 0.7 + sharedProjects * 0.05)
       addMediumCand(seed.id, other.id, heuristicScore)
-
-      // 若两端都尚无向量覆盖，且同场域、同项目+高主题重叠，也纳入小簇查重候选
-      if (
-        !vectorCoveredSeeds.has(seed.id) &&
-        sameRealms(seed.realms, other.realms) &&
-        sharedProjects > 0 &&
-        sharedTopics >= 2
-      ) {
-        highSimEdges.push({ a: seed.id, b: other.id, score: 0.85 })
-        consideredNeighborIds.add(other.id)
-      }
     }
   }
 
@@ -569,10 +565,10 @@ export async function runCrossMemoryFunnel(
       const candId = ftsIds[idx]!
       const score = 0.78 - idx * 0.02
       addMediumCand(seed.id, candId, score)
-      // 单条/多选指定查重时，若无向量嵌入，把同场域 Top-2 强相关 FTS 邻居一并纳入簇查重
+      // 单条/多选指定查重时，若无向量嵌入，把同场域且场景不互斥的 Top-2 强相关 FTS 邻居纳入簇查重
       if (targetShortSet && idx < 2) {
         const candRow = byId.get(candId)
-        if (candRow && sameRealms(seed.realms, candRow.realms)) {
+        if (candRow && canClusterEntries(seed, candRow)) {
           highSimEdges.push({ a: seed.id, b: candId, score: 0.84 })
         }
       }

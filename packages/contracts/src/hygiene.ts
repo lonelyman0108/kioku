@@ -15,7 +15,7 @@ export const HYGIENE_WARNING_CODES = [
   'legacy_lore_uri',
   'pinned_missing_summary',
   'pinned_oversized',
-  'pinned_scope_hint',
+  'topics_too_many',
   'missing_change_summary',
   'severe_shrink_or_lost_refs',
 ] as const
@@ -30,25 +30,11 @@ export type HygieneWarning = z.infer<typeof HygieneWarning>
 
 export const ENTRY_TITLE_RECOMMENDED_MAX = 32
 export const PINNED_FULL_SOFT_WARN_CHARS = 1_200
+export const TOPICS_SOFT_WARN_MAX = 8
 const PINNED_SUMMARY_THRESHOLD_CHARS = 1_500
-
-const BUILTIN_RUNTIME_SCOPE_HINTS: readonly { label: string; pattern: RegExp }[] = [
-  { label: 'Claude Code', pattern: /\b(?:claude[\s-]?code|claudecode)\b/i },
-  { label: 'Codex', pattern: /\bcodex\b/i },
-  { label: 'Gemini CLI', pattern: /\bgemini[\s-]?cli\b/i },
-  { label: 'Antigravity', pattern: /\b(?:antigravity|agy)\b/i },
-  { label: 'OpenCode', pattern: /\bopencode\b/i },
-  { label: 'ZCode', pattern: /\bzcode\b/i },
-  { label: 'OpenClaw', pattern: /\bopenclaw\b/i },
-  { label: 'Hermes', pattern: /\bhermes\b/i },
-]
-const SCOPE_PHRASE_HINT_RE = /(?:运行时约束|客户端约束|客户端规范|项目规范|仓库约定|项目约束)/
 
 const TITLE_DATE_RE =
   /(?:20\d{2}[-./年]\d{1,2}(?:[-./月]\d{1,2}日?)?|(?<![0-9a-zA-Z])\d{2}-\d{2}(?![0-9a-zA-Z]))/
-const TITLE_LOG_PAREN_RE =
-  /[（(][^）)]*(?:更新|迁移|迁到|迁至|新增|下线|停用|退役|立项|定方向|合并|上线|开发完成|完成|开始|实测|切换|重建|归档|卸载|调整|改为|定稿|PR\s*#|commit|v\d+\.\d+|第\s*\d)[^）)]*[）)]/i
-const TITLE_DASH_STATUS_RE = /[—–-]{2,}\s*(?:已于|已|20\d{2}|停用|退役|卸载|废弃|完成)/
 const FENCE_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/
 const H1_HEADING_RE = /^ {0,3}#[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$/
 const CHANGELOG_HEADING_RE =
@@ -163,7 +149,7 @@ export function extractLegacyRefs(content: string): { uris: string[]; slugLinks:
   return { uris: [...uris], slugLinks: [...slugLinks] }
 }
 
-// 尝试将标题尾部的日期/更新日志括号或破折号后缀拆出，供编辑器一键移入变更说明
+// 尝试将标题尾部的日期括号或破折号后缀拆出，供编辑器一键移入变更说明
 export function splitTitleLogSuffix(
   title: string,
 ): { cleanTitle: string; extractedNote: string } | null {
@@ -174,10 +160,7 @@ export function splitTitleLogSuffix(
   if (parenMatch?.[1] && parenMatch[2]) {
     const inside = parenMatch[2].trim()
     const base = parenMatch[1].trim()
-    if (
-      base.length >= 2 &&
-      (TITLE_DATE_RE.test(inside) || TITLE_LOG_PAREN_RE.test(`（${inside}）`))
-    ) {
+    if (base.length >= 2 && TITLE_DATE_RE.test(inside)) {
       return { cleanTitle: base, extractedNote: inside }
     }
   }
@@ -186,7 +169,7 @@ export function splitTitleLogSuffix(
   if (dashMatch?.[1] && dashMatch[2]) {
     const suffix = dashMatch[2].trim()
     const base = dashMatch[1].trim()
-    if (base.length >= 2 && TITLE_DASH_STATUS_RE.test(`——${suffix}`)) {
+    if (base.length >= 2 && TITLE_DATE_RE.test(suffix)) {
       return { cleanTitle: base, extractedNote: suffix }
     }
   }
@@ -220,20 +203,6 @@ function hasChangelogSectionOrStreak(content: string): boolean {
   return false
 }
 
-function escapeRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-}
-
-function matchesSlugInTitle(title: string, slug: string): boolean {
-  const clean = slug.trim().toLowerCase()
-  if (!clean) return false
-  const hasCjk = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/.test(clean)
-  if (!hasCjk && clean.length < 3) return false
-  if (hasCjk && clean.length < 2) return false
-  if (hasCjk) return title.toLowerCase().includes(clean)
-  return new RegExp(`(?<![a-z0-9])${escapeRegExp(clean)}(?![a-z0-9])`, 'i').test(title)
-}
-
 export interface LintEntryHygieneInput {
   title: string
   content: string
@@ -244,8 +213,7 @@ export interface LintEntryHygieneInput {
   realms?: readonly string[] | undefined
   projects?: readonly string[] | undefined
   runtimes?: readonly string[] | undefined
-  knownProjects?: readonly string[] | undefined
-  knownRuntimes?: readonly string[] | undefined
+  topics?: readonly string[] | undefined
   isUpdate?: boolean | undefined
   contentChanged?: boolean | undefined
   changeSummary?: string | null | undefined
@@ -266,14 +234,10 @@ export function lintEntryHygiene(input: LintEntryHygieneInput): HygieneWarning[]
     })
   }
 
-  if (
-    TITLE_DATE_RE.test(title) ||
-    TITLE_LOG_PAREN_RE.test(title) ||
-    TITLE_DASH_STATUS_RE.test(title)
-  ) {
+  if (TITLE_DATE_RE.test(title)) {
     warnings.push({
       code: 'title_has_date_or_log',
-      message: '标题包含日期或变更状态说明，建议保持稳定主题名，改动记录写入变更说明',
+      message: '标题包含日期，建议保持稳定主题名，改动记录写入变更说明',
     })
   }
 
@@ -330,34 +294,11 @@ export function lintEntryHygiene(input: LintEntryHygieneInput): HygieneWarning[]
     })
   }
 
-  const isGlobalScope =
-    (input.envs?.length ?? 0) === 0 &&
-    (input.realms?.length ?? 0) === 0 &&
-    (input.projects?.length ?? 0) === 0 &&
-    (input.runtimes?.length ?? 0) === 0
-  if (effectiveMode === 'full' && isGlobalScope && title) {
-    const matchedHints: string[] = []
-    for (const rt of BUILTIN_RUNTIME_SCOPE_HINTS) {
-      if (rt.pattern.test(title)) matchedHints.push(rt.label)
-    }
-    for (const proj of input.knownProjects ?? []) {
-      if (matchesSlugInTitle(title, proj) && !matchedHints.includes(proj)) {
-        matchedHints.push(proj)
-      }
-    }
-    for (const rt of input.knownRuntimes ?? []) {
-      if (matchesSlugInTitle(title, rt) && !matchedHints.includes(rt)) {
-        matchedHints.push(rt)
-      }
-    }
-    if (matchedHints.length > 0 || SCOPE_PHRASE_HINT_RE.test(title)) {
-      const target =
-        matchedHints.length > 0 ? `「${matchedHints.slice(0, 2).join('、')}」` : '特定项目或客户端'
-      warnings.push({
-        code: 'pinned_scope_hint',
-        message: `当前未限定场景，但标题涉及${target}，建议补充项目或客户端标签以避免跨场景加载`,
-      })
-    }
+  if ((input.topics?.length ?? 0) > TOPICS_SOFT_WARN_MAX) {
+    warnings.push({
+      code: 'topics_too_many',
+      message: `主题标签共 ${input.topics!.length} 个（建议收敛至 5 个以内，保留核心归类主题）`,
+    })
   }
 
   if (input.isUpdate && input.contentChanged && !input.changeSummary?.trim()) {
@@ -397,10 +338,5 @@ export function lintEntryHygiene(input: LintEntryHygieneInput): HygieneWarning[]
 
 export function isTitleDirty(title: string): boolean {
   const trimmed = title.trim()
-  return (
-    trimmed.length > ENTRY_TITLE_RECOMMENDED_MAX ||
-    TITLE_DATE_RE.test(trimmed) ||
-    TITLE_LOG_PAREN_RE.test(trimmed) ||
-    TITLE_DASH_STATUS_RE.test(trimmed)
-  )
+  return trimmed.length > ENTRY_TITLE_RECOMMENDED_MAX || TITLE_DATE_RE.test(trimmed)
 }

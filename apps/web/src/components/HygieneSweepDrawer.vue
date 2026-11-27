@@ -372,7 +372,7 @@ async function applySelected() {
           :description="
             report.dirtyTitleCount > 0
               ? `未检测到可自动修复的结构问题；另有 ${report.dirtyTitleCount} 条记忆标题含日期或较长，可在待处理页发起规范整理。`
-              : '未检测到可确定性预清洗项，也未发现疑似残缺或过时记忆。'
+              : '未检测到可确定性预清洗项，也未发现疑似残缺记忆。'
           "
         />
 

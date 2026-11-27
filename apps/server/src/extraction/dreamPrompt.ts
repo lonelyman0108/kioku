@@ -506,6 +506,24 @@ export function evaluateDreamResponse(
       if (resolved.some((r) => r.kind !== 'entry' || r.truncated)) continue
       const baseRealms = resolved[0]!.realms
       if (resolved.some((r) => !sameRealms(r.realms, baseRealms))) continue
+      const disjointNonEmpty = (a: readonly string[], b: readonly string[]) =>
+        a.length > 0 && b.length > 0 && !a.some((v) => b.includes(v))
+      let hasScopeConflict = false
+      for (let i = 0; i < resolved.length && !hasScopeConflict; i++) {
+        for (let j = i + 1; j < resolved.length; j++) {
+          const a = resolved[i]!
+          const b = resolved[j]!
+          if (
+            disjointNonEmpty(a.envs, b.envs) ||
+            disjointNonEmpty(a.projects, b.projects) ||
+            disjointNonEmpty(a.runtimes, b.runtimes)
+          ) {
+            hasScopeConflict = true
+            break
+          }
+        }
+      }
+      if (hasScopeConflict) continue
       // 合并重复严禁由模型改写场域，始终继承原词条一致场域
       proposedRealms = null
       // 合并提案严禁丢失任何一条被合并词条中的凭据占位符
