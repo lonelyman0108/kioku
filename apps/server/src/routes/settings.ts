@@ -135,6 +135,7 @@ export function settingsRoutes(deps: Deps) {
           previous?.baseUrl !== next?.baseUrl ||
           previous?.enabled !== next?.enabled
         if (modelChanged) {
+          await deps.jobs?.cancelEmbeddingBackfill?.()
           await purgeStaleEmbeddings(deps.db, next?.enabled ? next.model : null)
           if (next?.enabled) triggerBackfill = true
         }
@@ -177,8 +178,8 @@ export function settingsRoutes(deps: Deps) {
         return c.json({ error: '尚未配置或启用嵌入模型' }, 400)
       }
       const missing = Math.max(0, coverage.total - coverage.embedded)
-      await deps.jobs?.enqueueBackfill({ total: missing, model: coverage.model })
-      return c.json({ queued: missing }, 200)
+      const enqueued = await deps.jobs?.enqueueBackfill({ total: missing, model: coverage.model })
+      return c.json({ queued: enqueued === false ? 0 : missing }, 200)
     })
     .openapi(cancelBackfillRoute, async (c) => {
       const cancelled = (await deps.jobs?.cancelEmbeddingBackfill?.()) ?? false

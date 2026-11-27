@@ -165,6 +165,45 @@ describe('taskCenter', () => {
     expect(countUnreadFailures(merged, null, tFail2)).toBe(0)
   })
 
+  it('损坏的水位线字符串会被忽略，损坏的条目时间不会误判为更新记录', () => {
+    const t1 = '2026-11-27T01:00:00.000Z'
+    const merged = mergeTaskHistory(
+      makeDreamState({
+        recentRuns: [
+          {
+            id: 'ok-1',
+            trigger: 'manual',
+            mode: 'tidy',
+            outcome: 'failed',
+            considered: 1,
+            suggested: 0,
+            error: 'timeout',
+            createdAt: t1,
+          },
+          {
+            id: 'bad-ts',
+            trigger: 'manual',
+            mode: 'tidy',
+            outcome: 'failed',
+            considered: 1,
+            suggested: 0,
+            error: 'bad',
+            createdAt: 'not-a-timestamp',
+          },
+        ],
+      }),
+      null,
+    )
+
+    expect(filterVisibleHistory(merged, 'invalid-watermark').map((i) => i.id)).toEqual([
+      'ok-1',
+      'bad-ts',
+    ])
+    expect(filterVisibleHistory(merged, t1)).toEqual([])
+    expect(countUnreadFailures(merged, null, 'invalid-watermark')).toBe(2)
+    expect(countUnreadFailures(merged, null, t1)).toBe(0)
+  })
+
   it('汇总当前运行中任务的归一化进度', () => {
     expect(computeOverallProgress(makeDreamState(), makeBackfillState())).toBeNull()
     expect(

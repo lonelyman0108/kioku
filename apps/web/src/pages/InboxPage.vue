@@ -227,12 +227,16 @@ const filterTabs = computed<{ value: KindFilter; label: string; icon: string; co
   ],
 )
 
-watch([data, kindCounts], ([loaded, counts]) => {
-  if (!loaded) return
-  if (kindFilter.value !== 'all' && counts[kindFilter.value] === 0) {
-    kindFilter.value = 'all'
-  }
-})
+watch(
+  [data, kindCounts, kindFilter],
+  ([loaded, counts, currentKind]) => {
+    if (!loaded) return
+    if (currentKind !== 'all' && counts[currentKind] === 0) {
+      kindFilter.value = 'all'
+    }
+  },
+  { immediate: true },
+)
 
 const filteredItems = computed(() =>
   kindFilter.value === 'all'

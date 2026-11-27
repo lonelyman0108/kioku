@@ -14,6 +14,7 @@ import {
   computeOverallProgress,
   countUnreadFailures,
   filterVisibleHistory,
+  isAfterWatermark,
   latestFailedTimestamp,
   mergeTaskHistory,
   TASK_HISTORY_LIMIT,
@@ -57,11 +58,6 @@ const unreadBadgeText = computed(() =>
   unreadFailedCount.value > 9 ? '9+' : String(unreadFailedCount.value),
 )
 
-const completedHistoryCount = computed(
-  () =>
-    visibleHistory.value.filter((item) => item.outcome === 'ok' || item.outcome === 'skipped')
-      .length,
-)
 const issueHistoryCount = computed(
   () =>
     visibleHistory.value.filter((item) => item.outcome === 'failed' || item.outcome === 'partial')
@@ -126,11 +122,16 @@ const triggerTooltip = computed(() => {
   return `后台任务：${parts.join(' · ')}`
 })
 
+function advanceWatermark(target: typeof ackErrorAt, storageKey: string, candidate: string | null) {
+  if (!candidate) return
+  if (target.value && !isAfterWatermark(candidate, target.value)) return
+  target.value = candidate
+  writeStoredString(storageKey, candidate)
+}
+
 function acknowledgeErrors() {
   const latestFail = latestFailedTimestamp(visibleHistory.value)
-  if (!latestFail) return
-  ackErrorAt.value = latestFail
-  writeStoredString(UI_STORAGE_KEYS.tasksAckErrorAt, latestFail)
+  advanceWatermark(ackErrorAt, UI_STORAGE_KEYS.tasksAckErrorAt, latestFail)
 }
 
 watch(open, (visible) => {
@@ -142,11 +143,10 @@ watch(visibleHistory, () => {
 })
 
 function clearFinishedHistory() {
-  const newest = visibleHistory.value[0]?.finishedAt ?? new Date().toISOString()
-  clearedBefore.value = newest
-  ackErrorAt.value = newest
-  writeStoredString(UI_STORAGE_KEYS.tasksClearedBefore, newest)
-  writeStoredString(UI_STORAGE_KEYS.tasksAckErrorAt, newest)
+  const newest = visibleHistory.value[0]?.finishedAt ?? null
+  if (!newest) return
+  advanceWatermark(clearedBefore, UI_STORAGE_KEYS.tasksClearedBefore, newest)
+  advanceWatermark(ackErrorAt, UI_STORAGE_KEYS.tasksAckErrorAt, newest)
 }
 
 function outcomeIcon(outcome: DreamOutcome): string {
@@ -169,22 +169,32 @@ function outcomeTagText(item: TaskHistoryItem): string {
   return dreamOutcomeLabels[item.outcome]
 }
 
-// 监听后台任务由运行转为空闲时推送一次结果提醒，避免页面首次加载误报
+// 监听后台任务由运行转为空闲且产生新完成记录时推送一次结果提醒，避免首次加载或排队超时误报
 const initializedDream = ref(false)
 const prevDreamRunning = ref(false)
+const lastSeenDreamRunId = ref<string | null>(null)
 watch(
   dreamRunning,
   (running) => {
+    const latest = props.dreamState?.recentRuns[0] ?? null
     if (!initializedDream.value) {
       if (props.dreamState !== null) {
         initializedDream.value = true
         prevDreamRunning.value = running
+        lastSeenDreamRunId.value = latest?.id ?? null
       }
       return
     }
-    if (prevDreamRunning.value && !running) {
-      const latest = props.dreamState?.recentRuns[0] ?? null
-      const modeLabel = latest?.mode ? dreamModeLabels[latest.mode] : '记忆整理'
+    if (!prevDreamRunning.value && running) {
+      lastSeenDreamRunId.value = latest?.id ?? lastSeenDreamRunId.value
+    } else if (
+      prevDreamRunning.value &&
+      !running &&
+      latest &&
+      latest.id !== lastSeenDreamRunId.value
+    ) {
+      lastSeenDreamRunId.value = latest.id
+      const modeLabel = latest.mode ? dreamModeLabels[latest.mode] : '记忆整理'
       const onInbox = route.name === 'inbox'
       const inboxAction = !onInbox
         ? [
@@ -197,7 +207,7 @@ watch(
             },
           ]
         : undefined
-      if (latest?.outcome === 'cancelled') {
+      if (latest.outcome === 'cancelled') {
         toast.add({
           title:
             latest.suggested > 0
@@ -206,24 +216,24 @@ watch(
           color: 'neutral',
           ...(latest.suggested > 0 && inboxAction ? { actions: inboxAction } : {}),
         })
-      } else if (latest?.outcome === 'failed') {
+      } else if (latest.outcome === 'failed') {
         toast.add({
           title: latest.error ? `${modeLabel}失败：${latest.error}` : `${modeLabel}失败`,
           color: 'error',
           ...(inboxAction ? { actions: inboxAction } : {}),
         })
-      } else if (latest?.outcome === 'partial') {
+      } else if (latest.outcome === 'partial') {
         toast.add({
           title: `${modeLabel}部分完成，生成 ${latest.suggested} 条待处理建议`,
           color: 'warning',
           ...(inboxAction ? { actions: inboxAction } : {}),
         })
-      } else if (latest?.outcome === 'skipped') {
+      } else if (latest.outcome === 'skipped') {
         toast.add({
           title: `${modeLabel}完成，当前无可整理项`,
           color: 'neutral',
         })
-      } else if (latest) {
+      } else {
         toast.add({
           title:
             latest.suggested > 0
@@ -241,19 +251,33 @@ watch(
 
 const initializedBackfill = ref(false)
 const prevBackfillRunning = ref(false)
+const lastSeenBackfillRunId = ref<string | null>(null)
+function currentBackfillRunKey(state: EmbeddingBackfillState | null): string | null {
+  return state?.recentRuns?.[0]?.id ?? state?.lastFinishedAt ?? null
+}
 watch(
   backfillRunning,
   (running) => {
+    const bf = props.embeddingBackfill
+    const runKey = currentBackfillRunKey(bf)
     if (!initializedBackfill.value) {
-      if (props.embeddingBackfill !== null) {
+      if (bf !== null) {
         initializedBackfill.value = true
         prevBackfillRunning.value = running
+        lastSeenBackfillRunId.value = runKey
       }
       return
     }
-    if (prevBackfillRunning.value && !running) {
+    if (!prevBackfillRunning.value && running) {
+      lastSeenBackfillRunId.value = runKey ?? lastSeenBackfillRunId.value
+    } else if (
+      prevBackfillRunning.value &&
+      !running &&
+      runKey &&
+      runKey !== lastSeenBackfillRunId.value
+    ) {
+      lastSeenBackfillRunId.value = runKey
       void queryClient.invalidateQueries({ queryKey: ['models-settings'] })
-      const bf = props.embeddingBackfill
       if (bf?.lastOutcome === 'cancelled') {
         toast.add({
           title:
@@ -330,6 +354,7 @@ async function cancelBackfill() {
       :class="{
         'is-running': activeCount > 0,
         'is-error': activeCount === 0 && unreadFailedCount > 0,
+        'has-badge': unreadFailedCount > 0,
       }"
       :title="triggerTooltip"
       :aria-label="triggerTooltip"
@@ -383,8 +408,8 @@ async function cancelBackfill() {
             <strong class="stat-value">{{ activeCount }}</strong>
           </div>
           <div class="stat-cell">
-            <span class="stat-label">近期完成</span>
-            <strong class="stat-value">{{ completedHistoryCount }}</strong>
+            <span class="stat-label">近期记录</span>
+            <strong class="stat-value">{{ visibleHistory.length }}</strong>
           </div>
           <div class="stat-cell">
             <span class="stat-label">异常</span>
@@ -635,6 +660,9 @@ async function cancelBackfill() {
 }
 .task-trigger.is-error {
   border-color: var(--ui-error);
+}
+.task-trigger.has-badge {
+  margin-right: 3px;
 }
 
 .idle-icon {
@@ -905,14 +933,14 @@ async function cancelBackfill() {
 .history-trigger-tag {
   padding: 0 5px;
   border: 1px solid var(--ui-border-accented);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.45;
   color: var(--ui-text-muted);
 }
 .history-outcome-tag {
   padding: 0 5px;
   border: 1px solid var(--ui-border-accented);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.45;
   color: var(--ui-text-toned);
 }
@@ -953,7 +981,7 @@ async function cancelBackfill() {
   font-size: 12px;
   color: var(--ui-text);
   text-decoration: underline;
-  text-decoration-color: color-mix(in srgb, currentColor 38%, transparent);
+  text-decoration-color: color-mix(in srgb, currentColor 70%, transparent);
   text-underline-offset: 3px;
 }
 .history-link:hover {

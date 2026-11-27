@@ -136,10 +136,10 @@ const entry = computed(() => detail.value?.entry ?? null)
 const entryBootMode = computed<BootMode>(() =>
   entry.value ? effectiveBootMode(entry.value) : 'none',
 )
-const EDIT_VIEW_MODES: readonly EditViewMode[] = ['edit', 'split', 'preview']
+const PERSISTED_EDIT_VIEWS = ['edit', 'split'] as const
 const mode = ref<'read' | 'edit'>('read')
 const editView = ref<EditViewMode>(
-  readStoredEnum(UI_STORAGE_KEYS.editorView, EDIT_VIEW_MODES, 'edit'),
+  readStoredEnum(UI_STORAGE_KEYS.editorView, PERSISTED_EDIT_VIEWS, 'edit'),
 )
 const syncScroll = ref(readStoredBoolean(UI_STORAGE_KEYS.editorSyncScroll, true))
 const attrsOpen = ref(false)
@@ -151,7 +151,9 @@ const previewScrollRef = ref<HTMLElement | null>(null)
 const workbenchRef = ref<HTMLElement | null>(null)
 
 watch(editView, async (next) => {
-  writeStoredString(UI_STORAGE_KEYS.editorView, next)
+  if (next === 'edit' || next === 'split') {
+    writeStoredString(UI_STORAGE_KEYS.editorView, next)
+  }
   if (next === 'split' && mode.value === 'edit') {
     await nextTick()
     workbenchRef.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
@@ -373,6 +375,9 @@ function startEditing() {
   minValidTo.value = earliestValidTo()
   attrsOpen.value = false
   form.changeSummary = ''
+  if (editView.value === 'preview') {
+    editView.value = readStoredEnum(UI_STORAGE_KEYS.editorView, PERSISTED_EDIT_VIEWS, 'edit')
+  }
   mode.value = 'edit'
 }
 

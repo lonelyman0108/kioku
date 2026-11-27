@@ -128,7 +128,11 @@ export async function startJobs(options: {
   await boss.start()
 
   await boss.createQueue(EMBED_ENTRY, { expireInSeconds: EMBED_EXPIRE_SECONDS })
-  await boss.createQueue(EMBED_BACKFILL, { policy: 'singleton' })
+  await boss.createQueue(EMBED_BACKFILL, {
+    policy: 'singleton',
+    expireInSeconds: 3600,
+    retryLimit: 0,
+  })
   await boss.createQueue(EXTRACT_EPISODE, { policy: 'stately' })
   await boss.createQueue(DREAM, { policy: 'singleton', expireInSeconds: 3600, retryLimit: 0 })
   await boss.createQueue(CLEANUP_EXPIRED, { policy: 'singleton', expireInSeconds: 3600 })
@@ -221,7 +225,13 @@ export async function startJobs(options: {
     enqueueEmbed: (entryId) => void send(EMBED_ENTRY, { entryId } satisfies EmbedJobTarget),
     enqueueBackfill: async (opts) => {
       if (backfillRunning || backfillPendingUntil > Date.now()) return false
-      const id = await send(EMBED_BACKFILL, {})
+      const id = await boss.send(EMBED_BACKFILL, {}, { singletonKey: 'embed-backfill' }).then(
+        (jobId) => jobId,
+        (err: unknown) => {
+          console.error('向量补齐入队失败', loggableError(err))
+          return null
+        },
+      )
       if (id !== null && !handledBackfillIds.has(id)) {
         backfillPendingId = id
         backfillPendingUntil = Date.now() + 15_000
@@ -253,7 +263,7 @@ export async function startJobs(options: {
         await waitBriefly(backfillRunPromise)
         return true
       }
-      if (backfillPendingId !== null && backfillPendingUntil > Date.now()) {
+      if (backfillPendingId !== null && !handledBackfillIds.has(backfillPendingId)) {
         const pendingId = backfillPendingId
         const pendingTotal = backfillProgress.total
         const pendingModel = backfillProgress.model
@@ -329,7 +339,7 @@ export async function startJobs(options: {
         await waitBriefly(dreamRunPromise)
         return true
       }
-      if (dreamPendingId !== null && dreamPendingUntil > Date.now()) {
+      if (dreamPendingId !== null && !handledDreamIds.has(dreamPendingId)) {
         const pendingId = dreamPendingId
         const pendingMode = dreamPendingMode
         trackIdSet(cancelledDreamIds, pendingId)
@@ -380,6 +390,12 @@ export async function startJobs(options: {
     backfillAbortController = runAbort
     const combinedSignal = AbortSignal.any([stopController.signal, runAbort.signal])
     backfillRunning = true
+    backfillProgress = {
+      processed: 0,
+      total: backfillProgress.total,
+      model: backfillProgress.model,
+    }
+    let reportedProgress = false
     const startedAt = new Date().toISOString()
     const run = (async () => {
       try {
@@ -388,6 +404,7 @@ export async function startJobs(options: {
           options.masterKey,
           combinedSignal,
           (progress) => {
+            reportedProgress = true
             backfillProgress = progress
           },
         )
@@ -395,8 +412,8 @@ export async function startJobs(options: {
         recordBackfillRun({
           id: job.id,
           outcome: runAbort.signal.aborted ? 'cancelled' : 'ok',
-          processed: backfillProgress.processed,
-          total: backfillProgress.total,
+          processed: reportedProgress ? backfillProgress.processed : updated,
+          total: reportedProgress ? backfillProgress.total : updated,
           updated,
           model: backfillProgress.model,
           error: null,
@@ -408,9 +425,9 @@ export async function startJobs(options: {
           recordBackfillRun({
             id: job.id,
             outcome: 'cancelled',
-            processed: backfillProgress.processed,
-            total: backfillProgress.total,
-            updated: backfillProgress.processed,
+            processed: reportedProgress ? backfillProgress.processed : 0,
+            total: reportedProgress ? backfillProgress.total : 0,
+            updated: reportedProgress ? backfillProgress.processed : 0,
             model: backfillProgress.model,
             error: null,
             startedAt,
@@ -418,18 +435,18 @@ export async function startJobs(options: {
           })
         } else {
           const message = err instanceof Error ? err.message : String(err)
+          console.error('向量补齐失败', loggableError(err))
           recordBackfillRun({
             id: job.id,
             outcome: 'failed',
-            processed: backfillProgress.processed,
-            total: backfillProgress.total,
-            updated: backfillProgress.processed,
+            processed: reportedProgress ? backfillProgress.processed : 0,
+            total: reportedProgress ? backfillProgress.total : 0,
+            updated: reportedProgress ? backfillProgress.processed : 0,
             model: backfillProgress.model,
             error: message.slice(0, 300),
             startedAt,
             finishedAt: new Date().toISOString(),
           })
-          throw err
         }
       } finally {
         backfillRunning = false

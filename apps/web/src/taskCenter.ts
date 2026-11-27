@@ -73,10 +73,11 @@ function timestampMs(iso: string | null | undefined): number {
 
 export function isAfterWatermark(iso: string, watermark: string | null): boolean {
   if (!watermark) return true
-  const itemMs = timestampMs(iso)
   const markMs = timestampMs(watermark)
-  if (itemMs > 0 && markMs > 0) return itemMs > markMs
-  return iso > watermark
+  if (markMs <= 0) return true
+  const itemMs = timestampMs(iso)
+  if (itemMs <= 0) return false
+  return itemMs > markMs
 }
 
 export function mergeTaskHistory(
