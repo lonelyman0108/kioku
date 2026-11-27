@@ -347,6 +347,7 @@ function parseDreamRunSummary(raw: unknown): DreamRunSummary | null {
     (r.outcome !== 'ok' &&
       r.outcome !== 'partial' &&
       r.outcome !== 'skipped' &&
+      r.outcome !== 'cancelled' &&
       r.outcome !== 'failed') ||
     typeof r.considered !== 'number' ||
     typeof r.suggested !== 'number' ||
@@ -451,6 +452,7 @@ function parseStoredDreamState(raw: unknown): StoredDreamState {
       r.lastOutcome === 'ok' ||
       r.lastOutcome === 'partial' ||
       r.lastOutcome === 'skipped' ||
+      r.lastOutcome === 'cancelled' ||
       r.lastOutcome === 'failed'
         ? r.lastOutcome
         : null,
@@ -530,12 +532,14 @@ export async function recordDreamRun(db: Db | Tx, summary: DreamRunSummary): Pro
     crossMemory: { ...current.schedules.crossMemory },
     tidy: { ...current.schedules.tidy },
   }
-  if (runMode === 'cross_memory') {
-    nextSchedules.crossMemory.lastRunAt = summary.createdAt
-  } else if (runMode === 'tidy') {
-    nextSchedules.tidy.lastRunAt = summary.createdAt
-  } else {
-    nextSchedules.standard.lastRunAt = summary.createdAt
+  if (summary.outcome !== 'cancelled') {
+    if (runMode === 'cross_memory') {
+      nextSchedules.crossMemory.lastRunAt = summary.createdAt
+    } else if (runMode === 'tidy') {
+      nextSchedules.tidy.lastRunAt = summary.createdAt
+    } else {
+      nextSchedules.standard.lastRunAt = summary.createdAt
+    }
   }
   const next: StoredDreamState = {
     ...current,

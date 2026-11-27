@@ -64,9 +64,30 @@ export const DREAM_TRIGGERS = ['scheduled', 'manual'] as const
 export const DreamTrigger = z.enum(DREAM_TRIGGERS)
 export type DreamTrigger = z.infer<typeof DreamTrigger>
 
-export const DREAM_OUTCOMES = ['ok', 'partial', 'skipped', 'failed'] as const
+export const DREAM_OUTCOMES = ['ok', 'partial', 'skipped', 'cancelled', 'failed'] as const
 export const DreamOutcome = z.enum(DREAM_OUTCOMES)
 export type DreamOutcome = z.infer<typeof DreamOutcome>
+
+export const EMBEDDING_BACKFILL_OUTCOMES = ['ok', 'cancelled', 'failed'] as const
+export const EmbeddingBackfillOutcome = z.enum(EMBEDDING_BACKFILL_OUTCOMES)
+export type EmbeddingBackfillOutcome = z.infer<typeof EmbeddingBackfillOutcome>
+
+export const EmbeddingBackfillState = z.object({
+  running: z.boolean(),
+  processed: z.number().int().min(0),
+  total: z.number().int().min(0),
+  model: z.string().nullable(),
+  lastFinishedAt: z.string().nullable(),
+  lastOutcome: EmbeddingBackfillOutcome.nullable(),
+  lastUpdatedCount: z.number().int().min(0),
+  lastError: z.string().nullable(),
+})
+export type EmbeddingBackfillState = z.infer<typeof EmbeddingBackfillState>
+
+export const CancelTaskResponse = z.object({
+  cancelled: z.boolean(),
+})
+export type CancelTaskResponse = z.infer<typeof CancelTaskResponse>
 
 export const DreamProgress = z.object({
   mode: DreamMode,
@@ -182,6 +203,7 @@ export const InboxResponse = z.object({
   pendingCount: z.number().int(),
   tidyPendingCount: z.number().int().min(0),
   dreamState: DreamState,
+  embeddingBackfill: EmbeddingBackfillState.optional(),
 })
 export type InboxResponse = z.infer<typeof InboxResponse>
 

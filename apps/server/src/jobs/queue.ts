@@ -1,4 +1,10 @@
-import type { DreamMode, DreamProgress, DreamScope, DreamTrigger } from '@kioku/contracts'
+import type {
+  DreamMode,
+  DreamProgress,
+  DreamScope,
+  DreamTrigger,
+  EmbeddingBackfillState,
+} from '@kioku/contracts'
 import { PgBoss } from 'pg-boss'
 import postgres from 'postgres'
 
@@ -11,6 +17,7 @@ import type { BufferedBucket } from '../extraction/buffer'
 import { getDueScheduledDreamModes, runDream } from '../extraction/dream'
 import { extractEpisodeBatch } from '../extraction/extract'
 import { EntryService } from '../memory/service'
+import { recordDreamRun } from '../models/store'
 import { cleanupExpired } from './cleanup'
 
 const EMBED_ENTRY = 'embed-entry'
@@ -79,13 +86,21 @@ export interface DreamEnqueueOptions {
   targetShortIds?: string[] | undefined
 }
 
+export interface BackfillEnqueueOptions {
+  total?: number | undefined
+  model?: string | null | undefined
+}
+
 export interface Jobs {
   enqueueEmbed(entryId: string): void
-  enqueueBackfill(): Promise<boolean>
+  enqueueBackfill(options?: BackfillEnqueueOptions): Promise<boolean>
+  getEmbeddingBackfillState?(): EmbeddingBackfillState
+  cancelEmbeddingBackfill?(): Promise<boolean>
   enqueueExtraction(target: BufferedBucket, delaySeconds: number): Promise<void>
   enqueueDream(options?: DreamEnqueueOptions): Promise<string | null>
   isDreamRunning(): Promise<boolean>
   getDreamProgress?(): Promise<DreamProgress | null>
+  cancelDream?(): Promise<boolean>
   enqueueCleanup(): Promise<boolean>
 }
 
@@ -135,15 +150,108 @@ export async function startJobs(options: {
   let dreamRunning = false
   let enqueuingDream = false
   let dreamPendingId: string | null = null
+  let dreamPendingMode: DreamMode = 'standard'
   let dreamPendingUntil = 0
   let dreamProgress: DreamProgress | null = null
+  let dreamAbortController: AbortController | null = null
+  let dreamRunPromise: Promise<void> | null = null
   const handledDreamIds = new Set<string>()
+  const cancelledDreamIds = new Set<string>()
+
+  let backfillRunning = false
+  let backfillPendingId: string | null = null
+  let backfillPendingUntil = 0
+  let backfillAbortController: AbortController | null = null
+  let backfillRunPromise: Promise<void> | null = null
+  const handledBackfillIds = new Set<string>()
+  const cancelledBackfillIds = new Set<string>()
+  let backfillProgress: { processed: number; total: number; model: string | null } = {
+    processed: 0,
+    total: 0,
+    model: null,
+  }
+  let backfillLast: {
+    finishedAt: string | null
+    outcome: 'ok' | 'cancelled' | 'failed' | null
+    updatedCount: number
+    error: string | null
+  } = {
+    finishedAt: null,
+    outcome: null,
+    updatedCount: 0,
+    error: null,
+  }
+
   const stopController = new AbortController()
+
+  const trackIdSet = (set: Set<string>, id: string) => {
+    set.add(id)
+    if (set.size > 32) {
+      const oldest = set.values().next().value
+      if (oldest) set.delete(oldest)
+    }
+  }
+
+  const waitBriefly = (promise: Promise<void> | null, ms = 500) =>
+    promise
+      ? Promise.race([
+          promise.catch(() => undefined),
+          new Promise<void>((resolve) => setTimeout(resolve, ms)),
+        ])
+      : Promise.resolve()
 
   const credentialService = new CredentialService(options.db, options.masterKey)
   const jobsApi: Jobs = {
     enqueueEmbed: (entryId) => void send(EMBED_ENTRY, { entryId } satisfies EmbedJobTarget),
-    enqueueBackfill: () => send(EMBED_BACKFILL, {}).then((id) => id !== null),
+    enqueueBackfill: async (opts) => {
+      if (backfillRunning || backfillPendingUntil > Date.now()) return false
+      const id = await send(EMBED_BACKFILL, {})
+      if (id !== null && !handledBackfillIds.has(id)) {
+        backfillPendingId = id
+        backfillPendingUntil = Date.now() + 15_000
+        backfillProgress = {
+          processed: 0,
+          total: Math.max(0, opts?.total ?? 0),
+          model: opts?.model ?? null,
+        }
+      }
+      return id !== null
+    },
+    getEmbeddingBackfillState: () => {
+      const running = backfillRunning || backfillPendingUntil > Date.now()
+      return {
+        running,
+        processed: running ? backfillProgress.processed : 0,
+        total: running ? backfillProgress.total : 0,
+        model: running ? backfillProgress.model : null,
+        lastFinishedAt: backfillLast.finishedAt,
+        lastOutcome: backfillLast.outcome,
+        lastUpdatedCount: backfillLast.updatedCount,
+        lastError: backfillLast.error,
+      }
+    },
+    cancelEmbeddingBackfill: async () => {
+      if (backfillRunning && backfillAbortController) {
+        backfillAbortController.abort('user_cancelled')
+        await waitBriefly(backfillRunPromise)
+        return true
+      }
+      if (backfillPendingId !== null && backfillPendingUntil > Date.now()) {
+        const pendingId = backfillPendingId
+        trackIdSet(cancelledBackfillIds, pendingId)
+        backfillPendingId = null
+        backfillPendingUntil = 0
+        await boss.cancel(EMBED_BACKFILL, pendingId).catch(() => undefined)
+        backfillLast = {
+          finishedAt: new Date().toISOString(),
+          outcome: 'cancelled',
+          updatedCount: 0,
+          error: null,
+        }
+        return true
+      }
+      return false
+    },
     enqueueExtraction: async (target, delaySeconds) => {
       try {
         await boss.upsert(EXTRACT_EPISODE, target, {
@@ -160,6 +268,8 @@ export async function startJobs(options: {
       if (dreamRunning || enqueuingDream || dreamPendingUntil > Date.now()) return null
       enqueuingDream = true
       try {
+        const mode: DreamMode =
+          opts?.mode === 'tidy' || opts?.mode === 'cross_memory' ? opts.mode : 'standard'
         const data: DreamJobData = {
           trigger: 'manual',
           ...(opts?.mode ? { mode: opts.mode } : {}),
@@ -175,6 +285,7 @@ export async function startJobs(options: {
         if (id !== null && !handledDreamIds.has(id)) {
           // 刚入队到 pg-boss 拉起之间存在短暂轮询窗口，提前标记运行中以便前端持续轮询进度
           dreamPendingId = id
+          dreamPendingMode = mode
           dreamPendingUntil = Date.now() + 15_000
         }
         return id
@@ -187,6 +298,34 @@ export async function startJobs(options: {
     },
     isDreamRunning: async () => dreamRunning || dreamPendingUntil > Date.now(),
     getDreamProgress: async () => (dreamRunning ? dreamProgress : null),
+    cancelDream: async () => {
+      if (dreamRunning && dreamAbortController) {
+        dreamAbortController.abort('user_cancelled')
+        await waitBriefly(dreamRunPromise)
+        return true
+      }
+      if (dreamPendingId !== null && dreamPendingUntil > Date.now()) {
+        const pendingId = dreamPendingId
+        const pendingMode = dreamPendingMode
+        trackIdSet(cancelledDreamIds, pendingId)
+        dreamPendingId = null
+        dreamPendingUntil = 0
+        await boss.cancel(DREAM, pendingId).catch(() => undefined)
+        await recordDreamRun(options.db, {
+          id: pendingId,
+          trigger: 'manual',
+          mode: pendingMode,
+          outcome: 'cancelled',
+          considered: 0,
+          suggested: 0,
+          error: null,
+          abortedReason: '已手动取消',
+          createdAt: new Date().toISOString(),
+        }).catch(() => undefined)
+        return true
+      }
+      return false
+    },
     enqueueCleanup: () => send(CLEANUP_EXPIRED, {}).then((id) => id !== null),
   }
 
@@ -204,9 +343,63 @@ export async function startJobs(options: {
     },
   )
 
-  await boss.work(EMBED_BACKFILL, async () => {
-    const updated = await runBackfillEmbeddings(options.db, options.masterKey)
-    if (updated > 0) console.log(`向量补齐完成：更新 ${updated} 条`)
+  await boss.work(EMBED_BACKFILL, async ([job]) => {
+    if (!job) return
+    trackIdSet(handledBackfillIds, job.id)
+    if (cancelledBackfillIds.delete(job.id)) return
+    if (backfillPendingId === job.id || backfillPendingId === null) {
+      backfillPendingId = null
+      backfillPendingUntil = 0
+    }
+    const runAbort = new AbortController()
+    backfillAbortController = runAbort
+    const combinedSignal = AbortSignal.any([stopController.signal, runAbort.signal])
+    backfillRunning = true
+    const run = (async () => {
+      try {
+        const updated = await runBackfillEmbeddings(
+          options.db,
+          options.masterKey,
+          combinedSignal,
+          (progress) => {
+            backfillProgress = progress
+          },
+        )
+        if (updated > 0) console.log(`向量补齐完成：更新 ${updated} 条`)
+        backfillLast = {
+          finishedAt: new Date().toISOString(),
+          outcome: runAbort.signal.aborted ? 'cancelled' : 'ok',
+          updatedCount: updated,
+          error: null,
+        }
+      } catch (err) {
+        if (runAbort.signal.aborted) {
+          backfillLast = {
+            finishedAt: new Date().toISOString(),
+            outcome: 'cancelled',
+            updatedCount: backfillProgress.processed,
+            error: null,
+          }
+        } else {
+          const message = err instanceof Error ? err.message : String(err)
+          backfillLast = {
+            finishedAt: new Date().toISOString(),
+            outcome: 'failed',
+            updatedCount: backfillProgress.processed,
+            error: message.slice(0, 300),
+          }
+          throw err
+        }
+      } finally {
+        backfillRunning = false
+        backfillAbortController = null
+        backfillRunPromise = null
+        backfillPendingId = null
+        backfillPendingUntil = 0
+      }
+    })()
+    backfillRunPromise = run
+    await run
   })
 
   await boss.work<BufferedBucket>(EXTRACT_EPISODE, async (batch) => {
@@ -224,11 +417,8 @@ export async function startJobs(options: {
 
   await boss.work<DreamJobData>(DREAM, async ([job]) => {
     if (!job) return
-    handledDreamIds.add(job.id)
-    if (handledDreamIds.size > 32) {
-      const oldest = handledDreamIds.values().next().value
-      if (oldest) handledDreamIds.delete(oldest)
-    }
+    trackIdSet(handledDreamIds, job.id)
+    if (cancelledDreamIds.delete(job.id)) return
     const trigger: DreamTrigger = job.data?.trigger === 'manual' ? 'manual' : 'scheduled'
     const scheduledModes =
       trigger === 'scheduled' ? await getDueScheduledDreamModes(options.db) : []
@@ -237,52 +427,61 @@ export async function startJobs(options: {
       dreamPendingId = null
       dreamPendingUntil = 0
     }
+    const runAbort = new AbortController()
+    dreamAbortController = runAbort
+    const combinedSignal = AbortSignal.any([stopController.signal, runAbort.signal])
     dreamRunning = true
     dreamProgress = null
-    try {
-      if (trigger === 'scheduled') {
-        for (const mode of scheduledModes) {
-          if (stopController.signal.aborted) break
+    const run = (async () => {
+      try {
+        if (trigger === 'scheduled') {
+          for (const mode of scheduledModes) {
+            if (combinedSignal.aborted) break
+            const result = await runDream(options.db, options.masterKey, {
+              runId: `${job.id}:${mode}`,
+              trigger: 'scheduled',
+              mode,
+              ...(mode === 'cross_memory' ? { scope: 'full_corpus' as const } : {}),
+              ...(mode === 'tidy' ? { limit: 20, pinnedFirst: true } : {}),
+              signal: combinedSignal,
+              onProgress: (progress) => {
+                dreamProgress = progress
+              },
+            })
+            if (result.outcome === 'failed' || result.outcome === 'partial') {
+              console.error(`定时记忆整理（${mode}）出错`, result.error)
+            }
+          }
+        } else {
           const result = await runDream(options.db, options.masterKey, {
-            runId: `${job.id}:${mode}`,
-            trigger: 'scheduled',
-            mode,
-            ...(mode === 'cross_memory' ? { scope: 'full_corpus' as const } : {}),
-            ...(mode === 'tidy' ? { limit: 20, pinnedFirst: true } : {}),
-            signal: stopController.signal,
+            runId: job.id,
+            trigger,
+            mode: job.data?.mode,
+            scope: job.data?.scope,
+            limit: job.data?.limit,
+            all: job.data?.all,
+            pinnedFirst: job.data?.pinnedFirst,
+            targetShortIds: job.data?.targetShortIds,
+            signal: combinedSignal,
             onProgress: (progress) => {
               dreamProgress = progress
             },
           })
           if (result.outcome === 'failed' || result.outcome === 'partial') {
-            console.error(`定时记忆整理（${mode}）出错`, result.error)
+            console.error('记忆整理出错', result.error)
           }
         }
-      } else {
-        const result = await runDream(options.db, options.masterKey, {
-          runId: job.id,
-          trigger,
-          mode: job.data?.mode,
-          scope: job.data?.scope,
-          limit: job.data?.limit,
-          all: job.data?.all,
-          pinnedFirst: job.data?.pinnedFirst,
-          targetShortIds: job.data?.targetShortIds,
-          signal: stopController.signal,
-          onProgress: (progress) => {
-            dreamProgress = progress
-          },
-        })
-        if (result.outcome === 'failed' || result.outcome === 'partial') {
-          console.error('记忆整理出错', result.error)
-        }
+      } finally {
+        dreamAbortController = null
+        dreamRunPromise = null
+        dreamRunning = false
+        dreamProgress = null
+        dreamPendingId = null
+        dreamPendingUntil = 0
       }
-    } finally {
-      dreamRunning = false
-      dreamProgress = null
-      dreamPendingId = null
-      dreamPendingUntil = 0
-    }
+    })()
+    dreamRunPromise = run
+    await run
   })
 
   await boss.work(CLEANUP_EXPIRED, async () => {

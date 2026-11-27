@@ -14,6 +14,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import BootPreviewDrawer from '../components/BootPreviewDrawer.vue'
+import ConsequenceModal from '../components/ConsequenceModal.vue'
 import CreateMemoryModal from '../components/CreateMemoryModal.vue'
 import MemoryEditor from '../components/MemoryEditor.vue'
 import MemoryList from '../components/MemoryList.vue'
@@ -308,15 +309,33 @@ function invalidateEntries() {
   void queryClient.invalidateQueries({ queryKey: ['boot-preview'] })
 }
 
-async function onBatchOrganize(mode: 'tidy' | 'cross_memory', shortIds: string[]) {
+interface PendingBatchOrganize {
+  mode: 'tidy' | 'cross_memory'
+  shortIds: string[]
+}
+
+const pendingBatch = ref<PendingBatchOrganize | null>(null)
+const batchError = ref<string | null>(null)
+
+function onBatchOrganize(mode: 'tidy' | 'cross_memory', shortIds: string[]) {
   if (batchBusy.value || shortIds.length < 2) return
+  batchError.value = null
+  pendingBatch.value = { mode, shortIds }
+}
+
+async function confirmBatchOrganize() {
+  const pending = pendingBatch.value
+  if (!pending || batchBusy.value) return
   batchBusy.value = true
+  batchError.value = null
   try {
-    const res = await api.runDream({ mode, targetShortIds: shortIds })
+    const res = await api.runDream({ mode: pending.mode, targetShortIds: pending.shortIds })
     if (res.started) {
-      const label = mode === 'tidy' ? '规范整理' : '查重/关联'
+      const label = pending.mode === 'tidy' ? '规范整理' : '查重/关联'
+      pendingBatch.value = null
+      listRef.value?.exitBatchMode()
       toast.add({
-        title: `已发起所选 ${shortIds.length} 条记忆的${label}任务`,
+        title: `已发起所选 ${pending.shortIds.length} 条记忆的${label}任务`,
         color: 'success',
         actions: [
           {
@@ -330,10 +349,10 @@ async function onBatchOrganize(mode: 'tidy' | 'cross_memory', shortIds: string[]
       })
       void queryClient.invalidateQueries({ queryKey: ['inbox'] })
     } else {
-      toast.add({ title: res.reason ?? '已有整理任务在执行中', color: 'neutral' })
+      batchError.value = res.reason ?? '已有整理任务在执行中'
     }
   } catch (err) {
-    toast.add({ title: err instanceof ApiError ? err.message : '发起批量整理失败', color: 'error' })
+    batchError.value = err instanceof ApiError ? err.message : '发起批量整理失败'
   } finally {
     batchBusy.value = false
   }
@@ -583,6 +602,31 @@ onBeforeUnmount(() => {
       @open-entry="openEntryFromCapture"
     />
     <BootPreviewDrawer v-model:open="bootPreviewOpen" :facets="facets" @select="select" />
+    <ConsequenceModal
+      :open="pendingBatch !== null"
+      tone="primary"
+      :title="
+        pendingBatch
+          ? `对所选 ${pendingBatch.shortIds.length} 条记忆发起${pendingBatch.mode === 'tidy' ? '规范整理' : '查重/关联'}？`
+          : ''
+      "
+      :title-icon="pendingBatch?.mode === 'tidy' ? icons.tidy : icons.links"
+      :consequences="
+        pendingBatch
+          ? [
+              `将对所选 ${pendingBatch.shortIds.length} 条记忆调用对话模型执行${pendingBatch.mode === 'tidy' ? '逐条规范整理' : '跨记忆查重与关联'}。`,
+              '整理结果仅写入待处理建议，不会直接修改现有记忆。',
+              '执行期间可随时在待处理页或顶部导航栏取消。',
+            ]
+          : []
+      "
+      action="开始整理"
+      :action-icon="pendingBatch?.mode === 'tidy' ? icons.tidy : icons.links"
+      :busy="batchBusy"
+      :error="batchError"
+      @confirm="confirmBatchOrganize"
+      @close="((pendingBatch = null), (batchError = null))"
+    />
   </div>
 </template>
 

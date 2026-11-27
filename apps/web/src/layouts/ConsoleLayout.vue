@@ -8,6 +8,7 @@ import { useRoute, useRouter, type RouteLocationRaw } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import BackgroundTasksIndicator from '../components/BackgroundTasksIndicator.vue'
 import KiokuMark from '../components/KiokuMark.vue'
 import { confirmDiscard, hasUnsavedChanges } from '../composables/unsavedChanges'
 import { COLOR_PREFERENCES, useColorPreference } from '../composables/useColorPreference'
@@ -55,12 +56,16 @@ function focusAfterNavClosed(event: Event) {
   accountButton.value?.$el.focus()
 }
 
-// 待处理条数：与待处理页共用 inbox 缓存，应用或忽略建议后失效
+// 待处理条数与后台长任务状态：与待处理页共用 inbox 缓存，运行期间自动轮询
 const inbox = useQuery({
   queryKey: ['inbox'] as const,
   queryFn: () => api.inbox(),
   enabled: computed(() => Boolean(me.data.value)),
   staleTime: 30_000,
+  refetchInterval: (query) => {
+    const d = query.state.data
+    return d?.dreamState.running || d?.embeddingBackfill?.running ? 2500 : false
+  },
 })
 const inboxBadge = computed(() => {
   const count = inbox.data.value?.pendingCount ?? 0
@@ -188,6 +193,10 @@ provide(LOGOUT, logout)
         </nav>
 
         <div class="flex min-w-0 flex-1 items-center justify-end gap-1.5">
+          <BackgroundTasksIndicator
+            :dream-state="inbox.data.value?.dreamState ?? null"
+            :embedding-backfill="inbox.data.value?.embeddingBackfill ?? null"
+          />
           <UDashboardSearchButton
             label="搜索"
             aria-label="搜索"

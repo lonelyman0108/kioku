@@ -4,7 +4,7 @@ import type { MasterKey } from '../crypto/keyring'
 import type { Db } from '../db/client'
 import { entries, entryEmbeddings } from '../db/schema'
 import { EMBEDDING_SETTING_KEY, loadResolvedModel } from '../models/store'
-import { embedEntryIds } from './worker'
+import { embedEntryIds, type EmbedProgress } from './worker'
 
 export interface EmbedJobTarget {
   entryId: string
@@ -29,6 +29,7 @@ export async function runBackfillEmbeddings(
   db: Db,
   masterKey: MasterKey | null,
   signal?: AbortSignal,
+  onProgress?: (progress: EmbedProgress) => void,
 ): Promise<number> {
   const conn = await loadResolvedModel(db, masterKey, EMBEDDING_SETTING_KEY)
   if (!conn) return 0
@@ -45,10 +46,12 @@ export async function runBackfillEmbeddings(
     )
 
   if (!rows.length) return 0
+  onProgress?.({ processed: 0, total: rows.length, model: conn.model })
   return embedEntryIds(
     db,
     masterKey,
     rows.map((r) => r.id),
     signal,
+    onProgress,
   )
 }

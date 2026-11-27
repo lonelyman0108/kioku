@@ -1715,4 +1715,137 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
     )
     expect(stage2.stagedSuggestionId).toBe(stage1.stagedSuggestionId)
   })
+
+  it('手动取消整理任务时立即中止并记录为 cancelled，保留已生成建议且支持取消接口', async () => {
+    const masterKey = testMasterKey()
+    await saveModelEndpoint(database.db, masterKey, CHAT_LLM_SETTING_KEY, {
+      baseUrl: fakeAi.baseUrl,
+      model: 'fake-chat',
+      apiKey: 'sk-chat',
+      enabled: true,
+    })
+
+    const credSvc = new CredentialService(database.db, masterKey)
+    const entrySvc = new EntryService(database.db, masterKey, credSvc, null)
+    const consoleScope = { kind: 'console' as const, accountId: 'acc', sessionId: 'sess' }
+
+    const first = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '取消测试词条一（2026-10-01）',
+        content: '第一条待规范正文内容。',
+      }),
+    )
+    const second = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '取消测试词条二（2026-10-02）',
+        content: '第二条待规范正文内容。',
+      }),
+    )
+
+    const third = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '取消测试词条三（2026-10-03）',
+        content: '第三条待规范正文内容。',
+      }),
+    )
+
+    const controller = new AbortController()
+    let calls = 0
+    fakeAi.setChatHandler(() => {
+      calls++
+      if (calls === 1) {
+        return JSON.stringify({
+          needed: true,
+          title: '取消测试词条一',
+          summary: '第一条概要。',
+          content: '第一条待规范正文内容。',
+          change_summary: '规范标题',
+          archived_notes: [],
+          reason: '去日期',
+        })
+      }
+      if (calls === 2) {
+        controller.abort('user_cancelled')
+        return JSON.stringify({ needed: false, reason: '已中止' })
+      }
+      throw new Error('取消后不应继续调用模型')
+    })
+
+    const res = await runDream(database.db, masterKey, {
+      runId: 'tidy-manual-cancel',
+      trigger: 'manual',
+      mode: 'tidy',
+      targetShortIds: [first.entry.shortId, second.entry.shortId, third.entry.shortId],
+      concurrency: 1,
+      signal: controller.signal,
+    })
+
+    expect(calls).toBe(2)
+    expect(res.outcome).toBe('cancelled')
+    expect(res.error).toBeNull()
+    expect(res.abortedReason).toBe('已手动取消')
+    expect(res.suggested).toBe(1)
+    expect(res.failedItems).toEqual([])
+
+    let dreamCancelled = false
+    let backfillCancelled = false
+    const app = createTestApp(database, {
+      masterKey,
+      jobs: {
+        enqueueEmbed: () => undefined,
+        enqueueBackfill: async () => true,
+        getEmbeddingBackfillState: () => ({
+          running: true,
+          processed: 3,
+          total: 10,
+          model: 'fake-embed',
+          lastFinishedAt: null,
+          lastOutcome: null,
+          lastUpdatedCount: 0,
+          lastError: null,
+        }),
+        cancelEmbeddingBackfill: async () => {
+          backfillCancelled = true
+          return true
+        },
+        enqueueExtraction: async () => undefined,
+        enqueueDream: async () => 'job-1',
+        isDreamRunning: async () => false,
+        cancelDream: async () => {
+          dreamCancelled = true
+          return true
+        },
+        enqueueCleanup: async () => true,
+      },
+    })
+    const { cookie } = await createOwnerSession(database)
+
+    const inbox = InboxResponse.parse(
+      await (await app.request('/v1/console/inbox', { headers: { cookie } })).json(),
+    )
+    expect(inbox.dreamState.lastOutcome).toBe('cancelled')
+    expect(inbox.pendingCount).toBe(1)
+    expect(inbox.embeddingBackfill?.running).toBe(true)
+    expect(inbox.embeddingBackfill?.processed).toBe(3)
+    expect(inbox.embeddingBackfill?.total).toBe(10)
+
+    const cancelDreamRes = await app.request('/v1/console/dream/cancel', {
+      method: 'POST',
+      headers: consoleHeaders(cookie),
+    })
+    expect(cancelDreamRes.status).toBe(200)
+    expect(await cancelDreamRes.json()).toEqual({ cancelled: true })
+    expect(dreamCancelled).toBe(true)
+
+    const cancelBackfillRes = await app.request('/v1/console/settings/embedding/backfill/cancel', {
+      method: 'POST',
+      headers: consoleHeaders(cookie),
+    })
+    expect(cancelBackfillRes.status).toBe(200)
+    expect(await cancelBackfillRes.json()).toEqual({ cancelled: true })
+    expect(backfillCancelled).toBe(true)
+  })
 })

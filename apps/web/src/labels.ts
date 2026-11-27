@@ -216,6 +216,7 @@ export const dreamOutcomeLabels: Record<DreamOutcome, string> = {
   ok: '完成',
   partial: '部分完成',
   skipped: '跳过',
+  cancelled: '已取消',
   failed: '失败',
 }
 

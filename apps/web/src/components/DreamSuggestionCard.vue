@@ -496,9 +496,21 @@ function applyEdited() {
       <div v-if="editing" class="edit-box">
         <div class="grid gap-3 sm:grid-cols-2">
           <UFormField label="标题">
+            <template #label>
+              <span class="field-label">
+                <UIcon :name="icons.heading" class="field-label-icon" aria-hidden="true" />
+                <span>标题</span>
+              </span>
+            </template>
             <UInput v-model="draft.title" :maxlength="ENTRY_TITLE_MAX" class="w-full" />
           </UFormField>
           <UFormField label="主题">
+            <template #label>
+              <span class="field-label">
+                <UIcon :name="icons.topic" class="field-label-icon" aria-hidden="true" />
+                <span>主题</span>
+              </span>
+            </template>
             <UInputTags
               v-model="draft.topics"
               add-on-blur
@@ -508,6 +520,12 @@ function applyEdited() {
           </UFormField>
         </div>
         <UFormField label="现行概要（可选）">
+          <template #label>
+            <span class="field-label">
+              <UIcon :name="icons.summary" class="field-label-icon" aria-hidden="true" />
+              <span>现行概要（可选）</span>
+            </span>
+          </template>
           <UTextarea
             v-model="draft.summary"
             :rows="2"
@@ -523,6 +541,12 @@ function applyEdited() {
           }}，建议改存凭据并用占位符引用。
         </NoteLine>
         <UFormField label="正文">
+          <template #label>
+            <span class="field-label">
+              <UIcon :name="icons.file" class="field-label-icon" aria-hidden="true" />
+              <span>正文</span>
+            </span>
+          </template>
           <UTextarea v-model="draft.content" :rows="8" autoresize class="w-full font-mono" />
         </UFormField>
         <div class="grid gap-3 sm:grid-cols-2">
@@ -538,6 +562,12 @@ function applyEdited() {
         </UFormField>
         <div class="flex flex-wrap items-center gap-6">
           <UFormField label="启动加载方式">
+            <template #label>
+              <span class="field-label">
+                <UIcon :name="icons.pin" class="field-label-icon" aria-hidden="true" />
+                <span>启动加载方式</span>
+              </span>
+            </template>
             <SegmentedChoice
               v-model="draft.bootMode"
               :items="bootModeChoices"
@@ -1041,9 +1071,21 @@ function applyEdited() {
       <div v-if="editing" class="edit-box">
         <div class="grid gap-3 sm:grid-cols-2">
           <UFormField label="标题">
+            <template #label>
+              <span class="field-label">
+                <UIcon :name="icons.heading" class="field-label-icon" aria-hidden="true" />
+                <span>标题</span>
+              </span>
+            </template>
             <UInput v-model="draft.title" :maxlength="ENTRY_TITLE_MAX" class="w-full" />
           </UFormField>
           <UFormField label="主题">
+            <template #label>
+              <span class="field-label">
+                <UIcon :name="icons.topic" class="field-label-icon" aria-hidden="true" />
+                <span>主题</span>
+              </span>
+            </template>
             <UInputTags
               v-model="draft.topics"
               add-on-blur
@@ -1053,6 +1095,12 @@ function applyEdited() {
           </UFormField>
         </div>
         <UFormField label="现行概要（可选）">
+          <template #label>
+            <span class="field-label">
+              <UIcon :name="icons.summary" class="field-label-icon" aria-hidden="true" />
+              <span>现行概要（可选）</span>
+            </span>
+          </template>
           <UTextarea
             v-model="draft.summary"
             :rows="2"
@@ -1068,6 +1116,12 @@ function applyEdited() {
           }}，建议改存凭据并用占位符引用。
         </NoteLine>
         <UFormField label="正文">
+          <template #label>
+            <span class="field-label">
+              <UIcon :name="icons.file" class="field-label-icon" aria-hidden="true" />
+              <span>正文</span>
+            </span>
+          </template>
           <UTextarea v-model="draft.content" :rows="8" autoresize class="w-full font-mono" />
         </UFormField>
         <div class="grid gap-3 sm:grid-cols-2">
@@ -1083,6 +1137,12 @@ function applyEdited() {
         </UFormField>
         <div class="flex flex-wrap items-center gap-6">
           <UFormField label="启动加载方式">
+            <template #label>
+              <span class="field-label">
+                <UIcon :name="icons.pin" class="field-label-icon" aria-hidden="true" />
+                <span>启动加载方式</span>
+              </span>
+            </template>
             <SegmentedChoice
               v-model="draft.bootMode"
               :items="bootModeChoices"
@@ -1812,6 +1872,18 @@ function applyEdited() {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+.field-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.field-label-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+  color: var(--ui-text-muted);
 }
 .edit-actions {
   display: flex;

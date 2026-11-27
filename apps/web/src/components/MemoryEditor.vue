@@ -44,6 +44,7 @@ import {
   bootModeIcons,
   bootModeLabels,
   envDisplayName,
+  eventTypeIcons,
   eventTypeLabels,
   formatActorLabel,
 } from '../labels'
@@ -1036,7 +1037,8 @@ defineExpose({
 
                     <div v-if="pinDraft.bootMode === 'index'" class="space-y-1">
                       <label for="pin-summary-input" class="pin-field-label">
-                        现行概要（用于启动目录行）
+                        <UIcon :name="icons.summary" class="field-label-icon" aria-hidden="true" />
+                        <span>现行概要（用于启动目录行）</span>
                       </label>
                       <UTextarea
                         id="pin-summary-input"
@@ -1169,6 +1171,12 @@ defineExpose({
           <div class="edit-stack">
             <div class="edit-meta-grid">
               <UFormField label="标题">
+                <template #label>
+                  <span class="field-label">
+                    <UIcon :name="icons.heading" class="field-label-icon" aria-hidden="true" />
+                    <span>标题</span>
+                  </span>
+                </template>
                 <UInput v-model="form.title" :maxlength="ENTRY_TITLE_MAX" class="w-full" />
                 <template v-if="titleHint.message" #help>
                   <div class="title-hint-row">
@@ -1189,12 +1197,19 @@ defineExpose({
               </UFormField>
 
               <UFormField label="现行概要（可选）">
+                <template #label>
+                  <span class="field-label">
+                    <UIcon :name="icons.summary" class="field-label-icon" aria-hidden="true" />
+                    <span>现行概要（可选）</span>
+                  </span>
+                </template>
                 <UTextarea
                   v-model="form.summary"
                   :rows="1"
                   autoresize
                   :maxrows="3"
                   :maxlength="ENTRY_SUMMARY_MAX"
+                  :ui="{ base: 'py-[5px] text-sm/5 resize-none' }"
                   placeholder="1–2 句概括当前结论，用于启动加载与列表预览"
                   class="w-full"
                 />
@@ -1224,6 +1239,12 @@ defineExpose({
               <div v-if="attrsOpen" class="attrs-body space-y-4">
                 <div class="grid gap-3 sm:grid-cols-2">
                   <UFormField label="主题">
+                    <template #label>
+                      <span class="field-label">
+                        <UIcon :name="icons.topic" class="field-label-icon" aria-hidden="true" />
+                        <span>主题</span>
+                      </span>
+                    </template>
                     <UInputTags
                       v-model="form.topics"
                       add-on-blur
@@ -1232,12 +1253,17 @@ defineExpose({
                     />
                   </UFormField>
                   <UFormField label="启动加载方式">
+                    <template #label>
+                      <span class="field-label">
+                        <UIcon :name="icons.pin" class="field-label-icon" aria-hidden="true" />
+                        <span>启动加载方式</span>
+                      </span>
+                    </template>
                     <SegmentedChoice
                       v-if="entry.kind === 'entry'"
                       v-model="form.bootMode"
                       :items="BOOT_MODE_OPTIONS"
                       label="启动加载方式"
-                      compact
                     />
                     <span v-else class="text-xs text-muted">会话摘要不支持设为启动加载</span>
                     <template v-if="entry.kind === 'entry'" #help>
@@ -1611,8 +1637,15 @@ defineExpose({
                             {{ formatRelative(ev.occurredAt ?? ev.createdAt) }}
                           </time>
                         </span>
-                        <span class="evolution-text">
-                          {{ ev.changeSummary?.trim() || eventTypeLabels[ev.eventType] }}
+                        <span class="evolution-body">
+                          <UIcon
+                            :name="eventTypeIcons[ev.eventType]"
+                            class="evolution-event-icon"
+                            aria-hidden="true"
+                          />
+                          <span class="evolution-text">
+                            {{ ev.changeSummary?.trim() || eventTypeLabels[ev.eventType] }}
+                          </span>
                         </span>
                       </button>
                     </li>
@@ -1671,8 +1704,15 @@ defineExpose({
                           {{ formatRelative(ev.occurredAt ?? ev.createdAt) }}
                         </time>
                       </span>
-                      <span class="rail-history-text">
-                        {{ ev.changeSummary?.trim() || eventTypeLabels[ev.eventType] }}
+                      <span class="rail-history-body">
+                        <UIcon
+                          :name="eventTypeIcons[ev.eventType]"
+                          class="rail-history-icon"
+                          aria-hidden="true"
+                        />
+                        <span class="rail-history-text">
+                          {{ ev.changeSummary?.trim() || eventTypeLabels[ev.eventType] }}
+                        </span>
                       </span>
                     </button>
                   </li>
@@ -1981,9 +2021,23 @@ defineExpose({
   color: var(--ui-on-selected-muted);
 }
 .pin-field-label {
-  display: block;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-size: 12px;
   font-weight: 500;
+  color: var(--ui-text-muted);
+}
+.field-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.field-label-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
   color: var(--ui-text-muted);
 }
 .pin-scope-box {
@@ -2375,6 +2429,19 @@ defineExpose({
   font-size: 12px;
   color: var(--ui-text-muted);
 }
+.rail-history-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+}
+.rail-history-icon {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
+  margin-top: 3px;
+  color: var(--ui-text-muted);
+}
 .rail-history-text {
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -2524,6 +2591,19 @@ defineExpose({
   align-items: center;
   gap: 8px;
   font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.evolution-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+.evolution-event-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+  margin-top: 3px;
   color: var(--ui-text-muted);
 }
 .evolution-text {

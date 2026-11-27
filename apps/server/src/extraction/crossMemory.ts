@@ -760,6 +760,10 @@ export async function runCrossMemoryFunnel(
         succeededTasks++
       }
     } catch (err) {
+      if (options.signal?.aborted) {
+        considered = Math.max(0, considered - taskRows.length)
+        break
+      }
       guard.recordFailure(err)
       failedTasks++
       const reason = err instanceof Error ? err.message : String(err)
@@ -774,6 +778,22 @@ export async function runCrossMemoryFunnel(
       suggested,
       failed: failedTasks,
     })
+  }
+
+  if (options.signal?.aborted && !guard.isAborted) {
+    return {
+      result: {
+        outcome: 'cancelled',
+        considered,
+        suggested,
+        error: null,
+        failedItems,
+        retriedCount,
+        abortedReason: '已手动取消',
+      },
+      insertedIds,
+      consideredNeighbors: consideredNeighborIds.size,
+    }
   }
 
   const abortedReason = guard.abortedReason ?? (options.signal?.aborted ? '任务已中止' : null)
