@@ -5,11 +5,14 @@ import {
   CancelTaskResponse,
   ErrorResponse,
   InboxResponse,
+  ReviseSuggestionRequest,
+  ReviseSuggestionResponse,
   TriggerDreamRequest,
   TriggerDreamResponse,
 } from '@kioku/contracts'
 
 import { loadInbox } from '../extraction/dream'
+import { reviseSuggestion } from '../extraction/reviseSuggestion'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { MemoryError } from '../memory/errors'
@@ -49,6 +52,15 @@ const dismissRoute = createRoute({
   summary: '忽略一条整理建议',
   request: { params: SuggestionParams },
   responses: { 204: { description: '已忽略' }, ...errors },
+})
+
+const reviseRoute = createRoute({
+  method: 'post',
+  path: '/console/inbox/{id}/revise',
+  tags: ['dream'],
+  summary: '按单句说明无状态修订一条待处理整理建议草稿（不写入数据库）',
+  request: { params: SuggestionParams, body: jsonBody(ReviseSuggestionRequest) },
+  responses: { 200: jsonResponse('修订后的建议草稿', ReviseSuggestionResponse), ...errors },
 })
 
 const triggerRoute = createRoute({
@@ -93,6 +105,16 @@ export function dreamRoutes(deps: Deps, entries: EntryService) {
     .openapi(dismissRoute, async (c) => {
       await entries.dismissSuggestion(c.req.valid('param').id)
       return c.body(null, 204)
+    })
+    .openapi(reviseRoute, async (c) => {
+      const { id } = c.req.valid('param')
+      const body = c.req.valid('json')
+      return c.json(
+        await reviseSuggestion(deps.db, deps.masterKey, id, body, {
+          signal: c.req.raw.signal,
+        }),
+        200,
+      )
     })
     .openapi(triggerRoute, async (c) => {
       let options: TriggerDreamRequest = { mode: 'standard' }

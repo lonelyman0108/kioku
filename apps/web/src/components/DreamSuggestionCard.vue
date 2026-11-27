@@ -14,13 +14,19 @@ import {
   extractCredentialPlaceholders,
   extractTargetShortIds,
   normalizeSlugList,
+  REVISABLE_DREAM_KINDS,
+  REVISE_INSTRUCTION_MAX,
   type ApplySuggestionRequest,
   type BootMode,
   type CaptureIntegrity,
   type DreamSuggestionView,
+  type ReviseSuggestionRequest,
 } from '@kioku/contracts'
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 
+import { ApiError } from '../api/client'
+import { api } from '../api/endpoints'
+import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
 import {
   bootModeDescriptions,
@@ -58,6 +64,29 @@ const emit = defineEmits<{
 const editing = ref(false)
 const isInspector = computed(() => props.layout === 'inspector')
 
+const { me } = useSession()
+const hasChatModel = computed(() => Boolean(me.data.value?.hasChatModel))
+const isRevisableKind = computed(() =>
+  (REVISABLE_DREAM_KINDS as readonly string[]).includes(props.suggestion.kind),
+)
+const showReviseBar = computed(() => isRevisableKind.value && hasChatModel.value)
+
+const reviseInstruction = ref('')
+const reviseBusy = ref(false)
+const reviseError = ref<string | null>(null)
+const revisedReason = ref<string | null>(null)
+const showRevisedDiff = ref(true)
+let reviseController: AbortController | null = null
+
+function abortRevise() {
+  if (reviseController) {
+    reviseController.abort()
+    reviseController = null
+  }
+}
+
+onBeforeUnmount(abortRevise)
+
 const baseEntry = computed(() => {
   if (props.suggestion.keepId) {
     return (
@@ -94,11 +123,17 @@ const selectedLinkShortIds = ref<string[]>([])
 watch(
   () => props.suggestion.id,
   () => {
+    abortRevise()
     parts.title = true
     parts.summary = true
     parts.content = true
     selectedLinkShortIds.value = (props.suggestion.proposedLinks ?? []).map((l) => l.targetShortId)
     editing.value = false
+    reviseInstruction.value = ''
+    reviseBusy.value = false
+    reviseError.value = null
+    revisedReason.value = null
+    showRevisedDiff.value = true
   },
   { immediate: true },
 )
@@ -344,15 +379,95 @@ function openEditor() {
   editing.value = true
 }
 
+function closeEditor() {
+  editing.value = false
+  revisedReason.value = null
+  reviseError.value = null
+}
+
+async function submitRevise() {
+  const instruction = reviseInstruction.value.trim()
+  if (!instruction || reviseBusy.value || props.busy || props.disabled || !showReviseBar.value) {
+    return
+  }
+  abortRevise()
+  const controller = new AbortController()
+  reviseController = controller
+  reviseBusy.value = true
+  reviseError.value = null
+
+  const body: ReviseSuggestionRequest = {
+    instruction,
+    ...(editing.value
+      ? {
+          ...(draft.title.trim() ? { title: draft.title.trim() } : {}),
+          summary: draft.summary.replace(/[\r\n]+/g, ' ').trim() || null,
+          ...(draft.content.trim() ? { content: draft.content } : {}),
+          disclosure: draft.disclosure.trim() || null,
+          ...(draft.changeSummary.trim() ? { changeSummary: draft.changeSummary.trim() } : {}),
+          topics: draft.topics,
+          envs: draftScope.value.envs,
+          realms: draftScope.value.realms,
+          projects: draftScope.value.projects,
+          runtimes: draftScope.value.runtimes,
+          bootMode: draft.bootMode,
+        }
+      : {}),
+  }
+
+  try {
+    const res = await api.reviseInboxSuggestion(props.suggestion.id, body, controller.signal)
+    if (reviseController !== controller) return
+    reviseController = null
+    if (!editing.value) openEditor()
+    if (res.proposedTitle !== null) draft.title = res.proposedTitle
+    draft.summary = res.proposedSummary ?? ''
+    draft.content = res.proposedContent
+    draft.disclosure = res.proposedDisclosure ?? ''
+    if (res.proposedChangeSummary !== null) draft.changeSummary = res.proposedChangeSummary
+    if (res.proposedTopics !== null) draft.topics = [...res.proposedTopics]
+    if (res.proposedBootMode !== null) draft.bootMode = res.proposedBootMode
+    draftScope.value = {
+      envs: res.proposedEnvs !== null ? [...res.proposedEnvs] : [...draftScope.value.envs],
+      realms: res.proposedRealms !== null ? [...res.proposedRealms] : [...draftScope.value.realms],
+      projects:
+        res.proposedProjects !== null ? [...res.proposedProjects] : [...draftScope.value.projects],
+      runtimes:
+        res.proposedRuntimes !== null ? [...res.proposedRuntimes] : [...draftScope.value.runtimes],
+    }
+    revisedReason.value = res.reason
+    showRevisedDiff.value = true
+    reviseInstruction.value = ''
+  } catch (err) {
+    if (reviseController !== controller) return
+    reviseController = null
+    if (err instanceof Error && err.name === 'AbortError') return
+    reviseError.value = err instanceof ApiError ? err.message : '按说明修订失败，请重试'
+  } finally {
+    if (reviseController === null) reviseBusy.value = false
+  }
+}
+
+function onReviseKeydown(event: KeyboardEvent) {
+  if (event.isComposing || event.key !== 'Enter') return
+  event.preventDefault()
+  void submitRevise()
+}
+
+const reviseDiffBefore = computed(() => {
+  if (isDistillEpisode.value) {
+    return props.suggestion.proposedContent ?? baseEntry.value?.content ?? ''
+  }
+  return baseEntry.value?.content ?? ''
+})
+
 const effectiveProposedContent = computed<string | null>(() => {
   const s = props.suggestion
-  if (
-    s.kind === 'distill_episode' ||
-    s.kind === 'mark_stale' ||
-    s.kind === 'link_entries' ||
-    s.kind === 'adjust_boot_mode'
-  ) {
+  if (s.kind === 'mark_stale' || s.kind === 'link_entries' || s.kind === 'adjust_boot_mode') {
     return null
+  }
+  if (s.kind === 'distill_episode') {
+    return editing.value && revisedReason.value !== null ? draft.content : null
   }
   if (editing.value) return draft.content
   if (isTidy.value && !parts.content) return null
@@ -363,6 +478,9 @@ const integrity = computed<CaptureIntegrity | null>(() => {
   const base = baseEntry.value
   const next = effectiveProposedContent.value
   if (!base || next === null) return null
+  if (props.suggestion.kind === 'distill_episode') {
+    return checkCaptureIntegrity(reviseDiffBefore.value, next)
+  }
   if (props.suggestion.kind === 'merge_duplicates' && props.suggestion.entries.length > 1) {
     // 合并场景汇总全部待合并记忆的引用集合（排除被合并记忆自身短 ID）
     const mergedSelfIds = new Set(props.suggestion.entries.map((e) => e.shortId))
@@ -638,6 +756,36 @@ function applyEdited() {
 
       <!-- 编辑后应用表单（不用 form 标签防误回车提交） -->
       <div v-if="editing" class="edit-box">
+        <div v-if="revisedReason" class="revise-preview-panel">
+          <div class="revise-preview-head">
+            <span class="revise-preview-lead">
+              <UIcon :name="icons.sparkles" class="revise-preview-icon" aria-hidden="true" />
+              <span>已按说明修订草稿</span>
+            </span>
+            <UButton
+              size="xs"
+              color="neutral"
+              variant="ghost"
+              :icon="showRevisedDiff ? icons.chevronUp : icons.compare"
+              @click="showRevisedDiff = !showRevisedDiff"
+            >
+              {{ showRevisedDiff ? '收起对比' : '查看对比' }}
+            </UButton>
+          </div>
+          <p class="revise-preview-reason">{{ revisedReason }}</p>
+          <NoteLine v-if="hasLostRefs || integrity?.severeShrink" tone="warning" flush>
+            {{ integrityMessage }}
+          </NoteLine>
+          <DiffViewer
+            v-if="showRevisedDiff"
+            :before="reviseDiffBefore"
+            :after="draft.content"
+            :context="3"
+            :expand-step="10"
+            max-height="18rem"
+            empty-text="正文无变更，已更新草稿属性"
+          />
+        </div>
         <div class="grid gap-3 sm:grid-cols-2">
           <UFormField label="标题">
             <template #label>
@@ -733,7 +881,7 @@ function applyEdited() {
             size="sm"
             :icon="icons.check"
             :loading="busy"
-            :disabled="disabled || Boolean(editValidationProblem)"
+            :disabled="disabled || reviseBusy || Boolean(editValidationProblem)"
             @click="applyEdited"
           >
             保存并应用
@@ -742,8 +890,8 @@ function applyEdited() {
             size="sm"
             color="neutral"
             variant="ghost"
-            :disabled="busy || disabled"
-            @click="editing = false"
+            :disabled="busy || disabled || reviseBusy"
+            @click="closeEditor"
           >
             取消编辑
           </UButton>
@@ -1149,6 +1297,34 @@ function applyEdited() {
           </li>
         </ul>
       </details>
+
+      <!-- 单轮无状态按说明修订指令栏 -->
+      <div v-if="showReviseBar" class="revise-bar">
+        <div class="revise-bar-row">
+          <UInput
+            v-model="reviseInstruction"
+            size="sm"
+            :maxlength="REVISE_INSTRUCTION_MAX"
+            :disabled="busy || disabled || reviseBusy"
+            placeholder="输入一句修订说明，如：仅限家里 home-24 主机，收紧环境标签"
+            aria-label="修订说明"
+            class="revise-input"
+            @keydown="onReviseKeydown"
+          />
+          <UButton
+            size="sm"
+            color="neutral"
+            variant="outline"
+            :icon="icons.sparkles"
+            :loading="reviseBusy"
+            :disabled="busy || disabled || reviseBusy || !reviseInstruction.trim()"
+            @click="submitRevise"
+          >
+            按说明修订
+          </UButton>
+        </div>
+        <p v-if="reviseError" class="text-xs text-error" role="alert">{{ reviseError }}</p>
+      </div>
     </section>
 
     <!-- 右栏 35%：整理依据、涉及记忆、护栏与操作 -->
@@ -1281,7 +1457,7 @@ function applyEdited() {
           :color="isMarkStale ? 'error' : 'primary'"
           :icon="primaryApplyIcon"
           :loading="busy"
-          :disabled="disabled || !anyPartSelected"
+          :disabled="disabled || reviseBusy || !anyPartSelected"
           @click="applyDirect"
         >
           {{ primaryApplyLabel }}
@@ -1292,7 +1468,7 @@ function applyEdited() {
           color="neutral"
           variant="outline"
           :icon="icons.edit"
-          :disabled="busy || disabled"
+          :disabled="busy || disabled || reviseBusy"
           @click="openEditor"
         >
           编辑后应用
@@ -1302,7 +1478,7 @@ function applyEdited() {
           color="neutral"
           variant="ghost"
           :icon="icons.cancel"
-          :disabled="busy || disabled"
+          :disabled="busy || disabled || reviseBusy"
           @click="emit('dismiss', suggestion.id)"
         >
           忽略
@@ -1342,6 +1518,36 @@ function applyEdited() {
     <!-- 唯一亮纸核心变更区 -->
     <div class="card-delta-surface">
       <div v-if="editing" class="edit-box">
+        <div v-if="revisedReason" class="revise-preview-panel">
+          <div class="revise-preview-head">
+            <span class="revise-preview-lead">
+              <UIcon :name="icons.sparkles" class="revise-preview-icon" aria-hidden="true" />
+              <span>已按说明修订草稿</span>
+            </span>
+            <UButton
+              size="xs"
+              color="neutral"
+              variant="ghost"
+              :icon="showRevisedDiff ? icons.chevronUp : icons.compare"
+              @click="showRevisedDiff = !showRevisedDiff"
+            >
+              {{ showRevisedDiff ? '收起对比' : '查看对比' }}
+            </UButton>
+          </div>
+          <p class="revise-preview-reason">{{ revisedReason }}</p>
+          <NoteLine v-if="hasLostRefs || integrity?.severeShrink" tone="warning" flush>
+            {{ integrityMessage }}
+          </NoteLine>
+          <DiffViewer
+            v-if="showRevisedDiff"
+            :before="reviseDiffBefore"
+            :after="draft.content"
+            :context="3"
+            :expand-step="10"
+            max-height="16rem"
+            empty-text="正文无变更，已更新草稿属性"
+          />
+        </div>
         <div class="grid gap-3 sm:grid-cols-2">
           <UFormField label="标题">
             <template #label>
@@ -1636,6 +1842,34 @@ function applyEdited() {
           </li>
         </ul>
       </details>
+
+      <!-- 单轮无状态按说明修订指令栏 -->
+      <div v-if="showReviseBar" class="revise-bar">
+        <div class="revise-bar-row">
+          <UInput
+            v-model="reviseInstruction"
+            size="sm"
+            :maxlength="REVISE_INSTRUCTION_MAX"
+            :disabled="busy || disabled || reviseBusy"
+            placeholder="输入一句修订说明，如：仅限家里 home-24 主机，收紧环境标签"
+            aria-label="修订说明"
+            class="revise-input"
+            @keydown="onReviseKeydown"
+          />
+          <UButton
+            size="sm"
+            color="neutral"
+            variant="outline"
+            :icon="icons.sparkles"
+            :loading="reviseBusy"
+            :disabled="busy || disabled || reviseBusy || !reviseInstruction.trim()"
+            @click="submitRevise"
+          >
+            按说明修订
+          </UButton>
+        </div>
+        <p v-if="reviseError" class="text-xs text-error" role="alert">{{ reviseError }}</p>
+      </div>
     </div>
 
     <!-- 弱化整理的 AI 理由行 -->
@@ -1732,7 +1966,7 @@ function applyEdited() {
           :color="isMarkStale ? 'error' : 'primary'"
           :icon="primaryApplyIcon"
           :loading="busy"
-          :disabled="disabled || !anyPartSelected"
+          :disabled="disabled || reviseBusy || !anyPartSelected"
           @click="applyDirect"
         >
           {{ primaryApplyLabel }}
@@ -1743,7 +1977,7 @@ function applyEdited() {
           color="neutral"
           variant="outline"
           :icon="icons.edit"
-          :disabled="busy || disabled"
+          :disabled="busy || disabled || reviseBusy"
           @click="openEditor"
         >
           编辑后应用
@@ -1753,7 +1987,7 @@ function applyEdited() {
           color="neutral"
           variant="ghost"
           :icon="icons.cancel"
-          :disabled="busy || disabled"
+          :disabled="busy || disabled || reviseBusy"
           @click="emit('dismiss', suggestion.id)"
         >
           忽略
@@ -1764,7 +1998,7 @@ function applyEdited() {
           size="sm"
           :icon="icons.check"
           :loading="busy"
-          :disabled="disabled || Boolean(editValidationProblem)"
+          :disabled="disabled || reviseBusy || Boolean(editValidationProblem)"
           @click="applyEdited"
         >
           保存并应用
@@ -1773,8 +2007,8 @@ function applyEdited() {
           size="sm"
           color="neutral"
           variant="ghost"
-          :disabled="busy || disabled"
-          @click="editing = false"
+          :disabled="busy || disabled || reviseBusy"
+          @click="closeEditor"
         >
           取消编辑
         </UButton>
@@ -2278,6 +2512,60 @@ function applyEdited() {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+.revise-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--ui-border);
+}
+.revise-bar-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.revise-input {
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+.revise-preview-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--ui-border-accented);
+  border-left: 3px solid var(--ui-rule);
+  background: var(--ui-bg);
+}
+.revise-preview-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.revise-preview-lead {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ui-text-highlighted);
+}
+.revise-preview-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+  color: var(--ui-text-muted);
+}
+.revise-preview-reason {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ui-text);
+  overflow-wrap: anywhere;
 }
 .field-label {
   display: inline-flex;
