@@ -26,22 +26,13 @@ export async function runEmbedBatch(
   )
 }
 
-// 补齐当前模型下缺失向量的全部活跃正式词条，以及含结构化信号的活跃会话摘要
-export async function runBackfillEmbeddings(
-  db: Db,
-  masterKey: MasterKey | null,
-  signal?: AbortSignal,
-  onProgress?: (progress: EmbedProgress) => void,
-): Promise<number> {
-  const conn = await loadResolvedModel(db, masterKey, EMBEDDING_SETTING_KEY)
-  if (!conn) return 0
-
+async function findMissingEmbeddingIds(db: Db, model: string): Promise<string[]> {
   const rows = await db
     .select({ id: entries.id, kind: entries.kind, disclosure: entries.disclosure })
     .from(entries)
     .leftJoin(
       entryEmbeddings,
-      and(eq(entryEmbeddings.entryId, entries.id), eq(entryEmbeddings.model, conn.model)),
+      and(eq(entryEmbeddings.entryId, entries.id), eq(entryEmbeddings.model, model)),
     )
     .where(
       and(
@@ -54,9 +45,25 @@ export async function runBackfillEmbeddings(
       ),
     )
 
-  const targetIds = rows
-    .filter((r) => r.kind === 'entry' || hasEpisodeSignals(r.disclosure))
-    .map((r) => r.id)
+  return rows.filter((r) => r.kind === 'entry' || hasEpisodeSignals(r.disclosure)).map((r) => r.id)
+}
+
+// 统计当前模型下待补齐向量的词条总数（含活跃正式词条与含结构化信号的活跃会话摘要）
+export async function countMissingEmbeddings(db: Db, model: string): Promise<number> {
+  return (await findMissingEmbeddingIds(db, model)).length
+}
+
+// 补齐当前模型下缺失向量的全部活跃正式词条，以及含结构化信号的活跃会话摘要
+export async function runBackfillEmbeddings(
+  db: Db,
+  masterKey: MasterKey | null,
+  signal?: AbortSignal,
+  onProgress?: (progress: EmbedProgress) => void,
+): Promise<number> {
+  const conn = await loadResolvedModel(db, masterKey, EMBEDDING_SETTING_KEY)
+  if (!conn) return 0
+
+  const targetIds = await findMissingEmbeddingIds(db, conn.model)
   if (!targetIds.length) return 0
   onProgress?.({ processed: 0, total: targetIds.length, model: conn.model })
   return embedEntryIds(db, masterKey, targetIds, signal, onProgress)

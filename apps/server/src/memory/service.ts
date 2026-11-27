@@ -9,6 +9,7 @@ import {
   extractCredentialPlaceholders,
   extractMarkdownHeadings,
   extractTargetShortIds,
+  hasEpisodeSignals,
   lintEntryHygiene,
   mergeFallbackTopics,
   normalizeShortId,
@@ -597,7 +598,11 @@ export class EntryService {
       const nextSummary =
         input.summary !== undefined ? cleanOptionalText(input.summary) : existing.summary
       const nextDisclosure =
-        input.disclosure !== undefined ? cleanOptionalText(input.disclosure) : existing.disclosure
+        input.disclosure !== undefined
+          ? cleanOptionalText(input.disclosure)
+          : promoting
+            ? null
+            : existing.disclosure
       const nextBootMode: BootMode =
         nextKind === 'episode'
           ? 'none'
@@ -694,6 +699,13 @@ export class EntryService {
       }
 
       await syncEntryLinks(tx, updated.id, updated.shortId, updated.content)
+      const shouldEmbed =
+        updated.kind === 'entry' ||
+        (hasEpisodeSignals(updated.disclosure) &&
+          (updated.validTo === null || updated.validTo > now))
+      if (updated.kind === 'episode' && !shouldEmbed) {
+        await tx.delete(entryEmbeddings).where(eq(entryEmbeddings.entryId, updated.id))
+      }
       await tx.insert(entryEvents).values({
         entryId: updated.id,
         eventType: 'update',
@@ -720,13 +732,13 @@ export class EntryService {
         changeSummary: explicitChangeSummary,
         previousContent: existing.content,
       })
-      return this.hydrateDetail(tx, scope, updated, warnings)
+      return { detail: await this.hydrateDetail(tx, scope, updated, warnings), shouldEmbed }
     })
 
-    if (detail.entry.kind === 'entry') {
-      this.jobs?.enqueueEmbed(detail.entry.id)
+    if (detail.shouldEmbed) {
+      this.jobs?.enqueueEmbed(detail.detail.entry.id)
     }
-    return detail
+    return detail.detail
   }
 
   async remove(
@@ -827,7 +839,11 @@ export class EntryService {
           snapshot: toSnapshot(restored),
           createdAt: now,
         })
-        return this.hydrateDetail(tx, scope, restored)
+        const shouldEmbed =
+          restored.kind === 'entry' ||
+          (hasEpisodeSignals(restored.disclosure) &&
+            (restored.validTo === null || restored.validTo > now))
+        return { detail: await this.hydrateDetail(tx, scope, restored), shouldEmbed }
       }
 
       const [targetEvent] = await tx
@@ -905,6 +921,13 @@ export class EntryService {
       }
 
       await syncEntryLinks(tx, restored.id, restored.shortId, restored.content)
+      const shouldEmbed =
+        restored.kind === 'entry' ||
+        (hasEpisodeSignals(restored.disclosure) &&
+          (restored.validTo === null || restored.validTo > now))
+      if (restored.kind === 'episode' && !shouldEmbed) {
+        await tx.delete(entryEmbeddings).where(eq(entryEmbeddings.entryId, restored.id))
+      }
       await tx.insert(entryEvents).values({
         entryId: restored.id,
         eventType: 'restore',
@@ -914,13 +937,13 @@ export class EntryService {
         snapshot: toSnapshot(restored),
         createdAt: now,
       })
-      return this.hydrateDetail(tx, scope, restored)
+      return { detail: await this.hydrateDetail(tx, scope, restored), shouldEmbed }
     })
 
-    if (detail.entry.kind === 'entry') {
-      this.jobs?.enqueueEmbed(detail.entry.id)
+    if (detail.shouldEmbed) {
+      this.jobs?.enqueueEmbed(detail.detail.entry.id)
     }
-    return detail
+    return detail.detail
   }
 
   async history(

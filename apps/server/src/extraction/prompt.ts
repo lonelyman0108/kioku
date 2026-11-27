@@ -5,7 +5,7 @@ import {
 } from '@kioku/contracts'
 
 import { stripThinkTags, type ChatMessage } from '../models/client'
-import { clipChars, inlineText } from '../recall/text'
+import { clipChars, inlineText, oneLine } from '../recall/text'
 
 const MAX_TRANSCRIPT_CHARS = 12_000
 const MAX_USER_CHARS = 1_000
@@ -54,17 +54,25 @@ export function buildEpisodeMessages(
     chars += block.length + 2
   }
 
-  // 同桶混入多个 sessionId 时显式标注会话边界，防止不同会话的偏好与事实混为一谈
+  // 同桶混入多个 sessionId 时显式标注会话边界，交替出现的同一会话沿用原编号，空白 sessionId 单独标注
   const distinctSessions = new Set(kept.map((item) => item.sessionId).filter(Boolean))
   const blocks: string[] = []
   if (distinctSessions.size > 1) {
+    const sessionNumbers = new Map<string, number>()
     let lastSession: string | null = null
-    let sessionOrder = 0
     for (const item of kept) {
       if (item.sessionId !== lastSession) {
-        sessionOrder++
         lastSession = item.sessionId
-        blocks.push(`--- 会话 ${sessionOrder} ---`)
+        if (!item.sessionId) {
+          blocks.push('--- 未标识会话 ---')
+        } else {
+          let num = sessionNumbers.get(item.sessionId)
+          if (num === undefined) {
+            num = sessionNumbers.size + 1
+            sessionNumbers.set(item.sessionId, num)
+          }
+          blocks.push(`--- 会话 ${num} ---`)
+        }
       }
       blocks.push(item.block)
     }
@@ -103,7 +111,7 @@ function parseSignalList(raw: unknown): string[] {
   const out: string[] = []
   for (const item of raw) {
     if (typeof item !== 'string') continue
-    const clean = clipChars(inlineText(item), EPISODE_SIGNAL_ITEM_MAX_CHARS).trim()
+    const clean = clipChars(oneLine(item), EPISODE_SIGNAL_ITEM_MAX_CHARS).trim()
     const key = clean.toLowerCase()
     if (!clean || seen.has(key)) continue
     seen.add(key)

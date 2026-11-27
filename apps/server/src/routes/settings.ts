@@ -10,6 +10,7 @@ import {
   UpdateModelsSettingsRequest,
 } from '@kioku/contracts'
 
+import { countMissingEmbeddings } from '../embedding/jobs'
 import { getEmbeddingCoverage, purgeStaleEmbeddings } from '../embedding/worker'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
@@ -190,7 +191,7 @@ export function settingsRoutes(deps: Deps) {
       if (!coverage.model) {
         return c.json({ error: '尚未配置或启用嵌入模型' }, 400)
       }
-      const missing = Math.max(0, coverage.total - coverage.embedded)
+      const missing = await countMissingEmbeddings(deps.db, coverage.model)
       const enqueued = await deps.jobs?.enqueueBackfill({ total: missing, model: coverage.model })
       return c.json({ queued: enqueued === false ? 0 : missing }, 200)
     })

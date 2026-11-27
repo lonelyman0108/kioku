@@ -89,17 +89,27 @@ export function canReadEntry(
   return entry.realms.some((r) => allowed.has(r.trim().toLowerCase()))
 }
 
-// 计算密钥在允许场域约束下的有效默认场域（不限场域时若配置了 focusRealms 则返回聚焦场域，否则为空）
-export function resolveKeyDefaultRealms(scope: KeyPrincipal): string[] {
-  const allowed = scope.allowedRealms !== null ? normalizeSlugList(scope.allowedRealms) : null
-  const focused = scope.focusRealms?.length ? normalizeSlugList(scope.focusRealms) : null
-  if (focused) {
-    if (allowed === null) return focused
+// 在允许场域硬边界内按 focusRealms 聚焦默认场域：不限场域时用 focus，仅通用密钥（[]）始终返回 []
+export function resolveAllowedRealmsWithFocus(
+  allowedRealms: readonly string[] | null | undefined,
+  focusRealms: readonly string[] | null | undefined,
+): string[] {
+  const allowed =
+    allowedRealms !== null && allowedRealms !== undefined ? normalizeSlugList(allowedRealms) : null
+  const focused = focusRealms?.length ? normalizeSlugList(focusRealms) : []
+  if (allowed === null) return focused
+  if (allowed.length === 0) return []
+  if (focused.length > 0) {
     const allowedSet = new Set(allowed)
     const intersection = focused.filter((r) => allowedSet.has(r))
-    return intersection.length ? intersection : allowed
+    if (intersection.length > 0) return intersection
   }
-  return allowed ?? []
+  return allowed
+}
+
+// 计算密钥在允许场域约束下的有效默认场域（不限场域时若配置了 focusRealms 则返回聚焦场域，否则为空）
+export function resolveKeyDefaultRealms(scope: KeyPrincipal): string[] {
+  return resolveAllowedRealmsWithFocus(scope.allowedRealms, scope.focusRealms)
 }
 
 // 新建词条时解析落库场域：限定非空 allowedRealms 的密钥缺省未传 realms 时自动继承有效默认场域，避免误写穿为全局词条

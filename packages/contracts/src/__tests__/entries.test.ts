@@ -350,5 +350,15 @@ describe('entries contracts', () => {
     const parsedLong = parseEpisodeSignals(longEncoded)
     expect(parsedLong.directives.length).toBeGreaterThan(0)
     expect(parsedLong.facts.length).toBeGreaterThan(0)
+
+    // 含四字节代理对（emoji）的极端截断不得拆开代理对，且总长度严格不超过 DISCLOSURE_MAX
+    const emojiEncoded = serializeEpisodeSignals({
+      directives: ['🚀'.repeat(95), '🎯'.repeat(95)],
+      facts: ['🧩'.repeat(95), '🔧'.repeat(95)],
+    })
+    expect(emojiEncoded).toBeTruthy()
+    expect(emojiEncoded!.length).toBeLessThanOrEqual(DISCLOSURE_MAX)
+    expect(() => encodeURIComponent(emojiEncoded!)).not.toThrow()
+    expect(Disclosure.safeParse(emojiEncoded).success).toBe(true)
   })
 })

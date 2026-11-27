@@ -213,6 +213,18 @@ function cleanEpisodeSignalItems(raw: readonly string[] | undefined): string[] {
   return out
 }
 
+// 按 UTF-16 码元上限截断且不拆分代理对，确保与 Zod max 长度校验一致
+function clipUtf16(text: string, maxUnits: number): string {
+  if (maxUnits <= 0) return ''
+  if (text.length <= maxUnits) return text.trim()
+  let out = ''
+  for (const ch of text) {
+    if (out.length + ch.length > maxUnits) break
+    out += ch
+  }
+  return out.trim()
+}
+
 function packSignalSection(prefix: string, items: readonly string[], maxChars: number): string {
   if (!items.length || maxChars <= prefix.length) return ''
   const kept: string[] = []
@@ -223,8 +235,8 @@ function packSignalSection(prefix: string, items: readonly string[], maxChars: n
       kept.push(item)
       len += sepLen + item.length
     } else if (kept.length === 0) {
-      const avail = maxChars - prefix.length
-      if (avail > 0) kept.push([...item].slice(0, avail).join('').trim())
+      const clipped = clipUtf16(item, maxChars - prefix.length)
+      if (clipped) kept.push(clipped)
       break
     } else {
       break

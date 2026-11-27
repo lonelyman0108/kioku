@@ -32,7 +32,9 @@ vi.mock('../../models/client', async (importOriginal) => {
   }
 })
 
+import { resolveAllowedRealmsWithFocus } from '../../access/scope'
 import { extractEpisodeBatch } from '../extract'
+import { buildEpisodeMessages, evaluateEpisodeResponse } from '../prompt'
 
 describe('extractEpisodeBatch 透传设备标识与终端名称', () => {
   it('查询 api_keys.name 与 bucket.deviceKey 并写入会话摘要提示词头部', async () => {
@@ -248,5 +250,139 @@ describe('extractEpisodeBatch 透传设备标识与终端名称', () => {
         summary: '仅适用于 home-24 机器，本地代理端口调整为 7890。',
       }
     }
+  })
+
+  it('严守仅通用密钥 allowedRealms=[] 边界，不被 focusRealms 绕过写入受限场域', async () => {
+    expect(resolveAllowedRealmsWithFocus([], ['work'])).toEqual([])
+    expect(resolveAllowedRealmsWithFocus(['work'], ['personal'])).toEqual(['work'])
+    expect(resolveAllowedRealmsWithFocus(['work', 'personal'], ['work'])).toEqual(['work'])
+    expect(resolveAllowedRealmsWithFocus(null, ['work'])).toEqual(['work'])
+
+    capturedMessages.length = 0
+    let selectCall = 0
+    const fakeDb = {
+      select: vi.fn(() => {
+        selectCall++
+        if (selectCall === 1) {
+          return {
+            from: () => ({
+              where: () => ({
+                orderBy: async () => [
+                  {
+                    id: 31,
+                    keyId: '00000000-0000-4000-8000-000000000031',
+                    deviceKey: 'mac-universal',
+                    projectSlug: 'kioku',
+                    sessionId: 'sess-u1',
+                    userText: '通用脚本说明',
+                    replyText: '已记录。',
+                    createdAt: new Date('2026-10-01T00:00:00Z'),
+                  },
+                ],
+              }),
+            }),
+          }
+        }
+        return {
+          from: () => ({
+            where: () => ({
+              limit: async () => [
+                {
+                  name: 'Universal Only Key',
+                  envs: ['mac'],
+                  allowedRealms: [],
+                  focusRealms: ['work'],
+                },
+              ],
+            }),
+          }),
+        }
+      }),
+      delete: vi.fn(() => ({
+        where: async () => undefined,
+      })),
+    } as unknown as Db
+
+    const writeEpisode = vi.fn(async () => ({ shortId: 'm-567def' }))
+    const fakeEntryService = { writeEpisode } as unknown as EntryService
+
+    const outcome = await extractEpisodeBatch(fakeDb, null, fakeEntryService, {
+      deviceKey: 'mac-universal',
+      projectSlug: 'kioku',
+    })
+    expect(outcome.createdShortId).toBe('m-567def')
+    expect(writeEpisode).toHaveBeenCalledWith(
+      expect.objectContaining({
+        realms: [],
+      }),
+    )
+  })
+})
+
+describe('buildEpisodeMessages 与 evaluateEpisodeResponse 细节边界', () => {
+  it('交替 sessionId 复用原会话编号，混合空 sessionId 单独标注，并按上限保留最新轮次', () => {
+    const msgs = buildEpisodeMessages(
+      [
+        { sessionId: 'sess-a', userText: '甲首轮', replyText: '答甲首轮' },
+        { sessionId: 'sess-b', userText: '乙首轮', replyText: '答乙首轮' },
+        { sessionId: '', userText: '未标识轮', replyText: '答未标识轮' },
+        { sessionId: 'sess-a', userText: '甲次轮', replyText: '答甲次轮' },
+      ],
+      { projectSlug: 'kioku' },
+    )
+    const userContent = msgs[1]!.content
+    const markers = userContent.match(/--- .* ---/g)
+    expect(markers).toEqual([
+      '--- 会话 1 ---',
+      '--- 会话 2 ---',
+      '--- 未标识会话 ---',
+      '--- 会话 1 ---',
+    ])
+
+    // 超出 12,000 字符时保留最新轮次、裁掉较早轮次
+    const longTurns = Array.from({ length: 20 }, (_, i) => ({
+      sessionId: 'sess-long',
+      userText: `第${i + 1}轮：${'甲'.repeat(800)}`,
+      replyText: `答${i + 1}：${'乙'.repeat(200)}`,
+    }))
+    const clipped = buildEpisodeMessages(longTurns, {})[1]!.content
+    expect(clipped).toContain('第20轮：')
+    expect(clipped).not.toContain('第1轮：')
+  })
+
+  it('保留信号中的比较符与泛型尖括号，兼容空 summary 回退与旧版无信号响应', () => {
+    const withAngles = evaluateEpisodeResponse(
+      JSON.stringify({
+        title: '版本约束',
+        summary: '',
+        facts: ['Node >= 22 且 valid_to <= now() 视为过期', '泛型使用 Array<string>'],
+        directives: ['确保版本 >= 22 才发布'],
+      }),
+    )
+    expect(withAngles.status).toBe('summary')
+    if (withAngles.status === 'summary') {
+      expect(withAngles.data.facts).toEqual([
+        'Node >= 22 且 valid_to <= now() 视为过期',
+        '泛型使用 Array<string>',
+      ])
+      expect(withAngles.data.directives).toEqual(['确保版本 >= 22 才发布'])
+      expect(withAngles.data.summary).toContain('确保版本 >= 22 才发布')
+    }
+
+    const legacy = evaluateEpisodeResponse(
+      JSON.stringify({
+        title: '旧版格式',
+        summary: '仅包含标题和摘要。',
+      }),
+    )
+    expect(legacy).toEqual({
+      status: 'summary',
+      data: {
+        title: '旧版格式',
+        summary: '仅包含标题和摘要。',
+        facts: [],
+        directives: [],
+      },
+    })
   })
 })

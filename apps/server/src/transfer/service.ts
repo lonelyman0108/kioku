@@ -204,7 +204,9 @@ export async function exportTransferBundle(
       if (row.realms.length) meta.push(`场域：${row.realms.join(', ')}`)
       if (row.runtimes.length) meta.push(`客户端：${row.runtimes.join(', ')}`)
       if (row.topics.length) meta.push(`主题：${row.topics.join(', ')}`)
-      if (row.disclosure) meta.push(`触发场景：${row.disclosure}`)
+      if (row.disclosure) {
+        meta.push(`${row.kind === 'episode' ? '信号要点' : '触发场景'}：${row.disclosure}`)
+      }
       if (row.validTo) meta.push(`有效期至：${row.validTo.toISOString()}`)
       sections.push(`## ${row.title} (${row.shortId})`)
       sections.push('')

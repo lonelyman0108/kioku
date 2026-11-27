@@ -18,6 +18,7 @@ import {
   extractTargetShortIds,
   mergeFallbackTopics,
   normalizeSlugList,
+  parseEpisodeSignals,
   REVISABLE_DREAM_KINDS,
   ReviseSuggestionResponse,
   SCENE_TAGS_MAX,
@@ -271,7 +272,17 @@ function formatSourceEntry(
   const header = `### [${entry.shortId}] (${entry.kind}) ${entry.title}${tags.length ? ` | ${tags.join(' ')}` : ''}`
   const metaLines: string[] = []
   if (entry.summary?.trim()) metaLines.push(`现行概要：${inlineText(entry.summary)}`)
-  if (entry.disclosure?.trim()) metaLines.push(`触发场景：${inlineText(entry.disclosure)}`)
+  if (entry.kind === 'episode') {
+    const signals = parseEpisodeSignals(entry.disclosure)
+    if (signals.directives.length) {
+      metaLines.push(`提取偏好与指令：${inlineText(signals.directives.join('；'))}`)
+    }
+    if (signals.facts.length) {
+      metaLines.push(`提取事实要点：${inlineText(signals.facts.join('；'))}`)
+    }
+  } else if (entry.disclosure?.trim()) {
+    metaLines.push(`触发场景：${inlineText(entry.disclosure)}`)
+  }
 
   return [header, ...metaLines, sourceOpen, normalizeLineEndings(entry.content), sourceClose].join(
     '\n',

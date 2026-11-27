@@ -2,11 +2,11 @@ import {
   ApplySuggestionResponse,
   EntryDetailResponse,
   InboxResponse,
+  parseEpisodeSignals,
   SingleCrossCheckResponse,
   SingleTidyApplyResponse,
   SingleTidyPreviewResponse,
 } from '@kioku/contracts'
-import { parseEpisodeSignals } from '@kioku/contracts'
 import { eq, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
@@ -20,6 +20,7 @@ import {
   entryEmbeddings,
   turnBuffer,
 } from '../../db/schema'
+import { countMissingEmbeddings, runBackfillEmbeddings } from '../../embedding/jobs'
 import { embedEntryIds, getEmbeddingCoverage } from '../../embedding/worker'
 import type { Deps, KeyPrincipal } from '../../http/env'
 import { cleanupExpired } from '../../jobs/cleanup'
@@ -2383,7 +2384,20 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
     )
     expect(recalled.some((item) => item.shortId === epDetail.entry.shortId)).toBe(false)
 
-    // 将 episode 标记为过期后，cleanupExpired 自动回收其信号向量，同时保留正式词条向量
+    // 再写入一条未过期的含信号 episode，验证 backfill 计数/补齐与 cleanupExpired 仅回收过期摘要
+    const activeSigEp = await entrySvc.writeEpisode({
+      title: '未过期活跃信号摘要',
+      content: '确认继续沿用极简纸墨风。',
+      deviceKey: 'dev-mac',
+      projectSlug: 'kioku',
+      realms: ['work'],
+      directives: ['保持纸墨零圆角风格'],
+    })
+    expect(await countMissingEmbeddings(database.db, 'fake-embed-1024')).toBe(1)
+    expect(await runBackfillEmbeddings(database.db, masterKey)).toBe(1)
+    expect(await countMissingEmbeddings(database.db, 'fake-embed-1024')).toBe(0)
+
+    // 将第一条 episode 标记为过期后，cleanupExpired 自动回收其信号向量，同时保留未过期信号摘要与正式词条向量
     await database.db
       .update(entries)
       .set({ validTo: sql`now() - interval '1 hour'` })
@@ -2393,6 +2407,59 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
     const embAfterCleanup = await database.db
       .select({ entryId: entryEmbeddings.entryId })
       .from(entryEmbeddings)
-    expect(embAfterCleanup.map((r) => r.entryId)).toEqual([formal.entry.id])
+    expect(new Set(embAfterCleanup.map((r) => r.entryId))).toEqual(
+      new Set([formal.entry.id, activeSigEp.id]),
+    )
+
+    // 清空 episode 信号要点应立即删除旧信号向量且不重新入队；再次写入信号应重新入队
+    enqueuedEmbedIds.length = 0
+    const clearedEp = await entrySvc.update(consoleScope, activeSigEp.shortId, {
+      expectedVersion: 1,
+      disclosure: null,
+    })
+    expect(clearedEp.entry.disclosure).toBeNull()
+    expect(enqueuedEmbedIds).toEqual([])
+    const embAfterClear = await database.db
+      .select({ entryId: entryEmbeddings.entryId })
+      .from(entryEmbeddings)
+    expect(embAfterClear.map((r) => r.entryId)).toEqual([formal.entry.id])
+
+    const reSignaledEp = await entrySvc.update(consoleScope, activeSigEp.shortId, {
+      expectedVersion: clearedEp.entry.version,
+      disclosure: '偏好：保持纸墨零圆角风格',
+    })
+    expect(reSignaledEp.entry.disclosure).toBe('偏好：保持纸墨零圆角风格')
+    expect(enqueuedEmbedIds).toEqual([activeSigEp.id])
+    await embedEntryIds(database.db, masterKey, [activeSigEp.id])
+
+    // 软删除再从回收站恢复含信号 episode 应重新入队向量化
+    enqueuedEmbedIds.length = 0
+    await entrySvc.remove(consoleScope, activeSigEp.shortId)
+    const restoredSig = await entrySvc.restore(consoleScope, activeSigEp.shortId, {})
+    expect(enqueuedEmbedIds).toEqual([activeSigEp.id])
+
+    // promoteToEntry 未显式传 disclosure 时自动清空 episode 信号避免污染正式词条；回滚回无信号 episode 时清除向量
+    enqueuedEmbedIds.length = 0
+    const promoted = await entrySvc.update(consoleScope, activeSigEp.shortId, {
+      expectedVersion: restoredSig.entry.version,
+      promoteToEntry: true,
+    })
+    expect(promoted.entry.kind).toBe('entry')
+    expect(promoted.entry.disclosure).toBeNull()
+    expect(enqueuedEmbedIds).toEqual([activeSigEp.id])
+    await embedEntryIds(database.db, masterKey, [activeSigEp.id])
+
+    enqueuedEmbedIds.length = 0
+    const rolledBack = await entrySvc.restore(consoleScope, activeSigEp.shortId, {
+      version: clearedEp.entry.version,
+      expectedVersion: promoted.entry.version,
+    })
+    expect(rolledBack.entry.kind).toBe('episode')
+    expect(rolledBack.entry.disclosure).toBeNull()
+    expect(enqueuedEmbedIds).toEqual([])
+    const embAfterRollback = await database.db
+      .select({ entryId: entryEmbeddings.entryId })
+      .from(entryEmbeddings)
+    expect(embAfterRollback.map((r) => r.entryId)).toEqual([formal.entry.id])
   })
 })

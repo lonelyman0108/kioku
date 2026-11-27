@@ -1,6 +1,6 @@
-import { normalizeSlugList } from '@kioku/contracts'
 import { and, asc, eq, lte } from 'drizzle-orm'
 
+import { resolveAllowedRealmsWithFocus } from '../access/scope'
 import type { MasterKey } from '../crypto/keyring'
 import type { Db } from '../db/client'
 import { apiKeys, turnBuffer } from '../db/schema'
@@ -15,24 +15,6 @@ export interface ExtractionOutcome {
   turns: number
   createdShortId: string | null
   skippedReason?: string
-}
-
-// 按密钥的 focusRealms 与 allowedRealms 归因会话摘要场域：优先取交集，无交集或未配 focus 时回退 allowedRealms
-function resolveEpisodeRealms(
-  allowedRealms: readonly string[] | null | undefined,
-  focusRealms: readonly string[] | null | undefined,
-): string[] {
-  const allowed = normalizeSlugList(allowedRealms)
-  const focus = normalizeSlugList(focusRealms)
-  if (allowed.length > 0) {
-    if (focus.length > 0) {
-      const allowedSet = new Set(allowed)
-      const intersection = focus.filter((r) => allowedSet.has(r))
-      if (intersection.length > 0) return intersection
-    }
-    return allowed
-  }
-  return focus
 }
 
 // 从指定 (device_key, project_slug) 缓冲桶生成一条会话摘要（episode），并清理已消费轮次
@@ -147,7 +129,7 @@ export async function extractEpisodeBatch(
     deviceKey: bucket.deviceKey,
     projectSlug: bucket.projectSlug,
     envs: keyRow.envs,
-    realms: resolveEpisodeRealms(keyRow.allowedRealms, keyRow.focusRealms),
+    realms: resolveAllowedRealmsWithFocus(keyRow.allowedRealms, keyRow.focusRealms),
     projects: bucket.projectSlug ? [bucket.projectSlug] : [],
     ...(hasSignals
       ? {

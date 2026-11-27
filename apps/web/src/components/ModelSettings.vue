@@ -181,6 +181,16 @@ const coveragePercent = computed(() => {
   if (!c || !c.total) return null
   return Math.round((c.embedded / c.total) * 100)
 })
+const backfillPercent = computed(() => {
+  const state = backfillState.value
+  if (!state || !state.running || state.total <= 0) return null
+  return Math.min(100, Math.round((state.processed / state.total) * 100))
+})
+const meterPercent = computed(() =>
+  backfillRunning.value && backfillPercent.value !== null
+    ? backfillPercent.value
+    : coveragePercent.value,
+)
 
 const selectedWireValue = computed(() => reasoningEffortWireValues[form.chatLlm.reasoningEffort])
 
@@ -693,8 +703,8 @@ async function cancelBackfill() {
               重建索引
             </UButton>
           </div>
-          <div v-if="coveragePercent !== null" class="meter">
-            <i :style="{ width: `${coveragePercent}%` }" />
+          <div v-if="meterPercent !== null" class="meter">
+            <i :style="{ width: `${meterPercent}%` }" />
           </div>
         </div>
       </section>
