@@ -935,6 +935,7 @@ async function rebuildEmbeddings() {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  min-height: 30px;
   padding: 4px 9px;
   border: 1px solid var(--ui-border-accented);
   background: var(--ui-bg-muted);

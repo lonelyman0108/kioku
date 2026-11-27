@@ -49,6 +49,7 @@ export const icons = {
   backlink: 'i-lucide-arrow-down-left',
   copy: 'i-lucide-copy',
   refresh: 'i-lucide-refresh-cw',
+  heading: 'i-lucide-heading',
   cancel: 'i-lucide-x',
   check: 'i-lucide-check',
   file: 'i-lucide-file-text',
