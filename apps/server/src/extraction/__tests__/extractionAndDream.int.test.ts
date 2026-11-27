@@ -2562,7 +2562,7 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
         runId: 'habit-restrained',
         trigger: 'manual',
         mode: 'cross_memory',
-        scope: 'incremental',
+        scope: 'full_corpus',
       })
       expect(restrainedRun.outcome).toBe('skipped')
       expect(llmCalls).toBe(0)
@@ -2723,19 +2723,107 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
         (i) => i.kind === 'update' && i.entries[0]?.shortId === existingHabit.entry.shortId,
       )!
       expect(updateCard).toBeTruthy()
-      await entrySvc.dismissSuggestion(updateCard.id)
+      // 应用该 update 卡片使目标词条 version 递增后，再跑 full_corpus cross_memory 仍必须彻底抑制该簇，绝不重复调用 LLM 或循环弹卡
+      await entrySvc.applySuggestion(updateCard.id, {})
 
       const callsBeforeRepeatUpdate = llmCalls
       const repeatUpdateRun = await runDream(database.db, masterKey, {
-        runId: 'habit-update-dismissed-no-resurface',
+        runId: 'habit-update-applied-no-loop',
         trigger: 'manual',
         mode: 'cross_memory',
-        scope: 'incremental',
+        scope: 'full_corpus',
       })
       expect(repeatUpdateRun.outcome).toBe('skipped')
       expect(llmCalls).toBe(callsBeforeRepeatUpdate)
 
-      // 5. Task C 事实向量对账：摘要标题与正式词条完全无共享关键词时，靠 facts 信号向量命中并送入对账
+      // 5. 多选正式词条定向查重（targetShortIds.length >= 2）严守目标范围，绝不越界扫描全库未审习惯摘要
+      const scopedFormalA = await entrySvc.create(
+        consoleScope,
+        entryInput({
+          title: '咖啡豆烘焙温控曲线',
+          content: '浅烘阶段保持温升平稳。',
+          realms: ['work'],
+        }),
+      )
+      const scopedFormalB = await entrySvc.create(
+        consoleScope,
+        entryInput({
+          title: '阳台绿植浇水频率',
+          content: '夏季每周浇灌两次。',
+          realms: ['work'],
+        }),
+      )
+      const unreviewedHabitA = await entrySvc.writeEpisode({
+        title: '未审习惯甲',
+        content: '在 repo-x 要求跑完测试再提交。',
+        deviceKey: 'mac-scope',
+        projectSlug: 'repo-x',
+        realms: ['work'],
+        projects: ['repo-x'],
+        directives: ['每次提交前必须先运行完整测试'],
+      })
+      const unreviewedHabitB = await entrySvc.writeEpisode({
+        title: '未审习惯乙',
+        content: '在 repo-y 同样要求跑完测试再提交。',
+        deviceKey: 'mac-scope',
+        projectSlug: 'repo-y',
+        realms: ['work'],
+        projects: ['repo-y'],
+        directives: ['每次提交前必须先运行完整测试'],
+      })
+      await database.db
+        .update(entries)
+        .set({ createdAt: new Date(tBase.getTime() + 12 * 3_600_000) })
+        .where(eq(entries.id, unreviewedHabitA.id))
+      await database.db
+        .update(entries)
+        .set({ createdAt: new Date(tBase.getTime() + 36 * 3_600_000) })
+        .where(eq(entries.id, unreviewedHabitB.id))
+      await embedEntryIds(database.db, masterKey, [unreviewedHabitA.id, unreviewedHabitB.id])
+
+      const callsBeforeScoped = llmCalls
+      const scopedRun = await runDream(database.db, masterKey, {
+        runId: 'scoped-targets-no-habit-leak',
+        trigger: 'manual',
+        mode: 'cross_memory',
+        scope: 'incremental',
+        targetShortIds: [scopedFormalA.entry.shortId, scopedFormalB.entry.shortId],
+      })
+      expect(scopedRun.outcome).toBe('skipped')
+      expect(llmCalls).toBe(callsBeforeScoped)
+      // 清理本段临时习惯摘要，避免干扰下方 Task C 验证
+      await database.db
+        .update(entries)
+        .set({ deletedAt: sql`now()` })
+        .where(sql`${entries.id} in (${unreviewedHabitA.id}, ${unreviewedHabitB.id})`)
+
+      // 6. Task C 事实向量对账：在 7 条同向量全局词条干扰下（超出 SQL 每条 6 槽上限）仍通过 SQL 场域前置过滤命中 work 目标，且同项目零相关常驻词条不会混入目标
+      const distractorGlobalIds: string[] = []
+      const distractorShorts: string[] = []
+      for (let i = 0; i < 7; i++) {
+        const g = await entrySvc.create(
+          consoleScope,
+          entryInput({
+            title: `制品发布基线全局干扰项${i + 1}`,
+            summary: '全局通用记录，不能承接 work 场域事实。',
+            content: `全局干扰正文 ${i + 1}。`,
+            realms: [],
+          }),
+        )
+        distractorGlobalIds.push(g.entry.id)
+        distractorShorts.push(g.entry.shortId)
+      }
+      const unrelatedSameProjectPinned = await entrySvc.create(
+        consoleScope,
+        entryInput({
+          title: '值班轮换表',
+          summary: '每周五切换值班人。',
+          content: '周度值班排期安排。',
+          bootMode: 'full',
+          realms: ['work'],
+          projects: ['ops-pipeline'],
+        }),
+      )
       const formalBaseline = await entrySvc.create(
         consoleScope,
         entryInput({
@@ -2747,8 +2835,19 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
       )
       await database.db
         .update(entries)
-        .set({ dreamCheckedVersion: formalBaseline.entry.version })
-        .where(eq(entries.id, formalBaseline.entry.id))
+        .set({ dreamCheckedVersion: 1 })
+        .where(
+          sql`${entries.id} in (${sql.join(
+            [
+              ...distractorGlobalIds,
+              unrelatedSameProjectPinned.entry.id,
+              formalBaseline.entry.id,
+              scopedFormalA.entry.id,
+              scopedFormalB.entry.id,
+            ].map((id) => sql`${id}::uuid`),
+            sql`, `,
+          )})`,
+        )
 
       const factEp = await entrySvc.writeEpisode({
         title: '临时构建排障记录',
@@ -2759,14 +2858,16 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
         projects: ['ops-pipeline'],
         facts: ['镜像仓库地址变更为 registry-new.example.com'],
       })
-      await embedEntryIds(database.db, masterKey, [formalBaseline.entry.id, factEp.id])
+      await embedEntryIds(database.db, masterKey, [
+        ...distractorGlobalIds,
+        unrelatedSameProjectPinned.entry.id,
+        formalBaseline.entry.id,
+        factEp.id,
+      ])
 
-      let factReconcileSawBaseline = false
+      let factReconcilePrompt = ''
       fakeAi.setChatHandler((messages) => {
-        const userText = messages[1]?.content ?? ''
-        if (userText.includes(factEp.shortId) && userText.includes(formalBaseline.entry.shortId)) {
-          factReconcileSawBaseline = true
-        }
+        factReconcilePrompt = messages[1]?.content ?? ''
         return JSON.stringify({
           suggestions: [
             {
@@ -2788,7 +2889,13 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
       })
       expect(factRun.outcome).toBe('ok')
       expect(factRun.suggested).toBe(1)
-      expect(factReconcileSawBaseline).toBe(true)
+      expect(factReconcilePrompt).toContain(factEp.shortId)
+      expect(factReconcilePrompt).toContain(formalBaseline.entry.shortId)
+      // 零相关度的同项目常驻词条与不可流向的全局词条均不得混入 Task C 对账目标
+      expect(factReconcilePrompt).not.toContain(unrelatedSameProjectPinned.entry.shortId)
+      for (const sid of distractorShorts) {
+        expect(factReconcilePrompt).not.toContain(sid)
+      }
     } finally {
       fakeAi.setEmbedHandler(deterministicVector)
     }

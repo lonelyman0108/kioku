@@ -29,6 +29,18 @@ export function formatShort(iso: string, now: Date = new Date()): string {
   return d.getFullYear() === now.getFullYear() ? day : `${d.getFullYear()}-${day}`
 }
 
+// 按真实时间戳排序后格式化起止时间范围，避免跨年字符串排序倒置
+export function formatShortRange(isos: readonly string[], now: Date = new Date()): string | null {
+  const timestamps = isos
+    .map((iso) => Date.parse(iso))
+    .filter((ts) => Number.isFinite(ts))
+    .sort((a, b) => a - b)
+  if (!timestamps.length) return null
+  const first = formatShort(new Date(timestamps[0]!).toISOString(), now)
+  const last = formatShort(new Date(timestamps.at(-1)!).toISOString(), now)
+  return first === last ? first : `${first} – ${last}`
+}
+
 // 按天分组的列表里一行的时间：本地时间的时和分
 export function formatClock(iso: string): string {
   const d = new Date(iso)

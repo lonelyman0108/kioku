@@ -41,7 +41,7 @@ import {
 import { entryRoute } from '../routes'
 import { runtimeName } from '../runtimes'
 import { detectSecretPrefixes } from '../secretHint'
-import { formatRelative, formatShort, formatTime } from '../time'
+import { formatRelative, formatShort, formatShortRange, formatTime } from '../time'
 import SceneScopePicker, { type SceneScopeValue } from './SceneScopePicker.vue'
 import SegmentedChoice from './SegmentedChoice.vue'
 import DiffViewer from './ui/DiffViewer.vue'
@@ -299,10 +299,7 @@ const sourceEpisodeProvenance = computed(() => {
   const episodes = props.suggestion.entries.filter((e) => e.kind === 'episode')
   if (episodes.length < 2) return null
   const projects = normalizeSlugList(episodes.flatMap((e) => e.projects))
-  const dates = episodes.map((e) => formatShort(e.updatedAt)).sort()
-  const first = dates[0] ?? ''
-  const last = dates.at(-1) ?? ''
-  const dateRange = first && last ? (first === last ? first : `${first} – ${last}`) : null
+  const dateRange = formatShortRange(episodes.map((e) => e.updatedAt))
   return {
     episodeCount: episodes.length,
     projects,

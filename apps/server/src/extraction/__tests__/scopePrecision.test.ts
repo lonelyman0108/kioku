@@ -348,18 +348,39 @@ describe('会话摘要与整理提示词的主机边界透传', () => {
   })
 
   it('跨会话偏好聚簇严格区分独立会话、严守同场域边界并生成稳定簇指纹与提示词', () => {
-    // 同一设备同一项目 15 分钟内连续落桶（即使跨 UTC 零点）仅计 1 次独立会话
+    // 同一设备同一项目 15 分钟内连续落桶（即使跨 UTC 零点或大小写不同）仅计 1 次独立会话
     expect(
       countDistinctHabitSessions([
         {
-          deviceKey: 'mac-home',
-          projectSlug: 'kioku',
+          deviceKey: 'Mac-Home',
+          projectSlug: 'Kioku',
           createdAt: new Date('2026-11-26T23:55:00Z'),
         },
         {
           deviceKey: 'mac-home',
           projectSlug: 'kioku',
           createdAt: new Date('2026-11-27T00:05:00Z'),
+        },
+      ]),
+    ).toBe(1)
+
+    // 单次 3 小时连续长会话每 1.5 小时落桶一次（相邻间隔均 < 2 小时）仍仅计 1 次独立会话
+    expect(
+      countDistinctHabitSessions([
+        {
+          deviceKey: 'mac-home',
+          projectSlug: 'kioku',
+          createdAt: new Date('2026-11-27T08:00:00Z'),
+        },
+        {
+          deviceKey: 'mac-home',
+          projectSlug: 'kioku',
+          createdAt: new Date('2026-11-27T09:30:00Z'),
+        },
+        {
+          deviceKey: 'mac-home',
+          projectSlug: 'kioku',
+          createdAt: new Date('2026-11-27T11:00:00Z'),
         },
       ]),
     ).toBe(1)
@@ -444,6 +465,24 @@ describe('会话摘要与整理提示词的主机边界透传', () => {
       ),
     ).toEqual([])
 
+    // 非成对相似的枢纽桥接（A-B 相似、A-C 相似，但 B-C 无边）不会把无关的 B、C 揉进同一簇
+    const epWorkC = {
+      id: '00000000-0000-4000-8000-000000000105',
+      realms: ['work'],
+      deviceKey: 'mac-work',
+      projectSlug: 'repo-c',
+      createdAt: new Date('2026-11-27T10:00:00Z'),
+    }
+    const cliqueClusters = buildHabitClusters(
+      [epWorkA, epWorkB, epWorkC],
+      [
+        { a: epWorkA.id, b: epWorkB.id, score: 0.92 },
+        { a: epWorkA.id, b: epWorkC.id, score: 0.85 },
+      ],
+    )
+    expect(cliqueClusters).toHaveLength(1)
+    expect(cliqueClusters[0]!.map((r) => r.id).sort()).toEqual([epWorkA.id, epWorkB.id])
+
     const centroid = computeNormalizedCentroid([
       [1, 0, 0],
       [0, 1, 0],
@@ -451,6 +490,8 @@ describe('会话摘要与整理提示词的主机边界透传', () => {
     expect(centroid).toBeTruthy()
     expect(centroid![0]).toBeCloseTo(Math.SQRT1_2, 5)
     expect(centroid![1]).toBeCloseTo(Math.SQRT1_2, 5)
+    expect(computeNormalizedCentroid([[Number.POSITIVE_INFINITY, 0, 0]])).toBeNull()
+    expect(computeNormalizedCentroid([[Number.NaN, 1, 0]])).toBeNull()
 
     // 稳定簇指纹与成员顺序无关，随版本变化
     const discForward = habitClusterDiscriminator([
