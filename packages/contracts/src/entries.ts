@@ -628,24 +628,38 @@ export const CAPTURE_PATCH_KINDS = [
 export const CapturePatchKind = z.enum(CAPTURE_PATCH_KINDS)
 export type CapturePatchKind = z.infer<typeof CapturePatchKind>
 
-export const CapturePlanRequest = z.object({
-  text: z
-    .string()
-    .trim()
-    .min(1, '请输入要记录的内容')
-    .max(CAPTURE_TEXT_MAX, `随手记内容最多 ${CAPTURE_TEXT_MAX} 个字符`),
-  targetShortId: ShortId.optional(),
-  mode: z.enum(['auto', 'append']).default('auto'),
-  heading: z.string().trim().max(200).optional(),
-})
+export const CapturePlanRequest = z
+  .object({
+    text: z
+      .string()
+      .trim()
+      .min(1, '请输入要记录的内容')
+      .max(CAPTURE_TEXT_MAX, `随手记内容最多 ${CAPTURE_TEXT_MAX} 个字符`),
+    targetShortId: ShortId.optional(),
+    mode: z.enum(['auto', 'append', 'refine']).default('auto'),
+    heading: z.string().trim().max(200).optional(),
+  })
+  .superRefine((val, ctx) => {
+    if (val.mode === 'refine' && !val.targetShortId) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['targetShortId'],
+        message: '按说明微调必须指定目标记忆',
+      })
+    }
+  })
 export type CapturePlanRequest = z.infer<typeof CapturePlanRequest>
 
 export const CaptureCandidate = z.object({
   shortId: ShortId,
   title: z.string(),
+  summary: z.string().nullable().optional(),
   disclosure: z.string().nullable(),
   isPinned: z.boolean(),
+  envs: z.array(z.string()).optional(),
+  realms: z.array(z.string()).optional(),
   projects: z.array(z.string()),
+  runtimes: z.array(z.string()).optional(),
   topics: z.array(z.string()),
   version: z.number().int(),
   score: z.number(),
@@ -691,6 +705,14 @@ export const CapturePlanResponse = z.object({
   beforeContent: z.string().nullable(),
   proposedContent: z.string().nullable(),
   integrity: CaptureIntegrity.nullable(),
+  proposedTitle: EntryTitle.nullable().optional(),
+  proposedSummary: EntrySummary.nullable().optional(),
+  proposedDisclosure: Disclosure.nullable().optional(),
+  proposedEnvs: SceneSlugList.nullable().optional(),
+  proposedProjects: SceneSlugList.nullable().optional(),
+  proposedRealms: SceneSlugList.nullable().optional(),
+  proposedRuntimes: SceneSlugList.nullable().optional(),
+  proposedChangeSummary: ChangeSummary.nullable().optional(),
   proposedNew: CaptureProposedNew,
   candidates: z.array(CaptureCandidate),
 })

@@ -25,6 +25,7 @@ import {
   ModelsSettingsResponse,
   RebuildEmbeddingsResponse,
   RevealCredentialResponse,
+  ReviseSuggestionResponse,
   SessionsResponse,
   SetupStatusResponse,
   SingleCrossCheckResponse,
@@ -50,6 +51,7 @@ import {
   type ImportApplyRequest,
   type ImportPreviewRequest,
   type RestoreEntryRequest,
+  type ReviseSuggestionRequest,
   type RotateApiKeyRequest,
   type SetupRequest,
   type SingleTidyApplyRequest,
@@ -278,6 +280,12 @@ export const api = {
     }),
   dismissSuggestion: (id: string) =>
     request('POST', `/console/inbox/${encodeURIComponent(id)}/dismiss`),
+  reviseInboxSuggestion: (id: string, body: ReviseSuggestionRequest, signal?: AbortSignal) =>
+    request('POST', `/console/inbox/${encodeURIComponent(id)}/revise`, {
+      body,
+      schema: ReviseSuggestionResponse,
+      signal,
+    }),
   runDream: (body?: Partial<TriggerDreamRequest>) =>
     request('POST', '/console/dream/run', {
       ...(body ? { body } : {}),

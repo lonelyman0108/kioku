@@ -323,3 +323,53 @@ export const SingleCrossCheckResponse = z.object({
   retriedCount: z.number().int().min(0).optional(),
 })
 export type SingleCrossCheckResponse = z.infer<typeof SingleCrossCheckResponse>
+
+// ---- 待处理建议单轮无状态按说明修订契约 ----
+
+export const REVISABLE_DREAM_KINDS = [
+  'distill_episode',
+  'update',
+  'merge_duplicates',
+  'tidy',
+] as const
+export const RevisableDreamKind = z.enum(REVISABLE_DREAM_KINDS)
+export type RevisableDreamKind = z.infer<typeof RevisableDreamKind>
+
+export const REVISE_INSTRUCTION_MAX = 500
+
+export const ReviseSuggestionRequest = z.object({
+  instruction: z
+    .string()
+    .trim()
+    .min(1, '请输入修订说明')
+    .max(REVISE_INSTRUCTION_MAX, `修订说明最多 ${REVISE_INSTRUCTION_MAX} 个字符`),
+  title: EntryTitle.optional(),
+  summary: EntrySummary.nullable().optional(),
+  content: EntryContent.optional(),
+  disclosure: Disclosure.nullable().optional(),
+  changeSummary: ChangeSummary.nullable().optional(),
+  topics: TopicList.optional(),
+  envs: SceneSlugList.optional(),
+  realms: SceneSlugList.optional(),
+  projects: SceneSlugList.optional(),
+  runtimes: SceneSlugList.optional(),
+  bootMode: BootMode.optional(),
+})
+export type ReviseSuggestionRequest = z.infer<typeof ReviseSuggestionRequest>
+
+export const ReviseSuggestionResponse = z.object({
+  proposedTitle: z.string().nullable(),
+  proposedSummary: z.string().nullable(),
+  proposedContent: z.string(),
+  proposedDisclosure: z.string().nullable(),
+  proposedChangeSummary: z.string().nullable(),
+  proposedTopics: z.array(z.string()).nullable(),
+  proposedEnvs: z.array(z.string()).nullable(),
+  proposedRealms: z.array(z.string()).nullable(),
+  proposedProjects: z.array(z.string()).nullable(),
+  proposedRuntimes: z.array(z.string()).nullable(),
+  proposedBootMode: BootMode.nullable(),
+  reason: z.string(),
+  integrity: CaptureIntegrity,
+})
+export type ReviseSuggestionResponse = z.infer<typeof ReviseSuggestionResponse>

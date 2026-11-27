@@ -75,6 +75,7 @@ import ConsequenceModal from './ConsequenceModal.vue'
 import EntryLinksPanel from './EntryLinksPanel.vue'
 import MemoryContent from './MemoryContent.vue'
 import MemoryHistoryDrawer from './MemoryHistoryDrawer.vue'
+import QuickCaptureModal from './QuickCaptureModal.vue'
 import SceneScopePicker, { type SceneScopeValue } from './SceneScopePicker.vue'
 import SegmentedChoice from './SegmentedChoice.vue'
 import SingleTidyDrawer, { type SingleOrganizeMode } from './SingleTidyDrawer.vue'
@@ -754,9 +755,13 @@ const hasChatModel = computed(() => Boolean(me.data.value?.hasChatModel))
 const pendingSuggestionCount = computed(() => detail.value?.pendingSuggestionCount ?? 0)
 const organizeOpen = ref(false)
 const organizeMode = ref<SingleOrganizeMode>('tidy')
+const refineOpen = ref(false)
 
 watch(isDeleted, (deleted) => {
-  if (deleted) organizeOpen.value = false
+  if (deleted) {
+    organizeOpen.value = false
+    refineOpen.value = false
+  }
 })
 
 function openOrganize(targetMode: SingleOrganizeMode) {
@@ -765,12 +770,22 @@ function openOrganize(targetMode: SingleOrganizeMode) {
   organizeOpen.value = true
 }
 
+function openRefine() {
+  if (!hasChatModel.value || !entry.value || isDeleted.value || entry.value.kind !== 'entry') return
+  refineOpen.value = true
+}
+
 const organizeMenuItems = computed<DropdownMenuItem[][]>(() => {
   if (!hasChatModel.value) {
     return [[{ type: 'label', label: '请先在设置中配置对话模型' }]]
   }
   return [
     [
+      {
+        label: '按说明微调',
+        icon: icons.sparkles,
+        onSelect: () => openRefine(),
+      },
       {
         label: '规范此条',
         icon: icons.tidy,
@@ -1137,7 +1152,9 @@ defineExpose({
                   :icon="icons.tidy"
                   :trailing-icon="icons.chevronDown"
                   :disabled="!hasChatModel"
-                  :title="hasChatModel ? '主动规范此条或查重/关联' : '请先在设置中配置对话模型'"
+                  :title="
+                    hasChatModel ? '按说明微调、规范此条或查重/关联' : '请先在设置中配置对话模型'
+                  "
                 >
                   整理
                 </UButton>
@@ -1777,6 +1794,13 @@ defineExpose({
         :mode="organizeMode"
         @applied="onSingleTidyApplied"
         @staged="onSingleTidyStaged"
+      />
+
+      <QuickCaptureModal
+        v-if="!isDeleted && entry.kind === 'entry'"
+        v-model:open="refineOpen"
+        :target-entry="{ shortId: entry.shortId, title: entry.title }"
+        @applied="onSingleTidyApplied"
       />
 
       <ConsequenceModal

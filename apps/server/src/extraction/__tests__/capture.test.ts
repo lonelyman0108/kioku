@@ -5,9 +5,14 @@ import {
   buildCaptureMessages,
   buildDefaultProposedNew,
   buildManualPlan,
+  buildRefineMessages,
   CAPTURE_PROMPT_CHAR_BUDGET,
+  computeRefineMaxTokens,
   parseCaptureDecision,
+  parseRefineDecision,
+  REFINE_PROMPT_CONTENT_LIMIT,
   resolveCaptureDecision,
+  resolveRefineDecision,
 } from '../capture'
 
 function makeCandidate(overrides: Partial<CaptureCandidate> = {}): CaptureCandidate {
@@ -489,5 +494,243 @@ describe('capture 提示构造、JSON 解析与局部补丁回退', () => {
     expect(manualEmpty.action).toBe('create')
     expect(manualEmpty.patchKind).toBe('create')
     expect(manualEmpty.targetShortId).toBeNull()
+  })
+
+  it('单条按说明微调正确计算充裕输出预算、拼装元信息上下文并校验元信息与正文补丁', () => {
+    expect(computeRefineMaxTokens(200)).toBe(4_000)
+    expect(computeRefineMaxTokens(5_000)).toBe(10_000)
+    expect(computeRefineMaxTokens(20_000)).toBe(16_384)
+
+    const target = makeCandidate({
+      shortId: 'm-234xyz',
+      title: '本地代理配置',
+      summary: 'macOS 本地代理端口为 7890。',
+      disclosure: '排查代理问题时参考',
+      envs: ['mac'],
+      realms: ['work'],
+      projects: ['kioku'],
+      runtimes: ['claudecode'],
+      content: [
+        '## 代理端口',
+        '- 本地代理监听 127.0.0.1:7890',
+        '',
+        '## 凭据与关联',
+        '- 认证参考 {{cred:proxy-token}} 与 [[m-234abc]]',
+      ].join('\n'),
+      headings: ['代理端口', '凭据与关联'],
+    })
+
+    const messages = buildRefineMessages({
+      text: '补充说明仅适用于家里 home-24 主机，并把环境标签收紧为 home-24',
+      target,
+    })
+    expect(messages).toHaveLength(2)
+    const sys = messages[0]!.content
+    const usr = messages[1]!.content
+    const nonceMatch = sys.match(/<instruction_([0-9a-f]{8})>/)
+    expect(nonceMatch).not.toBeNull()
+    const nonce = nonceMatch![1]!
+    expect(sys).toContain(`<entry_${nonce}>`)
+    expect(usr).toContain(`<instruction_${nonce}>`)
+    expect(usr).toContain('环境（envs）：mac')
+    expect(usr).toContain('场域（realms）：work')
+    expect(usr).toContain('现行概要：macOS 本地代理端口为 7890。')
+
+    // 同时修订局部正文补丁与多项元信息，过滤非法标签与标题中的凭据占位符
+    const rawJson = JSON.stringify({
+      action: 'update',
+      patch: {
+        kind: 'replace',
+        oldText: '- 本地代理监听 127.0.0.1:7890',
+        text: '- 仅限家里 home-24 主机生效：本地代理监听 127.0.0.1:7890',
+      },
+      proposedTitle: 'home-24 本地代理配置 {{cred:leak}}',
+      proposedSummary: '仅适用于 home-24 主机，本地代理监听 7890 端口。',
+      proposedDisclosure: '在 home-24 主机排查代理时参考',
+      proposedEnvs: ['HOME-24', '含 空 格 非 法'],
+      proposedProjects: ['kioku'],
+      proposedRealms: ['personal'],
+      proposedRuntimes: [],
+      proposedChangeSummary: '限定仅适用于 home-24 主机并收紧环境标签',
+      reason: '补充了单机前提并将环境标签收紧为 home-24',
+    })
+    const parsed = parseRefineDecision(rawJson)
+    expect(parsed).not.toBeNull()
+    expect(parsed?.proposedTitle).toBe('home-24 本地代理配置')
+    expect(parsed?.proposedEnvs).toEqual(['home-24'])
+    expect(parsed?.proposedRuntimes).toEqual([])
+
+    // 密钥范围仅允许 work 场域时，自动拦截越权的 personal 场域建议
+    const resolvedWithKeyScope = resolveRefineDecision(target, parsed!, {
+      kind: 'key',
+      keyId: '00000000-0000-4000-8000-000000000001',
+      name: 'Work Mac',
+      prefix: 'kk_work',
+      runtimeFamily: 'claudecode',
+      envs: ['mac'],
+      allowedRealms: ['work'],
+      canWrite: true,
+      canResolveCredentials: false,
+    })
+    expect(resolvedWithKeyScope).not.toBeNull()
+    const validated = CapturePlanResponse.parse(resolvedWithKeyScope)
+    expect(validated.action).toBe('update')
+    expect(validated.patchKind).toBe('replace')
+    expect(validated.proposedContent).toContain('仅限家里 home-24 主机生效')
+    expect(validated.proposedContent).toContain('{{cred:proxy-token}}')
+    expect(validated.proposedContent).toContain('[[m-234abc]]')
+    expect(validated.integrity?.intact).toBe(true)
+    expect(validated.proposedTitle).toBe('home-24 本地代理配置')
+    expect(validated.proposedSummary).toBe('仅适用于 home-24 主机，本地代理监听 7890 端口。')
+    expect(validated.proposedDisclosure).toBe('在 home-24 主机排查代理时参考')
+    expect(validated.proposedEnvs).toEqual(['home-24'])
+    expect(validated.proposedProjects).toBeNull() // 与原值一致时自动归并为 null
+    expect(validated.proposedRealms).toBeNull() // 超出密钥允许场域被拦截
+    expect(validated.proposedRuntimes).toEqual([]) // 显式清空原有 runtimes
+    expect(validated.proposedChangeSummary).toBe('限定仅适用于 home-24 主机并收紧环境标签')
+
+    // 仅调整元信息（正文不变）仍产出有效 update 方案
+    const metaOnlyDecision = parseRefineDecision(
+      JSON.stringify({
+        action: 'update',
+        patch: null,
+        proposedContent: null,
+        proposedEnvs: ['home-24'],
+        reason: '仅收紧环境标签',
+      }),
+    )
+    const metaOnlyPlan = resolveRefineDecision(target, metaOnlyDecision!)
+    expect(metaOnlyPlan?.action).toBe('update')
+    expect(metaOnlyPlan?.proposedContent).toBe(target.content)
+    expect(metaOnlyPlan?.proposedEnvs).toEqual(['home-24'])
+    expect(metaOnlyPlan?.integrity?.intact).toBe(true)
+
+    // 整篇替换丢失双链或凭据占位符时，checkCaptureIntegrity 准确产出告警字段
+    const lossDecision = parseRefineDecision(
+      JSON.stringify({
+        action: 'update',
+        patch: null,
+        proposedContent: '## 代理端口\n- 仅限 home-24 生效，端口 7890。',
+        reason: '精简了正文',
+      }),
+    )
+    const lossPlan = resolveRefineDecision(target, lossDecision!)
+    expect(lossPlan?.integrity?.intact).toBe(false)
+    expect(lossPlan?.integrity?.missingLinks).toEqual(['m-234abc'])
+    expect(lossPlan?.integrity?.missingCreds).toEqual(['proxy-token'])
+
+    // 无实质变更自动收敛为 noop
+    const unchangedDecision = parseRefineDecision(
+      JSON.stringify({
+        action: 'update',
+        patch: null,
+        proposedEnvs: ['mac'],
+        reason: '已是 mac',
+      }),
+    )
+    const unchangedPlan = resolveRefineDecision(target, unchangedDecision!)
+    expect(unchangedPlan?.action).toBe('noop')
+    expect(unchangedPlan?.patchKind).toBe('noop')
+
+    // 密钥范围下禁止将限定场域词条（work）静默放宽为无场域 []
+    const widenKeyDecision = parseRefineDecision(
+      JSON.stringify({
+        action: 'update',
+        patch: null,
+        proposedRealms: [],
+        proposedEnvs: ['home-24'],
+        reason: '尝试放宽场域并收紧环境',
+      }),
+    )!
+    const widenKeyPlan = resolveRefineDecision(target, widenKeyDecision, {
+      kind: 'key',
+      keyId: '00000000-0000-4000-8000-000000000001',
+      name: 'Work Mac',
+      prefix: 'kk_work',
+      runtimeFamily: 'claudecode',
+      envs: ['mac'],
+      allowedRealms: ['work'],
+      canWrite: true,
+      canResolveCredentials: false,
+    })
+    expect(widenKeyPlan?.proposedRealms).toBeNull()
+    expect(widenKeyPlan?.proposedEnvs).toEqual(['home-24'])
+  })
+
+  it('超长正文截断时禁止整篇 proposedContent 覆写以防静默丢尾，但放行局部补丁与纯元信息修订', () => {
+    const tailMarker = '尾部核心配置-绝不能静默丢失'
+    const filler = '超长参考说明段落。'.repeat(Math.ceil(REFINE_PROMPT_CONTENT_LIMIT / 9) + 50)
+    const oversizedContent = `## 开头规则\n- 本地代理监听 7890\n\n## 参考附录\n${filler}\n- ${tailMarker}`
+    expect(oversizedContent.length).toBeGreaterThan(REFINE_PROMPT_CONTENT_LIMIT)
+
+    const longTarget = makeCandidate({
+      shortId: 'm-234lng',
+      title: '超长运维手册',
+      envs: ['mac'],
+      headings: ['开头规则', '参考附录'],
+      content: oversizedContent,
+    })
+
+    // 1. 提示词显式声明截断并禁止输出 proposedContent
+    const messages = buildRefineMessages({ text: '收紧适用主机为 home-24', target: longTarget })
+    expect(messages[1]?.content).toContain('严禁输出整篇 proposedContent')
+    expect(messages[1]?.content).toContain('超长正文尾部省略')
+
+    // 2. 直接输出整篇 proposedContent -> 必须拒绝返回 null
+    const directRewrite = parseRefineDecision(
+      JSON.stringify({
+        action: 'update',
+        patch: null,
+        proposedContent: '## 开头规则\n- 仅限 home-24：本地代理监听 7890\n...（超长正文尾部省略）',
+        reason: '重写正文',
+      }),
+    )!
+    expect(resolveRefineDecision(longTarget, directRewrite)).toBeNull()
+
+    // 3. 局部补丁失配后附带 proposedContent 兜底 -> 同样必须拒绝返回 null
+    const failedPatchWithRewrite = parseRefineDecision(
+      JSON.stringify({
+        action: 'update',
+        patch: { kind: 'replace', oldText: '不存在的旧句', text: '新句' },
+        proposedContent: '## 开头规则\n- 截断后的重写',
+        reason: '替换失败后重写',
+      }),
+    )!
+    expect(resolveRefineDecision(longTarget, failedPatchWithRewrite)).toBeNull()
+
+    // 4. 局部 patch 命中 -> 允许生效且 100% 完整保留超长尾部
+    const localPatch = parseRefineDecision(
+      JSON.stringify({
+        action: 'update',
+        patch: {
+          kind: 'replace',
+          oldText: '- 本地代理监听 7890',
+          text: '- 仅限 home-24 主机：本地代理监听 7890',
+        },
+        proposedEnvs: ['home-24'],
+        reason: '仅替换开头行并收紧环境标签',
+      }),
+    )!
+    const patched = resolveRefineDecision(longTarget, localPatch)
+    expect(patched?.action).toBe('update')
+    expect(patched?.patchKind).toBe('replace')
+    expect(patched?.proposedContent).toContain('仅限 home-24 主机：本地代理监听 7890')
+    expect(patched?.proposedContent).toContain(tailMarker)
+    expect(patched?.proposedEnvs).toEqual(['home-24'])
+
+    // 5. 纯元信息修订 -> 允许生效且正文原样保留
+    const metaOnly = parseRefineDecision(
+      JSON.stringify({
+        action: 'update',
+        patch: null,
+        proposedContent: null,
+        proposedEnvs: ['home-24'],
+        reason: '仅收紧环境标签',
+      }),
+    )!
+    const metaRes = resolveRefineDecision(longTarget, metaOnly)
+    expect(metaRes?.action).toBe('update')
+    expect(metaRes?.proposedContent).toBe(oversizedContent)
+    expect(metaRes?.proposedEnvs).toEqual(['home-24'])
   })
 })
