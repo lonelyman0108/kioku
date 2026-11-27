@@ -33,11 +33,13 @@ const form = reactive({
   envs: [] as string[],
   restrictRealms: false,
   allowedRealms: [] as string[],
+  focusRealms: [] as string[],
   canWrite: true,
   canResolveCredentials: false,
 })
 const customEnv = ref('')
 const customRealm = ref('')
+const customFocusRealm = ref('')
 const saving = ref(false)
 const error = ref<string | null>(null)
 const issued = ref<IssuedApiKeyResponse | null>(null)
@@ -48,12 +50,14 @@ watch(open, (visible) => {
   error.value = null
   customEnv.value = ''
   customRealm.value = ''
+  customFocusRealm.value = ''
   if (props.editing) {
     form.name = props.editing.name
     form.runtimeFamily = props.editing.runtimeFamily
     form.envs = [...props.editing.envs]
     form.restrictRealms = props.editing.allowedRealms !== null
     form.allowedRealms = [...(props.editing.allowedRealms ?? [])]
+    form.focusRealms = [...(props.editing.focusRealms ?? [])]
     form.canWrite = props.editing.canWrite
     form.canResolveCredentials = props.editing.canResolveCredentials
   } else {
@@ -62,6 +66,7 @@ watch(open, (visible) => {
     form.envs = []
     form.restrictRealms = false
     form.allowedRealms = []
+    form.focusRealms = []
     form.canWrite = true
     form.canResolveCredentials = false
   }
@@ -95,6 +100,28 @@ function addRealm() {
   customRealm.value = ''
 }
 
+function toggleFocusRealm(slug: string) {
+  form.focusRealms = form.focusRealms.includes(slug)
+    ? form.focusRealms.filter((v) => v !== slug)
+    : normalizeSlugList([...form.focusRealms, slug])
+}
+
+function addFocusRealm() {
+  const parsed = SceneSlug.safeParse(customFocusRealm.value)
+  if (!parsed.success) return
+  if (!form.focusRealms.includes(parsed.data)) {
+    form.focusRealms = normalizeSlugList([...form.focusRealms, parsed.data])
+  }
+  customFocusRealm.value = ''
+}
+
+const focusRealmOptions = computed(() =>
+  normalizeSlugList(['work', 'personal', ...form.allowedRealms, ...form.focusRealms]),
+)
+const outOfScopeFocusRealms = computed(() =>
+  form.restrictRealms ? form.focusRealms.filter((r) => !form.allowedRealms.includes(r)) : [],
+)
+
 const validationProblem = computed(() => {
   const parsed = KeyName.safeParse(form.name)
   return parsed.success ? null : (parsed.error.issues[0]?.message ?? '请填写名称')
@@ -106,12 +133,14 @@ async function submit() {
   error.value = null
   try {
     const allowedRealms = form.restrictRealms ? form.allowedRealms : null
+    const focusRealms = form.focusRealms.length ? form.focusRealms : null
     if (props.editing) {
       const updated = await api.updateKey(props.editing.id, {
         name: form.name.trim(),
         runtimeFamily: form.runtimeFamily,
         envs: form.envs,
         allowedRealms,
+        focusRealms,
         canWrite: form.canWrite,
         canResolveCredentials: form.canResolveCredentials,
       })
@@ -123,6 +152,7 @@ async function submit() {
         runtimeFamily: form.runtimeFamily,
         envs: form.envs,
         allowedRealms,
+        focusRealms,
         canWrite: form.canWrite,
         canResolveCredentials: form.canResolveCredentials,
       })
@@ -242,6 +272,38 @@ function closeOnce() {
             </div>
             <p class="text-xs text-muted">留空表示仅可访问未限定场域的通用记忆。</p>
           </div>
+        </div>
+
+        <div class="space-y-1.5">
+          <p class="text-xs font-medium text-muted">启动默认场域（可选）</p>
+          <div class="flex flex-wrap items-center gap-1.5">
+            <UButton
+              v-for="slug in focusRealmOptions"
+              :key="`focus:${slug}`"
+              type="button"
+              size="xs"
+              :color="form.focusRealms.includes(slug) ? 'primary' : 'neutral'"
+              :variant="form.focusRealms.includes(slug) ? 'solid' : 'outline'"
+              @click="toggleFocusRealm(slug)"
+            >
+              {{ slug }}
+            </UButton>
+            <UInput
+              v-model="customFocusRealm"
+              size="xs"
+              placeholder="新增默认场域"
+              class="w-28"
+              @keydown.enter.prevent="addFocusRealm"
+              @blur="addFocusRealm"
+            />
+          </div>
+          <NoteLine v-if="outOfScopeFocusRealms.length" tone="warning">
+            默认场域
+            {{ outOfScopeFocusRealms.join('、') }} 不在上方允许范围内，启动聚焦仅在允许场域内生效。
+          </NoteLine>
+          <p class="text-xs text-muted">
+            仅影响会话启动与召回时的默认场域聚焦，不改变上方允许访问的场域边界。
+          </p>
         </div>
 
         <div class="flex flex-wrap gap-6 pt-1">

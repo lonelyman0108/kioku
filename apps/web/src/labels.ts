@@ -1,5 +1,9 @@
 import {
   DREAM_KIND_NAMES,
+  type BootBucket,
+  type BootExcludeReason,
+  type BootMode,
+  type BootOmitReason,
   type DreamOutcome,
   type DreamSuggestionKind,
   type DreamTrigger,
@@ -52,6 +56,7 @@ export const entryFieldLabels: Record<string, string> = {
   content: '正文',
   disclosure: '触发场景',
   isPinned: '常驻',
+  bootMode: '启动加载',
   topics: '主题',
   envs: '环境',
   realms: '场域',
@@ -179,4 +184,35 @@ export const reasoningEffortLabels: Record<ReasoningEffort, string> = {
   low: '低',
   medium: '中',
   high: '高',
+}
+
+export const bootModeLabels: Record<BootMode, string> = {
+  none: '按需召回',
+  index: '目录常驻',
+  full: '全文常驻',
+}
+
+export const bootModeDescriptions: Record<BootMode, string> = {
+  none: '仅在检索或提及相关主题时按需召回',
+  index: '会话启动仅注入标题、概要与字数索引，适合长篇参考手册',
+  full: '会话启动直接展开全文，适合简短跨会话规则（建议 1,200 字内）',
+}
+
+export const bootBucketLabels: Record<BootBucket, string> = {
+  exact: '当前场景精准命中',
+  context: '环境与场域匹配',
+  global: '全局通用',
+}
+
+export const bootOmitReasonLabels: Record<BootOmitReason, string> = {
+  index: '目录常驻',
+  oversized: '超单条上限降级',
+  budget: '超预算降级',
+}
+
+export const bootExcludeReasonLabels: Record<BootExcludeReason, string> = {
+  realm_forbidden: '超出允许场域',
+  scene_conflict: '场景不匹配',
+  project_mismatch: '非当前项目',
+  expired: '已过期',
 }

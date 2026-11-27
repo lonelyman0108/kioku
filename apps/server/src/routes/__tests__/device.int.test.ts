@@ -76,6 +76,7 @@ describe.skipIf(!testDatabaseUrl)(
           userCode: auth.userCode,
           envs: ['mac'],
           allowedRealms: ['work'],
+          focusRealms: ['work'],
           canWrite: true,
           canResolveCredentials: true,
           items: [{ runtimeFamily: 'generic', keyName: 'Work CLI' }],
@@ -116,6 +117,7 @@ describe.skipIf(!testDatabaseUrl)(
       )
       expect(whoami.key.envs).toEqual(['mac'])
       expect(whoami.key.allowedRealms).toEqual(['work'])
+      expect(whoami.key.focusRealms).toEqual(['work'])
       expect(whoami.key.canResolveCredentials).toBe(true)
 
       // 二次轮询同一个 deviceCode 必须返回 expired（一次性消费）

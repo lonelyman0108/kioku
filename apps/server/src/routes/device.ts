@@ -232,6 +232,7 @@ export function deviceRoutes(deps: Deps) {
       const selections = grant.selections ?? []
       const envs = grant.envs ?? []
       const allowedRealms = grant.allowedRealms ?? null
+      const focusRealms = grant.focusRealms ?? null
       const canWrite = grant.canWrite ?? true
       const canResolveCredentials = grant.canResolveCredentials ?? false
 
@@ -248,6 +249,7 @@ export function deviceRoutes(deps: Deps) {
           secretHash: generated.secretHash,
           envs,
           allowedRealms,
+          focusRealms,
           canWrite,
           canResolveCredentials,
         })
@@ -276,6 +278,7 @@ export function deviceRoutes(deps: Deps) {
           secretHash: generated.secretHash,
           envs,
           allowedRealms,
+          focusRealms,
           canWrite,
           canResolveCredentials,
         })
@@ -377,6 +380,7 @@ export function deviceRoutes(deps: Deps) {
           keyName: approvedItems[0]?.keyName ?? null,
           envs: body.envs,
           allowedRealms: body.allowedRealms,
+          focusRealms: body.focusRealms?.length ? body.focusRealms : null,
           canWrite: body.canWrite,
           canResolveCredentials: body.canResolveCredentials,
           approvedAt: sql`now()`,

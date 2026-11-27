@@ -2,6 +2,7 @@ import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 
 import {
+  BootPreviewResponse,
   CapturePlanResponse,
   EntryDetailResponse,
   EntryHistoryResponse,
@@ -581,6 +582,106 @@ describe.skipIf(!testDatabaseUrl)('扁平记忆 CRUD、双链、筛选、回收�
     expect(cleanedDetail.recentHistory?.[0]?.actorMeta?.label).toBe('结构预清洗')
     // 结构预清洗不伪造新的核实时间
     expect(cleanedDetail.entry.verifiedAt).toBe(initialVerifiedAt)
+  })
+
+  it('控制台支持三态 bootMode、facets.runtimes、分层常驻计数与只读终端启动加载预览', async () => {
+    const masterKey = testMasterKey()
+    const app = createTestApp(database, { masterKey })
+    const { cookie } = await createOwnerSession(database)
+    const credSvc = new CredentialService(database.db, masterKey)
+    const entrySvc = new EntryService(database.db, masterKey, credSvc, null)
+    const consoleScope = { kind: 'console' as const, accountId: 'acc', sessionId: 'sess' }
+
+    const globalShort = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '全局简洁铁律',
+        content: '回答简洁直接。',
+        bootMode: 'full',
+      }),
+    )
+    const scopedRuntime = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: 'ZCode 专属约束',
+        content: '仅限自定义客户端。',
+        bootMode: 'full',
+        runtimes: ['zcode'],
+      }),
+    )
+    const indexDoc = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '运维参考手册',
+        summary: '汇总端口与编排规则。',
+        content: '详细参考内容。'.repeat(120),
+        bootMode: 'index',
+      }),
+    )
+    const personalRule = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '个人生活清单',
+        content: '仅个人场域可见。',
+        bootMode: 'full',
+        realms: ['personal'],
+      }),
+    )
+
+    // 列表返回 facets.runtimes 与真实分层常驻指标
+    const listRes = EntryListResponse.parse(
+      await (
+        await app.request('/v1/console/entries?tab=pinned', {
+          headers: { cookie },
+        })
+      ).json(),
+    )
+    expect(listRes.facets.runtimes).toEqual(['zcode'])
+    expect(listRes.counts).toMatchObject({
+      pinned: 4,
+      globalFullPinnedCount: 1,
+      scopedFullPinnedCount: 2,
+      indexPinnedCount: 1,
+    })
+    expect(listRes.counts.globalFullPinnedChars).toBe(
+      globalShort.entry.title.length + globalShort.entry.content.length,
+    )
+
+    // 仅传 runtime=zcode 筛选精确命中自定义客户端词条
+    const runtimeFiltered = EntryListResponse.parse(
+      await (
+        await app.request('/v1/console/entries?runtime=zcode', {
+          headers: { cookie },
+        })
+      ).json(),
+    )
+    expect(runtimeFiltered.items.map((i) => i.shortId)).toEqual([scopedRuntime.entry.shortId])
+
+    // 创建只允许 work 场域的 claudecode 密钥，验证只读预览接口返回展开/目录/排除明细
+    const workKey = await issueTestApiKey(database, {
+      name: 'Work Claude',
+      runtimeFamily: 'claudecode',
+      envs: ['mac'],
+      allowedRealms: ['work'],
+    })
+
+    const previewRes = await app.request('/v1/console/boot/preview', {
+      method: 'POST',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({ keyId: workKey.id, project: 'kioku' }),
+    })
+    expect(previewRes.status).toBe(200)
+    const preview = BootPreviewResponse.parse(await previewRes.json())
+    expect(preview.keyName).toBe('Work Claude')
+    expect(preview.hostLimit).toBe(9_500)
+    expect(preview.expanded.map((e) => e.shortId)).toEqual([globalShort.entry.shortId])
+    expect(preview.indexed.map((e) => e.shortId)).toEqual([indexDoc.entry.shortId])
+    expect(preview.excluded.find((e) => e.shortId === scopedRuntime.entry.shortId)?.reason).toBe(
+      'scene_conflict',
+    )
+    expect(preview.excluded.find((e) => e.shortId === personalRule.entry.shortId)?.reason).toBe(
+      'realm_forbidden',
+    )
   })
 })
 

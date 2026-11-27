@@ -49,6 +49,7 @@ function openEdit(item: ApiKeyView) {
 
 function onSaved() {
   void queryClient.invalidateQueries({ queryKey: ['api-keys'] })
+  void queryClient.invalidateQueries({ queryKey: ['boot-preview'] })
 }
 
 // 轮换访问密钥：弹出一次性明文窗口（不可误关）
@@ -61,6 +62,7 @@ async function rotate(item: ApiKeyView) {
   try {
     rotatedSecret.value = await api.rotateKey(item.id, {})
     void queryClient.invalidateQueries({ queryKey: ['api-keys'] })
+    void queryClient.invalidateQueries({ queryKey: ['boot-preview'] })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '轮换失败', color: 'error' })
   } finally {
@@ -83,6 +85,7 @@ async function confirmRevoke() {
     revoking.value = null
     toast.add({ title: `已吊销访问密钥「${target.name}」`, color: 'success' })
     void queryClient.invalidateQueries({ queryKey: ['api-keys'] })
+    void queryClient.invalidateQueries({ queryKey: ['boot-preview'] })
   } catch (err) {
     revokeError.value = err instanceof ApiError ? err.message : '吊销失败'
   } finally {
@@ -175,6 +178,9 @@ async function confirmRevoke() {
                   <span v-else-if="!item.allowedRealms.length" class="tag">仅通用</span>
                   <span v-for="r in item.allowedRealms ?? []" :key="`r:${r}`" class="tag">
                     场域:{{ r }}
+                  </span>
+                  <span v-for="f in item.focusRealms ?? []" :key="`f:${f}`" class="tag tag-focus">
+                    聚焦:{{ f }}
                   </span>
                 </div>
               </td>
@@ -386,6 +392,10 @@ async function confirmRevoke() {
   font-size: 12px;
   line-height: 1.5;
   white-space: nowrap;
+}
+.tag-focus {
+  border-style: dashed;
+  color: var(--ui-text-muted);
 }
 .row-actions {
   display: flex;

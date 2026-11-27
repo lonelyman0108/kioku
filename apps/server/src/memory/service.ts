@@ -1,11 +1,17 @@
 import {
   applyCapturePatch,
+  bootModeToPinned,
   buildSearchTags,
   deriveEntryTitle,
+  effectiveBootMode,
   lintEntryHygiene,
   normalizeSlugList,
+  resolveBootMode,
   type ApplySuggestionRequest,
   type ApplySuggestionResponse,
+  type BootMode,
+  type BootPreviewRequest,
+  type BootPreviewResponse,
   type BrowseEntriesQuery,
   type CapturePlanRequest,
   type CapturePlanResponse,
@@ -65,9 +71,19 @@ import {
   microsOf,
   UUID,
 } from '../db/paging'
-import { dreamSuggestions, entries, entryEmbeddings, entryEvents } from '../db/schema'
+import { apiKeys, dreamSuggestions, entries, entryEmbeddings, entryEvents } from '../db/schema'
 import { planCapture as planQuickCapture, type PlanCaptureOptions } from '../extraction/capture'
+import type { KeyPrincipal } from '../http/env'
 import type { Jobs } from '../jobs/queue'
+import { CONTEXT_RESERVE, GUIDANCE, HOST_CONTEXT_LIMIT } from '../lifecycle/lifecycle'
+import {
+  BOOT_CATALOG_BUDGET,
+  BOOT_CHAR_BUDGET,
+  compileBootDetailed,
+  computeEffectiveCatalogBudget,
+  formatBootBlock,
+  selectCatalogLines,
+} from '../recall/boot'
 import { recallEntries } from '../recall/recall'
 import { resolveActorMetaMap } from './actorMeta'
 import { MemoryError } from './errors'
@@ -102,6 +118,7 @@ function computeDiffMeta(
     content: string
     disclosure: string | null
     isPinned: boolean
+    bootMode: BootMode
     envs: readonly string[]
     realms: readonly string[]
     projects: readonly string[]
@@ -116,7 +133,7 @@ function computeDiffMeta(
   if ((before.summary ?? null) !== (after.summary ?? null)) changedFields.push('summary')
   if (before.content !== after.content) changedFields.push('content')
   if ((before.disclosure ?? null) !== (after.disclosure ?? null)) changedFields.push('disclosure')
-  if (before.isPinned !== after.isPinned) changedFields.push('isPinned')
+  if (before.bootMode !== after.bootMode) changedFields.push('bootMode')
   if (!sameStringList(before.envs, after.envs)) changedFields.push('envs')
   if (!sameStringList(before.realms, after.realms)) changedFields.push('realms')
   if (!sameStringList(before.projects, after.projects)) changedFields.push('projects')
@@ -143,6 +160,7 @@ function toEntryView(row: EntryRow): EntryView {
     content: row.content,
     disclosure: row.disclosure,
     isPinned: row.isPinned,
+    bootMode: row.bootMode,
     envs: row.envs,
     realms: row.realms,
     projects: row.projects,
@@ -169,6 +187,7 @@ function toListItem(row: EntryRow, extra?: { snippet?: string; score?: number })
     summary: row.summary,
     disclosure: row.disclosure,
     isPinned: row.isPinned,
+    bootMode: row.bootMode,
     envs: row.envs,
     realms: row.realms,
     projects: row.projects,
@@ -195,6 +214,7 @@ function toSnapshot(row: EntryRow): EntrySnapshot {
     content: row.content,
     disclosure: row.disclosure,
     isPinned: row.isPinned,
+    bootMode: row.bootMode,
     envs: row.envs,
     realms: row.realms,
     projects: row.projects,
@@ -337,12 +357,34 @@ export class EntryService {
     return row ?? null
   }
 
+  private async loadKnownScopeHints(
+    tx: Db | Tx,
+    scope: AccessScope,
+    now: Date,
+  ): Promise<{ knownProjects: string[]; knownRuntimes: string[] }> {
+    const visible = readableEntrySql(scope, { now })
+    const [row] = await tx.execute<{
+      projects: string[] | null
+      runtimes: string[] | null
+    }>(sql`
+      select
+        (select array_agg(distinct v order by v) from ${entries}, unnest(${entries.projects}) v where ${visible}) as projects,
+        (select array_agg(distinct v order by v) from ${entries}, unnest(${entries.runtimes}) v where ${visible}) as runtimes
+    `)
+    return {
+      knownProjects: row?.projects ?? [],
+      knownRuntimes: row?.runtimes ?? [],
+    }
+  }
+
   async create(scope: AccessScope, input: CreateEntryRequest): Promise<EntryDetailResponse> {
     assertEntryWriteAllowed(scope, input.realms)
     const detail = await withTx(this.db, async (tx, now) => {
       const validTo = parseValidTo(input.validTo, now)
       const summary = cleanOptionalText(input.summary)
       const changeSummary = cleanOptionalText(input.changeSummary)
+      const bootMode = resolveBootMode({ bootMode: input.bootMode, isPinned: input.isPinned })
+      const isPinned = bootModeToPinned(bootMode)
       const { value: row } = await insertWithAllocatedShortId(tx, async (sp, shortId) => {
         const title = deriveEntryTitle(input.title, input.content, shortId)
         const searchTags = buildSearchTags({
@@ -362,7 +404,8 @@ export class EntryService {
             summary,
             content: input.content,
             disclosure: cleanOptionalText(input.disclosure),
-            isPinned: input.isPinned,
+            isPinned,
+            bootMode,
             envs: input.envs,
             realms: input.realms,
             projects: input.projects,
@@ -395,11 +438,25 @@ export class EntryService {
         createdAt: now,
       })
 
+      const isGlobalFull =
+        row.bootMode === 'full' &&
+        row.envs.length === 0 &&
+        row.realms.length === 0 &&
+        row.projects.length === 0 &&
+        row.runtimes.length === 0
+      const scopeHints = isGlobalFull ? await this.loadKnownScopeHints(tx, scope, now) : undefined
+
       const warnings = lintEntryHygiene({
         title: row.title,
         content: row.content,
         summary: row.summary,
         isPinned: row.isPinned,
+        bootMode: row.bootMode,
+        envs: row.envs,
+        realms: row.realms,
+        projects: row.projects,
+        runtimes: row.runtimes,
+        ...(scopeHints ?? {}),
         isUpdate: false,
       })
       return this.hydrateDetail(tx, scope, row, warnings)
@@ -442,7 +499,10 @@ export class EntryService {
 
       const promoting = input.promoteToEntry === true && existing.kind === 'episode'
       const nextKind = promoting ? 'entry' : existing.kind
-      if (nextKind === 'episode' && input.isPinned === true) {
+      if (
+        nextKind === 'episode' &&
+        (input.isPinned === true || (input.bootMode !== undefined && input.bootMode !== 'none'))
+      ) {
         throw new MemoryError(400, '会话摘要不能直接标为常驻，请先提炼为正式记忆')
       }
 
@@ -465,7 +525,19 @@ export class EntryService {
         input.summary !== undefined ? cleanOptionalText(input.summary) : existing.summary
       const nextDisclosure =
         input.disclosure !== undefined ? cleanOptionalText(input.disclosure) : existing.disclosure
-      const nextIsPinned = nextKind === 'episode' ? false : (input.isPinned ?? existing.isPinned)
+      const nextBootMode: BootMode =
+        nextKind === 'episode'
+          ? 'none'
+          : input.bootMode !== undefined
+            ? input.bootMode
+            : input.isPinned !== undefined
+              ? input.isPinned
+                ? existing.bootMode === 'none'
+                  ? 'full'
+                  : existing.bootMode
+                : 'none'
+              : existing.bootMode
+      const nextIsPinned = bootModeToPinned(nextBootMode)
       const nextEnvs = input.envs ?? existing.envs
       const nextProjects = input.projects ?? existing.projects
       const nextRuntimes = input.runtimes ?? existing.runtimes
@@ -509,6 +581,7 @@ export class EntryService {
         content: nextContent,
         disclosure: nextDisclosure,
         isPinned: nextIsPinned,
+        bootMode: nextBootMode,
         envs: nextEnvs,
         realms: nextRealms,
         projects: nextProjects,
@@ -526,6 +599,7 @@ export class EntryService {
           content: nextContent,
           disclosure: nextDisclosure,
           isPinned: nextIsPinned,
+          bootMode: nextBootMode,
           envs: nextEnvs,
           realms: nextRealms,
           projects: nextProjects,
@@ -557,11 +631,25 @@ export class EntryService {
         createdAt: now,
       })
 
+      const isGlobalFull =
+        updated.bootMode === 'full' &&
+        updated.envs.length === 0 &&
+        updated.realms.length === 0 &&
+        updated.projects.length === 0 &&
+        updated.runtimes.length === 0
+      const scopeHints = isGlobalFull ? await this.loadKnownScopeHints(tx, scope, now) : undefined
+
       const warnings = lintEntryHygiene({
         title: updated.title,
         content: updated.content,
         summary: updated.summary,
         isPinned: updated.isPinned,
+        bootMode: updated.bootMode,
+        envs: updated.envs,
+        realms: updated.realms,
+        projects: updated.projects,
+        runtimes: updated.runtimes,
+        ...(scopeHints ?? {}),
         isUpdate: true,
         contentChanged,
         changeSummary: explicitChangeSummary,
@@ -694,7 +782,8 @@ export class EntryService {
       assertEntryWriteAllowed(scope, snap.realms)
 
       const nextKind = snap.kind
-      const nextIsPinned = nextKind === 'episode' ? false : snap.isPinned
+      const nextBootMode: BootMode = nextKind === 'episode' ? 'none' : effectiveBootMode(snap)
+      const nextIsPinned = bootModeToPinned(nextBootMode)
       const searchTags = buildSearchTags({
         shortId: existing.shortId,
         topics: snap.topics,
@@ -712,6 +801,7 @@ export class EntryService {
         content: snap.content,
         disclosure: snap.disclosure,
         isPinned: nextIsPinned,
+        bootMode: nextBootMode,
         envs: snap.envs,
         realms: snap.realms,
         projects: snap.projects,
@@ -729,6 +819,7 @@ export class EntryService {
           content: snap.content,
           disclosure: snap.disclosure,
           isPinned: nextIsPinned,
+          bootMode: nextBootMode,
           envs: snap.envs,
           realms: snap.realms,
           projects: snap.projects,
@@ -832,6 +923,10 @@ export class EntryService {
         episodes: sql<number>`count(*) filter (where ${entries.kind} = 'episode' and ${entries.deletedAt} is null)::int`,
         trash: sql<number>`count(*) filter (where ${entries.deletedAt} is not null)::int`,
         pinnedChars: sql<number>`coalesce(sum(char_length(${entries.content}) + char_length(${entries.title})) filter (where ${entries.kind} = 'entry' and ${entries.isPinned} = true and ${entries.deletedAt} is null), 0)::int`,
+        globalFullPinnedCount: sql<number>`count(*) filter (where ${entries.kind} = 'entry' and ${entries.bootMode} = 'full' and ${entries.deletedAt} is null and cardinality(${entries.envs}) = 0 and cardinality(${entries.realms}) = 0 and cardinality(${entries.projects}) = 0 and cardinality(${entries.runtimes}) = 0)::int`,
+        globalFullPinnedChars: sql<number>`coalesce(sum(char_length(${entries.content}) + char_length(${entries.title})) filter (where ${entries.kind} = 'entry' and ${entries.bootMode} = 'full' and ${entries.deletedAt} is null and cardinality(${entries.envs}) = 0 and cardinality(${entries.realms}) = 0 and cardinality(${entries.projects}) = 0 and cardinality(${entries.runtimes}) = 0), 0)::int`,
+        scopedFullPinnedCount: sql<number>`count(*) filter (where ${entries.kind} = 'entry' and ${entries.bootMode} = 'full' and ${entries.deletedAt} is null and (cardinality(${entries.envs}) > 0 or cardinality(${entries.realms}) > 0 or cardinality(${entries.projects}) > 0 or cardinality(${entries.runtimes}) > 0))::int`,
+        indexPinnedCount: sql<number>`count(*) filter (where ${entries.kind} = 'entry' and ${entries.bootMode} = 'index' and ${entries.deletedAt} is null)::int`,
       })
       .from(entries)
 
@@ -839,12 +934,14 @@ export class EntryService {
       projects: string[] | null
       envs: string[] | null
       realms: string[] | null
+      runtimes: string[] | null
       topics: string[] | null
     }>(sql`
       select
         (select array_agg(distinct v order by v) from entries, unnest(projects) v where deleted_at is null) as projects,
         (select array_agg(distinct v order by v) from entries, unnest(envs) v where deleted_at is null) as envs,
         (select array_agg(distinct v order by v) from entries, unnest(realms) v where deleted_at is null) as realms,
+        (select array_agg(distinct v order by v) from entries, unnest(runtimes) v where deleted_at is null) as runtimes,
         (
           select array_agg(t.v order by t.cnt desc, t.v asc)
           from (
@@ -866,11 +963,16 @@ export class EntryService {
         episodes: countRow?.episodes ?? 0,
         trash: countRow?.trash ?? 0,
         pinnedChars: countRow?.pinnedChars ?? 0,
+        globalFullPinnedCount: countRow?.globalFullPinnedCount ?? 0,
+        globalFullPinnedChars: countRow?.globalFullPinnedChars ?? 0,
+        scopedFullPinnedCount: countRow?.scopedFullPinnedCount ?? 0,
+        indexPinnedCount: countRow?.indexPinnedCount ?? 0,
       },
       facets: {
         projects: facetRow?.projects ?? [],
         envs: facetRow?.envs ?? [],
         realms: facetRow?.realms ?? [],
+        runtimes: facetRow?.runtimes ?? [],
         topics: facetRow?.topics ?? [],
       },
     }
@@ -1112,6 +1214,7 @@ export class EntryService {
         summary: row.summary,
         kind: row.kind,
         isPinned: row.isPinned,
+        bootMode: row.bootMode,
         topics: row.topics,
         envs: row.envs,
         realms: row.realms,
@@ -1188,6 +1291,7 @@ export class EntryService {
             content: input.content,
             disclosure: null,
             isPinned: false,
+            bootMode: 'none',
             envs,
             realms,
             projects,
@@ -1279,7 +1383,11 @@ export class EntryService {
           cleanOptionalText(overrides.changeSummary) ??
           cleanOptionalText(suggestion.proposedChangeSummary) ??
           '由会话摘要提炼为正式记忆'
-        const isPinned = overrides.isPinned ?? false
+        const bootMode = resolveBootMode(
+          { bootMode: overrides.bootMode, isPinned: overrides.isPinned },
+          'none',
+        )
+        const isPinned = bootModeToPinned(bootMode)
 
         const { value: created } = await insertWithAllocatedShortId(tx, async (sp, shortId) => {
           const title = deriveEntryTitle(
@@ -1298,6 +1406,7 @@ export class EntryService {
               content,
               disclosure,
               isPinned,
+              bootMode,
               envs,
               realms,
               projects,
@@ -1376,7 +1485,19 @@ export class EntryService {
         const realms = overrides.realms ?? suggestion.proposedRealms ?? keep.realms
         const projects = overrides.projects ?? suggestion.proposedProjects ?? keep.projects
         const runtimes = overrides.runtimes ?? suggestion.proposedRuntimes ?? keep.runtimes
-        const isPinned = overrides.isPinned ?? keep.isPinned
+        const bootMode: BootMode =
+          keep.kind === 'episode'
+            ? 'none'
+            : overrides.bootMode !== undefined
+              ? overrides.bootMode
+              : overrides.isPinned !== undefined
+                ? overrides.isPinned
+                  ? keep.bootMode === 'none'
+                    ? 'full'
+                    : keep.bootMode
+                  : 'none'
+                : keep.bootMode
+        const isPinned = bootModeToPinned(bootMode)
         const searchTags = buildSearchTags({
           shortId: keep.shortId,
           topics,
@@ -1392,6 +1513,7 @@ export class EntryService {
           content,
           disclosure,
           isPinned,
+          bootMode,
           envs,
           realms,
           projects,
@@ -1413,6 +1535,7 @@ export class EntryService {
             projects,
             runtimes,
             isPinned,
+            bootMode,
             searchTags,
             verifiedAt: now,
             lastChangeSummary: changeSummary,
@@ -1511,7 +1634,19 @@ export class EntryService {
         const realms = overrides.realms ?? suggestion.proposedRealms ?? target.realms
         const projects = overrides.projects ?? suggestion.proposedProjects ?? target.projects
         const runtimes = overrides.runtimes ?? suggestion.proposedRuntimes ?? target.runtimes
-        const isPinned = target.kind === 'episode' ? false : (overrides.isPinned ?? target.isPinned)
+        const bootMode: BootMode =
+          target.kind === 'episode'
+            ? 'none'
+            : overrides.bootMode !== undefined
+              ? overrides.bootMode
+              : overrides.isPinned !== undefined
+                ? overrides.isPinned
+                  ? target.bootMode === 'none'
+                    ? 'full'
+                    : target.bootMode
+                  : 'none'
+                : target.bootMode
+        const isPinned = bootModeToPinned(bootMode)
         const searchTags = buildSearchTags({
           shortId: target.shortId,
           topics,
@@ -1527,6 +1662,7 @@ export class EntryService {
           content,
           disclosure,
           isPinned,
+          bootMode,
           envs,
           realms,
           projects,
@@ -1571,6 +1707,7 @@ export class EntryService {
             projects,
             runtimes,
             isPinned,
+            bootMode,
             searchTags,
             verifiedAt: nextVerifiedAt,
             lastChangeSummary: changeSummary,
@@ -1646,5 +1783,88 @@ export class EntryService {
 
   async applyHygieneSweep(request: { shortIds?: string[] | undefined } = {}) {
     return runHygieneSweepApply(this.db, this.jobs, request)
+  }
+
+  async previewBoot(input: BootPreviewRequest): Promise<BootPreviewResponse> {
+    let targetScope: AccessScope = { kind: 'console', accountId: 'preview', sessionId: 'preview' }
+    let keyName: string | null = null
+    let keyRuntime: string | null = null
+
+    if (input.keyId) {
+      const [keyRow] = await this.db
+        .select()
+        .from(apiKeys)
+        .where(and(eq(apiKeys.id, input.keyId), isNull(apiKeys.revokedAt)))
+        .limit(1)
+      if (!keyRow) throw new MemoryError(404, '访问密钥不存在或已吊销')
+      const principal: KeyPrincipal = {
+        kind: 'key',
+        keyId: keyRow.id,
+        name: keyRow.name,
+        prefix: keyRow.prefix,
+        runtimeFamily: keyRow.runtimeFamily,
+        envs: keyRow.envs,
+        allowedRealms: keyRow.allowedRealms,
+        focusRealms: keyRow.focusRealms,
+        canWrite: keyRow.canWrite,
+        canResolveCredentials: keyRow.canResolveCredentials,
+      }
+      targetScope = principal
+      keyName = keyRow.name
+      keyRuntime = keyRow.runtimeFamily
+    }
+
+    const focus = synthesizeFocus(targetScope, {
+      project: input.project,
+      runtime: input.runtime,
+      env: input.env,
+      realm: input.realm,
+    })
+    const effectiveRuntime = input.runtime ?? keyRuntime
+    const hostLimit =
+      (effectiveRuntime ? HOST_CONTEXT_LIMIT[effectiveRuntime] : undefined) ??
+      (keyRuntime ? HOST_CONTEXT_LIMIT[keyRuntime] : undefined) ??
+      null
+    const fullBudget = Math.min(
+      BOOT_CHAR_BUDGET,
+      hostLimit ? Math.max(hostLimit - GUIDANCE.length - CONTEXT_RESERVE, 1_000) : BOOT_CHAR_BUDGET,
+    )
+
+    const detailed = await compileBootDetailed(this.db, targetScope, {
+      focus,
+      budget: fullBudget,
+      catalogBudget: BOOT_CATALOG_BUDGET,
+    })
+    const effectiveCatalogBudget = computeEffectiveCatalogBudget(
+      hostLimit,
+      GUIDANCE.length,
+      detailed.usedFullChars,
+    )
+    const { usedChars: usedCatalogChars } = selectCatalogLines(
+      detailed.boot.omitted,
+      detailed.boot.omittedItems,
+      effectiveCatalogBudget,
+    )
+    const rendered = formatBootBlock(detailed.boot, GUIDANCE, {
+      catalogBudget: effectiveCatalogBudget,
+    })
+
+    return {
+      keyName,
+      runtimeFamily: effectiveRuntime,
+      focus,
+      fullBudget: detailed.fullBudget,
+      catalogBudget: effectiveCatalogBudget,
+      hostLimit,
+      usedFullChars: detailed.usedFullChars,
+      usedCatalogChars,
+      globalUsedChars: detailed.globalUsedChars,
+      globalCapChars: detailed.globalCapChars,
+      totalRenderedChars: rendered.length,
+      expanded: detailed.expanded,
+      indexed: detailed.indexed,
+      demoted: detailed.demoted,
+      excluded: detailed.excluded,
+    }
   }
 }

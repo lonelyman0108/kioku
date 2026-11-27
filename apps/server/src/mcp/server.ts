@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
 import {
+  BOOT_MODES,
   BROWSE_GROUP_BY,
   BrowseEntriesQuery,
   CHANGE_SUMMARY_MAX,
@@ -87,6 +88,7 @@ function parseInput<T>(schema: z.ZodType<T>, value: unknown): T {
 const McpTagList = z.array(z.string().min(1).max(64)).max(SCENE_TAGS_MAX)
 const McpTopicList = z.array(z.string().min(1).max(64)).max(TOPICS_MAX)
 const McpEntryKind = z.enum(ENTRY_KINDS)
+const McpBootMode = z.enum(BOOT_MODES)
 const McpGroupBy = z.enum(BROWSE_GROUP_BY)
 const McpPatchSchema = z.object({
   kind: z
@@ -116,11 +118,23 @@ export function createKiokuMcpServer(
       inputSchema: {
         project: z.string().max(128).optional().describe('当前项目标识'),
         device_key: z.string().max(128).optional().describe('当前设备标识'),
+        env: z.string().max(64).optional().describe('临时环境焦点覆盖，如 mac、win、linux'),
+        realm: z
+          .string()
+          .max(64)
+          .optional()
+          .describe('临时场域焦点覆盖（仅影响启动聚焦，不放宽密钥授权边界）'),
+        runtime: z.string().max(64).optional().describe('临时客户端标识覆盖，支持自定义客户端名'),
       },
     },
     (args) =>
       runTool(async () => {
-        const focus = synthesizeFocus(key, { project: args.project })
+        const focus = synthesizeFocus(key, {
+          project: args.project,
+          env: args.env,
+          realm: args.realm,
+          runtime: args.runtime,
+        })
         const projectSlug = normalizeProjectSlug(args.project) ?? ''
         const bootResult = await compileBoot(deps.db, key, {
           focus,
@@ -329,8 +343,16 @@ export function createKiokuMcpServer(
         envs: McpTagList.optional().describe('适用环境/系统，如 ["mac", "linux"]'),
         realms: McpTagList.optional().describe('适用场域，如 ["work"]；留空表示通用'),
         projects: McpTagList.optional().describe('适用项目标识列表'),
-        runtimes: McpTagList.optional().describe('适用客户端标识列表'),
-        is_pinned: z.boolean().optional().describe('是否作为常驻记忆在会话启动时自动注入'),
+        runtimes: McpTagList.optional().describe('适用客户端标识列表（支持自定义客户端标识）'),
+        boot_mode: McpBootMode.optional().describe(
+          '启动加载方式：full（全文常驻，仅放极简跨会话铁律，建议 ≤1200 字）、index（目录常驻，适合长篇参考手册，会话启动仅展示摘要行）、none（按需召回，默认）',
+        ),
+        is_pinned: z
+          .boolean()
+          .optional()
+          .describe(
+            '兼容参数：true 等价于 boot_mode=full，false 等价于 none；同时传入时以 boot_mode 为准',
+          ),
         disclosure: z
           .string()
           .max(DISCLOSURE_MAX)
@@ -351,6 +373,7 @@ export function createKiokuMcpServer(
           ...(args.realms !== undefined ? { realms: args.realms } : {}),
           ...(args.projects !== undefined ? { projects: args.projects } : {}),
           ...(args.runtimes !== undefined ? { runtimes: args.runtimes } : {}),
+          ...(args.boot_mode !== undefined ? { bootMode: args.boot_mode } : {}),
           ...(args.is_pinned !== undefined ? { isPinned: args.is_pinned } : {}),
           ...(args.disclosure !== undefined ? { disclosure: args.disclosure } : {}),
           ...(args.valid_to !== undefined ? { validTo: args.valid_to } : {}),
@@ -399,8 +422,14 @@ export function createKiokuMcpServer(
         envs: McpTagList.optional().describe('覆盖适用环境列表'),
         realms: McpTagList.optional().describe('覆盖适用场域列表'),
         projects: McpTagList.optional().describe('覆盖适用项目列表'),
-        runtimes: McpTagList.optional().describe('覆盖适用客户端列表'),
-        is_pinned: z.boolean().optional().describe('是否设为常驻启动加载'),
+        runtimes: McpTagList.optional().describe('覆盖适用客户端列表（支持自定义客户端标识）'),
+        boot_mode: McpBootMode.optional().describe(
+          '修改启动加载方式：full（全文常驻，仅放极简跨会话铁律）、index（目录常驻，仅注入摘要目录行）、none（按需召回）',
+        ),
+        is_pinned: z
+          .boolean()
+          .optional()
+          .describe('兼容参数：设为 true 标为常驻，false 取消常驻；同时传入时以 boot_mode 为准'),
         disclosure: z
           .string()
           .max(DISCLOSURE_MAX)
@@ -452,6 +481,7 @@ export function createKiokuMcpServer(
           ...(args.realms !== undefined ? { realms: args.realms } : {}),
           ...(args.projects !== undefined ? { projects: args.projects } : {}),
           ...(args.runtimes !== undefined ? { runtimes: args.runtimes } : {}),
+          ...(args.boot_mode !== undefined ? { bootMode: args.boot_mode } : {}),
           ...(args.is_pinned !== undefined ? { isPinned: args.is_pinned } : {}),
           ...(args.disclosure !== undefined ? { disclosure: args.disclosure } : {}),
           ...(args.valid_to !== undefined ? { validTo: args.valid_to } : {}),

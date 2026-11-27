@@ -309,6 +309,7 @@ interface TidyCandidateRow {
   content: string
   disclosure: string | null
   isPinned: boolean
+  bootMode: EntryRow['bootMode']
   envs: string[]
   realms: string[]
   projects: string[]
@@ -324,6 +325,9 @@ interface TidyCandidateSelection {
   tidyChecked: Record<string, number>
 }
 
+// 规范整理只修改标题/概要/正文，不自动改常驻层级或场景标签；忽略这两项提示避免无效候选反复排队
+const TIDY_IGNORED_HYGIENE_CODES = new Set(['pinned_oversized', 'pinned_scope_hint'])
+
 function isTidyCandidate(
   row: {
     id: string
@@ -331,6 +335,11 @@ function isTidyCandidate(
     summary: string | null
     content: string
     isPinned: boolean
+    bootMode: EntryRow['bootMode']
+    envs: readonly string[]
+    realms: readonly string[]
+    projects: readonly string[]
+    runtimes: readonly string[]
     version: number
   },
   tidyChecked: Readonly<Record<string, number>>,
@@ -345,8 +354,13 @@ function isTidyCandidate(
     content: row.content,
     summary: row.summary,
     isPinned: row.isPinned,
+    bootMode: row.bootMode,
+    envs: row.envs,
+    realms: row.realms,
+    projects: row.projects,
+    runtimes: row.runtimes,
     isUpdate: false,
-  })
+  }).filter((w) => !TIDY_IGNORED_HYGIENE_CODES.has(w.code))
   return (
     warnings.length > 0 || (!row.summary?.trim() && (row.isPinned || row.content.length >= 400))
   )
@@ -369,6 +383,7 @@ async function selectTidyCandidates(
         content: entries.content,
         disclosure: entries.disclosure,
         isPinned: entries.isPinned,
+        bootMode: entries.bootMode,
         envs: entries.envs,
         realms: entries.realms,
         projects: entries.projects,
@@ -424,6 +439,11 @@ async function countTidyPending(db: Db): Promise<number> {
         summary: entries.summary,
         content: entries.content,
         isPinned: entries.isPinned,
+        bootMode: entries.bootMode,
+        envs: entries.envs,
+        realms: entries.realms,
+        projects: entries.projects,
+        runtimes: entries.runtimes,
         version: entries.version,
       })
       .from(entries)
@@ -1031,6 +1051,7 @@ function toDreamEntrySnapshot(row: EntryRow): DreamEntrySnapshot {
     content: row.content,
     disclosure: row.disclosure,
     isPinned: row.isPinned,
+    bootMode: row.bootMode,
     envs: row.envs,
     realms: row.realms,
     projects: row.projects,

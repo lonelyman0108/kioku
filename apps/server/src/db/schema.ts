@@ -1,5 +1,6 @@
 import type {
   ArchivedHistoryNote,
+  BootMode,
   DreamSuggestionKind,
   DreamSuggestionStatus,
   EntryDiffMeta,
@@ -84,6 +85,8 @@ export const apiKeys = pgTable('api_keys', {
     .default(sql`'{}'`),
   // null 表示不限场域；非 null 时为硬性静态场域边界
   allowedRealms: text().array(),
+  // 可空：仅作为启动加载与召回的默认聚焦场域，不影响 allowed_realms 安全边界
+  focusRealms: text().array(),
   canWrite: boolean().notNull().default(true),
   canResolveCredentials: boolean().notNull().default(false),
   createdAt: createdAt(),
@@ -119,6 +122,7 @@ export const deviceGrants = pgTable(
     keyName: text(),
     envs: text().array(),
     allowedRealms: text().array(),
+    focusRealms: text().array(),
     canWrite: boolean(),
     canResolveCredentials: boolean(),
     approvedAt: timestamp({ withTimezone: true }),
@@ -150,6 +154,7 @@ export const entries = pgTable(
     content: text().notNull(),
     disclosure: text(),
     isPinned: boolean().notNull().default(false),
+    bootMode: text().$type<BootMode>().notNull().default('none'),
     envs: text()
       .array()
       .notNull()
@@ -203,6 +208,8 @@ export const entries = pgTable(
     check('entries_short_id_format', sql`${t.shortId} ~ '^m-[2-9a-hjkmnp-tv-z]{6,8}$'`),
     check('entries_kind_check', sql`${t.kind} in ('entry', 'episode')`),
     check('entries_episode_not_pinned', sql`${t.kind} <> 'episode' or not ${t.isPinned}`),
+    check('entries_boot_mode_check', sql`${t.bootMode} in ('none', 'index', 'full')`),
+    check('entries_boot_mode_pinned_sync', sql`${t.isPinned} = (${t.bootMode} <> 'none')`),
     check('entries_version_positive', sql`${t.version} >= 1`),
   ],
 )

@@ -1,11 +1,12 @@
 import {
+  effectiveBootMode,
   normalizeSlugList,
   stripDuplicateLeadingHeading,
   type DreamSuggestionView,
   type EntrySnapshot,
 } from '@kioku/contracts'
 
-import { entryFieldLabels, entryKindLabels, envDisplayName } from './labels'
+import { bootModeLabels, entryFieldLabels, entryKindLabels, envDisplayName } from './labels'
 import { runtimeName } from './runtimes'
 import { formatTime } from './time'
 
@@ -439,7 +440,13 @@ export function diffEntrySnapshots(
   if (prevSummary !== currSummary) {
     push('summary', prevSummary || '（空）', currSummary || '（空）')
   }
-  if (prev.isPinned !== curr.isPinned) {
+  if (prev.bootMode !== undefined || curr.bootMode !== undefined) {
+    const prevMode = effectiveBootMode(prev)
+    const currMode = effectiveBootMode(curr)
+    if (prevMode !== currMode) {
+      push('bootMode', bootModeLabels[prevMode], bootModeLabels[currMode])
+    }
+  } else if (prev.isPinned !== curr.isPinned) {
     push('isPinned', prev.isPinned ? '常驻' : '按需', curr.isPinned ? '常驻' : '按需')
   }
   const prevDisclosure = prev.disclosure?.trim() ?? ''

@@ -16,7 +16,7 @@ import {
   testMasterKey,
 } from '../../testing/db'
 import { startFakeOpenAi, type FakeOpenAiServer } from '../../testing/fakeOpenAi'
-import { compileBoot, formatBootBlock } from '../boot'
+import { compileBoot, compileBootDetailed, formatBootBlock, loadRecentEntries } from '../boot'
 import { formatRecallBlock, recallEntries } from '../recall'
 
 describe.skipIf(!testDatabaseUrl)('Presence Engine：启动加载与混合召回', () => {
@@ -386,24 +386,205 @@ describe.skipIf(!testDatabaseUrl)('Presence Engine：启动加载与混合召回
       hits.findIndex((c) => c.shortId === bodyOnly.entry.shortId),
     )
 
-    // 验证多条超软上限（2500字）常驻在 6850 预算下仍能展开合理条数而非全部跳过导致零展开
-    for (let i = 1; i <= 3; i++) {
-      await entrySvc.create(
-        consoleScope,
-        entryInput({
-          title: `中型常驻手册${i}`,
-          summary: `第 ${i} 份手册概要`,
-          content: `第${i}份规则。`.repeat(420),
-          isPinned: true,
-          envs: ['linux'],
-        }),
-      )
-    }
+    // 验证单条超过 2,400 字的全文常驻自动降级为目录行，而 2,400 字以内的场景常驻正常展开
+    const overCap = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '超单条上限手册',
+        summary: '超过 2,400 字的运维参考手册',
+        content: '详细配置说明。'.repeat(420),
+        bootMode: 'full',
+        envs: ['linux'],
+      }),
+    )
+    const normalLinuxA = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '常规 Linux 规范 A',
+        content: '常规短规范。'.repeat(180),
+        bootMode: 'full',
+        envs: ['linux'],
+      }),
+    )
+    const normalLinuxB = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '常规 Linux 规范 B',
+        content: '常规短规范。'.repeat(180),
+        bootMode: 'full',
+        envs: ['linux'],
+      }),
+    )
     const mediumBoot = await compileBoot(database.db, consoleScope, {
       focus: { envs: ['linux'], realms: [], projects: [], runtimes: [] },
       budget: 6_850,
     })
-    expect(mediumBoot.entries.length).toBeGreaterThanOrEqual(2)
-    expect(mediumBoot.omitted.length).toBeGreaterThanOrEqual(1)
+    expect(mediumBoot.entries.map((e) => e.shortId)).toContain(normalLinuxA.entry.shortId)
+    expect(mediumBoot.entries.map((e) => e.shortId)).toContain(normalLinuxB.entry.shortId)
+    expect(mediumBoot.omitted).toContain(overCap.entry.shortId)
+    expect(mediumBoot.omittedItems?.find((i) => i.shortId === overCap.entry.shortId)?.reason).toBe(
+      'oversized',
+    )
+  })
+
+  it('三态 boot_mode、精准场景优先分桶、全局 50% 上限、自定义客户端、focus_realms 解耦与近期记忆零串场', async () => {
+    const masterKey = testMasterKey()
+    const entrySvc = new EntryService(
+      database.db,
+      masterKey,
+      new CredentialService(database.db, masterKey),
+      null,
+    )
+    const consoleScope = { kind: 'console' as const, accountId: 'acc', sessionId: 'sess' }
+
+    // 1. 目录常驻：固定进目录，永不消耗全文展开预算
+    const indexManual = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '基础设施参考手册',
+        summary: '记录集群拓扑与网关分层。',
+        content: '简短参考内容。',
+        bootMode: 'index',
+      }),
+    )
+
+    // 2. 较长的项目精准常驻（1,800 字）与两条较长全局常驻（各 1,200 字）
+    const projectExact = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: 'Alpha 项目核心规范',
+        content: '项目规范。'.repeat(360),
+        bootMode: 'full',
+        projects: ['alpha-app'],
+      }),
+    )
+    const globalRuleA = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '全局协作铁律 A',
+        content: '全局约定。'.repeat(240),
+        bootMode: 'full',
+      }),
+    )
+    const globalRuleB = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '全局协作铁律 B',
+        content: '全局约定。'.repeat(240),
+        bootMode: 'full',
+      }),
+    )
+
+    // 3. 自定义客户端 zcode 专属常驻 + 个人场域常驻 + 其他项目非常驻（验证 loadRecentEntries 零串场）
+    const zcodeRule = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: 'ZCode 运行时约束',
+        content: '仅在 zcode 终端生效的短约束。',
+        bootMode: 'full',
+        runtimes: ['zcode'],
+      }),
+    )
+    const personalPinned = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '个人作息提醒',
+        content: '仅个人场域常驻。',
+        bootMode: 'full',
+        realms: ['personal'],
+      }),
+    )
+    const otherProjRecent = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: 'Beta 项目最近改动',
+        content: '属于另一个项目的近期记忆。',
+        projects: ['beta-app'],
+      }),
+    )
+    const sameProjRecent = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: 'Alpha 项目最近改动',
+        content: '属于当前项目的近期记忆。',
+        projects: ['alpha-app'],
+      }),
+    )
+
+    // 密钥不限 allowedRealms（可查全部），但设 focusRealms=['work']
+    const key = await issueTestApiKey(database, {
+      runtimeFamily: 'generic',
+      envs: ['mac'],
+      allowedRealms: null,
+      focusRealms: ['work'],
+    })
+    const keyScope = {
+      kind: 'key' as const,
+      keyId: key.id,
+      name: 'Flexible Key',
+      prefix: key.prefix,
+      runtimeFamily: 'generic' as const,
+      envs: ['mac'],
+      allowedRealms: null,
+      focusRealms: ['work'],
+      canWrite: true,
+      canResolveCredentials: false,
+    }
+
+    // 预算 4,000（全局 50% 帽 = 2,000）：
+    // - 桶 1（projectExact ~1,830 + zcodeRule ~45）优先展开，绝不被更短的全局项挤掉
+    // - 桶 3（globalRuleA ~1,230 展开，globalRuleB ~1,230 超全局 2,000 帽被降级）
+    // - indexManual 直接进目录（reason='index'），personalPinned 因 focus_realms=['work'] 在 boot 被排除
+    const detailed = await compileBootDetailed(database.db, keyScope, {
+      focus: {
+        envs: ['mac'],
+        realms: ['work'],
+        projects: ['alpha-app', 'alpha-app-wt'],
+        runtimes: ['zcode'],
+      },
+      budget: 4_000,
+    })
+
+    expect(detailed.expanded.map((e) => e.shortId)).toContain(projectExact.entry.shortId)
+    expect(detailed.expanded.map((e) => e.shortId)).toContain(zcodeRule.entry.shortId)
+    expect(detailed.expanded.map((e) => e.shortId)).toContain(globalRuleA.entry.shortId)
+    expect(detailed.expanded.map((e) => e.shortId)).not.toContain(globalRuleB.entry.shortId)
+    expect(detailed.expanded.map((e) => e.shortId)).not.toContain(indexManual.entry.shortId)
+    expect(detailed.indexed.map((i) => i.shortId)).toEqual([indexManual.entry.shortId])
+    expect(detailed.demoted.map((i) => i.shortId)).toEqual([globalRuleB.entry.shortId])
+    expect(detailed.demoted[0]?.reason).toBe('budget')
+    expect(detailed.excluded.map((i) => i.shortId)).toContain(personalPinned.entry.shortId)
+
+    // GET /v1/boot 支持自定义 runtime=zcode 且继承 key.focusRealms
+    const app = createTestApp(database, { masterKey })
+    const bootRes = await app.request('/v1/boot?project=alpha-app&runtime=zcode', {
+      headers: { authorization: `Bearer ${key.key}` },
+    })
+    expect(bootRes.status).toBe(200)
+    const bootBody = BootResponse.parse(await bootRes.json())
+    expect(bootBody.entries.map((e) => e.shortId)).toContain(zcodeRule.entry.shortId)
+    expect(bootBody.entries.map((e) => e.shortId)).not.toContain(personalPinned.entry.shortId)
+    expect(
+      bootBody.omittedItems?.find((i) => i.shortId === indexManual.entry.shortId)?.reason,
+    ).toBe('index')
+
+    // 但 focus_realms 不改变安全硬边界：recall 仍能查到 personalPinned
+    const recalledPersonal = await recallEntries(database.db, masterKey, keyScope, '个人作息提醒', {
+      focus: { envs: ['mac'], realms: ['work'], projects: [], runtimes: [] },
+      useSemantic: false,
+      includeLinks: false,
+    })
+    expect(recalledPersonal.map((c) => c.shortId)).toContain(personalPinned.entry.shortId)
+
+    // loadRecentEntries 过滤跨项目与互斥场景词条，避免串场
+    const recent = await loadRecentEntries(database.db, keyScope, {
+      limit: 10,
+      focus: { envs: ['mac'], realms: ['work'], projects: ['alpha-app'], runtimes: ['codex'] },
+    })
+    const recentIds = recent.map((r) => r.shortId)
+    expect(recentIds).toContain(sameProjRecent.entry.shortId)
+    expect(recentIds).not.toContain(otherProjRecent.entry.shortId)
+    expect(recentIds).not.toContain(zcodeRule.entry.shortId)
+    expect(recentIds).not.toContain(personalPinned.entry.shortId)
   })
 })

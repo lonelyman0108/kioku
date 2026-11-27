@@ -37,6 +37,7 @@ export function whoamiRoutes(deps: Deps) {
           runtimeFamily: key.runtimeFamily,
           envs: [...key.envs],
           allowedRealms: key.allowedRealms ? [...key.allowedRealms] : null,
+          focusRealms: key.focusRealms ? [...key.focusRealms] : null,
           canWrite: key.canWrite,
           canResolveCredentials: key.canResolveCredentials,
         },

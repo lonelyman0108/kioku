@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 
 import {
+  bootModeToPinned,
   buildSearchTags,
   deriveEntryTitle,
   detectSecretPrefixes,
@@ -9,7 +10,9 @@ import {
   LEGACY_LORE_URI_REGEX,
   NON_SHORT_ID_WIKI_LINK_REGEX,
   normalizeSlugList,
+  resolveBootMode,
   WIKI_LINK_REGEX,
+  type BootMode,
   type ExportDataRequest,
   type ExportedCredentialRecord,
   type ImportApplyRequest,
@@ -46,6 +49,7 @@ interface ImportCandidate {
   content: string
   disclosure: string | null
   isPinned: boolean
+  bootMode: BootMode
   envs: string[]
   realms: string[]
   projects: string[]
@@ -193,7 +197,7 @@ export async function exportTransferBundle(
     for (const row of rows) {
       const meta: string[] = [
         `短 ID：\`${row.shortId}\``,
-        `类型：${row.kind === 'episode' ? '会话摘要' : row.isPinned ? '常驻记忆' : '正式记忆'}`,
+        `类型：${row.kind === 'episode' ? '会话摘要' : row.bootMode === 'full' ? '全文常驻' : row.bootMode === 'index' ? '目录常驻' : '正式记忆'}`,
       ]
       if (row.projects.length) meta.push(`项目：${row.projects.join(', ')}`)
       if (row.envs.length) meta.push(`环境：${row.envs.join(', ')}`)
@@ -244,6 +248,7 @@ export async function exportTransferBundle(
       content: row.content,
       disclosure: row.disclosure,
       isPinned: row.isPinned,
+      bootMode: row.bootMode,
       envs: row.envs,
       realms: row.realms,
       projects: row.projects,
@@ -299,6 +304,10 @@ async function resolveSource(
       const baseKey = item.shortId
       const key = seenKeys.has(baseKey) ? `${baseKey}#${idx}` : baseKey
       seenKeys.add(key)
+      const bootMode: BootMode =
+        item.kind === 'episode'
+          ? 'none'
+          : resolveBootMode({ bootMode: item.bootMode, isPinned: item.isPinned })
       return {
         key,
         sourceRef: item.shortId,
@@ -308,7 +317,8 @@ async function resolveSource(
         summary: item.summary ?? null,
         content: item.content,
         disclosure: item.disclosure ?? null,
-        isPinned: item.kind === 'episode' ? false : item.isPinned,
+        isPinned: bootModeToPinned(bootMode),
+        bootMode,
         envs: normalizeSlugList(item.envs),
         realms: normalizeSlugList(item.realms),
         projects: normalizeSlugList(item.projects),
@@ -354,6 +364,7 @@ async function resolveSource(
       content: item.content,
       disclosure: item.disclosure,
       isPinned: item.isPinned,
+      bootMode: item.bootMode,
       envs: item.envs,
       realms: item.realms,
       projects: item.projects,
@@ -419,6 +430,7 @@ export async function previewTransferImport(
       contentPreview: c.skippedReason ? '' : previewText(c.content),
       secretHintLabels: hints,
       isPinned: c.isPinned,
+      bootMode: c.bootMode,
       envs: c.envs,
       realms: c.realms,
       projects: c.projects,
@@ -561,6 +573,7 @@ export async function applyTransferImport(
             content: c.content,
             disclosure: c.disclosure,
             isPinned: c.kind === 'episode' ? false : c.isPinned,
+            bootMode: c.kind === 'episode' ? 'none' : c.bootMode,
             envs: c.envs,
             realms: c.realms,
             projects: c.projects,
@@ -607,6 +620,7 @@ export async function applyTransferImport(
               content: c.content,
               disclosure: c.disclosure,
               isPinned: c.kind === 'episode' ? false : c.isPinned,
+              bootMode: c.kind === 'episode' ? 'none' : c.bootMode,
               envs: c.envs,
               realms: c.realms,
               projects: c.projects,
@@ -688,6 +702,7 @@ export async function applyTransferImport(
             content: fresh.content,
             disclosure: fresh.disclosure,
             isPinned: fresh.isPinned,
+            bootMode: fresh.bootMode,
             envs: fresh.envs,
             realms: fresh.realms,
             projects: fresh.projects,

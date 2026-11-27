@@ -53,11 +53,29 @@ describe('场景焦点合成与互斥冲突判定', () => {
     const overridden = synthesizeFocus(scope, {
       env: 'Server',
       realm: 'Personal',
-      runtime: 'codex',
+      runtime: 'zcode',
+      project: { repoName: 'org/sample-app', dirName: '/work/sample-app-wt' },
     })
     expect(overridden.envs).toEqual(['server'])
     expect(overridden.realms).toEqual(['personal'])
-    expect(overridden.runtimes).toEqual(['codex'])
+    expect(overridden.runtimes).toEqual(['zcode'])
+    expect(overridden.projects).toEqual(['sample-app', 'sample-app-wt'])
+
+    // focusRealms 在不限 allowedRealms 时提供启动聚焦，限定 allowedRealms 时取交集绝不越权放宽
+    const unrestrictedFocus = synthesizeFocus(
+      keyScope({ allowedRealms: null, focusRealms: ['work'] }),
+    )
+    expect(unrestrictedFocus.realms).toEqual(['work'])
+
+    const boundedFocus = synthesizeFocus(
+      keyScope({ allowedRealms: ['work'], focusRealms: ['personal'] }),
+    )
+    expect(boundedFocus.realms).toEqual(['work'])
+
+    const narrowedFocus = synthesizeFocus(
+      keyScope({ allowedRealms: ['work', 'ops'], focusRealms: ['ops'] }),
+    )
+    expect(narrowedFocus.realms).toEqual(['ops'])
   })
 
   it('hasExclusiveSceneConflict 只在双方同独占维度（环境/场域/客户端）皆非空且无交集时判为冲突', () => {
@@ -291,5 +309,70 @@ describe.skipIf(!testDatabaseUrl)('allowed_realms 硬边界（JS 与 SQL 一致�
     expect(migratedHistory.items.map((ev) => ev.version)).toEqual([2])
     const v1Attempt = await entrySvc.history(workScope, personalEntry.entry.shortId, { version: 1 })
     expect(v1Attempt.items).toEqual([])
+  })
+
+  it('创建或更新全局全文常驻词条时，场景提示不会泄露当前密钥不可见场域的项目或客户端名', async () => {
+    const masterKey = testMasterKey()
+    const credSvc = new CredentialService(database.db, masterKey)
+    const entrySvc = new EntryService(database.db, masterKey, credSvc, null)
+    const consoleScope: AccessScope = { kind: 'console', accountId: 'acc', sessionId: 'sess' }
+
+    await entrySvc.create(consoleScope, {
+      title: '个人隐藏项目说明',
+      content: '仅个人场域可见。',
+      realms: ['personal'],
+      projects: ['secret-personal-proj'],
+      runtimes: ['secret-rt'],
+      envs: [],
+      topics: [],
+      isPinned: false,
+    })
+    await entrySvc.create(consoleScope, {
+      title: '工作可见项目说明',
+      content: '工作场域可见。',
+      realms: ['work'],
+      projects: ['visible-work-proj'],
+      runtimes: [],
+      envs: [],
+      topics: [],
+      isPinned: false,
+    })
+
+    const workScope = keyScope({ allowedRealms: ['work'], canWrite: true })
+    const hiddenMention = await entrySvc.create(workScope, {
+      title: 'secret-personal-proj 与 secret-rt 使用说明',
+      content: '正文提及属于不可见场域的项目与客户端标识。',
+      bootMode: 'full',
+      realms: [],
+      envs: [],
+      projects: [],
+      runtimes: [],
+      topics: [],
+      isPinned: true,
+    })
+    expect(
+      (hiddenMention.warnings ?? []).some(
+        (w) =>
+          w.code === 'pinned_scope_hint' &&
+          (w.message.includes('secret-personal-proj') || w.message.includes('secret-rt')),
+      ),
+    ).toBe(false)
+
+    const visibleMention = await entrySvc.create(workScope, {
+      title: 'visible-work-proj 部署约定',
+      content: '正文记录可见工作项目的部署流程。',
+      bootMode: 'full',
+      realms: [],
+      envs: [],
+      projects: [],
+      runtimes: [],
+      topics: [],
+      isPinned: true,
+    })
+    expect(
+      (visibleMention.warnings ?? []).some(
+        (w) => w.code === 'pinned_scope_hint' && w.message.includes('visible-work-proj'),
+      ),
+    ).toBe(true)
   })
 })

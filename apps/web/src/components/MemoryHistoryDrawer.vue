@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import {
+  effectiveBootMode,
   stripDuplicateLeadingHeading,
   type EntryDetailResponse,
   type EntryHistoryItem,
@@ -19,6 +20,7 @@ import {
 } from '../diff'
 import { icons } from '../icons'
 import {
+  bootModeLabels,
   entryFieldLabel,
   eventTypeLabels,
   formatActorLabel,
@@ -793,7 +795,7 @@ async function confirmRestore() {
                   <span class="font-medium">{{ inspectorSnapshot.title }}</span>
                   <span class="font-mono text-xs text-muted">
                     版本 {{ inspectorSnapshot.version }} ·
-                    {{ inspectorSnapshot.isPinned ? '常驻' : '按需' }}
+                    {{ bootModeLabels[effectiveBootMode(inspectorSnapshot)] }}
                   </span>
                 </div>
                 <div v-if="inspectorSnapshot.summary?.trim()" class="snapshot-summary">

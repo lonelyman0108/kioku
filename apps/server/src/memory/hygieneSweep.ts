@@ -287,6 +287,7 @@ function toSnapshot(row: EntryRow): EntrySnapshot {
     content: row.content,
     disclosure: row.disclosure,
     isPinned: row.isPinned,
+    bootMode: row.bootMode,
     envs: row.envs,
     realms: row.realms,
     projects: row.projects,

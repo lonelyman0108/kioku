@@ -56,6 +56,7 @@ export const icons = {
   compare: 'i-lucide-git-compare-arrows',
   sliders: 'i-lucide-sliders-horizontal',
   bookOpen: 'i-lucide-book-open',
+  terminal: 'i-lucide-terminal',
   shieldCheck: 'i-lucide-shield-check',
   listChecks: 'i-lucide-list-checks',
   table: 'i-lucide-table-2',

@@ -156,6 +156,19 @@ describe('快照属性变动对比', () => {
     })
   })
 
+  it('识别三态 bootMode 快照变动并输出中文标签', () => {
+    const prev = makeSnapshot({ isPinned: true, bootMode: 'full' })
+    const curr = makeSnapshot({ isPinned: true, bootMode: 'index', version: 2 })
+    expect(diffEntrySnapshots(prev, curr)).toEqual([
+      {
+        field: 'bootMode',
+        label: '启动加载',
+        before: '全文常驻',
+        after: '目录常驻',
+      },
+    ])
+  })
+
   it('无元数据差异时返回空数组', () => {
     const snap = makeSnapshot({ topics: ['a', 'b'] })
     expect(diffEntrySnapshots(snap, makeSnapshot({ topics: ['b', 'a'], version: 2 }))).toEqual([])

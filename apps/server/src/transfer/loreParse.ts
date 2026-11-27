@@ -1,4 +1,5 @@
 import {
+  bootModeToPinned,
   CREDENTIAL_PLACEHOLDER_PREFIX,
   DISCLOSURE_MAX,
   ENTRY_CONTENT_MAX,
@@ -6,12 +7,12 @@ import {
   LORE_BACKUP_FORMAT,
   normalizeProjectSlug,
   normalizeSlugList,
-  RUNTIME_FAMILIES,
   SCENE_SLUG_PATTERN,
   stripDuplicateLeadingHeading,
   stripLegacyGlossaryLines,
   TOPICS_MAX,
   TopicTag,
+  type BootMode,
 } from '@kioku/contracts'
 import { z } from 'zod'
 
@@ -19,7 +20,6 @@ import { MemoryError } from '../memory/errors'
 
 const MAX_ROWS = 200_000
 const CLOCK_SKEW_MS = 24 * 3600_000
-const RUNTIME_SET = new Set<string>(RUNTIME_FAMILIES)
 
 const SafeText = z.string().refine((v) => !v.includes('\0'), '不能包含空字符')
 const IsoTime = SafeText.refine((v) => !Number.isNaN(Date.parse(v)), '时间格式不正确').refine(
@@ -136,8 +136,13 @@ function mapLoreUri(
   const rawTopics: string[] = []
 
   if (d === 'core' && segments[0]?.toLowerCase() === 'agent' && segments[1]) {
-    const candidate = segments[1].toLowerCase()
-    if (RUNTIME_SET.has(candidate) && candidate !== 'generic' && candidate !== 'mcp') {
+    const candidate = segments[1].trim().toLowerCase()
+    if (
+      candidate !== 'generic' &&
+      candidate !== 'mcp' &&
+      SCENE_SLUG_PATTERN.test(candidate) &&
+      !candidate.includes(CREDENTIAL_PLACEHOLDER_PREFIX)
+    ) {
       runtimes.push(candidate)
     } else {
       rawTopics.push(candidate)
@@ -177,6 +182,7 @@ export interface ParsedLoreEntry {
   content: string
   disclosure: string | null
   isPinned: boolean
+  bootMode: BootMode
   envs: string[]
   realms: string[]
   projects: string[]
@@ -268,13 +274,16 @@ export function parseLoreToEntries(raw: unknown): ParsedLoreResult {
     const createdAt = new Date(node.created_at)
     const updatedAt = body ? new Date(body.at) : createdAt
 
+    const bootMode: BootMode = edge.priority <= 0 ? 'full' : edge.priority === 1 ? 'index' : 'none'
+
     result.push({
       key: uri,
       uri,
       title,
       content: cleanedContent,
       disclosure,
-      isPinned: edge.priority <= 1,
+      isPinned: bootModeToPinned(bootMode),
+      bootMode,
       envs: [],
       realms: [],
       projects: mapped.projects,
