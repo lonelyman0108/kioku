@@ -129,6 +129,9 @@ export function resolveActorDisplay(
   if (normalized === 'console') {
     return { kind: 'console', label: '本人 · 控制台', group: 'self' }
   }
+  if (normalized === 'tidy:single') {
+    return { kind: 'console', label: '本人 · 规范整理', group: 'self' }
+  }
   if (normalized === 'capture') {
     return { kind: 'capture', label: '本人 · 随手记', group: 'self' }
   }

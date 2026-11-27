@@ -26,6 +26,8 @@ export function runtimeDisplayName(family: string | null | undefined): string {
 
 export function resolveStaticActorMeta(actor: string): EntryActorMeta | null {
   if (actor === 'console') return { kind: 'console', label: '本人 · 控制台', runtimeFamily: null }
+  if (actor === 'tidy:single')
+    return { kind: 'console', label: '本人 · 规范整理', runtimeFamily: null }
   if (actor === 'dream') return { kind: 'dream', label: '后台整理', runtimeFamily: null }
   if (actor === 'extraction') return { kind: 'extraction', label: '自动摘要', runtimeFamily: null }
   if (actor === 'capture') return { kind: 'capture', label: '本人 · 随手记', runtimeFamily: null }

@@ -1,3 +1,29 @@
+<script lang="ts">
+import type { DreamSuggestionView } from '@kioku/contracts'
+
+export type SingleOrganizeMode = 'tidy' | 'cross_check'
+
+// 将单条查重与关联结果按是否直接涉及当前记忆拆分，便于把连带发现的关联记忆修订单独分组呈现
+export function partitionCrossSuggestions(
+  suggestions: readonly DreamSuggestionView[],
+  anchorShortId: string,
+): {
+  direct: DreamSuggestionView[]
+  related: DreamSuggestionView[]
+} {
+  const direct: DreamSuggestionView[] = []
+  const related: DreamSuggestionView[] = []
+  for (const item of suggestions) {
+    if (item.entries.some((e) => e.shortId === anchorShortId)) {
+      direct.push(item)
+    } else {
+      related.push(item)
+    }
+  }
+  return { direct, related }
+}
+</script>
+
 <script setup lang="ts">
 import {
   normalizeSlugList,
@@ -19,8 +45,7 @@ import DreamSuggestionCard from './DreamSuggestionCard.vue'
 import DiffViewer from './ui/DiffViewer.vue'
 import EmptyState from './ui/EmptyState.vue'
 import NoteLine from './ui/NoteLine.vue'
-
-export type SingleOrganizeMode = 'tidy' | 'cross_check'
+import SectionHeading from './ui/SectionHeading.vue'
 
 const props = defineProps<{
   shortId: string
@@ -93,14 +118,25 @@ async function runAction() {
           stageMessage.value = msg
         },
       })
-      if (!signal.aborted) tidyResult.value = res
+      if (!signal.aborted) {
+        tidyResult.value = res
+        if (!res.needed) {
+          void queryClient.invalidateQueries({ queryKey: ['inbox'] })
+        }
+      }
     } else {
       stageMessage.value = '正在检索相似记忆、双链邻居与断链并交由模型核查…'
       const res = await api.crossCheckEntry(props.shortId, signal)
       if (!signal.aborted) {
         crossResult.value = res
+        const touchedShortIds = new Set<string>([
+          props.shortId,
+          ...res.suggestions.flatMap((s) => s.entries.map((e) => e.shortId)),
+        ])
         void queryClient.invalidateQueries({ queryKey: ['inbox'] })
-        void queryClient.invalidateQueries({ queryKey: ['entry', props.shortId] })
+        for (const sid of touchedShortIds) {
+          void queryClient.invalidateQueries({ queryKey: ['entry', sid] })
+        }
       }
     }
   } catch (err) {
@@ -334,8 +370,15 @@ async function onApplyCrossSuggestion(id: string, body: ApplySuggestionRequest) 
   }
 }
 
+const crossSuggestionGroups = computed(() =>
+  partitionCrossSuggestions(crossResult.value?.suggestions ?? [], props.shortId),
+)
+const directCrossSuggestions = computed(() => crossSuggestionGroups.value.direct)
+const relatedCrossSuggestions = computed(() => crossSuggestionGroups.value.related)
+
 async function onDismissCrossSuggestion(id: string) {
   if (cardBusyId.value) return
+  const suggestion = crossResult.value?.suggestions.find((s) => s.id === id)
   cardBusyId.value = id
   try {
     await api.dismissSuggestion(id)
@@ -346,9 +389,18 @@ async function onDismissCrossSuggestion(id: string) {
         suggestions: crossResult.value.suggestions.filter((s) => s.id !== id),
       }
     }
+    const affectedShortIds = new Set<string>([
+      props.shortId,
+      ...(suggestion?.entries.map((e) => e.shortId) ?? []),
+    ])
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ['inbox'] }),
-      queryClient.invalidateQueries({ queryKey: ['entry', props.shortId] }),
+      queryClient.invalidateQueries({ queryKey: ['entries'] }),
+      queryClient.invalidateQueries({ queryKey: ['boot-preview'] }),
+      ...[...affectedShortIds].flatMap((sid) => [
+        queryClient.invalidateQueries({ queryKey: ['entry', sid] }),
+        queryClient.invalidateQueries({ queryKey: ['entry-history', sid] }),
+      ]),
     ])
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '忽略失败', color: 'error' })
@@ -614,6 +666,10 @@ const drawerDescription = computed(() =>
                 已比对 {{ crossResult.consideredNeighbors }} 条相邻记忆，本次新发现
                 {{ crossResult.createdCount }} 条建议
               </span>
+              <span v-if="relatedCrossSuggestions.length > 0" class="cross-meta-related">
+                <UIcon :name="icons.updateDoc" class="cross-meta-related-icon" aria-hidden="true" />
+                <span>含 {{ relatedCrossSuggestions.length }} 条关联记忆修订建议</span>
+              </span>
             </span>
             <UButton
               size="xs"
@@ -649,16 +705,55 @@ const drawerDescription = computed(() =>
             "
           />
 
-          <div v-else class="space-y-4">
-            <DreamSuggestionCard
-              v-for="item in crossResult.suggestions"
-              :key="item.id"
-              :suggestion="item"
-              :busy="cardBusyId === item.id"
-              :disabled="cardBusyId !== null && cardBusyId !== item.id"
-              @apply="onApplyCrossSuggestion"
-              @dismiss="onDismissCrossSuggestion"
-            />
+          <div v-else class="cross-groups">
+            <section v-if="directCrossSuggestions.length" class="cross-group">
+              <div v-if="relatedCrossSuggestions.length" class="cross-group-head">
+                <SectionHeading title="当前记忆建议" :icon="icons.links" :level="3">
+                  <template #hint>
+                    <span class="cross-group-count tabular-nums">
+                      （{{ directCrossSuggestions.length }} 条）
+                    </span>
+                  </template>
+                </SectionHeading>
+              </div>
+              <div class="space-y-4">
+                <DreamSuggestionCard
+                  v-for="item in directCrossSuggestions"
+                  :key="item.id"
+                  :suggestion="item"
+                  :busy="cardBusyId === item.id"
+                  :disabled="cardBusyId !== null && cardBusyId !== item.id"
+                  @apply="onApplyCrossSuggestion"
+                  @dismiss="onDismissCrossSuggestion"
+                />
+              </div>
+            </section>
+
+            <section v-if="relatedCrossSuggestions.length" class="cross-group">
+              <div class="cross-group-head">
+                <SectionHeading title="关联记忆修订建议" :icon="icons.updateDoc" :level="3">
+                  <template #hint>
+                    <span class="cross-group-count tabular-nums">
+                      （{{ relatedCrossSuggestions.length }} 条）
+                    </span>
+                  </template>
+                </SectionHeading>
+                <p class="cross-group-desc">
+                  由当前记忆比对发现，确认后将作用于对应关联记忆，不会修改当前记忆。
+                </p>
+              </div>
+              <div class="space-y-4">
+                <DreamSuggestionCard
+                  v-for="item in relatedCrossSuggestions"
+                  :key="item.id"
+                  :suggestion="item"
+                  :busy="cardBusyId === item.id"
+                  :disabled="cardBusyId !== null && cardBusyId !== item.id"
+                  @apply="onApplyCrossSuggestion"
+                  @dismiss="onDismissCrossSuggestion"
+                />
+              </div>
+            </section>
           </div>
         </template>
       </div>
@@ -935,14 +1030,57 @@ const drawerDescription = computed(() =>
 }
 .cross-meta-summary {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
+  gap: 6px 8px;
 }
 .cross-meta-icon {
   display: inline-block;
   flex: none;
   width: 14px;
   height: 14px;
+  color: var(--ui-text-muted);
+}
+.cross-meta-related {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border: 1px solid var(--ui-border-accented);
+  background: var(--ui-bg);
+  font-size: 12px;
+  color: var(--ui-text-toned);
+}
+.cross-meta-related-icon {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
+  color: var(--ui-text-muted);
+}
+.cross-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.cross-group {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.cross-group-head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.cross-group-count {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--ui-text-muted);
+}
+.cross-group-desc {
+  font-size: 13px;
+  line-height: 1.55;
   color: var(--ui-text-muted);
 }
 .drawer-foot {

@@ -1052,6 +1052,68 @@ function finishPatchedContent(
   return { ok: true, content: nextContent, matchedHeading }
 }
 
+function replaceUniqueText(
+  source: string,
+  oldText: string,
+  newText: string,
+  scopeLabel: string,
+): { ok: true; content: string } | { ok: false; reason: string } {
+  const oldNorm = oldText.replace(/\r\n/g, '\n')
+  const newNorm = newText.replace(/\r\n/g, '\n')
+  if (!oldNorm.trim()) return { ok: false, reason: '待替换片段为空' }
+  if (!newNorm.trim()) return { ok: false, reason: '替换内容为空' }
+
+  const firstIdx = source.indexOf(oldNorm)
+  if (firstIdx !== -1) {
+    if (source.indexOf(oldNorm, firstIdx + 1) !== -1) {
+      return { ok: false, reason: `待替换片段在${scopeLabel}中出现多处，无法唯一定位` }
+    }
+    const next = source.slice(0, firstIdx) + newNorm + source.slice(firstIdx + oldNorm.length)
+    return { ok: true, content: next }
+  }
+
+  // 容忍首尾空白差异的单行/多行精确行匹配
+  const sourceLines = source.split('\n')
+  const rawOldLines = stripOuterBlankLines(oldNorm.split('\n'))
+  const oldLines = rawOldLines.map((l) => l.trim())
+  if (!oldLines.length) return { ok: false, reason: '未匹配到待替换片段' }
+
+  const matches: number[] = []
+  for (let i = 0; i <= sourceLines.length - oldLines.length; i++) {
+    let allEqual = true
+    for (let j = 0; j < oldLines.length; j++) {
+      if (sourceLines[i + j]!.trim() !== oldLines[j]) {
+        allEqual = false
+        break
+      }
+    }
+    if (allEqual) matches.push(i)
+  }
+  if (matches.length !== 1) {
+    return {
+      ok: false,
+      reason:
+        matches.length === 0
+          ? `未在${scopeLabel}中找到待替换片段`
+          : `待替换片段在${scopeLabel}中存在多处匹配`,
+    }
+  }
+  const start = matches[0]!
+  const nextLines = [...sourceLines]
+  let replacementLines = stripOuterBlankLines(newNorm.split('\n'))
+  // 当待替换片段首行未带前导缩进而原文首行有缩进时，为未缩进的新内容补回原首行缩进
+  const sourceIndent = /^[ \t]*/.exec(sourceLines[start]!)?.[0] ?? ''
+  const oldFirstIndent = /^[ \t]*/.exec(rawOldLines[0]!)?.[0] ?? ''
+  const newFirstIndent = /^[ \t]*/.exec(replacementLines[0] ?? '')?.[0] ?? ''
+  if (sourceIndent && !oldFirstIndent && !newFirstIndent) {
+    replacementLines = replacementLines.map((line) =>
+      line.trim() ? `${sourceIndent}${line}` : line,
+    )
+  }
+  nextLines.splice(start, oldLines.length, ...replacementLines)
+  return { ok: true, content: nextLines.join('\n') }
+}
+
 // 将局部补丁确定性应用到完整正文，避免整篇重写误删无关内容
 export function applyCapturePatch(
   content: string,
@@ -1076,48 +1138,9 @@ export function applyCapturePatch(
     return finishPatchedContent(normalized, res.content, res.matchedHeading)
   }
 
-  const oldNorm = patch.oldText.replace(/\r\n/g, '\n')
-  const newNorm = patch.newText.replace(/\r\n/g, '\n')
-  if (!oldNorm.trim()) return { ok: false, reason: '待替换片段为空' }
-  if (!newNorm.trim()) return { ok: false, reason: '替换内容为空' }
-
-  const firstIdx = normalized.indexOf(oldNorm)
-  if (firstIdx !== -1) {
-    if (normalized.indexOf(oldNorm, firstIdx + 1) !== -1) {
-      return { ok: false, reason: '待替换片段在正文中出现多处，无法唯一定位' }
-    }
-    const next =
-      normalized.slice(0, firstIdx) + newNorm + normalized.slice(firstIdx + oldNorm.length)
-    return finishPatchedContent(normalized, next, null)
-  }
-
-  // 容忍首尾空白差异的单行/多行精确行匹配
-  const contentLines = normalized.split('\n')
-  const oldLines = stripOuterBlankLines(oldNorm.split('\n')).map((l) => l.trim())
-  if (!oldLines.length) return { ok: false, reason: '未匹配到待替换片段' }
-
-  const matches: number[] = []
-  for (let i = 0; i <= contentLines.length - oldLines.length; i++) {
-    let allEqual = true
-    for (let j = 0; j < oldLines.length; j++) {
-      if (contentLines[i + j]!.trim() !== oldLines[j]) {
-        allEqual = false
-        break
-      }
-    }
-    if (allEqual) matches.push(i)
-  }
-  if (matches.length !== 1) {
-    return {
-      ok: false,
-      reason: matches.length === 0 ? '未在正文中找到待替换片段' : '待替换片段存在多处匹配',
-    }
-  }
-  const start = matches[0]!
-  const nextLines = [...contentLines]
-  const replacementLines = stripOuterBlankLines(newNorm.split('\n'))
-  nextLines.splice(start, oldLines.length, ...replacementLines)
-  return finishPatchedContent(normalized, nextLines.join('\n'), null)
+  const replaced = replaceUniqueText(normalized, patch.oldText, patch.newText, '正文')
+  if (!replaced.ok) return replaced
+  return finishPatchedContent(normalized, replaced.content, null)
 }
 
 // 校验归并前后的双链、凭据占位符与篇幅变化，防止误删既有引用
@@ -1226,30 +1249,113 @@ export function extractMarkdownOutline(content: string): MarkdownOutlineSection[
   })
 }
 
+function normalizeHeadingText(raw: string): string {
+  return raw.replace(/\s+/g, ' ').trim()
+}
+
+type FindH2SectionResult =
+  | { status: 'matched'; span: SectionSpan }
+  | { status: 'missing' }
+  | { status: 'ambiguous'; count: number }
+
+function findH2SectionSpan(spans: readonly SectionSpan[], query: string): FindH2SectionResult {
+  const want = normalizeHeadingText(query.trim().replace(/^#{1,6}[ \t]+/, ''))
+  if (!want || !spans.length) return { status: 'missing' }
+
+  const exact = spans.filter((s) => normalizeHeadingText(s.heading) === want)
+  if (exact.length === 1) return { status: 'matched', span: exact[0]! }
+  if (exact.length > 1) return { status: 'ambiguous', count: exact.length }
+
+  const lowerWant = want.toLowerCase()
+  const ci = spans.filter((s) => normalizeHeadingText(s.heading).toLowerCase() === lowerWant)
+  if (ci.length === 1) return { status: 'matched', span: ci[0]! }
+  if (ci.length > 1) return { status: 'ambiguous', count: ci.length }
+
+  const partial = spans.filter((s) =>
+    normalizeHeadingText(s.heading).toLowerCase().includes(lowerWant),
+  )
+  if (partial.length === 1) return { status: 'matched', span: partial[0]! }
+  if (partial.length > 1) return { status: 'ambiguous', count: partial.length }
+
+  return { status: 'missing' }
+}
+
 export function extractMarkdownSection(
   content: string,
   query: string,
 ): { heading: string; content: string } | null {
-  const want = query
-    .trim()
-    .replace(/^#{1,6}[ \t]+/, '')
-    .trim()
-  if (!want) return null
   const lines = content.replace(/\r\n/g, '\n').split('\n')
   const spans = scanH2Sections(lines)
-  if (!spans.length) return null
-
-  const lowerWant = want.toLowerCase()
-  const matched =
-    spans.find((s) => s.heading === want) ??
-    spans.find((s) => s.heading.toLowerCase() === lowerWant) ??
-    spans.find((s) => s.heading.toLowerCase().includes(lowerWant))
-  if (!matched) return null
+  const found = findH2SectionSpan(spans, query)
+  if (found.status !== 'matched') return null
 
   return {
-    heading: matched.heading,
-    content: lines.slice(matched.startLine, matched.endLine).join('\n').trim(),
+    heading: found.span.heading,
+    content: lines.slice(found.span.startLine, found.span.endLine).join('\n').trim(),
   }
+}
+
+// 仅在命中的单个二级小节范围内执行唯一文本替换；正文无二级小节且未指定标题时回退整篇局部替换
+export function applyMarkdownSectionPatch(
+  content: string,
+  sectionHeading: string | null | undefined,
+  patch: { oldText: string; newText: string },
+): ApplyCapturePatchResult {
+  const normalized = content.replace(/\r\n/g, '\n')
+  const lines = normalized.split('\n')
+  const spans = scanH2Sections(lines)
+  const rawHeading = sectionHeading?.trim() ?? ''
+
+  if (!rawHeading) {
+    if (spans.length === 0) {
+      return applyCapturePatch(normalized, {
+        kind: 'replace',
+        oldText: patch.oldText,
+        newText: patch.newText,
+      })
+    }
+    return { ok: false, reason: '正文包含二级小节，必须指定目标小节标题' }
+  }
+
+  const found = findH2SectionSpan(spans, rawHeading)
+  if (found.status === 'ambiguous') {
+    return {
+      ok: false,
+      reason: `小节「${rawHeading}」存在 ${found.count} 处歧义匹配，无法唯一定位`,
+    }
+  }
+  if (found.status === 'missing') {
+    return { ok: false, reason: `未找到小节「${rawHeading}」` }
+  }
+  const matched = found.span
+
+  const sectionText = lines.slice(matched.startLine, matched.endLine).join('\n')
+  const replaced = replaceUniqueText(
+    sectionText,
+    patch.oldText,
+    patch.newText,
+    `小节「${matched.heading}」`,
+  )
+  if (!replaced.ok) return replaced
+
+  const firstLineAfter = replaced.content.split('\n', 1)[0] ?? ''
+  const headingAfter = H2_HEADING_RE.exec(firstLineAfter)?.[1]
+  if (
+    !headingAfter ||
+    normalizeHeadingText(headingAfter) !== normalizeHeadingText(matched.heading)
+  ) {
+    return {
+      ok: false,
+      reason: `补丁破坏或移除了小节「${matched.heading}」的二级标题行`,
+    }
+  }
+
+  const nextContent = [
+    ...lines.slice(0, matched.startLine),
+    replaced.content,
+    ...lines.slice(matched.endLine),
+  ].join('\n')
+  return finishPatchedContent(normalized, nextContent, matched.heading)
 }
 
 // ---- 存量确定性预清洗与结构体检契约 ----

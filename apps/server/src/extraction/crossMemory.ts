@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto'
 
 import {
+  applyMarkdownSectionPatch,
+  checkCaptureIntegrity,
+  extractMarkdownOutline,
+  extractMarkdownSection,
   normalizeShortId,
   normalizeSlugList,
   parseEpisodeSignals,
@@ -12,7 +16,7 @@ import {
   type DreamSuggestionKind,
   type SingleCrossCheckResponse,
 } from '@kioku/contracts'
-import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm'
+import { and, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm'
 
 import { hasOverlap, momentSql, stillValidSql, textArraySql } from '../access/scope'
 import type { MasterKey } from '../crypto/keyring'
@@ -45,20 +49,33 @@ import {
   buildHabitDistillMessages,
   buildLinkAuditMessages,
   buildOutlineSummary,
+  buildReconcileLocateMessages,
+  buildReconcilePatchMessages,
   buildSemanticRepairMessages,
   canFlowRealmInto,
   evaluateDreamResponse,
+  parseReconcileLocateResponse,
+  parseReconcilePatchResponse,
   sameRealms,
   type BrokenLinkHint,
   type DreamPromptItem,
   type HabitDistillProvenance,
   type ParsedDreamProposal,
+  type ReconcileCandidateItem,
+  type ReconcileSourceItem,
 } from './dreamPrompt'
 
 type EntryRow = typeof entries.$inferSelect
 
 const CLUSTER_COSINE_THRESHOLD = 0.84
 const LINK_COSINE_MIN = 0.7
+const RECONCILE_COSINE_MIN = 0.65
+const RECONCILE_VECTOR_LIMIT_PER_SEED = 12
+const RECONCILE_SEEDS_MAX = 4
+const RECONCILE_CANDIDATES_PER_SEED = 5
+const RECONCILE_PATCH_MAX_PER_SEED = 2
+const RECONCILE_SECTION_CONTENT_MAX = 4_000
+const RECONCILE_FULL_CORPUS_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
 const CLUSTER_MAX_SIZE = 4
 const CLUSTER_ITEM_CHAR_LIMIT = 8_000
 const CLUSTER_TOTAL_CHAR_BUDGET = 24_000
@@ -77,20 +94,38 @@ const HABIT_TARGETS_MAX = 3
 const HABIT_TARGET_MIN_COSINE = 0.55
 const BOOT_AUDIT_BATCH_SIZE = 6
 const DEFAULT_MAX_CROSS_CALLS = 12
-const SINGLE_CROSS_MAX_CALLS = 4
+const SINGLE_CROSS_MAX_CALLS = 6
 const CROSS_TIMEOUT_MS = 180_000
 const CROSS_HTTP_RETRIES = 2
 const CROSS_DYNAMIC_OUTPUT_TOKENS_MIN = 6_000
 const CROSS_DYNAMIC_OUTPUT_TOKENS_MAX = 16_384
+const CROSS_RECONCILE_LOCATE_MAX_TOKENS = 1_500
+const CROSS_RECONCILE_PATCH_TOKENS_MIN = 2_500
+const CROSS_RECONCILE_PATCH_TOKENS_MAX = 6_000
 const CROSS_LINKS_MAX_TOKENS = 2_500
 const CROSS_BOOT_TRIM_MAX_TOKENS = 3_000
 
 export function computeCrossMemoryTaskMaxTokens(
-  kind: 'cluster' | 'habit' | 'episode' | 'links' | 'boot_trim',
+  kind:
+    | 'cluster'
+    | 'habit'
+    | 'episode'
+    | 'reconcile_locate'
+    | 'reconcile_patch'
+    | 'links'
+    | 'boot_trim',
   targetChars = 0,
 ): number {
   if (kind === 'links') return CROSS_LINKS_MAX_TOKENS
   if (kind === 'boot_trim') return CROSS_BOOT_TRIM_MAX_TOKENS
+  if (kind === 'reconcile_locate') return CROSS_RECONCILE_LOCATE_MAX_TOKENS
+  if (kind === 'reconcile_patch') {
+    return computeDynamicOutputTokens(targetChars, {
+      min: CROSS_RECONCILE_PATCH_TOKENS_MIN,
+      max: CROSS_RECONCILE_PATCH_TOKENS_MAX,
+      overhead: 1_000,
+    })
+  }
   return computeDynamicOutputTokens(targetChars, {
     min: CROSS_DYNAMIC_OUTPUT_TOKENS_MIN,
     max: CROSS_DYNAMIC_OUTPUT_TOKENS_MAX,
@@ -177,6 +212,7 @@ function shareAny(a: readonly string[], b: readonly string[]): number {
 
 interface ExistingSuggestionsIndex {
   fingerprints: Set<string>
+  pendingByFingerprint: Map<string, string>
   updateRecords: { entryId: string; version: number; fingerprint: string }[]
   distillRecords: {
     entryIds: string[]
@@ -189,6 +225,8 @@ interface ExistingSuggestionsIndex {
 async function loadExistingSuggestions(db: Db): Promise<ExistingSuggestionsIndex> {
   const rows = await db
     .select({
+      id: dreamSuggestions.id,
+      status: dreamSuggestions.status,
       fingerprint: dreamSuggestions.fingerprint,
       kind: dreamSuggestions.kind,
       entryIds: dreamSuggestions.entryIds,
@@ -196,10 +234,14 @@ async function loadExistingSuggestions(db: Db): Promise<ExistingSuggestionsIndex
     })
     .from(dreamSuggestions)
   const fingerprints = new Set<string>()
+  const pendingByFingerprint = new Map<string, string>()
   const updateRecords: ExistingSuggestionsIndex['updateRecords'] = []
   const distillRecords: ExistingSuggestionsIndex['distillRecords'] = []
   for (const r of rows) {
     fingerprints.add(r.fingerprint)
+    if (r.status === 'pending') {
+      pendingByFingerprint.set(r.fingerprint, r.id)
+    }
     if (r.kind === 'update' && r.entryIds.length === 1 && r.entryVersions.length === 1) {
       updateRecords.push({
         entryId: r.entryIds[0]!,
@@ -219,7 +261,7 @@ async function loadExistingSuggestions(db: Db): Promise<ExistingSuggestionsIndex
       })
     }
   }
-  return { fingerprints, updateRecords, distillRecords }
+  return { fingerprints, pendingByFingerprint, updateRecords, distillRecords }
 }
 
 // 估算一组会话摘要覆盖的独立会话次数：不同设备或项目直接记为独立会话，同设备同项目需相邻两次落桶间隔 ≥ 2 小时（避免单次长会话多次落桶误判，也避免跨 UTC 零点误拆）
@@ -365,11 +407,13 @@ async function loadOutboundLinksMap(
   entryIds: readonly string[],
 ): Promise<{
   outboundByEntryId: Map<string, Set<string>>
+  inboundByTargetShortId: Map<string, Set<string>>
   brokenByEntryId: Map<string, BrokenLinkHint[]>
 }> {
   const outboundByEntryId = new Map<string, Set<string>>()
+  const inboundByTargetShortId = new Map<string, Set<string>>()
   const brokenByEntryId = new Map<string, BrokenLinkHint[]>()
-  if (!entryIds.length) return { outboundByEntryId, brokenByEntryId }
+  if (!entryIds.length) return { outboundByEntryId, inboundByTargetShortId, brokenByEntryId }
 
   const links = await db
     .select({
@@ -379,7 +423,7 @@ async function loadOutboundLinksMap(
     .from(entryLinks)
     .where(inArray(entryLinks.sourceEntryId, [...entryIds]))
 
-  if (!links.length) return { outboundByEntryId, brokenByEntryId }
+  if (!links.length) return { outboundByEntryId, inboundByTargetShortId, brokenByEntryId }
 
   const targetShorts = [...new Set(links.map((l) => l.targetShortId))]
   const targets = await db
@@ -396,6 +440,13 @@ async function loadOutboundLinksMap(
     }
     set.add(link.targetShortId)
 
+    let inboundSet = inboundByTargetShortId.get(link.targetShortId)
+    if (!inboundSet) {
+      inboundSet = new Set()
+      inboundByTargetShortId.set(link.targetShortId, inboundSet)
+    }
+    inboundSet.add(link.sourceEntryId)
+
     const target = targetMap.get(link.targetShortId)
     if (!target || target.deletedAt !== null) {
       const list = brokenByEntryId.get(link.sourceEntryId) ?? []
@@ -408,7 +459,7 @@ async function loadOutboundLinksMap(
     }
   }
 
-  return { outboundByEntryId, brokenByEntryId }
+  return { outboundByEntryId, inboundByTargetShortId, brokenByEntryId }
 }
 
 // 复用已有 1024 维 pgvector 嵌入，在 SQL 侧直接算余弦相似度（零 LLM 成本）
@@ -448,6 +499,65 @@ async function findVectorPairsForSeeds(
     limit ${limit}
   `)
   return [...rows]
+}
+
+// 按对账种子分区取 Top-K 余弦近邻（cos >= 0.65），避免全库高相似大簇占满全局上限饿死对账种子
+async function findReconcileVectorNeighbors(
+  db: Db,
+  seedIds: readonly string[],
+  minCosine = RECONCILE_COSINE_MIN,
+  limitPerSeed = RECONCILE_VECTOR_LIMIT_PER_SEED,
+): Promise<Map<string, Map<string, number>>> {
+  const out = new Map<string, Map<string, number>>()
+  if (!seedIds.length) return out
+  const seedArray = sql`array[${sql.join(
+    seedIds.map((id) => sql`${id}::uuid`),
+    sql`, `,
+  )}]`
+  const maxDist = 1 - minCosine
+  const rows = await db.execute<VectorPairRow>(sql`
+    with ranked as (
+      select
+        a.entry_id::text as entry_a,
+        b.entry_id::text as entry_b,
+        (1 - (a.embedding <=> b.embedding))::float8 as sim,
+        row_number() over (
+          partition by a.entry_id, a.model
+          order by (a.embedding <=> b.embedding) asc
+        ) as rn
+      from entry_embeddings a
+      join entry_embeddings b
+        on a.model = b.model
+       and a.entry_id <> b.entry_id
+      join entries ea
+        on ea.id = a.entry_id
+       and ea.deleted_at is null
+       and ea.kind = 'entry'
+       and (ea.valid_to is null or ea.valid_to > statement_timestamp())
+      join entries eb
+        on eb.id = b.entry_id
+       and eb.deleted_at is null
+       and eb.kind = 'entry'
+       and (eb.valid_to is null or eb.valid_to > statement_timestamp())
+      where a.entry_id = any(${seedArray})
+        and (a.embedding <=> b.embedding) <= ${maxDist}
+    )
+    select entry_a, entry_b, sim
+    from ranked
+    where rn <= ${limitPerSeed}
+    order by entry_a, sim desc
+  `)
+  for (const r of rows) {
+    if (!r.entry_a || !r.entry_b || !Number.isFinite(r.sim) || r.sim < minCosine) continue
+    let map = out.get(r.entry_a)
+    if (!map) {
+      map = new Map()
+      out.set(r.entry_a, map)
+    }
+    const prev = map.get(r.entry_b) ?? 0
+    if (r.sim > prev) map.set(r.entry_b, r.sim)
+  }
+  return out
 }
 
 // 查带信号向量的 episode 与场域兼容的活跃正式词条（kind = 'entry'）的余弦近邻，供事实反向对账使用
@@ -609,6 +719,97 @@ function canClusterEntries(a: EntryRow, b: EntryRow): boolean {
   return true
 }
 
+export function reconcileActionDiscriminator(sourceShortId: string, sourceVersion: number): string {
+  return `reconcile:${normalizeShortId(sourceShortId)}:v${sourceVersion}`
+}
+
+// 跨记忆事实对账安全守卫：仅允许基准记忆的场域合法流入目标记忆，且不得跨互斥环境/项目/客户端误伤
+export function canReconcileTarget(
+  source: Pick<EntryRow, 'id' | 'realms' | 'envs' | 'projects' | 'runtimes'>,
+  target: Pick<EntryRow, 'id' | 'realms' | 'envs' | 'projects' | 'runtimes'>,
+): boolean {
+  if (source.id === target.id) return false
+  if (!canFlowRealmInto(target.realms, source.realms)) return false
+  if (hasDisjointNonEmpty(source.envs, target.envs)) return false
+  if (hasDisjointNonEmpty(source.projects, target.projects)) return false
+  if (hasDisjointNonEmpty(source.runtimes, target.runtimes)) return false
+  return true
+}
+
+// 选取关联事实对账的基准种子：单条模式锚定当前记忆；增量/多选优先未复核且按语义时间倒序；全库限近 30 天内并封顶
+export function selectReconcileSeeds<
+  T extends Pick<
+    EntryRow,
+    'id' | 'shortId' | 'version' | 'dreamCheckedVersion' | 'verifiedAt' | 'createdAt' | 'updatedAt'
+  >,
+>(
+  seedFormal: readonly T[],
+  options: {
+    scope: DreamScope
+    isSingleTarget: boolean
+    now: Date
+    maxSeeds?: number | undefined
+  },
+): T[] {
+  if (!seedFormal.length) return []
+  if (options.isSingleTarget) return [seedFormal[0]!]
+  const maxSeeds = options.maxSeeds ?? RECONCILE_SEEDS_MAX
+  const semanticMs = (r: T) => (r.verifiedAt ?? r.createdAt).getTime()
+  if (options.scope === 'full_corpus') {
+    const cutoffMs = options.now.getTime() - RECONCILE_FULL_CORPUS_WINDOW_MS
+    return seedFormal
+      .filter((r) => semanticMs(r) >= cutoffMs)
+      .sort((a, b) => semanticMs(b) - semanticMs(a))
+      .slice(0, maxSeeds)
+  }
+  return [...seedFormal]
+    .sort((a, b) => {
+      const aUnchecked = a.version > a.dreamCheckedVersion ? 1 : 0
+      const bUnchecked = b.version > b.dreamCheckedVersion ? 1 : 0
+      if (bUnchecked !== aUnchecked) return bUnchecked - aUnchecked
+      return semanticMs(b) - semanticMs(a)
+    })
+    .slice(0, maxSeeds)
+}
+
+function toReconcileSourceItem(row: EntryRow): ReconcileSourceItem {
+  const deviceKey = row.deviceKey?.trim() || null
+  return {
+    shortId: row.shortId,
+    title: row.title,
+    summary: row.summary,
+    content: row.content,
+    lastChangeSummary: row.lastChangeSummary,
+    envs: row.envs,
+    realms: row.realms,
+    projects: row.projects,
+    runtimes: row.runtimes,
+    topics: row.topics,
+    ...(deviceKey ? { deviceKey } : {}),
+    verifiedAt: row.verifiedAt ? row.verifiedAt.toISOString() : null,
+    updatedAt: row.updatedAt.toISOString(),
+  }
+}
+
+function toReconcileCandidateItem(row: EntryRow, relationHint?: string): ReconcileCandidateItem {
+  const deviceKey = row.deviceKey?.trim() || null
+  return {
+    shortId: row.shortId,
+    title: row.title,
+    summary: row.summary,
+    content: row.content,
+    envs: row.envs,
+    realms: row.realms,
+    projects: row.projects,
+    runtimes: row.runtimes,
+    topics: row.topics,
+    ...(deviceKey ? { deviceKey } : {}),
+    verifiedAt: row.verifiedAt ? row.verifiedAt.toISOString() : null,
+    updatedAt: row.updatedAt.toISOString(),
+    ...(relationHint ? { relationHint } : {}),
+  }
+}
+
 // 对高相似且场景兼容的词条边做受限并查集聚类，严格控制每簇 2–4 条避免上下文爆炸
 function buildDuplicateClusters(
   edges: readonly { a: string; b: string; score: number }[],
@@ -658,12 +859,11 @@ function toClusterPromptItem(
   outbound: ReadonlySet<string> | undefined,
   perItemLimit: number,
 ): DreamPromptItem {
-  const base = toPromptItem(row, perItemLimit)
+  const base = toPromptItem(row, perItemLimit, outbound ? [...outbound] : [])
   const overCap = row.content.length > perItemLimit
   return {
     ...base,
     bootMode: row.bootMode,
-    outboundShortIds: outbound ? [...outbound] : [],
     ...(overCap ? { outline: buildOutlineSummary(row.content), truncated: true } : {}),
   }
 }
@@ -742,6 +942,118 @@ async function runSingleLlmMicroTask(
   return evaluated
 }
 
+async function runReconcileLocateCall(
+  conn: ModelConnection,
+  messages: ReturnType<typeof buildReconcileLocateMessages>,
+  allowedShortIds: ReadonlySet<string>,
+  guard: BatchResilienceGuard,
+  options: {
+    maxRetries: number
+    retryBaseMs?: number | undefined
+    signal?: AbortSignal | undefined
+    onRetry: () => void
+  },
+) {
+  const maxTokens = computeCrossMemoryTaskMaxTokens('reconcile_locate')
+  const res = await chatComplete(conn, messages, {
+    temperature: 0.1,
+    jsonMode: true,
+    maxTokens,
+    timeoutMs: CROSS_TIMEOUT_MS,
+    stream: true,
+    taskKind: 'organize',
+    maxRetries: options.maxRetries,
+    ...(options.retryBaseMs !== undefined ? { retryBaseMs: options.retryBaseMs } : {}),
+    ...(options.signal ? { signal: options.signal } : {}),
+    onRetry: ({ error }) => {
+      options.onRetry()
+      if (error.category === 'rate_limit') guard.recordRateLimit(error)
+    },
+  })
+  guard.recordSuccess()
+
+  let evaluated = parseReconcileLocateResponse(res.content, allowedShortIds)
+  if (evaluated.status === 'invalid' && !options.signal?.aborted && !guard.isAborted) {
+    await guard.waitIfCooling(options.signal)
+    if (!options.signal?.aborted && !guard.isAborted) {
+      options.onRetry()
+      const repairMessages = buildSemanticRepairMessages(
+        messages,
+        `上次输出解析失败（${evaluated.reason}）。请严格只输出单个合法 JSON 对象：{"conflicts":[...]}，无冲突时输出 {"conflicts":[]}。`,
+      )
+      const repaired = await chatComplete(conn, repairMessages, {
+        temperature: 0,
+        jsonMode: true,
+        maxTokens,
+        timeoutMs: CROSS_TIMEOUT_MS,
+        stream: true,
+        taskKind: 'organize',
+        maxRetries: 0,
+        ...(options.signal ? { signal: options.signal } : {}),
+      })
+      guard.recordSuccess()
+      evaluated = parseReconcileLocateResponse(repaired.content, allowedShortIds)
+    }
+  }
+  return evaluated
+}
+
+async function runReconcilePatchCall(
+  conn: ModelConnection,
+  messages: ReturnType<typeof buildReconcilePatchMessages>,
+  sectionChars: number,
+  guard: BatchResilienceGuard,
+  options: {
+    maxRetries: number
+    retryBaseMs?: number | undefined
+    signal?: AbortSignal | undefined
+    onRetry: () => void
+  },
+) {
+  const maxTokens = computeCrossMemoryTaskMaxTokens('reconcile_patch', sectionChars)
+  const res = await chatComplete(conn, messages, {
+    temperature: 0.1,
+    jsonMode: true,
+    maxTokens,
+    timeoutMs: CROSS_TIMEOUT_MS,
+    stream: true,
+    taskKind: 'organize',
+    maxRetries: options.maxRetries,
+    ...(options.retryBaseMs !== undefined ? { retryBaseMs: options.retryBaseMs } : {}),
+    ...(options.signal ? { signal: options.signal } : {}),
+    onRetry: ({ error }) => {
+      options.onRetry()
+      if (error.category === 'rate_limit') guard.recordRateLimit(error)
+    },
+  })
+  guard.recordSuccess()
+
+  let evaluated = parseReconcilePatchResponse(res.content)
+  if (evaluated.status === 'invalid' && !options.signal?.aborted && !guard.isAborted) {
+    await guard.waitIfCooling(options.signal)
+    if (!options.signal?.aborted && !guard.isAborted) {
+      options.onRetry()
+      const repairMessages = buildSemanticRepairMessages(
+        messages,
+        `上次输出解析失败（${evaluated.reason}）。请严格只输出单个合法 JSON 对象：{"needed":true,"old_text":"...","new_text":"...","change_summary":"...","reason":"..."} 或 {"needed":false}。`,
+      )
+      const repaired = await chatComplete(conn, repairMessages, {
+        temperature: 0,
+        jsonMode: true,
+        maxTokens,
+        timeoutMs: CROSS_TIMEOUT_MS,
+        stream: true,
+        taskKind: 'organize',
+        maxRetries: 0,
+        ...(options.signal ? { signal: options.signal } : {}),
+      })
+      guard.recordSuccess()
+      evaluated = parseReconcilePatchResponse(repaired.content)
+    }
+  }
+  return evaluated
+}
+
 export interface CrossMemoryOptions {
   scope?: DreamScope | undefined
   targetShortIds?: readonly string[] | undefined
@@ -755,6 +1067,7 @@ export interface CrossMemoryOptions {
 interface CrossMemoryRunOutput {
   result: Omit<DreamExecutionResult, 'mode'>
   insertedIds: string[]
+  matchedPendingIds: string[]
   consideredNeighbors: number
 }
 
@@ -783,6 +1096,7 @@ export async function runCrossMemoryFunnel(
   const formalEntries = allActive.filter((r) => r.kind === 'entry')
   const activeEpisodes = allActive.filter((r) => r.kind === 'episode')
   const byId = new Map(allActive.map((r) => [r.id, r]))
+  const byShortId = new Map(formalEntries.map((r) => [r.shortId, r]))
 
   // Stage 0：确定种子集；跨会话重复偏好拾遗独立于 dreamCheckedVersion 水位，扫描最近 14 天带偏好信号的活跃摘要
   const seedFormal: EntryRow[] = targetShortSet
@@ -816,14 +1130,26 @@ export async function runCrossMemoryFunnel(
         abortedReason: null,
       },
       insertedIds: [],
+      matchedPendingIds: [],
       consideredNeighbors: 0,
     }
   }
 
-  // Stage 1：零 LLM 候选图构建
+  // Stage 1：零 LLM 候选图构建（对账种子独立按种子分区取 Top-12 近邻，避免被全库高相似大簇配额饿死）
   const seedFormalIds = seedFormal.map((r) => r.id)
-  const [vectorPairs, linkMaps, existingSuggestions] = await Promise.all([
+  const reconcileSeeds = selectReconcileSeeds(seedFormal, {
+    scope,
+    isSingleTarget: targetShortSet?.size === 1,
+    now,
+  })
+  const [vectorPairs, reconcileVecBySeed, linkMaps, existingSuggestions] = await Promise.all([
     findVectorPairsForSeeds(db, seedFormalIds, LINK_COSINE_MIN, 240),
+    findReconcileVectorNeighbors(
+      db,
+      reconcileSeeds.map((r) => r.id),
+      RECONCILE_COSINE_MIN,
+      RECONCILE_VECTOR_LIMIT_PER_SEED,
+    ),
     loadOutboundLinksMap(
       db,
       formalEntries.map((r) => r.id),
@@ -836,6 +1162,16 @@ export async function runCrossMemoryFunnel(
   const mediumNeighborsBySeed = new Map<string, Map<string, number>>()
   const vectorCoveredSeeds = new Set<string>()
   const consideredNeighborIds = new Set<string>()
+  const ftsCandidatesCache = new Map<string, string[]>()
+
+  const getCachedFtsCandidates = async (seed: EntryRow, limit: number): Promise<string[]> => {
+    const cached = ftsCandidatesCache.get(seed.id)
+    if (cached && cached.length >= limit) return cached.slice(0, limit)
+    if (cached) return cached
+    const ids = await findRankedFtsCandidates(db, seed, new Set([seed.id]), Math.max(limit, 10))
+    ftsCandidatesCache.set(seed.id, ids)
+    return ids.slice(0, limit)
+  }
 
   const addMediumCand = (seedId: string, candId: string, score: number) => {
     if (seedId === candId) return
@@ -856,7 +1192,9 @@ export async function runCrossMemoryFunnel(
   }
 
   for (const pair of vectorPairs) {
-    vectorCoveredSeeds.add(pair.entry_a)
+    if (pair.sim >= LINK_COSINE_MIN) {
+      vectorCoveredSeeds.add(pair.entry_a)
+    }
     const rowA = byId.get(pair.entry_a)
     const rowB = byId.get(pair.entry_b)
     if (pair.sim >= CLUSTER_COSINE_THRESHOLD && rowA && rowB && canClusterEntries(rowA, rowB)) {
@@ -884,7 +1222,7 @@ export async function runCrossMemoryFunnel(
     (s) => !vectorCoveredSeeds.has(s.id) && !mediumNeighborsBySeed.get(s.id)?.size,
   )
   for (const seed of ftsProbeSeeds.slice(0, 12)) {
-    const ftsIds = await findRankedFtsCandidates(db, seed, new Set([seed.id]), 6)
+    const ftsIds = await getCachedFtsCandidates(seed, 6)
     for (let idx = 0; idx < ftsIds.length; idx++) {
       const candId = ftsIds[idx]!
       const score = 0.78 - idx * 0.02
@@ -899,7 +1237,7 @@ export async function runCrossMemoryFunnel(
     }
   }
 
-  // 构建 5 类有序 Micro-Task 队列（优先级：高相似查重簇 > 跨会话重复偏好拾遗 > 近期 episode 反向对账 > 缺失双链与断链 > 全文常驻减肥）
+  // 构建 6 类有序 Micro-Task 队列（优先级：高相似查重簇 > 跨会话重复偏好拾遗 > 近期 episode 反向对账 > 关联事实对账 > 缺失双链与断链 > 全文常驻减肥）
   type MicroTask =
     | { kind: 'cluster'; stage: string; rows: EntryRow[] }
     | {
@@ -913,6 +1251,13 @@ export async function runCrossMemoryFunnel(
       }
     | { kind: 'episode'; stage: string; episode: EntryRow; targets: EntryRow[] }
     | {
+        kind: 'reconcile'
+        stage: string
+        seed: EntryRow
+        candidates: { row: EntryRow; relationHint: string }[]
+        actionDiscriminator: string
+      }
+    | {
         kind: 'links'
         stage: string
         seed: EntryRow
@@ -922,16 +1267,50 @@ export async function runCrossMemoryFunnel(
     | { kind: 'boot_trim'; stage: string; rows: EntryRow[] }
 
   const tasks: MicroTask[] = []
+  const matchedPendingIds: string[] = []
 
   // Task A：高相似重复簇（2–4 条）
   const clusters = buildDuplicateClusters(highSimEdges, byId)
+  const clusterPeersByEntryId = new Map<string, Set<string>>()
   for (const cluster of clusters) {
+    if (targetShortSet?.size === 1) {
+      const anchorRow = cluster.find((r) => targetShortSet.has(r.shortId))
+      if (anchorRow) {
+        for (const peer of cluster) {
+          if (peer.id === anchorRow.id) continue
+          const fromUpdateId = existingSuggestions.pendingByFingerprint.get(
+            suggestionFingerprint('update', [peer.id], [peer.version], `from:${anchorRow.shortId}`),
+          )
+          if (fromUpdateId) matchedPendingIds.push(fromUpdateId)
+          const staleId = existingSuggestions.pendingByFingerprint.get(
+            suggestionFingerprint('mark_stale', [peer.id], [peer.version]),
+          )
+          if (staleId) matchedPendingIds.push(staleId)
+        }
+      }
+    }
+
     const fp = suggestionFingerprint(
       'merge_duplicates',
       cluster.map((r) => r.id),
       cluster.map((r) => r.version),
     )
     if (existingFingerprints.has(fp)) continue
+    const perItemLimit = Math.min(
+      CLUSTER_ITEM_CHAR_LIMIT,
+      Math.floor(CLUSTER_TOTAL_CHAR_BUDGET / Math.max(1, cluster.length)),
+    )
+    for (const a of cluster) {
+      let peers = clusterPeersByEntryId.get(a.id)
+      if (!peers) {
+        peers = new Set()
+        clusterPeersByEntryId.set(a.id, peers)
+      }
+      for (const b of cluster) {
+        // 仅跳过在 cluster 阶段未被截断的同簇成员；被截断的长文无法在 cluster 整篇改写，保留给 reconcile 做单小节补丁
+        if (b.id !== a.id && b.content.length <= perItemLimit) peers.add(b.id)
+      }
+    }
     tasks.push({ kind: 'cluster', stage: '查重与冲突审阅', rows: cluster })
   }
 
@@ -1165,6 +1544,136 @@ export async function runCrossMemoryFunnel(
     })
   }
 
+  // 关联事实对账（reconcile）：针对近期更新的基准记忆，按双向双链 > 向量近邻 > 同项目/FTS 召回候选并执行两阶段局部补丁
+  for (const seed of reconcileSeeds) {
+    const disc = reconcileActionDiscriminator(seed.shortId, seed.version)
+    const clusterPeers = clusterPeersByEntryId.get(seed.id)
+    const vecMap = reconcileVecBySeed.get(seed.id)
+    const seenCandidateIds = new Set<string>()
+    const candidates: { row: EntryRow; relationHint: string }[] = []
+
+    const tryAddCandidate = (cand: EntryRow | undefined, relationHint: string): boolean => {
+      if (candidates.length >= RECONCILE_CANDIDATES_PER_SEED) return false
+      if (!cand || cand.kind !== 'entry' || seenCandidateIds.has(cand.id)) return false
+      seenCandidateIds.add(cand.id)
+      if (clusterPeers?.has(cand.id)) return false
+      if (!canReconcileTarget(seed, cand)) return false
+      consideredNeighborIds.add(cand.id)
+      const fp = suggestionFingerprint('update', [cand.id], [cand.version], disc)
+      if (existingFingerprints.has(fp)) {
+        const pendingId = existingSuggestions.pendingByFingerprint.get(fp)
+        if (pendingId) matchedPendingIds.push(pendingId)
+        return false
+      }
+      candidates.push({ row: cand, relationHint })
+      return true
+    }
+
+    // 优先级一：1 跳双向 entry_links 邻居（出链与入链）
+    const linkNeighborMap = new Map<string, { row: EntryRow; out: boolean; inb: boolean }>()
+    for (const targetShort of linkMaps.outboundByEntryId.get(seed.id) ?? []) {
+      const targetRow = byShortId.get(targetShort)
+      if (!targetRow || targetRow.id === seed.id) continue
+      const existing = linkNeighborMap.get(targetRow.id)
+      if (existing) existing.out = true
+      else linkNeighborMap.set(targetRow.id, { row: targetRow, out: true, inb: false })
+    }
+    for (const sourceId of linkMaps.inboundByTargetShortId.get(seed.shortId) ?? []) {
+      const sourceRow = byId.get(sourceId)
+      if (!sourceRow || sourceRow.kind !== 'entry' || sourceRow.id === seed.id) continue
+      const existing = linkNeighborMap.get(sourceRow.id)
+      if (existing) existing.inb = true
+      else linkNeighborMap.set(sourceRow.id, { row: sourceRow, out: false, inb: true })
+    }
+    const sortedLinkNeighbors = [...linkNeighborMap.values()].sort((a, b) => {
+      const projDiff =
+        shareAny(seed.projects, b.row.projects) - shareAny(seed.projects, a.row.projects)
+      if (projDiff !== 0) return projDiff
+      const simDiff = (vecMap?.get(b.row.id) ?? 0) - (vecMap?.get(a.row.id) ?? 0)
+      if (simDiff !== 0) return simDiff
+      return (
+        (b.row.verifiedAt ?? b.row.createdAt).getTime() -
+        (a.row.verifiedAt ?? a.row.createdAt).getTime()
+      )
+    })
+    for (const item of sortedLinkNeighbors) {
+      const hint =
+        item.out && item.inb ? '双向双链邻居' : item.out ? '已建出链邻居' : '反向引用邻居'
+      tryAddCandidate(item.row, hint)
+    }
+
+    // 优先级二：向量近邻（0.65 <= cos < 0.84 或未进簇/被截断的高相似近邻），同项目优先
+    let vecAddedCount = 0
+    if (candidates.length < RECONCILE_CANDIDATES_PER_SEED && vecMap?.size) {
+      const vecEntries = [...vecMap.entries()]
+        .map(([id, sim]) => ({ row: byId.get(id), sim }))
+        .filter(
+          (x): x is { row: EntryRow; sim: number } => x.row !== undefined && x.row.kind === 'entry',
+        )
+        .sort((a, b) => {
+          const aSameProj =
+            seed.projects.length && shareAny(seed.projects, a.row.projects) > 0 ? 1 : 0
+          const bSameProj =
+            seed.projects.length && shareAny(seed.projects, b.row.projects) > 0 ? 1 : 0
+          if (bSameProj !== aSameProj) return bSameProj - aSameProj
+          return b.sim - a.sim
+        })
+      for (const item of vecEntries) {
+        if (candidates.length >= RECONCILE_CANDIDATES_PER_SEED) break
+        const sameProj = seed.projects.length > 0 && shareAny(seed.projects, item.row.projects) > 0
+        if (tryAddCandidate(item.row, sameProj ? '同项目向量近邻' : '向量语义近邻')) {
+          vecAddedCount++
+        }
+      }
+    }
+
+    // 优先级三：空位兜底——向量阶段未入选任何候选时用 FTS 补足，再以同项目近期记忆兜底
+    if (candidates.length < RECONCILE_CANDIDATES_PER_SEED && vecAddedCount === 0) {
+      const ftsIds = await getCachedFtsCandidates(seed, RECONCILE_CANDIDATES_PER_SEED * 2)
+      const ftsRows = ftsIds
+        .map((id, rank) => ({ row: byId.get(id), rank }))
+        .filter(
+          (x): x is { row: EntryRow; rank: number } =>
+            x.row !== undefined && x.row.kind === 'entry',
+        )
+        .sort((a, b) => {
+          const aSameProj =
+            seed.projects.length && shareAny(seed.projects, a.row.projects) > 0 ? 1 : 0
+          const bSameProj =
+            seed.projects.length && shareAny(seed.projects, b.row.projects) > 0 ? 1 : 0
+          if (bSameProj !== aSameProj) return bSameProj - aSameProj
+          return a.rank - b.rank
+        })
+      for (const item of ftsRows) {
+        if (candidates.length >= RECONCILE_CANDIDATES_PER_SEED) break
+        tryAddCandidate(item.row, '全文相关记忆')
+      }
+    }
+
+    if (candidates.length < RECONCILE_CANDIDATES_PER_SEED && seed.projects.length > 0) {
+      const sameProjectRecent = formalEntries
+        .filter((other) => other.id !== seed.id && shareAny(seed.projects, other.projects) > 0)
+        .sort(
+          (a, b) =>
+            (b.verifiedAt ?? b.createdAt).getTime() - (a.verifiedAt ?? a.createdAt).getTime(),
+        )
+      for (const other of sameProjectRecent) {
+        if (candidates.length >= RECONCILE_CANDIDATES_PER_SEED) break
+        tryAddCandidate(other, '同项目近期记忆')
+      }
+    }
+
+    if (candidates.length > 0) {
+      tasks.push({
+        kind: 'reconcile',
+        stage: '关联事实对账',
+        seed,
+        candidates,
+        actionDiscriminator: disc,
+      })
+    }
+  }
+
   // Task B：缺失双链与断链重连（按候选质量与断链存在度排序）
   const linkTaskCandidates: {
     seed: EntryRow
@@ -1224,8 +1733,7 @@ export async function runCrossMemoryFunnel(
     }
   }
 
-  const scheduled = tasks.slice(0, maxCalls)
-  if (!scheduled.length) {
+  if (!tasks.length) {
     return {
       result: {
         outcome: 'skipped',
@@ -1237,6 +1745,7 @@ export async function runCrossMemoryFunnel(
         abortedReason: null,
       },
       insertedIds: [],
+      matchedPendingIds,
       consideredNeighbors: consideredNeighborIds.size,
     }
   }
@@ -1250,6 +1759,8 @@ export async function runCrossMemoryFunnel(
   let succeededTasks = 0
   let failedTasks = 0
   let retriedCount = 0
+  let callsUsed = 0
+  const plannedTotal = Math.min(tasks.length, maxCalls)
 
   const appendFailure = (row: EntryRow, kind: string, reason: string) => {
     if (failedItems.length >= 50 || failedShortSet.has(row.shortId)) return
@@ -1262,23 +1773,219 @@ export async function runCrossMemoryFunnel(
     })
   }
 
-  for (let idx = 0; idx < scheduled.length && !options.signal?.aborted && !guard.isAborted; idx++) {
-    const task = scheduled[idx]!
+  for (
+    let idx = 0;
+    idx < tasks.length && callsUsed < maxCalls && !options.signal?.aborted && !guard.isAborted;
+    idx++
+  ) {
+    const task = tasks[idx]!
+    // 两阶段对账至少需要 2 次调用（定位 + 补丁）；仅余 1 次额度时让位给单次调用的补链或常驻巡检
+    if (task.kind === 'reconcile' && callsUsed + 2 > maxCalls) continue
+
     try {
       await guard.waitIfCooling(options.signal)
     } catch {
       break
     }
-    if (options.signal?.aborted || guard.isAborted) break
+    if (options.signal?.aborted || guard.isAborted || callsUsed >= maxCalls) break
+    if (task.kind === 'reconcile' && callsUsed + 2 > maxCalls) continue
 
     options.onProgress?.({
       mode: 'cross_memory',
       stage: task.stage,
       processed: idx,
-      total: scheduled.length,
+      total: Math.max(plannedTotal, idx + 1),
       suggested,
       failed: failedTasks,
     })
+
+    const microTaskRetries = targetShortSet?.size === 1 ? 1 : CROSS_HTTP_RETRIES
+
+    if (task.kind === 'reconcile') {
+      const taskRows = [task.seed, ...task.candidates.map((c) => c.row)]
+      considered += taskRows.length
+      try {
+        const sourceItem = toReconcileSourceItem(task.seed)
+        const candItems = task.candidates.map((c) =>
+          toReconcileCandidateItem(c.row, c.relationHint),
+        )
+        const candByShortId = new Map(task.candidates.map((c) => [c.row.shortId, c.row]))
+        const allowedShortIds = new Set(candByShortId.keys())
+        const locateMessages = buildReconcileLocateMessages(sourceItem, candItems)
+
+        callsUsed++
+        const located = await runReconcileLocateCall(conn, locateMessages, allowedShortIds, guard, {
+          maxRetries: microTaskRetries,
+          retryBaseMs: options.retryBaseMs,
+          signal: options.signal,
+          onRetry: () => {
+            retriedCount++
+          },
+        })
+
+        if (located.status === 'invalid') {
+          failedTasks++
+          appendFailure(task.seed, 'cross_memory', located.reason)
+        } else if (!located.conflicts.length) {
+          succeededTasks++
+        } else {
+          let hitSucceeded = 0
+          let hitFailed = 0
+          let skippedByBudgetOrAbort = false
+
+          for (const hit of located.conflicts.slice(0, RECONCILE_PATCH_MAX_PER_SEED)) {
+            if (callsUsed >= maxCalls || options.signal?.aborted || guard.isAborted) {
+              skippedByBudgetOrAbort = true
+              break
+            }
+            const target = candByShortId.get(hit.targetShortId)
+            if (!target) continue
+
+            const targetOutline = extractMarkdownOutline(target.content)
+            let matchedHeading: string | null = null
+            let sectionContent: string | null = null
+            if (targetOutline.length > 0) {
+              if (!hit.sectionHeading) continue
+              const extracted = extractMarkdownSection(target.content, hit.sectionHeading)
+              if (!extracted || extracted.content.length > RECONCILE_SECTION_CONTENT_MAX) continue
+              matchedHeading = extracted.heading
+              sectionContent = extracted.content
+            } else {
+              if (target.content.length > RECONCILE_SECTION_CONTENT_MAX) continue
+              matchedHeading = null
+              sectionContent = target.content
+            }
+
+            try {
+              await guard.waitIfCooling(options.signal)
+            } catch {
+              skippedByBudgetOrAbort = true
+              break
+            }
+            if (options.signal?.aborted || guard.isAborted || callsUsed >= maxCalls) {
+              skippedByBudgetOrAbort = true
+              break
+            }
+
+            callsUsed++
+            try {
+              const targetMeta = toReconcileCandidateItem(target)
+              const patchMessages = buildReconcilePatchMessages(
+                sourceItem,
+                targetMeta,
+                matchedHeading,
+                sectionContent,
+                hit.conflictReason,
+              )
+              const patchResult = await runReconcilePatchCall(
+                conn,
+                patchMessages,
+                sectionContent.length,
+                guard,
+                {
+                  maxRetries: microTaskRetries,
+                  retryBaseMs: options.retryBaseMs,
+                  signal: options.signal,
+                  onRetry: () => {
+                    retriedCount++
+                  },
+                },
+              )
+
+              if (patchResult.status === 'invalid') {
+                hitFailed++
+                appendFailure(target, 'cross_memory', patchResult.reason)
+                continue
+              }
+              if (patchResult.status === 'not_needed') {
+                hitSucceeded++
+                continue
+              }
+
+              const patched = applyMarkdownSectionPatch(target.content, matchedHeading, {
+                oldText: patchResult.patch.oldText,
+                newText: patchResult.patch.newText,
+              })
+              if (patched.ok) {
+                const integrity = checkCaptureIntegrity(target.content, patched.content)
+                if (
+                  integrity.missingLinks.length === 0 &&
+                  integrity.missingCreds.length === 0 &&
+                  !integrity.severeShrink
+                ) {
+                  const nextSummary =
+                    patchResult.patch.proposedSummary &&
+                    patchResult.patch.proposedSummary !== (target.summary ?? null)
+                      ? patchResult.patch.proposedSummary
+                      : null
+                  const proposal: ParsedDreamProposal = {
+                    kind: 'update',
+                    entryIds: [target.id],
+                    keepId: null,
+                    proposedTitle: null,
+                    proposedSummary: nextSummary,
+                    proposedContent: patched.content,
+                    proposedDisclosure: null,
+                    proposedChangeSummary: patchResult.patch.changeSummary,
+                    archivedNotes: null,
+                    proposedTopics: null,
+                    proposedEnvs: null,
+                    proposedRealms: null,
+                    proposedProjects: null,
+                    proposedRuntimes: null,
+                    proposedLinks: null,
+                    proposedBootMode: null,
+                    actionDiscriminator: task.actionDiscriminator,
+                    reason: patchResult.patch.reason,
+                  }
+                  const id = await insertDreamProposal(db, proposal, byId)
+                  if (id) {
+                    insertedIds.push(id)
+                    suggested++
+                  }
+                }
+              }
+              hitSucceeded++
+            } catch (err) {
+              if (options.signal?.aborted) {
+                skippedByBudgetOrAbort = true
+                break
+              }
+              guard.recordFailure(err)
+              hitFailed++
+              const reason = err instanceof Error ? err.message : String(err)
+              appendFailure(target, 'cross_memory', reason)
+            }
+          }
+
+          if (hitFailed > 0) {
+            failedTasks++
+            if (hitSucceeded > 0) succeededTasks++
+          } else if (hitSucceeded > 0 || !skippedByBudgetOrAbort) {
+            succeededTasks++
+          }
+        }
+      } catch (err) {
+        if (options.signal?.aborted) {
+          considered = Math.max(0, considered - taskRows.length)
+          break
+        }
+        guard.recordFailure(err)
+        failedTasks++
+        const reason = err instanceof Error ? err.message : String(err)
+        appendFailure(task.seed, 'cross_memory', reason)
+      }
+
+      options.onProgress?.({
+        mode: 'cross_memory',
+        stage: task.stage,
+        processed: idx + 1,
+        total: Math.max(plannedTotal, idx + 1),
+        suggested,
+        failed: failedTasks,
+      })
+      continue
+    }
 
     const taskRows: EntryRow[] = []
     if (task.kind === 'cluster') {
@@ -1294,7 +2001,6 @@ export async function runCrossMemoryFunnel(
     }
 
     const executeMicroTask = async () => {
-      const microTaskRetries = targetShortSet?.size === 1 ? 1 : CROSS_HTTP_RETRIES
       if (task.kind === 'cluster') {
         return runClusterTaskWithTopTwoFallback(
           task.rows,
@@ -1396,6 +2102,7 @@ export async function runCrossMemoryFunnel(
       })
     }
 
+    callsUsed++
     considered += taskRows.length
     try {
       const evaluated = await executeMicroTask()
@@ -1446,7 +2153,7 @@ export async function runCrossMemoryFunnel(
       mode: 'cross_memory',
       stage: task.stage,
       processed: idx + 1,
-      total: scheduled.length,
+      total: Math.max(plannedTotal, idx + 1),
       suggested,
       failed: failedTasks,
     })
@@ -1464,6 +2171,7 @@ export async function runCrossMemoryFunnel(
         abortedReason: '已手动取消',
       },
       insertedIds,
+      matchedPendingIds,
       consideredNeighbors: consideredNeighborIds.size,
     }
   }
@@ -1491,6 +2199,7 @@ export async function runCrossMemoryFunnel(
       abortedReason,
     },
     insertedIds,
+    matchedPendingIds,
     consideredNeighbors: consideredNeighborIds.size,
   }
 }
@@ -1552,16 +2261,19 @@ export async function runSingleCrossCheck(
     }
   }
 
-  // 返回本次新生成与该词条当前所有待处理建议，便于抽屉内联审阅
+  // 返回涉及当前记忆、本次新生成以及已命中但仍待确认（含关联旧记忆修订）的所有建议，便于抽屉内联审阅
+  const relatedPendingIds = [...new Set([...funnel.insertedIds, ...funnel.matchedPendingIds])]
+  const matchCondition = relatedPendingIds.length
+    ? or(
+        sql`${target.id}::uuid = any(${dreamSuggestions.entryIds})`,
+        inArray(dreamSuggestions.id, relatedPendingIds),
+      )
+    : sql`${target.id}::uuid = any(${dreamSuggestions.entryIds})`
+
   const pendingRows = await db
     .select()
     .from(dreamSuggestions)
-    .where(
-      and(
-        eq(dreamSuggestions.status, 'pending'),
-        sql`${target.id}::uuid = any(${dreamSuggestions.entryIds})`,
-      ),
-    )
+    .where(and(eq(dreamSuggestions.status, 'pending'), matchCondition))
     .orderBy(desc(dreamSuggestions.createdAt))
     .limit(20)
 

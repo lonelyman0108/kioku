@@ -24,10 +24,22 @@ import { and, asc, eq, inArray, isNull } from 'drizzle-orm'
 import { withTx, type Db } from '../db/client'
 import { entries, entryEvents, entryLinks } from '../db/schema'
 import type { Jobs } from '../jobs/queue'
+import { carryForwardTidyCheckedVersions, type TidyCheckedVersionTransition } from '../models/store'
 import { clipChars } from '../recall/text'
 import { syncEntryLinks } from './links'
 
 type EntryRow = typeof entries.$inferSelect
+
+// 仅当词条写入前已通过跨记忆/增量整理且本次写操作满足顺延条件时，才将检查水位同步推进至新版本
+export function carryForwardDreamCheckedVersion(
+  existing: { version: number; dreamCheckedVersion: number },
+  nextVersion: number,
+  eligible: boolean,
+): number {
+  return eligible && existing.dreamCheckedVersion === existing.version
+    ? nextVersion
+    : existing.dreamCheckedVersion
+}
 
 const FENCE_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/
 const INLINE_CODE_SPLIT_RE = /(`+[^`\r\n]*?`+)/g
@@ -411,6 +423,7 @@ export async function applyHygieneSweep(
     const index = buildUniqueSlugIndex(rows)
     const updatedIds: string[] = []
     const updatedShorts: string[] = []
+    const tidyTransitions: TidyCheckedVersionTransition[] = []
     let skippedCount = 0
 
     for (const row of rows) {
@@ -434,13 +447,17 @@ export async function applyHygieneSweep(
         contentCharsAfter: plan.nextContent.length,
       }
 
-      // 纯排版/链接清洗不刷新 verifiedAt，避免掩盖正文事实陈旧度
+      const nextVersion = row.version + 1
+      const nextDreamCheckedVersion = carryForwardDreamCheckedVersion(row, nextVersion, true)
+
+      // 纯排版/链接清洗不刷新 verifiedAt，避免掩盖正文事实陈旧度；若原本已检则同步顺延整理水位
       const [updated] = await tx
         .update(entries)
         .set({
           content: plan.nextContent,
           lastChangeSummary: changeSummary,
-          version: row.version + 1,
+          version: nextVersion,
+          dreamCheckedVersion: nextDreamCheckedVersion,
           updatedAt: now,
         })
         .where(and(eq(entries.id, row.id), eq(entries.version, row.version)))
@@ -464,6 +481,15 @@ export async function applyHygieneSweep(
 
       updatedIds.push(updated.id)
       updatedShorts.push(updated.shortId)
+      tidyTransitions.push({
+        id: updated.id,
+        fromVersion: row.version,
+        toVersion: updated.version,
+      })
+    }
+
+    if (tidyTransitions.length) {
+      await carryForwardTidyCheckedVersions(tx, tidyTransitions)
     }
 
     return { appliedIds: updatedIds, appliedShortIds: updatedShorts, skipped: skippedCount }

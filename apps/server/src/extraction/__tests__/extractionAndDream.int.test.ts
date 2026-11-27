@@ -2900,4 +2900,268 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
       fakeAi.setEmbedHandler(deterministicVector)
     }
   })
+
+  it('已审阅记忆经单条规范、结构检查与反链重定向后不再重进增量整理，未审阅记忆规范后仍保留重检', async () => {
+    const masterKey = testMasterKey()
+    await saveModelEndpoint(database.db, masterKey, CHAT_LLM_SETTING_KEY, {
+      baseUrl: fakeAi.baseUrl,
+      model: 'fake-chat',
+      apiKey: 'sk-chat',
+      enabled: true,
+    })
+
+    const credSvc = new CredentialService(database.db, masterKey)
+    const entrySvc = new EntryService(database.db, masterKey, credSvc, null)
+    const consoleScope = { kind: 'console' as const, accountId: 'acc', sessionId: 'sess' }
+
+    const tidyTarget = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '本地开发端口清单',
+        content: '## 端口分配\n- 后端服务：18920\n- 前端开发：5173',
+        realms: ['work'],
+      }),
+    )
+    const sweepTarget = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '缓存清理说明',
+        content: '# 缓存清理说明\n\n## 操作步骤\n重启 Redis 前先确认持久化完成。',
+        realms: ['work'],
+      }),
+    )
+    const mergeKeep = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '发布流程总则',
+        content: '发布前执行完整检查脚本。',
+        realms: ['work'],
+      }),
+    )
+    const mergeDup = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '发布流程旧版',
+        content: '发布前先运行测试再推送。',
+        realms: ['work'],
+      }),
+    )
+    const backlinkHolder = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '上线值班手册',
+        content: `上线前核对 [[${mergeDup.entry.shortId}|发布流程]]。`,
+        realms: ['work'],
+      }),
+    )
+
+    // 先跑一轮增量整理，把以上 5 条的水位全部推进至当前版本
+    fakeAi.setChatHandler(() => JSON.stringify({ suggestions: [] }))
+    const initialRun = await runDream(database.db, masterKey, {
+      runId: 'watermark-baseline',
+      trigger: 'manual',
+      mode: 'standard',
+    })
+    expect(initialRun.outcome).toBe('ok')
+
+    // 1. 单条规范应用（原已审阅）
+    const tidied = await entrySvc.applySingleTidy(consoleScope, tidyTarget.entry.shortId, {
+      expectedVersion: tidyTarget.entry.version,
+      title: '本地开发端口清单',
+      summary: '记录本地后端与前端开发端口。',
+      content: '## 端口分配\n- 后端：18920\n- 前端：5173',
+      changeSummary: '精简端口列表表述',
+      stageToInbox: false,
+    })
+    expect(tidied.entry?.entry.version).toBe(2)
+
+    // 2. 零模型结构检查（去除首行重复标题，原已审阅）
+    const swept = await entrySvc.applyHygieneSweep({ shortIds: [sweepTarget.entry.shortId] })
+    expect(swept.applied).toBe(1)
+
+    // 3. 采纳合并重复建议（保留条与被重定向反链词条原均已审阅）
+    const [mergeSuggestion] = await database.db
+      .insert(dreamSuggestions)
+      .values({
+        kind: 'merge_duplicates',
+        entryIds: [mergeKeep.entry.id, mergeDup.entry.id],
+        entryVersions: [mergeKeep.entry.version, mergeDup.entry.version],
+        keepId: mergeKeep.entry.id,
+        proposedTitle: '发布流程总则',
+        proposedContent: '发布前执行完整检查与测试脚本。',
+        reason: '合并重复发布流程记忆',
+        fingerprint: `merge-watermark-test-${mergeKeep.entry.id}`,
+        status: 'pending',
+      })
+      .returning({ id: dreamSuggestions.id })
+    const mergeApplied = await entrySvc.applySuggestion(mergeSuggestion!.id, {})
+    expect(mergeApplied.redirectedBacklinkCount).toBe(1)
+
+    // 下一次增量整理应直接跳过，0 次模型调用
+    let llmCalls = 0
+    fakeAi.setChatHandler(() => {
+      llmCalls++
+      return JSON.stringify({ suggestions: [] })
+    })
+    const afterMaintenanceRun = await runDream(database.db, masterKey, {
+      runId: 'watermark-after-maintenance',
+      trigger: 'manual',
+      mode: 'standard',
+    })
+    expect(afterMaintenanceRun.outcome).toBe('skipped')
+    expect(llmCalls).toBe(0)
+
+    // 确认反链词条已重定向且版本推进，但未触发重检
+    const [refRow] = await database.db
+      .select()
+      .from(entries)
+      .where(eq(entries.id, backlinkHolder.entry.id))
+      .limit(1)
+    expect(refRow?.content).toContain(`[[${mergeKeep.entry.shortId}`)
+    expect(refRow?.version).toBe(2)
+    expect(refRow?.dreamCheckedVersion).toBe(2)
+
+    // 4. 对照：新建尚未经增量审阅的词条仅做单条规范后，仍应进入增量整理
+    const uncheckedEntry = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '新部署节点说明',
+        content: '节点位于 node-b.example.com。',
+        realms: ['work'],
+      }),
+    )
+    await entrySvc.applySingleTidy(consoleScope, uncheckedEntry.entry.shortId, {
+      expectedVersion: uncheckedEntry.entry.version,
+      title: '新部署节点说明',
+      summary: '记录新部署节点地址。',
+      content: '## 节点地址\n- node-b.example.com',
+      stageToInbox: false,
+    })
+
+    const nextStdRun = await runDream(database.db, masterKey, {
+      runId: 'watermark-unchecked-still-runs',
+      trigger: 'manual',
+      mode: 'standard',
+    })
+    expect(nextStdRun.outcome).toBe('ok')
+    expect(llmCalls).toBe(1)
+  })
+
+  it('单条查重两阶段关联对账可局部修订超长旧记忆并持续在抽屉可见，采纳后不破坏其他小节且顺延水位', async () => {
+    const masterKey = testMasterKey()
+    await saveModelEndpoint(database.db, masterKey, CHAT_LLM_SETTING_KEY, {
+      baseUrl: fakeAi.baseUrl,
+      model: 'fake-chat',
+      apiKey: 'sk-chat',
+      enabled: true,
+    })
+
+    const credSvc = new CredentialService(database.db, masterKey)
+    const entrySvc = new EntryService(database.db, masterKey, credSvc, null)
+    const consoleScope = { kind: 'console' as const, accountId: 'acc', sessionId: 'sess' }
+
+    const entryA = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '统一数据层地址',
+        summary: 'Redis 与 PostgreSQL 统一迁移至 cache-new.example.com。',
+        content:
+          '## 现行地址\n- Redis：redis://cache-new.example.com:6379/4\n- 旧地址 cache-old.example.com 已停用。',
+        realms: ['personal'],
+        projects: ['lab-demo'],
+      }),
+    )
+
+    const longPadding = '其他网络拓扑与交换机端口详细说明，保持原样不得截断或改动。'.repeat(70)
+    const longEntryB = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '服务运维手册',
+        summary: '涵盖数据层连接、备份与凭据引用。',
+        content: [
+          '## 网络拓扑与交换机',
+          longPadding,
+          '',
+          '## 缓存连接配置',
+          `- 当前缓存地址：redis://cache-old.example.com:6379/4，详见 [[${entryA.entry.shortId}|统一数据层地址]]。`,
+          '- 管理凭据使用 {{cred:demo-redis}}。',
+          '',
+          '## 备份巡检',
+          '每日凌晨执行自动备份并核对归档校验值。',
+        ].join('\n'),
+        realms: ['personal'],
+        projects: ['lab-demo'],
+      }),
+    )
+    expect(longEntryB.entry.content.length).toBeGreaterThan(2_000)
+
+    // 先把长文 B 标记为已审阅
+    await database.db
+      .update(entries)
+      .set({ dreamCheckedVersion: longEntryB.entry.version })
+      .where(eq(entries.id, longEntryB.entry.id))
+
+    let locateCalls = 0
+    let patchCalls = 0
+    fakeAi.setChatHandler((messages) => {
+      const sys = messages[0]?.content ?? ''
+      if (sys.includes('跨记忆事实冲突定位助手')) {
+        locateCalls++
+        return JSON.stringify({
+          conflicts: [
+            {
+              target_short_id: longEntryB.entry.shortId,
+              section_heading: '缓存连接配置',
+              conflict_reason: '旧缓存地址 cache-old.example.com 已被 cache-new.example.com 替代',
+            },
+          ],
+        })
+      }
+      if (sys.includes('单小节事实修订助手')) {
+        patchCalls++
+        return JSON.stringify({
+          needed: true,
+          old_text: `- 当前缓存地址：redis://cache-old.example.com:6379/4，详见 [[${entryA.entry.shortId}|统一数据层地址]]。`,
+          new_text: `- 当前缓存地址：redis://cache-new.example.com:6379/4，详见 [[${entryA.entry.shortId}|统一数据层地址]]。`,
+          change_summary: '同步缓存地址至 cache-new.example.com',
+          reason: `依据 [[${entryA.entry.shortId}]] 更新过时的缓存地址`,
+        })
+      }
+      return JSON.stringify({ suggestions: [] })
+    })
+
+    // 1. 首次单条查重：两阶段生成针对 B 的局部补丁建议，并直接在抽屉返回中可见
+    const firstCheck = await entrySvc.crossCheckEntry(entryA.entry.shortId)
+    expect(locateCalls).toBe(1)
+    expect(patchCalls).toBe(1)
+    expect(firstCheck.createdCount).toBe(1)
+    const bSuggestion = firstCheck.suggestions.find(
+      (s) => s.kind === 'update' && s.entries.some((e) => e.shortId === longEntryB.entry.shortId),
+    )
+    expect(bSuggestion).toBeTruthy()
+    expect(bSuggestion?.proposedContent).toContain('redis://cache-new.example.com:6379/4')
+    expect(bSuggestion?.proposedContent).toContain(longPadding)
+    expect(bSuggestion?.proposedContent).toContain('{{cred:demo-redis}}')
+    expect(bSuggestion?.proposedContent).toContain('每日凌晨执行自动备份并核对归档校验值。')
+
+    // 2. 二次重开单条查重：指纹命中跳过重复模型调用，但该待确认建议仍保持在抽屉可见
+    const secondCheck = await entrySvc.crossCheckEntry(entryA.entry.shortId)
+    expect(locateCalls).toBe(1)
+    expect(patchCalls).toBe(1)
+    expect(secondCheck.createdCount).toBe(0)
+    expect(secondCheck.suggestions.some((s) => s.id === bSuggestion!.id)).toBe(true)
+
+    // 3. 采纳对 B 的修订建议：局部内容生效、其余长文/双链/凭据完好，且 B 原已审阅故水位顺延
+    await entrySvc.applySuggestion(bSuggestion!.id, {})
+    const [updatedB] = await database.db
+      .select()
+      .from(entries)
+      .where(eq(entries.id, longEntryB.entry.id))
+      .limit(1)
+    expect(updatedB?.content).toContain('redis://cache-new.example.com:6379/4')
+    expect(updatedB?.content).toContain(longPadding)
+    expect(updatedB?.content).toContain('{{cred:demo-redis}}')
+    expect(updatedB?.version).toBe(2)
+    expect(updatedB?.dreamCheckedVersion).toBe(2)
+  })
 })

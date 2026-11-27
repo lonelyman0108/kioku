@@ -603,19 +603,82 @@ export async function recordDreamRun(db: Db | Tx, summary: DreamRunSummary): Pro
     })
 }
 
-export async function loadTidyCheckedVersions(db: Db | Tx): Promise<Record<string, number>> {
-  const [row] = await db
-    .select()
-    .from(settings)
-    .where(eq(settings.key, TIDY_CHECKED_SETTING_KEY))
-    .limit(1)
-  const raw = row?.value
+export interface TidyCheckedVersionTransition {
+  id: string
+  fromVersion: number
+  toVersion: number
+}
+
+function parseTidyCheckedVersions(raw: unknown): Record<string, number> {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
   const out: Record<string, number> = {}
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
     if (typeof v === 'number' && Number.isInteger(v) && v >= 1) out[k] = v
   }
   return out
+}
+
+export function applyTidyCheckedVersionTransitions(
+  current: Readonly<Record<string, number>>,
+  transitions: readonly TidyCheckedVersionTransition[],
+): { next: Record<string, number>; changed: boolean } {
+  const next: Record<string, number> = { ...current }
+  let changed = false
+  for (const item of transitions) {
+    if (
+      !Number.isInteger(item.fromVersion) ||
+      item.fromVersion < 1 ||
+      !Number.isInteger(item.toVersion) ||
+      item.toVersion <= item.fromVersion
+    ) {
+      continue
+    }
+    if (next[item.id] === item.fromVersion) {
+      next[item.id] = item.toVersion
+      changed = true
+    }
+  }
+  return { next, changed }
+}
+
+export function applyTidyCheckedVersionMerge(
+  current: Readonly<Record<string, number>>,
+  updates: ReadonlyMap<string, number>,
+  pruneIds?: ReadonlySet<string>,
+): { next: Record<string, number>; changed: boolean } {
+  const next: Record<string, number> = { ...current }
+  let changed = false
+
+  if (pruneIds) {
+    for (const id of pruneIds) {
+      const incoming = updates.get(id)
+      if (incoming !== undefined && Number.isInteger(incoming) && incoming >= 1) continue
+      if (Object.prototype.hasOwnProperty.call(next, id)) {
+        delete next[id]
+        changed = true
+      }
+    }
+  }
+
+  for (const [id, ver] of updates) {
+    if (!Number.isInteger(ver) || ver < 1) continue
+    const merged = Math.max(next[id] ?? 0, ver)
+    if (next[id] !== merged) {
+      next[id] = merged
+      changed = true
+    }
+  }
+
+  return { next, changed }
+}
+
+export async function loadTidyCheckedVersions(db: Db | Tx): Promise<Record<string, number>> {
+  const [row] = await db
+    .select()
+    .from(settings)
+    .where(eq(settings.key, TIDY_CHECKED_SETTING_KEY))
+    .limit(1)
+  return parseTidyCheckedVersions(row?.value)
 }
 
 export async function saveTidyCheckedVersions(
@@ -629,6 +692,115 @@ export async function saveTidyCheckedVersions(
       target: settings.key,
       set: { value: versions, updatedAt: sql`now()` },
     })
+}
+
+// 在行锁保护下将批量规范新登记水位按单调最大值合并落库，并仅清理显式指定且不在本次更新集内的失效键
+export async function mergeTidyCheckedVersions(
+  db: Db | Tx,
+  updates: ReadonlyMap<string, number>,
+  pruneIds?: ReadonlySet<string>,
+): Promise<void> {
+  const validUpdates = new Map<string, number>()
+  for (const [id, ver] of updates) {
+    if (Number.isInteger(ver) && ver >= 1) {
+      validUpdates.set(id, Math.max(validUpdates.get(id) ?? 0, ver))
+    }
+  }
+  const hasPrunes = Boolean(pruneIds && pruneIds.size > 0)
+  if (validUpdates.size === 0 && !hasPrunes) return
+
+  await db.transaction(async (tx) => {
+    let [row] = await tx
+      .select({ value: settings.value })
+      .from(settings)
+      .where(eq(settings.key, TIDY_CHECKED_SETTING_KEY))
+      .for('update')
+    if (!row) {
+      if (validUpdates.size === 0) return
+      await tx
+        .insert(settings)
+        .values({ key: TIDY_CHECKED_SETTING_KEY, value: {}, updatedAt: sql`now()` })
+        .onConflictDoNothing()
+      ;[row] = await tx
+        .select({ value: settings.value })
+        .from(settings)
+        .where(eq(settings.key, TIDY_CHECKED_SETTING_KEY))
+        .for('update')
+    }
+    const current = parseTidyCheckedVersions(row?.value)
+    const { next, changed } = applyTidyCheckedVersionMerge(current, validUpdates, pruneIds)
+    if (!changed) return
+    await tx
+      .update(settings)
+      .set({ value: next, updatedAt: sql`now()` })
+      .where(eq(settings.key, TIDY_CHECKED_SETTING_KEY))
+  })
+}
+
+// 幂等登记单条词条已完成规范检查的版本水位（单调递增，行锁避免并发覆盖）
+export async function markTidyCheckedVersion(
+  db: Db | Tx,
+  entryId: string,
+  version: number,
+): Promise<void> {
+  if (!Number.isInteger(version) || version < 1) return
+  await db.transaction(async (tx) => {
+    let [row] = await tx
+      .select({ value: settings.value })
+      .from(settings)
+      .where(eq(settings.key, TIDY_CHECKED_SETTING_KEY))
+      .for('update')
+    if (!row) {
+      await tx
+        .insert(settings)
+        .values({ key: TIDY_CHECKED_SETTING_KEY, value: {}, updatedAt: sql`now()` })
+        .onConflictDoNothing()
+      ;[row] = await tx
+        .select({ value: settings.value })
+        .from(settings)
+        .where(eq(settings.key, TIDY_CHECKED_SETTING_KEY))
+        .for('update')
+    }
+    const versions = parseTidyCheckedVersions(row?.value)
+    const nextVersion = Math.max(versions[entryId] ?? 0, version)
+    if (versions[entryId] === nextVersion) return
+    versions[entryId] = nextVersion
+    await tx
+      .update(settings)
+      .set({ value: versions, updatedAt: sql`now()` })
+      .where(eq(settings.key, TIDY_CHECKED_SETTING_KEY))
+  })
+}
+
+// 对纯派生维护或仅改元信息的版本递进顺延已登记的规范水位；无项命中时不写表
+export async function carryForwardTidyCheckedVersions(
+  db: Db | Tx,
+  transitions: readonly TidyCheckedVersionTransition[],
+): Promise<void> {
+  const valid = transitions.filter(
+    (item) =>
+      Number.isInteger(item.fromVersion) &&
+      item.fromVersion >= 1 &&
+      Number.isInteger(item.toVersion) &&
+      item.toVersion > item.fromVersion,
+  )
+  if (!valid.length) return
+
+  await db.transaction(async (tx) => {
+    const [row] = await tx
+      .select({ value: settings.value })
+      .from(settings)
+      .where(eq(settings.key, TIDY_CHECKED_SETTING_KEY))
+      .for('update')
+    if (!row) return
+    const current = parseTidyCheckedVersions(row.value)
+    const { next, changed } = applyTidyCheckedVersionTransitions(current, valid)
+    if (!changed) return
+    await tx
+      .update(settings)
+      .set({ value: next, updatedAt: sql`now()` })
+      .where(eq(settings.key, TIDY_CHECKED_SETTING_KEY))
+  })
 }
 
 // ---- 供主密钥启动校验与同步重封读取加密设置项 ----

@@ -14,7 +14,7 @@ import { entries } from '../db/schema'
 import { MemoryError } from '../memory/errors'
 import { buildUniqueSlugIndex, computeDeterministicFixes } from '../memory/hygieneSweep'
 import { chatComplete } from '../models/client'
-import { CHAT_LLM_SETTING_KEY, loadResolvedModel } from '../models/store'
+import { CHAT_LLM_SETTING_KEY, loadResolvedModel, markTidyCheckedVersion } from '../models/store'
 import { CaptureAbortedError } from './capture'
 import { computeDynamicOutputTokens, toPromptItem } from './dream'
 import { buildSemanticRepairMessages, buildTidyMessages, evaluateTidyResponse } from './dreamPrompt'
@@ -180,6 +180,12 @@ export async function previewSingleTidy(
 
   const hasPreCleanDiff = preCleanedContent !== target.content
   if (evaluated.status === 'not_needed') {
+    if (!hasPreCleanDiff && preCleanedFixes.length === 0) {
+      if (options.signal?.aborted) throw new CaptureAbortedError()
+      if (typeof db.transaction === 'function') {
+        await markTidyCheckedVersion(db, target.id, target.version)
+      }
+    }
     const integrity = checkCaptureIntegrity(target.content, preCleanedContent)
     return {
       shortId: target.shortId,
@@ -236,6 +242,13 @@ export async function previewSingleTidy(
     finalContent !== target.content ||
     topicsChanged ||
     disclosureChanged
+
+  if (!actuallyChanged && preCleanedFixes.length === 0) {
+    if (options.signal?.aborted) throw new CaptureAbortedError()
+    if (typeof db.transaction === 'function') {
+      await markTidyCheckedVersion(db, target.id, target.version)
+    }
+  }
 
   return {
     shortId: target.shortId,

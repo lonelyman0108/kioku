@@ -44,11 +44,66 @@ export interface DreamPromptItem {
   topics: string[]
   deviceKey?: string | null | undefined
   version: number
+  verifiedAt?: string | null | undefined
   updatedAt: string
   truncated: boolean
   outboundShortIds?: string[] | undefined
   outline?: string | undefined
 }
+
+export interface ReconcileSourceItem {
+  shortId: string
+  title: string
+  summary?: string | null | undefined
+  content: string
+  lastChangeSummary?: string | null | undefined
+  envs: string[]
+  realms: string[]
+  projects: string[]
+  runtimes: string[]
+  topics: string[]
+  deviceKey?: string | null | undefined
+  verifiedAt?: string | null | undefined
+  updatedAt: string
+}
+
+export interface ReconcileCandidateItem {
+  shortId: string
+  title: string
+  summary?: string | null | undefined
+  content: string
+  envs: string[]
+  realms: string[]
+  projects: string[]
+  runtimes: string[]
+  topics: string[]
+  deviceKey?: string | null | undefined
+  verifiedAt?: string | null | undefined
+  updatedAt: string
+  relationHint?: string | undefined
+}
+
+export interface ReconcileConflictHit {
+  targetShortId: string
+  sectionHeading: string | null
+  conflictReason: string
+}
+
+export type ReconcileLocateParseResult =
+  { status: 'ok'; conflicts: ReconcileConflictHit[] } | { status: 'invalid'; reason: string }
+
+export interface ReconcilePatchProposal {
+  oldText: string
+  newText: string
+  proposedSummary: string | null
+  changeSummary: string
+  reason: string
+}
+
+export type ReconcilePatchParseResult =
+  | { status: 'patch'; patch: ReconcilePatchProposal }
+  | { status: 'not_needed' }
+  | { status: 'invalid'; reason: string }
 
 export interface BrokenLinkHint {
   targetShortId: string
@@ -100,7 +155,7 @@ const SYSTEM_PROMPT = [
   '1. "distill_episode"：把 1 条或多条有长期价值的会话摘要（episode）提炼为一条永久正式记忆。须提供 target_short_ids、title（简短稳定、禁日期）、content、reason，推荐提供 summary（1–2 句现行结论）、change_summary、disclosure、topics（1–5 个简洁粗粒度分类标签）、envs、realms、projects、runtimes；若属跨项目的通用规则可显式传 projects: []（跨环境可传 envs: []），但严禁放宽 realms；仅当属简短、高频生效的核心工作流铁律时可额外提供 proposed_boot_mode: "full"（其余省略或 "none"）。',
   '2. "merge_duplicates"：合并 2 条以上内容高度重叠且 realms 一致的正式记忆（entry）。须提供 target_short_ids、keep_short_id、title、content、reason，推荐提供 summary、change_summary、disclosure、topics（主动收敛为 1–5 个核心分类标签，不要把旧标签全数堆砌）、envs、realms、projects、runtimes。不得合并被截断或仅互补的独立主题页。',
   '3. "mark_stale"：某条正式记忆已被更新的记忆推翻或明显过时失效。须提供 target_short_ids（1 条）与 reason。',
-  '4. "update"：根据更新的会话摘要或关联邻居记忆（含双链邻居间的事实矛盾），对某条现有正式记忆做具体事实补充或修正。须提供 target_short_ids（1 条）、content、reason，推荐提供 title、summary、change_summary、disclosure、topics、envs、realms、projects、runtimes。',
+  '4. "update"：根据更新的会话摘要或关联邻居记忆（含双链邻居间的事实矛盾），对某条现有正式记忆做具体事实补充或修正。须提供 target_short_ids（1 条）、content、reason；基于较新记忆的事实对另一条旧记忆提 update 时必须填 source_short_id 标明事实来源短 ID；推荐提供 title、summary、change_summary、disclosure、topics、envs、realms、projects、runtimes。',
   '5. "link_entries"：为互补主题或存在明显上下游依赖、却尚未互链的正式记忆补充双链。须提供 target_short_ids（1 条待追加双链的词条）、links（数组，每项含 target_short_id、relation、可选 anchor_heading、可选 reason）与 reason。',
   '6. "adjust_boot_mode"：某条常驻词条过长或属参考手册，建议调整其启动加载层级（full -> index 或 none）。须提供 target_short_ids（1 条）、proposed_boot_mode（"none"|"index"|"full"）、reason；改为 index 时强烈建议同步给出 summary（1–2 句现行概要）。',
   '',
@@ -121,7 +176,7 @@ const CLUSTER_AUDIT_SYSTEM_PROMPT = [
   '允许输出的 kind：',
   '- "merge_duplicates"：仅当 2 条及以上词条表述同一主题、内容高度重叠且 realms 一致、未被截断时才合并；须给 target_short_ids、keep_short_id、title、summary、content、change_summary、reason，推荐同时将 topics 收敛为 1–5 个核心分类标签，且必须完整保留全部被合并词条中的外部 [[m-xxxxxx]] 双链与 {{cred:...}} 凭据占位符。',
   '- "link_entries"：若词条属于互补的独立主题页（例如架构与排错、服务端与客户端），绝不硬揉合并，而是输出 link_entries 建议（target_short_ids=[1条]、links=[{target_short_id, relation, anchor_heading?, reason}]、reason）。',
-  '- "update"：若一条较新词条明确推翻或修正了另一条的旧配置/旧路径，对旧词条输出 update（须保留所有原有双链与凭据占位符）。',
+  '- "update"：若一条较新词条明确推翻或修正了另一条的旧配置/旧路径，对旧词条输出 update（须填 source_short_id 标明事实来源短 ID，并保留所有原有双链与凭据占位符）。',
   '- "mark_stale"：若某条已完全被另一条替代且无独立价值，输出 mark_stale。',
   '',
   '反膨胀守卫：合并或更新后的正文应提炼抽象规则、决策结论与防踩坑依据，去掉重复段落，不得无故拉长或引入日志流水。不需要调整作用域或主题时直接省略对应字段，勿填占位空数组 []。',
@@ -191,6 +246,32 @@ const TIDY_SYSTEM_PROMPT = [
   '6. archived_notes：每条只写精炼单行（≤200 字），日期已知时填 ISO 8601（如 2026-10-21T00:00:00Z），未知填 null；无剥离历史时给 []。',
 ].join('\n')
 
+const RECONCILE_LOCATE_SYSTEM_PROMPT = [
+  '你是 Kioku 跨记忆事实冲突定位助手。给定一条新近更新的基准记忆以及若干相关候选记忆（提供概要与二级小节大纲或正文摘录），请判断是否需要修订候选记忆中的过时陈述。',
+  '只输出单个 JSON 对象：{"conflicts":[{"target_short_id":"m-xxxxxx","section_heading":"命中的二级小节标题（无二级小节时填 null）","conflict_reason":"简明说明哪条具体事实已被基准记忆推翻或过时"}]}。',
+  '无明确冲突时必须输出 {"conflicts":[]}。',
+  '',
+  '严格规则：',
+  '1. 仅当基准记忆中已确定的现行结论明确推翻或过时化候选记忆的某个具体陈述（例如地址、端口、路径、工具、依赖、架构或流程决策变更）时才返回冲突定位。',
+  '2. 仅主题相关、互补信息、属于不同机器/环境特例或缺乏明确矛盾时，必须返回 {"conflicts":[]}，宁缺毋滥。',
+  '3. target_short_id 必须严格取自下方候选记忆列表；每条候选记忆至多返回一条最关键的冲突定位。',
+  '4. 候选记忆存在二级小节大纲时，section_heading 须准确填对应的二级小节标题；若候选记忆没有二级小节，section_heading 填 null。',
+  '5. 结合「核实于/更新于」时间判断新旧方向，不得用旧结论覆盖更新的事实，也不得将单机特例泛化到无关主机。',
+].join('\n')
+
+const RECONCILE_PATCH_SYSTEM_PROMPT = [
+  '你是 Kioku 单小节事实修订助手。给定一条基准记忆的现行结论、疑似过时的目标记忆单个二级小节原文（或无小节时的短全文）以及冲突线索，请核实该小节是否确实包含被推翻或过时的具体事实。',
+  '若核查小节原文后确认确实需要最小局部修订，输出单个 JSON 对象：',
+  '{"needed":true,"old_text":"原小节中逐字匹配的片段","new_text":"修订后的片段","proposed_summary":"可选，仅当目标现行概要同步过时时填写","change_summary":"一句话说明修订内容","reason":"为何需要修订（请注明基准记忆短 ID）"}',
+  '若小节原文实际上已经一致、并不存在明确矛盾或证据不足，必须输出 {"needed":false}。',
+  '',
+  '严格规则：',
+  '1. old_text 必须逐字复制自下方给出的目标小节原文，且在该小节内唯一出现（必要时多包含相邻行上下文确保唯一）。',
+  '2. new_text 只修订确实过时的具体陈述，保持其余正常内容与原有格式不变，禁止大幅重写或扩写流水账。',
+  '3. 严禁删除或破坏原文中的 [[m-xxxxxx]] 双链与 {{cred:...}} 凭据占位符，严禁编造任何密码、密钥或令牌。',
+  '4. 仅当目标记忆的现行概要也一并过时才填 proposed_summary；概要仍准确时省略或填 null。',
+].join('\n')
+
 export function sameRealms(a: readonly string[], b: readonly string[]): boolean {
   const left = normalizeSlugList(a)
   const right = normalizeSlugList(b)
@@ -210,7 +291,19 @@ export function canFlowRealmInto(
   return recipient.every((r) => donorSet.has(r))
 }
 
-function formatItem(item: DreamPromptItem, compact = false): string {
+function formatSemanticTimeLabel(verifiedAt: string | null | undefined, updatedAt: string): string {
+  return verifiedAt ? `核实于 ${verifiedAt.slice(0, 10)}` : `更新于 ${updatedAt.slice(0, 10)}`
+}
+
+function formatSceneTags(item: {
+  bootMode?: BootMode | undefined
+  projects: readonly string[]
+  envs: readonly string[]
+  deviceKey?: string | null | undefined
+  realms: readonly string[]
+  runtimes: readonly string[]
+  topics: readonly string[]
+}): string[] {
   const tags: string[] = []
   if (item.bootMode && item.bootMode !== 'none') tags.push(`boot=${item.bootMode}`)
   if (item.projects.length) tags.push(`project=${item.projects.join(',')}`)
@@ -220,7 +313,13 @@ function formatItem(item: DreamPromptItem, compact = false): string {
   if (item.realms.length) tags.push(`realm=${item.realms.join(',')}`)
   if (item.runtimes.length) tags.push(`runtime=${item.runtimes.join(',')}`)
   if (item.topics.length) tags.push(`topic=${item.topics.join(',')}`)
-  const head = `[${item.shortId}] (${item.kind}${item.truncated ? ', 已截断' : ''}, ${item.content.length}字) ${item.title} | 更新于 ${item.updatedAt.slice(0, 10)}${tags.length ? ` | ${tags.join(' ')}` : ''}`
+  return tags
+}
+
+function formatItem(item: DreamPromptItem, compact = false): string {
+  const tags = formatSceneTags(item)
+  const timeLabel = formatSemanticTimeLabel(item.verifiedAt, item.updatedAt)
+  const head = `[${item.shortId}] (${item.kind}${item.truncated ? ', 已截断' : ''}, ${item.content.length}字) ${item.title} | ${timeLabel}${tags.length ? ` | ${tags.join(' ')}` : ''}`
   const sum = item.summary ? `\n现行概要：${item.summary}` : ''
   let disc = ''
   if (item.disclosure) {
@@ -570,7 +669,10 @@ export type DreamStandardParseResult =
 export function evaluateDreamResponse(
   raw: string,
   catalog: ReadonlyMap<string, DreamPromptItem>,
-  options: { allowedKinds?: ReadonlySet<DreamSuggestionKind> | undefined } = {},
+  options: {
+    allowedKinds?: ReadonlySet<DreamSuggestionKind> | undefined
+    changedShortIds?: ReadonlySet<string> | undefined
+  } = {},
 ): DreamStandardParseResult {
   const parsed = parseJsonObject(raw)
   if (!parsed) return { status: 'invalid', reason: '模型输出非合法 JSON' }
@@ -578,6 +680,9 @@ export function evaluateDreamResponse(
     return { status: 'invalid', reason: '模型输出缺少 suggestions 数组' }
   }
   const list = parsed.suggestions
+  const normalizedChangedShortIds = options.changedShortIds?.size
+    ? new Set([...options.changedShortIds].map(normalizeShortId))
+    : null
 
   const proposals: ParsedDreamProposal[] = []
   for (const item of list) {
@@ -682,13 +787,43 @@ export function evaluateDreamResponse(
         continue
       }
       const integrity = checkCaptureIntegrity(resolved[0]!.content, proposedContent)
-      if (integrity.missingCreds.length > 0) continue
-      const sourceSid =
-        typeof rec.source_short_id === 'string' ? normalizeShortId(rec.source_short_id) : ''
-      if (sourceSid) {
+      if (integrity.missingCreds.length > 0 || integrity.missingLinks.length > 0) continue
+      const rawSource = rec.source_short_id ?? rec.sourceShortId
+      const hasExplicitSource =
+        rawSource !== undefined &&
+        rawSource !== null &&
+        (typeof rawSource !== 'string' || rawSource.trim().length > 0)
+      if (hasExplicitSource) {
+        if (typeof rawSource !== 'string') continue
+        const sourceSid = normalizeShortId(rawSource)
         const sourceItem = catalog.get(sourceSid)
-        if (sourceItem && !canFlowRealmInto(resolved[0]!.realms, sourceItem.realms)) continue
+        if (!sourceItem || sourceItem.shortId === resolved[0]!.shortId) continue
+        if (!canFlowRealmInto(resolved[0]!.realms, sourceItem.realms)) continue
         actionDiscriminator = `from:${sourceSid}`
+      } else if (normalizedChangedShortIds) {
+        if (!normalizedChangedShortIds.has(resolved[0]!.shortId)) {
+          // 目标为邻居且省略 source_short_id 时 fail-closed：批次内全部变更项的场域均须合法流入目标
+          let allChangedCanFlow = true
+          for (const changedSid of normalizedChangedShortIds) {
+            const changedItem = catalog.get(changedSid)
+            if (!changedItem || !canFlowRealmInto(resolved[0]!.realms, changedItem.realms)) {
+              allChangedCanFlow = false
+              break
+            }
+          }
+          if (!allChangedCanFlow) continue
+        } else {
+          // 目标在变更批次内且省略 source_short_id 时 fail-closed：同批与邻居中不得混入无法流入目标的更窄或异场域记忆
+          let allCatalogCanFlow = true
+          for (const otherItem of catalog.values()) {
+            if (otherItem.shortId === resolved[0]!.shortId) continue
+            if (!canFlowRealmInto(resolved[0]!.realms, otherItem.realms)) {
+              allCatalogCanFlow = false
+              break
+            }
+          }
+          if (!allCatalogCanFlow) continue
+        }
       }
       if (proposedRealms && !canFlowRealmInto(proposedRealms, resolved[0]!.realms)) {
         proposedRealms = null
@@ -854,4 +989,223 @@ export function parseTidyProposal(
 ): ParsedDreamProposal | null {
   const res = evaluateTidyResponse(raw, target)
   return res.status === 'proposal' ? res.proposal : null
+}
+
+const RECONCILE_SOURCE_PREVIEW_CHARS = 2_000
+const RECONCILE_CANDIDATE_NO_H2_EXCERPT_CHARS = 400
+const RECONCILE_SECTION_HEADING_MAX_CHARS = 200
+
+function formatReconcileSourceBlock(source: ReconcileSourceItem): string {
+  const tags = formatSceneTags(source)
+  const timeLabel = formatSemanticTimeLabel(source.verifiedAt, source.updatedAt)
+  const truncated = source.content.length > RECONCILE_SOURCE_PREVIEW_CHARS
+  const body = truncated
+    ? clipChars(source.content, RECONCILE_SOURCE_PREVIEW_CHARS)
+    : source.content
+  const lines = [
+    `[${source.shortId}] ${source.title}${truncated ? '（正文已截断）' : ''} | ${timeLabel}${tags.length ? ` | ${tags.join(' ')}` : ''}`,
+  ]
+  if (source.lastChangeSummary?.trim()) {
+    lines.push(`最近变更说明：${source.lastChangeSummary.trim()}`)
+  }
+  if (source.summary?.trim()) {
+    lines.push(`现行概要：${source.summary.trim()}`)
+  }
+  lines.push(body)
+  return lines.join('\n')
+}
+
+function formatReconcileCandidateBlock(cand: ReconcileCandidateItem): string {
+  const tags = formatSceneTags(cand)
+  const timeLabel = formatSemanticTimeLabel(cand.verifiedAt, cand.updatedAt)
+  const rel = cand.relationHint ? ` | ${cand.relationHint}` : ''
+  const lines = [
+    `[${cand.shortId}] ${cand.title} (${cand.content.length}字) | ${timeLabel}${rel}${tags.length ? ` | ${tags.join(' ')}` : ''}`,
+  ]
+  if (cand.summary?.trim()) {
+    lines.push(`现行概要：${cand.summary.trim()}`)
+  }
+  const outline = extractMarkdownOutline(cand.content)
+  if (outline.length) {
+    lines.push('二级小节大纲：')
+    for (const sec of outline.slice(0, 24)) {
+      lines.push(
+        `- ## ${sec.heading}（${sec.charCount} 字）${sec.preview ? `：${sec.preview}` : ''}`,
+      )
+    }
+  } else {
+    lines.push(
+      `正文摘录（无二级小节）：\n${clipChars(cand.content, RECONCILE_CANDIDATE_NO_H2_EXCERPT_CHARS)}`,
+    )
+  }
+  return lines.join('\n')
+}
+
+export function buildReconcileLocateMessages(
+  source: ReconcileSourceItem,
+  candidates: readonly ReconcileCandidateItem[],
+): ChatMessage[] {
+  const sections = [
+    '## 基准记忆（新近更新的现行结论）',
+    formatReconcileSourceBlock(source),
+    '',
+    `## 关联候选记忆（共 ${candidates.length} 条，仅展示概要与小节大纲）`,
+    ...candidates.map((cand) => formatReconcileCandidateBlock(cand)),
+  ]
+  return [
+    { role: 'system', content: RECONCILE_LOCATE_SYSTEM_PROMPT },
+    { role: 'user', content: sections.join('\n\n') },
+  ]
+}
+
+export function parseReconcileLocateResponse(
+  raw: string,
+  allowedShortIds: ReadonlySet<string>,
+): ReconcileLocateParseResult {
+  const parsed = parseJsonObject(raw)
+  if (!parsed) return { status: 'invalid', reason: '模型输出非合法 JSON' }
+  if (!Array.isArray(parsed.conflicts)) {
+    if (
+      parsed.conflicts === undefined &&
+      Array.isArray(parsed.suggestions) &&
+      parsed.suggestions.length === 0
+    ) {
+      return { status: 'ok', conflicts: [] }
+    }
+    return { status: 'invalid', reason: '模型输出缺少 conflicts 数组' }
+  }
+
+  const allowed = new Set([...allowedShortIds].map(normalizeShortId))
+  const seen = new Set<string>()
+  const conflicts: ReconcileConflictHit[] = []
+
+  for (const item of parsed.conflicts) {
+    if (!item || typeof item !== 'object') continue
+    const rec = item as Record<string, unknown>
+    const rawTarget = rec.target_short_id ?? rec.targetShortId
+    if (typeof rawTarget !== 'string') continue
+    const targetShortId = normalizeShortId(rawTarget)
+    if (!targetShortId || !allowed.has(targetShortId) || seen.has(targetShortId)) continue
+
+    const conflictReason = sanitizeDreamPlainField(
+      rec.conflict_reason ?? rec.conflictReason ?? rec.reason,
+      MAX_REASON_CHARS,
+    )
+    if (!conflictReason) continue
+
+    const rawHeading = rec.section_heading ?? rec.sectionHeading
+    const cleanedHeading =
+      typeof rawHeading === 'string'
+        ? sanitizeDreamPlainField(
+            rawHeading.replace(/^#{1,6}[ \t]+/, ''),
+            RECONCILE_SECTION_HEADING_MAX_CHARS,
+          ) || null
+        : null
+
+    seen.add(targetShortId)
+    conflicts.push({
+      targetShortId,
+      sectionHeading: cleanedHeading,
+      conflictReason,
+    })
+  }
+
+  return { status: 'ok', conflicts }
+}
+
+export function buildReconcilePatchMessages(
+  source: ReconcileSourceItem,
+  target: Pick<
+    ReconcileCandidateItem,
+    | 'shortId'
+    | 'title'
+    | 'summary'
+    | 'envs'
+    | 'realms'
+    | 'projects'
+    | 'runtimes'
+    | 'topics'
+    | 'deviceKey'
+    | 'verifiedAt'
+    | 'updatedAt'
+  >,
+  sectionHeading: string | null,
+  sectionContent: string,
+  conflictReason: string,
+): ChatMessage[] {
+  const targetTags = formatSceneTags(target)
+  const targetTime = formatSemanticTimeLabel(target.verifiedAt, target.updatedAt)
+  const targetMetaLines = [
+    `[${target.shortId}] ${target.title} | ${targetTime}${targetTags.length ? ` | ${targetTags.join(' ')}` : ''}`,
+  ]
+  if (target.summary?.trim()) {
+    targetMetaLines.push(`现行概要：${target.summary.trim()}`)
+  }
+
+  const sectionLabel = sectionHeading
+    ? `小节「## ${sectionHeading}」原文`
+    : '完整正文（无二级小节）'
+  const sections = [
+    '## 基准记忆（现行有效结论）',
+    formatReconcileSourceBlock(source),
+    '',
+    '## 疑似冲突说明',
+    conflictReason,
+    '',
+    '## 待核查目标记忆元信息',
+    targetMetaLines.join('\n'),
+    '',
+    `## 待核查${sectionLabel}`,
+    sectionContent,
+  ]
+  return [
+    { role: 'system', content: RECONCILE_PATCH_SYSTEM_PROMPT },
+    { role: 'user', content: sections.join('\n\n') },
+  ]
+}
+
+export function parseReconcilePatchResponse(raw: string): ReconcilePatchParseResult {
+  const rec = parseJsonObject(raw)
+  if (!rec) return { status: 'invalid', reason: '模型输出非合法 JSON' }
+  if (rec.needed === false) return { status: 'not_needed' }
+
+  const oldText =
+    typeof rec.old_text === 'string'
+      ? rec.old_text
+      : typeof rec.oldText === 'string'
+        ? rec.oldText
+        : ''
+  const newText =
+    typeof rec.new_text === 'string'
+      ? rec.new_text
+      : typeof rec.newText === 'string'
+        ? rec.newText
+        : ''
+
+  if (typeof rec.needed !== 'boolean' && !oldText.trim() && !newText.trim()) {
+    return { status: 'invalid', reason: '模型输出缺少 needed 布尔字段' }
+  }
+  if (!oldText.trim()) return { status: 'invalid', reason: '缺少待替换片段 old_text' }
+  if (!newText.trim()) return { status: 'invalid', reason: '缺少替换内容 new_text' }
+  if (oldText.replace(/\r\n/g, '\n') === newText.replace(/\r\n/g, '\n')) {
+    return { status: 'not_needed' }
+  }
+
+  const proposedSummary =
+    sanitizeDreamPlainField(rec.proposed_summary ?? rec.proposedSummary, ENTRY_SUMMARY_MAX) || null
+  const changeSummary =
+    sanitizeDreamPlainField(rec.change_summary ?? rec.changeSummary, CHANGE_SUMMARY_MAX) ||
+    '根据关联记忆修订过时事实'
+  const reason = sanitizeDreamPlainField(rec.reason, MAX_REASON_CHARS) || changeSummary
+
+  return {
+    status: 'patch',
+    patch: {
+      oldText,
+      newText,
+      proposedSummary,
+      changeSummary,
+      reason,
+    },
+  }
 }
