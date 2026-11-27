@@ -1806,7 +1806,7 @@ defineExpose({
 .head-status-line {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
+  align-items: center;
   gap: 4px 7px;
   font-size: 12px;
   line-height: 1.5;
@@ -2286,7 +2286,7 @@ defineExpose({
 }
 .rail-heading-row {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 8px;
   padding-bottom: 4px;
@@ -2324,7 +2324,7 @@ defineExpose({
 }
 .outline-btn {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 8px;
   width: 100%;
@@ -2369,7 +2369,7 @@ defineExpose({
 }
 .rail-history-meta {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 6px;
   font-size: 12px;
@@ -2395,16 +2395,21 @@ defineExpose({
 }
 .meta-strip > div {
   display: flex;
-  align-items: baseline;
+  align-items: flex-start;
   gap: 8px;
 }
 .meta-strip dt {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  min-height: 20px;
   font-size: 12px;
+  line-height: 20px;
   color: var(--ui-text-muted);
   white-space: nowrap;
+}
+.meta-strip dd {
+  line-height: 20px;
 }
 .meta-dt-icon {
   display: inline-block;
@@ -2516,7 +2521,7 @@ defineExpose({
 .evolution-meta {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
   font-size: 12px;
   color: var(--ui-text-muted);

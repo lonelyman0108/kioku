@@ -8,7 +8,7 @@ withDefaults(defineProps<{ title?: string; level?: 1 | 2 | 3 | 4; icon?: string 
 </script>
 
 <template>
-  <div class="flex items-baseline justify-between gap-3 border-b border-rule pb-1.5">
+  <div class="flex items-center justify-between gap-3 border-b border-rule pb-1.5">
     <component :is="`h${level}`" class="flex items-center gap-1.5 text-sm/6 font-semibold">
       <UIcon
         v-if="icon"

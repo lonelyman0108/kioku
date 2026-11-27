@@ -769,7 +769,7 @@ function resetOverrides() {
 .section-head {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 6px 12px;
   padding-bottom: 6px;

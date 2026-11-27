@@ -1192,7 +1192,7 @@ defineExpose({ filterOpen })
 }
 .row-sub {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 6px;
   min-width: 0;
   overflow: hidden;

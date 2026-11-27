@@ -1608,7 +1608,7 @@ function applyEdited() {
 .link-check-top {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
+  align-items: center;
   gap: 4px 8px;
   font-size: 14px;
 }
@@ -2044,14 +2044,14 @@ function applyEdited() {
 .card-head {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 8px;
 }
 .card-head-main {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
   min-width: 0;
 }
@@ -2121,7 +2121,7 @@ function applyEdited() {
 .card-affected-list li {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
 }
 .card-actions {
