@@ -242,6 +242,36 @@ function markCredentials(root: DocumentFragment, { bySlug, href }: CredentialLin
   }
 }
 
+const SVG_NS = 'http://www.w3.org/2000/svg'
+
+// 精简内联 lucide link-2 矢量图标，经由 DOM API 构建，避免拼接 HTML 字符串
+function createWikiLinkIcon(): SVGSVGElement {
+  const svg = document.createElementNS(SVG_NS, 'svg')
+  svg.setAttribute('viewBox', '0 0 24 24')
+  svg.setAttribute('fill', 'none')
+  svg.setAttribute('stroke', 'currentColor')
+  svg.setAttribute('stroke-width', '2')
+  svg.setAttribute('stroke-linecap', 'round')
+  svg.setAttribute('stroke-linejoin', 'round')
+  svg.setAttribute('aria-hidden', 'true')
+  svg.setAttribute('class', 'kioku-wikilink-icon')
+
+  for (const d of ['M9 17H7A5 5 0 0 1 7 7h2', 'M15 7h2a5 5 0 1 1 0 10h-2']) {
+    const path = document.createElementNS(SVG_NS, 'path')
+    path.setAttribute('d', d)
+    svg.append(path)
+  }
+
+  const line = document.createElementNS(SVG_NS, 'line')
+  line.setAttribute('x1', '8')
+  line.setAttribute('x2', '16')
+  line.setAttribute('y1', '12')
+  line.setAttribute('y2', '12')
+  svg.append(line)
+
+  return svg
+}
+
 function markWikiLinks(root: DocumentFragment, targets: WikiLinkTargets) {
   for (const text of textNodes(root)) {
     const segments = splitWikiLinks(text.data)
@@ -260,7 +290,10 @@ function markWikiLinks(root: DocumentFragment, targets: WikiLinkTargets) {
       link.href = targets.href(shortId)
       link.dataset.shortId = shortId
       link.title = resolved ? `${resolved.title}（${shortId}）` : shortId
-      link.textContent = alias ?? resolved?.title ?? shortId
+      const label = document.createElement('span')
+      label.className = 'kioku-wikilink-label'
+      label.textContent = alias ?? resolved?.title ?? shortId
+      link.append(createWikiLinkIcon(), label)
       replacement.append(link)
     }
     text.replaceWith(replacement)

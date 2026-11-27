@@ -1,7 +1,8 @@
+import DOMPurify from 'dompurify'
 import { Tokenizer } from 'marked'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { markdownToHtml, rawHtml, splitWikiLinks } from '../markdown'
+import { markdownToHtml, rawHtml, renderMarkdown, splitWikiLinks } from '../markdown'
 
 describe('rawHtml', () => {
   it('不带属性的排版标签照常渲染', () => {
@@ -218,5 +219,365 @@ describe('双链切分', () => {
     expect(splitWikiLinks('[[m-234567|   ]]')).toEqual([
       { text: '[[m-234567|   ]]', link: { shortId: 'm-234567', alias: null } },
     ])
+  })
+})
+
+const VOID_TAGS = new Set(['br', 'hr'])
+
+function escapeXmlText(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+function escapeXmlAttr(value: string): string {
+  return escapeXmlText(value).replace(/"/g, '&quot;')
+}
+
+function decodeEntities(raw: string): string {
+  return raw.replace(/&(amp|lt|gt|quot|#x[0-9a-fA-F]+|#\d+);/g, (_, entity: string) => {
+    if (entity === 'amp') return '&'
+    if (entity === 'lt') return '<'
+    if (entity === 'gt') return '>'
+    if (entity === 'quot') return '"'
+    if (entity.startsWith('#x') || entity.startsWith('#X')) {
+      return String.fromCodePoint(parseInt(entity.slice(2), 16))
+    }
+    return String.fromCodePoint(parseInt(entity.slice(1), 10))
+  })
+}
+
+type FakeChild = FakeText | FakeElement
+
+class FakeNode {
+  parent: FakeContainer | null = null
+  get parentElement(): FakeElement | null {
+    return this.parent instanceof FakeElement ? this.parent : null
+  }
+  replaceWith(replacement: FakeDocumentFragment | FakeChild | string) {
+    if (!this.parent) return
+    const idx = this.parent.childNodes.indexOf(this as unknown as FakeChild)
+    if (idx === -1) return
+    const items: FakeChild[] =
+      replacement instanceof FakeDocumentFragment
+        ? [...replacement.childNodes]
+        : typeof replacement === 'string'
+          ? [new FakeText(replacement)]
+          : [replacement]
+    for (const item of items) item.parent = this.parent
+    this.parent.childNodes.splice(idx, 1, ...items)
+    this.parent = null
+  }
+}
+
+class FakeText extends FakeNode {
+  data: string
+  constructor(data: string) {
+    super()
+    this.data = data
+  }
+  toHtml(): string {
+    return escapeXmlText(this.data)
+  }
+}
+
+abstract class FakeContainer extends FakeNode {
+  childNodes: FakeChild[] = []
+  append(...items: (FakeDocumentFragment | FakeChild | string)[]) {
+    for (const item of items) {
+      if (item instanceof FakeDocumentFragment) {
+        const moved = item.childNodes.splice(0)
+        for (const child of moved) {
+          child.parent = this
+          this.childNodes.push(child)
+        }
+      } else if (typeof item === 'string') {
+        const text = new FakeText(item)
+        text.parent = this
+        this.childNodes.push(text)
+      } else {
+        item.parent = this
+        this.childNodes.push(item)
+      }
+    }
+  }
+  querySelectorAll(selector: string): FakeElement[] {
+    const out: FakeElement[] = []
+    const walk = (node: FakeContainer) => {
+      for (const child of node.childNodes) {
+        if (child instanceof FakeElement) {
+          if (child.matchesSimple(selector)) out.push(child)
+          walk(child)
+        }
+      }
+    }
+    walk(this)
+    return out
+  }
+  get innerHTML(): string {
+    return this.childNodes.map((child) => child.toHtml()).join('')
+  }
+}
+
+class FakeDocumentFragment extends FakeContainer {}
+
+class FakeElement extends FakeContainer {
+  tagName: string
+  attrs = new Map<string, string>()
+  dataset: Record<string, string | undefined>
+
+  constructor(tagName: string) {
+    super()
+    this.tagName = tagName.toLowerCase()
+    this.dataset = new Proxy<Record<string, string | undefined>>(
+      {},
+      {
+        get: (_, prop: string) =>
+          this.attrs.get(`data-${prop.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}`),
+        set: (_, prop: string, value: string | undefined) => {
+          const key = `data-${prop.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}`
+          if (value === undefined) this.attrs.delete(key)
+          else this.attrs.set(key, String(value))
+          return true
+        },
+      },
+    )
+  }
+
+  get className(): string {
+    return this.attrs.get('class') ?? ''
+  }
+  set className(value: string) {
+    this.attrs.set('class', value)
+  }
+  get href(): string {
+    return this.attrs.get('href') ?? ''
+  }
+  set href(value: string) {
+    this.attrs.set('href', value)
+  }
+  get title(): string {
+    return this.attrs.get('title') ?? ''
+  }
+  set title(value: string) {
+    this.attrs.set('title', value)
+  }
+  set textContent(value: string) {
+    this.childNodes = []
+    const text = new FakeText(value)
+    text.parent = this
+    this.childNodes.push(text)
+  }
+  setAttribute(name: string, value: string) {
+    this.attrs.set(name, value)
+  }
+  getAttribute(name: string): string | null {
+    return this.attrs.get(name) ?? null
+  }
+  matchesSimple(selector: string): boolean {
+    for (const raw of selector.split(',')) {
+      const part = raw.trim()
+      if (!part) continue
+      if (part === 'a[href]') {
+        if (this.tagName === 'a' && this.attrs.has('href')) return true
+        continue
+      }
+      if (part.startsWith('.')) {
+        const cls = part.slice(1)
+        if (this.className.split(/\s+/).includes(cls)) return true
+        continue
+      }
+      if (this.tagName === part.toLowerCase()) return true
+    }
+    return false
+  }
+  closest(selector: string): FakeElement | null {
+    if (this.matchesSimple(selector)) return this
+    let cur = this.parentElement
+    while (cur) {
+      if (cur.matchesSimple(selector)) return cur
+      cur = cur.parentElement
+    }
+    return null
+  }
+  toHtml(): string {
+    const attrs = [...this.attrs.entries()].map(([k, v]) => ` ${k}="${escapeXmlAttr(v)}"`).join('')
+    if (VOID_TAGS.has(this.tagName)) return `<${this.tagName}${attrs}>`
+    return `<${this.tagName}${attrs}>${this.innerHTML}</${this.tagName}>`
+  }
+}
+
+function parseSanitizedFragment(
+  html: string,
+  allowedTags: Set<string>,
+  allowedAttrs: Set<string>,
+): FakeDocumentFragment {
+  const root = new FakeDocumentFragment()
+  const stack: FakeContainer[] = [root]
+  const tokenRe = /<(\/?)([a-zA-Z][a-zA-Z0-9-]*)([^>]*?)(\/?)>|([^<]+)/g
+  let match: RegExpExecArray | null
+  while ((match = tokenRe.exec(html)) !== null) {
+    const [, closing, rawTag, rawAttrs, selfClose, text] = match
+    const parent = stack.at(-1)!
+    if (text !== undefined) {
+      parent.append(decodeEntities(text))
+      continue
+    }
+    const tag = rawTag!.toLowerCase()
+    if (!allowedTags.has(tag)) continue
+    if (closing) {
+      for (let i = stack.length - 1; i > 0; i--) {
+        const candidate = stack[i]
+        if (candidate instanceof FakeElement && candidate.tagName === tag) {
+          stack.length = i
+          break
+        }
+      }
+      continue
+    }
+    const el = new FakeElement(tag)
+    const attrRe = /([a-zA-Z][a-zA-Z0-9-]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g
+    let attr: RegExpExecArray | null
+    while ((attr = attrRe.exec(rawAttrs ?? '')) !== null) {
+      const name = attr[1]!.toLowerCase()
+      if (!allowedAttrs.has(name)) continue
+      const val = decodeEntities(attr[2] ?? attr[3] ?? attr[4] ?? '')
+      el.setAttribute(name, val)
+    }
+    parent.append(el)
+    if (!selfClose && !VOID_TAGS.has(tag)) stack.push(el)
+  }
+  return root
+}
+
+function installFakeDom() {
+  const fakeDoc = {
+    createElement: (tag: string) => new FakeElement(tag),
+    createElementNS: (_ns: string, tag: string) => new FakeElement(tag),
+    createDocumentFragment: () => new FakeDocumentFragment(),
+    createTreeWalker: (root: FakeContainer) => {
+      const texts: FakeText[] = []
+      const walk = (node: FakeContainer) => {
+        for (const child of node.childNodes) {
+          if (child instanceof FakeText) texts.push(child)
+          else walk(child)
+        }
+      }
+      walk(root)
+      let cursor = 0
+      return {
+        nextNode: () => texts[cursor++] ?? null,
+      }
+    },
+  }
+  vi.stubGlobal('document', fakeDoc)
+  vi.stubGlobal('NodeFilter', { SHOW_TEXT: 4 })
+
+  const purify = DOMPurify as unknown as {
+    sanitize?: (
+      dirty: string,
+      config?: { ALLOWED_TAGS?: string[]; ALLOWED_ATTR?: string[] },
+    ) => unknown
+  }
+  const previousSanitize = purify.sanitize
+  purify.sanitize = (dirty, config) =>
+    parseSanitizedFragment(
+      dirty,
+      new Set(config?.ALLOWED_TAGS ?? []),
+      new Set(config?.ALLOWED_ATTR ?? []),
+    )
+
+  return () => {
+    if (previousSanitize === undefined) delete purify.sanitize
+    else purify.sanitize = previousSanitize
+    vi.unstubAllGlobals()
+  }
+}
+
+describe('renderMarkdown 双链芯片渲染', () => {
+  let restoreDom: (() => void) | null = null
+
+  beforeEach(() => {
+    restoreDom = installFakeDom()
+  })
+
+  afterEach(() => {
+    restoreDom?.()
+    restoreDom = null
+  })
+
+  it('输出带图标 SVG 与标题标签的纸墨双链，且不泄露原始括号', () => {
+    const html = renderMarkdown('补全双链：[[m-s8a8df]]、[[m-2ft6p4|自定义名称]]', {
+      wikiLinks: {
+        byShortId: new Map([
+          ['m-s8a8df', { title: '家庭网络架构' }],
+          ['m-2ft6p4', { title: '网关配置清单' }],
+        ]),
+        href: (sid) => `/memories?id=${sid}`,
+      },
+    })
+
+    expect(html).not.toContain('[[')
+    expect(html).not.toContain(']]')
+    expect(html).toContain('class="kioku-wikilink"')
+    expect(html).toContain('href="/memories?id=m-s8a8df"')
+    expect(html).toContain('data-short-id="m-s8a8df"')
+    expect(html).toContain('title="家庭网络架构（m-s8a8df）"')
+    expect(html).toContain('<svg viewBox="0 0 24 24"')
+    expect(html).toContain('class="kioku-wikilink-icon"')
+    expect(html).toContain('M9 17H7A5 5 0 0 1 7 7h2')
+    expect(html).toContain('M15 7h2a5 5 0 1 1 0 10h-2')
+    expect(html).toContain('<line x1="8" x2="16" y1="12" y2="12"></line>')
+    expect(html).toContain('<span class="kioku-wikilink-label">家庭网络架构</span>')
+    expect(html).toContain('<span class="kioku-wikilink-label">自定义名称</span>')
+    expect(html).toContain('title="网关配置清单（m-2ft6p4）"')
+  })
+
+  it('目标缺失时附加 kioku-wikilink-missing 并回退短 ID 或别名', () => {
+    const html = renderMarkdown('失效引用 [[m-999999]] 与 [[m-888888|旧名称]]', {
+      wikiLinks: {
+        byShortId: new Map([['m-s8a8df', { title: '有效目标' }]]),
+        href: (sid) => `/memories?id=${sid}`,
+      },
+    })
+
+    expect(html).not.toContain('[[')
+    expect(html).not.toContain(']]')
+    expect(html).toContain('class="kioku-wikilink kioku-wikilink-missing"')
+    expect(html).toContain('title="m-999999"')
+    expect(html).toContain('<span class="kioku-wikilink-label">m-999999</span>')
+    expect(html).toContain('<span class="kioku-wikilink-label">旧名称</span>')
+  })
+
+  it('恶意别名与恶意标题文本会被安全转义，不产生注入标签', () => {
+    const html = renderMarkdown('测试 [[m-s8a8df|<img src=x onerror=alert(1)>]] 与 [[m-2ft6p4]]', {
+      wikiLinks: {
+        byShortId: new Map([
+          ['m-s8a8df', { title: '安全标题' }],
+          ['m-2ft6p4', { title: '<script>alert("xss")</script>' }],
+        ]),
+        href: (sid) => `/memories?id=${sid}`,
+      },
+    })
+
+    expect(html).not.toContain('<img')
+    expect(html).not.toContain('<script>')
+    expect(html).toContain(
+      '<span class="kioku-wikilink-label">&lt;img src=x onerror=alert(1)&gt;</span>',
+    )
+    expect(html).toContain(
+      '<span class="kioku-wikilink-label">&lt;script&gt;alert("xss")&lt;/script&gt;</span>',
+    )
+  })
+
+  it('行内代码与围栏代码块里的双链语法保持原文不转换', () => {
+    const html = renderMarkdown('行内 `[[m-s8a8df]]`\n\n```\n[[m-2ft6p4]]\n```', {
+      wikiLinks: {
+        byShortId: new Map([['m-s8a8df', { title: '家庭网络架构' }]]),
+        href: (sid) => `/memories?id=${sid}`,
+      },
+    })
+
+    expect(html).not.toContain('kioku-wikilink')
+    expect(html).toContain('<code>[[m-s8a8df]]</code>')
+    expect(html).toContain('[[m-2ft6p4]]')
   })
 })
