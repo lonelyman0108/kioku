@@ -278,7 +278,7 @@ function onClick(event: MouseEvent) {
   align-items: center;
   gap: 4px;
   max-width: 100%;
-  margin: 0 2px;
+  margin: 0 1px;
   padding: 0 6px;
   border: 1px solid var(--ui-border-accented);
   background: var(--ui-bg-muted);

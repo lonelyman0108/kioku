@@ -132,7 +132,7 @@ function onChipClick(shortId: string, event: MouseEvent) {
   align-items: center;
   gap: 3px;
   max-width: 100%;
-  margin: 0 2px;
+  margin: 0 1px;
   padding: 0 5px;
   border: 1px solid var(--wiki-chip-border, var(--ui-border-accented));
   background: var(--wiki-chip-bg, var(--ui-bg-muted));

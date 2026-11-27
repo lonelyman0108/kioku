@@ -329,7 +329,9 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(memoryContent).toContain('kioku-wikilink-icon')
 
     expect(memoryEditor).toContain('<WikiText')
-    expect(memoryEditor).toContain('复制 ID')
+    expect(memoryEditor).toContain('status-copy-id')
+    expect(memoryEditor).toContain('status-id-code')
+    expect(memoryEditor).toContain('head-change-line')
     expect(memoryEditor).not.toContain('<ShortIdLine')
     expect(memoryEditor).toContain(':entry-title="entry.title"')
 

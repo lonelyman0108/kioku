@@ -104,6 +104,20 @@ const emit = defineEmits<{
 const router = useRouter()
 const toast = useToast()
 const copy = useCopy()
+const shortIdCopied = ref(false)
+let shortIdCopyTimer: ReturnType<typeof setTimeout> | null = null
+async function copyShortId() {
+  const sid = entry.value?.shortId
+  if (!sid) return
+  const ok = await copy(sid)
+  if (!ok) return
+  shortIdCopied.value = true
+  if (shortIdCopyTimer) clearTimeout(shortIdCopyTimer)
+  shortIdCopyTimer = setTimeout(() => {
+    shortIdCopied.value = false
+    shortIdCopyTimer = null
+  }, 1600)
+}
 const queryClient = useQueryClient()
 const { getKbdKey } = useKbd()
 
@@ -915,7 +929,13 @@ function onEditorKeydown(event: KeyboardEvent) {
 }
 
 onMounted(() => window.addEventListener('keydown', onEditorKeydown))
-onBeforeUnmount(() => window.removeEventListener('keydown', onEditorKeydown))
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onEditorKeydown)
+  if (shortIdCopyTimer) {
+    clearTimeout(shortIdCopyTimer)
+    shortIdCopyTimer = null
+  }
+})
 
 const titleEl = ref<HTMLElement | null>(null)
 defineExpose({
@@ -974,7 +994,7 @@ defineExpose({
               </span>
             </div>
 
-            <!-- 轻量动态状态行：版本、相对更新时间、来源、常驻字数与最新变更摘要 -->
+            <!-- 轻量动态状态行：版本、相对更新时间、来源、常驻字数与低调短 ID 复制入口 -->
             <div class="head-status-line">
               <span class="tabular-nums">版本 {{ entry.version }}</span>
               <span class="status-sep" aria-hidden="true">·</span>
@@ -985,17 +1005,8 @@ defineExpose({
               </time>
               <template v-if="entry.isPinned">
                 <span class="status-sep" aria-hidden="true">·</span>
-                <span class="tabular-nums">约 {{ entry.content.length.toLocaleString() }} 字</span>
-              </template>
-              <template v-if="latestChangeText">
-                <span class="status-sep" aria-hidden="true">·</span>
-                <span class="status-change" :title="latestChangePlainText">
-                  近改：<WikiText
-                    :text="latestChangeText"
-                    :titles="resolvedTitles"
-                    compact
-                    @open="emit('open', $event)"
-                  />
+                <span class="tabular-nums">
+                  约 {{ (entry.content.length + entry.title.length).toLocaleString() }} 字
                 </span>
               </template>
               <template v-if="mode === 'read' && pendingSuggestionCount > 0">
@@ -1009,12 +1020,28 @@ defineExpose({
               <button
                 type="button"
                 class="status-copy-id"
-                :title="`短 ID：${entry.shortId}（点击复制）`"
-                @click="copy(entry.shortId)"
+                :title="`点击复制记忆短 ID：${entry.shortId}`"
+                :aria-label="`复制短 ID ${entry.shortId}`"
+                @click="copyShortId"
               >
-                <UIcon :name="icons.copy" class="status-inline-icon" aria-hidden="true" />
-                <span>复制 ID</span>
+                <span class="status-id-prefix">ID:</span>
+                <code class="status-id-code font-mono">{{ entry.shortId }}</code>
+                <UIcon
+                  :name="shortIdCopied ? icons.check : icons.copy"
+                  class="status-inline-icon"
+                  :class="{ 'is-copied': shortIdCopied }"
+                  aria-hidden="true"
+                />
               </button>
+            </div>
+            <div v-if="latestChangeText" class="head-change-line" :title="latestChangePlainText">
+              <span class="status-change-label">近改：</span>
+              <WikiText
+                :text="latestChangeText"
+                :titles="resolvedTitles"
+                compact
+                @open="emit('open', $event)"
+              />
             </div>
           </div>
 
@@ -1973,10 +2000,14 @@ defineExpose({
 .status-sep {
   color: var(--ui-border-accented);
 }
-.status-change {
-  max-width: 38rem;
+.head-change-line {
+  font-size: 12px;
+  line-height: 1.55;
   color: var(--ui-text-toned);
   overflow-wrap: anywhere;
+}
+.status-change-label {
+  color: var(--ui-text-muted);
 }
 .status-history-link {
   display: inline-flex;
@@ -1989,18 +2020,34 @@ defineExpose({
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  padding: 0 5px;
+  border: 1px solid transparent;
+  background: transparent;
   font-size: 12px;
+  line-height: 1.45;
   color: var(--ui-text-dimmed);
   cursor: pointer;
 }
 .status-copy-id:hover {
+  border-color: var(--ui-border-accented);
+  background: var(--ui-bg-muted);
   color: var(--ui-text-highlighted);
+}
+.status-id-prefix {
+  color: var(--ui-text-dimmed);
+}
+.status-id-code {
+  font-size: 12px;
+  letter-spacing: 0.01em;
 }
 .status-inline-icon {
   display: inline-block;
   flex: none;
   width: 12px;
   height: 12px;
+}
+.status-inline-icon.is-copied {
+  color: var(--ui-success);
 }
 .pill {
   display: inline-flex;

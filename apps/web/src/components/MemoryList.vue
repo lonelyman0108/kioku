@@ -678,11 +678,19 @@ defineExpose({ filterOpen, exitBatchMode, displayItems })
         <div class="pinned-overcap-banner" role="status">
           <div class="overcap-body">
             <UIcon :name="icons.warning" class="overcap-icon" aria-hidden="true" />
-            <p class="overcap-text tabular-nums">
+            <p v-if="!compact" class="overcap-text tabular-nums">
               全局全文已超出 {{ GLOBAL_FULL_CHAR_CAP.toLocaleString() }} 字预算上限（当前
               {{ pinnedWatermark.globalChars.toLocaleString() }} 字，超出
               {{ pinnedWatermark.overChars.toLocaleString() }}
               字），超出部分在会话启动时将自动降为目录常驻。建议将长篇参考改为目录常驻，或为特定项目/客户端补充场景标签。
+            </p>
+            <p
+              v-else
+              class="overcap-text tabular-nums"
+              :title="`全局全文已超出 ${GLOBAL_FULL_CHAR_CAP.toLocaleString()} 字预算上限（当前 ${pinnedWatermark.globalChars.toLocaleString()} 字），建议将长篇参考改为目录常驻或补充场景标签`"
+            >
+              全局全文超预算 +{{ pinnedWatermark.overChars.toLocaleString() }}
+              字，建议改目录或限场景
             </p>
           </div>
           <div class="overcap-actions">
@@ -694,7 +702,11 @@ defineExpose({ filterOpen, exitBatchMode, displayItems })
               :icon="icons.filter"
               @click="emit('update:pinnedGroup', 'global_full')"
             >
-              查看这 {{ pinnedWatermark.globalCount }} 条（按字数）
+              {{
+                compact
+                  ? `看这 ${pinnedWatermark.globalCount} 条`
+                  : `查看这 ${pinnedWatermark.globalCount} 条（按字数）`
+              }}
             </UButton>
             <UButton
               v-else
@@ -704,7 +716,7 @@ defineExpose({ filterOpen, exitBatchMode, displayItems })
               :icon="icons.restore"
               @click="emit('update:pinnedGroup', null)"
             >
-              显示全部常驻
+              {{ compact ? '全部常驻' : '显示全部常驻' }}
             </UButton>
           </div>
         </div>
@@ -779,7 +791,7 @@ defineExpose({ filterOpen, exitBatchMode, displayItems })
                         :title="
                           isOversizedGlobalPinned(item)
                             ? '单条超过 1,200 字建议上限，建议改为目录常驻或补充场景标签'
-                            : '词条总字数（含标题与正文）'
+                            : '记忆总字数（含标题与正文）'
                         "
                       >
                         {{ entryBootChars(item).toLocaleString() }} 字
@@ -1630,7 +1642,14 @@ defineExpose({ filterOpen, exitBatchMode, displayItems })
   margin-left: 0;
 }
 .list-pane.is-compact .pinned-overcap-wrap {
-  padding: 8px 16px;
+  padding: 6px 16px;
+}
+.list-pane.is-compact .pinned-overcap-banner {
+  padding: 6px 10px;
+  gap: 6px 10px;
+}
+.list-pane.is-compact .overcap-body {
+  flex: 1 1 10rem;
 }
 .list-pane.is-compact .entry-row {
   grid-template-columns: minmax(0, 1fr);
