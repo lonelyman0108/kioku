@@ -224,7 +224,7 @@ watch(highlightSlug, (slug) => {
                       :disabled="!hasMasterKey"
                       @click="openReveal(item)"
                     >
-                      查看与更新值
+                      查看值
                     </UButton>
                     <UButton
                       size="xs"

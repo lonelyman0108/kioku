@@ -130,7 +130,7 @@ function setUniversal() {
           限定场景
         </UButton>
       </div>
-      <span v-if="!expanded" class="text-xs text-muted">对全部系统、项目与场域生效</span>
+      <span v-if="!expanded" class="text-xs text-muted">不限场景</span>
     </div>
 
     <div v-if="expanded" class="scope-grid">

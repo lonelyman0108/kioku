@@ -250,7 +250,7 @@ async function applySelected() {
     :open="open"
     side="right"
     title="结构体检与预清洗"
-    description="无需对话模型，零误差检查重复标题、旧版关键词行、断链引用与异常记忆"
+    description="无需对话模型，检查并修复重复标题、旧引用与异常记忆"
     :dismissible="!applying"
     :close="!applying"
     :ui="{ content: 'w-[min(92vw,960px)] max-w-[960px] sm:max-w-[960px] ring-2 ring-rule' }"
@@ -264,6 +264,21 @@ async function applySelected() {
       </div>
 
       <div v-else-if="report" class="sweep-body">
+        <div class="sweep-head-row">
+          <span class="sweep-head-label">扫描概览</span>
+          <UButton
+            size="xs"
+            color="neutral"
+            variant="outline"
+            :icon="icons.refresh"
+            :loading="previewQuery.isFetching.value"
+            :disabled="applying"
+            @click="refreshScan"
+          >
+            重新扫描
+          </UButton>
+        </div>
+
         <!-- 扫描概览（有结果项支持点击直达对应分组） -->
         <div class="sweep-stats tabular-nums">
           <div class="stat-cell">
@@ -323,23 +338,6 @@ async function applySelected() {
             <span class="stat-label">悬空断链</span>
             <span class="stat-val">0 条</span>
           </div>
-        </div>
-
-        <div class="sweep-toolbar">
-          <span class="text-xs text-muted">
-            确定性预清洗只做安全结构修复，原有完整内容均保存在版本历史中，可随时恢复。
-          </span>
-          <UButton
-            size="xs"
-            color="neutral"
-            variant="outline"
-            :icon="icons.refresh"
-            :loading="previewQuery.isFetching.value"
-            :disabled="applying"
-            @click="refreshScan"
-          >
-            重新扫描
-          </UButton>
         </div>
 
         <EmptyState
@@ -458,9 +456,7 @@ async function applySelected() {
         <!-- 疑似残缺记忆 -->
         <section v-if="suspectTruncated.length" ref="truncatedSectionRef" class="sweep-section">
           <SectionHeading title="疑似残缺记忆" :level="3" />
-          <p class="text-xs text-muted">
-            正文篇幅异常偏短或可能被局部片段覆盖，建议打开记忆查看版本历史确认。
-          </p>
+          <p class="text-xs text-muted">篇幅异常偏短，建议核对版本历史</p>
           <ul class="flag-list">
             <li v-for="flag in suspectTruncated" :key="flag.shortId" class="flag-item is-error">
               <div class="flag-head">
@@ -485,9 +481,7 @@ async function applySelected() {
         <!-- 疑似过时记忆 -->
         <section v-if="suspectObsolete.length" ref="obsoleteSectionRef" class="sweep-section">
           <SectionHeading title="疑似过时记忆" :level="3" />
-          <p class="text-xs text-muted">
-            疑似阶段性记录或已停用记忆，建议核实后决定保留、更新或移入回收站。
-          </p>
+          <p class="text-xs text-muted">阶段性或已停用，建议核实更新</p>
           <ul class="flag-list">
             <li v-for="flag in suspectObsolete" :key="flag.shortId" class="flag-item is-warning">
               <div class="flag-head">
@@ -511,9 +505,7 @@ async function applySelected() {
         <!-- 悬空断链记忆 -->
         <section v-if="brokenLinks.length" ref="brokenLinksSectionRef" class="sweep-section">
           <SectionHeading title="悬空断链记忆" :level="3" />
-          <p class="text-xs text-muted">
-            以下记忆中的双链指向已移入回收站或不存在的目标，可前往编辑移除或通过「全库查重与关联」建议重连。
-          </p>
+          <p class="text-xs text-muted">指向已删除或不存在的目标</p>
           <ul class="flag-list">
             <li v-for="item in brokenLinks" :key="item.shortId" class="flag-item is-warning">
               <div class="flag-head">
@@ -584,12 +576,17 @@ async function applySelected() {
   font-weight: 600;
   color: var(--ui-text-highlighted);
 }
-.sweep-toolbar {
+.sweep-head-row {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 8px 12px;
+}
+.sweep-head-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ui-text-muted);
 }
 .sweep-section {
   display: flex;
