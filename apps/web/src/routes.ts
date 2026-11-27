@@ -35,7 +35,7 @@ export const routes: RouteRecordRaw[] = [
       },
       {
         path: 'inbox',
-        redirect: (to) => ({ name: 'organize', query: to.query }),
+        redirect: (to) => ({ name: 'organize', query: to.query, hash: to.hash }),
       },
       {
         path: 'credentials',

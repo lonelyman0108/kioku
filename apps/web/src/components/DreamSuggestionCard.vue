@@ -1665,7 +1665,7 @@ function applyEdited() {
         <NoteLine tone="warning" flush>
           另有
           {{ suggestion.affectedBacklinkCount }}
-          条记忆引用了待合并记忆，应用合并时将自动将双链重定向至保留目标。
+          条记忆引用了待合并记忆，应用合并时会自动将反链重定向至保留目标。
         </NoteLine>
       </div>
 
@@ -2311,7 +2311,7 @@ function applyEdited() {
     >
       另有
       {{ suggestion.affectedBacklinkCount }}
-      条记忆引用了待合并记忆，应用合并时将自动将双链重定向至保留目标。
+      条记忆引用了待合并记忆，应用合并时会自动将反链重定向至保留目标。
     </NoteLine>
 
     <!-- 完整性护栏条 -->

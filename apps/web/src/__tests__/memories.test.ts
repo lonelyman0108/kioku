@@ -139,7 +139,7 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(entryLinksPanel).toContain('contextSnippet')
   })
 
-  it('宽屏采用居中画布对齐，待处理采用全宽速审台账，设置采用双栏侧边导航结构，弹窗与抽屉幅面匹配内容密度', () => {
+  it('宽屏采用居中画布对齐，整理页采用全宽待确认列表，设置采用双栏侧边导航结构，弹窗与抽屉幅面匹配内容密度', () => {
     expect(consoleLayout).toContain('console-header-inner')
     expect(memoriesPage).toContain('margin-inline: auto')
     expect(credentialsPage).toContain('credentials-shell')
@@ -196,7 +196,7 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(hygieneSweepDrawer).toContain('<DiffViewer')
   })
 
-  it('待处理页采用四流速审台账、行内双栏审校面板、高风险展开护栏、批量安全应用、预清洗抽屉与 8 秒撤销，且消除逐卡免责套话', () => {
+  it('整理页采用四列待确认列表、行内双栏审校面板、高风险展开护栏、批量安全应用、结构检查抽屉与 8 秒撤销，且消除逐卡免责套话', () => {
     expect(inboxPage).toContain('结构检查')
     expect(inboxPage).toContain('规范整理')
     expect(inboxPage).toContain('增量整理')

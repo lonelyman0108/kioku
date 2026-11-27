@@ -1103,8 +1103,8 @@ export function parseRefineDecision(raw: string): ParsedRefineDecision | null {
     typeof rec.reason === 'string' && rec.reason.trim()
       ? clipChars(inlineText(rec.reason), MAX_REASON_CHARS)
       : action === 'noop'
-        ? '当前记忆已符合微调说明，无需修改'
-        : '已按微调说明生成修改方案'
+        ? '当前记忆已符合修订说明，无需修改'
+        : '已按修订说明生成修改方案'
 
   const hasAnyChangeProposal =
     patch !== null ||
@@ -1278,7 +1278,7 @@ export function resolveRefineDecision(
 
   const proposedChangeSummary =
     decision.proposedChangeSummary ??
-    (contentChanged ? '按说明微调记忆内容' : '按说明微调记忆元信息')
+    (contentChanged ? '按说明修订记忆内容' : '按说明修订记忆元信息')
 
   return {
     mode: 'llm',
@@ -1313,17 +1313,17 @@ async function planRefineCapture(
   options: PlanCaptureOptions,
 ): Promise<CapturePlanResponse> {
   if (!input.targetShortId) {
-    throw new MemoryError(400, '按说明微调必须指定目标记忆')
+    throw new MemoryError(400, '按说明修订必须指定目标记忆')
   }
   const shortId = parseShortId(input.targetShortId)
-  if (!shortId) throw new MemoryError(404, '目标记忆不存在或不可微调')
+  if (!shortId) throw new MemoryError(404, '目标记忆不存在或不可修订')
 
   const [row] = await db
     .select()
     .from(entries)
     .where(and(eq(entries.shortId, shortId), eq(entries.kind, 'entry'), readableEntrySql(scope)))
     .limit(1)
-  if (!row) throw new MemoryError(404, '目标记忆不存在或不可微调')
+  if (!row) throw new MemoryError(404, '目标记忆不存在或不可修订')
 
   if (options.signal?.aborted) throw new CaptureAbortedError()
 
@@ -1366,7 +1366,7 @@ async function planRefineCapture(
     }
     throw new MemoryError(
       502,
-      `按说明微调失败：${err instanceof Error ? err.message : String(err)}`,
+      `按说明修订失败：${err instanceof Error ? err.message : String(err)}`,
     )
   }
 
@@ -1374,7 +1374,7 @@ async function planRefineCapture(
 
   const decision = parseRefineDecision(rawContent)
   if (!decision) {
-    throw new MemoryError(422, '模型未返回有效的微调方案，请调整说明后重试')
+    throw new MemoryError(422, '模型未返回有效的修订方案，请调整说明后重试')
   }
 
   const resolved = resolveRefineDecision(target, decision, scope)
@@ -1385,7 +1385,7 @@ async function planRefineCapture(
         '当前正文超长，暂不支持整篇覆写，请缩小修改范围或指定具体小节后重试',
       )
     }
-    throw new MemoryError(422, '未能准确定位正文修改片段，请补充更具体的微调说明后重试')
+    throw new MemoryError(422, '未能准确定位正文修改片段，请补充更具体的修订说明后重试')
   }
 
   return resolved
