@@ -245,7 +245,7 @@ const dirtyChanges = computed<SaveBarChange[]>(() => {
   const baseDisclosure = e.disclosure?.trim() ?? ''
   if (normDisclosure !== baseDisclosure) {
     list.push({
-      label: '触发场景',
+      label: e.kind === 'episode' ? '信号要点' : '触发场景',
       before: baseDisclosure || '（空）',
       after: normDisclosure || '（空）',
     })
@@ -876,7 +876,9 @@ const editAttrsSummary = computed(() => {
     scope.value.projects.length +
     scope.value.runtimes.length
   parts.push(scopeCount > 0 ? `${scopeCount} 项场景限定` : '所有环境')
-  if (form.disclosure.trim()) parts.push('已设触发场景')
+  if (form.disclosure.trim()) {
+    parts.push(entry.value?.kind === 'episode' ? '已设信号要点' : '已设触发场景')
+  }
   if (form.validTo) parts.push('已设有效期')
   return parts.join(' · ')
 })
@@ -1358,7 +1360,9 @@ defineExpose({
                 </UFormField>
 
                 <div class="grid gap-3 sm:grid-cols-2">
-                  <UFormField label="触发场景（可选）">
+                  <UFormField
+                    :label="entry.kind === 'episode' ? '信号要点（可选）' : '触发场景（可选）'"
+                  >
                     <UInput v-model="form.disclosure" :maxlength="DISCLOSURE_MAX" class="w-full" />
                   </UFormField>
                   <UFormField label="有效期（可选）">
@@ -1628,7 +1632,7 @@ defineExpose({
                 <div v-if="entry.disclosure">
                   <dt>
                     <UIcon :name="icons.trigger" class="meta-dt-icon" aria-hidden="true" />
-                    <span>触发场景</span>
+                    <span>{{ entry.kind === 'episode' ? '信号要点' : '触发场景' }}</span>
                   </dt>
                   <dd>{{ entry.disclosure }}</dd>
                 </div>

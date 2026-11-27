@@ -2,6 +2,7 @@ import {
   ApplySuggestionResponse,
   EntryDetailResponse,
   InboxResponse,
+  parseEpisodeSignals,
   SingleCrossCheckResponse,
   SingleTidyApplyResponse,
   SingleTidyPreviewResponse,
@@ -19,9 +20,13 @@ import {
   entryEmbeddings,
   turnBuffer,
 } from '../../db/schema'
+import { countMissingEmbeddings, runBackfillEmbeddings } from '../../embedding/jobs'
+import { embedEntryIds, getEmbeddingCoverage } from '../../embedding/worker'
 import type { Deps, KeyPrincipal } from '../../http/env'
+import { cleanupExpired } from '../../jobs/cleanup'
 import { EntryService } from '../../memory/service'
-import { CHAT_LLM_SETTING_KEY, saveModelEndpoint } from '../../models/store'
+import { CHAT_LLM_SETTING_KEY, EMBEDDING_SETTING_KEY, saveModelEndpoint } from '../../models/store'
+import { recallEntries } from '../../recall/recall'
 import {
   consoleHeaders,
   createOwnerSession,
@@ -2237,5 +2242,224 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
     expect(cancelBackfillRes.status).toBe(200)
     expect(await cancelBackfillRes.json()).toEqual({ cancelled: true })
     expect(backfillCancelled).toBe(true)
+  })
+
+  it('三槽会话分拣按 focusRealms 归因、仅对含信号摘要触发定向向量化、绝不污染日常召回且过期自动回收', async () => {
+    const masterKey = testMasterKey()
+    await saveModelEndpoint(database.db, masterKey, CHAT_LLM_SETTING_KEY, {
+      baseUrl: fakeAi.baseUrl,
+      model: 'fake-chat',
+      apiKey: 'sk-chat',
+      enabled: true,
+    })
+    await saveModelEndpoint(database.db, masterKey, EMBEDDING_SETTING_KEY, {
+      baseUrl: fakeAi.baseUrl,
+      model: 'fake-embed-1024',
+      apiKey: 'sk-embed',
+      enabled: true,
+    })
+
+    const enqueuedEmbedIds: string[] = []
+    const credSvc = new CredentialService(database.db, masterKey)
+    const entrySvc = new EntryService(database.db, masterKey, credSvc, {
+      enqueueEmbed: (id) => enqueuedEmbedIds.push(id),
+      enqueueBackfill: async () => true,
+      enqueueExtraction: async () => undefined,
+      enqueueDream: async () => null,
+      isDreamRunning: async () => false,
+      enqueueCleanup: async () => true,
+    })
+    const consoleScope = { kind: 'console' as const, accountId: 'acc', sessionId: 'sess' }
+
+    // 签发 allowedRealms=['work','personal'] 且 focusRealms=['work'] 的终端密钥
+    const issued = await issueTestApiKey(database, {
+      name: 'Work Dev Key',
+      envs: ['mac'],
+      allowedRealms: ['work', 'personal'],
+    })
+    await database.db
+      .update(apiKeys)
+      .set({ focusRealms: ['work'] })
+      .where(eq(apiKeys.id, issued.id))
+
+    // 缓冲跨 2 个 sessionId 的轮次
+    await database.db.insert(turnBuffer).values([
+      {
+        keyId: issued.id,
+        deviceKey: 'dev-mac',
+        projectSlug: 'kioku',
+        sessionId: 'sess-1',
+        userText: '以后提代码记得拆分成独立 PR，合并完删分支',
+        replyText: '收到，会按职责拆分 PR 并清理分支。',
+      },
+      {
+        keyId: issued.id,
+        deviceKey: 'dev-mac',
+        projectSlug: 'kioku',
+        sessionId: 'sess-2',
+        userText: '本地测试 PG 端口是 55432',
+        replyText: '已记录。',
+      },
+    ])
+
+    let seenSessionBoundary = false
+    fakeAi.setChatHandler((messages) => {
+      const userText = messages[1]?.content ?? ''
+      if (userText.includes('--- 会话 1 ---') && userText.includes('--- 会话 2 ---')) {
+        seenSessionBoundary = true
+      }
+      return JSON.stringify({
+        title: '提交拆 PR 习惯与测试端口',
+        summary: '明确开发提交流程习惯并确认测试库端口。',
+        facts: ['本地测试 PG 映射端口为 55432'],
+        directives: ['代码修改按职责拆分独立 PR 提交', 'PR 合并后清理工作区与本地分支'],
+      })
+    })
+
+    const outcome = await extractEpisodeBatch(database.db, masterKey, entrySvc, {
+      deviceKey: 'dev-mac',
+      projectSlug: 'kioku',
+    })
+    expect(outcome.turns).toBe(2)
+    expect(outcome.createdShortId).toBeTruthy()
+    expect(seenSessionBoundary).toBe(true)
+
+    const epDetail = await entrySvc.get(consoleScope, outcome.createdShortId!)
+    expect(epDetail.entry.kind).toBe('episode')
+    expect(epDetail.entry.realms).toEqual(['work'])
+    expect(parseEpisodeSignals(epDetail.entry.disclosure)).toEqual({
+      directives: ['代码修改按职责拆分独立 PR 提交', 'PR 合并后清理工作区与本地分支'],
+      facts: ['本地测试 PG 映射端口为 55432'],
+    })
+    // 含结构化信号的 episode 自动入队向量化
+    expect(enqueuedEmbedIds).toEqual([epDetail.entry.id])
+
+    // 纯叙事无信号 episode 不应入队向量化，即使强传给 embedEntryIds 也会被跳过
+    const plainEp = await entrySvc.writeEpisode({
+      title: '纯叙事无信号摘要',
+      content: '常规浏览了一遍日志，没有新决定。',
+      deviceKey: 'dev-mac',
+      projectSlug: 'kioku',
+      realms: ['work'],
+    })
+    expect(enqueuedEmbedIds).toEqual([epDetail.entry.id])
+
+    // 同步写一条正式词条作为覆盖度对照
+    const formal = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '正式文档词条',
+        content: '这是正式记忆词条。',
+        realms: ['work'],
+      }),
+    )
+
+    const embeddedCount = await embedEntryIds(database.db, masterKey, [
+      epDetail.entry.id,
+      plainEp.id,
+      formal.entry.id,
+    ])
+    expect(embeddedCount).toBe(2)
+
+    // 确认仅有 signal episode 与 formal entry 写入了向量，plainEp 未生成向量
+    const embRows = await database.db
+      .select({ entryId: entryEmbeddings.entryId })
+      .from(entryEmbeddings)
+    const embIdSet = new Set(embRows.map((r) => r.entryId))
+    expect(embIdSet.has(epDetail.entry.id)).toBe(true)
+    expect(embIdSet.has(formal.entry.id)).toBe(true)
+    expect(embIdSet.has(plainEp.id)).toBe(false)
+
+    // 嵌入覆盖度仅统计正式词条，不被活跃 episode 向量干扰
+    const coverage = await getEmbeddingCoverage(database.db, masterKey)
+    expect(coverage).toEqual({ total: 1, embedded: 1, model: 'fake-embed-1024' })
+
+    // 日常 recall 严守 kind='entry'，即使精准检索信号关键词也绝不召回 episode
+    const recalled = await recallEntries(
+      database.db,
+      masterKey,
+      consoleScope,
+      '代码修改按职责拆分独立 PR 提交 55432',
+      { limit: 10, focus: { envs: [], realms: ['work'], projects: [], runtimes: [] } },
+    )
+    expect(recalled.some((item) => item.shortId === epDetail.entry.shortId)).toBe(false)
+
+    // 再写入一条未过期的含信号 episode，验证 backfill 计数/补齐与 cleanupExpired 仅回收过期摘要
+    const activeSigEp = await entrySvc.writeEpisode({
+      title: '未过期活跃信号摘要',
+      content: '确认继续沿用极简纸墨风。',
+      deviceKey: 'dev-mac',
+      projectSlug: 'kioku',
+      realms: ['work'],
+      directives: ['保持纸墨零圆角风格'],
+    })
+    expect(await countMissingEmbeddings(database.db, 'fake-embed-1024')).toBe(1)
+    expect(await runBackfillEmbeddings(database.db, masterKey)).toBe(1)
+    expect(await countMissingEmbeddings(database.db, 'fake-embed-1024')).toBe(0)
+
+    // 将第一条 episode 标记为过期后，cleanupExpired 自动回收其信号向量，同时保留未过期信号摘要与正式词条向量
+    await database.db
+      .update(entries)
+      .set({ validTo: sql`now() - interval '1 hour'` })
+      .where(eq(entries.id, epDetail.entry.id))
+    await cleanupExpired(database.db)
+
+    const embAfterCleanup = await database.db
+      .select({ entryId: entryEmbeddings.entryId })
+      .from(entryEmbeddings)
+    expect(new Set(embAfterCleanup.map((r) => r.entryId))).toEqual(
+      new Set([formal.entry.id, activeSigEp.id]),
+    )
+
+    // 清空 episode 信号要点应立即删除旧信号向量且不重新入队；再次写入信号应重新入队
+    enqueuedEmbedIds.length = 0
+    const clearedEp = await entrySvc.update(consoleScope, activeSigEp.shortId, {
+      expectedVersion: 1,
+      disclosure: null,
+    })
+    expect(clearedEp.entry.disclosure).toBeNull()
+    expect(enqueuedEmbedIds).toEqual([])
+    const embAfterClear = await database.db
+      .select({ entryId: entryEmbeddings.entryId })
+      .from(entryEmbeddings)
+    expect(embAfterClear.map((r) => r.entryId)).toEqual([formal.entry.id])
+
+    const reSignaledEp = await entrySvc.update(consoleScope, activeSigEp.shortId, {
+      expectedVersion: clearedEp.entry.version,
+      disclosure: '偏好：保持纸墨零圆角风格',
+    })
+    expect(reSignaledEp.entry.disclosure).toBe('偏好：保持纸墨零圆角风格')
+    expect(enqueuedEmbedIds).toEqual([activeSigEp.id])
+    await embedEntryIds(database.db, masterKey, [activeSigEp.id])
+
+    // 软删除再从回收站恢复含信号 episode 应重新入队向量化
+    enqueuedEmbedIds.length = 0
+    await entrySvc.remove(consoleScope, activeSigEp.shortId)
+    const restoredSig = await entrySvc.restore(consoleScope, activeSigEp.shortId, {})
+    expect(enqueuedEmbedIds).toEqual([activeSigEp.id])
+
+    // promoteToEntry 未显式传 disclosure 时自动清空 episode 信号避免污染正式词条；回滚回无信号 episode 时清除向量
+    enqueuedEmbedIds.length = 0
+    const promoted = await entrySvc.update(consoleScope, activeSigEp.shortId, {
+      expectedVersion: restoredSig.entry.version,
+      promoteToEntry: true,
+    })
+    expect(promoted.entry.kind).toBe('entry')
+    expect(promoted.entry.disclosure).toBeNull()
+    expect(enqueuedEmbedIds).toEqual([activeSigEp.id])
+    await embedEntryIds(database.db, masterKey, [activeSigEp.id])
+
+    enqueuedEmbedIds.length = 0
+    const rolledBack = await entrySvc.restore(consoleScope, activeSigEp.shortId, {
+      version: clearedEp.entry.version,
+      expectedVersion: promoted.entry.version,
+    })
+    expect(rolledBack.entry.kind).toBe('episode')
+    expect(rolledBack.entry.disclosure).toBeNull()
+    expect(enqueuedEmbedIds).toEqual([])
+    const embAfterRollback = await database.db
+      .select({ entryId: entryEmbeddings.entryId })
+      .from(entryEmbeddings)
+    expect(embAfterRollback.map((r) => r.entryId)).toEqual([formal.entry.id])
   })
 })

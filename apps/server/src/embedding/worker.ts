@@ -1,6 +1,7 @@
 import type { EmbeddingCoverage } from '@kioku/contracts'
-import { and, count, eq, inArray, isNull, ne, sql } from 'drizzle-orm'
+import { and, count, eq, inArray, isNotNull, isNull, ne, or, sql } from 'drizzle-orm'
 
+import { stillValidSql } from '../access/scope'
 import type { MasterKey } from '../crypto/keyring'
 import type { Db } from '../db/client'
 import { entries, entryEmbeddings } from '../db/schema'
@@ -60,7 +61,14 @@ export async function embedEntryIds(
     .select()
     .from(entries)
     .where(
-      and(inArray(entries.id, uniqueIds), eq(entries.kind, 'entry'), isNull(entries.deletedAt)),
+      and(
+        inArray(entries.id, uniqueIds),
+        isNull(entries.deletedAt),
+        or(
+          eq(entries.kind, 'entry'),
+          and(eq(entries.kind, 'episode'), stillValidSql(), isNotNull(entries.disclosure)),
+        ),
+      ),
     )
   if (!rows.length) return 0
 

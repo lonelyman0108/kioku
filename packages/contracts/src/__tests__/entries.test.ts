@@ -9,6 +9,8 @@ import {
   checkCaptureIntegrity,
   CreateEntryRequest,
   deriveEntryTitle,
+  Disclosure,
+  DISCLOSURE_MAX,
   effectiveBootMode,
   ENTRY_CONTENT_MAX,
   ENTRY_TITLE_NEW_MAX,
@@ -18,10 +20,13 @@ import {
   extractMarkdownSection,
   extractProjectSlugs,
   firstMarkdownHeading,
+  hasEpisodeSignals,
   normalizeProjectSlug,
   normalizeSlugList,
+  parseEpisodeSignals,
   resolveBootMode,
   RestoreEntryRequest,
+  serializeEpisodeSignals,
   UpdateEntryRequest,
 } from '../entries'
 
@@ -309,5 +314,51 @@ describe('entries contracts', () => {
         verified: true,
       }).success,
     ).toBe(true)
+  })
+
+  it('serializes and parses structured episode signals within disclosure limits and strips credentials', () => {
+    const encoded = serializeEpisodeSignals({
+      directives: [
+        '按职责拆分 PR；合并后清理分支',
+        '避免 | 管道符干扰',
+        '按职责拆分 PR；合并后清理分支',
+      ],
+      facts: ['本地测试库端口 55432', '不要泄露 {{cred:prod-db}} 占位符'],
+    })
+    expect(encoded).toBeTruthy()
+    expect(encoded!.length).toBeLessThanOrEqual(DISCLOSURE_MAX)
+    expect(Disclosure.safeParse(encoded).success).toBe(true)
+    expect(hasEpisodeSignals(encoded)).toBe(true)
+
+    const decoded = parseEpisodeSignals(encoded)
+    expect(decoded.directives).toEqual(['按职责拆分 PR，合并后清理分支', '避免 ， 管道符干扰'])
+    expect(decoded.facts).toEqual(['本地测试库端口 55432', '不要泄露 占位符'])
+
+    expect(serializeEpisodeSignals({ directives: [], facts: [] })).toBeNull()
+    expect(hasEpisodeSignals(null)).toBe(false)
+    expect(hasEpisodeSignals('普通的旧版自由文本触发场景')).toBe(false)
+    expect(parseEpisodeSignals('普通的旧版自由文本触发场景')).toEqual({ directives: [], facts: [] })
+
+    // 超长信号自动裁剪至 DISCLOSURE_MAX 以内且仍可合法通过 Disclosure 校验
+    const longEncoded = serializeEpisodeSignals({
+      directives: Array.from({ length: 6 }, (_, i) => `长期偏好条目${i + 1}：${'细则'.repeat(45)}`),
+      facts: Array.from({ length: 6 }, (_, i) => `环境事实条目${i + 1}：${'说明'.repeat(45)}`),
+    })
+    expect(longEncoded).toBeTruthy()
+    expect(longEncoded!.length).toBeLessThanOrEqual(DISCLOSURE_MAX)
+    expect(Disclosure.safeParse(longEncoded).success).toBe(true)
+    const parsedLong = parseEpisodeSignals(longEncoded)
+    expect(parsedLong.directives.length).toBeGreaterThan(0)
+    expect(parsedLong.facts.length).toBeGreaterThan(0)
+
+    // 含四字节代理对（emoji）的极端截断不得拆开代理对，且总长度严格不超过 DISCLOSURE_MAX
+    const emojiEncoded = serializeEpisodeSignals({
+      directives: ['🚀'.repeat(95), '🎯'.repeat(95)],
+      facts: ['🧩'.repeat(95), '🔧'.repeat(95)],
+    })
+    expect(emojiEncoded).toBeTruthy()
+    expect(emojiEncoded!.length).toBeLessThanOrEqual(DISCLOSURE_MAX)
+    expect(() => encodeURIComponent(emojiEncoded!)).not.toThrow()
+    expect(Disclosure.safeParse(emojiEncoded).success).toBe(true)
   })
 })

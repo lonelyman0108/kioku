@@ -1,3 +1,4 @@
+import { serializeEpisodeSignals } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
 import { buildEmbeddingText } from '../text'
@@ -138,5 +139,47 @@ describe('buildEmbeddingText', () => {
     })
     expect(tailFocused).toContain('小节纲要：')
     expect(tailFocused).toContain('尾部紧急回滚手册')
+  })
+
+  it('embeds only decoupled structured signals for episodes and returns empty string without signals', () => {
+    const signalDisclosure = serializeEpisodeSignals({
+      directives: ['按职责拆分 PR 提交', '合并后清理本地工作区与分支'],
+      facts: ['本地测试 PostgreSQL 映射端口为 55432'],
+    })
+    const episodeText = buildEmbeddingText({
+      shortId: 'm-ep2345',
+      kind: 'episode',
+      title: '排查数据库迁移与接口调试',
+      summary: null,
+      disclosure: signalDisclosure,
+      topics: [],
+      envs: ['mac'],
+      realms: ['work'],
+      projects: ['kioku'],
+      runtimes: [],
+      content: '今天排查了半天某项业务逻辑报错和 CSS 样式对齐细节。',
+    })
+    expect(episodeText).toContain('按职责拆分 PR 提交')
+    expect(episodeText).toContain('合并后清理本地工作区与分支')
+    expect(episodeText).toContain('本地测试 PostgreSQL 映射端口为 55432')
+    // 业务正文、标题与项目标签不得混入 episode 信号向量文本
+    expect(episodeText).not.toContain('排查数据库迁移')
+    expect(episodeText).not.toContain('CSS 样式对齐')
+    expect(episodeText).not.toContain('kioku')
+
+    const noSignalText = buildEmbeddingText({
+      shortId: 'm-ep6789',
+      kind: 'episode',
+      title: '纯叙事会话摘要',
+      summary: null,
+      disclosure: null,
+      topics: [],
+      envs: [],
+      realms: [],
+      projects: [],
+      runtimes: [],
+      content: '完成了常规重构任务。',
+    })
+    expect(noSignalText).toBe('')
   })
 })

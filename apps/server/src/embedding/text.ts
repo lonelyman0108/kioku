@@ -1,11 +1,17 @@
 import { createHash } from 'node:crypto'
 
-import { extractMarkdownOutline, stripDuplicateLeadingHeading } from '@kioku/contracts'
+import {
+  extractMarkdownOutline,
+  parseEpisodeSignals,
+  stripDuplicateLeadingHeading,
+  type EntryKind,
+} from '@kioku/contracts'
 
 import { clipChars } from '../recall/text'
 
 export interface EmbeddableEntry {
   shortId: string
+  kind?: EntryKind | undefined
   title: string
   summary?: string | null | undefined
   disclosure: string | null
@@ -60,8 +66,25 @@ function stripTrailingChangelogSections(content: string): string {
   return joined || content.trim()
 }
 
-// 拼接高信噪比向量文本：标题、现行概要、触发场景、场景标签与去噪后的正文（超长正文附加二级小节纲要以覆盖后段）
+// 会话摘要（episode）仅对剥离后的结构化信号做定向向量化，与业务正文解耦，避免业务语境淹没跨会话行为模式
+export function buildEpisodeSignalEmbeddingText(disclosure: string | null | undefined): string {
+  const signals = parseEpisodeSignals(disclosure)
+  if (!signals.directives.length && !signals.facts.length) return ''
+  const parts: string[] = []
+  if (signals.directives.length) {
+    parts.push(`行为偏好与指令：\n${signals.directives.join('\n')}`)
+  }
+  if (signals.facts.length) {
+    parts.push(`确认事实与约束：\n${signals.facts.join('\n')}`)
+  }
+  return parts.join('\n\n').trim()
+}
+
+// 拼接高信噪比向量文本：正式词条取标题、概要、触发场景、场景标签与去噪正文；会话摘要仅编码结构化信号
 export function buildEmbeddingText(entry: EmbeddableEntry): string {
+  if (entry.kind === 'episode') {
+    return buildEpisodeSignalEmbeddingText(entry.disclosure)
+  }
   const lines: string[] = [entry.title.trim()]
   if (entry.summary?.trim()) lines.push(entry.summary.trim())
   if (entry.disclosure?.trim()) lines.push(entry.disclosure.trim())

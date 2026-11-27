@@ -1,5 +1,6 @@
 import { and, asc, eq, lte } from 'drizzle-orm'
 
+import { resolveAllowedRealmsWithFocus } from '../access/scope'
 import type { MasterKey } from '../crypto/keyring'
 import type { Db } from '../db/client'
 import { apiKeys, turnBuffer } from '../db/schema'
@@ -41,9 +42,14 @@ export async function extractEpisodeBatch(
   if (!rows.length) return { turns: 0, createdShortId: null, skippedReason: 'empty' }
 
   const lastRow = rows.at(-1)!
-  // 按原密钥 ID 读取终端名、环境与场域边界（不过滤 revokedAt），避免密钥在去抖窗口内轮换或吊销时丢失终端身份与场域隔离
+  // 按原密钥 ID 读取终端名、环境、焦点场域与场域边界（不过滤 revokedAt），避免密钥在去抖窗口内轮换或吊销时丢失终端身份与场域隔离
   const [keyRow] = await db
-    .select({ name: apiKeys.name, envs: apiKeys.envs, allowedRealms: apiKeys.allowedRealms })
+    .select({
+      name: apiKeys.name,
+      envs: apiKeys.envs,
+      allowedRealms: apiKeys.allowedRealms,
+      focusRealms: apiKeys.focusRealms,
+    })
     .from(apiKeys)
     .where(eq(apiKeys.id, lastRow.keyId))
     .limit(1)
@@ -82,7 +88,7 @@ export async function extractEpisodeBatch(
   if (evaluated.status === 'invalid' && !signal?.aborted) {
     const repairMessages = buildSemanticRepairMessages(
       messages,
-      `上次输出解析失败（${evaluated.reason}）。请严格只输出单个合法 JSON 对象：{"title":"简短标题","summary":"摘要"}；若无可记录结论则输出 {"title":"","summary":""}。`,
+      `上次输出解析失败（${evaluated.reason}）。请严格只输出单个合法 JSON 对象：{"title":"简短标题","summary":"摘要","facts":[],"directives":[]}；若无可记录结论则输出 {"title":"","summary":"","facts":[],"directives":[]}。`,
     )
     const retryResult = await chatComplete(conn, repairMessages, {
       temperature: 0,
@@ -116,14 +122,21 @@ export async function extractEpisodeBatch(
     return { turns: rows.length, createdShortId: null, skippedReason: 'no_summary' }
   }
 
+  const hasSignals = evaluated.data.facts.length > 0 || evaluated.data.directives.length > 0
   const created = await entryService.writeEpisode({
     title: evaluated.data.title,
     content: evaluated.data.summary,
     deviceKey: bucket.deviceKey,
     projectSlug: bucket.projectSlug,
     envs: keyRow.envs,
-    realms: keyRow.allowedRealms ?? [],
+    realms: resolveAllowedRealmsWithFocus(keyRow.allowedRealms, keyRow.focusRealms),
     projects: bucket.projectSlug ? [bucket.projectSlug] : [],
+    ...(hasSignals
+      ? {
+          facts: evaluated.data.facts,
+          directives: evaluated.data.directives,
+        }
+      : {}),
   })
 
   return { turns: rows.length, createdShortId: created.shortId }
