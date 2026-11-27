@@ -1,3 +1,9 @@
+<script lang="ts">
+const INBOX_ACTION_TOAST_PREFIX = 'inbox-action-'
+let inboxToastSeq = 0
+let latestInboxToastId: string | null = null
+</script>
+
 <script setup lang="ts">
 import {
   checkCaptureIntegrity,
@@ -17,7 +23,7 @@ import {
 import type { DropdownMenuItem } from '@nuxt/ui'
 import { useToast } from '@nuxt/ui/composables'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
@@ -719,19 +725,23 @@ const batchBusy = ref(false)
 const batchDismissBusy = ref(false)
 const undoingKeys = new Set<string>()
 const undoneKeys = new Set<string>()
-let inboxToastSeq = 0
-let activeInboxToastId: string | null = null
 
-function showInboxActionToast(options: Parameters<typeof toast.add>[0]) {
-  if (activeInboxToastId) {
-    toast.toasts.value = toast.toasts.value.filter((item) => item.id !== activeInboxToastId)
-  }
-  const nextId = `inbox-action-${++inboxToastSeq}`
-  activeInboxToastId = nextId
+function showInboxActionToast(options: Omit<Parameters<typeof toast.add>[0], 'id'>) {
+  toast.toasts.value = toast.toasts.value.filter(
+    (item) => !String(item.id).startsWith(INBOX_ACTION_TOAST_PREFIX),
+  )
+  const nextId = `${INBOX_ACTION_TOAST_PREFIX}${++inboxToastSeq}`
+  latestInboxToastId = nextId
   toast.add({
-    id: nextId,
     orientation: 'horizontal',
     ...options,
+    id: nextId,
+  })
+  void nextTick(() => {
+    if (latestInboxToastId !== nextId) return
+    toast.toasts.value = toast.toasts.value.filter(
+      (item) => !String(item.id).startsWith(INBOX_ACTION_TOAST_PREFIX) || item.id === nextId,
+    )
   })
 }
 
