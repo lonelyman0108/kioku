@@ -28,8 +28,8 @@ export function resolveStaticActorMeta(actor: string): EntryActorMeta | null {
   if (actor === 'console') return { kind: 'console', label: '本人 · 控制台', runtimeFamily: null }
   if (actor === 'dream') return { kind: 'dream', label: '后台整理', runtimeFamily: null }
   if (actor === 'extraction') return { kind: 'extraction', label: '自动摘要', runtimeFamily: null }
-  if (actor === 'capture') return { kind: 'capture', label: '随手记', runtimeFamily: null }
-  if (actor === 'hygiene:sweep') return { kind: 'system', label: '结构预清洗', runtimeFamily: null }
+  if (actor === 'capture') return { kind: 'capture', label: '本人 · 随手记', runtimeFamily: null }
+  if (actor === 'hygiene:sweep') return { kind: 'system', label: '结构检查', runtimeFamily: null }
   if (actor === 'import:lore')
     return { kind: 'system', label: '数据导入（Lore）', runtimeFamily: null }
   if (actor === 'import:kioku') return { kind: 'system', label: '数据导入', runtimeFamily: null }

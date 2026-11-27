@@ -225,7 +225,7 @@ const scheduleRows = computed(
       },
       {
         key: 'crossMemory' as const,
-        label: '查重/关联',
+        label: '查重与关联',
         desc: '全库扫描重复合并、补全双链与常驻巡检',
         icon: icons.links,
         draft: form.dream.crossMemory,
@@ -233,7 +233,7 @@ const scheduleRows = computed(
       {
         key: 'tidy' as const,
         label: '规范整理',
-        desc: '批量规范脏标题、补概要并剥离旧日志',
+        desc: '批量规范标题、补概要并归档旧日志',
         icon: icons.tidy,
         draft: form.dream.tidy,
       },
@@ -358,7 +358,7 @@ const validationProblem = computed(() => {
     return '启用嵌入模型时须填写接口地址与模型名称'
   }
   if (form.chatLlm.enabled && (!form.chatLlm.baseUrl.trim() || !form.chatLlm.model.trim())) {
-    return '启用对话与整理模型时须填写接口地址与模型名称'
+    return '启用对话模型时须填写接口地址与模型名称'
   }
   const hasExplicitThinking =
     form.chatLlm.reasoningEffort !== 'default' || activeOverrideCount.value > 0
@@ -510,11 +510,11 @@ async function rebuildEmbeddings() {
   rebuilding.value = true
   try {
     const res = await api.backfillEmbeddings()
-    toast.add({ title: `已加入向量重建队列（${res.queued} 条）`, color: 'success' })
+    toast.add({ title: `已加入向量补齐队列（${res.queued} 条）`, color: 'success' })
     void queryClient.invalidateQueries({ queryKey: ['models-settings'] })
     void queryClient.invalidateQueries({ queryKey: ['inbox'] })
   } catch (err) {
-    toast.add({ title: err instanceof ApiError ? err.message : '触发重建失败', color: 'error' })
+    toast.add({ title: err instanceof ApiError ? err.message : '触发补齐失败', color: 'error' })
   } finally {
     rebuilding.value = false
   }
@@ -700,7 +700,7 @@ async function cancelBackfill() {
               :disabled="!settingsQuery.data.value?.embedding?.enabled"
               @click="rebuildEmbeddings"
             >
-              重建索引
+              补齐索引
             </UButton>
           </div>
           <div v-if="meterPercent !== null" class="meter">
@@ -709,9 +709,9 @@ async function cancelBackfill() {
         </div>
       </section>
 
-      <!-- 对话与整理模型 -->
+      <!-- 对话模型 -->
       <section class="space-y-4">
-        <SectionHeading title="对话与整理模型（可选）" :icon="icons.sparkles" :level="2">
+        <SectionHeading title="对话模型（摘要与整理，可选）" :icon="icons.sparkles" :level="2">
           <template #actions>
             <USwitch v-model="form.chatLlm.enabled" label="启用" />
           </template>
@@ -858,7 +858,7 @@ async function cancelBackfill() {
                       <span>整理任务</span>
                     </span>
                     <span class="override-desc"
-                      >增量整理、查重/关联与规范整理，可按需提高推理深度</span
+                      >增量整理、查重与关联及规范整理，可按需提高推理深度</span
                     >
                   </div>
                   <USelect
@@ -916,7 +916,7 @@ async function cancelBackfill() {
       <section class="space-y-3">
         <SectionHeading title="定时整理" :icon="icons.calendarClock" :level="2" />
         <p class="text-xs text-muted">
-          三种整理各自独立计时；生成的建议均进入待处理队列，确认后才写入记忆。
+          三种整理各自独立计时；生成的建议均进入整理页待确认列表，确认后才写入记忆。
         </p>
         <div class="schedule-list">
           <div

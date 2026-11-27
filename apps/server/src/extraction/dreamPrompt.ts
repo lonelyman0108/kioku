@@ -799,7 +799,7 @@ export function evaluateTidyResponse(raw: string, target: DreamPromptItem): Tidy
     parsedDisclosure && parsedDisclosure !== currentDisclosure ? parsedDisclosure : null
   const proposedChangeSummary =
     sanitizeDreamPlainField(rec.change_summary, CHANGE_SUMMARY_MAX) ||
-    '规范标题与正文结构，剥离历史流水账'
+    '规范标题与正文结构，归档旧日志'
   const archivedNotes = parseArchivedNotes(rec.archived_notes ?? rec.archivedNotes)
   const reason =
     sanitizeDreamPlainField(rec.reason, MAX_REASON_CHARS) || '规范标题与结构并补充现行概要'

@@ -222,8 +222,8 @@ async function applySelected() {
     const res = await api.applyHygieneSweep(payload)
     const summary =
       res.skipped > 0
-        ? `已预清洗 ${res.applied} 条记忆，跳过 ${res.skipped} 条`
-        : `已预清洗 ${res.applied} 条记忆`
+        ? `已修复 ${res.applied} 条记忆，跳过 ${res.skipped} 条`
+        : `已修复 ${res.applied} 条记忆`
     toast.add({ title: summary, color: res.applied > 0 ? 'success' : 'neutral' })
     selectionInitialized.value = false
     resetPreviewCache()
@@ -238,7 +238,7 @@ async function applySelected() {
     ])
     emit('applied')
   } catch (err) {
-    applyError.value = err instanceof ApiError ? err.message : '预清洗执行失败，请重试'
+    applyError.value = err instanceof ApiError ? err.message : '自动修复失败，请重试'
   } finally {
     applying.value = false
   }
@@ -296,14 +296,14 @@ async function applySelected() {
           >
             <span class="stat-label">
               <UIcon :name="icons.shieldCheck" class="stat-label-icon" aria-hidden="true" />
-              <span>可确定性预清洗</span>
+              <span>可自动修复</span>
             </span>
             <span class="stat-val">{{ candidates.length }} 条</span>
           </button>
           <div v-else class="stat-cell">
             <span class="stat-label">
               <UIcon :name="icons.shieldCheck" class="stat-label-icon" aria-hidden="true" />
-              <span>可确定性预清洗</span>
+              <span>可自动修复</span>
             </span>
             <span class="stat-val">0 条</span>
           </div>
@@ -368,17 +368,17 @@ async function applySelected() {
           v-if="isClean"
           :icon="icons.shieldCheck"
           tone="success"
-          :title="report.dirtyTitleCount > 0 ? '无需确定性预清洗' : '记忆结构良好'"
+          :title="report.dirtyTitleCount > 0 ? '无需自动修复' : '记忆结构良好'"
           :description="
             report.dirtyTitleCount > 0
-              ? `未检测到可自动修复的结构问题；另有 ${report.dirtyTitleCount} 条记忆标题含日期或较长，可在待处理页发起规范整理。`
-              : '未检测到可确定性预清洗项，也未发现疑似残缺记忆。'
+              ? `未检测到可自动修复的结构问题；另有 ${report.dirtyTitleCount} 条记忆标题含日期或较长，可在整理页发起规范整理。`
+              : '未检测到可自动修复项，也未发现疑似残缺记忆。'
           "
         />
 
-        <!-- 确定性预清洗项 -->
+        <!-- 自动修复项 -->
         <section v-if="candidates.length" ref="candidatesSectionRef" class="sweep-section">
-          <SectionHeading title="确定性预清洗项" :icon="icons.shieldCheck" :level="3">
+          <SectionHeading title="自动修复项" :icon="icons.shieldCheck" :level="3">
             <template #actions>
               <UButton
                 size="xs"

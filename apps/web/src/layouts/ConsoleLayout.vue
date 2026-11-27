@@ -56,7 +56,7 @@ function focusAfterNavClosed(event: Event) {
   accountButton.value?.$el.focus()
 }
 
-// 待处理条数与后台长任务状态：与待处理页共用 inbox 缓存，运行期间自动轮询
+// 待确认建议条数与后台长任务状态：与整理页共用 inbox 缓存，运行期间自动轮询
 const inbox = useQuery({
   queryKey: ['inbox'] as const,
   queryFn: () => api.inbox(),
@@ -83,10 +83,10 @@ interface NavItem {
 const navItems = computed<NavItem[]>(() => [
   { label: '记忆', icon: icons.memories, to: { name: 'memories' }, routeName: 'memories' },
   {
-    label: '待处理',
-    icon: icons.inbox,
-    to: { name: 'inbox' },
-    routeName: 'inbox',
+    label: '整理',
+    icon: icons.listChecks,
+    to: { name: 'organize' },
+    routeName: 'organize',
     count: inboxBadge.value,
   },
   {
@@ -181,13 +181,14 @@ provide(LOGOUT, logout)
             v-for="item in navItems"
             :key="item.routeName"
             :to="item.to"
+            :title="item.count ? `${item.label}（${item.count} 条待确认建议）` : undefined"
             :aria-current="isCurrent(item) ? 'page' : undefined"
             class="nav-link flex items-center gap-1.5 px-2.5 whitespace-nowrap"
           >
             <UIcon :name="item.icon" class="nav-icon" aria-hidden="true" />
             {{ item.label }}
             <span v-if="item.count" class="nav-count">
-              {{ item.count }}<span class="sr-only"> 项</span>
+              {{ item.count }}<span class="sr-only"> 条待确认</span>
             </span>
           </RouterLink>
         </nav>
@@ -248,6 +249,7 @@ provide(LOGOUT, logout)
                   v-for="item in navItems"
                   :key="item.routeName"
                   :to="item.to"
+                  :title="item.count ? `${item.label}（${item.count} 条待确认建议）` : undefined"
                   :aria-current="isCurrent(item) ? 'page' : undefined"
                   class="drawer-link flex items-center gap-2 py-2 text-[15px]/6 aria-[current=page]:font-semibold"
                   @click="navOpen = false"
@@ -255,7 +257,7 @@ provide(LOGOUT, logout)
                   <UIcon :name="item.icon" class="nav-icon" aria-hidden="true" />
                   {{ item.label }}
                   <span v-if="item.count" class="nav-count">
-                    {{ item.count }}<span class="sr-only"> 项</span>
+                    {{ item.count }}<span class="sr-only"> 条待确认</span>
                   </span>
                 </RouterLink>
               </nav>

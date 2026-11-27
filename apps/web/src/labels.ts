@@ -73,7 +73,7 @@ export const entryFieldLabels: Record<string, string> = {
   title: '标题',
   summary: '现行概要',
   content: '正文',
-  disclosure: '触发场景',
+  disclosure: '召回时机',
   isPinned: '常驻',
   bootMode: '启动加载',
   topics: '主题',
@@ -144,7 +144,7 @@ export function resolveActorDisplay(
     normalized === 'hygiene:sweep' ||
     normalized === 'hygiene_sweep'
   ) {
-    return { kind: 'system', label: '结构预清洗', group: 'dream' }
+    return { kind: 'system', label: '结构检查', group: 'dream' }
   }
   if (normalized === 'import:lore') {
     return { kind: 'system', label: '数据导入（Lore）', group: 'dream' }
@@ -203,7 +203,7 @@ export const dreamKindIcons: Record<DreamSuggestionKind, string> = {
 
 export const dreamModeLabels: Record<DreamMode, string> = {
   standard: '增量整理',
-  cross_memory: '查重/关联',
+  cross_memory: '查重与关联',
   tidy: '规范整理',
 }
 
@@ -248,7 +248,7 @@ export const reasoningEffortDescriptions: Record<ReasoningEffort, string> = {
   minimal: '极少量思考（发送 reasoning_effort: "minimal"），仅做最基础校验',
   low: '轻量思考（发送 reasoning_effort: "low"），平衡响应速度与准确度',
   medium: '中等思考（发送 reasoning_effort: "medium"），适合日常增量与规范整理',
-  high: '深度思考（发送 reasoning_effort: "high"），适合跨记忆查重合并与复杂规范',
+  high: '深度思考（发送 reasoning_effort: "high"），适合查重与关联及复杂规范',
   xhigh: '超高深度思考（发送 reasoning_effort: "xhigh"），供支持超高档位的推理模型使用',
   max: '最高推理预算（发送 reasoning_effort: "max"），耗时与开销最高，建议仅在深度整理时按需选用',
 }

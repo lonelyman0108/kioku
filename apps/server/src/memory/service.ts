@@ -2370,7 +2370,7 @@ export class EntryService {
       if (input.stageToInbox) {
         // 复用标准 tidy 指纹并支持同版本重复暂存平滑覆盖，避免唯一键冲突或与批量规范重复入队
         const fingerprint = suggestionFingerprint('tidy', [existing.id], [existing.version])
-        const stagedReason = cleanOptionalText(input.reason) ?? '由编辑页主动规范暂存至待处理'
+        const stagedReason = cleanOptionalText(input.reason) ?? '由编辑页主动规范暂存至整理'
         const [staged] = await tx
           .insert(dreamSuggestions)
           .values({

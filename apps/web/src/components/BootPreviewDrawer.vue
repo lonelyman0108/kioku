@@ -406,7 +406,7 @@ function resetOverrides() {
                 "
                 class="text-xs text-muted"
               >
-                全部通用（无特定项目、环境或客户端限定）
+                全局通用（无特定项目、环境或客户端限定）
               </span>
             </div>
 
@@ -423,7 +423,7 @@ function resetOverrides() {
                 v-if="!preview.expanded.length"
                 :icon="icons.terminal"
                 title="暂无全文展开的常驻记忆"
-                description="当前终端与场景下未命中全文常驻词条。"
+                description="当前终端与场景下未命中全文常驻记忆。"
               />
               <ul v-else class="item-list">
                 <li v-for="item in preview.expanded" :key="item.shortId">
@@ -517,7 +517,7 @@ function resetOverrides() {
                 </h3>
                 <span class="section-note">
                   单条超 2,400 字或超出预算与全局 50%
-                  上限时自动降级，点击词条可改为目录常驻并补充概要
+                  上限时自动降级，点击记忆可改为目录常驻并补充概要
                 </span>
               </div>
               <ul class="item-list">

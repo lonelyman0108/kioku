@@ -241,7 +241,7 @@ async function submitSingleTidy(stageToInbox: boolean) {
           applyTitle ? '规范标题' : '',
           applySummary ? '更新现行概要' : '',
           applyTopics ? '收敛主题' : '',
-          applyDisclosure ? '更新触发场景' : '',
+          applyDisclosure ? '更新召回时机' : '',
         ]
           .filter(Boolean)
           .join('并') || '主动规范记忆'
@@ -259,7 +259,7 @@ async function submitSingleTidy(stageToInbox: boolean) {
       reason: res.reason,
     })
     if (stageToInbox) {
-      toast.add({ title: '已暂存至待处理，可稍后统一审阅', color: 'success' })
+      toast.add({ title: '已暂存至整理，可稍后统一确认', color: 'success' })
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['inbox'] }),
         queryClient.invalidateQueries({ queryKey: ['entry', props.shortId] }),
@@ -292,7 +292,7 @@ async function onApplyCrossSuggestion(id: string, body: ApplySuggestionRequest) 
   try {
     const res = await api.applySuggestion(id, body)
     const redirectSuffix = res.redirectedBacklinkCount
-      ? `，并自动重定向 ${res.redirectedBacklinkCount} 条引用双链`
+      ? `，并自动重定向 ${res.redirectedBacklinkCount} 条反链`
       : ''
     toast.add({
       title: res.entry
@@ -357,10 +357,10 @@ async function onDismissCrossSuggestion(id: string) {
   }
 }
 
-const drawerTitle = computed(() => (props.mode === 'tidy' ? '规范此条记忆' : '查重/关联'))
+const drawerTitle = computed(() => (props.mode === 'tidy' ? '规范此条记忆' : '查重与关联'))
 const drawerDescription = computed(() =>
   props.mode === 'tidy'
-    ? `对「${props.entryTitle}」执行确定性预清洗与单条规范重构，确认后才写入记忆`
+    ? `对「${props.entryTitle}」执行结构检查与单条规范重构，确认后才写入记忆`
     : `以「${props.entryTitle}」为锚点检视相似重复、事实冲突与缺失双链`,
 )
 </script>
@@ -433,7 +433,7 @@ const drawerDescription = computed(() =>
             <div v-if="tidyResult.preCleanedFixes.length" class="fix-strip">
               <span class="strip-label">
                 <UIcon :name="icons.shieldCheck" class="strip-label-icon" aria-hidden="true" />
-                <span>已叠加确定性预清洗</span>
+                <span>已同步自动修复</span>
               </span>
               <span v-for="fix in tidyResult.preCleanedFixes" :key="fix" class="fix-pill">
                 <UIcon :name="hygieneFixIcons[fix]" class="fix-pill-icon" aria-hidden="true" />
@@ -465,7 +465,7 @@ const drawerDescription = computed(() =>
                     type="checkbox"
                     :disabled="applying || staging"
                   />
-                  <span>更新触发场景</span>
+                  <span>更新召回时机</span>
                 </label>
                 <label v-if="hasContentChange" class="part-check">
                   <input v-model="parts.content" type="checkbox" :disabled="applying || staging" />
@@ -529,7 +529,7 @@ const drawerDescription = computed(() =>
             >
               <span class="strip-label">
                 <UIcon :name="icons.trigger" class="strip-label-icon" aria-hidden="true" />
-                <span>建议触发场景</span>
+                <span>建议召回时机</span>
               </span>
               <p class="summary-text">{{ tidyResult.proposed.disclosure }}</p>
             </div>
@@ -681,12 +681,12 @@ const drawerDescription = computed(() =>
             size="sm"
             color="neutral"
             variant="outline"
-            :icon="icons.inbox"
+            :icon="icons.listChecks"
             :loading="staging"
             :disabled="applying || !anySelected"
             @click="submitSingleTidy(true)"
           >
-            暂存至待处理
+            暂存至整理
           </UButton>
           <UButton
             size="sm"

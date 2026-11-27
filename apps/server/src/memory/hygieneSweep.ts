@@ -427,7 +427,7 @@ export async function applyHygieneSweep(
       if (plan.candidate.fixes.includes('rewrite_legacy_links')) {
         labels.push(`转换 ${plan.candidate.rewrites.length} 处旧路径为双链`)
       }
-      const changeSummary = `结构预清洗：${labels.join('、')}`
+      const changeSummary = `结构检查：${labels.join('、')}`
       const diffMeta: EntryDiffMeta = {
         changedFields: ['content'],
         contentCharsBefore: row.content.length,

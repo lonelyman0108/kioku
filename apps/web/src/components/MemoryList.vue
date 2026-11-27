@@ -366,7 +366,7 @@ defineExpose({ filterOpen, exitBatchMode, displayItems })
             aria-label="搜索记忆"
             :model-value="search"
             :icon="icons.search"
-            placeholder="搜索标题、正文或触发场景"
+            placeholder="搜索标题、正文或召回时机"
             :ui="{ base: search ? 'text-[13px]/5 pe-9' : 'text-[13px]/5' }"
             class="w-full"
             @update:model-value="(v) => emit('update:search', String(v ?? ''))"
@@ -854,7 +854,7 @@ defineExpose({ filterOpen, exitBatchMode, displayItems })
                       :class="`is-${tag.kind}`"
                       :title="
                         tag.kind === 'topic'
-                          ? `主题标签：${tag.label}（不限定触发场景）`
+                          ? `主题标签：${tag.label}（不限定适用场景）`
                           : undefined
                       "
                     >
@@ -968,7 +968,7 @@ defineExpose({ filterOpen, exitBatchMode, displayItems })
             :disabled="selectedBatchIds.length < 2"
             @click="submitBatch('cross_memory')"
           >
-            查重/关联
+            查重与关联
           </UButton>
         </div>
       </div>

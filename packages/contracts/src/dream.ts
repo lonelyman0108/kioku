@@ -30,13 +30,13 @@ export const DreamSuggestionKind = z.enum(DREAM_KINDS).meta({ id: 'DreamSuggesti
 export type DreamSuggestionKind = z.infer<typeof DreamSuggestionKind>
 
 export const DREAM_KIND_NAMES: Record<DreamSuggestionKind, string> = {
-  distill_episode: '提炼会话摘要',
-  merge_duplicates: '合并重复记忆',
-  mark_stale: '标记过时记忆',
-  update: '更新记忆内容',
-  tidy: '规范与精简',
+  distill_episode: '提炼摘要',
+  merge_duplicates: '合并重复',
+  mark_stale: '标记过时',
+  update: '更新内容',
+  tidy: '规范精简',
   link_entries: '补全双链',
-  adjust_boot_mode: '调整启动加载',
+  adjust_boot_mode: '调整常驻',
 }
 
 export const DREAM_MODES = ['standard', 'tidy', 'cross_memory'] as const

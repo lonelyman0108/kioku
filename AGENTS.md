@@ -62,7 +62,7 @@
 - 砖红（Nuxt UI 的 `error`）是唯一的强调色，只给告警、角标计数和破坏性操作。零圆角，层次全靠 1px 墨线（`--ui-rule`）与次级细线，不用阴影（`main.css` 将 `--ui-radius` 设为 `0rem` 并清空 `--shadow-*`）。
 - 只用系统字体栈，不打包字体、不向第三方请求字体；logo（`KiokuMark.vue` 与 `public/` 下图标）只取 Shippori Mincho 字形轮廓写成路径，来源与许可证登记在 `NOTICE`。正文不小于 14px，标签不小于 12px；短 ID `m-xxxxxx`、凭据标识、访问密钥前缀与代码用等宽字；数字用正文字体加 `tabular-nums`。
 - 图标只用 lucide 一套，全部登记在 `apps/web/src/icons.ts`（构建时打包，避免运行时请求公共 Iconify）；导航、设置标签、操作按钮的图标旁一定配文字，不只留图标。
-- 3+1 主导航（`layouts/ConsoleLayout.vue` 与 `routes.ts`）：`记忆`（`/memories`，左侧列表筛选 + 右侧 Markdown 编辑器、版本历史抽屉与双链面板）、`待处理`（`/inbox`，整理建议审核）、`凭据`（`/credentials`，加密托管凭据管理）、`设置`（`/settings/:tab?`，`keys` 连接与终端 / `models` 模型 / `account` 账号与数据三标签）。通用原语集中在 `apps/web/src/components/ui/`（`EmptyState`、`EntryFrame`、`NoteLine`、`PageHead`、`PropertyList`、`ReadFailureNote`、`SaveBar`、`SectionHeading`、`ShortIdLine`）。
+- 3+1 主导航（`layouts/ConsoleLayout.vue` 与 `routes.ts`）：`记忆`（`/memories`，左侧列表筛选 + 右侧 Markdown 编辑器、版本历史抽屉与双链面板）、`整理`（`/organize`，兼容 `/inbox` 重定向；集中发起结构检查与三模式整理并确认待确认建议）、`凭据`（`/credentials`，加密托管凭据管理）、`设置`（`/settings/:tab?`，`keys` 连接与终端 / `models` 模型 / `account` 账号与数据三标签）。通用原语集中在 `apps/web/src/components/ui/`（`EmptyState`、`EntryFrame`、`NoteLine`、`PageHead`、`PropertyList`、`ReadFailureNote`、`SaveBar`、`SectionHeading`、`ShortIdLine`）。
 - 正文编辑接入 `apps/web/src/secretHint.ts`（`detectSecretPrefixes`），在浏览器本地做轻量常见明文前缀提醒，只提示、不阻断保存。
 - 一次性访问密钥明文弹窗（`IssueKeyModal.vue`、`KeysSettings.vue` 轮换弹窗）展示期间设 `dismissible: false`、`close: false`，只能点确认关闭；凭据明文查看（`CredentialsPage.vue`）只放组件局部 `ref`，关闭立即清空，绝不进入 TanStack Query 缓存。
 - 跳过登录检查的页面只有 `/setup`、`/database-unavailable`、`/login` 与 `/unavailable`；`/authorize` 须登录后访问，确认码只从输入框经请求体提交、不进 URL 查询参数，批准按钮不放在 `<form>` 内（防误回车签发）。退出当前设备一律走 `useLogout`（统一处理未保存确认与清缓存）；不可逆确认用 `ConsequenceModal`（不用 `<form>`）。

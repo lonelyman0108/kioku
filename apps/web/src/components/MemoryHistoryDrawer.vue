@@ -840,7 +840,7 @@ async function confirmRestore() {
                     @open="openLinkedEntry"
                   />
                 </p>
-                <p class="text-xs text-muted">该记录由历史流水账沉淀而来，不含独立正文快照。</p>
+                <p class="text-xs text-muted">该记录由旧日志归档而来，不含独立正文快照。</p>
               </div>
 
               <!-- 变更对比模式 -->

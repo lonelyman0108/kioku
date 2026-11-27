@@ -234,15 +234,15 @@ watch(
     ) {
       lastSeenDreamRunId.value = latest.id
       const modeLabel = latest.mode ? dreamModeLabels[latest.mode] : '记忆整理'
-      const onInbox = route.name === 'inbox'
-      const inboxAction = !onInbox
+      const onOrganize = route.name === 'organize'
+      const organizeAction = !onOrganize
         ? [
             {
-              label: '前往待处理',
-              icon: icons.inbox,
+              label: '前往整理',
+              icon: icons.listChecks,
               color: 'neutral' as const,
               variant: 'outline' as const,
-              onClick: () => void router.push({ name: 'inbox' }),
+              onClick: () => void router.push({ name: 'organize' }),
             },
           ]
         : undefined
@@ -250,30 +250,30 @@ watch(
         toast.add({
           title:
             latest.suggested > 0
-              ? `${modeLabel}已取消，已保留 ${latest.suggested} 条待处理建议`
+              ? `${modeLabel}已取消，已保留 ${latest.suggested} 条待确认建议`
               : `${modeLabel}已取消`,
           color: 'neutral',
           orientation: 'horizontal',
-          ...(latest.suggested > 0 && inboxAction ? { actions: inboxAction } : {}),
+          ...(latest.suggested > 0 && organizeAction ? { actions: organizeAction } : {}),
         })
       } else if (latest.outcome === 'failed') {
         toast.add({
           title: latest.error ? `${modeLabel}失败：${latest.error}` : `${modeLabel}失败`,
           color: 'error',
           orientation: 'horizontal',
-          ...(inboxAction ? { actions: inboxAction } : {}),
+          ...(organizeAction ? { actions: organizeAction } : {}),
         })
       } else if (latest.outcome === 'partial') {
         const errReason = latest.error?.trim() || latest.failedItems?.[0]?.reason?.trim()
         toast.add({
           title:
             latest.suggested > 0
-              ? `${modeLabel}部分完成，生成 ${latest.suggested} 条待处理建议`
+              ? `${modeLabel}部分完成，生成 ${latest.suggested} 条待确认建议`
               : `${modeLabel}部分失败`,
           ...(errReason ? { description: errReason } : {}),
           color: 'warning',
           orientation: 'horizontal',
-          ...(inboxAction ? { actions: inboxAction } : {}),
+          ...(organizeAction ? { actions: organizeAction } : {}),
         })
       } else if (latest.outcome === 'skipped') {
         toast.add({
@@ -285,11 +285,11 @@ watch(
         toast.add({
           title:
             latest.suggested > 0
-              ? `${modeLabel}完成，生成 ${latest.suggested} 条待处理建议`
+              ? `${modeLabel}完成，生成 ${latest.suggested} 条待确认建议`
               : `${modeLabel}完成，暂无新增建议`,
           color: 'success',
           orientation: 'horizontal',
-          ...(latest.suggested > 0 && inboxAction ? { actions: inboxAction } : {}),
+          ...(latest.suggested > 0 && organizeAction ? { actions: organizeAction } : {}),
         })
       }
     }
@@ -532,11 +532,11 @@ async function cancelBackfill() {
                   size="xs"
                   color="neutral"
                   variant="outline"
-                  :icon="icons.inbox"
-                  :to="{ name: 'inbox' }"
+                  :icon="icons.listChecks"
+                  :to="{ name: 'organize' }"
                   @click="open = false"
                 >
-                  前往待处理
+                  前往整理
                 </UButton>
                 <UButton
                   size="xs"
@@ -669,11 +669,11 @@ async function cancelBackfill() {
                 <div v-if="item.routeTarget" class="history-links">
                   <RouterLink
                     v-if="item.routeTarget === 'inbox'"
-                    :to="{ name: 'inbox' }"
+                    :to="{ name: 'organize' }"
                     class="history-link"
                     @click="open = false"
                   >
-                    查看待处理
+                    前往整理
                   </RouterLink>
                   <RouterLink
                     v-else-if="item.routeTarget === 'models'"

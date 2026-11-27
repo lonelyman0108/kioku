@@ -624,7 +624,7 @@ const editValidationProblem = computed(() => {
   }
   if (draft.disclosure.trim()) {
     const check = Disclosure.safeParse(draft.disclosure)
-    if (!check.success) return check.error.issues[0]?.message ?? '触发场景格式有误'
+    if (!check.success) return check.error.issues[0]?.message ?? '召回时机格式有误'
   }
   if (draft.changeSummary.trim()) {
     const check = ChangeSummary.safeParse(draft.changeSummary)
@@ -739,7 +739,7 @@ const deltaSectionTitle = computed(() => {
   if (isAdjustBootMode.value) return '启动加载变更'
   if (isLinkEntries.value) return '建议追加的双链'
   if (isMergeDuplicates.value) return '合并结构与正文变更对比'
-  if (isTidy.value) return '规范与精简变更对比'
+  if (isTidy.value) return '规范精简变更对比'
   if (isDistillEpisode.value) return '提炼为正式记忆'
   if (isMarkStale.value) return '移入回收站核对'
   return '正文更新对比'
@@ -797,7 +797,7 @@ function applyDirect() {
         if (applyTitle) appliedLabels.push('规范标题')
         if (applySummary) appliedLabels.push('更新现行概要')
         if (applyTopics) appliedLabels.push('收敛主题')
-        if (applyDisclosure) appliedLabels.push('更新触发场景')
+        if (applyDisclosure) appliedLabels.push('更新召回时机')
         if (appliedLabels.length) changeSummary = appliedLabels.join('并')
       }
       const body: ApplySuggestionRequest = {
@@ -955,7 +955,7 @@ function applyEdited() {
           <UTextarea v-model="draft.content" :rows="8" autoresize class="w-full font-mono" />
         </UFormField>
         <div class="grid gap-3 sm:grid-cols-2">
-          <UFormField label="触发场景（可选）">
+          <UFormField label="召回时机（可选）">
             <UInput v-model="draft.disclosure" :maxlength="DISCLOSURE_MAX" class="w-full" />
           </UFormField>
           <UFormField label="变更说明（可选）">
@@ -1243,7 +1243,7 @@ function applyEdited() {
               </template>
               <span v-else class="scope-chip is-universal">
                 <UIcon :name="icons.globe" class="scope-chip-icon" aria-hidden="true" />
-                <span>所有环境（未限定场景）</span>
+                <span>全局通用</span>
               </span>
               <span
                 v-for="label in widenedScopeLabels"
@@ -1267,7 +1267,7 @@ function applyEdited() {
           <div v-if="effectiveDisclosure" class="scope-review-row">
             <span class="scope-review-label">
               <UIcon :name="icons.trigger" class="scope-review-icon" aria-hidden="true" />
-              <span>{{ isProposedDisclosureNew ? '建议触发场景' : '触发场景' }}</span>
+              <span>{{ isProposedDisclosureNew ? '建议召回时机' : '召回时机' }}</span>
             </span>
             <span class="scope-disclosure-text">{{ effectiveDisclosure }}</span>
           </div>
@@ -1323,7 +1323,7 @@ function applyEdited() {
               </template>
               <span v-else class="scope-chip is-universal">
                 <UIcon :name="icons.globe" class="scope-chip-icon" aria-hidden="true" />
-                <span>所有环境（未限定场景）</span>
+                <span>全局通用</span>
               </span>
               <span
                 v-for="label in widenedScopeLabels"
@@ -1389,7 +1389,7 @@ function applyEdited() {
           <div v-if="effectiveDisclosure && (!isTidy || parts.disclosure)" class="scope-review-row">
             <span class="scope-review-label">
               <UIcon :name="icons.trigger" class="scope-review-icon" aria-hidden="true" />
-              <span>{{ isProposedDisclosureNew ? '建议触发场景' : '触发场景' }}</span>
+              <span>{{ isProposedDisclosureNew ? '建议召回时机' : '召回时机' }}</span>
             </span>
             <span class="scope-disclosure-text">{{ effectiveDisclosure }}</span>
           </div>
@@ -1448,7 +1448,7 @@ function applyEdited() {
               class="square-check"
               :disabled="busy"
             />
-            <span>更新触发场景</span>
+            <span>更新召回时机</span>
           </label>
           <label v-if="hasContentChange || hasArchivedNotes" class="part-check">
             <input v-model="parts.content" type="checkbox" class="square-check" :disabled="busy" />
@@ -1512,7 +1512,7 @@ function applyEdited() {
               </template>
               <span v-else class="scope-chip is-universal">
                 <UIcon :name="icons.globe" class="scope-chip-icon" aria-hidden="true" />
-                <span>所有环境（未限定场景）</span>
+                <span>全局通用</span>
               </span>
               <span
                 v-for="label in widenedScopeLabels"
@@ -1536,7 +1536,7 @@ function applyEdited() {
           <div v-if="effectiveDisclosure && (!isTidy || parts.disclosure)" class="scope-review-row">
             <span class="scope-review-label">
               <UIcon :name="icons.trigger" class="scope-review-icon" aria-hidden="true" />
-              <span>{{ isProposedDisclosureNew ? '建议触发场景' : '触发场景' }}</span>
+              <span>{{ isProposedDisclosureNew ? '建议召回时机' : '召回时机' }}</span>
             </span>
             <span class="scope-disclosure-text">{{ effectiveDisclosure }}</span>
           </div>
@@ -1665,7 +1665,7 @@ function applyEdited() {
         <NoteLine tone="warning" flush>
           另有
           {{ suggestion.affectedBacklinkCount }}
-          条记忆引用了待合并词条，应用合并时将自动将双链重定向至保留目标。
+          条记忆引用了待合并记忆，应用合并时将自动将双链重定向至保留目标。
         </NoteLine>
       </div>
 
@@ -1892,7 +1892,7 @@ function applyEdited() {
           <UTextarea v-model="draft.content" :rows="8" autoresize class="w-full font-mono" />
         </UFormField>
         <div class="grid gap-3 sm:grid-cols-2">
-          <UFormField label="触发场景（可选）">
+          <UFormField label="召回时机（可选）">
             <UInput v-model="draft.disclosure" :maxlength="DISCLOSURE_MAX" class="w-full" />
           </UFormField>
           <UFormField label="变更说明（可选）">
@@ -2051,7 +2051,7 @@ function applyEdited() {
               class="square-check"
               :disabled="busy"
             />
-            <span>更新触发场景</span>
+            <span>更新召回时机</span>
           </label>
           <label v-if="hasContentChange || hasArchivedNotes" class="part-check">
             <input v-model="parts.content" type="checkbox" class="square-check" :disabled="busy" />
@@ -2118,7 +2118,7 @@ function applyEdited() {
               </template>
               <span v-else class="scope-chip is-universal">
                 <UIcon :name="icons.globe" class="scope-chip-icon" aria-hidden="true" />
-                <span>所有环境（未限定场景）</span>
+                <span>全局通用</span>
               </span>
               <span
                 v-for="label in widenedScopeLabels"
@@ -2184,7 +2184,7 @@ function applyEdited() {
           <div v-if="effectiveDisclosure && (!isTidy || parts.disclosure)" class="scope-review-row">
             <span class="scope-review-label">
               <UIcon :name="icons.trigger" class="scope-review-icon" aria-hidden="true" />
-              <span>{{ isProposedDisclosureNew ? '建议触发场景' : '触发场景' }}</span>
+              <span>{{ isProposedDisclosureNew ? '建议召回时机' : '召回时机' }}</span>
             </span>
             <span class="scope-disclosure-text">{{ effectiveDisclosure }}</span>
           </div>
@@ -2311,7 +2311,7 @@ function applyEdited() {
     >
       另有
       {{ suggestion.affectedBacklinkCount }}
-      条记忆引用了待合并词条，应用合并时将自动将双链重定向至保留目标。
+      条记忆引用了待合并记忆，应用合并时将自动将双链重定向至保留目标。
     </NoteLine>
 
     <!-- 完整性护栏条 -->

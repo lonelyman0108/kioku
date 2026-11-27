@@ -57,7 +57,7 @@ function summarizeDreamRun(run: DreamState['recentRuns'][number]): string {
     return resolveDreamErrorDetail(run) || '执行过程中遇到错误'
   }
   if (run.outcome === 'cancelled') {
-    if (run.suggested > 0) return `已取消 · 已保留 ${run.suggested} 条待处理建议`
+    if (run.suggested > 0) return `已取消 · 已保留 ${run.suggested} 条待确认建议`
     return run.abortedReason?.trim() || '已手动取消'
   }
   if (run.outcome === 'skipped') {

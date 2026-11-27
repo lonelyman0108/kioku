@@ -375,7 +375,7 @@ async function confirmBatchOrganize() {
   try {
     const res = await api.runDream({ mode: pending.mode, targetShortIds: pending.shortIds })
     if (res.started) {
-      const label = pending.mode === 'tidy' ? '规范整理' : '查重/关联'
+      const label = pending.mode === 'tidy' ? '规范整理' : '查重与关联'
       pendingBatch.value = null
       listRef.value?.exitBatchMode()
       toast.add({
@@ -383,11 +383,11 @@ async function confirmBatchOrganize() {
         color: 'success',
         actions: [
           {
-            label: '前往待处理',
-            icon: icons.inbox,
+            label: '前往整理',
+            icon: icons.listChecks,
             color: 'neutral',
             variant: 'outline',
-            onClick: () => void router.push({ name: 'inbox' }),
+            onClick: () => void router.push({ name: 'organize' }),
           },
         ],
       })
@@ -655,16 +655,16 @@ onBeforeUnmount(() => {
       tone="primary"
       :title="
         pendingBatch
-          ? `对所选 ${pendingBatch.shortIds.length} 条记忆发起${pendingBatch.mode === 'tidy' ? '规范整理' : '查重/关联'}？`
+          ? `对所选 ${pendingBatch.shortIds.length} 条记忆发起${pendingBatch.mode === 'tidy' ? '规范整理' : '查重与关联'}？`
           : ''
       "
       :title-icon="pendingBatch?.mode === 'tidy' ? icons.tidy : icons.links"
       :consequences="
         pendingBatch
           ? [
-              `将对所选 ${pendingBatch.shortIds.length} 条记忆调用对话模型执行${pendingBatch.mode === 'tidy' ? '逐条规范整理' : '跨记忆查重与关联'}。`,
-              '整理结果仅写入待处理建议，不会直接修改现有记忆。',
-              '执行期间可随时在待处理页或顶部导航栏取消。',
+              `将对所选 ${pendingBatch.shortIds.length} 条记忆调用对话模型执行${pendingBatch.mode === 'tidy' ? '逐条规范整理' : '查重与关联'}。`,
+              '整理结果仅写入待确认建议，不会直接修改现有记忆。',
+              '执行期间可随时在整理页或顶部导航栏取消。',
             ]
           : []
       "
