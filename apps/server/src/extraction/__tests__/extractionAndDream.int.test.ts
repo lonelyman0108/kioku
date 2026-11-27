@@ -19,10 +19,9 @@ import {
   entryEmbeddings,
   turnBuffer,
 } from '../../db/schema'
-import { embedEntryIds } from '../../embedding/worker'
 import type { Deps, KeyPrincipal } from '../../http/env'
 import { EntryService } from '../../memory/service'
-import { CHAT_LLM_SETTING_KEY, EMBEDDING_SETTING_KEY, saveModelEndpoint } from '../../models/store'
+import { CHAT_LLM_SETTING_KEY, saveModelEndpoint } from '../../models/store'
 import {
   consoleHeaders,
   createOwnerSession,
@@ -998,8 +997,8 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
     const inboxMissingSummary = await loadInbox(database.db, false)
     expect(inboxMissingSummary.tidyPendingCount).toBe(1)
 
-    // 主题标签超过 8 个的词条应自动计入待规范存量
-    await entrySvc.create(
+    // 主题标签超过 8 个时写入应给出客观提醒，但在 tidy 支持收敛主题前暂不计入批量待规范存量
+    const overTopics = await entrySvc.create(
       consoleScope,
       entryInput({
         title: '主题膨胀词条',
@@ -1008,11 +1007,12 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
         topics: ['t1', 't2', 't3', 't4', 't5', 't6', 't7', 't8', 't9'],
       }),
     )
+    expect(overTopics.warnings?.map((w) => w.code)).toContain('topics_too_many')
     const inboxOverTopics = await loadInbox(database.db, false)
-    expect(inboxOverTopics.tidyPendingCount).toBe(2)
+    expect(inboxOverTopics.tidyPendingCount).toBe(1)
   })
 
-  it('跨记忆查重簇严格拒绝合并 envs 或 projects 互斥的高相似词条', async () => {
+  it('跨记忆查重簇与增量整理严格拒绝合并 envs、projects 或 runtimes 互斥的高相似词条（含传递桥接防护）', async () => {
     const masterKey = testMasterKey()
     await saveModelEndpoint(database.db, masterKey, CHAT_LLM_SETTING_KEY, {
       baseUrl: fakeAi.baseUrl,
@@ -1020,16 +1020,26 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
       apiKey: 'sk-chat',
       enabled: true,
     })
-    await saveModelEndpoint(database.db, masterKey, EMBEDDING_SETTING_KEY, {
-      baseUrl: fakeAi.baseUrl,
-      model: 'fake-embed-1024',
-      apiKey: 'sk-embed',
-      enabled: true,
-    })
     const credSvc = new CredentialService(database.db, masterKey)
     const entrySvc = new EntryService(database.db, masterKey, credSvc, null)
     const consoleScope = { kind: 'console' as const, accountId: 'acc', sessionId: 'sess' }
 
+    const basisVec = (slot: number): number[] => {
+      const vec = new Array<number>(EMBEDDING_DIMENSIONS).fill(0)
+      vec[slot] = 1
+      return vec
+    }
+
+    // 组 1：globalGit(envs=[]) + homeGit(envs=['home']) + officeGit(envs=['company']) 同向量（cos=1.0）
+    // 期望：正对照触发簇审阅（globalGit 可与其中一方成簇），但严禁将 homeGit 与 officeGit 经由 globalGit 传递聚入同一簇
+    const globalGit = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '通用 Git 提交规范',
+        content: '提交前执行本地检查并保持提交记录清晰。',
+        envs: [],
+      }),
+    )
     const homeGit = await entrySvc.create(
       consoleScope,
       entryInput({
@@ -1046,6 +1056,7 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
         envs: ['company'],
       }),
     )
+    // 组 2：互斥项目（cos=1.0）
     const projA = await entrySvc.create(
       consoleScope,
       entryInput({
@@ -1062,18 +1073,44 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
         projects: ['repo-beta'],
       }),
     )
-    await embedEntryIds(database.db, masterKey, [
-      homeGit.entry.id,
-      officeGit.entry.id,
-      projA.entry.id,
-      projB.entry.id,
+    // 组 3：互斥客户端（cos=1.0）
+    const claudeRule = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '客户端工作流约束',
+        content: '在编码前先说明修改范围。',
+        runtimes: ['claudecode'],
+      }),
+    )
+    const codexRule = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '客户端工作流约束',
+        content: '在编码前先说明修改范围。',
+        runtimes: ['codex'],
+      }),
+    )
+
+    await database.db.insert(entryEmbeddings).values([
+      { entryId: globalGit.entry.id, model: 'test-emb', contentHash: 'g1', embedding: basisVec(0) },
+      { entryId: homeGit.entry.id, model: 'test-emb', contentHash: 'h1', embedding: basisVec(0) },
+      { entryId: officeGit.entry.id, model: 'test-emb', contentHash: 'o1', embedding: basisVec(0) },
+      { entryId: projA.entry.id, model: 'test-emb', contentHash: 'p1', embedding: basisVec(1) },
+      { entryId: projB.entry.id, model: 'test-emb', contentHash: 'p2', embedding: basisVec(1) },
+      {
+        entryId: claudeRule.entry.id,
+        model: 'test-emb',
+        contentHash: 'r1',
+        embedding: basisVec(2),
+      },
+      { entryId: codexRule.entry.id, model: 'test-emb', contentHash: 'r2', embedding: basisVec(2) },
     ])
 
-    let clusterCalled = false
+    const clusterUserPrompts: string[] = []
     fakeAi.setChatHandler((messages) => {
       const sys = messages[0]?.content ?? ''
       if (sys.includes('跨记忆查重与冲突审阅助手')) {
-        clusterCalled = true
+        clusterUserPrompts.push(messages[1]?.content ?? '')
       }
       return JSON.stringify({ suggestions: [] })
     })
@@ -1083,7 +1120,42 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
       trigger: 'manual',
       mode: 'cross_memory',
     })
-    expect(clusterCalled).toBe(false)
+
+    // 正对照：globalGit 与单方 envs 兼容，必然触发至少 1 次簇审阅
+    expect(clusterUserPrompts.length).toBeGreaterThanOrEqual(1)
+    for (const body of clusterUserPrompts) {
+      // 严禁把互斥 envs / projects / runtimes 塞进同一个查重簇
+      expect(body.includes(homeGit.entry.shortId) && body.includes(officeGit.entry.shortId)).toBe(
+        false,
+      )
+      expect(body.includes(projA.entry.shortId) && body.includes(projB.entry.shortId)).toBe(false)
+      expect(
+        body.includes(claudeRule.entry.shortId) && body.includes(codexRule.entry.shortId),
+      ).toBe(false)
+    }
+
+    // 增量整理（standard）即使模型强行产出跨互斥 envs 的 merge_duplicates 提案，也必须在校验层丢弃
+    fakeAi.setChatHandler(() =>
+      JSON.stringify({
+        suggestions: [
+          {
+            kind: 'merge_duplicates',
+            entry_short_ids: [homeGit.entry.shortId, officeGit.entry.shortId],
+            keep_short_id: homeGit.entry.shortId,
+            title: '误合并 Git 规范',
+            content: '试图合并互斥环境词条。',
+            reason: '误判重复',
+          },
+        ],
+      }),
+    )
+    const stdRes = await runDream(database.db, masterKey, {
+      runId: 'standard-disjoint-guard',
+      trigger: 'manual',
+      mode: 'standard',
+      targetShortIds: [homeGit.entry.shortId, officeGit.entry.shortId],
+    })
+    expect(stdRes.suggested).toBe(0)
   })
 
   it('跨记忆四阶段整理覆盖长文查重、反链自动重定向、场域硬边界、补全双链、会话对账与启动降级', async () => {

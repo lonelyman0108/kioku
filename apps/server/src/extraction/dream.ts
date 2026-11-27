@@ -628,8 +628,8 @@ interface TidyCandidateSelection {
   tidyChecked: Record<string, number>
 }
 
-// 规范整理不直接调整常驻层级；忽略 pinned_oversized 避免仅因篇幅偏长反复排队
-const TIDY_IGNORED_HYGIENE_CODES = new Set(['pinned_oversized'])
+// 规范整理不调整常驻层级，且当前版本尚未改写主题列表；暂忽略对应提醒避免反复无效排队
+const TIDY_IGNORED_HYGIENE_CODES = new Set(['pinned_oversized', 'topics_too_many'])
 
 function isTidyCandidate(
   row: {
@@ -639,10 +639,6 @@ function isTidyCandidate(
     content: string
     isPinned: boolean
     bootMode: EntryRow['bootMode']
-    envs: readonly string[]
-    realms: readonly string[]
-    projects: readonly string[]
-    runtimes: readonly string[]
     topics: readonly string[]
     version: number
   },
@@ -659,10 +655,6 @@ function isTidyCandidate(
     summary: row.summary,
     isPinned: row.isPinned,
     bootMode: row.bootMode,
-    envs: row.envs,
-    realms: row.realms,
-    projects: row.projects,
-    runtimes: row.runtimes,
     topics: row.topics,
     isUpdate: false,
   }).filter((w) => !TIDY_IGNORED_HYGIENE_CODES.has(w.code))
@@ -745,10 +737,6 @@ async function countTidyPending(db: Db): Promise<number> {
         content: entries.content,
         isPinned: entries.isPinned,
         bootMode: entries.bootMode,
-        envs: entries.envs,
-        realms: entries.realms,
-        projects: entries.projects,
-        runtimes: entries.runtimes,
         topics: entries.topics,
         version: entries.version,
       })

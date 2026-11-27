@@ -289,11 +289,12 @@ function hasDisjointNonEmpty(a: readonly string[], b: readonly string[]): boolea
   return a.length > 0 && b.length > 0 && !hasOverlap(a, b)
 }
 
-// 查重合并安全守卫：必须同场域，且不得跨互斥环境或互斥项目合并（防止合并为污染并集）
+// 查重合并安全守卫：必须同场域，且不得跨互斥环境、互斥项目或互斥客户端合并（防止合并为污染并集）
 function canClusterEntries(a: EntryRow, b: EntryRow): boolean {
   if (!sameRealms(a.realms, b.realms)) return false
   if (hasDisjointNonEmpty(a.envs, b.envs)) return false
   if (hasDisjointNonEmpty(a.projects, b.projects)) return false
+  if (hasDisjointNonEmpty(a.runtimes, b.runtimes)) return false
   return true
 }
 
@@ -446,7 +447,7 @@ interface CrossMemoryRunOutput {
 }
 
 // 四阶段漏斗跨记忆整理引擎：
-// Stage 0 场域与双轨范围 → Stage 1 零 LLM 多路候选图（pgvector + 同项目/主题 + 相关性 FTS + 1 跳邻居 + 断链）
+// Stage 0 场域与双轨范围 → Stage 1 零 LLM 多路候选图（pgvector + 同项目 + 相关性 FTS + 1 跳邻居 + 断链）
 // → Stage 2 按优先级拆分 Micro-Task（查重簇 > 摘要对账 > 缺链与断链 > 常驻减肥）→ Stage 3 去重入收件箱
 export async function runCrossMemoryFunnel(
   db: Db,

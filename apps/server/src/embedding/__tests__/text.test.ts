@@ -88,5 +88,55 @@ describe('buildEmbeddingText', () => {
     expect(text).not.toContain('noise-tag-ignored')
     expect(text).toContain('小节纲要：')
     expect(text).toContain('灾难恢复与冷备步骤')
+
+    // 未超过截断阈值时不追加小节纲要
+    const shortWithHeadings = buildEmbeddingText({
+      shortId: 'm-234abc',
+      title: '短文档测试',
+      summary: null,
+      disclosure: null,
+      topics: [],
+      envs: [],
+      realms: [],
+      projects: [],
+      runtimes: [],
+      content: '## 第一节\n简短正文。\n## 第二节\n补充说明。',
+    })
+    expect(shortWithHeadings).not.toContain('小节纲要：')
+
+    // 超长但无二级小节标题时不追加小节纲要
+    const longWithoutHeadings = buildEmbeddingText({
+      shortId: 'm-234abc',
+      title: '无小节长文',
+      summary: null,
+      disclosure: null,
+      topics: [],
+      envs: [],
+      realms: [],
+      projects: [],
+      runtimes: [],
+      content: '纯段落描述。'.repeat(500),
+    })
+    expect(longWithoutHeadings).not.toContain('小节纲要：')
+
+    // 前段已有大量小节标题时，优先保留 2,500 字之后的尾部小节标题，防止 400 字上限把尾部裁掉
+    const manyEarlyHeadings = Array.from(
+      { length: 25 },
+      (_, idx) => `## 前段配置说明小节编号-${idx + 1}-参数详表\n${'基础说明。'.repeat(22)}`,
+    ).join('\n')
+    const tailFocused = buildEmbeddingText({
+      shortId: 'm-234abc',
+      title: '超长多小节手册',
+      summary: null,
+      disclosure: null,
+      topics: [],
+      envs: [],
+      realms: [],
+      projects: [],
+      runtimes: [],
+      content: `${manyEarlyHeadings}\n\n## 尾部紧急回滚手册\n回滚细节。`,
+    })
+    expect(tailFocused).toContain('小节纲要：')
+    expect(tailFocused).toContain('尾部紧急回滚手册')
   })
 })

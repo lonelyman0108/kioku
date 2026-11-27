@@ -127,6 +127,15 @@ describe('entry hygiene helpers', () => {
     expect(fullOversized.map((w) => w.code)).toContain('pinned_oversized')
     expect(fullOversized.map((w) => w.code)).toContain('topics_too_many')
 
+    // 边界：8 个主题不触发提醒，9 个触发 topics_too_many
+    const eightTopics = lintEntryHygiene({
+      title: '主题边界校验',
+      content: '简短正文。',
+      summary: '已有概要。',
+      topics: ['t1', 't2', 't3', 't4', 't5', 't6', 't7', 't8'],
+    })
+    expect(eightTopics.map((w) => w.code)).not.toContain('topics_too_many')
+
     // 改为目录常驻并收敛主题至 5 个以内且补齐概要后，提醒全部消失
     const indexScoped = lintEntryHygiene({
       title: 'Codex 运行时约束',

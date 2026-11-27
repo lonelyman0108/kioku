@@ -71,15 +71,14 @@ export function buildEmbeddingText(entry: EmbeddableEntry): string {
   const stripped = stripTrailingChangelogSections(deduped)
   const cleaned = clipChars(stripped, EMBEDDING_CONTENT_MAX_CHARS)
   if (cleaned) lines.push(cleaned)
-  if (stripped.length > EMBEDDING_CONTENT_MAX_CHARS) {
-    const headings = extractMarkdownOutline(stripped)
+  if (cleaned.length < stripped.length) {
+    const allHeadings = extractMarkdownOutline(stripped)
       .map((s) => s.heading.trim())
       .filter(Boolean)
-    if (headings.length) {
-      const outlineLine = clipChars(
-        `小节纲要：${headings.join(' / ')}`,
-        EMBEDDING_OUTLINE_MAX_CHARS,
-      )
+    const tailHeadings = allHeadings.filter((h) => !cleaned.includes(h))
+    const chosen = tailHeadings.length ? tailHeadings : allHeadings
+    if (chosen.length) {
+      const outlineLine = clipChars(`小节纲要：${chosen.join(' / ')}`, EMBEDDING_OUTLINE_MAX_CHARS)
       lines.push(outlineLine)
     }
   }
