@@ -4,6 +4,7 @@ import {
   earliestValidTo,
   formatRelative,
   formatShort,
+  formatShortRange,
   fromLocalInput,
   isExpired,
   toLocalInput,
@@ -82,5 +83,13 @@ describe('有效到', () => {
     expect(isExpired('2026-10-31T10:00:00Z', now)).toBe(true)
     expect(formatShort('2026-11-02T01:00:00Z', now)).toBe('11-02 09:00')
     expect(formatShort('2027-01-02T01:00:00Z', now)).toBe('2027-01-02 09:00')
+
+    // 跨年聚合时间范围按真实时间戳排序，去年在前今年在后绝不倒置
+    const newYearNow = new Date('2027-01-05T10:00:00Z')
+    expect(formatShortRange(['2027-01-02T01:00:00Z', '2026-12-28T01:00:00Z'], newYearNow)).toBe(
+      '2026-12-28 09:00 – 01-02 09:00',
+    )
+    expect(formatShortRange(['2027-01-02T01:00:00Z', 'invalid'], newYearNow)).toBe('01-02 09:00')
+    expect(formatShortRange(['invalid'], newYearNow)).toBeNull()
   })
 })

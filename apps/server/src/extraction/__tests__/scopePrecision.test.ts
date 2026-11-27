@@ -1,10 +1,17 @@
 import { DreamEntrySnapshot, mergeFallbackTopics } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
+import {
+  buildHabitClusters,
+  computeNormalizedCentroid,
+  countDistinctHabitSessions,
+  habitClusterDiscriminator,
+} from '../crossMemory'
 import { toPromptItem } from '../dream'
 import {
   buildDreamMessages,
   buildEpisodeReconcileMessages,
+  buildHabitDistillMessages,
   buildTidyMessages,
   evaluateDreamResponse,
   evaluateTidyResponse,
@@ -338,5 +345,197 @@ describe('会话摘要与整理提示词的主机边界透传', () => {
         ],
       ),
     ).toEqual(['docker', 'k1', 'k2', 'k3', 'shared'])
+  })
+
+  it('跨会话偏好聚簇严格区分独立会话、严守同场域边界并生成稳定簇指纹与提示词', () => {
+    // 同一设备同一项目 15 分钟内连续落桶（即使跨 UTC 零点或大小写不同）仅计 1 次独立会话
+    expect(
+      countDistinctHabitSessions([
+        {
+          deviceKey: 'Mac-Home',
+          projectSlug: 'Kioku',
+          createdAt: new Date('2026-11-26T23:55:00Z'),
+        },
+        {
+          deviceKey: 'mac-home',
+          projectSlug: 'kioku',
+          createdAt: new Date('2026-11-27T00:05:00Z'),
+        },
+      ]),
+    ).toBe(1)
+
+    // 单次 3 小时连续长会话每 1.5 小时落桶一次（相邻间隔均 < 2 小时）仍仅计 1 次独立会话
+    expect(
+      countDistinctHabitSessions([
+        {
+          deviceKey: 'mac-home',
+          projectSlug: 'kioku',
+          createdAt: new Date('2026-11-27T08:00:00Z'),
+        },
+        {
+          deviceKey: 'mac-home',
+          projectSlug: 'kioku',
+          createdAt: new Date('2026-11-27T09:30:00Z'),
+        },
+        {
+          deviceKey: 'mac-home',
+          projectSlug: 'kioku',
+          createdAt: new Date('2026-11-27T11:00:00Z'),
+        },
+      ]),
+    ).toBe(1)
+
+    // 同设备同项目间隔 >= 2 小时计为 2 次独立会话
+    expect(
+      countDistinctHabitSessions([
+        {
+          deviceKey: 'mac-home',
+          projectSlug: 'kioku',
+          createdAt: new Date('2026-11-27T08:00:00Z'),
+        },
+        {
+          deviceKey: 'mac-home',
+          projectSlug: 'kioku',
+          createdAt: new Date('2026-11-27T10:30:00Z'),
+        },
+      ]),
+    ).toBe(2)
+
+    // 不同项目或不同设备即使同分钟也计为独立会话
+    expect(
+      countDistinctHabitSessions([
+        {
+          deviceKey: 'mac-home',
+          projectSlug: 'kioku',
+          createdAt: new Date('2026-11-27T08:00:00Z'),
+        },
+        {
+          deviceKey: 'mac-home',
+          projectSlug: 'kioku-plugins',
+          createdAt: new Date('2026-11-27T08:05:00Z'),
+        },
+      ]),
+    ).toBe(2)
+
+    const epWorkA = {
+      id: '00000000-0000-4000-8000-000000000101',
+      realms: ['work'],
+      deviceKey: 'mac-work',
+      projectSlug: 'repo-a',
+      createdAt: new Date('2026-11-25T10:00:00Z'),
+    }
+    const epWorkB = {
+      id: '00000000-0000-4000-8000-000000000102',
+      realms: ['work'],
+      deviceKey: 'mac-work',
+      projectSlug: 'repo-b',
+      createdAt: new Date('2026-11-26T10:00:00Z'),
+    }
+    const epPersonal = {
+      id: '00000000-0000-4000-8000-000000000103',
+      realms: ['personal'],
+      deviceKey: 'mac-home',
+      projectSlug: 'kioku',
+      createdAt: new Date('2026-11-26T12:00:00Z'),
+    }
+    const epSameSession = {
+      id: '00000000-0000-4000-8000-000000000104',
+      realms: ['work'],
+      deviceKey: 'mac-work',
+      projectSlug: 'repo-a',
+      createdAt: new Date('2026-11-25T10:15:00Z'),
+    }
+
+    // 跨场域边被拦截，仅同场域且跨 >= 2 次独立会话的 work 对成簇
+    const clusters = buildHabitClusters(
+      [epWorkA, epWorkB, epPersonal],
+      [
+        { a: epWorkA.id, b: epPersonal.id, score: 0.99 },
+        { a: epWorkA.id, b: epWorkB.id, score: 0.88 },
+      ],
+    )
+    expect(clusters).toHaveLength(1)
+    expect(clusters[0]!.map((r) => r.id).sort()).toEqual([epWorkA.id, epWorkB.id])
+
+    // 仅同一次会话的 2 条摘要被克制门槛拦截，不成簇
+    expect(
+      buildHabitClusters(
+        [epWorkA, epSameSession],
+        [{ a: epWorkA.id, b: epSameSession.id, score: 0.95 }],
+      ),
+    ).toEqual([])
+
+    // 非成对相似的枢纽桥接（A-B 相似、A-C 相似，但 B-C 无边）不会把无关的 B、C 揉进同一簇
+    const epWorkC = {
+      id: '00000000-0000-4000-8000-000000000105',
+      realms: ['work'],
+      deviceKey: 'mac-work',
+      projectSlug: 'repo-c',
+      createdAt: new Date('2026-11-27T10:00:00Z'),
+    }
+    const cliqueClusters = buildHabitClusters(
+      [epWorkA, epWorkB, epWorkC],
+      [
+        { a: epWorkA.id, b: epWorkB.id, score: 0.92 },
+        { a: epWorkA.id, b: epWorkC.id, score: 0.85 },
+      ],
+    )
+    expect(cliqueClusters).toHaveLength(1)
+    expect(cliqueClusters[0]!.map((r) => r.id).sort()).toEqual([epWorkA.id, epWorkB.id])
+
+    const centroid = computeNormalizedCentroid([
+      [1, 0, 0],
+      [0, 1, 0],
+    ])
+    expect(centroid).toBeTruthy()
+    expect(centroid![0]).toBeCloseTo(Math.SQRT1_2, 5)
+    expect(centroid![1]).toBeCloseTo(Math.SQRT1_2, 5)
+    expect(computeNormalizedCentroid([[Number.POSITIVE_INFINITY, 0, 0]])).toBeNull()
+    expect(computeNormalizedCentroid([[Number.NaN, 1, 0]])).toBeNull()
+
+    // 稳定簇指纹与成员顺序无关，随版本变化
+    const discForward = habitClusterDiscriminator([
+      { id: epWorkA.id, version: 1 },
+      { id: epWorkB.id, version: 1 },
+    ])
+    const discReverse = habitClusterDiscriminator([
+      { id: epWorkB.id, version: 1 },
+      { id: epWorkA.id, version: 1 },
+    ])
+    const discBumped = habitClusterDiscriminator([
+      { id: epWorkA.id, version: 2 },
+      { id: epWorkB.id, version: 1 },
+    ])
+    expect(discForward).toBe(discReverse)
+    expect(discForward).not.toBe(discBumped)
+
+    const epItemA = toPromptItem(
+      makeRow({
+        id: epWorkA.id,
+        shortId: 'm-234abc',
+        disclosure: '偏好：公司项目直接提交开发分支不提 PR',
+        projects: ['repo-a'],
+      }),
+    )
+    const epItemB = toPromptItem(
+      makeRow({
+        id: epWorkB.id,
+        shortId: 'm-345bcd',
+        disclosure: '偏好：公司代码直接推送开发分支',
+        projects: ['repo-b'],
+      }),
+    )
+    const msgs = buildHabitDistillMessages([epItemA, epItemB], [], {
+      realms: ['work'],
+      episodeCount: 2,
+      distinctSessions: 2,
+      projects: ['repo-a', 'repo-b'],
+      devices: ['mac-work'],
+      dateRange: '2026-11-25 至 2026-11-26',
+    })
+    expect(msgs[0]?.content).toContain('优先检查下方既有正式记忆')
+    expect(msgs[1]?.content).toContain('估算独立会话数：2 次')
+    expect(msgs[1]?.content).toContain('涉及项目：repo-a、repo-b')
+    expect(msgs[1]?.content).toContain('提取偏好与指令：公司项目直接提交开发分支不提 PR')
   })
 })

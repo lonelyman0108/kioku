@@ -56,6 +56,15 @@ export interface BrokenLinkHint {
   targetTitle: string | null
 }
 
+export interface HabitDistillProvenance {
+  realms: string[]
+  episodeCount: number
+  distinctSessions: number
+  projects: string[]
+  devices: string[]
+  dateRange: string | null
+}
+
 export interface ParsedDreamProposal {
   kind: DreamSuggestionKind
   entryIds: string[]
@@ -137,6 +146,20 @@ const EPISODE_RECONCILE_SYSTEM_PROMPT = [
   '4. 禁止将特定机器、局域网主机、本机路径/端口或单次环境特例泛化为全局或整个操作系统规则；提炼与更新时必须在 title、summary、disclosure 与正文中明确保留适用机器与前提条件，并在 envs 中避免给单机特例盲目打上过于宽泛的通用标签。',
   '',
   '只输出 JSON：{"suggestions":[...]}。所有结论须提炼为稳定规则与防踩坑原因，严禁写入逐轮对话流水账；不调整作用域或主题时直接省略对应字段，勿填占位空数组 []。',
+].join('\n')
+
+const HABIT_DISTILL_SYSTEM_PROMPT = [
+  '你是 Kioku 跨会话习惯沉淀助手。用户在同场域的多次不同会话中重复表达了相近的工作流偏好、协作习惯或纠偏要求，下方给出聚簇后的近期会话摘要与最相关的既有正式记忆。',
+  '只输出 JSON：{"suggestions":[...]}；若这些要求纯属巧合、仅为一次性具体任务或不值得沉淀为长期规则，输出 {"suggestions":[]}。',
+  '',
+  '决策顺序：',
+  '1. 优先检查下方既有正式记忆是否已覆盖同类工作流或习惯域：若已存在匹配词条，优先输出 "update"（target_short_ids=["m-已有短ID"]），将重复出现的偏好自然融入其中，严禁丢失原有 [[m-xxxxxx]] 双链与 {{cred:...}} 凭据占位符。',
+  '2. 若无匹配的既有正式记忆，输出 "distill_episode" 提炼为一条简洁常青的新正式记忆：',
+  '   - target_short_ids 须列出全部支撑该习惯的源会话摘要短 ID（至少 2 条）；',
+  '   - title 简短稳定（禁日期），summary 写 1–2 句现行结论，content 提炼清晰可执行的抽象规则与原因（严禁写逐轮过程流水账），topics 给 1–3 个简洁小写标签；',
+  '   - 作用域精准性：跨 ≥ 2 个不同项目或属通用工作流习惯时，显式传 projects: []（与特定机器或系统无关时亦可传 envs: []），简短高频核心工作流铁律（≤ 600 字）可附 proposed_boot_mode: "full"；仅限单一项目时保持 projects: ["该项目"]；涉及特定单机或本机路径端口时严禁泛化；严禁放宽 realms（省略或保留原场域）。',
+  '3. reason 须简洁写明来源统计（如「近期在 3 次会话（涉及项目 kioku、kioku-plugins）中重复提出该流程习惯，建议沉淀为常驻规范」或「…建议并入既有习惯记忆」）。',
+  '4. 不调整某维度时直接省略对应字段，勿在 update 中填占位空数组 []。',
 ].join('\n')
 
 const BOOT_AUDIT_SYSTEM_PROMPT = [
@@ -305,6 +328,43 @@ export function buildEpisodeReconcileMessages(
   }
   return [
     { role: 'system', content: EPISODE_RECONCILE_SYSTEM_PROMPT },
+    { role: 'user', content: sections.join('\n\n') },
+  ]
+}
+
+export function buildHabitDistillMessages(
+  episodes: readonly DreamPromptItem[],
+  targets: readonly DreamPromptItem[],
+  provenance: HabitDistillProvenance,
+): ChatMessage[] {
+  const statLines = [
+    `场域：${provenance.realms.length ? provenance.realms.join('、') : '通用（未限定场域）'}`,
+    `聚合会话摘要数：${provenance.episodeCount} 条（估算独立会话数：${provenance.distinctSessions} 次）`,
+    `涉及项目：${provenance.projects.length ? provenance.projects.join('、') : '未标注项目'}`,
+  ]
+  if (provenance.devices.length) {
+    statLines.push(`涉及设备：${provenance.devices.join('、')}`)
+  }
+  if (provenance.dateRange) {
+    statLines.push(`时间跨度：${provenance.dateRange}`)
+  }
+
+  const sections = [
+    '## 跨会话重复偏好统计',
+    statLines.join('\n'),
+    '',
+    '## 聚合的近期会话摘要（同场域）',
+    ...episodes.map((ep) => formatItem(ep)),
+  ]
+  if (targets.length) {
+    sections.push(
+      '',
+      '## 最相关的既有正式记忆（优先考虑并入更新，避免重复建卡）',
+      ...targets.map((t) => formatItem(t)),
+    )
+  }
+  return [
+    { role: 'system', content: HABIT_DISTILL_SYSTEM_PROMPT },
     { role: 'user', content: sections.join('\n\n') },
   ]
 }
