@@ -175,6 +175,27 @@ export function splitWikiLinks(text: string): WikiLinkSegment[] {
   return segments
 }
 
+// 剥离标题与双链语境摘要中的常见行内 Markdown 符号，保留 [[m-xxxxxx|别名]] 与标识符内下划线
+export function stripInlineMarkdown(text: string): string {
+  const cleanPlain = (raw: string) =>
+    raw
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+      .replace(/\*\*([^*]+?)\*\*/g, '$1')
+      .replace(/__([^_]+?)__/g, '$1')
+      .replace(/~~([^~]+?)~~/g, '$1')
+      .replace(/(^|[^\w])\*([^*]+?)\*(?=[^\w]|$)/g, '$1$2')
+      .replace(/(^|[^\w])_([^_]+?)_(?=[^\w]|$)/g, '$1$2')
+      .replace(/\*\*|~~/g, '')
+
+  return splitWikiLinks(text)
+    .map((seg) => (seg.link ? seg.text : cleanPlain(seg.text)))
+    .join('')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 export function renderMarkdown(
   source: string,
   options: {

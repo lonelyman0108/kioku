@@ -2,7 +2,13 @@ import DOMPurify from 'dompurify'
 import { Tokenizer } from 'marked'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { markdownToHtml, rawHtml, renderMarkdown, splitWikiLinks } from '../markdown'
+import {
+  markdownToHtml,
+  rawHtml,
+  renderMarkdown,
+  splitWikiLinks,
+  stripInlineMarkdown,
+} from '../markdown'
 
 describe('rawHtml', () => {
   it('不带属性的排版标签照常渲染', () => {
@@ -219,6 +225,18 @@ describe('双链切分', () => {
     expect(splitWikiLinks('[[m-234567|   ]]')).toEqual([
       { text: '[[m-234567|   ]]', link: { shortId: 'm-234567', alias: null } },
     ])
+  })
+})
+
+describe('stripInlineMarkdown 行内符号清理', () => {
+  it('剥离粗体、斜体、删除线、行内代码与链接语法，同时保留双链与标识符下划线', () => {
+    expect(
+      stripInlineMarkdown('**关联注意点**：参考 `kioku_zh` 与 [文档](https://example.com)'),
+    ).toBe('关联注意点：参考 kioku_zh 与 文档')
+    expect(
+      stripInlineMarkdown('见 [[m-ab2345|工作_流]] 与 **dev_profile**，~~旧方案~~ _斜体_'),
+    ).toBe('见 [[m-ab2345|工作_流]] 与 dev_profile，旧方案 斜体')
+    expect(stripInlineMarkdown('截断后的 **未闭合粗体')).toBe('截断后的 未闭合粗体')
   })
 })
 

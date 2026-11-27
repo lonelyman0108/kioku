@@ -3,6 +3,7 @@
 export const UI_STORAGE_KEYS = {
   editorView: 'kioku:editor:view',
   editorSyncScroll: 'kioku:editor:sync-scroll',
+  readRailWidth: 'kioku:editor:read-rail-width',
   historyDiffLayout: 'kioku:history:diff-layout',
   historyDiffContext: 'kioku:history:diff-context',
   tasksClearedBefore: 'kioku:tasks:cleared-before',

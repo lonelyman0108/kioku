@@ -49,7 +49,12 @@ import {
   eventTypeLabels,
   formatActorLabel,
 } from '../labels'
-import { splitWikiLinks, type CredentialLinks, type WikiLinkTargets } from '../markdown'
+import {
+  splitWikiLinks,
+  stripInlineMarkdown,
+  type CredentialLinks,
+  type WikiLinkTargets,
+} from '../markdown'
 import { placeholderOf } from '../placeholders'
 import { credentialRoute, entryRoute } from '../routes'
 import { runtimeName } from '../runtimes'
@@ -68,6 +73,7 @@ import { analyzeTitleHint, appendExtractedChangeNote } from '../titleHint'
 import {
   readStoredBoolean,
   readStoredEnum,
+  readStoredString,
   UI_STORAGE_KEYS,
   writeStoredBoolean,
   writeStoredString,
@@ -706,15 +712,6 @@ useMarkdownSyncScroll({
   getSourceEl: () => contentRef.value?.textareaRef ?? null,
   getPreviewEl: () => previewScrollRef.value,
 })
-function stripInlineMarkdown(text: string): string {
-  return text
-    .replace(/`([^`]+)`/g, '$1')
-    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
-    .replace(/[*_~]+/g, '')
-    .trim()
-}
-
 const outline = computed(() =>
   extractMarkdownOutline(displayContent.value).map((sec) => ({
     ...sec,
@@ -737,6 +734,161 @@ const hasLinks = computed(
 )
 const hasSideRail = computed(
   () => outline.value.length > 0 || recentHistory.value.length > 0 || hasLinks.value,
+)
+const railHistoryOnly = computed(() => outline.value.length === 0 && !hasLinks.value)
+const railHistoryExpanded = ref(false)
+
+watch(
+  () => props.shortId,
+  () => {
+    railHistoryExpanded.value = false
+  },
+)
+
+// 右侧辅助轨默认按容器弹性自适应，拖拽后持久化像素宽度，双击分隔线恢复自适应
+const RAIL_WIDTH_MIN = 240
+const RAIL_WIDTH_MAX = 480
+const RAIL_CONTAINER_MIN = 960
+const RAIL_MAIN_MIN_WIDTH = 460
+const RAIL_GAP = 28
+
+function readStoredRailWidth(): number | null {
+  const raw = readStoredString(UI_STORAGE_KEYS.readRailWidth)
+  if (!raw) return null
+  const parsed = Number(raw)
+  return Number.isFinite(parsed) && parsed >= RAIL_WIDTH_MIN && parsed <= RAIL_WIDTH_MAX
+    ? Math.round(parsed)
+    : null
+}
+
+const editorScrollRef = ref<HTMLElement | null>(null)
+const readRailRef = ref<HTMLElement | null>(null)
+const editorScrollWidth = ref(0)
+const storedRailWidth = ref<number | null>(readStoredRailWidth())
+const railResizing = ref(false)
+let editorScrollObserver: ResizeObserver | null = null
+let railDragStartX = 0
+let railDragStartWidth = 320
+
+const maxRailWidth = computed(() => {
+  if (editorScrollWidth.value <= 0) return RAIL_WIDTH_MAX
+  const canvasWidth = Math.min(1320, Math.max(0, editorScrollWidth.value - 56))
+  return Math.max(
+    RAIL_WIDTH_MIN,
+    Math.min(RAIL_WIDTH_MAX, Math.floor(canvasWidth - RAIL_MAIN_MIN_WIDTH - RAIL_GAP)),
+  )
+})
+
+const effectiveRailWidth = computed<number | null>(() => {
+  if (storedRailWidth.value === null) return null
+  return Math.max(RAIL_WIDTH_MIN, Math.min(storedRailWidth.value, maxRailWidth.value))
+})
+
+const readLayoutStyle = computed(() =>
+  effectiveRailWidth.value !== null
+    ? { '--rail-width': `${effectiveRailWidth.value}px` }
+    : undefined,
+)
+
+function currentRailWidthPx(): number {
+  if (effectiveRailWidth.value !== null) return effectiveRailWidth.value
+  const measured = Math.round(readRailRef.value?.getBoundingClientRect().width ?? 320)
+  return Math.max(RAIL_WIDTH_MIN, Math.min(maxRailWidth.value, measured))
+}
+
+function onRailPointerMove(event: PointerEvent) {
+  if (!railResizing.value) return
+  const next = Math.round(
+    Math.max(
+      RAIL_WIDTH_MIN,
+      Math.min(maxRailWidth.value, railDragStartWidth - (event.clientX - railDragStartX)),
+    ),
+  )
+  storedRailWidth.value = next
+}
+
+function stopRailResize() {
+  if (!railResizing.value) return
+  railResizing.value = false
+  window.removeEventListener('pointermove', onRailPointerMove)
+  window.removeEventListener('pointerup', stopRailResize)
+  window.removeEventListener('pointercancel', stopRailResize)
+  window.removeEventListener('blur', stopRailResize)
+  if (storedRailWidth.value !== null) {
+    writeStoredString(UI_STORAGE_KEYS.readRailWidth, String(storedRailWidth.value))
+  }
+}
+
+function startRailResize(event: PointerEvent) {
+  if (
+    event.button !== 0 ||
+    mode.value !== 'read' ||
+    (editorScrollWidth.value > 0 && editorScrollWidth.value < RAIL_CONTAINER_MIN)
+  ) {
+    return
+  }
+  event.preventDefault()
+  railDragStartX = event.clientX
+  railDragStartWidth = currentRailWidthPx()
+  storedRailWidth.value = railDragStartWidth
+  railResizing.value = true
+  window.addEventListener('pointermove', onRailPointerMove)
+  window.addEventListener('pointerup', stopRailResize)
+  window.addEventListener('pointercancel', stopRailResize)
+  window.addEventListener('blur', stopRailResize)
+}
+
+function resetRailWidth() {
+  stopRailResize()
+  storedRailWidth.value = null
+  writeStoredString(UI_STORAGE_KEYS.readRailWidth, null)
+}
+
+function onRailSplitterKeydown(event: KeyboardEvent) {
+  if (
+    mode.value !== 'read' ||
+    (editorScrollWidth.value > 0 && editorScrollWidth.value < RAIL_CONTAINER_MIN)
+  ) {
+    return
+  }
+  const step = event.shiftKey ? 40 : 16
+  if (event.key === 'ArrowLeft') {
+    event.preventDefault()
+    const next = Math.min(maxRailWidth.value, currentRailWidthPx() + step)
+    storedRailWidth.value = next
+    writeStoredString(UI_STORAGE_KEYS.readRailWidth, String(next))
+  } else if (event.key === 'ArrowRight') {
+    event.preventDefault()
+    const next = Math.max(RAIL_WIDTH_MIN, currentRailWidthPx() - step)
+    storedRailWidth.value = next
+    writeStoredString(UI_STORAGE_KEYS.readRailWidth, String(next))
+  } else if (event.key === 'Home') {
+    event.preventDefault()
+    resetRailWidth()
+  }
+}
+
+watch(mode, (next) => {
+  if (next !== 'read') stopRailResize()
+})
+
+watch(
+  editorScrollRef,
+  (el) => {
+    editorScrollObserver?.disconnect()
+    editorScrollObserver = null
+    if (!el || typeof ResizeObserver === 'undefined') return
+    editorScrollWidth.value = Math.round(el.clientWidth)
+    editorScrollObserver = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width
+      if (w !== undefined) {
+        editorScrollWidth.value = Math.round(w)
+        if (w < RAIL_CONTAINER_MIN) stopRailResize()
+      }
+    })
+    editorScrollObserver.observe(el)
+  },
+  { flush: 'post' },
 )
 
 const { me } = useSession()
@@ -905,6 +1057,9 @@ function onEditorKeydown(event: KeyboardEvent) {
 
 onMounted(() => window.addEventListener('keydown', onEditorKeydown))
 onBeforeUnmount(() => {
+  stopRailResize()
+  editorScrollObserver?.disconnect()
+  editorScrollObserver = null
   window.removeEventListener('keydown', onEditorKeydown)
   if (shortIdCopyTimer) {
     clearTimeout(shortIdCopyTimer)
@@ -1242,7 +1397,7 @@ defineExpose({
         </div>
       </header>
 
-      <div class="editor-scroll" :class="{ 'is-editing': mode === 'edit' }">
+      <div ref="editorScrollRef" class="editor-scroll" :class="{ 'is-editing': mode === 'edit' }">
         <ReadFailureNote v-if="detailQuery.isError.value" :query="detailQuery" />
 
         <NoteLine v-if="expiredNow" tone="warning">
@@ -1603,7 +1758,11 @@ defineExpose({
 
         <!-- 阅读模式 -->
         <template v-else>
-          <div class="read-layout" :class="{ 'has-rail': hasSideRail }">
+          <div
+            class="read-layout"
+            :class="{ 'has-rail': hasSideRail, 'is-resizing': railResizing }"
+            :style="hasSideRail ? readLayoutStyle : undefined"
+          >
             <div class="read-main">
               <dl class="meta-strip">
                 <div>
@@ -1744,85 +1903,181 @@ defineExpose({
               </div>
             </div>
 
-            <!-- 宽屏右侧 240px 静态辅助轨（@container >= 960px 显示） -->
-            <aside v-if="hasSideRail" class="read-rail" aria-label="文档辅助导航">
-              <section v-if="outline.length" class="rail-section">
-                <h2 class="rail-heading">
-                  <UIcon :name="icons.bookOpen" class="rail-heading-icon" aria-hidden="true" />
-                  <span>小节目录</span>
-                </h2>
-                <ol class="outline-list">
-                  <li v-for="(sec, idx) in outline" :key="`${idx}-${sec.heading}`">
+            <!-- 宽屏右侧弹性可拖拽辅助轨（@container >= 960px 显示） -->
+            <aside v-if="hasSideRail" ref="readRailRef" class="read-rail" aria-label="文档辅助导航">
+              <div
+                class="rail-splitter"
+                role="separator"
+                aria-orientation="vertical"
+                aria-label="拖动调节右侧辅助栏宽度"
+                :aria-valuenow="effectiveRailWidth ?? undefined"
+                :aria-valuemin="RAIL_WIDTH_MIN"
+                :aria-valuemax="maxRailWidth"
+                tabindex="0"
+                title="拖动调节宽度，双击恢复自适应"
+                @pointerdown="startRailResize"
+                @dblclick="resetRailWidth"
+                @keydown="onRailSplitterKeydown"
+              />
+              <span
+                v-if="railResizing && effectiveRailWidth !== null"
+                class="rail-width-badge tabular-nums"
+                aria-hidden="true"
+              >
+                {{ effectiveRailWidth }}px
+              </span>
+              <div class="rail-scroll">
+                <section v-if="outline.length" class="rail-section">
+                  <h2 class="rail-heading">
+                    <UIcon :name="icons.bookOpen" class="rail-heading-icon" aria-hidden="true" />
+                    <span>小节目录</span>
+                    <span class="rail-heading-count tabular-nums">{{ outline.length }}</span>
+                  </h2>
+                  <ol class="outline-list">
+                    <li v-for="(sec, idx) in outline" :key="`${idx}-${sec.heading}`">
+                      <button
+                        type="button"
+                        class="outline-btn"
+                        :title="sec.preview || sec.heading"
+                        @click="jumpToSection(sec.heading, idx)"
+                      >
+                        <span class="outline-title">{{ sec.displayHeading }}</span>
+                        <span class="outline-chars tabular-nums">{{ sec.charCount }}</span>
+                      </button>
+                    </li>
+                  </ol>
+                </section>
+
+                <EntryLinksPanel
+                  v-if="hasLinks"
+                  compact
+                  :outbound-links="detail?.outboundLinks ?? []"
+                  :backlinks="detail?.backlinks ?? []"
+                  :titles="resolvedTitles"
+                  @open="(sid) => emit('open', sid)"
+                />
+
+                <section v-if="railHistory.length && railHistoryOnly" class="rail-section">
+                  <div class="rail-heading-row">
+                    <h2 class="rail-heading">
+                      <UIcon :name="icons.history" class="rail-heading-icon" aria-hidden="true" />
+                      <span>近期演进</span>
+                      <span class="rail-heading-count tabular-nums">{{ railHistory.length }}</span>
+                    </h2>
                     <button
                       type="button"
-                      class="outline-btn"
-                      :title="sec.preview || sec.heading"
-                      @click="jumpToSection(sec.heading, idx)"
+                      class="text-primary rail-more-link"
+                      @click="openHistory()"
                     >
-                      <span class="outline-title">{{ sec.displayHeading }}</span>
-                      <span class="outline-chars tabular-nums">{{ sec.charCount }}</span>
+                      全部历史
                     </button>
-                  </li>
-                </ol>
-              </section>
-
-              <section v-if="railHistory.length" class="rail-section">
-                <div class="rail-heading-row">
-                  <h2 class="rail-heading">
-                    <UIcon :name="icons.history" class="rail-heading-icon" aria-hidden="true" />
-                    <span>近期演进</span>
-                  </h2>
-                  <button type="button" class="text-primary rail-more-link" @click="openHistory()">
-                    全部历史
-                  </button>
-                </div>
-                <ol class="rail-history-list">
-                  <li v-for="ev in railHistory" :key="ev.id">
-                    <div
-                      role="button"
-                      tabindex="0"
-                      class="rail-history-btn"
-                      @click="openHistory(ev.id)"
-                      @keydown.enter.self="openHistory(ev.id)"
-                      @keydown.space.prevent.self="openHistory(ev.id)"
-                    >
-                      <span class="rail-history-meta">
-                        <span v-if="ev.version !== null" class="font-mono"
-                          >版本 {{ ev.version }}</span
-                        >
-                        <span v-else>{{ eventTypeLabels[ev.eventType] }}</span>
-                        <time :datetime="ev.occurredAt ?? ev.createdAt">
-                          {{ formatRelative(ev.occurredAt ?? ev.createdAt) }}
-                        </time>
-                      </span>
-                      <span class="rail-history-body">
-                        <UIcon
-                          :name="eventTypeIcons[ev.eventType]"
-                          class="rail-history-icon"
-                          aria-hidden="true"
-                        />
-                        <span class="rail-history-text">
-                          <WikiText
-                            :text="ev.changeSummary?.trim() || eventTypeLabels[ev.eventType]"
-                            :titles="resolvedTitles"
-                            compact
-                            @open="emit('open', $event)"
-                          />
+                  </div>
+                  <ol class="rail-history-list">
+                    <li v-for="ev in railHistory" :key="ev.id">
+                      <div
+                        role="button"
+                        tabindex="0"
+                        class="rail-history-btn"
+                        @click="openHistory(ev.id)"
+                        @keydown.enter.self="openHistory(ev.id)"
+                        @keydown.space.prevent.self="openHistory(ev.id)"
+                      >
+                        <span class="rail-history-meta">
+                          <span v-if="ev.version !== null" class="font-mono"
+                            >版本 {{ ev.version }}</span
+                          >
+                          <span v-else>{{ eventTypeLabels[ev.eventType] }}</span>
+                          <time :datetime="ev.occurredAt ?? ev.createdAt">
+                            {{ formatRelative(ev.occurredAt ?? ev.createdAt) }}
+                          </time>
                         </span>
-                      </span>
-                    </div>
-                  </li>
-                </ol>
-              </section>
+                        <span class="rail-history-body">
+                          <UIcon
+                            :name="eventTypeIcons[ev.eventType]"
+                            class="rail-history-icon"
+                            aria-hidden="true"
+                          />
+                          <span class="rail-history-text">
+                            <WikiText
+                              :text="ev.changeSummary?.trim() || eventTypeLabels[ev.eventType]"
+                              :titles="resolvedTitles"
+                              compact
+                              @open="emit('open', $event)"
+                            />
+                          </span>
+                        </span>
+                      </div>
+                    </li>
+                  </ol>
+                </section>
 
-              <EntryLinksPanel
-                v-if="hasLinks"
-                compact
-                :outbound-links="detail?.outboundLinks ?? []"
-                :backlinks="detail?.backlinks ?? []"
-                :titles="resolvedTitles"
-                @open="(sid) => emit('open', sid)"
-              />
+                <section v-else-if="railHistory.length" class="rail-history-disclosure">
+                  <div class="rail-disclosure-head">
+                    <button
+                      type="button"
+                      class="rail-disclosure-toggle"
+                      :aria-expanded="railHistoryExpanded"
+                      @click="railHistoryExpanded = !railHistoryExpanded"
+                    >
+                      <UIcon
+                        :name="icons.chevronRight"
+                        class="rail-disclosure-chevron"
+                        :class="{ 'is-open': railHistoryExpanded }"
+                        aria-hidden="true"
+                      />
+                      <UIcon :name="icons.history" class="rail-heading-icon" aria-hidden="true" />
+                      <span>近期演进</span>
+                      <span class="rail-heading-count tabular-nums">{{ railHistory.length }}</span>
+                    </button>
+                    <button
+                      type="button"
+                      class="text-primary rail-more-link"
+                      @click="openHistory()"
+                    >
+                      全部历史
+                    </button>
+                  </div>
+                  <div v-if="railHistoryExpanded" class="rail-disclosure-body">
+                    <ol class="rail-history-list">
+                      <li v-for="ev in railHistory" :key="ev.id">
+                        <div
+                          role="button"
+                          tabindex="0"
+                          class="rail-history-btn"
+                          @click="openHistory(ev.id)"
+                          @keydown.enter.self="openHistory(ev.id)"
+                          @keydown.space.prevent.self="openHistory(ev.id)"
+                        >
+                          <span class="rail-history-meta">
+                            <span v-if="ev.version !== null" class="font-mono"
+                              >版本 {{ ev.version }}</span
+                            >
+                            <span v-else>{{ eventTypeLabels[ev.eventType] }}</span>
+                            <time :datetime="ev.occurredAt ?? ev.createdAt">
+                              {{ formatRelative(ev.occurredAt ?? ev.createdAt) }}
+                            </time>
+                          </span>
+                          <span class="rail-history-body">
+                            <UIcon
+                              :name="eventTypeIcons[ev.eventType]"
+                              class="rail-history-icon"
+                              aria-hidden="true"
+                            />
+                            <span class="rail-history-text">
+                              <WikiText
+                                :text="ev.changeSummary?.trim() || eventTypeLabels[ev.eventType]"
+                                :titles="resolvedTitles"
+                                compact
+                                @open="emit('open', $event)"
+                              />
+                            </span>
+                          </span>
+                        </div>
+                      </li>
+                    </ol>
+                  </div>
+                </section>
+              </div>
             </aside>
           </div>
         </template>
@@ -2432,7 +2687,7 @@ defineExpose({
     height: 100%;
   }
 }
-/* 阅读态主栏与宽屏右侧 248px 静态辅助轨，整体居中收束在画布宽度内 */
+/* 阅读态主栏与宽屏右侧弹性可拖拽辅助轨，整体居中收束在画布宽度内 */
 .read-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -2440,6 +2695,10 @@ defineExpose({
   width: 100%;
   max-width: var(--canvas-max);
   margin-inline: auto;
+}
+.read-layout.is-resizing {
+  user-select: none;
+  cursor: col-resize;
 }
 .read-main {
   min-width: 0;
@@ -2449,32 +2708,126 @@ defineExpose({
 }
 @container (min-width: 960px) {
   .read-layout.has-rail {
-    grid-template-columns: minmax(0, 1fr) 248px;
-    gap: 36px;
+    grid-template-columns: minmax(0, 1fr) var(--rail-width, clamp(296px, 28cqi, 360px));
+    gap: 28px;
     align-items: start;
   }
   .read-layout.has-rail .read-rail {
     position: sticky;
     top: 0;
-    max-height: calc(100vh - 14rem);
-    overflow-y: auto;
+    max-height: calc(100vh - 11.5rem);
     display: flex;
     flex-direction: column;
-    gap: 20px;
-    padding-left: 18px;
     border-left: 1px solid var(--ui-border);
-  }
-  .read-layout.has-rail .read-rail > * {
-    flex-shrink: 0;
   }
   .read-layout.has-rail .read-below-only {
     display: none;
   }
 }
+.rail-splitter {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -5px;
+  z-index: 15;
+  width: 9px;
+  cursor: col-resize;
+  touch-action: none;
+}
+.rail-splitter::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 4px;
+  width: 2px;
+  background: var(--ui-rule);
+  opacity: 0;
+  transition: opacity 140ms ease;
+}
+.rail-splitter:hover::after,
+.rail-splitter:focus-visible::after,
+.read-layout.is-resizing .rail-splitter::after {
+  opacity: 1;
+}
+.rail-splitter:focus-visible {
+  outline: 0;
+}
+.rail-width-badge {
+  position: absolute;
+  top: 2px;
+  left: 8px;
+  z-index: 20;
+  padding: 1px 6px;
+  border: 1px solid var(--ui-rule);
+  background: var(--ui-selected);
+  color: var(--ui-on-selected);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.4;
+  pointer-events: none;
+}
+.rail-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding-left: 20px;
+  padding-right: 4px;
+}
+.rail-scroll > * {
+  flex-shrink: 0;
+}
 .rail-section {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+.rail-heading-count {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--ui-text-dimmed);
+}
+.rail-history-disclosure {
+  border: 1px solid var(--ui-border);
+  background: var(--ui-bg-muted);
+}
+.rail-disclosure-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+}
+.rail-disclosure-toggle {
+  flex: 1;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ui-text-highlighted);
+  text-align: left;
+  cursor: pointer;
+}
+.rail-disclosure-chevron {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+  color: var(--ui-text-muted);
+  transition: transform 0.12s ease;
+}
+.rail-disclosure-chevron.is-open {
+  transform: rotate(90deg);
+}
+.rail-disclosure-body {
+  padding: 2px 10px 6px;
+  border-top: 1px solid var(--ui-border);
+  background: var(--ui-bg);
 }
 .rail-heading-row {
   display: flex;

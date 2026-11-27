@@ -4,6 +4,7 @@ import { computed } from 'vue'
 
 import { icons } from '../icons'
 import { entryKindLabels } from '../labels'
+import { stripInlineMarkdown } from '../markdown'
 import SectionHeading from './ui/SectionHeading.vue'
 import WikiText from './ui/WikiText.vue'
 
@@ -38,12 +39,20 @@ const resolvedTitles = computed<Map<string, { title: string }>>(() => {
   for (const item of props.backlinks) map.set(item.shortId, { title: item.title })
   return map
 })
+
+function formatSnippet(raw: string): string {
+  return stripInlineMarkdown(raw)
+}
 </script>
 
 <template>
   <div v-if="outboundLinks.length || backlinks.length" class="links-panel" :class="{ compact }">
     <section v-if="outboundLinks.length" class="links-section">
-      <SectionHeading title="出链" :icon="icons.promote" :level="3" />
+      <SectionHeading title="出链" :icon="icons.promote" :level="3">
+        <template #hint>
+          <span class="links-count tabular-nums">{{ outboundLinks.length }}</span>
+        </template>
+      </SectionHeading>
       <ul class="links-list">
         <li v-for="item in outboundLinks" :key="`out-${item.shortId}`">
           <button
@@ -61,7 +70,7 @@ const resolvedTitles = computed<Map<string, { title: string }>>(() => {
               <span v-if="item.relation && item.contextSnippet" aria-hidden="true"> · </span>
               <WikiText
                 v-if="item.contextSnippet"
-                :text="item.contextSnippet"
+                :text="formatSnippet(item.contextSnippet)"
                 :titles="resolvedTitles"
                 :interactive="false"
                 :mark-missing="false"
@@ -74,7 +83,11 @@ const resolvedTitles = computed<Map<string, { title: string }>>(() => {
     </section>
 
     <section v-if="backlinks.length" class="links-section">
-      <SectionHeading title="反链" :icon="icons.backlink" :level="3" />
+      <SectionHeading title="反链" :icon="icons.backlink" :level="3">
+        <template #hint>
+          <span class="links-count tabular-nums">{{ backlinks.length }}</span>
+        </template>
+      </SectionHeading>
       <ul class="links-list">
         <li v-for="item in backlinks" :key="`in-${item.shortId}`">
           <button
@@ -92,7 +105,7 @@ const resolvedTitles = computed<Map<string, { title: string }>>(() => {
               <span v-if="item.relation && item.contextSnippet" aria-hidden="true"> · </span>
               <WikiText
                 v-if="item.contextSnippet"
-                :text="item.contextSnippet"
+                :text="formatSnippet(item.contextSnippet)"
                 :titles="resolvedTitles"
                 :interactive="false"
                 :mark-missing="false"
@@ -133,6 +146,11 @@ const resolvedTitles = computed<Map<string, { title: string }>>(() => {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+.links-count {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--ui-text-dimmed);
 }
 .links-list {
   border-top: 1px solid var(--ui-border);
