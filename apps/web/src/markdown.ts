@@ -320,25 +320,21 @@ function unwrapMarkdownLinks(src: string): string {
   }
 
   const out: string[] = []
-  const stack: Array<{ outIdx: number; isImage: boolean }> = []
-
-  const hasLabelContent = (fromIdx: number): boolean => {
-    for (let k = fromIdx + 1; k < out.length; k++) {
-      if (out[k]) return true
-    }
-    return false
-  }
+  const stack: Array<{ outIdx: number; isImage: boolean; baseCount: number }> = []
+  let nonEmptyCount = 0
 
   for (let i = 0; i < n;) {
     if (src[i] === '!' && src[i + 1] === '[') {
-      stack.push({ outIdx: out.length, isImage: true })
+      stack.push({ outIdx: out.length, isImage: true, baseCount: nonEmptyCount })
       out.push('![')
+      nonEmptyCount++
       i += 2
       continue
     }
     if (src[i] === '[') {
-      stack.push({ outIdx: out.length, isImage: false })
+      stack.push({ outIdx: out.length, isImage: false, baseCount: nonEmptyCount })
       out.push('[')
+      nonEmptyCount++
       i += 1
       continue
     }
@@ -346,19 +342,22 @@ function unwrapMarkdownLinks(src: string): string {
       const top = stack[stack.length - 1]!
       if (src[i + 1] === '(') {
         const closeIdx = closeParen[i + 1]!
-        if (closeIdx !== -1 && (top.isImage || hasLabelContent(top.outIdx))) {
+        if (closeIdx !== -1 && (top.isImage || nonEmptyCount > top.baseCount + 1)) {
           stack.pop()
           out[top.outIdx] = ''
+          nonEmptyCount--
           i = closeIdx + 1
           continue
         }
       }
       stack.pop()
       out.push(']')
+      nonEmptyCount++
       i += 1
       continue
     }
     out.push(src[i]!)
+    nonEmptyCount++
     i += 1
   }
 
@@ -379,8 +378,16 @@ function protectBareUrls(src: string, tokens: InlineToken[]): string {
         BARE_URL_PREFIX_STICKY.lastIndex = i
         const match = BARE_URL_PREFIX_STICKY.exec(src)
         if (match) {
-          const end = bareUrlEnd(src, i + match[0].length)
-          if (end > i + match[0].length) {
+          const urlStart = i + match[0].length
+          let end = bareUrlEnd(src, urlStart)
+          // 剥离紧贴裸网址末尾的强调/删除线闭合符号，避免吞掉 **url**、_url_、~~url~~ 的右边界
+          while (
+            end > urlStart &&
+            (src[end - 1] === '*' || src[end - 1] === '_' || src[end - 1] === '~')
+          ) {
+            end--
+          }
+          if (end > urlStart) {
             if (i > plainStart) out.push(src.slice(plainStart, i))
             const id = tokens.length
             tokens.push({ text: src.slice(i, end) })
@@ -401,7 +408,12 @@ function protectBareUrls(src: string, tokens: InlineToken[]): string {
 }
 
 // 线性配对剥离强调/粗体/删除线边界，避开单词内下划线、乘号、路径通配符与空格内侧
-function stripPairedDelimiter(input: string, delim: string, checkWordBoundary: boolean): string {
+function stripPairedDelimiter(
+  input: string,
+  delim: string,
+  checkOpenWordBoundary: boolean,
+  checkCloseWordBoundary = checkOpenWordBoundary,
+): string {
   const d = delim.length
   const ch = delim[0]!
   if (!input.includes(delim)) return input
@@ -429,7 +441,8 @@ function stripPairedDelimiter(input: string, delim: string, checkWordBoundary: b
       leftOfRun !== '' &&
       !/\s/.test(leftOfRun) &&
       leftOfRun !== '/' &&
-      (!checkWordBoundary || !ASCII_WORD_OR_SLASH.test(rightOfRun))
+      rightOfRun !== '/' &&
+      (!checkCloseWordBoundary || !ASCII_WORD_OR_SLASH.test(rightOfRun))
 
     if (canClose) {
       const openPos = openStack.pop()!
@@ -446,7 +459,8 @@ function stripPairedDelimiter(input: string, delim: string, checkWordBoundary: b
       rightOfRun !== '' &&
       !/\s/.test(rightOfRun) &&
       rightOfRun !== '/' &&
-      (!checkWordBoundary || !ASCII_WORD_OR_SLASH.test(leftOfRun))
+      leftOfRun !== '/' &&
+      (!checkOpenWordBoundary || !ASCII_WORD_OR_SLASH.test(leftOfRun))
 
     if (canOpen) {
       openStack.push(i - d)
@@ -473,13 +487,13 @@ export function stripInlineMarkdownSegments(text: string): WikiLinkSegment[] {
   let s = protectCodeAndWikiLinks(text, tokens)
   s = unwrapMarkdownLinks(s)
   s = protectBareUrls(s, tokens)
-  s = stripPairedDelimiter(s, '***', true)
-  s = stripPairedDelimiter(s, '___', true)
-  s = stripPairedDelimiter(s, '**', true)
-  s = stripPairedDelimiter(s, '__', true)
-  s = stripPairedDelimiter(s, '~~', false)
-  s = stripPairedDelimiter(s, '*', true)
-  s = stripPairedDelimiter(s, '_', true)
+  s = stripPairedDelimiter(s, '***', true, false)
+  s = stripPairedDelimiter(s, '___', true, true)
+  s = stripPairedDelimiter(s, '**', true, false)
+  s = stripPairedDelimiter(s, '__', true, true)
+  s = stripPairedDelimiter(s, '~~', false, false)
+  s = stripPairedDelimiter(s, '*', true, true)
+  s = stripPairedDelimiter(s, '_', true, true)
   s = s.replace(DANGLING_OPEN, '$1').replace(DANGLING_CLOSE, '')
 
   const segments: WikiLinkSegment[] = []

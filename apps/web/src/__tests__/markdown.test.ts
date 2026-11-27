@@ -271,6 +271,10 @@ describe('stripInlineMarkdown 行内符号清理', () => {
     expect(stripInlineMarkdown('见 https://example.com/_foo_/bar，_说明_')).toBe(
       '见 https://example.com/_foo_/bar，说明',
     )
+    expect(stripInlineMarkdown('**https://example.com/foo**')).toBe('https://example.com/foo')
+    expect(stripInlineMarkdown('~~https://example.com/foo~~')).toBe('https://example.com/foo')
+    expect(stripInlineMarkdown('_https://example.com/foo_')).toBe('https://example.com/foo')
+    expect(stripInlineMarkdown('**a**b 与 **bold** 2**10')).toBe('ab 与 bold 2**10')
     expect(stripInlineMarkdown('[Foo](https://en.wikipedia.org/wiki/Foo_(bar))')).toBe('Foo')
     expect(
       stripInlineMarkdown('[![build](https://example.com/b.svg)](https://example.com/ci)'),
@@ -280,8 +284,13 @@ describe('stripInlineMarkdown 行内符号清理', () => {
     )
   })
 
-  it('对大量未闭合括号或反引号保持线性时间，不发生回溯卡顿', () => {
-    const cases = ['['.repeat(50_000) + 'a', '[a]('.repeat(20_000) + 'x', '`'.repeat(50_000)]
+  it('对大量未闭合括号、空图片或反引号保持线性时间，不发生回溯卡顿', () => {
+    const cases = [
+      '['.repeat(50_000) + 'a',
+      '[a]('.repeat(20_000) + 'x',
+      '['.repeat(20_000) + '![](u)'.repeat(20_000) + 'a' + ']()'.repeat(20_000),
+      '`'.repeat(50_000),
+    ]
     for (const input of cases) {
       const started = performance.now()
       const out = stripInlineMarkdown(input)
