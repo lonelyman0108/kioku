@@ -22,6 +22,7 @@ import { icons } from '../icons'
 import {
   bootModeLabels,
   entryFieldLabel,
+  eventTypeIcons,
   eventTypeLabels,
   formatActorLabel,
   resolveActorDisplay,
@@ -38,11 +39,11 @@ import ReadFailureNote from './ui/ReadFailureNote.vue'
 type SourceFilter = 'all' | ActorFilterGroup
 type InspectTab = 'diff' | 'snapshot'
 
-const SOURCE_FILTER_OPTIONS: { value: SourceFilter; label: string }[] = [
-  { value: 'all', label: '全部' },
-  { value: 'self', label: '本人' },
-  { value: 'agent', label: 'Agent' },
-  { value: 'dream', label: '整理' },
+const SOURCE_FILTER_OPTIONS: { value: SourceFilter; label: string; icon: string }[] = [
+  { value: 'all', label: '全部', icon: icons.layers },
+  { value: 'self', label: '本人', icon: icons.account },
+  { value: 'agent', label: 'Agent', icon: icons.bot },
+  { value: 'dream', label: '整理', icon: icons.sparkles },
 ]
 
 const INSPECT_TAB_OPTIONS: { value: InspectTab; label: string; icon: string }[] = [
@@ -454,6 +455,7 @@ async function confirmRestore() {
               size="xs"
               color="neutral"
               variant="outline"
+              :icon="icons.restore"
               @click="((searchInput = ''), (sourceFilter = 'all'))"
             >
               重置筛选
@@ -476,6 +478,11 @@ async function confirmRestore() {
               <button type="button" class="timeline-select" @click="selectItem(item)">
                 <div class="tl-top">
                   <span class="tl-badges">
+                    <UIcon
+                      :name="eventTypeIcons[item.eventType]"
+                      class="tl-event-icon"
+                      aria-hidden="true"
+                    />
                     <span v-if="itemVersion(item) !== null" class="tl-ver font-mono">
                       版本 {{ itemVersion(item) }}
                     </span>
@@ -533,7 +540,11 @@ async function confirmRestore() {
                 "
                 @click.stop="togglePinBase(item)"
               >
-                <UIcon :name="icons.compare" class="tl-pin-icon" aria-hidden="true" />
+                <UIcon
+                  :name="customBaseItem?.id === item.id ? icons.cancel : icons.compare"
+                  class="tl-pin-icon"
+                  aria-hidden="true"
+                />
                 <span>{{ customBaseItem?.id === item.id ? '取消基准' : '设为基准' }}</span>
               </button>
             </li>
@@ -576,7 +587,10 @@ async function confirmRestore() {
                     v-if="activeItem.snapshot && compareBaseOptions.length > 1"
                     class="compare-picker"
                   >
-                    <span class="compare-picker-label">对比基准</span>
+                    <span class="compare-picker-label">
+                      <UIcon :name="icons.compare" class="compare-picker-icon" aria-hidden="true" />
+                      <span>对比基准</span>
+                    </span>
                     <USelect
                       :model-value="selectedBaseValue"
                       :items="compareBaseOptions"
@@ -623,9 +637,22 @@ async function confirmRestore() {
                   <span v-if="itemVersion(activeItem) !== null" class="font-mono font-medium">
                     版本 {{ itemVersion(activeItem) }}
                   </span>
-                  <span v-else class="tl-archive-tag">历史归档</span>
-                  <span v-if="activeItem.eventType !== 'archive_note'">
-                    {{ eventTypeLabels[activeItem.eventType] }}
+                  <span v-else class="tl-archive-tag">
+                    <UIcon
+                      v-if="activeItem.eventType === 'archive_note'"
+                      :name="eventTypeIcons[activeItem.eventType]"
+                      class="commit-event-icon"
+                      aria-hidden="true"
+                    />
+                    <span>历史归档</span>
+                  </span>
+                  <span v-if="activeItem.eventType !== 'archive_note'" class="commit-event-type">
+                    <UIcon
+                      :name="eventTypeIcons[activeItem.eventType]"
+                      class="commit-event-icon"
+                      aria-hidden="true"
+                    />
+                    <span>{{ eventTypeLabels[activeItem.eventType] }}</span>
                   </span>
                   <span>·</span>
                   <span>{{ formatActorLabel(activeItem.actor, activeItem.actorMeta) }}</span>
@@ -744,7 +771,8 @@ async function confirmRestore() {
               <template v-else-if="inspectTab === 'diff' && inspectorAfter !== null">
                 <div v-if="inspectorFieldChanges.length" class="attr-card">
                   <div class="attr-card-head">
-                    属性变动（{{ inspectorFieldChanges.length }} 项）
+                    <UIcon :name="icons.sliders" class="attr-card-icon" aria-hidden="true" />
+                    <span>属性变动（{{ inspectorFieldChanges.length }} 项）</span>
                   </div>
                   <table class="attr-table">
                     <thead>
@@ -795,7 +823,10 @@ async function confirmRestore() {
                   </span>
                 </div>
                 <div v-if="inspectorSnapshot.summary?.trim()" class="snapshot-summary">
-                  <span class="snapshot-summary-label">现行概要</span>
+                  <span class="snapshot-summary-label">
+                    <UIcon :name="icons.summary" class="snapshot-summary-icon" aria-hidden="true" />
+                    <span>现行概要</span>
+                  </span>
                   <p>{{ inspectorSnapshot.summary }}</p>
                 </div>
                 <div class="snapshot-body">
@@ -825,6 +856,7 @@ async function confirmRestore() {
       '此次恢复会记为一次新版本，现有内容仍保留在历史记录中。',
     ]"
     action="确认恢复"
+    :action-icon="icons.restore"
     :busy="restoring"
     :error="restoreError"
     @confirm="confirmRestore"
@@ -923,11 +955,21 @@ async function confirmRestore() {
   align-items: center;
   gap: 5px;
 }
+.tl-event-icon {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
+  color: var(--ui-text-muted);
+}
 .tl-ver {
   font-weight: 600;
   color: var(--ui-text-highlighted);
 }
 .tl-archive-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   padding: 0 5px;
   border: 1px solid var(--ui-border-accented);
   font-size: 12px;
@@ -1039,9 +1081,18 @@ async function confirmRestore() {
   gap: 6px;
 }
 .compare-picker-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-size: 12px;
   color: var(--ui-text-muted);
   white-space: nowrap;
+}
+.compare-picker-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
 }
 .compare-select {
   min-width: 13rem;
@@ -1101,6 +1152,17 @@ async function confirmRestore() {
   font-size: 12px;
   color: var(--ui-text-muted);
 }
+.commit-event-type {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.commit-event-icon {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
+}
 .ws-toolbar {
   flex: none;
   display: flex;
@@ -1139,12 +1201,22 @@ async function confirmRestore() {
   background: var(--ui-bg-bright);
 }
 .attr-card-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   padding: 6px 12px;
   border-bottom: 1px solid var(--ui-border);
   background: var(--ui-bg-muted);
   font-size: 12px;
   font-weight: 600;
   color: var(--ui-text-toned);
+}
+.attr-card-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+  color: var(--ui-text-muted);
 }
 .attr-table {
   width: 100%;
@@ -1248,10 +1320,18 @@ async function confirmRestore() {
   overflow-wrap: anywhere;
 }
 .snapshot-summary-label {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 5px;
   margin-bottom: 2px;
   font-size: 12px;
   color: var(--ui-text-muted);
+}
+.snapshot-summary-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
 }
 .snapshot-body {
   padding: 14px 18px;

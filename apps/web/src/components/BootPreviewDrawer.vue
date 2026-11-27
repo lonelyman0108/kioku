@@ -13,9 +13,12 @@ import { api } from '../api/endpoints'
 import { useDebounced } from '../composables/useDebounced'
 import { icons } from '../icons'
 import {
+  bootBucketIcons,
   bootBucketLabels,
+  bootExcludeReasonIcons,
   bootExcludeReasonLabels,
   bootModeLabels,
+  bootOmitReasonIcons,
   bootOmitReasonLabels,
   envDisplayName,
 } from '../labels'
@@ -175,6 +178,7 @@ function resetOverrides() {
                 v-model="selectedKeyId"
                 :items="keyOptions"
                 value-key="value"
+                :icon="icons.keys"
                 size="sm"
                 class="w-full"
               />
@@ -184,6 +188,7 @@ function resetOverrides() {
               <UInput
                 v-model="projectInput"
                 size="sm"
+                :icon="icons.project"
                 placeholder="输入项目名，留空表示未在项目目录内"
                 class="w-full"
               >
@@ -251,6 +256,7 @@ function resetOverrides() {
               <UInput
                 v-model="runtimeInput"
                 size="xs"
+                :icon="icons.terminal"
                 placeholder="留空沿用所选密钥"
                 list="boot-preview-runtimes"
                 class="w-full"
@@ -263,6 +269,7 @@ function resetOverrides() {
               <UInput
                 v-model="envInput"
                 size="xs"
+                :icon="icons.env"
                 placeholder="例如 mac / linux"
                 list="boot-preview-envs"
                 class="w-full"
@@ -275,6 +282,7 @@ function resetOverrides() {
               <UInput
                 v-model="realmInput"
                 size="xs"
+                :icon="icons.realm"
                 placeholder="例如 work / personal"
                 list="boot-preview-realms"
                 class="w-full"
@@ -284,7 +292,13 @@ function resetOverrides() {
               </datalist>
             </UFormField>
             <div class="advanced-reset">
-              <UButton size="xs" color="neutral" variant="ghost" @click="resetOverrides">
+              <UButton
+                size="xs"
+                color="neutral"
+                variant="ghost"
+                :icon="icons.restore"
+                @click="resetOverrides"
+              >
                 清空覆盖
               </UButton>
             </div>
@@ -303,7 +317,10 @@ function resetOverrides() {
             <!-- 生效焦点与预算计量条 -->
             <section class="stats-strip" aria-label="启动加载预算计量">
               <div class="stat-cell">
-                <span class="stat-label">全文展开</span>
+                <span class="stat-label">
+                  <UIcon :name="icons.pin" class="stat-label-icon" aria-hidden="true" />
+                  <span>全文展开</span>
+                </span>
                 <strong class="stat-value tabular-nums">
                   {{ preview.usedFullChars.toLocaleString() }}
                   <span class="stat-cap">/ {{ preview.fullBudget.toLocaleString() }} 字</span>
@@ -318,7 +335,10 @@ function resetOverrides() {
               </div>
 
               <div class="stat-cell">
-                <span class="stat-label">全局通用占比（上限 50%）</span>
+                <span class="stat-label">
+                  <UIcon :name="icons.globe" class="stat-label-icon" aria-hidden="true" />
+                  <span>全局通用占比（上限 50%）</span>
+                </span>
                 <strong class="stat-value tabular-nums">
                   {{ preview.globalUsedChars.toLocaleString() }}
                   <span class="stat-cap">/ {{ preview.globalCapChars.toLocaleString() }} 字</span>
@@ -326,7 +346,10 @@ function resetOverrides() {
               </div>
 
               <div class="stat-cell">
-                <span class="stat-label">独立目录槽</span>
+                <span class="stat-label">
+                  <UIcon :name="icons.bookmark" class="stat-label-icon" aria-hidden="true" />
+                  <span>独立目录槽</span>
+                </span>
                 <strong class="stat-value tabular-nums">
                   {{ preview.usedCatalogChars.toLocaleString() }}
                   <span class="stat-cap">/ {{ preview.catalogBudget.toLocaleString() }} 字</span>
@@ -337,7 +360,10 @@ function resetOverrides() {
               </div>
 
               <div class="stat-cell">
-                <span class="stat-label">预计总渲染（含指南与目录）</span>
+                <span class="stat-label">
+                  <UIcon :name="icons.gauge" class="stat-label-icon" aria-hidden="true" />
+                  <span>预计总渲染（含指南与目录）</span>
+                </span>
                 <strong class="stat-value tabular-nums">
                   {{ preview.totalRenderedChars.toLocaleString() }} 字
                   <span v-if="preview.hostLimit" class="stat-cap">
@@ -355,7 +381,10 @@ function resetOverrides() {
             </section>
 
             <div class="focus-bar">
-              <span class="focus-label">生效焦点</span>
+              <span class="focus-label">
+                <UIcon :name="icons.targetExact" class="focus-label-icon" aria-hidden="true" />
+                <span>生效焦点</span>
+              </span>
               <span v-if="preview.focus.projects.length" class="focus-tag font-mono">
                 项目:{{ preview.focus.projects.join('、') }}
               </span>
@@ -384,11 +413,15 @@ function resetOverrides() {
             <!-- 1. 全文展开清单 -->
             <section class="result-section">
               <div class="section-head">
-                <h3 class="section-title">全文展开（{{ preview.expanded.length }} 条）</h3>
+                <h3 class="section-title">
+                  <UIcon :name="icons.pin" class="section-title-icon" aria-hidden="true" />
+                  <span>全文展开（{{ preview.expanded.length }} 条）</span>
+                </h3>
                 <span class="section-note">会话启动直接写入上下文正文</span>
               </div>
               <EmptyState
                 v-if="!preview.expanded.length"
+                :icon="icons.terminal"
                 title="暂无全文展开的常驻记忆"
                 description="当前终端与场景下未命中全文常驻词条。"
               />
@@ -400,7 +433,12 @@ function resetOverrides() {
                       <div class="item-sub">
                         <span class="item-id font-mono">{{ item.shortId }}</span>
                         <span class="item-badge" :class="`is-${item.bucket}`">
-                          {{ bootBucketLabels[item.bucket] }}
+                          <UIcon
+                            :name="bootBucketIcons[item.bucket]"
+                            class="item-badge-icon"
+                            aria-hidden="true"
+                          />
+                          <span>{{ bootBucketLabels[item.bucket] }}</span>
                         </span>
                         <span
                           v-for="p in item.projects"
@@ -431,7 +469,10 @@ function resetOverrides() {
             <!-- 2. 目录常驻清单 -->
             <section class="result-section">
               <div class="section-head">
-                <h3 class="section-title">目录常驻（{{ preview.indexed.length }} 条）</h3>
+                <h3 class="section-title">
+                  <UIcon :name="icons.bookmark" class="section-title-icon" aria-hidden="true" />
+                  <span>目录常驻（{{ preview.indexed.length }} 条）</span>
+                </h3>
                 <span class="section-note">仅占摘要目录槽，按需读取全文</span>
               </div>
               <p v-if="!preview.indexed.length" class="empty-inline">
@@ -445,7 +486,10 @@ function resetOverrides() {
                       <div class="item-sub">
                         <span class="item-id font-mono">{{ item.shortId }}</span>
                         <span v-if="item.summary" class="item-summary">{{ item.summary }}</span>
-                        <span v-else class="item-warn">缺少现行概要</span>
+                        <span v-else class="item-warn">
+                          <UIcon :name="icons.warning" class="item-warn-icon" aria-hidden="true" />
+                          <span>缺少现行概要</span>
+                        </span>
                       </div>
                     </div>
                     <span class="item-chars tabular-nums">
@@ -460,7 +504,8 @@ function resetOverrides() {
             <section v-if="preview.demoted.length" class="result-section">
               <div class="section-head">
                 <h3 class="section-title is-warn">
-                  超限降级为目录（{{ preview.demoted.length }} 条）
+                  <UIcon :name="icons.warning" class="section-title-icon" aria-hidden="true" />
+                  <span>超限降级为目录（{{ preview.demoted.length }} 条）</span>
                 </h3>
                 <span class="section-note">
                   单条超 2,400 字或超出预算与全局 50%
@@ -475,7 +520,12 @@ function resetOverrides() {
                       <div class="item-sub">
                         <span class="item-id font-mono">{{ item.shortId }}</span>
                         <span class="item-badge is-warn">
-                          {{ bootOmitReasonLabels[item.reason] }}
+                          <UIcon
+                            :name="bootOmitReasonIcons[item.reason]"
+                            class="item-badge-icon"
+                            aria-hidden="true"
+                          />
+                          <span>{{ bootOmitReasonLabels[item.reason] }}</span>
                         </span>
                         <span v-if="item.summary" class="item-summary">{{ item.summary }}</span>
                       </div>
@@ -490,10 +540,15 @@ function resetOverrides() {
 
             <!-- 4. 本次未加载（被排除）清单 -->
             <section class="result-section">
-              <details :open="preview.excluded.length > 0 && preview.excluded.length <= 8">
+              <details
+                class="excluded-details"
+                :open="preview.excluded.length > 0 && preview.excluded.length <= 8"
+              >
                 <summary class="excluded-summary">
                   <span class="section-title">
-                    本次未加载的常驻记忆（{{ preview.excluded.length }} 条）
+                    <UIcon :name="icons.chevronRight" class="excluded-chevron" aria-hidden="true" />
+                    <UIcon :name="icons.hide" class="section-title-icon" aria-hidden="true" />
+                    <span>本次未加载的常驻记忆（{{ preview.excluded.length }} 条）</span>
                   </span>
                   <span class="section-note">已被场景隔离、场域权限或有效期排除</span>
                 </summary>
@@ -511,7 +566,12 @@ function resetOverrides() {
                             class="item-badge"
                             :class="item.reason === 'realm_forbidden' ? 'is-error' : ''"
                           >
-                            {{ bootExcludeReasonLabels[item.reason] }}
+                            <UIcon
+                              :name="bootExcludeReasonIcons[item.reason]"
+                              class="item-badge-icon"
+                              aria-hidden="true"
+                            />
+                            <span>{{ bootExcludeReasonLabels[item.reason] }}</span>
                           </span>
                           <span class="item-summary">{{ item.detail }}</span>
                         </div>
@@ -631,8 +691,17 @@ function resetOverrides() {
   border-right: 0;
 }
 .stat-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-size: 12px;
   color: var(--ui-text-muted);
+}
+.stat-label-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
 }
 .stat-value {
   font-size: 15px;
@@ -672,9 +741,18 @@ function resetOverrides() {
   background: var(--ui-bg-muted);
 }
 .focus-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-size: 12px;
   font-weight: 500;
   color: var(--ui-text-muted);
+}
+.focus-label-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
 }
 .focus-tag {
   padding: 0 6px;
@@ -691,19 +769,32 @@ function resetOverrides() {
 .section-head {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 6px 12px;
   padding-bottom: 6px;
   border-bottom: 1px solid var(--ui-border-accented);
 }
 .section-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 14px;
   font-weight: 600;
   color: var(--ui-text-highlighted);
 }
+.section-title-icon {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--ui-text-muted);
+}
 .section-title.is-warn {
   color: var(--ui-warning);
+}
+.section-title.is-warn .section-title-icon {
+  color: currentColor;
 }
 .section-note {
   font-size: 12px;
@@ -712,12 +803,27 @@ function resetOverrides() {
 .excluded-summary {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 6px 12px;
   padding-bottom: 6px;
   border-bottom: 1px solid var(--ui-border);
+  list-style: none;
   cursor: pointer;
+}
+.excluded-summary::-webkit-details-marker {
+  display: none;
+}
+.excluded-chevron {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--ui-text-muted);
+  transition: transform 0.12s ease;
+}
+.excluded-details[open] .excluded-chevron {
+  transform: rotate(90deg);
 }
 .empty-inline {
   font-size: 13px;
@@ -775,11 +881,21 @@ function resetOverrides() {
   color: var(--ui-text-dimmed);
 }
 .item-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   padding: 0 5px;
   border: 1px solid var(--ui-border-accented);
   background: var(--ui-bg-muted);
   color: var(--ui-text-toned);
   white-space: nowrap;
+}
+.item-badge-icon,
+.item-warn-icon {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
 }
 .item-badge.is-exact {
   border-color: var(--ui-rule);
@@ -808,6 +924,9 @@ function resetOverrides() {
   max-width: min(34rem, 100%);
 }
 .item-warn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   color: var(--ui-warning);
 }
 .item-chars,

@@ -7,6 +7,7 @@ import { api } from '../api/endpoints'
 import EntryFrame from '../components/ui/EntryFrame.vue'
 import SectionHeading from '../components/ui/SectionHeading.vue'
 import { ME_KEY } from '../composables/useSession'
+import { icons } from '../icons'
 import { queryClient } from '../query'
 
 const router = useRouter()
@@ -41,7 +42,7 @@ async function submit() {
 
 <template>
   <EntryFrame>
-    <SectionHeading title="登录" :level="1" />
+    <SectionHeading title="登录" :level="1" :icon="icons.lock" />
     <form class="mt-4 space-y-4" @submit.prevent="submit">
       <UFormField label="用户名">
         <UInput
@@ -62,8 +63,17 @@ async function submit() {
           required
         />
       </UFormField>
-      <p v-if="error" class="text-error" role="alert">{{ error }}</p>
-      <UButton type="submit" size="lg" block :loading="submitting">登录</UButton>
+      <p v-if="error" class="flex items-start gap-1.5 text-error" role="alert">
+        <UIcon
+          :name="icons.error"
+          class="mt-[3px] inline-block size-4 shrink-0"
+          aria-hidden="true"
+        />
+        <span>{{ error }}</span>
+      </p>
+      <UButton type="submit" size="lg" block :icon="icons.logIn" :loading="submitting"
+        >登录</UButton
+      >
     </form>
   </EntryFrame>
 </template>

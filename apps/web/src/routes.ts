@@ -62,6 +62,14 @@ export const captureRoute = (draft?: string, baseQuery?: LocationQuery) => {
   return { name: 'memories' as const, query }
 }
 
+export const createEntryRoute = (baseQuery?: LocationQuery) => {
+  const query: LocationQueryRaw = baseQuery ? { ...baseQuery } : {}
+  query.create = '1'
+  delete query.capture
+  delete query.draft
+  return { name: 'memories' as const, query }
+}
+
 export const credentialRoute = (slug: string) => ({
   name: 'credentials' as const,
   query: { id: slug },

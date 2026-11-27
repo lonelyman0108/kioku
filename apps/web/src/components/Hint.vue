@@ -12,7 +12,7 @@ withDefaults(defineProps<{ label?: string }>(), { label: '说明' })
       class="inline-flex size-4 cursor-pointer items-center justify-center align-[-0.15em] text-muted hover:text-default"
       :aria-label="label"
     >
-      <UIcon :name="icons.info" class="size-3.5" />
+      <UIcon :name="icons.info" class="inline-block size-3.5 shrink-0" aria-hidden="true" />
     </button>
     <template #content>
       <div class="max-w-xs p-3 text-sm text-default"><slot /></div>

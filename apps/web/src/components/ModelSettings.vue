@@ -558,24 +558,39 @@ async function rebuildEmbeddings() {
           </UButton>
           <span
             v-if="testResults.embedding"
-            class="text-xs"
+            class="test-result"
             :class="testResults.embedding.ok ? 'text-success' : 'text-error'"
           >
-            {{
-              testResults.embedding.ok
-                ? `连接正常（${testResults.embedding.latencyMs} ms${testResults.embedding.dimensions ? `，${testResults.embedding.dimensions} 维` : ''}）`
-                : `连接失败：${testResults.embedding.error ?? '未知原因'}`
-            }}
+            <UIcon
+              :name="testResults.embedding.ok ? icons.checkCircle : icons.error"
+              class="test-result-icon"
+              aria-hidden="true"
+            />
+            <span>
+              {{
+                testResults.embedding.ok
+                  ? `连接正常（${testResults.embedding.latencyMs} ms${testResults.embedding.dimensions ? `，${testResults.embedding.dimensions} 维` : ''}）`
+                  : `连接失败：${testResults.embedding.error ?? '未知原因'}`
+              }}
+            </span>
           </span>
         </div>
 
         <div v-if="coverage" class="coverage-box">
           <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
-            <span>
-              向量索引覆盖：<strong class="tabular-nums">{{ coverage.embedded }}</strong> /
-              <span class="tabular-nums">{{ coverage.total }}</span>
-              <template v-if="coveragePercent !== null">（{{ coveragePercent }}%）</template>
-              <template v-if="coverage.model"> · {{ coverage.model }}</template>
+            <span class="coverage-label">
+              <UIcon
+                :name="coveragePercent === 100 ? icons.checkCircle : icons.layers"
+                class="coverage-icon"
+                :class="{ 'is-complete': coveragePercent === 100 }"
+                aria-hidden="true"
+              />
+              <span>
+                向量索引覆盖：<strong class="tabular-nums">{{ coverage.embedded }}</strong> /
+                <span class="tabular-nums">{{ coverage.total }}</span>
+                <template v-if="coveragePercent !== null">（{{ coveragePercent }}%）</template>
+                <template v-if="coverage.model"> · {{ coverage.model }}</template>
+              </span>
             </span>
             <UButton
               type="button"
@@ -719,7 +734,10 @@ async function rebuildEmbeddings() {
               <div v-if="taskOverridesOpen" class="override-box">
                 <div class="override-item">
                   <div class="override-meta">
-                    <span class="override-title">快速任务</span>
+                    <span class="override-title">
+                      <UIcon :name="icons.trigger" class="override-title-icon" aria-hidden="true" />
+                      <span>快速任务</span>
+                    </span>
                     <span class="override-desc">随手记归并与会话摘要，建议关闭或设低以防超时</span>
                   </div>
                   <USelect
@@ -733,7 +751,14 @@ async function rebuildEmbeddings() {
                 </div>
                 <div class="override-item">
                   <div class="override-meta">
-                    <span class="override-title">整理任务</span>
+                    <span class="override-title">
+                      <UIcon
+                        :name="icons.sparkles"
+                        class="override-title-icon"
+                        aria-hidden="true"
+                      />
+                      <span>整理任务</span>
+                    </span>
                     <span class="override-desc"
                       >增量整理、查重/关联与规范整理，可按需提高推理深度</span
                     >
@@ -770,14 +795,21 @@ async function rebuildEmbeddings() {
           </UButton>
           <span
             v-if="testResults.chat_llm"
-            class="text-xs"
+            class="test-result"
             :class="testResults.chat_llm.ok ? 'text-success' : 'text-error'"
           >
-            {{
-              testResults.chat_llm.ok
-                ? `连接正常（${testResults.chat_llm.latencyMs} ms${formatChatProbeSuffix(testResults.chat_llm)}）`
-                : `连接失败：${testResults.chat_llm.error ?? '未知原因'}${formatChatProbeSuffix(testResults.chat_llm)}`
-            }}
+            <UIcon
+              :name="testResults.chat_llm.ok ? icons.checkCircle : icons.error"
+              class="test-result-icon"
+              aria-hidden="true"
+            />
+            <span>
+              {{
+                testResults.chat_llm.ok
+                  ? `连接正常（${testResults.chat_llm.latencyMs} ms${formatChatProbeSuffix(testResults.chat_llm)}）`
+                  : `连接失败：${testResults.chat_llm.error ?? '未知原因'}${formatChatProbeSuffix(testResults.chat_llm)}`
+              }}
+            </span>
           </span>
         </div>
       </section>
@@ -841,6 +873,19 @@ async function rebuildEmbeddings() {
 </template>
 
 <style scoped>
+.test-result {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 5px;
+  font-size: 12px;
+}
+.test-result-icon {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin-top: 2px;
+}
 .coverage-box {
   display: flex;
   flex-direction: column;
@@ -848,6 +893,21 @@ async function rebuildEmbeddings() {
   padding: 10px 12px;
   border: 1px solid var(--ui-border);
   background: var(--ui-bg-muted);
+}
+.coverage-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.coverage-icon {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--ui-text-muted);
+}
+.coverage-icon.is-complete {
+  color: var(--ui-success);
 }
 .meter {
   position: relative;
@@ -875,6 +935,7 @@ async function rebuildEmbeddings() {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  min-height: 30px;
   padding: 4px 9px;
   border: 1px solid var(--ui-border-accented);
   background: var(--ui-bg-muted);
@@ -972,9 +1033,19 @@ async function rebuildEmbeddings() {
   flex: 1 1 14rem;
 }
 .override-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 13px;
   font-weight: 500;
   color: var(--ui-text-highlighted);
+}
+.override-title-icon {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--ui-text-toned);
 }
 .override-desc {
   font-size: 12px;

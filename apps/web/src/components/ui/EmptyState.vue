@@ -1,14 +1,27 @@
 <script setup lang="ts">
 import KiokuMark from '../KiokuMark.vue'
 
-// 列表读到空时的样子：淡色的品牌标记、名词短语的标题、可选的一句说明与下一步的操作。
+// 列表读到空时的样子：图标或淡色的品牌标记、名词短语的标题、可选的一句说明与下一步的操作。
 // 只在真的读到空时用，读取失败照常是 ReadFailureNote
-defineProps<{ title: string; description?: string | null }>()
+withDefaults(
+  defineProps<{
+    title: string
+    description?: string | null
+    icon?: string
+    tone?: 'neutral' | 'success'
+  }>(),
+  {
+    description: undefined,
+    icon: undefined,
+    tone: 'neutral',
+  },
+)
 </script>
 
 <template>
   <div class="empty-state">
-    <KiokuMark class="empty-mark" :height="22" aria-hidden="true" />
+    <UIcon v-if="icon" :name="icon" class="empty-icon" :class="tone" aria-hidden="true" />
+    <KiokuMark v-else class="empty-mark" :height="22" aria-hidden="true" />
     <p class="empty-title">
       {{ title }}
       <slot name="hint" />
@@ -27,6 +40,16 @@ defineProps<{ title: string; description?: string | null }>()
   gap: 8px;
   padding: 32px 16px;
   text-align: center;
+}
+.empty-icon {
+  display: inline-block;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  color: var(--ui-text-muted);
+}
+.empty-icon.success {
+  color: var(--ui-success);
 }
 .empty-mark {
   color: var(--ui-border-accented);

@@ -23,6 +23,7 @@ import { computed, reactive, ref, watch } from 'vue'
 import { icons } from '../icons'
 import {
   bootModeDescriptions,
+  bootModeIcons,
   bootModeLabels,
   dreamKindIcons,
   dreamKindLabels,
@@ -105,7 +106,11 @@ const isAdjustBootMode = computed(() => props.suggestion.kind === 'adjust_boot_m
 const isMergeDuplicates = computed(() => props.suggestion.kind === 'merge_duplicates')
 const isMarkStale = computed(() => props.suggestion.kind === 'mark_stale')
 const isDistillEpisode = computed(() => props.suggestion.kind === 'distill_episode')
-const bootModeChoices = BOOT_MODES.map((value) => ({ value, label: bootModeLabels[value] }))
+const bootModeChoices = BOOT_MODES.map((value) => ({
+  value,
+  label: bootModeLabels[value],
+  icon: bootModeIcons[value],
+}))
 
 const selectedProposedLinks = computed(() =>
   (props.suggestion.proposedLinks ?? []).filter((l) =>
@@ -371,6 +376,10 @@ const primaryApplyLabel = computed(() => {
   return isInspector.value ? '应用改动' : '应用'
 })
 
+const primaryApplyIcon = computed(() =>
+  isMarkStale.value ? icons.remove : isMergeDuplicates.value ? icons.merge : icons.check,
+)
+
 const deltaSectionTitle = computed(() => {
   if (editing.value) return '编辑后应用'
   if (isAdjustBootMode.value) return '启动加载变更'
@@ -487,9 +496,21 @@ function applyEdited() {
       <div v-if="editing" class="edit-box">
         <div class="grid gap-3 sm:grid-cols-2">
           <UFormField label="标题">
+            <template #label>
+              <span class="field-label">
+                <UIcon :name="icons.heading" class="field-label-icon" aria-hidden="true" />
+                <span>标题</span>
+              </span>
+            </template>
             <UInput v-model="draft.title" :maxlength="ENTRY_TITLE_MAX" class="w-full" />
           </UFormField>
           <UFormField label="主题">
+            <template #label>
+              <span class="field-label">
+                <UIcon :name="icons.topic" class="field-label-icon" aria-hidden="true" />
+                <span>主题</span>
+              </span>
+            </template>
             <UInputTags
               v-model="draft.topics"
               add-on-blur
@@ -499,6 +520,12 @@ function applyEdited() {
           </UFormField>
         </div>
         <UFormField label="现行概要（可选）">
+          <template #label>
+            <span class="field-label">
+              <UIcon :name="icons.summary" class="field-label-icon" aria-hidden="true" />
+              <span>现行概要（可选）</span>
+            </span>
+          </template>
           <UTextarea
             v-model="draft.summary"
             :rows="2"
@@ -514,6 +541,12 @@ function applyEdited() {
           }}，建议改存凭据并用占位符引用。
         </NoteLine>
         <UFormField label="正文">
+          <template #label>
+            <span class="field-label">
+              <UIcon :name="icons.file" class="field-label-icon" aria-hidden="true" />
+              <span>正文</span>
+            </span>
+          </template>
           <UTextarea v-model="draft.content" :rows="8" autoresize class="w-full font-mono" />
         </UFormField>
         <div class="grid gap-3 sm:grid-cols-2">
@@ -529,6 +562,12 @@ function applyEdited() {
         </UFormField>
         <div class="flex flex-wrap items-center gap-6">
           <UFormField label="启动加载方式">
+            <template #label>
+              <span class="field-label">
+                <UIcon :name="icons.pin" class="field-label-icon" aria-hidden="true" />
+                <span>启动加载方式</span>
+              </span>
+            </template>
             <SegmentedChoice
               v-model="draft.bootMode"
               :items="bootModeChoices"
@@ -572,7 +611,14 @@ function applyEdited() {
         <div class="boot-transition">
           <div class="boot-state-col">
             <span class="boot-state-kicker">变更前</span>
-            <span class="boot-state-name">{{ bootModeLabels[currentBootMode] }}</span>
+            <span class="boot-state-name">
+              <UIcon
+                :name="bootModeIcons[currentBootMode]"
+                class="boot-state-icon"
+                aria-hidden="true"
+              />
+              <span>{{ bootModeLabels[currentBootMode] }}</span>
+            </span>
             <span class="boot-state-detail tabular-nums">
               {{
                 currentBootMode === 'full'
@@ -586,7 +632,14 @@ function applyEdited() {
           </div>
           <div class="boot-state-col is-target">
             <span class="boot-state-kicker">变更后</span>
-            <span class="boot-state-name">{{ bootModeLabels[suggestion.proposedBootMode] }}</span>
+            <span class="boot-state-name">
+              <UIcon
+                :name="bootModeIcons[suggestion.proposedBootMode]"
+                class="boot-state-icon"
+                aria-hidden="true"
+              />
+              <span>{{ bootModeLabels[suggestion.proposedBootMode] }}</span>
+            </span>
             <span class="boot-state-detail">
               {{ bootModeDescriptions[suggestion.proposedBootMode] }}
             </span>
@@ -594,7 +647,10 @@ function applyEdited() {
         </div>
 
         <div v-if="hasSummaryChange || suggestion.proposedSummary?.trim()" class="summary-change">
-          <span class="sub-eyebrow">附带现行概要变更</span>
+          <span class="sub-eyebrow">
+            <UIcon :name="icons.summary" class="sub-eyebrow-icon" aria-hidden="true" />
+            <span>附带现行概要变更</span>
+          </span>
           <div class="summary-diff-grid">
             <div class="summary-row">
               <span class="summary-tag">原概要</span>
@@ -608,7 +664,10 @@ function applyEdited() {
         </div>
 
         <div v-if="suggestion.proposedBootMode === 'index'" class="summary-change">
-          <span class="sub-eyebrow">启动目录条目预览</span>
+          <span class="sub-eyebrow">
+            <UIcon :name="icons.bookmark" class="sub-eyebrow-icon" aria-hidden="true" />
+            <span>启动目录条目预览</span>
+          </span>
           <div class="index-preview-line tabular-nums">
             <span class="font-mono text-xs text-muted">{{ baseEntry.shortId }}</span>
             <strong class="index-preview-title">{{ baseEntry.title }}</strong>
@@ -652,7 +711,10 @@ function applyEdited() {
         </ul>
 
         <div class="link-write-preview">
-          <span class="sub-eyebrow">写入预览</span>
+          <span class="sub-eyebrow">
+            <UIcon :name="icons.code" class="sub-eyebrow-icon" aria-hidden="true" />
+            <span>写入预览</span>
+          </span>
           <pre v-if="selectedProposedLinks.length" class="link-preview-code">{{
             selectedProposedLinks
               .map((l) => {
@@ -673,7 +735,7 @@ function applyEdited() {
           <span class="strip-role">保留目标</span>
           <span class="strip-new">{{ baseEntry.title }}</span>
           <span class="font-mono text-xs text-muted">{{ baseEntry.shortId }}</span>
-          <span class="strip-arrow" aria-hidden="true">←</span>
+          <UIcon :name="icons.back" class="compare-arrow" aria-hidden="true" />
           <span class="strip-role">并入来源</span>
           <template v-for="(src, idx) in mergedSourceEntries" :key="src.id">
             <span v-if="idx > 0" class="text-muted">、</span>
@@ -690,7 +752,10 @@ function applyEdited() {
         </div>
 
         <div v-if="suggestion.proposedSummary?.trim()" class="summary-preview">
-          <span class="summary-preview-label">建议现行概要</span>
+          <span class="summary-preview-label">
+            <UIcon :name="icons.summary" class="summary-preview-icon" aria-hidden="true" />
+            <span>建议现行概要</span>
+          </span>
           <p class="summary-preview-text">{{ suggestion.proposedSummary }}</p>
         </div>
 
@@ -711,7 +776,10 @@ function applyEdited() {
           <span class="strip-new">{{ suggestion.proposedTitle }}</span>
         </div>
         <div v-if="suggestion.proposedSummary?.trim()" class="summary-preview">
-          <span class="summary-preview-label">建议现行概要</span>
+          <span class="summary-preview-label">
+            <UIcon :name="icons.summary" class="summary-preview-icon" aria-hidden="true" />
+            <span>建议现行概要</span>
+          </span>
           <p class="summary-preview-text">{{ suggestion.proposedSummary }}</p>
         </div>
         <pre v-if="suggestion.proposedContent" class="preview-box">{{
@@ -722,12 +790,20 @@ function applyEdited() {
       <!-- 标记过时记忆 -->
       <template v-else-if="isMarkStale">
         <div v-if="baseEntry" class="structure-strip tabular-nums">
-          <span class="strip-role">待移入回收站</span>
+          <span class="strip-role">
+            <UIcon :name="icons.remove" class="strip-role-icon is-danger" aria-hidden="true" />
+            <span>待移入回收站</span>
+          </span>
           <span class="strip-new">{{ baseEntry.title }}</span>
           <span class="font-mono text-xs text-muted">{{ baseEntry.shortId }}</span>
           <span class="text-xs text-muted">{{ baseEntry.content.length.toLocaleString() }} 字</span>
           <span v-if="baseEntry.isPinned" class="keep-tag">
-            {{ bootModeLabels[effectiveBootMode(baseEntry)] }}
+            <UIcon
+              :name="bootModeIcons[effectiveBootMode(baseEntry)]"
+              class="keep-tag-icon"
+              aria-hidden="true"
+            />
+            <span>{{ bootModeLabels[effectiveBootMode(baseEntry)] }}</span>
           </span>
         </div>
         <pre v-if="baseEntry?.content" class="preview-box">{{ baseEntry.content }}</pre>
@@ -736,7 +812,10 @@ function applyEdited() {
       <!-- 规范与精简 / 更新记忆内容 -->
       <template v-else>
         <div v-if="showPartialChecks" class="partial-row" role="group" aria-label="分项应用选择">
-          <span class="partial-label">分项应用</span>
+          <span class="partial-label">
+            <UIcon :name="icons.listChecks" class="partial-label-icon" aria-hidden="true" />
+            <span>分项应用</span>
+          </span>
           <label v-if="hasTitleChange" class="part-check">
             <input v-model="parts.title" type="checkbox" class="square-check" :disabled="busy" />
             <span>规范标题</span>
@@ -762,7 +841,10 @@ function applyEdited() {
           v-if="suggestion.proposedSummary?.trim() && (!isTidy || parts.summary)"
           class="summary-preview"
         >
-          <span class="summary-preview-label">建议现行概要</span>
+          <span class="summary-preview-label">
+            <UIcon :name="icons.summary" class="summary-preview-icon" aria-hidden="true" />
+            <span>建议现行概要</span>
+          </span>
           <p class="summary-preview-text">{{ suggestion.proposedSummary }}</p>
         </div>
 
@@ -785,7 +867,9 @@ function applyEdited() {
         class="archived-notes"
       >
         <summary class="archived-summary">
-          将写入版本历史的归档说明（{{ suggestion.archivedNotes!.length }} 条）
+          <UIcon :name="icons.chevronRight" class="archived-chevron" aria-hidden="true" />
+          <UIcon :name="icons.history" class="archived-icon" aria-hidden="true" />
+          <span>将写入版本历史的归档说明（{{ suggestion.archivedNotes!.length }} 条）</span>
         </summary>
         <ul class="archived-list">
           <li v-for="(item, idx) in suggestion.archivedNotes" :key="idx">
@@ -821,9 +905,22 @@ function applyEdited() {
             <div class="involved-meta">
               <span class="font-mono text-xs text-muted">{{ entry.shortId }}</span>
               <span class="text-xs text-muted">{{ entryKindLabels[entry.kind] }}</span>
-              <span v-if="entry.isPinned" class="keep-tag">常驻</span>
-              <span v-if="entry.id === suggestion.keepId" class="keep-tag">保留目标</span>
-              <span v-else-if="isMergeDuplicates" class="keep-tag">待并入</span>
+              <span v-if="entry.isPinned" class="keep-tag">
+                <UIcon
+                  :name="bootModeIcons[effectiveBootMode(entry)]"
+                  class="keep-tag-icon"
+                  aria-hidden="true"
+                />
+                <span>常驻</span>
+              </span>
+              <span v-if="entry.id === suggestion.keepId" class="keep-tag">
+                <UIcon :name="icons.check" class="keep-tag-icon" aria-hidden="true" />
+                <span>保留目标</span>
+              </span>
+              <span v-else-if="isMergeDuplicates" class="keep-tag">
+                <UIcon :name="icons.merge" class="keep-tag-icon" aria-hidden="true" />
+                <span>待并入</span>
+              </span>
             </div>
           </li>
         </ul>
@@ -844,7 +941,11 @@ function applyEdited() {
       <!-- 完整性护栏 / 改动影响 -->
       <div v-if="integrity || nonContentImpactNote" class="side-block">
         <h3 class="side-heading">
-          <UIcon :name="icons.shieldCheck" class="side-heading-icon" aria-hidden="true" />
+          <UIcon
+            :name="hasLostRefs || integrity?.severeShrink ? icons.shieldAlert : icons.shieldCheck"
+            class="side-heading-icon"
+            aria-hidden="true"
+          />
           <span>{{ integrity ? '完整性护栏' : '改动影响' }}</span>
         </h3>
         <div
@@ -857,7 +958,13 @@ function applyEdited() {
         >
           <span class="guard-status">
             <UIcon
-              :name="hasLostRefs || integrity.severeShrink ? icons.warning : icons.check"
+              :name="
+                hasLostRefs
+                  ? icons.shieldAlert
+                  : integrity.severeShrink
+                    ? icons.warning
+                    : icons.check
+              "
               class="guard-icon"
               aria-hidden="true"
             />
@@ -885,8 +992,12 @@ function applyEdited() {
             {{ lengthDelta.after.toLocaleString() }} 字（{{ lengthDelta.deltaText }}）
           </span>
         </div>
-        <p v-else-if="nonContentImpactNote" class="impact-note">
-          <UIcon :name="icons.check" class="impact-icon" aria-hidden="true" />
+        <p v-else-if="nonContentImpactNote" class="impact-note" :class="{ 'is-warn': isMarkStale }">
+          <UIcon
+            :name="isMarkStale ? icons.warning : icons.check"
+            class="impact-icon"
+            aria-hidden="true"
+          />
           <span>{{ nonContentImpactNote }}</span>
         </p>
       </div>
@@ -895,7 +1006,7 @@ function applyEdited() {
         <UButton
           size="sm"
           :color="isMarkStale ? 'error' : 'primary'"
-          :icon="icons.check"
+          :icon="primaryApplyIcon"
           :loading="busy"
           :disabled="disabled || !anyPartSelected"
           @click="applyDirect"
@@ -937,7 +1048,14 @@ function applyEdited() {
         </span>
         <span class="card-target-title">{{ displayTitle }}</span>
         <span v-if="baseEntry" class="font-mono text-xs text-muted">{{ baseEntry.shortId }}</span>
-        <span v-if="baseEntry?.isPinned" class="keep-tag">常驻</span>
+        <span v-if="baseEntry?.isPinned" class="keep-tag">
+          <UIcon
+            :name="bootModeIcons[effectiveBootMode(baseEntry)]"
+            class="keep-tag-icon"
+            aria-hidden="true"
+          />
+          <span>常驻</span>
+        </span>
       </div>
       <time
         class="text-xs text-muted"
@@ -953,9 +1071,21 @@ function applyEdited() {
       <div v-if="editing" class="edit-box">
         <div class="grid gap-3 sm:grid-cols-2">
           <UFormField label="标题">
+            <template #label>
+              <span class="field-label">
+                <UIcon :name="icons.heading" class="field-label-icon" aria-hidden="true" />
+                <span>标题</span>
+              </span>
+            </template>
             <UInput v-model="draft.title" :maxlength="ENTRY_TITLE_MAX" class="w-full" />
           </UFormField>
           <UFormField label="主题">
+            <template #label>
+              <span class="field-label">
+                <UIcon :name="icons.topic" class="field-label-icon" aria-hidden="true" />
+                <span>主题</span>
+              </span>
+            </template>
             <UInputTags
               v-model="draft.topics"
               add-on-blur
@@ -965,6 +1095,12 @@ function applyEdited() {
           </UFormField>
         </div>
         <UFormField label="现行概要（可选）">
+          <template #label>
+            <span class="field-label">
+              <UIcon :name="icons.summary" class="field-label-icon" aria-hidden="true" />
+              <span>现行概要（可选）</span>
+            </span>
+          </template>
           <UTextarea
             v-model="draft.summary"
             :rows="2"
@@ -980,6 +1116,12 @@ function applyEdited() {
           }}，建议改存凭据并用占位符引用。
         </NoteLine>
         <UFormField label="正文">
+          <template #label>
+            <span class="field-label">
+              <UIcon :name="icons.file" class="field-label-icon" aria-hidden="true" />
+              <span>正文</span>
+            </span>
+          </template>
           <UTextarea v-model="draft.content" :rows="8" autoresize class="w-full font-mono" />
         </UFormField>
         <div class="grid gap-3 sm:grid-cols-2">
@@ -995,6 +1137,12 @@ function applyEdited() {
         </UFormField>
         <div class="flex flex-wrap items-center gap-6">
           <UFormField label="启动加载方式">
+            <template #label>
+              <span class="field-label">
+                <UIcon :name="icons.pin" class="field-label-icon" aria-hidden="true" />
+                <span>启动加载方式</span>
+              </span>
+            </template>
             <SegmentedChoice
               v-model="draft.bootMode"
               :items="bootModeChoices"
@@ -1022,7 +1170,7 @@ function applyEdited() {
           <span class="strip-role">保留目标</span>
           <span class="strip-new">{{ baseEntry.title }}</span>
           <span class="font-mono text-xs text-muted">{{ baseEntry.shortId }}</span>
-          <span class="strip-arrow" aria-hidden="true">←</span>
+          <UIcon :name="icons.back" class="compare-arrow" aria-hidden="true" />
           <span class="strip-role">并入来源</span>
           <template v-for="(src, idx) in mergedSourceEntries" :key="src.id">
             <span v-if="idx > 0" class="text-muted">、</span>
@@ -1037,14 +1185,31 @@ function applyEdited() {
           class="title-compare"
         >
           <span class="compare-label">启动加载调整</span>
-          <span class="compare-old">{{ bootModeLabels[currentBootMode] }}</span>
+          <span class="compare-old compare-mode">
+            <UIcon
+              :name="bootModeIcons[currentBootMode]"
+              class="compare-mode-icon"
+              aria-hidden="true"
+            />
+            <span>{{ bootModeLabels[currentBootMode] }}</span>
+          </span>
           <UIcon :name="icons.inherits" class="compare-arrow" aria-hidden="true" />
-          <span class="compare-new">{{ bootModeLabels[suggestion.proposedBootMode] }}</span>
+          <span class="compare-new compare-mode">
+            <UIcon
+              :name="bootModeIcons[suggestion.proposedBootMode]"
+              class="compare-mode-icon"
+              aria-hidden="true"
+            />
+            <span>{{ bootModeLabels[suggestion.proposedBootMode] }}</span>
+          </span>
         </div>
 
         <!-- 补全双链清单 -->
         <div v-if="isLinkEntries && suggestion.proposedLinks?.length" class="card-links-wrap">
-          <span class="sub-eyebrow">建议追加的双链</span>
+          <span class="sub-eyebrow">
+            <UIcon :name="icons.links" class="sub-eyebrow-icon" aria-hidden="true" />
+            <span>建议追加的双链</span>
+          </span>
           <ul class="link-checklist">
             <li
               v-for="link in suggestion.proposedLinks"
@@ -1082,7 +1247,10 @@ function applyEdited() {
 
         <!-- 规范与精简分项勾选 -->
         <div v-if="showPartialChecks" class="partial-row" role="group" aria-label="分项应用选择">
-          <span class="partial-label">分项应用</span>
+          <span class="partial-label">
+            <UIcon :name="icons.listChecks" class="partial-label-icon" aria-hidden="true" />
+            <span>分项应用</span>
+          </span>
           <label v-if="hasTitleChange" class="part-check">
             <input v-model="parts.title" type="checkbox" class="square-check" :disabled="busy" />
             <span>规范标题</span>
@@ -1110,7 +1278,10 @@ function applyEdited() {
           v-if="suggestion.proposedSummary?.trim() && (!isTidy || parts.summary)"
           class="summary-preview"
         >
-          <span class="summary-preview-label">建议现行概要</span>
+          <span class="summary-preview-label">
+            <UIcon :name="icons.summary" class="summary-preview-icon" aria-hidden="true" />
+            <span>建议现行概要</span>
+          </span>
           <p class="summary-preview-text">{{ suggestion.proposedSummary }}</p>
         </div>
 
@@ -1136,7 +1307,9 @@ function applyEdited() {
         class="archived-notes"
       >
         <summary class="archived-summary">
-          将写入版本历史的归档说明（{{ suggestion.archivedNotes!.length }} 条）
+          <UIcon :name="icons.chevronRight" class="archived-chevron" aria-hidden="true" />
+          <UIcon :name="icons.history" class="archived-icon" aria-hidden="true" />
+          <span>将写入版本历史的归档说明（{{ suggestion.archivedNotes!.length }} 条）</span>
         </summary>
         <ul class="archived-list">
           <li v-for="(item, idx) in suggestion.archivedNotes" :key="idx">
@@ -1151,11 +1324,18 @@ function applyEdited() {
 
     <!-- 弱化整理的 AI 理由行 -->
     <p class="card-reason">
-      <span class="card-reason-prefix">整理依据：</span>{{ suggestion.reason }}
+      <span class="card-reason-prefix">
+        <UIcon :name="icons.lightbulb" class="card-reason-icon" aria-hidden="true" />
+        <span>整理依据：</span>
+      </span>
+      <span>{{ suggestion.reason }}</span>
     </p>
 
     <div v-if="suggestion.entries.length > 1" class="card-affected">
-      <span class="sub-eyebrow">涉及记忆</span>
+      <span class="sub-eyebrow">
+        <UIcon :name="icons.file" class="sub-eyebrow-icon" aria-hidden="true" />
+        <span>涉及记忆</span>
+      </span>
       <ul class="card-affected-list">
         <li v-for="entry in suggestion.entries" :key="entry.id">
           <RouterLink :to="entryRoute(entry.shortId)" class="text-primary">
@@ -1163,8 +1343,22 @@ function applyEdited() {
           </RouterLink>
           <span class="font-mono text-xs text-muted">{{ entry.shortId }}</span>
           <span class="text-xs text-muted">{{ entryKindLabels[entry.kind] }}</span>
-          <span v-if="entry.isPinned" class="keep-tag">常驻</span>
-          <span v-if="entry.id === suggestion.keepId" class="keep-tag">保留目标</span>
+          <span v-if="entry.isPinned" class="keep-tag">
+            <UIcon
+              :name="bootModeIcons[effectiveBootMode(entry)]"
+              class="keep-tag-icon"
+              aria-hidden="true"
+            />
+            <span>常驻</span>
+          </span>
+          <span v-if="entry.id === suggestion.keepId" class="keep-tag">
+            <UIcon :name="icons.check" class="keep-tag-icon" aria-hidden="true" />
+            <span>保留目标</span>
+          </span>
+          <span v-else-if="isMergeDuplicates" class="keep-tag">
+            <UIcon :name="icons.merge" class="keep-tag-icon" aria-hidden="true" />
+            <span>待并入</span>
+          </span>
         </li>
       </ul>
     </div>
@@ -1191,7 +1385,9 @@ function applyEdited() {
     >
       <span class="guard-status">
         <UIcon
-          :name="hasLostRefs || integrity.severeShrink ? icons.warning : icons.check"
+          :name="
+            hasLostRefs ? icons.shieldAlert : integrity.severeShrink ? icons.warning : icons.check
+          "
           class="guard-icon"
           aria-hidden="true"
         />
@@ -1214,7 +1410,7 @@ function applyEdited() {
         <UButton
           size="sm"
           :color="isMarkStale ? 'error' : 'primary'"
-          :icon="icons.check"
+          :icon="primaryApplyIcon"
           :loading="busy"
           :disabled="disabled || !anyPartSelected"
           @click="applyDirect"
@@ -1315,10 +1511,18 @@ function applyEdited() {
   font-weight: 400;
 }
 .sub-eyebrow {
-  display: block;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-size: 12px;
   font-weight: 600;
   color: var(--ui-text-muted);
+}
+.sub-eyebrow-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
 }
 
 /* 启动加载前后对比 */
@@ -1346,9 +1550,22 @@ function applyEdited() {
   color: var(--ui-text-muted);
 }
 .boot-state-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 16px;
   font-weight: 600;
   color: var(--ui-text-highlighted);
+}
+.boot-state-icon {
+  display: inline-block;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--ui-text-muted);
+}
+.boot-state-col.is-target .boot-state-icon {
+  color: var(--ui-warning);
 }
 .boot-state-detail {
   font-size: 14px;
@@ -1451,7 +1668,7 @@ function applyEdited() {
 .link-check-top {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
+  align-items: center;
   gap: 4px 8px;
   font-size: 14px;
 }
@@ -1488,7 +1705,7 @@ function applyEdited() {
 .structure-strip {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
+  align-items: center;
   gap: 6px 8px;
   padding-bottom: 10px;
   border-bottom: 1px solid var(--ui-border);
@@ -1496,10 +1713,22 @@ function applyEdited() {
   line-height: 1.55;
 }
 .strip-role {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   flex: none;
   font-size: 12px;
   font-weight: 600;
   color: var(--ui-text-muted);
+}
+.strip-role-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+}
+.strip-role-icon.is-danger {
+  color: var(--ui-error);
 }
 .strip-old {
   color: var(--ui-text-muted);
@@ -1511,15 +1740,11 @@ function applyEdited() {
   color: var(--ui-text-highlighted);
   overflow-wrap: anywhere;
 }
-.strip-arrow {
-  color: var(--ui-text-muted);
-  user-select: none;
-}
 
 .title-compare {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
+  align-items: center;
   gap: 6px 8px;
   padding: 8px 12px;
   border-left: 3px solid var(--ui-rule);
@@ -1536,6 +1761,17 @@ function applyEdited() {
   color: var(--ui-text-muted);
   text-decoration: line-through;
   overflow-wrap: anywhere;
+}
+.compare-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.compare-mode-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
 }
 .compare-arrow {
   display: inline-block;
@@ -1561,9 +1797,18 @@ function applyEdited() {
   font-size: 13px;
 }
 .partial-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-size: 12px;
   font-weight: 600;
   color: var(--ui-text-muted);
+}
+.partial-label-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
 }
 .part-check {
   display: inline-flex;
@@ -1584,10 +1829,18 @@ function applyEdited() {
   background: var(--ui-diff-add-bg);
 }
 .summary-preview-label {
-  display: block;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   margin-bottom: 2px;
   font-size: 12px;
   color: var(--ui-text-muted);
+}
+.summary-preview-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
 }
 .summary-preview-text {
   font-size: 14px;
@@ -1620,6 +1873,18 @@ function applyEdited() {
   flex-direction: column;
   gap: 12px;
 }
+.field-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.field-label-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+  color: var(--ui-text-muted);
+}
 .edit-actions {
   display: flex;
   flex-wrap: wrap;
@@ -1634,10 +1899,31 @@ function applyEdited() {
   font-size: 13px;
 }
 .archived-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  list-style: none;
   font-size: 12px;
   font-weight: 500;
   color: var(--ui-text-toned);
   cursor: pointer;
+}
+.archived-summary::-webkit-details-marker {
+  display: none;
+}
+.archived-chevron,
+.archived-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+  color: var(--ui-text-muted);
+}
+.archived-chevron {
+  transition: transform 150ms ease;
+}
+.archived-notes[open] .archived-chevron {
+  transform: rotate(90deg);
 }
 .archived-list {
   display: flex;
@@ -1708,11 +1994,20 @@ function applyEdited() {
   gap: 6px;
 }
 .keep-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   padding: 0 5px;
   border: 1px solid var(--ui-border-accented);
   font-size: 12px;
   line-height: 1.4;
   color: var(--ui-text-muted);
+}
+.keep-tag-icon {
+  display: inline-block;
+  flex: none;
+  width: 11px;
+  height: 11px;
 }
 
 /* 完整性护栏 */
@@ -1795,6 +2090,9 @@ function applyEdited() {
   margin-top: 3px;
   color: var(--ui-success);
 }
+.impact-note.is-warn .impact-icon {
+  color: var(--ui-warning);
+}
 
 .side-actions {
   display: flex;
@@ -1818,14 +2116,14 @@ function applyEdited() {
 .card-head {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 8px;
 }
 .card-head-main {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
   min-width: 0;
 }
@@ -1866,8 +2164,18 @@ function applyEdited() {
   overflow-wrap: anywhere;
 }
 .card-reason-prefix {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  vertical-align: text-bottom;
   font-weight: 600;
   color: var(--ui-text-muted);
+}
+.card-reason-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
 }
 .card-affected {
   display: flex;
@@ -1885,7 +2193,7 @@ function applyEdited() {
 .card-affected-list li {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
 }
 .card-actions {

@@ -7,6 +7,7 @@ import { api } from '../api/endpoints'
 import EntryFrame from '../components/ui/EntryFrame.vue'
 import PropertyList from '../components/ui/PropertyList.vue'
 import SectionHeading from '../components/ui/SectionHeading.vue'
+import { icons } from '../icons'
 import { setupLost } from '../routes'
 import { lockedHint } from '../setup'
 import { formatTime } from '../time'
@@ -70,7 +71,7 @@ onBeforeUnmount(() => {
 
 <template>
   <EntryFrame>
-    <SectionHeading title="数据库不可用" :level="1" />
+    <SectionHeading title="数据库不可用" :level="1" :icon="icons.databaseZap" />
     <div class="mt-3 space-y-3">
       <p>服务暂时无法连接数据库，正在自动重试。连接恢复后回到之前的页面。</p>
       <PropertyList v-if="facts.length" :groups="facts" />
@@ -78,9 +79,12 @@ onBeforeUnmount(() => {
         持续无法连接时，检查数据库是否在运行，或者{{ lockedHint(status.database.source) }}
       </p>
     </div>
-    <UButton class="mt-5" size="lg" block :loading="checking" @click="check">重新检查</UButton>
-    <p v-if="checkedAt" class="mt-2 text-muted" role="status">
-      最近检查：{{ formatTime(checkedAt) }}
+    <UButton class="mt-5" size="lg" block :icon="icons.refresh" :loading="checking" @click="check">
+      重新检查
+    </UButton>
+    <p v-if="checkedAt" class="mt-2 flex items-center gap-1.5 text-muted" role="status">
+      <UIcon :name="icons.clock" class="inline-block size-3.5 shrink-0" aria-hidden="true" />
+      <span>最近检查：{{ formatTime(checkedAt) }}</span>
     </p>
   </EntryFrame>
 </template>

@@ -21,7 +21,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { icons } from '../icons'
-import { bootModeDescriptions, bootModeLabels } from '../labels'
+import { bootModeDescriptions, bootModeIcons, bootModeLabels } from '../labels'
 import { detectSecretPrefixes } from '../secretHint'
 import { earliestValidTo, fromLocalInput, validToTooSoon } from '../time'
 import { analyzeTitleHint } from '../titleHint'
@@ -60,10 +60,13 @@ const CONTENT_TAB_OPTIONS: { value: 'edit' | 'preview'; label: string; icon: str
   { value: 'preview', label: '预览', icon: icons.reveal },
 ]
 
-const BOOT_MODE_OPTIONS: { value: BootMode; label: string }[] = BOOT_MODES.map((value) => ({
-  value,
-  label: bootModeLabels[value],
-}))
+const BOOT_MODE_OPTIONS: { value: BootMode; label: string; icon: string }[] = BOOT_MODES.map(
+  (value) => ({
+    value,
+    label: bootModeLabels[value],
+    icon: bootModeIcons[value],
+  }),
+)
 
 const { getKbdKey } = useKbd()
 const submitShortcut = computed(() => {
@@ -220,6 +223,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onModalKeydown))
       <div class="space-y-4">
         <div class="grid gap-3 sm:grid-cols-2">
           <UFormField label="标题">
+            <template #label>
+              <span class="field-label">
+                <UIcon :name="icons.heading" class="field-label-icon" aria-hidden="true" />
+                <span>标题</span>
+              </span>
+            </template>
             <UInput v-model="form.title" :maxlength="ENTRY_TITLE_NEW_MAX" class="w-full" />
             <template #help>
               <div v-if="titleHint.message" class="title-hint-row">
@@ -240,17 +249,30 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onModalKeydown))
             </template>
           </UFormField>
           <UFormField label="主题">
+            <template #label>
+              <span class="field-label">
+                <UIcon :name="icons.topic" class="field-label-icon" aria-hidden="true" />
+                <span>主题</span>
+              </span>
+            </template>
             <UInputTags v-model="form.topics" add-on-blur placeholder="输入后回车" class="w-full" />
           </UFormField>
         </div>
 
         <UFormField label="现行概要（可选）" help="1–2 句概括当前结论，用于启动加载与列表预览">
+          <template #label>
+            <span class="field-label">
+              <UIcon :name="icons.summary" class="field-label-icon" aria-hidden="true" />
+              <span>现行概要（可选）</span>
+            </span>
+          </template>
           <UTextarea
             v-model="form.summary"
             :rows="1"
             autoresize
             :maxrows="3"
             :maxlength="ENTRY_SUMMARY_MAX"
+            :ui="{ base: 'py-[5px] text-sm/5 resize-none' }"
             placeholder="例如：生产环境统一使用 Docker Compose 部署，反向代理监听本机回环端口。"
             class="w-full"
           />
@@ -265,6 +287,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onModalKeydown))
               size="xs"
               color="neutral"
               variant="outline"
+              :icon="icons.credentials"
               :to="{ name: 'credentials' }"
               @click="open = false"
             >
@@ -275,7 +298,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onModalKeydown))
 
         <div class="space-y-1.5">
           <div class="content-head">
-            <span class="content-label">正文（Markdown）</span>
+            <span class="content-label">
+              <UIcon :name="icons.file" class="field-label-icon" aria-hidden="true" />
+              <span>正文（Markdown）</span>
+            </span>
             <SegmentedChoice
               v-model="contentTab"
               :items="CONTENT_TAB_OPTIONS"
@@ -301,7 +327,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onModalKeydown))
 
         <div class="space-y-1.5">
           <div class="flex flex-wrap items-center gap-3">
-            <span class="content-label">启动加载</span>
+            <span class="content-label">
+              <UIcon :name="icons.pin" class="field-label-icon" aria-hidden="true" />
+              <span>启动加载</span>
+            </span>
             <SegmentedChoice
               v-model="form.bootMode"
               :items="BOOT_MODE_OPTIONS"
@@ -327,6 +356,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onModalKeydown))
               size="xs"
               color="neutral"
               variant="outline"
+              :icon="icons.bookmark"
               @click="form.bootMode = 'index'"
             >
               改为目录常驻
@@ -336,6 +366,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onModalKeydown))
               size="xs"
               color="neutral"
               variant="outline"
+              :icon="icons.sliders"
               @click="attrsOpen = true"
             >
               限定场景
@@ -422,7 +453,22 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onModalKeydown))
   justify-content: space-between;
   gap: 8px;
 }
+.field-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.field-label-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+  color: var(--ui-text-muted);
+}
 .content-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-size: 13px;
   font-weight: 500;
   color: var(--ui-text-highlighted);

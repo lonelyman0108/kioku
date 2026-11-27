@@ -127,6 +127,7 @@ const PROJECT_SCOPE_OPTIONS: { value: ProjectScope; label: string }[] = [
 interface ActiveFilterPill {
   key: 'projectScope' | 'topic' | 'project' | 'runtime' | 'env' | 'realm'
   label: string
+  icon: string
 }
 
 const activeFilters = computed<ActiveFilterPill[]>(() => {
@@ -135,13 +136,24 @@ const activeFilters = computed<ActiveFilterPill[]>(() => {
     pills.push({
       key: 'projectScope',
       label: `归属：${props.projectScope === 'unassigned' ? '无项目归属' : '已关联项目'}`,
+      icon: icons.projectScope,
     })
   }
-  if (props.topic) pills.push({ key: 'topic', label: `主题：${props.topic}` })
-  if (props.project) pills.push({ key: 'project', label: `项目：${props.project}` })
-  if (props.runtime) pills.push({ key: 'runtime', label: `客户端：${runtimeName(props.runtime)}` })
-  if (props.env) pills.push({ key: 'env', label: `环境：${envDisplayName(props.env)}` })
-  if (props.realm) pills.push({ key: 'realm', label: `场域：${props.realm}` })
+  if (props.topic) pills.push({ key: 'topic', label: `主题：${props.topic}`, icon: icons.topic })
+  if (props.project) {
+    pills.push({ key: 'project', label: `项目：${props.project}`, icon: icons.project })
+  }
+  if (props.runtime) {
+    pills.push({
+      key: 'runtime',
+      label: `客户端：${runtimeName(props.runtime)}`,
+      icon: icons.terminal,
+    })
+  }
+  if (props.env) {
+    pills.push({ key: 'env', label: `环境：${envDisplayName(props.env)}`, icon: icons.env })
+  }
+  if (props.realm) pills.push({ key: 'realm', label: `场域：${props.realm}`, icon: icons.realm })
   return pills
 })
 
@@ -305,11 +317,15 @@ defineExpose({ filterOpen })
           <template #content>
             <div class="filter-popover">
               <div class="popover-head">
-                <span class="popover-title">多维筛选</span>
+                <span class="popover-title">
+                  <UIcon :name="icons.filter" class="popover-title-icon" aria-hidden="true" />
+                  <span>多维筛选</span>
+                </span>
                 <UButton
                   size="xs"
                   color="neutral"
                   variant="ghost"
+                  :icon="icons.restore"
                   :disabled="!hasFilters"
                   @click="emit('clearFilters')"
                 >
@@ -318,7 +334,10 @@ defineExpose({ filterOpen })
               </div>
 
               <div class="facet-group">
-                <span class="facet-label">归属范围</span>
+                <span class="facet-label">
+                  <UIcon :name="icons.projectScope" class="facet-icon" aria-hidden="true" />
+                  <span>归属范围</span>
+                </span>
                 <div class="facet-chips">
                   <button
                     v-for="opt in PROJECT_SCOPE_OPTIONS"
@@ -334,7 +353,10 @@ defineExpose({ filterOpen })
               </div>
 
               <div v-if="facets?.topics.length" class="facet-group">
-                <span class="facet-label">主题</span>
+                <span class="facet-label">
+                  <UIcon :name="icons.topic" class="facet-icon" aria-hidden="true" />
+                  <span>主题</span>
+                </span>
                 <div class="facet-chips">
                   <button
                     v-for="t in facets.topics"
@@ -350,7 +372,10 @@ defineExpose({ filterOpen })
               </div>
 
               <div v-if="facets?.projects.length" class="facet-group">
-                <span class="facet-label">项目</span>
+                <span class="facet-label">
+                  <UIcon :name="icons.project" class="facet-icon" aria-hidden="true" />
+                  <span>项目</span>
+                </span>
                 <div class="facet-chips">
                   <button
                     v-for="p in facets.projects"
@@ -366,7 +391,10 @@ defineExpose({ filterOpen })
               </div>
 
               <div v-if="facets?.runtimes?.length" class="facet-group">
-                <span class="facet-label">客户端</span>
+                <span class="facet-label">
+                  <UIcon :name="icons.terminal" class="facet-icon" aria-hidden="true" />
+                  <span>客户端</span>
+                </span>
                 <div class="facet-chips">
                   <button
                     v-for="rt in facets.runtimes"
@@ -382,7 +410,10 @@ defineExpose({ filterOpen })
               </div>
 
               <div v-if="facets?.envs.length" class="facet-group">
-                <span class="facet-label">环境</span>
+                <span class="facet-label">
+                  <UIcon :name="icons.env" class="facet-icon" aria-hidden="true" />
+                  <span>环境</span>
+                </span>
                 <div class="facet-chips">
                   <button
                     v-for="e in facets.envs"
@@ -398,7 +429,10 @@ defineExpose({ filterOpen })
               </div>
 
               <div v-if="facets?.realms.length" class="facet-group">
-                <span class="facet-label">场域</span>
+                <span class="facet-label">
+                  <UIcon :name="icons.realm" class="facet-icon" aria-hidden="true" />
+                  <span>场域</span>
+                </span>
                 <div class="facet-chips">
                   <button
                     v-for="r in facets.realms"
@@ -443,6 +477,7 @@ defineExpose({ filterOpen })
       <!-- 仅存在激活筛选时展示已选条件条 -->
       <div v-if="activeFilters.length" class="active-filters-bar">
         <span v-for="pill in activeFilters" :key="pill.key" class="active-pill">
+          <UIcon :name="pill.icon" class="pill-dim-icon" aria-hidden="true" />
           <span>{{ pill.label }}</span>
           <button
             type="button"
@@ -453,7 +488,13 @@ defineExpose({ filterOpen })
             <UIcon :name="icons.cancel" class="pill-remove-icon" />
           </button>
         </span>
-        <UButton size="xs" color="neutral" variant="ghost" @click="emit('clearFilters')">
+        <UButton
+          size="xs"
+          color="neutral"
+          variant="ghost"
+          :icon="icons.restore"
+          @click="emit('clearFilters')"
+        >
           清除全部
         </UButton>
       </div>
@@ -475,8 +516,15 @@ defineExpose({ filterOpen })
                   : '无场景限定的全局全文常驻默认占比上限为 3,500 字'
               "
             >
-              全局全文 {{ pinnedWatermark.globalCount }} 条 /
-              {{ pinnedWatermark.globalChars.toLocaleString() }} 字
+              <UIcon
+                :name="pinnedWatermark.globalOverCap ? icons.warning : icons.gauge"
+                class="pinned-budget-icon"
+                aria-hidden="true"
+              />
+              <span>
+                全局全文 {{ pinnedWatermark.globalCount }} 条 /
+                {{ pinnedWatermark.globalChars.toLocaleString() }} 字
+              </span>
             </span>
             <span class="meta-sep" aria-hidden="true">·</span>
             <span>场景全文 {{ pinnedWatermark.scopedCount }} 条</span>
@@ -490,7 +538,7 @@ defineExpose({ filterOpen })
             size="xs"
             :color="batchMode ? 'primary' : 'neutral'"
             :variant="batchMode ? 'solid' : 'ghost'"
-            :icon="icons.listChecks"
+            :icon="batchMode ? icons.cancel : icons.listChecks"
             @click="toggleBatchMode"
           >
             {{ batchMode ? '退出批量' : '批量整理' }}
@@ -638,6 +686,7 @@ defineExpose({ filterOpen })
               size="sm"
               color="neutral"
               variant="outline"
+              :icon="icons.chevronsDown"
               :loading="fetchingNextPage"
               @click="emit('loadMore')"
             >
@@ -647,6 +696,7 @@ defineExpose({ filterOpen })
         </template>
         <EmptyState
           v-else-if="!query.isError.value"
+          :icon="search.trim() || hasFilters ? icons.search : entryTabIcons[tab]"
           :title="
             search.trim() || hasFilters
               ? '暂无匹配记忆'
@@ -673,6 +723,7 @@ defineExpose({ filterOpen })
               size="sm"
               color="neutral"
               variant="outline"
+              :icon="icons.restore"
               @click="(emit('clearFilters'), emit('update:search', ''))"
             >
               重置筛选
@@ -885,9 +936,19 @@ defineExpose({ filterOpen })
   border-bottom: 1px solid var(--ui-border);
 }
 .popover-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 13px;
   font-weight: 600;
   color: var(--ui-text-highlighted);
+}
+.popover-title-icon {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--ui-text-muted);
 }
 .facet-group {
   display: flex;
@@ -895,8 +956,17 @@ defineExpose({ filterOpen })
   gap: 6px;
 }
 .facet-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-size: 12px;
   color: var(--ui-text-muted);
+}
+.facet-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
 }
 .facet-chips {
   display: flex;
@@ -939,6 +1009,13 @@ defineExpose({ filterOpen })
   font-size: 12px;
   color: var(--ui-text-highlighted);
 }
+.pill-dim-icon {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
+  color: var(--ui-text-muted);
+}
 .pill-remove {
   display: inline-flex;
   align-items: center;
@@ -950,6 +1027,7 @@ defineExpose({ filterOpen })
 }
 .pill-remove-icon {
   display: inline-block;
+  flex: none;
   width: 12px;
   height: 12px;
 }
@@ -996,8 +1074,18 @@ defineExpose({ filterOpen })
   color: var(--ui-border-accented);
 }
 .pinned-budget {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.pinned-budget-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
 }
 .pinned-budget.is-over {
   color: var(--ui-warning);
@@ -1104,7 +1192,7 @@ defineExpose({ filterOpen })
 }
 .row-sub {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 6px;
   min-width: 0;
   overflow: hidden;

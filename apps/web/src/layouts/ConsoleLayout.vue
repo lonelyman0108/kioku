@@ -179,7 +179,7 @@ provide(LOGOUT, logout)
             :aria-current="isCurrent(item) ? 'page' : undefined"
             class="nav-link flex items-center gap-1.5 px-2.5 whitespace-nowrap"
           >
-            <UIcon :name="item.icon" class="nav-icon" />
+            <UIcon :name="item.icon" class="nav-icon" aria-hidden="true" />
             {{ item.label }}
             <span v-if="item.count" class="nav-count">
               {{ item.count }}<span class="sr-only"> 项</span>
@@ -206,6 +206,7 @@ provide(LOGOUT, logout)
             >
               <UButton
                 ref="accountButton"
+                :icon="icons.account"
                 :label="displayName"
                 :title="displayName"
                 :trailing-icon="icons.chevronDown"
@@ -226,6 +227,7 @@ provide(LOGOUT, logout)
           >
             <UButton
               :icon="icons.menu"
+              label="导航"
               color="neutral"
               variant="ghost"
               class="shrink-0 min-[1024px]:hidden"
@@ -241,7 +243,7 @@ provide(LOGOUT, logout)
                   class="drawer-link flex items-center gap-2 py-2 text-[15px]/6 aria-[current=page]:font-semibold"
                   @click="navOpen = false"
                 >
-                  <UIcon :name="item.icon" class="nav-icon" />
+                  <UIcon :name="item.icon" class="nav-icon" aria-hidden="true" />
                   {{ item.label }}
                   <span v-if="item.count" class="nav-count">
                     {{ item.count }}<span class="sr-only"> 项</span>
@@ -251,10 +253,11 @@ provide(LOGOUT, logout)
               <div class="space-y-4 px-5 py-4">
                 <div>
                   <p class="pb-1.5 text-xs text-muted">主题</p>
-                  <div class="flex gap-1">
+                  <div class="flex flex-wrap gap-1">
                     <UButton
                       v-for="option in COLOR_PREFERENCES"
                       :key="option.value"
+                      :icon="option.icon"
                       :label="option.label"
                       :variant="colorPreference.current() === option.value ? 'solid' : 'subtle'"
                       :color="colorPreference.current() === option.value ? 'primary' : 'neutral'"
@@ -265,13 +268,25 @@ provide(LOGOUT, logout)
                   </div>
                 </div>
                 <div class="border-t border-default pt-3">
-                  <p class="truncate pb-1 text-sm" :title="displayName">{{ displayName }}</p>
+                  <p class="flex items-center gap-2 pb-1 text-sm" :title="displayName">
+                    <UIcon
+                      :name="icons.account"
+                      class="inline-block size-4 shrink-0 text-muted"
+                      aria-hidden="true"
+                    />
+                    <span class="truncate">{{ displayName }}</span>
+                  </p>
                   <button
                     type="button"
-                    class="block w-full py-1.5 text-left text-sm/6"
+                    class="flex w-full cursor-pointer items-center gap-2 py-1.5 text-left text-sm/6"
                     @click="logout"
                   >
-                    退出登录
+                    <UIcon
+                      :name="icons.logout"
+                      class="inline-block size-4 shrink-0 text-muted"
+                      aria-hidden="true"
+                    />
+                    <span>退出登录</span>
                   </button>
                   <p v-if="versionText" class="pt-2 text-xs text-muted">{{ versionText }}</p>
                 </div>

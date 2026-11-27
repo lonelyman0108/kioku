@@ -222,7 +222,10 @@ function closeOnce() {
         </div>
 
         <div class="space-y-1.5">
-          <p class="text-xs font-medium text-muted">终端环境（用于自动匹配当前系统）</p>
+          <p class="section-caption">
+            <UIcon :name="icons.env" class="section-caption-icon" aria-hidden="true" />
+            <span>终端环境（用于自动匹配当前系统）</span>
+          </p>
           <div class="flex flex-wrap items-center gap-1.5">
             <UButton
               v-for="slug in normalizeSlugList([...BUILTIN_ENVS, ...form.envs])"
@@ -275,7 +278,10 @@ function closeOnce() {
         </div>
 
         <div class="space-y-1.5">
-          <p class="text-xs font-medium text-muted">启动默认场域（可选）</p>
+          <p class="section-caption">
+            <UIcon :name="icons.focus" class="section-caption-icon" aria-hidden="true" />
+            <span>启动默认场域（可选）</span>
+          </p>
           <div class="flex flex-wrap items-center gap-1.5">
             <UButton
               v-for="slug in focusRealmOptions"
@@ -340,6 +346,20 @@ function closeOnce() {
 </template>
 
 <style scoped>
+.section-caption {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ui-text-muted);
+}
+.section-caption-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+}
 .secret-row {
   display: flex;
   align-items: center;

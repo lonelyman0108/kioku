@@ -24,6 +24,7 @@ import PropertyList, { type Property } from '../components/ui/PropertyList.vue'
 import SectionHeading from '../components/ui/SectionHeading.vue'
 import { useNow } from '../composables/useNow'
 import { useSession } from '../composables/useSession'
+import { icons } from '../icons'
 import { envDisplayName } from '../labels'
 import { runtimeName } from '../runtimes'
 import { settingsRoute } from '../routes'
@@ -270,7 +271,7 @@ async function deny() {
 
 <template>
   <EntryFrame :wide="step === 'review'">
-    <SectionHeading title="浏览器授权" :level="1" />
+    <SectionHeading title="浏览器授权" :level="1" :icon="icons.shieldCheck" />
 
     <template v-if="step === 'code'">
       <NoteLine v-if="notice" class="mt-4" tone="warning">{{ notice }}</NoteLine>
@@ -290,7 +291,9 @@ async function deny() {
             required
           />
         </UFormField>
-        <UButton type="submit" size="lg" block :loading="looking">继续</UButton>
+        <UButton type="submit" size="lg" block :trailing-icon="icons.arrowRight" :loading="looking">
+          继续
+        </UButton>
       </form>
     </template>
 
@@ -298,7 +301,15 @@ async function deny() {
       <NoteLine v-if="expired" class="mt-4" tone="error">
         该确认码已过期，请在命令行重新发起浏览器授权。
         <template #actions>
-          <UButton size="sm" color="neutral" variant="outline" @click="restart()">重新输入</UButton>
+          <UButton
+            size="sm"
+            color="neutral"
+            variant="outline"
+            :icon="icons.restore"
+            @click="restart()"
+          >
+            重新输入
+          </UButton>
         </template>
       </NoteLine>
 
@@ -306,7 +317,7 @@ async function deny() {
         <PropertyList :groups="requestFacts" />
 
         <section class="space-y-2.5">
-          <SectionHeading title="签发对象" :level="2" />
+          <SectionHeading title="签发对象" :level="2" :icon="icons.terminal" />
           <div
             v-for="row in rows"
             :key="row.runtimeFamily"
@@ -327,7 +338,7 @@ async function deny() {
         </section>
 
         <section class="space-y-3">
-          <SectionHeading title="终端环境与权限" :level="2">
+          <SectionHeading title="终端环境与权限" :level="2" :icon="icons.sliders">
             <template #hint>
               <Hint>
                 终端环境用于启动加载与召回时自动匹配当前系统；限定场域是硬边界，仅返回允许场域及通用记忆。
@@ -356,9 +367,11 @@ async function deny() {
                 size="xs"
                 color="primary"
                 variant="solid"
+                :trailing-icon="icons.cancel"
+                :aria-label="`移除环境 ${env}`"
                 @click="toggleEnv(env)"
               >
-                {{ env }} ×
+                {{ env }}
               </UButton>
               <div class="flex items-center gap-1">
                 <UInput
@@ -374,6 +387,7 @@ async function deny() {
                   size="xs"
                   color="neutral"
                   variant="outline"
+                  :icon="icons.add"
                   @click="addCustomEnv"
                 >
                   添加
@@ -408,9 +422,11 @@ async function deny() {
                   size="xs"
                   color="primary"
                   variant="solid"
+                  :trailing-icon="icons.cancel"
+                  :aria-label="`移除场域 ${realm}`"
                   @click="removeRealm(realm)"
                 >
-                  {{ realm }} ×
+                  {{ realm }}
                 </UButton>
                 <div class="flex items-center gap-1">
                   <UInput
@@ -426,6 +442,7 @@ async function deny() {
                     size="xs"
                     color="neutral"
                     variant="outline"
+                    :icon="icons.add"
                     @click="addCustomRealm"
                   >
                     添加
@@ -464,6 +481,7 @@ async function deny() {
                   size="xs"
                   color="neutral"
                   variant="outline"
+                  :icon="icons.add"
                   @click="addCustomFocusRealm"
                 >
                   添加
@@ -486,8 +504,17 @@ async function deny() {
           </div>
         </section>
 
-        <p v-if="error || validationProblem" class="text-sm text-error" role="alert">
-          {{ error ?? validationProblem }}
+        <p
+          v-if="error || validationProblem"
+          class="flex items-start gap-1.5 text-sm text-error"
+          role="alert"
+        >
+          <UIcon
+            :name="icons.error"
+            class="mt-[3px] inline-block size-4 shrink-0"
+            aria-hidden="true"
+          />
+          <span>{{ error ?? validationProblem }}</span>
         </p>
 
         <div class="flex flex-wrap items-center justify-end gap-2 border-t border-default pt-4">
@@ -495,6 +522,7 @@ async function deny() {
             type="button"
             color="neutral"
             variant="ghost"
+            :icon="icons.back"
             :disabled="submitting !== null"
             @click="restart()"
           >
@@ -504,6 +532,7 @@ async function deny() {
             type="button"
             color="error"
             variant="outline"
+            :icon="icons.shieldX"
             :loading="submitting === 'deny'"
             :disabled="submitting !== null || expired"
             @click="deny"
@@ -512,6 +541,7 @@ async function deny() {
           </UButton>
           <UButton
             type="button"
+            :icon="icons.shieldCheck"
             :loading="submitting === 'approve'"
             :disabled="submitting !== null || expired || Boolean(validationProblem)"
             @click="approve"
@@ -524,7 +554,7 @@ async function deny() {
 
     <template v-else-if="step === 'approved' && approved">
       <div class="mt-4 space-y-4">
-        <NoteLine>已批准，客户端将在数秒内自动获取访问密钥。</NoteLine>
+        <NoteLine tone="success">已批准，客户端将在数秒内自动获取访问密钥。</NoteLine>
         <ul class="divide-y divide-default border-y border-default">
           <li
             v-for="item in approved.items"
@@ -536,10 +566,10 @@ async function deny() {
           </li>
         </ul>
         <div class="flex gap-2">
-          <UButton :to="settingsRoute('keys')" color="neutral" variant="outline">
+          <UButton :to="settingsRoute('keys')" color="neutral" variant="outline" :icon="icons.keys">
             查看访问密钥
           </UButton>
-          <UButton :to="{ name: 'memories' }">前往记忆</UButton>
+          <UButton :to="{ name: 'memories' }" :icon="icons.memories">前往记忆</UButton>
         </div>
       </div>
     </template>
@@ -548,8 +578,10 @@ async function deny() {
       <div class="mt-4 space-y-4">
         <NoteLine tone="warning">已拒绝本次浏览器授权申请。</NoteLine>
         <div class="flex gap-2">
-          <UButton color="neutral" variant="outline" @click="restart()">处理下一个</UButton>
-          <UButton :to="{ name: 'memories' }">返回记忆</UButton>
+          <UButton color="neutral" variant="outline" :icon="icons.restore" @click="restart()">
+            处理下一个
+          </UButton>
+          <UButton :to="{ name: 'memories' }" :icon="icons.memories">返回记忆</UButton>
         </div>
       </div>
     </template>
