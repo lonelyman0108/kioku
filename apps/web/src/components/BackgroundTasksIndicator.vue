@@ -214,24 +214,28 @@ watch(
               ? `${modeLabel}已取消，已保留 ${latest.suggested} 条待处理建议`
               : `${modeLabel}已取消`,
           color: 'neutral',
+          orientation: 'horizontal',
           ...(latest.suggested > 0 && inboxAction ? { actions: inboxAction } : {}),
         })
       } else if (latest.outcome === 'failed') {
         toast.add({
           title: latest.error ? `${modeLabel}失败：${latest.error}` : `${modeLabel}失败`,
           color: 'error',
+          orientation: 'horizontal',
           ...(inboxAction ? { actions: inboxAction } : {}),
         })
       } else if (latest.outcome === 'partial') {
         toast.add({
           title: `${modeLabel}部分完成，生成 ${latest.suggested} 条待处理建议`,
           color: 'warning',
+          orientation: 'horizontal',
           ...(inboxAction ? { actions: inboxAction } : {}),
         })
       } else if (latest.outcome === 'skipped') {
         toast.add({
           title: `${modeLabel}完成，当前无可整理项`,
           color: 'neutral',
+          orientation: 'horizontal',
         })
       } else {
         toast.add({
@@ -240,6 +244,7 @@ watch(
               ? `${modeLabel}完成，生成 ${latest.suggested} 条待处理建议`
               : `${modeLabel}完成，暂无新增建议`,
           color: 'success',
+          orientation: 'horizontal',
           ...(latest.suggested > 0 && inboxAction ? { actions: inboxAction } : {}),
         })
       }

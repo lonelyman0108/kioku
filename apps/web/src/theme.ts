@@ -419,9 +419,16 @@ export const theme = {
       close: 'top-2.5 end-3',
     },
   },
+  toaster: {
+    slots: {
+      viewport: 'sm:w-[32rem]',
+    },
+  },
+
   toast: {
     slots: {
-      root: 'ring-rule p-3 gap-2',
+      root: 'ring-rule px-3.5 py-2.5 gap-2.5',
+      title: 'text-sm/5 font-medium text-highlighted',
       icon: 'size-4 mt-0.5',
     },
   },
