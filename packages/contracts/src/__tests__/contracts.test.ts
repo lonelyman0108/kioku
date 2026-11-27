@@ -4,6 +4,8 @@ import {
   API_GENERATION,
   ApplySuggestionResponse,
   BootResponse,
+  CapturePlanRequest,
+  CapturePlanResponse,
   CreateApiKeyRequest,
   DeviceAuthorizeRequest,
   DeviceGrantApproveRequest,
@@ -15,6 +17,9 @@ import {
   LifecycleEventRequest,
   RecallRequest,
   RebuildEmbeddingsResponse,
+  REVISABLE_DREAM_KINDS,
+  ReviseSuggestionRequest,
+  ReviseSuggestionResponse,
   ResolveCredentialsRequest,
   RotateApiKeyRequest,
   SetupRequest,
@@ -222,5 +227,109 @@ describe('wire-compatible contracts', () => {
         omittedItems: [{ shortId: 'm-345bcd', title: '手册', envs: ['mac'] }],
       }).entries[0]?.envs,
     ).toEqual(['home-24'])
+  })
+
+  it('validates single-turn refine capture plans and inbox suggestion revise contracts', () => {
+    expect(
+      CapturePlanRequest.parse({
+        text: '补充说明仅适用于 home-24 主机',
+        targetShortId: 'm-234abc',
+        mode: 'refine',
+      }),
+    ).toMatchObject({
+      targetShortId: 'm-234abc',
+      mode: 'refine',
+    })
+    expect(
+      CapturePlanRequest.safeParse({
+        text: '补充说明仅适用于 home-24 主机',
+        mode: 'refine',
+      }).success,
+    ).toBe(false)
+    expect(CapturePlanRequest.parse({ text: '普通随手记' }).mode).toBe('auto')
+
+    const parsedPlan = CapturePlanResponse.parse({
+      mode: 'llm',
+      fallbackReason: null,
+      action: 'update',
+      patchKind: 'replace',
+      patchHeading: null,
+      reason: '收紧主机适用边界',
+      targetShortId: 'm-234abc',
+      targetVersion: 2,
+      beforeContent: '旧正文',
+      proposedContent: '仅限 home-24 主机的新正文',
+      integrity: {
+        intact: true,
+        linksBefore: 0,
+        linksAfter: 0,
+        missingLinks: [],
+        credsBefore: 0,
+        credsAfter: 0,
+        missingCreds: [],
+        severeShrink: false,
+      },
+      proposedTitle: 'home-24 本机代理配置',
+      proposedSummary: '仅适用于 home-24 局域网主机。',
+      proposedDisclosure: '在 home-24 排查代理时参考',
+      proposedEnvs: ['HOME-24'],
+      proposedProjects: ['kioku'],
+      proposedRealms: null,
+      proposedRuntimes: [],
+      proposedChangeSummary: '限定单机边界',
+      proposedNew: {
+        title: 'home-24 本机代理配置',
+        content: '旧正文',
+        disclosure: null,
+        topics: [],
+        envs: [],
+        realms: [],
+        projects: [],
+        runtimes: [],
+        isPinned: false,
+      },
+      candidates: [],
+    })
+    expect(parsedPlan.proposedEnvs).toEqual(['home-24'])
+    expect(parsedPlan.proposedRuntimes).toEqual([])
+
+    expect(REVISABLE_DREAM_KINDS).toEqual(['distill_episode', 'update', 'merge_duplicates', 'tidy'])
+    expect(
+      ReviseSuggestionRequest.parse({
+        instruction: '  收紧环境标签为 home-24  ',
+        envs: ['HOME-24'],
+      }),
+    ).toMatchObject({
+      instruction: '收紧环境标签为 home-24',
+      envs: ['home-24'],
+    })
+    expect(ReviseSuggestionRequest.safeParse({ instruction: '   ' }).success).toBe(false)
+    expect(ReviseSuggestionRequest.safeParse({ instruction: '字'.repeat(501) }).success).toBe(false)
+
+    const revised = ReviseSuggestionResponse.parse({
+      proposedTitle: 'home-24 本地代理',
+      proposedSummary: '仅适用于 home-24 主机',
+      proposedContent: '仅限 home-24 生效，端口 7890。',
+      proposedDisclosure: '配置 home-24 本地代理时参考',
+      proposedChangeSummary: '限定仅适用于 home-24',
+      proposedTopics: ['network'],
+      proposedEnvs: ['home-24'],
+      proposedRealms: ['work'],
+      proposedProjects: ['kioku'],
+      proposedRuntimes: [],
+      proposedBootMode: 'none',
+      reason: '已按说明收紧主机适用边界与环境标签',
+      integrity: {
+        intact: true,
+        linksBefore: 0,
+        linksAfter: 0,
+        missingLinks: [],
+        credsBefore: 0,
+        credsAfter: 0,
+        missingCreds: [],
+        severeShrink: false,
+      },
+    })
+    expect(revised.proposedEnvs).toEqual(['home-24'])
   })
 })

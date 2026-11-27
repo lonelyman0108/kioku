@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
+import endpointsSource from '../api/endpoints.ts?raw'
 import accountDataSettings from '../components/AccountDataSettings.vue?raw'
 import bootPreviewDrawer from '../components/BootPreviewDrawer.vue?raw'
 import consequenceModal from '../components/ConsequenceModal.vue?raw'
@@ -247,9 +248,31 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(sceneScopePicker).toContain('仅标主机标识')
 
     expect(memoryEditor).toContain('<SingleTidyDrawer')
+    expect(memoryEditor).toContain('<QuickCaptureModal')
+    expect(memoryEditor).toContain(':target-entry')
+    expect(memoryEditor).toContain('按说明微调')
     expect(memoryEditor).toContain('规范此条')
     expect(memoryEditor).toContain('查重/关联')
     expect(memoryEditor).toContain('pendingSuggestionCount')
+
+    expect(quickCaptureModal).toContain('targetEntry')
+    expect(quickCaptureModal).toContain("mode: 'refine'")
+    expect(quickCaptureModal).toContain('按说明微调')
+    expect(quickCaptureModal).toContain('adoptMeta')
+    expect(quickCaptureModal).toContain('proposedEnvs')
+    expect(quickCaptureModal).toContain('<SceneScopePicker')
+    expect(quickCaptureModal).toContain('duration: 8000')
+
+    expect(dreamSuggestionCard).not.toContain('<form')
+    expect(dreamSuggestionCard).toContain('useSession')
+    expect(dreamSuggestionCard).toContain('api.reviseInboxSuggestion')
+    expect(dreamSuggestionCard).toContain('REVISABLE_DREAM_KINDS')
+    expect(dreamSuggestionCard).toContain('按说明修订')
+    expect(dreamSuggestionCard).toContain('revise-bar')
+    expect(dreamSuggestionCard).toContain('revise-preview-panel')
+
+    expect(endpointsSource).toContain('reviseInboxSuggestion')
+    expect(endpointsSource).toContain('ReviseSuggestionResponse')
 
     expect(singleTidyDrawer).toContain('api.previewSingleTidy')
     expect(singleTidyDrawer).toContain('api.applySingleTidy')

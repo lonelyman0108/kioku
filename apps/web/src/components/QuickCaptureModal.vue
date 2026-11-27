@@ -2,13 +2,20 @@
 import {
   applyMarkdownAppend,
   CAPTURE_TEXT_MAX,
+  CHANGE_SUMMARY_MAX,
+  ChangeSummary,
   checkCaptureIntegrity,
   Disclosure,
   DISCLOSURE_MAX,
   ENTRY_CONTENT_MAX,
+  ENTRY_SUMMARY_MAX,
+  ENTRY_TITLE_MAX,
   ENTRY_TITLE_NEW_MAX,
+  EntrySummary,
+  EntryTitle,
   extractMarkdownHeadings,
   NewEntryTitle,
+  normalizeSlugList,
   TOPICS_MAX,
   TopicTag,
   type CaptureCandidate,
@@ -16,6 +23,7 @@ import {
   type CapturePatchKind,
   type CapturePlanResponse,
   type EntryDetailResponse,
+  type UpdateEntryRequest,
 } from '@kioku/contracts'
 import { useKbd, useToast } from '@nuxt/ui/composables'
 import { useQueryClient } from '@tanstack/vue-query'
@@ -25,8 +33,11 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
+import { envDisplayName } from '../labels'
+import { runtimeName } from '../runtimes'
 import { detectSecretPrefixes } from '../secretHint'
 import MemoryContent from './MemoryContent.vue'
+import SceneScopePicker, { type SceneScopeValue } from './SceneScopePicker.vue'
 import DiffViewer from './ui/DiffViewer.vue'
 import NoteLine from './ui/NoteLine.vue'
 
@@ -51,9 +62,12 @@ const PATCH_KIND_ICONS: Record<CapturePatchKind, string> = {
 const props = withDefaults(
   defineProps<{
     initialText?: string
+    targetEntry?: { shortId: string; title: string } | null
   }>(),
-  { initialText: '' },
+  { initialText: '', targetEntry: null },
 )
+
+const isRefineMode = computed(() => Boolean(props.targetEntry))
 
 const open = defineModel<boolean>('open', { required: true })
 
@@ -96,6 +110,27 @@ const manualAppendActive = ref(false)
 const selectedSection = ref(END_SECTION)
 const editingDiff = ref(false)
 const applyBusy = ref(false)
+
+// 可选元信息修订草稿与基线（用于单条按说明微调预览与采纳控制）
+const adoptMeta = ref(true)
+const editingMeta = ref(false)
+const planProposedChangeSummary = ref<string | null>(null)
+const metaBaseline = reactive({
+  title: '',
+  summary: '',
+  disclosure: '',
+  envs: [] as string[],
+  realms: [] as string[],
+  projects: [] as string[],
+  runtimes: [] as string[],
+})
+const metaDraft = reactive({
+  title: '',
+  summary: '',
+  disclosure: '',
+  changeSummary: '',
+})
+const metaScope = ref<SceneScopeValue>({ envs: [], realms: [], projects: [], runtimes: [] })
 
 const createForm = reactive({
   title: '',
@@ -142,6 +177,21 @@ function resetState(prefill: string) {
   selectedSection.value = END_SECTION
   editingDiff.value = false
   applyBusy.value = false
+  adoptMeta.value = true
+  editingMeta.value = false
+  planProposedChangeSummary.value = null
+  metaBaseline.title = props.targetEntry?.title ?? ''
+  metaBaseline.summary = ''
+  metaBaseline.disclosure = ''
+  metaBaseline.envs = []
+  metaBaseline.realms = []
+  metaBaseline.projects = []
+  metaBaseline.runtimes = []
+  metaDraft.title = props.targetEntry?.title ?? ''
+  metaDraft.summary = ''
+  metaDraft.disclosure = ''
+  metaDraft.changeSummary = ''
+  metaScope.value = { envs: [], realms: [], projects: [], runtimes: [] }
 }
 
 async function focusInput() {
@@ -250,6 +300,84 @@ const showGuardStrip = computed(() => {
   )
 })
 
+const sameList = (a: readonly string[], b: readonly string[]) =>
+  normalizeSlugList(a).join('\n') === normalizeSlugList(b).join('\n')
+
+interface MetaDiffRow {
+  key: string
+  label: string
+  before: string
+  after: string
+}
+
+const metaChanges = computed<MetaDiffRow[]>(() => {
+  if (step.value !== 'preview' || viewAction.value !== 'update') return []
+  const list: MetaDiffRow[] = []
+  const normTitle = metaDraft.title.trim()
+  if (normTitle && normTitle !== metaBaseline.title) {
+    list.push({
+      key: 'title',
+      label: '标题',
+      before: metaBaseline.title || '（无）',
+      after: normTitle,
+    })
+  }
+  const normSummary = metaDraft.summary.replace(/[\r\n]+/g, ' ').trim()
+  if (normSummary !== metaBaseline.summary.trim()) {
+    list.push({
+      key: 'summary',
+      label: '现行概要',
+      before: metaBaseline.summary.trim() || '（无）',
+      after: normSummary || '（清空）',
+    })
+  }
+  const normDisclosure = metaDraft.disclosure.trim()
+  if (normDisclosure !== metaBaseline.disclosure.trim()) {
+    list.push({
+      key: 'disclosure',
+      label: '触发场景',
+      before: metaBaseline.disclosure.trim() || '（无）',
+      after: normDisclosure || '（清空）',
+    })
+  }
+  if (!sameList(metaScope.value.envs, metaBaseline.envs)) {
+    list.push({
+      key: 'envs',
+      label: '环境',
+      before: metaBaseline.envs.map(envDisplayName).join('、') || '不限',
+      after: normalizeSlugList(metaScope.value.envs).map(envDisplayName).join('、') || '不限',
+    })
+  }
+  if (!sameList(metaScope.value.realms, metaBaseline.realms)) {
+    list.push({
+      key: 'realms',
+      label: '场域',
+      before: metaBaseline.realms.join('、') || '不限',
+      after: normalizeSlugList(metaScope.value.realms).join('、') || '不限',
+    })
+  }
+  if (!sameList(metaScope.value.projects, metaBaseline.projects)) {
+    list.push({
+      key: 'projects',
+      label: '项目',
+      before: metaBaseline.projects.join('、') || '不限',
+      after: normalizeSlugList(metaScope.value.projects).join('、') || '不限',
+    })
+  }
+  if (!sameList(metaScope.value.runtimes, metaBaseline.runtimes)) {
+    list.push({
+      key: 'runtimes',
+      label: '客户端',
+      before: metaBaseline.runtimes.map(runtimeName).join('、') || '不限',
+      after: normalizeSlugList(metaScope.value.runtimes).map(runtimeName).join('、') || '不限',
+    })
+  }
+  return list
+})
+
+const hasMetaChanges = computed(() => metaChanges.value.length > 0)
+const hasEffectiveMetaAdoption = computed(() => hasMetaChanges.value && adoptMeta.value)
+
 const hasDiffChanges = computed(
   () =>
     step.value === 'preview' &&
@@ -257,11 +385,31 @@ const hasDiffChanges = computed(
     beforeContent.value.replace(/\r\n/g, '\n') !== draftContent.value.replace(/\r\n/g, '\n'),
 )
 
+const hasAnyUpdateChanges = computed(() => hasDiffChanges.value || hasEffectiveMetaAdoption.value)
+
 const mergeValidationProblem = computed(() => {
   if (viewAction.value !== 'update') return null
   if (!draftContent.value.trim()) return '正文不能为空'
   if (draftContent.value.length > ENTRY_CONTENT_MAX) {
     return `正文最多 ${ENTRY_CONTENT_MAX} 个字符`
+  }
+  if (hasEffectiveMetaAdoption.value || editingMeta.value) {
+    if (metaDraft.title.trim()) {
+      const parsed = EntryTitle.safeParse(metaDraft.title)
+      if (!parsed.success) return parsed.error.issues[0]?.message ?? '标题格式有误'
+    }
+    if (metaDraft.summary.trim()) {
+      const parsed = EntrySummary.safeParse(metaDraft.summary)
+      if (!parsed.success) return parsed.error.issues[0]?.message ?? '现行概要格式有误'
+    }
+    if (metaDraft.disclosure.trim()) {
+      const parsed = Disclosure.safeParse(metaDraft.disclosure)
+      if (!parsed.success) return parsed.error.issues[0]?.message ?? '触发场景格式有误'
+    }
+  }
+  if (metaDraft.changeSummary.trim()) {
+    const parsed = ChangeSummary.safeParse(metaDraft.changeSummary)
+    if (!parsed.success) return parsed.error.issues[0]?.message ?? '变更说明格式有误'
   }
   return null
 })
@@ -293,7 +441,7 @@ const canConfirmMerge = computed(
     viewAction.value === 'update' &&
     Boolean(targetShortId.value) &&
     targetVersion.value !== null &&
-    hasDiffChanges.value &&
+    hasAnyUpdateChanges.value &&
     !mergeValidationProblem.value &&
     !versionConflict.value &&
     !applyBusy.value,
@@ -323,6 +471,47 @@ function restorePlanTargetState(res: CapturePlanResponse) {
   editingDiff.value = false
   error.value = null
   versionConflict.value = false
+
+  const targetCand = res.candidates.find((c) => c.shortId === res.targetShortId) ?? null
+  metaBaseline.title = targetCand?.title ?? props.targetEntry?.title ?? ''
+  metaBaseline.summary = targetCand?.summary ?? ''
+  metaBaseline.disclosure = targetCand?.disclosure ?? ''
+  metaBaseline.envs = normalizeSlugList(targetCand?.envs)
+  metaBaseline.realms = normalizeSlugList(targetCand?.realms)
+  metaBaseline.projects = normalizeSlugList(targetCand?.projects)
+  metaBaseline.runtimes = normalizeSlugList(targetCand?.runtimes)
+
+  metaDraft.title = res.proposedTitle ?? metaBaseline.title
+  metaDraft.summary =
+    res.proposedSummary !== undefined && res.proposedSummary !== null
+      ? res.proposedSummary
+      : metaBaseline.summary
+  metaDraft.disclosure =
+    res.proposedDisclosure !== undefined && res.proposedDisclosure !== null
+      ? res.proposedDisclosure
+      : metaBaseline.disclosure
+  planProposedChangeSummary.value = res.proposedChangeSummary ?? null
+  metaDraft.changeSummary = res.proposedChangeSummary ?? ''
+  metaScope.value = {
+    envs:
+      res.proposedEnvs !== undefined && res.proposedEnvs !== null
+        ? [...res.proposedEnvs]
+        : [...metaBaseline.envs],
+    realms:
+      res.proposedRealms !== undefined && res.proposedRealms !== null
+        ? [...res.proposedRealms]
+        : [...metaBaseline.realms],
+    projects:
+      res.proposedProjects !== undefined && res.proposedProjects !== null
+        ? [...res.proposedProjects]
+        : [...metaBaseline.projects],
+    runtimes:
+      res.proposedRuntimes !== undefined && res.proposedRuntimes !== null
+        ? [...res.proposedRuntimes]
+        : [...metaBaseline.runtimes],
+  }
+  adoptMeta.value = true
+  editingMeta.value = false
 }
 
 function applyPlanResponse(res: CapturePlanResponse) {
@@ -351,12 +540,15 @@ async function runCapturePlan(targetId?: string) {
   abortPending()
   const nextController = new AbortController()
   controller = nextController
-  loadingReturnStep = targetId && plan.value ? 'preview' : 'input'
-  loadingHint.value = targetId
-    ? '正在按所选目标重新生成修改方案'
-    : hasChatModel.value
-      ? '正在检索相关记忆并生成归并方案'
-      : '正在检索候选目标记忆'
+  const effectiveTargetId = targetId ?? props.targetEntry?.shortId
+  loadingReturnStep = step.value === 'preview' ? 'preview' : 'input'
+  loadingHint.value = isRefineMode.value
+    ? '正在按说明生成微调方案'
+    : targetId
+      ? '正在按所选目标重新生成修改方案'
+      : hasChatModel.value
+        ? '正在检索相关记忆并生成归并方案'
+        : '正在检索候选目标记忆'
   error.value = null
   versionConflict.value = false
   step.value = 'loading'
@@ -364,7 +556,8 @@ async function runCapturePlan(targetId?: string) {
     const res = await api.capturePlan(
       {
         text,
-        ...(targetId ? { targetShortId: targetId } : {}),
+        ...(effectiveTargetId ? { targetShortId: effectiveTargetId } : {}),
+        ...(isRefineMode.value ? { mode: 'refine' as const } : {}),
       },
       nextController.signal,
     )
@@ -376,7 +569,12 @@ async function runCapturePlan(targetId?: string) {
     if (controller !== nextController) return
     if (err instanceof Error && err.name === 'AbortError') return
     controller = null
-    error.value = err instanceof ApiError ? err.message : '匹配失败，请重试'
+    error.value =
+      err instanceof ApiError
+        ? err.message
+        : isRefineMode.value
+          ? '生成微调方案失败，请重试'
+          : '匹配失败，请重试'
     step.value = loadingReturnStep
   }
 }
@@ -493,8 +691,9 @@ async function undoMerge(
     queryClient.setQueryData(['entry', shortId], restored)
     void queryClient.invalidateQueries({ queryKey: ['entries'] })
     void queryClient.invalidateQueries({ queryKey: ['entry-history', shortId] })
+    void queryClient.invalidateQueries({ queryKey: ['boot-preview'] })
     toast.add({
-      title: `已撤销对「${title}」的归并，恢复至版本 ${prevVersion}`,
+      title: `已撤销对「${title}」的修改，恢复至版本 ${prevVersion}`,
       color: 'success',
     })
   } catch (err) {
@@ -519,29 +718,69 @@ async function confirmMerge() {
   versionConflict.value = false
   const sid = targetShortId.value
   const prevVersion = targetVersion.value
+  const refining = isRefineMode.value
+
+  const payload: UpdateEntryRequest = {
+    expectedVersion: prevVersion,
+  }
+  if (hasDiffChanges.value) {
+    payload.content = draftContent.value
+  }
+  const changeSummaryText =
+    metaDraft.changeSummary.trim() ||
+    planProposedChangeSummary.value?.trim() ||
+    (refining ? '按说明微调记忆' : '')
+  if (changeSummaryText) {
+    payload.changeSummary = changeSummaryText
+  }
+  if (hasEffectiveMetaAdoption.value) {
+    const normTitle = metaDraft.title.trim()
+    if (normTitle && normTitle !== metaBaseline.title) payload.title = normTitle
+    const normSummary = metaDraft.summary.replace(/[\r\n]+/g, ' ').trim()
+    if (normSummary !== metaBaseline.summary.trim()) payload.summary = normSummary || null
+    const normDisclosure = metaDraft.disclosure.trim()
+    if (normDisclosure !== metaBaseline.disclosure.trim()) {
+      payload.disclosure = normDisclosure || null
+    }
+    if (!sameList(metaScope.value.envs, metaBaseline.envs)) payload.envs = metaScope.value.envs
+    if (!sameList(metaScope.value.realms, metaBaseline.realms)) {
+      payload.realms = metaScope.value.realms
+    }
+    if (!sameList(metaScope.value.projects, metaBaseline.projects)) {
+      payload.projects = metaScope.value.projects
+    }
+    if (!sameList(metaScope.value.runtimes, metaBaseline.runtimes)) {
+      payload.runtimes = metaScope.value.runtimes
+    }
+  }
+
   try {
-    const updated = await api.updateEntry(sid, {
-      expectedVersion: prevVersion,
-      content: draftContent.value,
-    })
+    const updated = await api.updateEntry(sid, payload)
     const mergedVersion = updated.entry.version
     queryClient.setQueryData(['entry', sid], updated)
     void queryClient.invalidateQueries({ queryKey: ['entries'] })
     void queryClient.invalidateQueries({ queryKey: ['entry-history', sid] })
+    void queryClient.invalidateQueries({ queryKey: ['boot-preview'] })
     open.value = false
     emit('applied', updated)
     toast.add({
-      title: `已归并至「${updated.entry.title}」（版本 ${mergedVersion}）`,
+      title: refining
+        ? `已微调「${updated.entry.title}」（版本 ${mergedVersion}）`
+        : `已归并至「${updated.entry.title}」（版本 ${mergedVersion}）`,
       color: 'success',
       duration: 8000,
       actions: [
-        {
-          label: '查看记忆',
-          icon: icons.promote,
-          color: 'neutral',
-          variant: 'outline',
-          onClick: () => emit('openEntry', sid),
-        },
+        ...(!refining
+          ? [
+              {
+                label: '查看记忆',
+                icon: icons.promote,
+                color: 'neutral' as const,
+                variant: 'outline' as const,
+                onClick: () => emit('openEntry', sid),
+              },
+            ]
+          : []),
         {
           label: '撤销',
           icon: icons.undelete,
@@ -556,7 +795,12 @@ async function confirmMerge() {
       versionConflict.value = true
       error.value = '目标记忆已更新，当前预览版本已过期。'
     } else {
-      error.value = err instanceof ApiError ? err.message : '归并失败，请重试'
+      error.value =
+        err instanceof ApiError
+          ? err.message
+          : refining
+            ? '应用微调失败，请重试'
+            : '归并失败，请重试'
     }
   } finally {
     applyBusy.value = false
@@ -650,8 +894,12 @@ onBeforeUnmount(() => {
 <template>
   <UModal
     :open="open"
-    title="随手记"
-    description="自动匹配并归并至既有记忆"
+    :title="isRefineMode ? '按说明微调' : '随手记'"
+    :description="
+      isRefineMode && targetEntry
+        ? `针对 ${targetEntry.shortId} · ${targetEntry.title} 生成单轮修改方案`
+        : '自动匹配并归并至既有记忆'
+    "
     :dismissible="!applyBusy && step !== 'loading'"
     :close="!applyBusy"
     :ui="{
@@ -663,10 +911,22 @@ onBeforeUnmount(() => {
     <template #body>
       <!-- 输入阶段 -->
       <div v-if="step === 'input'" class="space-y-3.5">
+        <div v-if="isRefineMode && targetEntry" class="refine-target-bar">
+          <span class="refine-target-lead">
+            <UIcon :name="icons.file" class="refine-target-icon" aria-hidden="true" />
+            <strong class="refine-target-title">{{ targetEntry.title }}</strong>
+          </span>
+          <span class="plan-meta">{{ targetEntry.shortId }}</span>
+        </div>
+
         <UFormField
-          label="记录内容"
+          :label="isRefineMode ? '微调说明' : '记录内容'"
           name="text"
-          help="无需先填标题或分类，可直接输入习惯、约定或事实更新"
+          :help="
+            isRefineMode
+              ? '用一句话说明要补充的适用前提、修改的内容或要调整的场景标签，预览确认后再写入'
+              : '无需先填标题或分类，可直接输入习惯、约定或事实更新'
+          "
         >
           <UTextarea
             id="capture-input"
@@ -677,7 +937,11 @@ onBeforeUnmount(() => {
             autoresize
             :maxrows="12"
             :maxlength="CAPTURE_TEXT_MAX"
-            placeholder="例如：方案对比结论优先用 Markdown 表格呈现，列清取舍与代价……"
+            :placeholder="
+              isRefineMode
+                ? '例如：补充说明仅适用于家里 home-24 主机，收紧环境标签为 home-24，并更新现行概要……'
+                : '例如：方案对比结论优先用 Markdown 表格呈现，列清取舍与代价……'
+            "
             class="w-full"
           />
         </UFormField>
@@ -756,8 +1020,8 @@ onBeforeUnmount(() => {
           <p class="plan-reason">{{ reason }}</p>
         </div>
 
-        <!-- 候选目标切换 chips -->
-        <div v-if="candidates.length" class="candidate-bar">
+        <!-- 候选目标切换 chips（全局随手记显示，单条微调锁定当前词条） -->
+        <div v-if="!isRefineMode && candidates.length" class="candidate-bar">
           <span class="section-label">候选目标（点击可切换归并对象）</span>
           <div class="candidate-chips">
             <button
@@ -922,21 +1186,135 @@ onBeforeUnmount(() => {
             }}，建议改存凭据并用占位符引用。
           </NoteLine>
 
-          <div class="space-y-1.5">
-            <div class="diff-toolbar">
-              <span class="section-label">
-                {{ editingDiff ? '微调归并后正文' : '变更预览（行级对比）' }}
+          <!-- 可选元信息变更预览与编辑 -->
+          <div v-if="hasMetaChanges || editingMeta" class="meta-revision-box">
+            <div class="meta-revision-head">
+              <label v-if="hasMetaChanges" class="meta-adopt-toggle">
+                <input
+                  v-model="adoptMeta"
+                  type="checkbox"
+                  class="square-check"
+                  :disabled="applyBusy"
+                />
+                <span>采纳元信息变更（{{ metaChanges.length }} 项）</span>
+              </label>
+              <span v-else class="section-label section-label-inline">
+                <UIcon :name="icons.sliders" class="section-label-icon" aria-hidden="true" />
+                <span>调整元信息</span>
               </span>
               <UButton
                 size="xs"
                 color="neutral"
                 variant="ghost"
-                :icon="editingDiff ? icons.compare : icons.edit"
+                :icon="editingMeta ? icons.check : icons.edit"
                 :disabled="applyBusy"
-                @click="editingDiff = !editingDiff"
+                @click="editingMeta = !editingMeta"
               >
-                {{ editingDiff ? '返回对比视图' : '微调内容' }}
+                {{ editingMeta ? '完成调整' : '调整元信息' }}
               </UButton>
+            </div>
+
+            <div v-if="editingMeta" class="meta-edit-fields">
+              <UFormField label="标题" name="metaTitle">
+                <UInput
+                  v-model="metaDraft.title"
+                  name="metaTitle"
+                  :maxlength="ENTRY_TITLE_MAX"
+                  :disabled="applyBusy"
+                  class="w-full"
+                />
+              </UFormField>
+              <UFormField label="现行概要（可选）" name="metaSummary">
+                <UTextarea
+                  v-model="metaDraft.summary"
+                  name="metaSummary"
+                  :rows="2"
+                  autoresize
+                  :maxrows="4"
+                  :maxlength="ENTRY_SUMMARY_MAX"
+                  :disabled="applyBusy"
+                  class="w-full"
+                />
+              </UFormField>
+              <div class="grid gap-3 sm:grid-cols-2">
+                <UFormField label="触发场景（可选）" name="metaDisclosure">
+                  <UInput
+                    v-model="metaDraft.disclosure"
+                    name="metaDisclosure"
+                    :maxlength="DISCLOSURE_MAX"
+                    :disabled="applyBusy"
+                    class="w-full"
+                  />
+                </UFormField>
+                <UFormField label="变更说明（可选）" name="metaChangeSummary">
+                  <UInput
+                    v-model="metaDraft.changeSummary"
+                    name="metaChangeSummary"
+                    :maxlength="CHANGE_SUMMARY_MAX"
+                    :disabled="applyBusy"
+                    class="w-full"
+                  />
+                </UFormField>
+              </div>
+              <UFormField label="适用场景">
+                <SceneScopePicker v-model="metaScope" :disabled="applyBusy" />
+              </UFormField>
+            </div>
+
+            <dl
+              v-else-if="hasMetaChanges"
+              class="meta-diff-list"
+              :class="{ 'is-muted': !adoptMeta }"
+            >
+              <div v-for="item in metaChanges" :key="item.key" class="meta-diff-row">
+                <dt class="meta-diff-label">{{ item.label }}</dt>
+                <dd class="meta-diff-val">
+                  <span class="meta-before">{{ item.before }}</span>
+                  <UIcon :name="icons.inherits" class="meta-arrow" aria-hidden="true" />
+                  <span class="meta-after">{{ item.after }}</span>
+                </dd>
+              </div>
+            </dl>
+
+            <p v-if="!editingMeta && metaDraft.changeSummary.trim()" class="meta-change-note">
+              变更说明：{{ metaDraft.changeSummary.trim() }}
+            </p>
+          </div>
+
+          <div class="space-y-1.5">
+            <div class="diff-toolbar">
+              <span class="section-label">
+                {{
+                  editingDiff
+                    ? isRefineMode
+                      ? '微调修改后正文'
+                      : '微调归并后正文'
+                    : '变更预览（行级对比）'
+                }}
+              </span>
+              <div class="diff-toolbar-actions">
+                <UButton
+                  v-if="isRefineMode && !hasMetaChanges && !editingMeta"
+                  size="xs"
+                  color="neutral"
+                  variant="ghost"
+                  :icon="icons.sliders"
+                  :disabled="applyBusy"
+                  @click="editingMeta = true"
+                >
+                  调整元信息
+                </UButton>
+                <UButton
+                  size="xs"
+                  color="neutral"
+                  variant="ghost"
+                  :icon="editingDiff ? icons.compare : icons.edit"
+                  :disabled="applyBusy"
+                  @click="editingDiff = !editingDiff"
+                >
+                  {{ editingDiff ? '返回对比视图' : '微调内容' }}
+                </UButton>
+              </div>
             </div>
 
             <UTextarea
@@ -949,8 +1327,11 @@ onBeforeUnmount(() => {
               :maxrows="20"
               :disabled="applyBusy"
               class="w-full font-mono"
-              aria-label="归并后正文"
+              aria-label="修改后正文"
             />
+            <p v-else-if="!hasDiffChanges && hasEffectiveMetaAdoption" class="meta-only-note">
+              正文无变更，确认后仅应用上方元信息调整。
+            </p>
             <DiffViewer
               v-else
               :before="beforeContent"
@@ -972,7 +1353,7 @@ onBeforeUnmount(() => {
               :icon="icons.refresh"
               @click="runCapturePlan(targetShortId ?? undefined)"
             >
-              重新匹配
+              {{ isRefineMode ? '重新生成' : '重新匹配' }}
             </UButton>
           </div>
         </template>
@@ -986,11 +1367,11 @@ onBeforeUnmount(() => {
           <UButton color="neutral" variant="ghost" size="sm" @click="open = false">取消</UButton>
           <UButton
             size="sm"
-            :icon="hasChatModel ? icons.capture : icons.search"
+            :icon="isRefineMode ? icons.sparkles : hasChatModel ? icons.capture : icons.search"
             :disabled="!rawText.trim()"
             @click="runCapturePlan()"
           >
-            {{ hasChatModel ? '匹配归并方案' : '检索候选目标' }}
+            {{ isRefineMode ? '生成微调方案' : hasChatModel ? '匹配归并方案' : '检索候选目标' }}
             <span class="shortcut-hint" aria-hidden="true">{{ submitShortcut }}</span>
           </UButton>
         </div>
@@ -1055,6 +1436,7 @@ onBeforeUnmount(() => {
             返回修改
           </UButton>
           <UButton
+            v-if="!isRefineMode"
             color="neutral"
             variant="outline"
             size="sm"
@@ -1066,7 +1448,12 @@ onBeforeUnmount(() => {
         </div>
         <div class="foot-group">
           <UButton color="neutral" variant="ghost" size="sm" @click="open = false">关闭</UButton>
-          <UButton v-if="targetShortId" size="sm" :icon="icons.promote" @click="openOriginalEntry">
+          <UButton
+            v-if="!isRefineMode && targetShortId"
+            size="sm"
+            :icon="icons.promote"
+            @click="openOriginalEntry"
+          >
             查看原记忆
           </UButton>
         </div>
@@ -1086,7 +1473,7 @@ onBeforeUnmount(() => {
             返回修改
           </UButton>
           <UButton
-            v-if="patchKind !== 'append' || !manualAppendActive"
+            v-if="!isRefineMode && (patchKind !== 'append' || !manualAppendActive)"
             color="neutral"
             variant="outline"
             size="sm"
@@ -1114,7 +1501,7 @@ onBeforeUnmount(() => {
             :disabled="!canConfirmMerge"
             @click="confirmMerge"
           >
-            确认归并
+            {{ isRefineMode ? '确认应用微调' : '确认归并' }}
             <span v-if="!integrityWarning" class="shortcut-hint" aria-hidden="true">{{
               submitShortcut
             }}</span>
@@ -1329,6 +1716,131 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+.diff-toolbar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.refine-target-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--ui-border);
+  border-left: 3px solid var(--ui-rule);
+  background: var(--ui-bg-muted);
+}
+.refine-target-lead {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.refine-target-icon {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--ui-text-muted);
+}
+.refine-target-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ui-text-highlighted);
+  overflow-wrap: anywhere;
+}
+.meta-revision-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--ui-border-accented);
+  background: var(--ui-bg-muted);
+}
+.meta-revision-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.meta-adopt-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ui-text-highlighted);
+  cursor: pointer;
+}
+.square-check {
+  flex: none;
+  accent-color: var(--ui-primary);
+  cursor: pointer;
+}
+.meta-diff-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.meta-diff-list.is-muted {
+  opacity: 0.55;
+}
+.meta-diff-row {
+  display: grid;
+  grid-template-columns: 4.5rem minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+}
+.meta-diff-label {
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.meta-diff-val {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.meta-before {
+  color: var(--ui-text-muted);
+  text-decoration: line-through;
+  overflow-wrap: anywhere;
+}
+.meta-arrow {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
+  color: var(--ui-text-dimmed);
+}
+.meta-after {
+  font-weight: 500;
+  color: var(--ui-text-highlighted);
+  overflow-wrap: anywhere;
+}
+.meta-change-note {
+  padding-top: 6px;
+  border-top: 1px solid var(--ui-border);
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.meta-edit-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.meta-only-note {
+  padding: 10px 12px;
+  border: 1px dashed var(--ui-border-accented);
+  font-size: 13px;
+  color: var(--ui-text-muted);
 }
 .error-row {
   display: flex;
