@@ -21,6 +21,7 @@ import diffViewer from '../components/ui/DiffViewer.vue?raw'
 import emptyState from '../components/ui/EmptyState.vue?raw'
 import noteLine from '../components/ui/NoteLine.vue?raw'
 import shortIdLine from '../components/ui/ShortIdLine.vue?raw'
+import wikiText from '../components/ui/WikiText.vue?raw'
 import consoleSearch from '../composables/useConsoleSearch.ts?raw'
 import { icons } from '../icons'
 import consoleLayout from '../layouts/ConsoleLayout.vue?raw'
@@ -302,6 +303,36 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(accountDataSettings).toContain('parseUserAgent')
     expect(dataTransferPanel).toContain('icons.fileDown')
     expect(dataTransferPanel).toContain('icons.fileUp')
+  })
+
+  it('常驻预算支持分组筛选与超限指引，双链统一呈现图标与标题芯片，全站界面淡化记忆短 ID', () => {
+    expect(memoriesPage).toContain('PINNED_GROUPS')
+    expect(memoriesPage).toContain('pinnedGroup')
+    expect(memoriesPage).toContain('linkedTitles')
+
+    expect(memoryList).toContain('global_full')
+    expect(memoryList).toContain('scoped_full')
+    expect(memoryList).toContain('全局全文')
+    expect(memoryList).toContain('场景全文')
+    expect(memoryList).toContain('<WikiText')
+    expect(memoryList).not.toContain('class="row-id"')
+
+    expect(wikiText).toContain('icons.linkChain')
+    expect(wikiText).toContain('wiki-chip')
+    expect(memoryContent).toContain('kioku-wikilink-icon')
+
+    expect(memoryEditor).toContain('<WikiText')
+    expect(memoryEditor).toContain('复制 ID')
+    expect(memoryEditor).not.toContain('<ShortIdLine')
+    expect(memoryEditor).toContain(':entry-title="entry.title"')
+
+    expect(memoryHistoryDrawer).toContain('entryTitle')
+    expect(memoryHistoryDrawer).toContain('<WikiText')
+    expect(memoryHistoryDrawer).not.toContain('`版本历史 · ${shortId}`')
+
+    expect(dreamSuggestionCard).toContain('<WikiText')
+    expect(entryLinksPanel).not.toContain('{{ item.shortId }}')
+    expect(bootPreviewDrawer).not.toContain('class="item-id')
   })
 
   it('界面中引用的全部 icons.* 均已在 icons.ts 注册，且没有直接写死未打包的 i-lucide-*', () => {
