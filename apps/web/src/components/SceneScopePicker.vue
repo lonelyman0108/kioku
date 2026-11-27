@@ -142,28 +142,34 @@ function setUniversal() {
           <UIcon :name="icons.env" class="scope-label-icon" aria-hidden="true" />
           <span>环境</span>
         </span>
-        <div class="scope-chips">
-          <UButton
-            v-for="slug in envChoices"
-            :key="slug"
-            type="button"
-            size="xs"
-            :color="modelValue.envs.includes(slug) ? 'primary' : 'neutral'"
-            :variant="modelValue.envs.includes(slug) ? 'solid' : 'outline'"
-            :disabled="disabled"
-            @click="toggle('envs', slug)"
-          >
-            {{ envDisplayName(slug) }}
-          </UButton>
-          <UInput
-            v-model="draft.env"
-            size="xs"
-            placeholder="新增环境"
-            class="w-24"
-            :disabled="disabled"
-            @keydown.enter.prevent="addCustom('envs', 'env')"
-            @blur="addCustom('envs', 'env')"
-          />
+        <div class="scope-field">
+          <div class="scope-chips">
+            <UButton
+              v-for="slug in envChoices"
+              :key="slug"
+              type="button"
+              size="xs"
+              :color="modelValue.envs.includes(slug) ? 'primary' : 'neutral'"
+              :variant="modelValue.envs.includes(slug) ? 'solid' : 'outline'"
+              :disabled="disabled"
+              @click="toggle('envs', slug)"
+            >
+              {{ envDisplayName(slug) }}
+            </UButton>
+            <UInput
+              v-model="draft.env"
+              size="xs"
+              placeholder="如 home-24"
+              class="w-28"
+              :disabled="disabled"
+              @keydown.enter.prevent="addCustom('envs', 'env')"
+              @blur="addCustom('envs', 'env')"
+            />
+          </div>
+          <p class="scope-hint">
+            可填系统名（mac、linux、win）或自定义主机标识（如
+            home-24）。多标签按任一命中；单机专用记忆若需隔离，仅标主机标识。
+          </p>
         </div>
       </div>
 
@@ -307,10 +313,21 @@ function setUniversal() {
   width: 13px;
   height: 13px;
 }
+.scope-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
 .scope-chips {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 4px;
+}
+.scope-hint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ui-text-muted);
 }
 </style>

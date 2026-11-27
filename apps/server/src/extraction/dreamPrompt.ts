@@ -37,6 +37,7 @@ export interface DreamPromptItem {
   projects: string[]
   runtimes: string[]
   topics: string[]
+  deviceKey?: string | null | undefined
   version: number
   updatedAt: string
   truncated: boolean
@@ -91,6 +92,7 @@ const SYSTEM_PROMPT = [
   '',
   '严格约束：',
   '- 宁缺毋滥，不要为细枝末节的措辞调整提建议；保持精炼，提炼抽象规则与防踩坑原因，绝不扩写流水账。',
+  '- 禁止将特定机器、局域网主机、本机路径/端口或单次环境特例泛化为全局或整个操作系统规则；提炼与更新时必须在 title、summary、disclosure 与正文中明确保留适用机器与前提条件，并在 envs 中避免给单机特例盲目打上过于宽泛的通用标签。',
   '- 合并必须克制：只合并真正重复或高度重叠的词条；互补主题页优先用 link_entries 建双链而非硬揉成大汇总页。',
   '- 标题必须简短稳定，不夹带日期、版本号或改动日志；正文维护现行有效状态，不在首行重复标题。',
   '- 严禁编造任何密码、API Key 或令牌；原文中的 [[m-xxxxxx]] 双链与 {{cred:...}} 占位符必须完整保留。',
@@ -126,6 +128,7 @@ const EPISODE_RECONCILE_SYSTEM_PROMPT = [
   '1. 会话中的新结论是否推翻、修正或补充了某条既有正式记忆？若是，优先输出 "update" 更新该既有词条（并可带 source_short_id 标明摘要短 ID），严禁丢失原有双链与 {{cred:...}} 凭据占位符。',
   '2. 若摘要包含值得长期沉淀的独立经验且不应揉进任何已有词条，则输出 "distill_episode" 提炼为新正式记忆。',
   '3. 若摘要仅为一次性临时排错且未推翻既有记忆，输出 {"suggestions":[]}。',
+  '4. 禁止将特定机器、局域网主机、本机路径/端口或单次环境特例泛化为全局或整个操作系统规则；提炼与更新时必须在 title、summary、disclosure 与正文中明确保留适用机器与前提条件，并在 envs 中避免给单机特例盲目打上过于宽泛的通用标签。',
   '',
   '只输出 JSON：{"suggestions":[...]}。所有结论须提炼为稳定规则与防踩坑原因，严禁写入逐轮对话流水账。',
 ].join('\n')
@@ -181,6 +184,8 @@ function formatItem(item: DreamPromptItem, compact = false): string {
   if (item.bootMode && item.bootMode !== 'none') tags.push(`boot=${item.bootMode}`)
   if (item.projects.length) tags.push(`project=${item.projects.join(',')}`)
   if (item.envs.length) tags.push(`env=${item.envs.join(',')}`)
+  const deviceKey = item.deviceKey?.trim()
+  if (deviceKey) tags.push(`device=${deviceKey}`)
   if (item.realms.length) tags.push(`realm=${item.realms.join(',')}`)
   if (item.runtimes.length) tags.push(`runtime=${item.runtimes.join(',')}`)
   if (item.topics.length) tags.push(`topic=${item.topics.join(',')}`)

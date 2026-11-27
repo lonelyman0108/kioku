@@ -24,12 +24,13 @@ const SYSTEM_PROMPT = [
   '规则：',
   '- 若对话仅是寒暄、纯测试或没有值得后续会话参考的结论，请返回 {"title":"","summary":""}。',
   '- 不要编造内容，不要写入明文密码、API Key 或令牌；正文中的 {{cred:...}} 占位符原样保留。',
+  '- 涉及单机配置、本机路径、端口、局域网 IP、硬件差异或特定机器开关时，必须在标题或摘要中明确注明适用设备、主机或前提条件，不得泛化为通用系统或全局配置。',
   '- summary 控制在 500 字以内，简洁陈述事实。',
 ].join('\n')
 
 export function buildEpisodeMessages(
   turns: readonly BufferedTurnItem[],
-  context: { projectSlug?: string; deviceKey?: string },
+  context: { projectSlug?: string; deviceKey?: string; deviceName?: string },
 ): ChatMessage[] {
   // 按最新轮次优先保留，总长不超过 MAX_TRANSCRIPT_CHARS
   const blocks: string[] = []
@@ -45,8 +46,17 @@ export function buildEpisodeMessages(
   }
 
   const headerParts: string[] = []
-  if (context.projectSlug) headerParts.push(`项目：${context.projectSlug}`)
-  if (context.deviceKey) headerParts.push(`设备：${context.deviceKey}`)
+  const projectSlug = context.projectSlug?.trim() ?? ''
+  if (projectSlug) headerParts.push(`项目：${projectSlug}`)
+  const deviceKey = context.deviceKey?.trim() ?? ''
+  const deviceName = context.deviceName?.trim() ?? ''
+  if (deviceKey && deviceName && deviceName !== deviceKey) {
+    headerParts.push(`设备：${deviceKey}（${deviceName}）`)
+  } else if (deviceKey) {
+    headerParts.push(`设备：${deviceKey}`)
+  } else if (deviceName) {
+    headerParts.push(`终端：${deviceName}`)
+  }
   const header = headerParts.length ? `${headerParts.join(' · ')}\n\n` : ''
 
   return [

@@ -224,7 +224,7 @@ function closeOnce() {
         <div class="space-y-1.5">
           <p class="section-caption">
             <UIcon :name="icons.env" class="section-caption-icon" aria-hidden="true" />
-            <span>终端环境（用于自动匹配当前系统）</span>
+            <span>终端环境（系统名或自定义主机标识）</span>
           </p>
           <div class="flex flex-wrap items-center gap-1.5">
             <UButton
@@ -241,12 +241,16 @@ function closeOnce() {
             <UInput
               v-model="customEnv"
               size="xs"
-              placeholder="自定义环境"
-              class="w-24"
+              placeholder="如 home-24"
+              class="w-28"
               @keydown.enter.prevent="addEnv"
               @blur="addEnv"
             />
           </div>
+          <p class="text-xs text-muted">
+            可填系统名（mac、linux、win）或自定义主机标识（如
+            home-24）。多标签按任一命中；单机专用记忆若需隔离，仅标主机标识。
+          </p>
         </div>
 
         <div class="space-y-2">

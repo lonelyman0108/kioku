@@ -201,11 +201,32 @@ export function bootHeading(shortId: string, title: string): string {
   return clean && clean !== shortId ? `${clean} (${shortId})` : shortId
 }
 
+function formatSceneScopeHint(scope?: {
+  projects?: readonly string[] | undefined
+  envs?: readonly string[] | undefined
+  realms?: readonly string[] | undefined
+  runtimes?: readonly string[] | undefined
+}): string {
+  if (!scope) return ''
+  const tags = [
+    ...(scope.projects ?? []),
+    ...(scope.envs ?? []),
+    ...(scope.realms ?? []),
+    ...(scope.runtimes ?? []),
+  ]
+  return tags.length ? ` [${tags.join(', ')}]` : ''
+}
+
 function bootMetaSuffix(meta: {
   updatedAt?: string | undefined
   version?: number | undefined
   lastChangeSummary?: string | null | undefined
+  projects?: readonly string[] | undefined
+  envs?: readonly string[] | undefined
+  realms?: readonly string[] | undefined
+  runtimes?: readonly string[] | undefined
 }): string {
+  const scopeHint = formatSceneScopeHint(meta)
   const metaParts: string[] = []
   if (meta.updatedAt) metaParts.push(`更新 ${meta.updatedAt.slice(0, 10)}`)
   if (meta.lastChangeSummary) {
@@ -213,7 +234,10 @@ function bootMetaSuffix(meta: {
       `${meta.version ? `v${meta.version}：` : ''}${clipChars(inlineText(meta.lastChangeSummary), 80)}`,
     )
   }
-  return metaParts.length ? ` · ${metaParts.join('（')}${metaParts.length > 1 ? '）' : ''}` : ''
+  const metaText = metaParts.length
+    ? ` · ${metaParts.join('（')}${metaParts.length > 1 ? '）' : ''}`
+    : ''
+  return `${scopeHint}${metaText}`
 }
 
 export function bootEntryChars(
@@ -223,6 +247,10 @@ export function bootEntryChars(
     updatedAt?: string | undefined
     version?: number | undefined
     lastChangeSummary?: string | null | undefined
+    projects?: readonly string[] | undefined
+    envs?: readonly string[] | undefined
+    realms?: readonly string[] | undefined
+    runtimes?: readonly string[] | undefined
   },
 ): number {
   const suffix = meta ? bootMetaSuffix(meta) : ''
@@ -236,6 +264,7 @@ function formatCharScale(chars: number | undefined): string {
 
 function formatCatalogLine(info: BootOmittedItem): string {
   const label = `${info.shortId}${titleSuffix(info.shortId, info.title)}`
+  const scopeHint = formatSceneScopeHint(info)
   const updated = info.updatedAt ? ` · 更新 ${info.updatedAt.slice(0, 10)}` : ''
   const recent = info.lastChangeSummary
     ? `（近改：${clipChars(inlineText(info.lastChangeSummary), 50)}）`
@@ -243,7 +272,7 @@ function formatCatalogLine(info: BootOmittedItem): string {
   const descText = info.summary?.trim() || info.disclosure?.trim() || ''
   const desc = descText ? ` — ${clipChars(inlineText(descText), 100)}` : ''
   const scale = formatCharScale(info.charCount)
-  return `- ${label}${updated}${recent}${desc}${scale}`
+  return `- ${label}${scopeHint}${updated}${recent}${desc}${scale}`
 }
 
 export function selectCatalogLines(
@@ -308,6 +337,10 @@ function compilePinnedRows(
         updatedAt: row.updatedAt.toISOString(),
         version: row.version,
         lastChangeSummary: row.lastChangeSummary,
+        envs: row.envs,
+        realms: row.realms,
+        projects: row.projects,
+        runtimes: row.runtimes,
       })
       return {
         row,
@@ -380,6 +413,10 @@ function compilePinnedRows(
         bucket: item.bucket,
         content: item.displayContent,
         summary: row.summary,
+        envs: row.envs,
+        realms: row.realms,
+        projects: row.projects,
+        runtimes: row.runtimes,
         updatedAt,
         lastChangeSummary: row.lastChangeSummary,
         version: row.version,
@@ -424,6 +461,10 @@ function compilePinnedRows(
       reason,
       summary: row.summary,
       disclosure: row.disclosure,
+      envs: row.envs,
+      realms: row.realms,
+      projects: row.projects,
+      runtimes: row.runtimes,
       updatedAt,
       lastChangeSummary: row.lastChangeSummary,
       charCount: row.content.length,
@@ -559,6 +600,10 @@ export async function loadRecentEntries(
     title: r.title,
     summary: r.summary,
     isPinned: r.isPinned,
+    envs: r.envs,
+    realms: r.realms,
+    projects: r.projects,
+    runtimes: r.runtimes,
     disclosure: r.disclosure,
     lastChangeSummary: r.lastChangeSummary,
     updatedAt: r.updatedAt.toISOString(),
@@ -828,13 +873,14 @@ export function formatSummaryBlock(summaries: readonly SessionSummary[]): string
 export function formatRecentBlock(recent: readonly RecentEntry[]): string {
   if (!recent.length) return ''
   const lines = recent.map((m) => {
+    const scopeHint = formatSceneScopeHint(m)
     const pin = m.isPinned ? '，常驻' : ''
     const change = m.lastChangeSummary
       ? ` · 近改：${clipChars(inlineText(m.lastChangeSummary), 60)}`
       : ''
     const detail = m.summary?.trim() || m.disclosure?.trim() || ''
     const note = detail ? `：${clipChars(inlineText(detail), 100)}` : ''
-    return `- ${bootHeading(m.shortId, m.title)}（更新于 ${m.updatedAt.slice(0, 10)}${pin}${change}）${note}`
+    return `- ${bootHeading(m.shortId, m.title)}${scopeHint}（更新于 ${m.updatedAt.slice(0, 10)}${pin}${change}）${note}`
   })
   return ['## 近期更新的记忆', '', ...lines].join('\n')
 }

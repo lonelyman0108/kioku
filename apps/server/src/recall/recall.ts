@@ -433,7 +433,7 @@ export function formatRecallBlock(
   const lines = candidates.map((c) => {
     const score = c.score.toFixed(2)
     const label = `${c.shortId}${titleSuffix(c.shortId, c.title)}`
-    const tags = [...c.projects, ...c.envs, ...c.realms]
+    const tags = [...c.projects, ...c.envs, ...c.realms, ...c.runtimes]
     const scopeHint = tags.length ? ` [${tags.join(', ')}]` : ''
     const updated = c.updatedAt ? ` · 更新 ${c.updatedAt.slice(0, 10)}` : ''
     const cue = c.cues.length ? ` — ${clipChars(c.cues.join('；'), 160)}` : ''
