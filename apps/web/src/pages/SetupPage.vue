@@ -499,7 +499,7 @@ async function submitAdmin() {
   display: grid;
   grid-template-columns: 6.5rem minmax(0, 1fr) auto;
   gap: 2px 12px;
-  align-items: baseline;
+  align-items: center;
   padding: 6px 0;
   border-bottom: 1px solid var(--ui-border);
   font-size: 14px;

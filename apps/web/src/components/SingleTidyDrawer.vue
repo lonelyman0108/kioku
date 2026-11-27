@@ -715,7 +715,7 @@ const drawerDescription = computed(() =>
 .title-compare {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
+  align-items: center;
   gap: 6px 8px;
   padding: 8px 12px;
   border-left: 3px solid var(--ui-rule);
