@@ -50,15 +50,18 @@ describe('场景焦点合成与互斥冲突判定', () => {
     expect(inherited.projects).toEqual(['kioku'])
     expect(inherited.runtimes).toEqual(['claudecode'])
 
+    const zcodeInherited = synthesizeFocus(keyScope({ runtimeFamily: 'zcode' }))
+    expect(zcodeInherited.runtimes).toEqual(['zcode'])
+
     const overridden = synthesizeFocus(scope, {
       env: 'Server',
       realm: 'Personal',
-      runtime: 'zcode',
+      runtime: 'custom-ide',
       project: { repoName: 'org/sample-app', dirName: '/work/sample-app-wt' },
     })
     expect(overridden.envs).toEqual(['server'])
     expect(overridden.realms).toEqual(['personal'])
-    expect(overridden.runtimes).toEqual(['zcode'])
+    expect(overridden.runtimes).toEqual(['custom-ide'])
     expect(overridden.projects).toEqual(['sample-app', 'sample-app-wt'])
 
     // focusRealms 在不限 allowedRealms 时提供启动聚焦，限定 allowedRealms 时取交集绝不越权放宽

@@ -14,6 +14,7 @@ const RUNTIME_DISPLAY: Record<string, string> = {
   opencode: 'OpenCode',
   pi: 'Pi',
   dsh: 'DSH',
+  zcode: 'ZCode',
   mcp: 'MCP 客户端',
   generic: '通用客户端',
 }

@@ -36,5 +36,11 @@ describe('运行时选项与图标', () => {
     )
     expect(labelHtml).toContain('Antigravity')
     expect(labelHtml).toContain('<svg')
+
+    const zcodeHtml = await renderToString(
+      createSSRApp({ render: () => h(RuntimeLabel, { family: 'zcode', size: 16 }) }),
+    )
+    expect(zcodeHtml).toContain('ZCode')
+    expect(zcodeHtml).toContain('<svg')
   })
 })

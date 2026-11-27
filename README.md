@@ -61,6 +61,7 @@ npx @kioku-memory/cli
 | Hermes | ● | ● | ● | ● |
 | OpenClaw | ● | ● | ● | ● |
 | DeepSeek Harness | ● | ● | ● | ● |
+| ZCode | ● | ● | ● | ● |
 | 任意 MCP 客户端 | — | — | — | ● |
 
 各平台插件与 `kioku run` 命令行维护在 [kioku-plugins](https://github.com/lonelyman0108/kioku-plugins)；MCP 端点为 `/v1/mcp`（Streamable HTTP，提供 `kioku_boot`、`kioku_search`、`kioku_get`、`kioku_browse`、`kioku_create`、`kioku_update`、`kioku_delete`、`kioku_list_credentials` 八个工具），完整 HTTP 契约见 `/v1/openapi.json`。

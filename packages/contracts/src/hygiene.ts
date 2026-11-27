@@ -38,6 +38,7 @@ const BUILTIN_RUNTIME_SCOPE_HINTS: readonly { label: string; pattern: RegExp }[]
   { label: 'Gemini CLI', pattern: /\bgemini[\s-]?cli\b/i },
   { label: 'Antigravity', pattern: /\b(?:antigravity|agy)\b/i },
   { label: 'OpenCode', pattern: /\bopencode\b/i },
+  { label: 'ZCode', pattern: /\bzcode\b/i },
   { label: 'OpenClaw', pattern: /\bopenclaw\b/i },
   { label: 'Hermes', pattern: /\bhermes\b/i },
 ]

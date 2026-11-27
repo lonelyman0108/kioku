@@ -22,6 +22,7 @@ describe('hostOutput 宿主输出格式兼容', () => {
     expect(HOST_CONTEXT_LIMIT).toMatchObject({
       claudecode: 9_500,
       codex: 9_500,
+      zcode: 9_500,
       agy: 11_000,
       gemini: 11_000,
       opencode: 11_000,
@@ -36,6 +37,18 @@ describe('hostOutput 宿主输出格式兼容', () => {
       value: 'ctx',
     })
     expect(hostOutput('codex', 'prompt.submit', 'ctx')).toEqual({
+      mode: 'stdout_json',
+      value: {
+        hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: 'ctx' },
+      },
+    })
+    expect(hostOutput('zcode', 'session.start', 'ctx')).toEqual({
+      mode: 'stdout_json',
+      value: {
+        hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: 'ctx' },
+      },
+    })
+    expect(hostOutput('zcode', 'prompt.submit', 'ctx')).toEqual({
       mode: 'stdout_json',
       value: {
         hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: 'ctx' },
@@ -263,6 +276,58 @@ describe.skipIf(!testDatabaseUrl)('生命周期事件接口 /v1/lifecycle/event'
       expect(text.slice(recentIdx)).not.toContain(projUnpinned.entry.shortId)
     }
 
+    // zcode 密钥走内置运行时焦点与 stdout_json 输出格式
+    const zcodeKey = await issueTestApiKey(database, {
+      runtimeFamily: 'zcode',
+      envs: ['mac'],
+      canWrite: true,
+    })
+    const zcodeStart = await app.request('/v1/lifecycle/event', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${zcodeKey.key}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        event: 'session.start',
+        sessionId: 'sess-zcode-native',
+        project: { repoName: 'org/demo-proj' },
+      }),
+    })
+    expect(zcodeStart.status).toBe(200)
+    const zcodeBody = LifecycleEventResponse.parse(await zcodeStart.json())
+    expect(zcodeBody.hostOutput.mode).toBe('stdout_json')
+    const zcodeHook = (
+      zcodeBody.hostOutput.value as {
+        hookSpecificOutput?: { hookEventName?: string; additionalContext?: string }
+      }
+    ).hookSpecificOutput
+    expect(zcodeHook?.hookEventName).toBe('SessionStart')
+    expect(zcodeHook?.additionalContext).toContain('ZCode 专属约定')
+
+    const zcodePrompt = await app.request('/v1/lifecycle/event', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${zcodeKey.key}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        event: 'prompt.submit',
+        sessionId: 'sess-zcode-native',
+        prompt: 'ZCode 专属约定',
+      }),
+    })
+    expect(zcodePrompt.status).toBe(200)
+    const zcodePromptBody = LifecycleEventResponse.parse(await zcodePrompt.json())
+    expect(zcodePromptBody.hostOutput.mode).toBe('stdout_json')
+    const zcodePromptHook = (
+      zcodePromptBody.hostOutput.value as {
+        hookSpecificOutput?: { hookEventName?: string; additionalContext?: string }
+      }
+    ).hookSpecificOutput
+    expect(zcodePromptHook?.hookEventName).toBe('UserPromptSubmit')
+    expect(zcodePromptHook?.additionalContext).toContain('ZCode 专属约定')
+
     // claudecode 密钥覆盖为自定义 runtime 时，仍回退沿用 claudecode 宿主上限，且目录用量不超过目录预算
     const claudeKey = await issueTestApiKey(database, {
       runtimeFamily: 'claudecode',
@@ -271,10 +336,10 @@ describe.skipIf(!testDatabaseUrl)('生命周期事件接口 /v1/lifecycle/event'
     })
     const preview = await entrySvc.previewBoot({
       keyId: claudeKey.id,
-      runtime: 'zcode',
+      runtime: 'custom-ide',
       project: 'demo-proj',
     })
-    expect(preview.runtimeFamily).toBe('zcode')
+    expect(preview.runtimeFamily).toBe('custom-ide')
     expect(preview.hostLimit).toBe(9_500)
     expect(preview.usedCatalogChars).toBeLessThanOrEqual(preview.catalogBudget)
   })

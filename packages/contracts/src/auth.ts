@@ -36,6 +36,7 @@ export const RUNTIME_FAMILIES = [
   'opencode',
   'pi',
   'dsh',
+  'zcode',
   'openclaw',
   'hermes',
   'mcp',
