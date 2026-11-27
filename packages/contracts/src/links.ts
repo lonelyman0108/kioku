@@ -165,3 +165,114 @@ export function extractCredentialSlugs(content: string): string[] {
   }
   return [...seen]
 }
+
+const FENCE_LINE_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/
+
+// 按 CommonMark 等长反引号规则扫描行内代码，仅在代码跨度之外执行替换回调
+function replaceOutsideInlineCode(line: string, replacePlain: (segment: string) => string): string {
+  if (!line.includes('`')) return replacePlain(line)
+  let out = ''
+  let plainStart = 0
+  let i = 0
+  const n = line.length
+
+  while (i < n) {
+    if (line[i] !== '`') {
+      i++
+      continue
+    }
+    const tickStart = i
+    while (i < n && line[i] === '`') i++
+    const tickLen = i - tickStart
+
+    // 查找下一个恰好等长（前后均非反引号）的闭合反引号序列
+    let closeStart = -1
+    let j = i
+    while (j < n) {
+      if (line[j] !== '`') {
+        j++
+        continue
+      }
+      const runStart = j
+      while (j < n && line[j] === '`') j++
+      if (j - runStart === tickLen) {
+        closeStart = runStart
+        break
+      }
+    }
+
+    if (closeStart !== -1) {
+      const closeEnd = closeStart + tickLen
+      if (tickStart > plainStart) {
+        out += replacePlain(line.slice(plainStart, tickStart))
+      }
+      out += line.slice(tickStart, closeEnd)
+      i = closeEnd
+      plainStart = closeEnd
+    }
+  }
+
+  if (plainStart < n) {
+    out += replacePlain(line.slice(plainStart))
+  }
+  return out
+}
+
+// 确定性重定向正文中的 [[oldShortId]] / [[oldShortId|别名]] 双链（跳过围栏代码块与行内代码），用于合并重复后修复全库反链
+export function redirectWikiLinksInContent(
+  content: string,
+  redirectMap: ReadonlyMap<string, string>,
+): { content: string; replacedCount: number; redirectedTargets: string[] } {
+  if (!redirectMap.size || !content) {
+    return { content, replacedCount: 0, redirectedTargets: [] }
+  }
+  const normalizedMap = new Map<string, string>()
+  for (const [from, to] of redirectMap.entries()) {
+    const f = normalizeShortId(from)
+    const t = normalizeShortId(to)
+    if (f && t && f !== t) normalizedMap.set(f, t)
+  }
+  if (!normalizedMap.size) {
+    return { content, replacedCount: 0, redirectedTargets: [] }
+  }
+
+  const eol = content.includes('\r\n') ? '\r\n' : '\n'
+  const normalized = content.replace(/\r\n/g, '\n')
+  const lines = normalized.split('\n')
+  let fence: string | null = null
+  let replacedCount = 0
+  const redirectedTargets = new Set<string>()
+
+  const replaceSegment = (segment: string) =>
+    segment.replace(
+      new RegExp(WIKI_LINK_REGEX.source, 'gi'),
+      (full, rawId: string, alias?: string) => {
+        const target = normalizedMap.get(rawId.toLowerCase())
+        if (!target) return full
+        replacedCount++
+        redirectedTargets.add(rawId.toLowerCase())
+        return alias !== undefined ? `[[${target}|${alias}]]` : `[[${target}]]`
+      },
+    )
+
+  const outLines = lines.map((line) => {
+    const [, marker, info = ''] = FENCE_LINE_RE.exec(line) ?? []
+    if (fence !== null) {
+      const closes = marker !== undefined && marker[0] === fence[0] && marker.length >= fence.length
+      if (closes && /^[ \t]*$/.test(info)) fence = null
+      return line
+    }
+    if (marker && !(marker[0] === '`' && info.includes('`'))) {
+      fence = marker
+      return line
+    }
+
+    return replaceOutsideInlineCode(line, replaceSegment)
+  })
+
+  return {
+    content: replacedCount > 0 ? outLines.join(eol) : content,
+    replacedCount,
+    redirectedTargets: [...redirectedTargets],
+  }
+}

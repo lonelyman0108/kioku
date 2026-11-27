@@ -40,8 +40,10 @@ const props = withDefaults(
     }
     hasNextPage: boolean
     fetchingNextPage: boolean
+    hasChatModel?: boolean
+    batchBusy?: boolean
   }>(),
-  { compact: false },
+  { compact: false, hasChatModel: false, batchBusy: false },
 )
 
 const emit = defineEmits<{
@@ -60,6 +62,7 @@ const emit = defineEmits<{
   loadMore: []
   clearFilters: []
   previewBoot: []
+  batchOrganize: [mode: 'tidy' | 'cross_memory', shortIds: string[]]
 }>()
 
 const { getKbdKey } = useKbd()
@@ -70,6 +73,51 @@ const captureShortcut = computed(() => {
 
 const filterOpen = ref(false)
 const listScrollRef = ref<HTMLElement | null>(null)
+const batchMode = ref(false)
+const selectedBatchIds = ref<string[]>([])
+const BATCH_MAX = 20
+
+const canUseBatch = computed(
+  () => props.hasChatModel && props.tab !== 'episodes' && props.tab !== 'trash',
+)
+
+watch(canUseBatch, (allowed) => {
+  if (!allowed) {
+    batchMode.value = false
+    selectedBatchIds.value = []
+  }
+})
+
+function toggleBatchMode() {
+  batchMode.value = !batchMode.value
+  selectedBatchIds.value = []
+}
+
+function toggleBatchItem(item: EntryListItem) {
+  if (item.kind !== 'entry') return
+  const sid = item.shortId
+  if (selectedBatchIds.value.includes(sid)) {
+    selectedBatchIds.value = selectedBatchIds.value.filter((id) => id !== sid)
+    return
+  }
+  if (selectedBatchIds.value.length >= BATCH_MAX) return
+  selectedBatchIds.value = [...selectedBatchIds.value, sid]
+}
+
+function onRowClick(item: EntryListItem) {
+  if (batchMode.value) {
+    toggleBatchItem(item)
+    return
+  }
+  emit('select', item.shortId)
+}
+
+function submitBatch(mode: 'tidy' | 'cross_memory') {
+  if (selectedBatchIds.value.length < 2 || props.batchBusy) return
+  emit('batchOrganize', mode, [...selectedBatchIds.value])
+  batchMode.value = false
+  selectedBatchIds.value = []
+}
 
 const PROJECT_SCOPE_OPTIONS: { value: ProjectScope; label: string }[] = [
   { value: 'unassigned', label: '无项目归属' },
@@ -436,6 +484,16 @@ defineExpose({ filterOpen })
         </div>
         <div class="meta-right">
           <UButton
+            v-if="canUseBatch && (batchMode || items.length >= 2)"
+            size="xs"
+            :color="batchMode ? 'primary' : 'neutral'"
+            :variant="batchMode ? 'solid' : 'ghost'"
+            :icon="icons.listChecks"
+            @click="toggleBatchMode"
+          >
+            {{ batchMode ? '退出批量' : '批量整理' }}
+          </UButton>
+          <UButton
             v-if="tab === 'pinned'"
             size="xs"
             color="neutral"
@@ -445,7 +503,7 @@ defineExpose({ filterOpen })
           >
             预览终端加载
           </UButton>
-          <div v-else-if="!compact" class="list-hint" aria-hidden="true">
+          <div v-else-if="!compact && !batchMode" class="list-hint" aria-hidden="true">
             <span>↑ ↓ 切换</span>
             <span>Esc 关闭详情</span>
             <span>{{ captureShortcut }} 随手记</span>
@@ -469,16 +527,35 @@ defineExpose({ filterOpen })
                 class="entry-row"
                 :class="{
                   selected: item.shortId === selectedId,
+                  'has-batch-check': batchMode && item.kind === 'entry',
                   'is-pinned': effectiveBootMode(item) === 'full',
                   'is-pinned-index': effectiveBootMode(item) === 'index',
                   'is-episode': item.kind === 'episode' && !item.isPinned,
                 }"
                 :data-short-id="item.shortId"
                 :title="item.title"
-                :aria-selected="item.shortId === selectedId"
-                :aria-current="item.shortId === selectedId ? 'true' : undefined"
-                @click="emit('select', item.shortId)"
+                :aria-selected="
+                  batchMode ? selectedBatchIds.includes(item.shortId) : item.shortId === selectedId
+                "
+                :aria-current="!batchMode && item.shortId === selectedId ? 'true' : undefined"
+                @click="onRowClick(item)"
               >
+                <span
+                  v-if="batchMode && item.kind === 'entry'"
+                  class="batch-check"
+                  aria-hidden="true"
+                >
+                  <input
+                    type="checkbox"
+                    tabindex="-1"
+                    :checked="selectedBatchIds.includes(item.shortId)"
+                    :disabled="
+                      !selectedBatchIds.includes(item.shortId) &&
+                      selectedBatchIds.length >= BATCH_MAX
+                    "
+                    readonly
+                  />
+                </span>
                 <span class="row-main">
                   <span class="row-title">{{ item.title }}</span>
                   <span class="row-sub">
@@ -600,6 +677,34 @@ defineExpose({ filterOpen })
           </template>
         </EmptyState>
       </div>
+
+      <div v-if="batchMode" class="batch-bar" role="region" aria-label="批量整理操作栏">
+        <span class="batch-status tabular-nums">
+          已选 {{ selectedBatchIds.length }} / {{ BATCH_MAX }} 条（至少选 2 条）
+        </span>
+        <div class="batch-actions">
+          <UButton
+            size="xs"
+            color="neutral"
+            variant="outline"
+            :icon="icons.tidy"
+            :loading="batchBusy"
+            :disabled="selectedBatchIds.length < 2"
+            @click="submitBatch('tidy')"
+          >
+            规范所选
+          </UButton>
+          <UButton
+            size="xs"
+            :icon="icons.links"
+            :loading="batchBusy"
+            :disabled="selectedBatchIds.length < 2"
+            @click="submitBatch('cross_memory')"
+          >
+            查重与关联
+          </UButton>
+        </div>
+      </div>
     </section>
   </div>
 </template>
@@ -607,6 +712,35 @@ defineExpose({ filterOpen })
 <style scoped>
 .list-shell {
   display: contents;
+}
+.batch-check {
+  display: inline-flex;
+  align-items: flex-start;
+  padding-top: 4px;
+  flex: none;
+}
+.batch-check input[type='checkbox'] {
+  pointer-events: none;
+  accent-color: var(--ui-primary);
+}
+.batch-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  padding: 8px 16px;
+  border-top: 1px solid var(--ui-rule);
+  background: var(--ui-bg-muted);
+}
+.batch-status {
+  font-size: 12px;
+  color: var(--ui-text-toned);
+}
+.batch-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 .list-toolbar {
   grid-column: 1 / -1;
@@ -870,6 +1004,10 @@ defineExpose({ filterOpen })
   text-align: left;
   cursor: pointer;
 }
+.entry-row.has-batch-check {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 4px 12px;
+}
 .entry-row.is-pinned::before {
   content: '';
   position: absolute;
@@ -1062,6 +1200,13 @@ defineExpose({ filterOpen })
   padding: 11px 16px;
   gap: 4px;
 }
+.list-pane.is-compact .entry-row.has-batch-check {
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 10px;
+}
+.list-pane.is-compact .entry-row.has-batch-check .row-aside {
+  grid-column: 2;
+}
 .list-pane.is-compact .row-title {
   font-size: 14px;
 }
@@ -1098,6 +1243,13 @@ defineExpose({ filterOpen })
     grid-template-columns: minmax(0, 1fr);
     padding: 11px 14px;
     gap: 4px;
+  }
+  .entry-row.has-batch-check {
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 4px 10px;
+  }
+  .entry-row.has-batch-check .row-aside {
+    grid-column: 2;
   }
   .row-title {
     font-size: 14px;

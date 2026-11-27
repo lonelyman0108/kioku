@@ -26,6 +26,9 @@ import {
   RevealCredentialResponse,
   SessionsResponse,
   SetupStatusResponse,
+  SingleCrossCheckResponse,
+  SingleTidyApplyResponse,
+  SingleTidyPreviewResponse,
   TestModelResponse,
   TriggerDreamResponse,
   type ApplySuggestionRequest,
@@ -48,6 +51,7 @@ import {
   type RestoreEntryRequest,
   type RotateApiKeyRequest,
   type SetupRequest,
+  type SingleTidyApplyRequest,
   type TestModelRequest,
   type TriggerDreamRequest,
   type UpdateApiKeyRequest,
@@ -57,7 +61,114 @@ import {
   type UpdateProfileRequest,
 } from '@kioku/contracts'
 
-import { download, request } from './client'
+import { ApiError, download, request, requestRaw } from './client'
+
+async function streamSingleTidyPreview(
+  shortId: string,
+  options: {
+    signal?: AbortSignal
+    onStage?: (stage: string, message: string) => void
+  } = {},
+): Promise<SingleTidyPreviewResponse> {
+  const res = await requestRaw(
+    'POST',
+    `/console/entries/${encodeURIComponent(shortId)}/tidy/preview`,
+    {
+      headers: { accept: 'text/event-stream' },
+      signal: options.signal,
+    },
+  )
+
+  const contentType = res.headers.get('content-type') ?? ''
+  if (!contentType.includes('text/event-stream') || !res.body) {
+    return SingleTidyPreviewResponse.parse(await res.json())
+  }
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let currentEvent = 'message'
+  let dataLines: string[] = []
+  let finalResult: SingleTidyPreviewResponse | null = null
+  let streamFinished = false
+
+  const dispatchEvent = () => {
+    const data = dataLines.join('\n')
+    const eventName = currentEvent
+    currentEvent = 'message'
+    dataLines = []
+    if (!data || eventName === 'heartbeat') return
+    if (eventName === 'stage') {
+      try {
+        const parsed = JSON.parse(data) as { stage?: string; message?: string }
+        if (parsed.message) options.onStage?.(parsed.stage ?? 'llm', parsed.message)
+      } catch {
+        // 忽略无效阶段事件
+      }
+      return
+    }
+    if (eventName === 'error') {
+      let msg = '单条规范整理失败'
+      let status = 500
+      try {
+        const parsed = JSON.parse(data) as { error?: string; status?: number }
+        if (parsed.error) msg = parsed.error
+        if (typeof parsed.status === 'number') status = parsed.status
+      } catch {
+        // 忽略
+      }
+      throw new ApiError(status, msg)
+    }
+    if (eventName === 'result') {
+      finalResult = SingleTidyPreviewResponse.parse(JSON.parse(data))
+    }
+  }
+
+  const processLine = (rawLine: string) => {
+    const line = rawLine.replace(/\r$/, '')
+    if (line === '') {
+      dispatchEvent()
+    } else if (line.startsWith('event:')) {
+      currentEvent = line.slice(6).trim()
+    } else if (line.startsWith('data:')) {
+      dataLines.push(line.startsWith('data: ') ? line.slice(6) : line.slice(5))
+    }
+  }
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) {
+        streamFinished = true
+        break
+      }
+      buffer += decoder.decode(value, { stream: true })
+      let idx = buffer.indexOf('\n')
+      while (idx !== -1) {
+        processLine(buffer.slice(0, idx))
+        buffer = buffer.slice(idx + 1)
+        idx = buffer.indexOf('\n')
+      }
+    }
+    buffer += decoder.decode()
+    if (buffer.length > 0) {
+      for (const tailLine of buffer.split('\n')) {
+        processLine(tailLine)
+      }
+    }
+    if (dataLines.length) dispatchEvent()
+  } finally {
+    if (!streamFinished) {
+      await reader.cancel().catch(() => undefined)
+    }
+    reader.releaseLock()
+  }
+
+  if (!finalResult) {
+    throw new ApiError(502, '规范整理连接意外中断，未收到完整结果')
+  }
+  return finalResult
+}
 
 export const api = {
   // 健康检查与初始化
@@ -141,6 +252,20 @@ export const api = {
     request('POST', '/console/boot/preview', {
       body,
       schema: BootPreviewResponse,
+    }),
+  previewSingleTidy: (
+    shortId: string,
+    options?: { signal?: AbortSignal; onStage?: (stage: string, message: string) => void },
+  ) => streamSingleTidyPreview(shortId, options),
+  applySingleTidy: (shortId: string, body: SingleTidyApplyRequest) =>
+    request('POST', `/console/entries/${encodeURIComponent(shortId)}/tidy/apply`, {
+      body,
+      schema: SingleTidyApplyResponse,
+    }),
+  crossCheckEntry: (shortId: string, signal?: AbortSignal) =>
+    request('POST', `/console/entries/${encodeURIComponent(shortId)}/cross-check`, {
+      schema: SingleCrossCheckResponse,
+      signal,
     }),
 
   // 待处理整理建议

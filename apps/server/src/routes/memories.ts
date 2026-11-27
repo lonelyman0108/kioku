@@ -16,11 +16,18 @@ import {
   HygieneSweepPreviewResponse,
   RestoreEntryRequest,
   ShortId,
+  SingleCrossCheckResponse,
+  SingleTidyApplyRequest,
+  SingleTidyApplyResponse,
+  SingleTidyPreviewResponse,
   UpdateEntryRequest,
 } from '@kioku/contracts'
+import { streamSSE } from 'hono/streaming'
 
-import type { EntryService } from '../memory/service'
+import { logInternalError } from '../db/client'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
+import { MemoryError } from '../memory/errors'
+import type { EntryService } from '../memory/service'
 
 const errors = {
   400: jsonResponse('请求不合法', ErrorResponse),
@@ -136,6 +143,37 @@ const historyRoute = createRoute({
   responses: { 200: jsonResponse('历史记录', EntryHistoryResponse), ...errors },
 })
 
+const singleTidyPreviewRoute = createRoute({
+  method: 'post',
+  path: '/console/entries/{shortId}/tidy/preview',
+  tags: ['console'],
+  summary:
+    '主动预览单条记忆的规范整理结果（Accept: text/event-stream 时以 SSE 推送阶段进度与心跳）',
+  request: { params: ShortIdParams },
+  responses: {
+    200: { description: '规范整理预览（JSON 或 SSE 流）' },
+    ...errors,
+  },
+})
+
+const singleTidyApplyRoute = createRoute({
+  method: 'post',
+  path: '/console/entries/{shortId}/tidy/apply',
+  tags: ['console'],
+  summary: '按乐观锁直接应用单条规范整理结果，或暂存至待处理收件箱',
+  request: { params: ShortIdParams, body: jsonBody(SingleTidyApplyRequest) },
+  responses: { 200: jsonResponse('已应用或暂存', SingleTidyApplyResponse), ...errors },
+})
+
+const singleCrossCheckRoute = createRoute({
+  method: 'post',
+  path: '/console/entries/{shortId}/cross-check',
+  tags: ['console'],
+  summary: '以单条记忆为锚点查找重复、冲突与缺失双链，写入收件箱并返回关联建议列表',
+  request: { params: ShortIdParams },
+  responses: { 200: jsonResponse('查重与关联结果', SingleCrossCheckResponse), ...errors },
+})
+
 export function memoryRoutes(entries: EntryService) {
   return router()
     .openapi(listRoute, async (c) =>
@@ -188,6 +226,76 @@ export function memoryRoutes(entries: EntryService) {
     .openapi(historyRoute, async (c) =>
       c.json(
         await entries.history(c.get('console'), c.req.valid('param').shortId, c.req.valid('query')),
+        200,
+      ),
+    )
+    .openapi(singleTidyPreviewRoute, async (c) => {
+      const { shortId } = c.req.valid('param')
+      const accept = c.req.header('accept') ?? ''
+      if (accept.includes('text/event-stream')) {
+        c.header('Cache-Control', 'no-cache')
+        c.header('X-Accel-Buffering', 'no')
+        return streamSSE(c, async (stream) => {
+          const controller = new AbortController()
+          const onAbort = () => controller.abort()
+          if (c.req.raw.signal.aborted) controller.abort()
+          else c.req.raw.signal.addEventListener('abort', onAbort, { once: true })
+          stream.onAbort(onAbort)
+          const heartbeat = setInterval(() => {
+            void stream.writeSSE({ event: 'heartbeat', data: '' }).catch(() => {})
+          }, 5_000)
+          try {
+            const result = await entries.previewSingleTidy(shortId, {
+              signal: controller.signal,
+              onStage: (stage, message) => {
+                void stream
+                  .writeSSE({ event: 'stage', data: JSON.stringify({ stage, message }) })
+                  .catch(() => {})
+              },
+            })
+            if (!controller.signal.aborted) {
+              await stream.writeSSE({ event: 'result', data: JSON.stringify(result) })
+            }
+          } catch (err) {
+            if (!controller.signal.aborted) {
+              if (!(err instanceof MemoryError)) {
+                logInternalError('单条规范整理 SSE 失败', err)
+              }
+              const message = err instanceof MemoryError ? err.message : '单条规范整理失败'
+              const status = err instanceof MemoryError ? err.status : 500
+              await stream
+                .writeSSE({
+                  event: 'error',
+                  data: JSON.stringify({ error: message, status }),
+                })
+                .catch(() => {})
+            }
+          } finally {
+            clearInterval(heartbeat)
+            c.req.raw.signal.removeEventListener('abort', onAbort)
+          }
+        })
+      }
+      const preview = await entries.previewSingleTidy(shortId, {
+        signal: c.req.raw.signal,
+      })
+      return c.json(SingleTidyPreviewResponse.parse(preview), 200)
+    })
+    .openapi(singleTidyApplyRoute, async (c) =>
+      c.json(
+        await entries.applySingleTidy(
+          c.get('console'),
+          c.req.valid('param').shortId,
+          c.req.valid('json'),
+        ),
+        200,
+      ),
+    )
+    .openapi(singleCrossCheckRoute, async (c) =>
+      c.json(
+        await entries.crossCheckEntry(c.req.valid('param').shortId, {
+          signal: c.req.raw.signal,
+        }),
         200,
       ),
     )

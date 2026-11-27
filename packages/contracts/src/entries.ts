@@ -438,6 +438,7 @@ export const EntryDetailResponse = z.object({
   credentialRefs: z.array(CredentialRefStatus),
   recentHistory: z.array(EntryRecentHistoryItem).optional(),
   warnings: z.array(HygieneWarning).optional(),
+  pendingSuggestionCount: z.number().int().min(0).optional(),
 })
 export type EntryDetailResponse = z.infer<typeof EntryDetailResponse>
 
@@ -1094,12 +1095,29 @@ export const HygieneSweepFlag = z.object({
 })
 export type HygieneSweepFlag = z.infer<typeof HygieneSweepFlag>
 
+export const HygieneSweepBrokenLinkTarget = z.object({
+  targetShortId: ShortId,
+  status: z.enum(['missing', 'deleted']),
+  targetTitle: z.string().nullable(),
+})
+export type HygieneSweepBrokenLinkTarget = z.infer<typeof HygieneSweepBrokenLinkTarget>
+
+export const HygieneSweepBrokenLink = z.object({
+  id: z.uuid(),
+  shortId: ShortId,
+  title: z.string(),
+  isPinned: z.boolean(),
+  targets: z.array(HygieneSweepBrokenLinkTarget),
+})
+export type HygieneSweepBrokenLink = z.infer<typeof HygieneSweepBrokenLink>
+
 export const HygieneSweepPreviewResponse = z.object({
   totalScanned: z.number().int(),
   dirtyTitleCount: z.number().int(),
   deterministicCandidates: z.array(HygieneSweepCandidate),
   suspectTruncated: z.array(HygieneSweepFlag),
   suspectObsolete: z.array(HygieneSweepFlag),
+  brokenLinks: z.array(HygieneSweepBrokenLink).optional(),
 })
 export type HygieneSweepPreviewResponse = z.infer<typeof HygieneSweepPreviewResponse>
 

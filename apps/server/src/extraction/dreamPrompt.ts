@@ -1,4 +1,5 @@
 import {
+  BOOT_MODES,
   CHANGE_SUMMARY_MAX,
   checkCaptureIntegrity,
   CREDENTIAL_PLACEHOLDER_PREFIX,
@@ -8,10 +9,15 @@ import {
   ENTRY_SUMMARY_MAX,
   ENTRY_TITLE_MAX,
   ENTRY_TITLE_NEW_MAX,
+  extractCredentialPlaceholders,
+  extractMarkdownOutline,
+  normalizeShortId,
   normalizeSlugList,
   type ArchivedHistoryNote,
+  type BootMode,
   type DreamSuggestionKind,
   type EntryKind,
+  type ProposedLinkItem,
 } from '@kioku/contracts'
 
 import { stripThinkTags, type ChatMessage } from '../models/client'
@@ -25,6 +31,7 @@ export interface DreamPromptItem {
   summary?: string | null | undefined
   content: string
   disclosure: string | null
+  bootMode?: BootMode | undefined
   envs: string[]
   realms: string[]
   projects: string[]
@@ -33,6 +40,14 @@ export interface DreamPromptItem {
   version: number
   updatedAt: string
   truncated: boolean
+  outboundShortIds?: string[] | undefined
+  outline?: string | undefined
+}
+
+export interface BrokenLinkHint {
+  targetShortId: string
+  status: 'missing' | 'deleted'
+  targetTitle: string | null
 }
 
 export interface ParsedDreamProposal {
@@ -50,28 +65,79 @@ export interface ParsedDreamProposal {
   proposedRealms: string[] | null
   proposedProjects: string[] | null
   proposedRuntimes: string[] | null
+  proposedLinks: ProposedLinkItem[] | null
+  proposedBootMode: BootMode | null
+  actionDiscriminator?: string | undefined
   reason: string
 }
 
 const DREAM_KIND_SET: ReadonlySet<string> = new Set(DREAM_KINDS)
+const BOOT_MODE_SET: ReadonlySet<string> = new Set(BOOT_MODES)
 const MAX_REASON_CHARS = 300
 const MAX_ARCHIVED_NOTES = 20
+const MAX_PROPOSED_LINKS = 6
 
 const SYSTEM_PROMPT = [
   '你是 Kioku 记忆整理助手。请审阅给出的记忆词条（entry）与近期会话摘要（episode），只在确实值得整理时提出少量高价值建议。',
   '只输出 JSON：{"suggestions":[...]}，没有建议时输出 {"suggestions":[]}。',
   '',
-  '允许以下 4 种常规建议类型（kind）：',
+  '允许以下 6 种整理建议类型（kind）：',
   '1. "distill_episode"：把 1 条或多条有长期价值的会话摘要（episode）提炼为一条永久正式记忆。须提供 target_short_ids、title（简短稳定、禁日期）、content、reason，推荐提供 summary（1–2 句现行结论）、change_summary、disclosure、topics、envs、realms、projects、runtimes。',
-  '2. "merge_duplicates"：合并 2 条以上内容高度重叠且 realms 一致的正式记忆（entry）。须提供 target_short_ids、keep_short_id、title、content、reason，推荐提供 summary、change_summary、disclosure、topics、envs、realms、projects、runtimes。不得合并被截断的词条。',
+  '2. "merge_duplicates"：合并 2 条以上内容高度重叠且 realms 一致的正式记忆（entry）。须提供 target_short_ids、keep_short_id、title、content、reason，推荐提供 summary、change_summary、disclosure、topics、envs、realms、projects、runtimes。不得合并被截断或仅互补的独立主题页。',
   '3. "mark_stale"：某条正式记忆已被更新的记忆推翻或明显过时失效。须提供 target_short_ids（1 条）与 reason。',
   '4. "update"：根据更新的会话摘要或关联邻居记忆（含双链邻居间的事实矛盾），对某条现有正式记忆做具体事实补充或修正。须提供 target_short_ids（1 条）、content、reason，推荐提供 title、summary、change_summary、disclosure、topics、envs、realms、projects、runtimes。',
+  '5. "link_entries"：为互补主题或存在明显上下游依赖、却尚未互链的正式记忆补充双链。须提供 target_short_ids（1 条待追加双链的词条）、links（数组，每项含 target_short_id、relation、可选 anchor_heading、可选 reason）与 reason。',
+  '6. "adjust_boot_mode"：某条常驻词条过长或属参考手册，建议调整其启动加载层级（full -> index 或 none）。须提供 target_short_ids（1 条）、proposed_boot_mode（"none"|"index"|"full"）、reason；改为 index 时强烈建议同步给出 summary（1–2 句现行概要）。',
   '',
   '严格约束：',
-  '- 宁缺毋滥，不要为细枝末节的措辞调整提建议；但若关联邻居与本条出现明确的配置/地址/架构矛盾，应提出 update 同步修正。',
-  '- 标题必须简短稳定，不夹带日期、版本号或改动日志；正文维护现行有效状态与长期防踩坑原因，不在首行重复标题。',
+  '- 宁缺毋滥，不要为细枝末节的措辞调整提建议；保持精炼，提炼抽象规则与防踩坑原因，绝不扩写流水账。',
+  '- 合并必须克制：只合并真正重复或高度重叠的词条；互补主题页优先用 link_entries 建双链而非硬揉成大汇总页。',
+  '- 标题必须简短稳定，不夹带日期、版本号或改动日志；正文维护现行有效状态，不在首行重复标题。',
   '- 严禁编造任何密码、API Key 或令牌；原文中的 [[m-xxxxxx]] 双链与 {{cred:...}} 占位符必须完整保留。',
-  '- target_short_ids 必须全部取自下方提供的列表。',
+  '- target_short_ids 与 links[].target_short_id 必须全部取自下方提供的列表。',
+].join('\n')
+
+const CLUSTER_AUDIT_SYSTEM_PROMPT = [
+  '你是 Kioku 跨记忆查重与冲突审阅助手。下面是一组语义或主题高度接近的记忆词条（2–4 条），请判断它们是否真正重复、存在事实矛盾，或是互补主题页需要互链。',
+  '只输出 JSON：{"suggestions":[...]}，若各自独立清晰且无需调整则输出 {"suggestions":[]}。',
+  '',
+  '允许输出的 kind：',
+  '- "merge_duplicates"：仅当 2 条及以上词条表述同一主题、内容高度重叠且 realms 一致、未被截断时才合并；须给 target_short_ids、keep_short_id、title、summary、content、change_summary、reason，且必须完整保留全部被合并词条中的外部 [[m-xxxxxx]] 双链与 {{cred:...}} 凭据占位符。',
+  '- "link_entries"：若词条属于互补的独立主题页（例如架构与排错、服务端与客户端），绝不硬揉合并，而是输出 link_entries 建议（target_short_ids=[1条]、links=[{target_short_id, relation, anchor_heading?, reason}]、reason）。',
+  '- "update"：若一条较新词条明确推翻或修正了另一条的旧配置/旧路径，对旧词条输出 update（须保留所有原有双链与凭据占位符）。',
+  '- "mark_stale"：若某条已完全被另一条替代且无独立价值，输出 mark_stale。',
+  '',
+  '反膨胀守卫：合并或更新后的正文应提炼抽象规则、决策结论与防踩坑依据，去掉重复段落，不得无故拉长或引入日志流水。',
+].join('\n')
+
+const LINK_AUDIT_SYSTEM_PROMPT = [
+  '你是 Kioku 双链关联审阅助手。给定一条核心记忆（含现行出链与可能的断链清单）以及若干尚未建立双链的候选记忆，请判断是否值得补充少量高价值双链（最多 4 条），或修正已失效断链。',
+  '只输出 JSON：{"suggestions":[...]}，无需补链时输出 {"suggestions":[]}。',
+  '',
+  '规则：',
+  '1. 只在两条记忆存在真实依赖、架构上下游、排错对照或同一项目核心分工时才建议 link_entries，泛泛相似一律忽略。',
+  '2. link_entries 格式：{"kind":"link_entries","target_short_ids":["m-源词条"],"links":[{"target_short_id":"m-目标","relation":"简短关系语境(≤24字)","anchor_heading":"可选已有二级小节名","reason":"为什么值得互链"}],"reason":"整体补链理由"}。',
+  '3. 若核心记忆存在指向已删除/不存在目标的断链，且候选中有明确的替代记忆，可额外提出一条 link_entries 指向替代记忆并在 reason 中说明原断链短 ID。',
+  '4. 绝不可引用列表中不存在的短 ID，也不可建议已存在的出链。',
+].join('\n')
+
+const EPISODE_RECONCILE_SYSTEM_PROMPT = [
+  '你是 Kioku 会话摘要对账助手。给定一条近期会话摘要（episode）以及最相关的既有正式记忆（优先含常驻记忆），请判断：',
+  '1. 会话中的新结论是否推翻、修正或补充了某条既有正式记忆？若是，优先输出 "update" 更新该既有词条（并可带 source_short_id 标明摘要短 ID），严禁丢失原有双链与 {{cred:...}} 凭据占位符。',
+  '2. 若摘要包含值得长期沉淀的独立经验且不应揉进任何已有词条，则输出 "distill_episode" 提炼为新正式记忆。',
+  '3. 若摘要仅为一次性临时排错且未推翻既有记忆，输出 {"suggestions":[]}。',
+  '',
+  '只输出 JSON：{"suggestions":[...]}。所有结论须提炼为稳定规则与防踩坑原因，严禁写入逐轮对话流水账。',
+].join('\n')
+
+const BOOT_AUDIT_SYSTEM_PROMPT = [
+  '你是 Kioku 启动加载分层审阅助手。以下记忆当前均设为「全文常驻（full）」，会在每次命中场景的会话开始时全文注入上下文。',
+  '请审阅每条词条的性质与篇幅：',
+  '- 简短跨会话核心铁律、硬约束应保留为 "full"（无需提建议）。',
+  '- 长篇运维手册、端口/拓扑清单、阶段性参考资料或超过 1,200 字的详述文档，建议降级为 "index"（目录常驻，启动仅注入标题+1–2句现行概要，按需再读全文），并在建议中提供精炼的 summary。',
+  '- 极少用到或仅特定排错才查的文档，可建议降级为 "none"（按需召回）。',
+  '',
+  '只输出 JSON：{"suggestions":[{"kind":"adjust_boot_mode","target_short_ids":["m-xxxxxx"],"proposed_boot_mode":"index","summary":"1-2句现行概要","reason":"降级理由"}]}。无需调整时输出 {"suggestions":[]}。',
 ].join('\n')
 
 const TIDY_SYSTEM_PROMPT = [
@@ -91,33 +157,139 @@ const TIDY_SYSTEM_PROMPT = [
   '4. archived_notes：每条只写精炼单行（≤200 字），日期已知时填 ISO 8601（如 2026-10-21T00:00:00Z），未知填 null；无剥离历史时给 []。',
 ].join('\n')
 
-function formatItem(item: DreamPromptItem): string {
+export function sameRealms(a: readonly string[], b: readonly string[]): boolean {
+  const left = normalizeSlugList(a)
+  const right = normalizeSlugList(b)
+  return left.length === right.length && left.every((v, i) => v === right[i])
+}
+
+// 场域流向守卫：donor（提供事实/被引用目标）的可见范围必须覆盖 recipient（被写入/被追加双链词条），禁止窄场域信息渗入更宽或通用词条
+export function canFlowRealmInto(
+  recipientRealms: readonly string[],
+  donorRealms: readonly string[],
+): boolean {
+  const donor = normalizeSlugList(donorRealms)
+  if (!donor.length) return true
+  const recipient = normalizeSlugList(recipientRealms)
+  if (!recipient.length) return false
+  const donorSet = new Set(donor)
+  return recipient.every((r) => donorSet.has(r))
+}
+
+function formatItem(item: DreamPromptItem, compact = false): string {
   const tags: string[] = []
+  if (item.bootMode && item.bootMode !== 'none') tags.push(`boot=${item.bootMode}`)
   if (item.projects.length) tags.push(`project=${item.projects.join(',')}`)
   if (item.envs.length) tags.push(`env=${item.envs.join(',')}`)
   if (item.realms.length) tags.push(`realm=${item.realms.join(',')}`)
   if (item.runtimes.length) tags.push(`runtime=${item.runtimes.join(',')}`)
   if (item.topics.length) tags.push(`topic=${item.topics.join(',')}`)
-  const head = `[${item.shortId}] (${item.kind}${item.truncated ? ', 已截断' : ''}) ${item.title} | 更新于 ${item.updatedAt.slice(0, 10)}${tags.length ? ` | ${tags.join(' ')}` : ''}`
+  const head = `[${item.shortId}] (${item.kind}${item.truncated ? ', 已截断' : ''}, ${item.content.length}字) ${item.title} | 更新于 ${item.updatedAt.slice(0, 10)}${tags.length ? ` | ${tags.join(' ')}` : ''}`
   const sum = item.summary ? `\n现行概要：${item.summary}` : ''
   const disc = item.disclosure ? `\n触发场景：${item.disclosure}` : ''
-  return `${head}${sum}${disc}\n${item.content}`
+  const outbound = item.outboundShortIds?.length
+    ? `\n已有出链：${item.outboundShortIds.join(', ')}`
+    : ''
+  if (compact) {
+    const preview = item.summary?.trim()
+      ? ''
+      : `\n摘录：${clipChars(inlineText(item.content), 220)}`
+    return `${head}${sum}${disc}${preview}`
+  }
+  const body = item.outline ? `【超长正文大纲】\n${item.outline}` : item.content
+  return `${head}${sum}${disc}${outbound}\n${body}`
+}
+
+export function buildOutlineSummary(content: string): string {
+  const sections = extractMarkdownOutline(content)
+  if (!sections.length) return clipChars(content, 1_500)
+  return sections
+    .slice(0, 24)
+    .map((s) => `- ## ${s.heading}（${s.charCount} 字）${s.preview ? `：${s.preview}` : ''}`)
+    .join('\n')
 }
 
 export function buildDreamMessages(
   changed: readonly DreamPromptItem[],
   neighbors: readonly DreamPromptItem[],
 ): ChatMessage[] {
-  const sections: string[] = ['## 本次待整理的新增/变动记录', ...changed.map(formatItem)]
+  const sections: string[] = ['## 本次待整理的新增/变动记录', ...changed.map((i) => formatItem(i))]
   if (neighbors.length) {
     sections.push(
       '',
-      '## 相关已有记忆（含双链邻居，供查重与矛盾核对参考）',
-      ...neighbors.map(formatItem),
+      '## 相关已有记忆（含向量近邻、全文相关与双链邻居，供查重、补双链与矛盾核对参考）',
+      ...neighbors.map((i) => formatItem(i)),
     )
   }
   return [
     { role: 'system', content: SYSTEM_PROMPT },
+    { role: 'user', content: sections.join('\n\n') },
+  ]
+}
+
+export function buildClusterAuditMessages(cluster: readonly DreamPromptItem[]): ChatMessage[] {
+  const sections = [
+    `## 高相似记忆簇（共 ${cluster.length} 条，请判断重复合并、事实矛盾或互补互链）`,
+    ...cluster.map((item) => formatItem(item)),
+  ]
+  return [
+    { role: 'system', content: CLUSTER_AUDIT_SYSTEM_PROMPT },
+    { role: 'user', content: sections.join('\n\n') },
+  ]
+}
+
+export function buildLinkAuditMessages(
+  seed: DreamPromptItem,
+  candidates: readonly DreamPromptItem[],
+  brokenLinks: readonly BrokenLinkHint[] = [],
+): ChatMessage[] {
+  const sections = ['## 核心记忆', formatItem(seed)]
+  if (brokenLinks.length) {
+    sections.push(
+      '',
+      '## 核心记忆当前存在的失效断链',
+      ...brokenLinks.map(
+        (b) =>
+          `- [[${b.targetShortId}]]（${b.status === 'deleted' ? `已移入回收站：${b.targetTitle ?? ''}` : '目标不存在'}）`,
+      ),
+    )
+  }
+  sections.push(
+    '',
+    '## 尚未互链的相关候选记忆（仅摘要信息）',
+    ...candidates.map((cand) => formatItem(cand, true)),
+  )
+  return [
+    { role: 'system', content: LINK_AUDIT_SYSTEM_PROMPT },
+    { role: 'user', content: sections.join('\n\n') },
+  ]
+}
+
+export function buildEpisodeReconcileMessages(
+  episode: DreamPromptItem,
+  targets: readonly DreamPromptItem[],
+): ChatMessage[] {
+  const sections = ['## 近期会话摘要（待对账）', formatItem(episode)]
+  if (targets.length) {
+    sections.push(
+      '',
+      '## 最相关的既有正式记忆（优先核查事实是否已被上述会话推翻或补充）',
+      ...targets.map((t) => formatItem(t)),
+    )
+  }
+  return [
+    { role: 'system', content: EPISODE_RECONCILE_SYSTEM_PROMPT },
+    { role: 'user', content: sections.join('\n\n') },
+  ]
+}
+
+export function buildBootAuditMessages(pinnedItems: readonly DreamPromptItem[]): ChatMessage[] {
+  const sections = [
+    `## 待审阅的全文常驻记忆（共 ${pinnedItems.length} 条，当前均设 boot_mode=full）`,
+    ...pinnedItems.map((item) => formatItem(item)),
+  ]
+  return [
+    { role: 'system', content: BOOT_AUDIT_SYSTEM_PROMPT },
     { role: 'user', content: sections.join('\n\n') },
   ]
 }
@@ -129,16 +301,10 @@ export function buildTidyMessages(item: DreamPromptItem): ChatMessage[] {
   ]
 }
 
-function asStringArray(value: unknown): string[] | null {
+function asNonEmptyStringArray(value: unknown): string[] | null {
   if (!Array.isArray(value)) return null
-  const items = value.filter((v): v is string => typeof v === 'string')
-  return normalizeSlugList(items)
-}
-
-function sameRealms(a: readonly string[], b: readonly string[]): boolean {
-  const left = normalizeSlugList(a)
-  const right = normalizeSlugList(b)
-  return left.length === right.length && left.every((v, i) => v === right[i])
+  const items = normalizeSlugList(value.filter((v): v is string => typeof v === 'string'))
+  return items.length ? items : null
 }
 
 // 组装单轮干净修复提示词，避免多轮透传缺失 reasoning_content 导致部分推理模型网关报 400
@@ -219,12 +385,57 @@ function parseArchivedNotes(raw: unknown): ArchivedHistoryNote[] {
   return notes
 }
 
+function parseProposedLinks(
+  raw: unknown,
+  source: DreamPromptItem,
+  catalog: ReadonlyMap<string, DreamPromptItem>,
+): ProposedLinkItem[] {
+  if (!Array.isArray(raw)) return []
+  const existing = new Set((source.outboundShortIds ?? []).map(normalizeShortId))
+  const seen = new Set<string>()
+  const links: ProposedLinkItem[] = []
+  for (const item of raw) {
+    if (links.length >= MAX_PROPOSED_LINKS) break
+    if (!item || typeof item !== 'object') continue
+    const rec = item as Record<string, unknown>
+    const rawTarget = rec.target_short_id ?? rec.targetShortId
+    if (typeof rawTarget !== 'string') continue
+    const targetShortId = normalizeShortId(rawTarget)
+    if (
+      !targetShortId ||
+      targetShortId === source.shortId ||
+      seen.has(targetShortId) ||
+      existing.has(targetShortId)
+    ) {
+      continue
+    }
+    const targetItem = catalog.get(targetShortId)
+    if (!targetItem || targetItem.kind !== 'entry') continue
+    // 严格校验场域流向：禁止向通用/宽场域词条写入指向窄场域词条的双链与标题
+    if (!canFlowRealmInto(source.realms, targetItem.realms)) continue
+    seen.add(targetShortId)
+    const relation = sanitizeDreamPlainField(rec.relation, 64) || null
+    const anchorHeading =
+      sanitizeDreamPlainField(rec.anchor_heading ?? rec.anchorHeading, 120) || null
+    const reason = sanitizeDreamPlainField(rec.reason, 240) || null
+    links.push({
+      targetShortId,
+      targetTitle: clipChars(targetItem.title, 160),
+      ...(relation ? { relation } : {}),
+      ...(anchorHeading ? { anchorHeading } : {}),
+      ...(reason ? { reason } : {}),
+    })
+  }
+  return links
+}
+
 export type DreamStandardParseResult =
   { status: 'ok'; proposals: ParsedDreamProposal[] } | { status: 'invalid'; reason: string }
 
 export function evaluateDreamResponse(
   raw: string,
   catalog: ReadonlyMap<string, DreamPromptItem>,
+  options: { allowedKinds?: ReadonlySet<DreamSuggestionKind> | undefined } = {},
 ): DreamStandardParseResult {
   const parsed = parseJsonObject(raw)
   if (!parsed) return { status: 'invalid', reason: '模型输出非合法 JSON' }
@@ -242,6 +453,7 @@ export function evaluateDreamResponse(
         ? (rec.kind as DreamSuggestionKind)
         : null
     if (!kind || kind === 'tidy') continue
+    if (options.allowedKinds && !options.allowedKinds.has(kind)) continue
 
     const reason = sanitizeDreamPlainField(rec.reason, MAX_REASON_CHARS)
     if (!reason) continue
@@ -270,19 +482,79 @@ export function evaluateDreamResponse(
     const proposedChangeSummary =
       sanitizeDreamPlainField(rec.change_summary, CHANGE_SUMMARY_MAX) || null
 
+    let proposedLinks: ProposedLinkItem[] | null = null
+    let proposedBootMode: BootMode | null = null
+    let proposedRealms: string[] | null = asNonEmptyStringArray(rec.realms)
+    let actionDiscriminator: string | undefined
+
     if (kind === 'distill_episode') {
       if (!resolved.every((r) => r.kind === 'episode') || !proposedContent) continue
+      // 提炼后的场域必须满足全部源会话摘要的可见流向，严禁把受限场域放宽为通用词条
+      const fallbackRealms = resolved[0]!.realms
+      if (proposedRealms && !resolved.every((ep) => canFlowRealmInto(proposedRealms!, ep.realms))) {
+        proposedRealms = null
+      }
+      const effectiveRealms = proposedRealms ?? fallbackRealms
+      if (!resolved.every((ep) => canFlowRealmInto(effectiveRealms, ep.realms))) continue
     } else if (kind === 'merge_duplicates') {
       if (resolved.length < 2 || !proposedContent) continue
       if (resolved.some((r) => r.kind !== 'entry' || r.truncated)) continue
       const baseRealms = resolved[0]!.realms
       if (resolved.some((r) => !sameRealms(r.realms, baseRealms))) continue
+      // 合并重复严禁由模型改写场域，始终继承原词条一致场域
+      proposedRealms = null
+      // 合并提案严禁丢失任何一条被合并词条中的凭据占位符
+      const credKey = (p: { slug: string; field: string | null }) =>
+        p.field ? `${p.slug}#${p.field}` : p.slug
+      const afterCreds = new Set(extractCredentialPlaceholders(proposedContent).map(credKey))
+      const lostCred = resolved.some((r) =>
+        extractCredentialPlaceholders(r.content).some((p) => !afterCreds.has(credKey(p))),
+      )
+      if (lostCred) continue
     } else if (kind === 'mark_stale') {
       if (resolved.length !== 1 || resolved[0]!.kind !== 'entry') continue
+      proposedRealms = null
     } else if (kind === 'update') {
-      if (resolved.length !== 1 || resolved[0]!.kind !== 'entry' || !proposedContent) continue
+      // 禁止对已截断/仅传大纲的词条整篇覆写，避免丢失截断尾部内容与引用
+      if (
+        resolved.length !== 1 ||
+        resolved[0]!.kind !== 'entry' ||
+        resolved[0]!.truncated ||
+        !proposedContent
+      ) {
+        continue
+      }
       const integrity = checkCaptureIntegrity(resolved[0]!.content, proposedContent)
       if (integrity.missingCreds.length > 0) continue
+      const sourceSid =
+        typeof rec.source_short_id === 'string' ? normalizeShortId(rec.source_short_id) : ''
+      if (sourceSid) {
+        const sourceItem = catalog.get(sourceSid)
+        if (sourceItem && !canFlowRealmInto(resolved[0]!.realms, sourceItem.realms)) continue
+        actionDiscriminator = `from:${sourceSid}`
+      }
+      if (proposedRealms && !canFlowRealmInto(proposedRealms, resolved[0]!.realms)) {
+        proposedRealms = null
+      }
+    } else if (kind === 'link_entries') {
+      if (resolved.length !== 1 || resolved[0]!.kind !== 'entry') continue
+      const links = parseProposedLinks(rec.links ?? rec.proposed_links, resolved[0]!, catalog)
+      if (!links.length) continue
+      proposedLinks = links
+      proposedRealms = null
+      actionDiscriminator = `links:${links
+        .map((l) => l.targetShortId)
+        .sort()
+        .join(',')}`
+    } else if (kind === 'adjust_boot_mode') {
+      if (resolved.length !== 1 || resolved[0]!.kind !== 'entry') continue
+      const rawMode = rec.proposed_boot_mode ?? rec.proposedBootMode ?? rec.boot_mode
+      if (typeof rawMode !== 'string' || !BOOT_MODE_SET.has(rawMode)) continue
+      const nextMode = rawMode as BootMode
+      if (resolved[0]!.bootMode && nextMode === resolved[0]!.bootMode) continue
+      proposedBootMode = nextMode
+      proposedRealms = null
+      actionDiscriminator = `boot:${nextMode}`
     }
 
     let keepId: string | null = null
@@ -303,11 +575,14 @@ export function evaluateDreamResponse(
       proposedDisclosure,
       proposedChangeSummary,
       archivedNotes: null,
-      proposedTopics: asStringArray(rec.topics),
-      proposedEnvs: asStringArray(rec.envs),
-      proposedRealms: asStringArray(rec.realms),
-      proposedProjects: asStringArray(rec.projects),
-      proposedRuntimes: asStringArray(rec.runtimes),
+      proposedTopics: asNonEmptyStringArray(rec.topics),
+      proposedEnvs: asNonEmptyStringArray(rec.envs),
+      proposedRealms,
+      proposedProjects: asNonEmptyStringArray(rec.projects),
+      proposedRuntimes: asNonEmptyStringArray(rec.runtimes),
+      proposedLinks,
+      proposedBootMode,
+      ...(actionDiscriminator ? { actionDiscriminator } : {}),
       reason,
     })
   }
@@ -392,6 +667,8 @@ export function evaluateTidyResponse(raw: string, target: DreamPromptItem): Tidy
       proposedRealms: null,
       proposedProjects: null,
       proposedRuntimes: null,
+      proposedLinks: null,
+      proposedBootMode: null,
       reason,
     },
   }

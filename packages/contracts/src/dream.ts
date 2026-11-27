@@ -3,12 +3,15 @@ import { z } from 'zod'
 import {
   ArchivedHistoryNote,
   BootMode,
+  CaptureIntegrity,
   ChangeSummary,
   Disclosure,
   EntryContent,
+  EntryDetailResponse,
   EntryKind,
   EntrySummary,
   EntryTitle,
+  HygieneSweepFixKind,
   SceneSlugList,
   TopicList,
 } from './entries'
@@ -20,6 +23,8 @@ export const DREAM_KINDS = [
   'mark_stale',
   'update',
   'tidy',
+  'link_entries',
+  'adjust_boot_mode',
 ] as const
 export const DreamSuggestionKind = z.enum(DREAM_KINDS).meta({ id: 'DreamSuggestionKind' })
 export type DreamSuggestionKind = z.infer<typeof DreamSuggestionKind>
@@ -30,7 +35,26 @@ export const DREAM_KIND_NAMES: Record<DreamSuggestionKind, string> = {
   mark_stale: '标记过时记忆',
   update: '更新记忆内容',
   tidy: '规范与精简',
+  link_entries: '补全双链',
+  adjust_boot_mode: '调整启动加载',
 }
+
+export const DREAM_MODES = ['standard', 'tidy', 'cross_memory'] as const
+export const DreamMode = z.enum(DREAM_MODES)
+export type DreamMode = z.infer<typeof DreamMode>
+
+export const DREAM_SCOPES = ['incremental', 'full_corpus'] as const
+export const DreamScope = z.enum(DREAM_SCOPES)
+export type DreamScope = z.infer<typeof DreamScope>
+
+export const ProposedLinkItem = z.object({
+  targetShortId: ShortId,
+  targetTitle: z.string().max(160).optional(),
+  relation: z.string().trim().max(64).nullable().optional(),
+  anchorHeading: z.string().trim().max(120).nullable().optional(),
+  reason: z.string().trim().max(240).nullable().optional(),
+})
+export type ProposedLinkItem = z.infer<typeof ProposedLinkItem>
 
 export const DREAM_STATUSES = ['pending', 'applied', 'rejected'] as const
 export const DreamSuggestionStatus = z.enum(DREAM_STATUSES)
@@ -45,7 +69,8 @@ export const DreamOutcome = z.enum(DREAM_OUTCOMES)
 export type DreamOutcome = z.infer<typeof DreamOutcome>
 
 export const DreamProgress = z.object({
-  mode: z.enum(['standard', 'tidy']),
+  mode: DreamMode,
+  stage: z.string().optional(),
   processed: z.number().int().min(0),
   total: z.number().int().min(0),
   suggested: z.number().int().min(0),
@@ -64,7 +89,7 @@ export type DreamFailedItem = z.infer<typeof DreamFailedItem>
 export const DreamRunSummary = z.object({
   id: z.string(),
   trigger: DreamTrigger,
-  mode: z.enum(['standard', 'tidy']).optional(),
+  mode: DreamMode.optional(),
   outcome: DreamOutcome,
   considered: z.number().int(),
   suggested: z.number().int(),
@@ -128,6 +153,9 @@ export const DreamSuggestionView = z.object({
   proposedRealms: z.array(z.string()).nullable(),
   proposedProjects: z.array(z.string()).nullable(),
   proposedRuntimes: z.array(z.string()).nullable(),
+  proposedLinks: z.array(ProposedLinkItem).nullable().optional(),
+  proposedBootMode: BootMode.nullable().optional(),
+  affectedBacklinkCount: z.number().int().min(0).optional(),
   reason: z.string(),
   status: DreamSuggestionStatus,
   createdAt: z.string(),
@@ -158,6 +186,7 @@ export const ApplySuggestionRequest = z.object({
   runtimes: SceneSlugList.optional(),
   isPinned: z.boolean().optional(),
   bootMode: BootMode.optional(),
+  proposedLinks: z.array(ProposedLinkItem).optional(),
 })
 export type ApplySuggestionRequest = z.infer<typeof ApplySuggestionRequest>
 
@@ -171,11 +200,13 @@ export const ApplySuggestionResponse = z.object({
       previousVersion: z.number().int().optional(),
     })
     .nullable(),
+  redirectedBacklinkCount: z.number().int().min(0).optional(),
 })
 export type ApplySuggestionResponse = z.infer<typeof ApplySuggestionResponse>
 
 export const TriggerDreamRequest = z.object({
-  mode: z.enum(['standard', 'tidy']).default('standard'),
+  mode: DreamMode.default('standard'),
+  scope: DreamScope.optional(),
   limit: z.number().int().min(1).max(200).optional(),
   all: z.boolean().optional(),
   pinnedFirst: z.boolean().optional(),
@@ -189,3 +220,55 @@ export const TriggerDreamResponse = z.object({
   reason: z.string().nullable().optional(),
 })
 export type TriggerDreamResponse = z.infer<typeof TriggerDreamResponse>
+
+// ---- 编辑页主动单条规范整理与深度查重关联契约 ----
+
+export const SingleTidyPreviewResponse = z.object({
+  shortId: ShortId,
+  baseVersion: z.number().int().min(1),
+  needed: z.boolean(),
+  reason: z.string(),
+  preCleanedFixes: z.array(HygieneSweepFixKind),
+  before: z.object({
+    title: z.string(),
+    summary: z.string().nullable(),
+    content: z.string(),
+  }),
+  proposed: z.object({
+    title: z.string(),
+    summary: z.string().nullable(),
+    content: z.string(),
+    changeSummary: z.string(),
+    archivedNotes: z.array(ArchivedHistoryNote),
+  }),
+  integrity: CaptureIntegrity,
+})
+export type SingleTidyPreviewResponse = z.infer<typeof SingleTidyPreviewResponse>
+
+export const SingleTidyApplyRequest = z.object({
+  expectedVersion: z.number().int().min(1),
+  title: EntryTitle,
+  summary: EntrySummary.nullable(),
+  content: EntryContent,
+  changeSummary: ChangeSummary.nullable().optional(),
+  archivedNotes: z.array(ArchivedHistoryNote).max(20).optional(),
+  applyArchivedNotes: z.boolean().optional(),
+  stageToInbox: z.boolean().optional(),
+  reason: z.string().trim().max(300).optional(),
+})
+export type SingleTidyApplyRequest = z.infer<typeof SingleTidyApplyRequest>
+
+export const SingleTidyApplyResponse = z.object({
+  stagedSuggestionId: z.uuid().nullable(),
+  entry: EntryDetailResponse.nullable(),
+})
+export type SingleTidyApplyResponse = z.infer<typeof SingleTidyApplyResponse>
+
+export const SingleCrossCheckResponse = z.object({
+  shortId: ShortId,
+  consideredNeighbors: z.number().int().min(0),
+  createdCount: z.number().int().min(0),
+  suggestions: z.array(DreamSuggestionView),
+  retriedCount: z.number().int().min(0).optional(),
+})
+export type SingleCrossCheckResponse = z.infer<typeof SingleCrossCheckResponse>

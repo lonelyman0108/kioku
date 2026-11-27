@@ -22,6 +22,13 @@
       "when": 1796200000000,
       "tag": "0002_boot_mode_and_focus",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1796300000000,
+      "tag": "0003_cross_memory_dream",
+      "breakpoints": true
     }
   ]
 }

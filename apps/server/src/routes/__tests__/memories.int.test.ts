@@ -582,6 +582,46 @@ describe.skipIf(!testDatabaseUrl)('扁平记忆 CRUD、双链、筛选、回收�
     expect(cleanedDetail.recentHistory?.[0]?.actorMeta?.label).toBe('结构预清洗')
     // 结构预清洗不伪造新的核实时间
     expect(cleanedDetail.entry.verifiedAt).toBe(initialVerifiedAt)
+
+    // 悬空断链扫描：目标已软删除（deleted）与目标不存在（missing）均应在 brokenLinks 中报告
+    const tempTarget = await entrySvc.create(
+      consoleScope,
+      entryInput({ title: '临时引用目标', content: '即将删除。' }),
+    )
+    const missingId = 'm-zzzz99'
+    const linker = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '包含断链的词条',
+        content: `引用已删 [[${tempTarget.entry.shortId}]] 以及不存在 [[${missingId}]]。`,
+      }),
+    )
+    await entrySvc.remove(consoleScope, tempTarget.entry.shortId)
+
+    const brokenPreview = HygieneSweepPreviewResponse.parse(
+      await (
+        await app.request('/v1/console/entries/hygiene/preview', {
+          method: 'POST',
+          headers: consoleHeaders(cookie),
+        })
+      ).json(),
+    )
+    const brokenItem = brokenPreview.brokenLinks?.find((b) => b.shortId === linker.entry.shortId)
+    expect(brokenItem).toBeTruthy()
+    expect(brokenItem?.targets).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          targetShortId: tempTarget.entry.shortId,
+          status: 'deleted',
+          targetTitle: '临时引用目标',
+        }),
+        expect.objectContaining({
+          targetShortId: missingId,
+          status: 'missing',
+          targetTitle: null,
+        }),
+      ]),
+    )
   })
 
   it('控制台支持三态 bootMode、facets.runtimes、分层常驻计数与只读终端启动加载预览', async () => {
