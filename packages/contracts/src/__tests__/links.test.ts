@@ -55,6 +55,27 @@ describe('links & placeholders', () => {
         contextSnippet: '再次提及 [[m-999xyz|排障教训]]，参见历史事故',
       },
     ])
+
+    // 跳过行内代码、多反引号代码跨度与围栏代码块中的示例双链，同时保留精确偏移量
+    const withCode = [
+      '正文引用 [[m-234abc|主引用]]，示例 `[[m-888aaa]]` 与 ``含 `[[m-888bbb]]` 示例`` 不计入。',
+      '```markdown',
+      '代码块中的 [[m-888ccc]] 与 [[m-888ddd|示例]] 不计入。',
+      '```',
+      '~~~',
+      '波浪围栏里的 [[m-888eee]] 也不计入。',
+      '~~~',
+      '孤立反引号 ` 后的 [[m-999xyz|有效尾部]] 应保留。',
+    ].join('\r\n')
+    const parsedWithCode = extractWikiLinks(withCode)
+    expect(parsedWithCode.map((item) => ({ id: item.targetShortId, alias: item.alias }))).toEqual([
+      { id: 'm-234abc', alias: '主引用' },
+      { id: 'm-999xyz', alias: '有效尾部' },
+    ])
+    for (const item of parsedWithCode) {
+      expect(withCode.slice(item.start, item.end)).toBe(item.raw)
+    }
+    expect(extractTargetShortIds(withCode)).toEqual(['m-234abc', 'm-999xyz'])
   })
 
   it('extracts both bare and field credential placeholders', () => {

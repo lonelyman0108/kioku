@@ -139,7 +139,38 @@ describe.skipIf(!testDatabaseUrl)('无状态 MCP 服务与 9 个扁平工具', (
     const shortId = shortIdMatch![0]!
     expect(createdDetail.entry.shortId).toBe(shortId)
 
-    // 越权写入 personal 场域必须被拦截，并在 structuredContent 返回 403 状态
+    // 越权写入 personal 场域或显式写入无场域全局词条必须被拦截，省略 realms 时自动继承当前默认场域
+    const autoInherited = await mcpRpc(app, workKey.key, 'tools/call', {
+      name: 'kioku_create',
+      arguments: {
+        title: '默认场域继承验证',
+        content: '省略 realms 时自动归入 work 场域。',
+      },
+    })
+    const autoInheritedResult = autoInherited.body.result as {
+      isError?: boolean
+      structuredContent?: unknown
+    }
+    expect(autoInheritedResult.isError).not.toBe(true)
+    expect(EntryDetailResponse.parse(autoInheritedResult.structuredContent).entry.realms).toEqual([
+      'work',
+    ])
+
+    const explicitGlobal = await mcpRpc(app, workKey.key, 'tools/call', {
+      name: 'kioku_create',
+      arguments: {
+        title: '显式空场域写穿',
+        content: '受限密钥不得显式写入全局词条',
+        realms: [],
+      },
+    })
+    const explicitGlobalResult = explicitGlobal.body.result as {
+      isError?: boolean
+      structuredContent?: Record<string, unknown>
+    }
+    expect(explicitGlobalResult.isError).toBe(true)
+    expect(explicitGlobalResult.structuredContent).toMatchObject({ status: 403 })
+
     const crossRealm = await mcpRpc(app, workKey.key, 'tools/call', {
       name: 'kioku_create',
       arguments: {

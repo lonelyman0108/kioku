@@ -476,7 +476,7 @@ export const CreateEntryRequest = z.object({
   isPinned: z.boolean().default(false),
   bootMode: BootMode.optional(),
   envs: SceneSlugList.default([]),
-  realms: SceneSlugList.default([]),
+  realms: SceneSlugList.optional(),
   projects: SceneSlugList.default([]),
   runtimes: SceneSlugList.default([]),
   topics: TopicList.default([]),

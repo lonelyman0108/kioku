@@ -394,48 +394,61 @@ function compilePinnedRows(
     }
   }
 
-  const kept: BootEntry[] = []
-  const expanded: BootPreviewExpandedItem[] = []
+  const keptItems: (typeof eligible)[number][] = []
   const catalogCandidates: Array<{
     item: (typeof eligible)[number]
     reason: BootOmitReason
   }> = []
 
   for (const item of eligible) {
-    const { row } = item
-    const updatedAt = row.updatedAt.toISOString()
     if (expandedIndexes.has(item.index)) {
-      kept.push({
-        shortId: row.shortId,
-        title: row.title,
-        kind: row.kind,
-        bootMode: item.bootMode,
-        bucket: item.bucket,
-        content: item.displayContent,
-        summary: row.summary,
-        envs: row.envs,
-        realms: row.realms,
-        projects: row.projects,
-        runtimes: row.runtimes,
-        updatedAt,
-        lastChangeSummary: row.lastChangeSummary,
-        version: row.version,
-        charCount: row.content.length,
-      })
-      expanded.push({
-        shortId: row.shortId,
-        title: row.title,
-        bootMode: item.bootMode,
-        bucket: item.bucket,
-        charCount: row.content.length,
-        envs: row.envs,
-        realms: row.realms,
-        projects: row.projects,
-        runtimes: row.runtimes,
-      })
+      keptItems.push(item)
     } else {
       catalogCandidates.push({ item, reason: omitReasonByIndex.get(item.index) ?? 'budget' })
     }
+  }
+
+  // 全文展开按场景精准度分层排序（当前项目/客户端 -> 当前环境/场域 -> 全局通用），桶内保持稳定顺序
+  keptItems.sort((a, b) => {
+    const rankDiff = BUCKET_RANK[a.bucket] - BUCKET_RANK[b.bucket]
+    if (rankDiff !== 0) return rankDiff
+    if (b.specificity !== a.specificity) return b.specificity - a.specificity
+    return a.index - b.index
+  })
+
+  const kept: BootEntry[] = []
+  const expanded: BootPreviewExpandedItem[] = []
+  for (const item of keptItems) {
+    const { row } = item
+    const updatedAt = row.updatedAt.toISOString()
+    kept.push({
+      shortId: row.shortId,
+      title: row.title,
+      kind: row.kind,
+      bootMode: item.bootMode,
+      bucket: item.bucket,
+      content: item.displayContent,
+      summary: row.summary,
+      envs: row.envs,
+      realms: row.realms,
+      projects: row.projects,
+      runtimes: row.runtimes,
+      updatedAt,
+      lastChangeSummary: row.lastChangeSummary,
+      version: row.version,
+      charCount: row.content.length,
+    })
+    expanded.push({
+      shortId: row.shortId,
+      title: row.title,
+      bootMode: item.bootMode,
+      bucket: item.bucket,
+      charCount: row.content.length,
+      envs: row.envs,
+      realms: row.realms,
+      projects: row.projects,
+      runtimes: row.runtimes,
+    })
   }
 
   // 目录槽同样按场景精准度优先排序，确保当前项目/客户端的目录项最先展示
@@ -844,11 +857,18 @@ export function formatBootBlock(
 ): string {
   if (!result.entries.length && !result.omitted.length) return guidance
   const catalogBudget = options.catalogBudget ?? BOOT_CATALOG_BUDGET
-  const sections: string[] = result.entries.map((e) => {
+  const bucketCount = new Set(result.entries.map((e) => e.bucket).filter(Boolean)).size
+  const sections: string[] = []
+  if (bucketCount > 1) {
+    sections.push(
+      '> 按场景优先级从高到低排列：若更具体的项目、环境或场域约定与后文更通用规则冲突，以更具体场景为准。',
+    )
+  }
+  for (const e of result.entries) {
     const cleanBody = stripDuplicateLeadingHeading(e.title, e.content)
     const suffix = bootMetaSuffix(e)
-    return `## ${bootHeading(e.shortId, e.title)}${suffix}\n\n${cleanBody}`
-  })
+    sections.push(`## ${bootHeading(e.shortId, e.title)}${suffix}\n\n${cleanBody}`)
+  }
 
   if (result.omitted.length) {
     const { lines: listed } = selectCatalogLines(result.omitted, result.omittedItems, catalogBudget)

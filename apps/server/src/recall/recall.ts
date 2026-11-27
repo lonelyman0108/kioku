@@ -1,5 +1,5 @@
 import type { EntryKind, RecallCandidate, RecallVia } from '@kioku/contracts'
-import { and, eq, sql } from 'drizzle-orm'
+import { and, eq, inArray, sql } from 'drizzle-orm'
 
 import { hasOverlap, readableEntrySql, type AccessScope, type SceneFocus } from '../access/scope'
 import type { MasterKey } from '../crypto/keyring'
@@ -320,10 +320,32 @@ export async function recallEntries(
     }
 
     const useAdaptiveHybrid = vectorHitCount > 0
+    // 区分“已有当前模型向量但未进语义前 K”与“尚无向量行的新写入词条”，避免后者被混合权重误打折
+    const embeddedFtsOnly = new Set<string>()
+    if (useAdaptiveHybrid && semantic) {
+      const ftsOnlyIds = [...hits.values()]
+        .filter((h) => !h.via.has('semantic'))
+        .map((h) => h.row.entryId)
+      if (ftsOnlyIds.length) {
+        const embeddedRows = await tx
+          .select({ entryId: entryEmbeddings.entryId })
+          .from(entryEmbeddings)
+          .where(
+            and(
+              inArray(entryEmbeddings.entryId, ftsOnlyIds),
+              eq(entryEmbeddings.model, semantic.model),
+            ),
+          )
+        for (const r of embeddedRows) embeddedFtsOnly.add(r.entryId)
+      }
+    }
+
     const scored = new Map<string, RecallCandidate>()
 
     for (const h of hits.values()) {
-      const sBase = useAdaptiveHybrid
+      const useHybridForHit =
+        useAdaptiveHybrid && (h.via.has('semantic') || embeddedFtsOnly.has(h.row.entryId))
+      const sBase = useHybridForHit
         ? WEIGHT_SEMANTIC * h.semantic + WEIGHT_FULLTEXT * h.fulltext
         : h.fulltext
       const pinBoost = h.row.isPinned ? PINNED_MICRO_BOOST : 0

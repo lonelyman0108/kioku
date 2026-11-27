@@ -4,7 +4,7 @@ import {
   type LifecycleEventResponse,
 } from '@kioku/contracts'
 
-import { synthesizeFocus } from '../access/scope'
+import { hasExclusiveSceneConflict, synthesizeFocus } from '../access/scope'
 import { bufferTurn } from '../extraction/buffer'
 import type { Deps, KeyPrincipal } from '../http/env'
 import {
@@ -82,11 +82,15 @@ export async function handleLifecycleEvent(
       pQuery
         ? recallEntries(deps.db, deps.masterKey, key, pQuery, {
             focus,
-            limit: SESSION_RELATED_LIMIT + bootMentionedSet.size,
+            limit: Math.min(32, SESSION_RELATED_LIMIT * 2 + bootMentionedSet.size),
             useSemantic: false,
             includeLinks: false,
           }).then((list) =>
-            list.filter((c) => !bootMentionedSet.has(c.shortId)).slice(0, SESSION_RELATED_LIMIT),
+            list
+              .filter(
+                (c) => !bootMentionedSet.has(c.shortId) && !hasExclusiveSceneConflict(c, focus),
+              )
+              .slice(0, SESSION_RELATED_LIMIT),
           )
         : Promise.resolve([]),
       loadRecentEntries(deps.db, key, {

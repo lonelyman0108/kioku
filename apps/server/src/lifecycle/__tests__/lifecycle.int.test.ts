@@ -238,6 +238,15 @@ describe.skipIf(!testDatabaseUrl)('生命周期事件接口 /v1/lifecycle/event'
         projects: ['unrelated-proj'],
       }),
     )
+    // 正文偶发提及当前项目名，但环境与当前焦点 mac 互斥，不应经关键词兜底串入相关目录
+    const conflictingEnvMention = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: 'Windows 专属构建说明',
+        content: '在 Windows 上编译 demo-proj 时使用专用脚本。',
+        envs: ['win'],
+      }),
+    )
 
     const key = await issueTestApiKey(database, {
       runtimeFamily: 'generic',
@@ -269,6 +278,8 @@ describe.skipIf(!testDatabaseUrl)('生命周期事件接口 /v1/lifecycle/event'
     expect(text).toContain('核心模块接口清单')
     expect(text).toContain('列出本仓库对外接口约定。')
     expect(text).not.toContain('其他项目排错记录')
+    expect(body.shortIds).not.toContain(conflictingEnvMention.entry.shortId)
+    expect(text).not.toContain('Windows 专属构建说明')
     // 目录常驻项与已入选当前项目相关的条目不重复出现在「近期更新的记忆」
     const recentIdx = text.indexOf('## 近期更新的记忆')
     if (recentIdx >= 0) {
