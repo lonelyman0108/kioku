@@ -22,7 +22,7 @@ import { stillValidSql } from '../access/scope'
 import type { MasterKey } from '../crypto/keyring'
 import type { Db } from '../db/client'
 import { dreamSuggestions, entries, entryLinks } from '../db/schema'
-import { abortableSleep, chatComplete, ModelClientError } from '../models/client'
+import { abortableSleep, chatComplete, ModelClientError, type ChatMessage } from '../models/client'
 import {
   CHAT_LLM_SETTING_KEY,
   loadDreamState,
@@ -32,6 +32,7 @@ import {
   saveTidyCheckedVersions,
 } from '../models/store'
 import { anyTermQuery, clipChars, searchTerms } from '../recall/recall'
+import { inlineText } from '../recall/text'
 import { runCrossMemoryFunnel } from './crossMemory'
 import {
   buildDreamMessages,
@@ -44,11 +45,19 @@ import {
 } from './dreamPrompt'
 
 const MAX_CALLS_PER_RUN = 4
-const CHANGED_PER_CALL = 20
+export const CHANGED_PER_CALL = 8
 const MAX_NEIGHBORS_PER_CALL = 15
 const NEIGHBORS_PER_ITEM = 5
-const INPUT_CHAR_BUDGET = 16_000
+export const STANDARD_CHANGED_CHAR_BUDGET = 12_000
+export const STANDARD_NEIGHBOR_CHAR_BUDGET = 8_000
+export const STANDARD_TOTAL_CHAR_BUDGET = 20_000
 const ITEM_CONTENT_LIMIT = 1_500
+const COMPACT_NEIGHBOR_EXCERPT_LIMIT = 240
+export const STANDARD_MAX_SUGGESTIONS_PER_CALL = 5
+const STANDARD_OUTPUT_TOKENS_MIN = 6_000
+const STANDARD_OUTPUT_TOKENS_MAX = 12_000
+const TIDY_OUTPUT_TOKENS_MIN = 6_000
+const TIDY_OUTPUT_TOKENS_MAX = 16_384
 const TIDY_CONTENT_LIMIT = 16_000
 const DEFAULT_TIDY_BATCH_LIMIT = 10
 const MAX_TIDY_BATCH_LIMIT = 200
@@ -60,6 +69,25 @@ const RATE_LIMIT_COOLDOWN_FALLBACK_MS = 5_000
 const QUOTA_CIRCUIT_BREAKER_THRESHOLD = 3
 const MAX_FAILED_ITEMS = 50
 const INBOX_ITEMS_LIMIT = 200
+
+export interface DynamicOutputTokensOptions {
+  min: number
+  max: number
+  overhead?: number | undefined
+  charsMultiplier?: number | undefined
+}
+
+// 按待输出或待改写正文字符数动态估算输出 token 预算，避免固定低值导致中文长文截断
+export function computeDynamicOutputTokens(
+  targetChars: number,
+  options: DynamicOutputTokensOptions,
+): number {
+  const safeChars = Math.max(0, Number.isFinite(targetChars) ? targetChars : 0)
+  const multiplier = options.charsMultiplier ?? 1.6
+  const overhead = options.overhead ?? 2_000
+  const estimated = Math.ceil(safeChars * multiplier) + overhead
+  return Math.max(options.min, Math.min(options.max, estimated))
+}
 
 type EntryRow = typeof entries.$inferSelect
 
@@ -229,6 +257,159 @@ function appendFailedItem(
     kind: item.kind,
     reason: clipChars(item.reason, 240),
   })
+}
+
+type PromptSourceRow = Parameters<typeof toPromptItem>[0]
+
+function estimatePromptItemChars(item: DreamPromptItem): number {
+  return (
+    item.title.length +
+    (item.summary?.length ?? 0) +
+    (item.disclosure?.length ?? 0) +
+    item.content.length +
+    120
+  )
+}
+
+function toCompactNeighborPromptItem(row: PromptSourceRow): DreamPromptItem {
+  const hasSummary = Boolean(row.summary?.trim())
+  const base = toPromptItem(row, hasSummary ? 0 : COMPACT_NEIGHBOR_EXCERPT_LIMIT)
+  if (hasSummary) {
+    return {
+      ...base,
+      content: '',
+      truncated: row.content.length > 0,
+    }
+  }
+  const excerpt = clipChars(inlineText(row.content), COMPACT_NEIGHBOR_EXCERPT_LIMIT)
+  return {
+    ...base,
+    content: excerpt,
+    truncated: row.content.length > COMPACT_NEIGHBOR_EXCERPT_LIMIT || excerpt !== row.content,
+  }
+}
+
+export interface PackedStandardDreamItems {
+  promptChanged: DreamPromptItem[]
+  promptNeighbors: DreamPromptItem[]
+  changedChars: number
+  neighborChars: number
+  compactNeighborCount: number
+}
+
+// 统一约束增量整理变更项与邻居的总输入字符预算；邻居放不下完整摘录时优先退为概要或紧凑摘录
+export function packStandardDreamPromptItems(
+  changedRows: readonly PromptSourceRow[],
+  neighborRows: readonly PromptSourceRow[],
+  budgets: {
+    neighborBudget?: number | undefined
+    totalBudget?: number | undefined
+  } = {},
+): PackedStandardDreamItems {
+  const neighborBudget = budgets.neighborBudget ?? STANDARD_NEIGHBOR_CHAR_BUDGET
+  const totalBudget = budgets.totalBudget ?? STANDARD_TOTAL_CHAR_BUDGET
+
+  const promptChanged = changedRows.map((row) => toPromptItem(row))
+  const changedChars = promptChanged.reduce((sum, item) => sum + estimatePromptItemChars(item), 0)
+  const remainingForNeighbors = Math.min(neighborBudget, Math.max(0, totalBudget - changedChars))
+
+  const promptNeighbors: DreamPromptItem[] = []
+  let neighborChars = 0
+  let compactNeighborCount = 0
+
+  for (const row of neighborRows) {
+    const remaining = remainingForNeighbors - neighborChars
+    if (remaining < 120) break
+
+    const fullItem = toPromptItem(row)
+    const fullSize = estimatePromptItemChars(fullItem)
+    if (fullSize <= remaining) {
+      promptNeighbors.push(fullItem)
+      neighborChars += fullSize
+      continue
+    }
+
+    const compactItem = toCompactNeighborPromptItem(row)
+    const compactSize = estimatePromptItemChars(compactItem)
+    if (compactSize <= remaining) {
+      promptNeighbors.push(compactItem)
+      neighborChars += compactSize
+      compactNeighborCount++
+    }
+  }
+
+  return {
+    promptChanged,
+    promptNeighbors,
+    changedChars,
+    neighborChars,
+    compactNeighborCount,
+  }
+}
+
+export function buildStandardDreamMessages(
+  promptChanged: readonly DreamPromptItem[],
+  promptNeighbors: readonly DreamPromptItem[],
+): ChatMessage[] {
+  const base = buildDreamMessages(promptChanged, promptNeighbors)
+  const hint = `## 输出篇幅要求\n单次调用最多输出 ${STANDARD_MAX_SUGGESTIONS_PER_CALL} 条最核心、最高价值的建议（优先处理重复合并与明显事实更新），其余次要调整留待后续批次。`
+  const lastIdx = base.length - 1
+  if (lastIdx >= 0 && base[lastIdx]!.role === 'user') {
+    return [
+      ...base.slice(0, lastIdx),
+      { role: 'user', content: `${base[lastIdx]!.content}\n\n${hint}` },
+    ]
+  }
+  return [...base, { role: 'user', content: hint }]
+}
+
+function isSplittableBatchError(err: unknown): boolean {
+  return (
+    err instanceof ModelClientError &&
+    (err.category === 'length_limit' || err.category === 'context_length')
+  )
+}
+
+// 批量调用命中输出截断或上下文超限时自动二分递归重试，将失败隔离到单条
+export async function executeStandardBatchWithSplit<T>(
+  batch: readonly T[],
+  runSubBatch: (subBatch: readonly T[]) => Promise<void>,
+  options: {
+    guard: Pick<BatchResilienceGuard, 'isAborted' | 'waitIfCooling' | 'recordFailure'>
+    signal?: AbortSignal | undefined
+    onSplit?: ((left: readonly T[], right: readonly T[], err: ModelClientError) => void) | undefined
+    onFailure: (subBatch: readonly T[], err: unknown) => void
+  },
+): Promise<void> {
+  const runNode = async (subBatch: readonly T[]): Promise<void> => {
+    if (!subBatch.length || options.signal?.aborted || options.guard.isAborted) return
+    try {
+      await options.guard.waitIfCooling(options.signal)
+    } catch {
+      return
+    }
+    if (options.signal?.aborted || options.guard.isAborted) return
+
+    try {
+      await runSubBatch(subBatch)
+    } catch (err) {
+      if (options.signal?.aborted) return
+      if (isSplittableBatchError(err) && subBatch.length > 1) {
+        const mid = Math.ceil(subBatch.length / 2)
+        const left = subBatch.slice(0, mid)
+        const right = subBatch.slice(mid)
+        options.onSplit?.(left, right, err as ModelClientError)
+        await runNode(left)
+        if (options.signal?.aborted || options.guard.isAborted) return
+        await runNode(right)
+        return
+      }
+      options.guard.recordFailure(err)
+      options.onFailure(subBatch, err)
+    }
+  }
+
+  await runNode(batch)
 }
 
 async function findLinkedNeighbors(
@@ -762,10 +943,15 @@ export async function runDream(
             try {
               const promptItem = toPromptItem(row, TIDY_CONTENT_LIMIT)
               const tidyMessages = buildTidyMessages(promptItem)
+              const tidyMaxTokens = computeDynamicOutputTokens(promptItem.content.length, {
+                min: TIDY_OUTPUT_TOKENS_MIN,
+                max: TIDY_OUTPUT_TOKENS_MAX,
+                overhead: 2_000,
+              })
               const res = await chatComplete(conn, tidyMessages, {
                 temperature: 0.1,
                 jsonMode: true,
-                maxTokens: 4_000,
+                maxTokens: tidyMaxTokens,
                 timeoutMs: TIDY_CHAT_TIMEOUT_MS,
                 stream: true,
                 taskKind: 'organize',
@@ -791,7 +977,7 @@ export async function runDream(
                   const repairedRes = await chatComplete(conn, repairMessages, {
                     temperature: 0,
                     jsonMode: true,
-                    maxTokens: 4_000,
+                    maxTokens: tidyMaxTokens,
                     timeoutMs: TIDY_CHAT_TIMEOUT_MS,
                     stream: true,
                     taskKind: 'organize',
@@ -986,8 +1172,13 @@ export async function runDream(
       const batch: EntryRow[] = []
       let usedChars = 0
       for (const row of unchecked) {
-        const size = Math.min(row.content.length, ITEM_CONTENT_LIMIT) + row.title.length + 120
-        if (usedChars + size > INPUT_CHAR_BUDGET && batch.length > 0) break
+        const size =
+          Math.min(row.content.length, ITEM_CONTENT_LIMIT) +
+          row.title.length +
+          (row.summary?.length ?? 0) +
+          (row.disclosure?.length ?? 0) +
+          120
+        if (usedChars + size > STANDARD_CHANGED_CHAR_BUDGET && batch.length > 0) break
         batch.push(row)
         usedChars += size
       }
@@ -1001,108 +1192,125 @@ export async function runDream(
         failed: failedCount,
       })
 
-      const neighbors = await findRelevantNeighbors(
-        db,
+      await executeStandardBatchWithSplit(
         batch,
-        batch.map((r) => r.id),
-      )
-
-      const promptChanged = batch.map((r) => toPromptItem(r))
-      const promptNeighbors = neighbors.map((r) => toPromptItem(r))
-      const catalog = new Map<string, DreamPromptItem>()
-      const rowById = new Map<string, EntryRow>()
-      for (const row of [...batch, ...neighbors]) rowById.set(row.id, row)
-      for (const item of [...promptChanged, ...promptNeighbors]) catalog.set(item.shortId, item)
-
-      const dreamMessages = buildDreamMessages(promptChanged, promptNeighbors)
-
-      try {
-        const res = await chatComplete(conn, dreamMessages, {
-          temperature: 0.2,
-          jsonMode: true,
-          maxTokens: 2_000,
-          timeoutMs: STANDARD_DREAM_TIMEOUT_MS,
-          stream: true,
-          taskKind: 'organize',
-          maxRetries: DREAM_HTTP_MAX_RETRIES,
-          ...(options.retryBaseMs !== undefined ? { retryBaseMs: options.retryBaseMs } : {}),
-          ...(options.signal ? { signal: options.signal } : {}),
-          onRetry: ({ error }) => {
-            retriedCount++
-            if (error.category === 'rate_limit') guard.recordRateLimit(error)
-          },
-        })
-        guard.recordSuccess()
-
-        let evaluated = evaluateDreamResponse(res.content, catalog)
-        if (evaluated.status === 'invalid' && !options.signal?.aborted && !guard.isAborted) {
-          await guard.waitIfCooling(options.signal)
-          if (!options.signal?.aborted && !guard.isAborted) {
-            retriedCount++
-            const repairMessages = buildSemanticRepairMessages(
-              dreamMessages,
-              `上次输出解析失败（${evaluated.reason}）。请严格只输出单个合法 JSON 对象：{"suggestions":[...]}，没有建议时输出 {"suggestions":[]}。`,
-            )
-            const repairedRes = await chatComplete(conn, repairMessages, {
-              temperature: 0,
-              jsonMode: true,
-              maxTokens: 2_000,
-              timeoutMs: STANDARD_DREAM_TIMEOUT_MS,
-              stream: true,
-              taskKind: 'organize',
-              maxRetries: 0,
-              ...(options.signal ? { signal: options.signal } : {}),
-            })
-            guard.recordSuccess()
-            evaluated = evaluateDreamResponse(repairedRes.content, catalog)
-          }
-        }
-
-        // 解析仍失败时记入失败明细且绝不推进 dreamCheckedVersion，防止静默跳过
-        if (evaluated.status === 'invalid') {
-          for (const row of batch) {
-            standardFailures.push({ shortId: row.shortId, reason: evaluated.reason })
-            appendFailedItem(failedItems, failedShortSet, {
-              shortId: row.shortId,
-              title: row.title,
-              kind: 'standard',
-              reason: evaluated.reason,
-            })
-          }
-          failedCount += batch.length
-          totalConsidered += batch.length
-        } else {
-          for (const prop of evaluated.proposals) {
-            const insertedId = await insertDreamProposal(db, prop, rowById)
-            if (insertedId) totalSuggested++
+        async (subBatch) => {
+          const neighbors = await findRelevantNeighbors(
+            db,
+            subBatch,
+            subBatch.map((r) => r.id),
+          )
+          const packed = packStandardDreamPromptItems(subBatch, neighbors)
+          const catalog = new Map<string, DreamPromptItem>()
+          const rowById = new Map<string, EntryRow>()
+          for (const row of [...subBatch, ...neighbors]) rowById.set(row.id, row)
+          for (const item of [...packed.promptChanged, ...packed.promptNeighbors]) {
+            catalog.set(item.shortId, item)
           }
 
-          for (const row of batch) {
-            await db
-              .update(entries)
-              .set({ dreamCheckedVersion: row.version })
-              .where(and(eq(entries.id, row.id), eq(entries.version, row.version)))
-          }
-          succeededBatches++
-          totalSucceeded += batch.length
-          totalConsidered += batch.length
-        }
-      } catch (err) {
-        if (options.signal?.aborted) break
-        guard.recordFailure(err)
-        const reason = err instanceof Error ? err.message : String(err)
-        for (const row of batch) {
-          standardFailures.push({ shortId: row.shortId, reason })
-          appendFailedItem(failedItems, failedShortSet, {
-            shortId: row.shortId,
-            title: row.title,
-            kind: 'standard',
-            reason,
+          const dreamMessages = buildStandardDreamMessages(
+            packed.promptChanged,
+            packed.promptNeighbors,
+          )
+          const batchMaxTokens = computeDynamicOutputTokens(packed.changedChars, {
+            min: STANDARD_OUTPUT_TOKENS_MIN,
+            max: STANDARD_OUTPUT_TOKENS_MAX,
+            overhead: 2_000,
           })
-        }
-        failedCount += batch.length
-        totalConsidered += batch.length
-      }
+
+          const res = await chatComplete(conn, dreamMessages, {
+            temperature: 0.2,
+            jsonMode: true,
+            maxTokens: batchMaxTokens,
+            timeoutMs: STANDARD_DREAM_TIMEOUT_MS,
+            stream: true,
+            taskKind: 'organize',
+            maxRetries: DREAM_HTTP_MAX_RETRIES,
+            ...(options.retryBaseMs !== undefined ? { retryBaseMs: options.retryBaseMs } : {}),
+            ...(options.signal ? { signal: options.signal } : {}),
+            onRetry: ({ error }) => {
+              retriedCount++
+              if (error.category === 'rate_limit') guard.recordRateLimit(error)
+            },
+          })
+          guard.recordSuccess()
+
+          let evaluated = evaluateDreamResponse(res.content, catalog)
+          if (evaluated.status === 'invalid' && !options.signal?.aborted && !guard.isAborted) {
+            await guard.waitIfCooling(options.signal)
+            if (!options.signal?.aborted && !guard.isAborted) {
+              retriedCount++
+              const repairMessages = buildSemanticRepairMessages(
+                dreamMessages,
+                `上次输出解析失败（${evaluated.reason}）。请严格只输出单个合法 JSON 对象：{"suggestions":[...]}，没有建议时输出 {"suggestions":[]}。`,
+              )
+              const repairedRes = await chatComplete(conn, repairMessages, {
+                temperature: 0,
+                jsonMode: true,
+                maxTokens: batchMaxTokens,
+                timeoutMs: STANDARD_DREAM_TIMEOUT_MS,
+                stream: true,
+                taskKind: 'organize',
+                maxRetries: 0,
+                ...(options.signal ? { signal: options.signal } : {}),
+              })
+              guard.recordSuccess()
+              evaluated = evaluateDreamResponse(repairedRes.content, catalog)
+            }
+          }
+
+          // 解析仍失败时记入失败明细且绝不推进 dreamCheckedVersion，防止静默跳过
+          if (evaluated.status === 'invalid') {
+            for (const row of subBatch) {
+              standardFailures.push({ shortId: row.shortId, reason: evaluated.reason })
+              appendFailedItem(failedItems, failedShortSet, {
+                shortId: row.shortId,
+                title: row.title,
+                kind: 'standard',
+                reason: evaluated.reason,
+              })
+            }
+            failedCount += subBatch.length
+            totalConsidered += subBatch.length
+          } else {
+            for (const prop of evaluated.proposals) {
+              const insertedId = await insertDreamProposal(db, prop, rowById)
+              if (insertedId) totalSuggested++
+            }
+
+            for (const row of subBatch) {
+              await db
+                .update(entries)
+                .set({ dreamCheckedVersion: row.version })
+                .where(and(eq(entries.id, row.id), eq(entries.version, row.version)))
+            }
+            succeededBatches++
+            totalSucceeded += subBatch.length
+            totalConsidered += subBatch.length
+          }
+        },
+        {
+          guard,
+          signal: options.signal,
+          onSplit: () => {
+            retriedCount++
+          },
+          onFailure: (subBatch, err) => {
+            const reason = err instanceof Error ? err.message : String(err)
+            for (const row of subBatch) {
+              standardFailures.push({ shortId: row.shortId, reason })
+              appendFailedItem(failedItems, failedShortSet, {
+                shortId: row.shortId,
+                title: row.title,
+                kind: 'standard',
+                reason,
+              })
+            }
+            failedCount += subBatch.length
+            totalConsidered += subBatch.length
+          },
+        },
+      )
 
       options.onProgress?.({
         mode: 'standard',

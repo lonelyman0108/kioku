@@ -1,11 +1,14 @@
 import { CapturePlanResponse, ENTRY_CONTENT_MAX, type CaptureCandidate } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
+import { ModelClientError } from '../../models/client'
 import {
   buildCaptureMessages,
   buildDefaultProposedNew,
   buildManualPlan,
+  CAPTURE_CHAT_MAX_TOKENS,
   CAPTURE_PROMPT_CHAR_BUDGET,
+  classifyModelError,
   parseCaptureDecision,
   resolveCaptureDecision,
 } from '../capture'
@@ -489,5 +492,39 @@ describe('capture 提示构造、JSON 解析与局部补丁回退', () => {
     expect(manualEmpty.action).toBe('create')
     expect(manualEmpty.patchKind).toBe('create')
     expect(manualEmpty.targetShortId).toBeNull()
+  })
+
+  it('提升输出预算至 2500、约束仅 create 输出 newEntry 并明确区分 length_limit 降级原因', () => {
+    expect(CAPTURE_CHAT_MAX_TOKENS).toBe(2_500)
+
+    const messages = buildCaptureMessages({
+      text: '把超时时间调整为 30 秒',
+      candidates: [makeCandidate()],
+    })
+    const systemPrompt = messages[0]?.content ?? ''
+    expect(systemPrompt).toContain('仅当 action="create" 时才填写 newEntry')
+    expect(systemPrompt).toContain('置为 null')
+
+    expect(
+      classifyModelError(
+        new ModelClientError('对话模型输出达到长度上限被截断（已输出 2500 token，请求上限 2500）', {
+          category: 'length_limit',
+          retryable: false,
+        }),
+      ),
+    ).toBe('对话模型输出超出长度上限被截断，已切换为手动追加')
+
+    expect(
+      classifyModelError(
+        new ModelClientError('请求超时', {
+          category: 'timeout',
+          retryable: true,
+        }),
+      ),
+    ).toBe('对话模型响应超时，已切换为手动追加')
+
+    expect(classifyModelError(new Error('network error'))).toBe(
+      '对话模型暂时不可用，已切换为手动追加',
+    )
   })
 })

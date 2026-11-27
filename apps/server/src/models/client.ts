@@ -107,6 +107,12 @@ const DEFAULT_RETRY_MAX_MS = 30_000
 const RETRY_AFTER_MAX_MS = 60_000
 const REASONING_CACHE_TTL_MS = 3_600_000
 const REASONING_CACHE_MAX_SIZE = 128
+const DEFAULT_REASONING_BONUS_THRESHOLD = 1_000
+const DEFAULT_REASONING_MAX_TOKENS_BONUS = 4_000
+const DEFAULT_REASONING_MAX_TOKENS_CAP = 16_384
+const AUTO_EXPAND_MAX_TOKENS_CAP = 16_384
+const MIN_UPSTREAM_MAX_TOKENS_CAP = 256
+const MAX_UPSTREAM_MAX_TOKENS_CAP = 131_072
 
 const REASONING_MAX_TOKENS_BONUS: Record<
   'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max',
@@ -127,6 +133,18 @@ const GENERIC_PARAM_UNSUPPORTED_RE =
   /unknown (?:field|parameter)|unrecognized request argument|unsupported (?:parameter|value|field)|extra inputs are not permitted/i
 const OTHER_PARAM_NAMED_RE =
   /\b(?:max_tokens|max_completion_tokens|response_format|messages|tools|tool_choice|top_p|presence_penalty|frequency_penalty|seed|stop)\b/i
+const MAX_TOKENS_CONTEXT_RE =
+  /\b(?:max_tokens|max_completion_tokens|max_output_tokens)\b|output\s+tokens?|completion\s+tokens?|最大输出|输出.*上限/i
+const MAX_COMPLETION_TOKENS_HINT_RE = /\bmax_completion_tokens\b/i
+const MAX_TOKENS_UNSUPPORTED_RE =
+  /max_completion_tokens|unsupported\s+(?:parameter|field)[^.\n]*\bmax_tokens\b|\bmax_tokens\b[^.\n]*(?:is\s+)?not\s+supported|unknown\s+(?:field|parameter)[^.\n]*\bmax_tokens\b/i
+const MAX_TOKENS_RANGE_RE = /range[^[\](){}.\n"]*[[(]\s*\d+\s*,\s*(\d{3,6})\s*[\])]/gi
+const MAX_TOKENS_COMPARISON_RE =
+  /(?:(?:must|should)\s+be\s*(?:<=|≤|at\s+most|less\s+than\s+or\s+equal\s+to)|<=|≤|cannot\s+exceed|exceeds?\s+(?:the\s+)?(?:model(?:'s)?\s+)?(?:maximum|limit)(?:\s+of)?|at\s+most|less\s+than\s+or\s+equal\s+to|不超过|不能超过|上限为?)\s*[:=]?\s*(\d{3,6})\b/gi
+const MAX_TOKENS_GREATER_THAN_RE =
+  /\b(?:max_tokens|max_completion_tokens|max_output_tokens)\b[^.\n"{}]{0,24}>\s*(\d{3,6})\b/gi
+const MAX_TOKENS_MAXIMUM_RE =
+  /(?:\bmaximum\b|\bmax(?:\s+allowed)?)\s*(?:allowed\s+)?(?:(?:output|completion)\s+tokens?|tokens?|value|limit)?\s*(?:(?:for\s+(?:this\s+model|max_tokens|max_completion_tokens|max_output_tokens)\s+)?(?:is|of)|:|=|\()\s*(\d{3,6})\b/gi
 const QUOTA_ERROR_RE =
   /insufficient_quota|exceeded your current quota|quota exceeded|billing|credit balance|余额不足|额度(?:不足|已用尽|耗尽)/i
 const CONTEXT_LENGTH_RE =
@@ -136,16 +154,93 @@ function isReasoningUnsupportedError(detail: string): boolean {
   if (REASONING_EXPLICIT_RE.test(detail)) return true
   return GENERIC_PARAM_UNSUPPORTED_RE.test(detail) && !OTHER_PARAM_NAMED_RE.test(detail)
 }
+
+// 若错误详情是 JSON 错误体，优先提取可读 message 文本，避免外层 code/status 数值干扰上限解析
+function extractErrorMessageText(raw: string): string {
+  const trimmed = raw.trim()
+  if (!trimmed.startsWith('{')) return raw
+  try {
+    const parsed = JSON.parse(trimmed) as Record<string, unknown>
+    const errField = parsed.error
+    if (typeof errField === 'string' && errField.trim()) return errField.trim()
+    if (errField && typeof errField === 'object' && !Array.isArray(errField)) {
+      const msg = (errField as { message?: unknown }).message
+      if (typeof msg === 'string' && msg.trim()) return msg.trim()
+    }
+    if (typeof parsed.message === 'string' && parsed.message.trim()) return parsed.message.trim()
+    if (typeof parsed.detail === 'string' && parsed.detail.trim()) return parsed.detail.trim()
+  } catch {
+    // 非合法 JSON 时回退原始文本匹配
+  }
+  return raw
+}
+
+function extractUpstreamMaxTokensCap(detail: string, sentMaxTokens: number): number | null {
+  const text = extractErrorMessageText(detail)
+  if (!MAX_TOKENS_CONTEXT_RE.test(text) || CONTEXT_LENGTH_RE.test(text)) return null
+  for (const pattern of [
+    MAX_TOKENS_RANGE_RE,
+    MAX_TOKENS_COMPARISON_RE,
+    MAX_TOKENS_GREATER_THAN_RE,
+    MAX_TOKENS_MAXIMUM_RE,
+  ]) {
+    const re = new RegExp(pattern.source, pattern.flags)
+    let match: RegExpExecArray | null
+    while ((match = re.exec(text)) !== null) {
+      const parsed = Number(match[1])
+      if (
+        Number.isInteger(parsed) &&
+        parsed >= MIN_UPSTREAM_MAX_TOKENS_CAP &&
+        parsed <= MAX_UPSTREAM_MAX_TOKENS_CAP &&
+        parsed < sentMaxTokens
+      ) {
+        return parsed
+      }
+    }
+  }
+  return null
+}
+
+function computeInitialMaxTokens(
+  baseMaxTokens: number,
+  effectiveEffort: ReasoningEffort,
+  includeReasoning: boolean,
+): number {
+  if (includeReasoning && effectiveEffort in REASONING_MAX_TOKENS_BONUS) {
+    return (
+      baseMaxTokens +
+      REASONING_MAX_TOKENS_BONUS[effectiveEffort as keyof typeof REASONING_MAX_TOKENS_BONUS]
+    )
+  }
+  if (
+    (effectiveEffort === 'default' || !includeReasoning) &&
+    baseMaxTokens >= DEFAULT_REASONING_BONUS_THRESHOLD
+  ) {
+    if (baseMaxTokens >= DEFAULT_REASONING_MAX_TOKENS_CAP) return baseMaxTokens
+    return Math.min(
+      DEFAULT_REASONING_MAX_TOKENS_CAP,
+      baseMaxTokens + DEFAULT_REASONING_MAX_TOKENS_BONUS,
+    )
+  }
+  return baseMaxTokens
+}
+
 const TRANSIENT_PAYLOAD_ERROR_RE =
   /rate.?limit|too many requests|overloaded|gateway timeout|temporarily unavailable|try again|service unavailable|bad gateway/i
 const RETRYABLE_HTTP_STATUS = new Set([408, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524])
 const LEADING_THINK_BLOCK_RE = /^\s*(?:<think\b[^>]*>[\s\S]*?<\/think>\s*)+/i
 
-// 进程内缓存上游不支持指定 reasoning_effort 的端点，避免批处理逐条撞 400
+// 进程内缓存上游参数兼容性探测结果，避免批处理逐条撞 400
 const reasoningUnsupportedCache = new Map<string, number>()
+const maxCompletionTokensCache = new Map<string, number>()
+const upstreamMaxTokensCapCache = new Map<string, { cap: number; expiresAt: number }>()
+
+function modelEndpointCacheKey(baseUrl: string, model: string): string {
+  return `${baseUrl.replace(/\/+$/, '')}\0${model}`
+}
 
 function reasoningCacheKey(baseUrl: string, model: string, effort: ReasoningEffort): string {
-  return `${baseUrl.replace(/\/+$/, '')}\0${model}\0${effort}`
+  return `${modelEndpointCacheKey(baseUrl, model)}\0${effort}`
 }
 
 function isReasoningCachedUnsupported(
@@ -165,15 +260,70 @@ function isReasoningCachedUnsupported(
 
 function markReasoningUnsupported(baseUrl: string, model: string, effort: ReasoningEffort): void {
   const key = reasoningCacheKey(baseUrl, model, effort)
-  if (reasoningUnsupportedCache.size >= REASONING_CACHE_MAX_SIZE) {
+  if (
+    !reasoningUnsupportedCache.has(key) &&
+    reasoningUnsupportedCache.size >= REASONING_CACHE_MAX_SIZE
+  ) {
     const oldest = reasoningUnsupportedCache.keys().next().value
     if (oldest !== undefined) reasoningUnsupportedCache.delete(oldest)
   }
   reasoningUnsupportedCache.set(key, Date.now() + REASONING_CACHE_TTL_MS)
 }
 
-export function clearReasoningFallbackCache(): void {
+function isMaxCompletionTokensCached(baseUrl: string, model: string): boolean {
+  const key = modelEndpointCacheKey(baseUrl, model)
+  const expiresAt = maxCompletionTokensCache.get(key)
+  if (expiresAt === undefined) return false
+  if (expiresAt <= Date.now()) {
+    maxCompletionTokensCache.delete(key)
+    return false
+  }
+  return true
+}
+
+function markUsesMaxCompletionTokens(baseUrl: string, model: string): void {
+  const key = modelEndpointCacheKey(baseUrl, model)
+  if (
+    !maxCompletionTokensCache.has(key) &&
+    maxCompletionTokensCache.size >= REASONING_CACHE_MAX_SIZE
+  ) {
+    const oldest = maxCompletionTokensCache.keys().next().value
+    if (oldest !== undefined) maxCompletionTokensCache.delete(oldest)
+  }
+  maxCompletionTokensCache.set(key, Date.now() + REASONING_CACHE_TTL_MS)
+}
+
+function getCachedUpstreamMaxTokensCap(baseUrl: string, model: string): number | null {
+  const key = modelEndpointCacheKey(baseUrl, model)
+  const entry = upstreamMaxTokensCapCache.get(key)
+  if (!entry) return null
+  if (entry.expiresAt <= Date.now()) {
+    upstreamMaxTokensCapCache.delete(key)
+    return null
+  }
+  return entry.cap
+}
+
+function markUpstreamMaxTokensCap(baseUrl: string, model: string, cap: number): void {
+  const key = modelEndpointCacheKey(baseUrl, model)
+  if (
+    !upstreamMaxTokensCapCache.has(key) &&
+    upstreamMaxTokensCapCache.size >= REASONING_CACHE_MAX_SIZE
+  ) {
+    const oldest = upstreamMaxTokensCapCache.keys().next().value
+    if (oldest !== undefined) upstreamMaxTokensCapCache.delete(oldest)
+  }
+  upstreamMaxTokensCapCache.set(key, { cap, expiresAt: Date.now() + REASONING_CACHE_TTL_MS })
+}
+
+export function clearModelCompatibilityCaches(): void {
   reasoningUnsupportedCache.clear()
+  maxCompletionTokensCache.clear()
+  upstreamMaxTokensCapCache.clear()
+}
+
+export function clearReasoningFallbackCache(): void {
+  clearModelCompatibilityCaches()
 }
 
 // 剥离网关 thinking_to_content 拼在正文开头的 <think>...</think> 块，不改动 JSON 正文内部的字面文本
@@ -579,13 +729,24 @@ function finalizeChatResult(
   completionTokens: number,
   finishReason: string | null,
   jsonMode: boolean,
+  diagnostic?: {
+    reportedCompletionTokens?: number | null | undefined
+    sentMaxTokens?: number | undefined
+  },
 ): ChatResult {
   const content = stripThinkTags(rawContent)
   if (finishReason === 'length' && (jsonMode || !content)) {
-    throw new ModelClientError('对话模型输出达到长度上限被截断', {
+    const reportedTokens = diagnostic?.reportedCompletionTokens ?? null
+    const sentMaxTokens = diagnostic?.sentMaxTokens
+    const hasUsageInfo = reportedTokens !== null || sentMaxTokens !== undefined
+    const message = hasUsageInfo
+      ? `对话模型输出达到长度上限被截断（已输出 ${reportedTokens ?? '未知'} token，请求上限 ${sentMaxTokens ?? '未指定'}）`
+      : '对话模型输出达到长度上限被截断'
+    const rawDetail = `finish_reason=length completion_tokens=${reportedTokens ?? 'unknown'} max_tokens=${sentMaxTokens ?? 'unset'}`
+    throw new ModelClientError(message, {
       category: 'length_limit',
       retryable: false,
-      rawDetail: 'finish_reason=length',
+      rawDetail,
     })
   }
   return {
@@ -596,7 +757,7 @@ function finalizeChatResult(
   }
 }
 
-function parseChatPayload(payload: unknown, jsonMode: boolean): ChatResult {
+function parseChatPayload(payload: unknown, jsonMode: boolean, sentMaxTokens?: number): ChatResult {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     throw new ModelClientError('对话模型接口返回空或非对象响应', {
       category: 'unknown',
@@ -607,8 +768,9 @@ function parseChatPayload(payload: unknown, jsonMode: boolean): ChatResult {
   const errMsg = extractPayloadError(rec.error)
   if (errMsg) throw classifyPayloadError('对话模型接口失败', errMsg)
   const promptTokens = typeof rec.usage?.prompt_tokens === 'number' ? rec.usage.prompt_tokens : 0
-  const completionTokens =
-    typeof rec.usage?.completion_tokens === 'number' ? rec.usage.completion_tokens : 0
+  const reportedCompletionTokens =
+    typeof rec.usage?.completion_tokens === 'number' ? rec.usage.completion_tokens : null
+  const completionTokens = reportedCompletionTokens ?? 0
   const choice = rec.choices?.[0]
   const finishReason = typeof choice?.finish_reason === 'string' ? choice.finish_reason : null
   return finalizeChatResult(
@@ -617,6 +779,7 @@ function parseChatPayload(payload: unknown, jsonMode: boolean): ChatResult {
     completionTokens,
     finishReason,
     jsonMode,
+    { reportedCompletionTokens, sentMaxTokens },
   )
 }
 
@@ -624,6 +787,7 @@ async function readChatJson(
   res: Response,
   jsonMode: boolean,
   callerSignal: AbortSignal | undefined,
+  sentMaxTokens?: number,
 ): Promise<ChatResult> {
   let payload: unknown
   try {
@@ -631,7 +795,7 @@ async function readChatJson(
   } catch (err) {
     throw classifyFetchError(err, callerSignal)
   }
-  return parseChatPayload(payload, jsonMode)
+  return parseChatPayload(payload, jsonMode, sentMaxTokens)
 }
 
 interface ChunkReader {
@@ -670,6 +834,7 @@ async function readChatEventStream(
     jsonMode: boolean
     idleTimeoutMs: number
     callerSignal: AbortSignal | undefined
+    sentMaxTokens?: number | undefined
   },
 ): Promise<ChatResult> {
   if (!res.body) {
@@ -684,6 +849,7 @@ async function readChatEventStream(
   const parts: string[] = []
   let promptTokens = 0
   let completionTokens = 0
+  let reportedCompletionTokens: number | null = null
   let finishReason: string | null = null
   let buffer = ''
   let done = false
@@ -729,6 +895,7 @@ async function readChatEventStream(
       }
       if (typeof chunk.usage.completion_tokens === 'number') {
         completionTokens = chunk.usage.completion_tokens
+        reportedCompletionTokens = chunk.usage.completion_tokens
       }
     }
     const choice = chunk.choices?.[0]
@@ -807,7 +974,7 @@ async function readChatEventStream(
     const raw = nonSseLines.join('\n').trim()
     if (raw.startsWith('{')) {
       try {
-        return parseChatPayload(JSON.parse(raw), options.jsonMode)
+        return parseChatPayload(JSON.parse(raw), options.jsonMode, options.sentMaxTokens)
       } catch (err) {
         if (err instanceof ModelClientError) throw err
       }
@@ -839,10 +1006,19 @@ async function readChatEventStream(
     completionTokens,
     finishReason,
     options.jsonMode,
+    { reportedCompletionTokens, sentMaxTokens: options.sentMaxTokens },
   )
 }
 
-// 调用 OpenAI 兼容 /chat/completions 接口；支持思考等级透传与降级、流式保活及传输层指数退避重试
+interface ChatSendFlags {
+  useStream: boolean
+  includeReasoning: boolean
+  includeTemperature: boolean
+  useMaxCompletionTokens: boolean
+  overrideMaxTokens?: number | undefined
+}
+
+// 调用 OpenAI 兼容 /chat/completions 接口；支持思考等级透传与降级、输出上限自适应、截断自动扩容与流式保活
 export async function chatComplete(
   conn: ModelConnection,
   messages: readonly ChatMessage[],
@@ -855,22 +1031,31 @@ export async function chatComplete(
   const allowReasoningFallback = options.allowReasoningFallback !== false
   const jsonMode = Boolean(options.jsonMode)
 
-  return withRetries(async () => {
-    const signal = combineSignals(options.signal, timeoutMs)
+  let expandedMaxTokens: number | undefined
+  let hasExpandedOnLength = false
 
+  return withRetries(async () => {
     const initialIncludeReasoning =
       effectiveEffort !== 'default' &&
       (!allowReasoningFallback ||
         !isReasoningCachedUnsupported(conn.baseUrl, conn.model, effectiveEffort))
+    const initialUseMaxCompletionTokens = isMaxCompletionTokensCached(conn.baseUrl, conn.model)
+
+    let lastAcceptedFlags: ChatSendFlags | null = null
+    let lastSentMaxTokens: number | undefined
 
     const send = async (
-      flags: {
-        useStream: boolean
-        includeReasoning: boolean
-        includeTemperature: boolean
-      },
-      downgradesLeft = 3,
+      flags: ChatSendFlags,
+      downgradesLeft = 5,
+      onAccepted: readonly (() => void)[] = [],
     ): Promise<ChatResult> => {
+      if (options.signal?.aborted) {
+        throw new ModelClientError('请求已取消', {
+          category: 'cancelled',
+          retryable: false,
+        })
+      }
+      const signal = combineSignals(options.signal, timeoutMs)
       const body: Record<string, unknown> = {
         model: conn.model,
         messages,
@@ -881,13 +1066,29 @@ export async function chatComplete(
       if (flags.includeReasoning && effectiveEffort !== 'default') {
         body.reasoning_effort = effectiveEffort === 'off' ? 'none' : effectiveEffort
       }
-      if (options.maxTokens !== undefined) {
-        const bonus =
-          flags.includeReasoning && effectiveEffort in REASONING_MAX_TOKENS_BONUS
-            ? REASONING_MAX_TOKENS_BONUS[effectiveEffort as keyof typeof REASONING_MAX_TOKENS_BONUS]
-            : 0
-        body.max_tokens = options.maxTokens + bonus
+
+      let sentMaxTokens: number | undefined
+      if (flags.overrideMaxTokens !== undefined) {
+        sentMaxTokens = flags.overrideMaxTokens
+      } else if (options.maxTokens !== undefined) {
+        sentMaxTokens = computeInitialMaxTokens(
+          options.maxTokens,
+          effectiveEffort,
+          flags.includeReasoning,
+        )
       }
+      if (sentMaxTokens !== undefined) {
+        const cachedCap = getCachedUpstreamMaxTokensCap(conn.baseUrl, conn.model)
+        if (cachedCap !== null) {
+          sentMaxTokens = Math.min(sentMaxTokens, cachedCap)
+        }
+        if (flags.useMaxCompletionTokens) {
+          body.max_completion_tokens = sentMaxTokens
+        } else {
+          body.max_tokens = sentMaxTokens
+        }
+      }
+
       if (jsonMode) body.response_format = { type: 'json_object' }
       if (flags.useStream) body.stream = true
 
@@ -913,10 +1114,43 @@ export async function chatComplete(
           !QUOTA_ERROR_RE.test(errorText)
         ) {
           if (flags.useStream && STREAM_UNSUPPORTED_RE.test(errorText)) {
-            return send({ ...flags, useStream: false }, downgradesLeft - 1)
+            return send({ ...flags, useStream: false }, downgradesLeft - 1, onAccepted)
           }
           if (flags.includeTemperature && TEMPERATURE_UNSUPPORTED_RE.test(errorText)) {
-            return send({ ...flags, includeTemperature: false }, downgradesLeft - 1)
+            return send({ ...flags, includeTemperature: false }, downgradesLeft - 1, onAccepted)
+          }
+          const parsedCap =
+            sentMaxTokens !== undefined
+              ? extractUpstreamMaxTokensCap(errorText, sentMaxTokens)
+              : null
+          const needsMaxCompletionTokens =
+            sentMaxTokens !== undefined &&
+            !flags.useMaxCompletionTokens &&
+            (MAX_COMPLETION_TOKENS_HINT_RE.test(errorText) ||
+              (parsedCap === null && MAX_TOKENS_UNSUPPORTED_RE.test(errorText)))
+          if (needsMaxCompletionTokens) {
+            const nextAccepted = [
+              ...onAccepted,
+              () => markUsesMaxCompletionTokens(conn.baseUrl, conn.model),
+              ...(parsedCap !== null
+                ? [() => markUpstreamMaxTokensCap(conn.baseUrl, conn.model, parsedCap)]
+                : []),
+            ]
+            return send(
+              {
+                ...flags,
+                useMaxCompletionTokens: true,
+                ...(parsedCap !== null ? { overrideMaxTokens: parsedCap } : {}),
+              },
+              downgradesLeft - 1,
+              nextAccepted,
+            )
+          }
+          if (parsedCap !== null) {
+            return send({ ...flags, overrideMaxTokens: parsedCap }, downgradesLeft - 1, [
+              ...onAccepted,
+              () => markUpstreamMaxTokensCap(conn.baseUrl, conn.model, parsedCap),
+            ])
           }
           if (
             flags.includeReasoning &&
@@ -924,17 +1158,19 @@ export async function chatComplete(
             effectiveEffort !== 'default' &&
             isReasoningUnsupportedError(errorText)
           ) {
-            // 仅在剥离思考参数后重试成功时才写入降级缓存，避免无关 400 误污染缓存
-            const fallbackResult = await send(
-              { ...flags, includeReasoning: false },
-              downgradesLeft - 1,
-            )
-            markReasoningUnsupported(conn.baseUrl, conn.model, effectiveEffort)
-            return fallbackResult
+            // 仅在剥离思考参数并被上游接受后才写入降级缓存，避免无关 400 误污染缓存
+            return send({ ...flags, includeReasoning: false }, downgradesLeft - 1, [
+              ...onAccepted,
+              () => markReasoningUnsupported(conn.baseUrl, conn.model, effectiveEffort),
+            ])
           }
         }
         throw classifyHttpError('对话模型接口失败', res, detail, rawBody)
       }
+
+      for (const callback of onAccepted) callback()
+      lastAcceptedFlags = flags
+      lastSentMaxTokens = sentMaxTokens
 
       const contentType = (res.headers.get('content-type') ?? '').toLowerCase()
       if (flags.useStream && !contentType.includes('application/json')) {
@@ -942,16 +1178,49 @@ export async function chatComplete(
           jsonMode,
           idleTimeoutMs,
           callerSignal: options.signal,
+          sentMaxTokens,
         })
       }
-      return readChatJson(res, jsonMode, options.signal)
+      return readChatJson(res, jsonMode, options.signal, sentMaxTokens)
     }
 
-    return send({
+    const initialFlags: ChatSendFlags = {
       useStream: Boolean(options.stream),
       includeReasoning: initialIncludeReasoning,
       includeTemperature: true,
-    })
+      useMaxCompletionTokens: initialUseMaxCompletionTokens,
+      overrideMaxTokens: expandedMaxTokens,
+    }
+
+    try {
+      return await send(initialFlags)
+    } catch (err) {
+      if (
+        err instanceof ModelClientError &&
+        err.category === 'length_limit' &&
+        !hasExpandedOnLength &&
+        !options.signal?.aborted &&
+        lastSentMaxTokens !== undefined &&
+        lastSentMaxTokens < AUTO_EXPAND_MAX_TOKENS_CAP
+      ) {
+        const cachedCap = getCachedUpstreamMaxTokensCap(conn.baseUrl, conn.model)
+        if (cachedCap === null || lastSentMaxTokens < cachedCap) {
+          const doubled = Math.min(AUTO_EXPAND_MAX_TOKENS_CAP, lastSentMaxTokens * 2)
+          const nextLimit = cachedCap !== null ? Math.min(doubled, cachedCap) : doubled
+          if (nextLimit > lastSentMaxTokens) {
+            hasExpandedOnLength = true
+            expandedMaxTokens = nextLimit
+            options.onRetry?.({ attempt: 1, delayMs: 0, error: err })
+            const baseRetryFlags = lastAcceptedFlags ?? initialFlags
+            return send({
+              ...baseRetryFlags,
+              overrideMaxTokens: expandedMaxTokens,
+            })
+          }
+        }
+      }
+      throw err
+    }
   }, options)
 }
 
@@ -972,10 +1241,12 @@ export async function testModelConnection(
         dimensions: vec?.length ?? EMBEDDING_DIMENSIONS,
       }
     }
-    // 基础 64 叠加 low/medium/high 补偿后分别为 2064/4064/8064，既够思考又不超过常见的 8192 上限
+    const effort = resolveEffectiveReasoningEffort(conn, {})
+    // 默认档位给 256 防止轻度思考模型连通测试截断；显式 high 档位叠加 +8000 后控制在 8192 内
+    const probeMaxTokens = effort === 'high' ? 192 : 256
     await chatComplete(conn, [{ role: 'user', content: 'Reply with OK.' }], {
       temperature: 0,
-      maxTokens: 64,
+      maxTokens: probeMaxTokens,
       timeoutMs: 25_000,
       maxRetries: 0,
       allowReasoningFallback: false,
@@ -996,7 +1267,7 @@ export async function testModelConnection(
           [{ role: 'user', content: 'Reply with OK.' }],
           {
             temperature: 0,
-            maxTokens: 64,
+            maxTokens: 256,
             timeoutMs: 15_000,
             maxRetries: 0,
             allowReasoningFallback: false,

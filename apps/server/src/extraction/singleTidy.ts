@@ -14,11 +14,21 @@ import { buildUniqueSlugIndex, computeDeterministicFixes } from '../memory/hygie
 import { chatComplete } from '../models/client'
 import { CHAT_LLM_SETTING_KEY, loadResolvedModel } from '../models/store'
 import { CaptureAbortedError } from './capture'
-import { toPromptItem } from './dream'
+import { computeDynamicOutputTokens, toPromptItem } from './dream'
 import { buildSemanticRepairMessages, buildTidyMessages, evaluateTidyResponse } from './dreamPrompt'
 
 const SINGLE_TIDY_CONTENT_LIMIT = 16_000
 const SINGLE_TIDY_TIMEOUT_MS = 240_000
+const SINGLE_TIDY_OUTPUT_TOKENS_MIN = 6_000
+const SINGLE_TIDY_OUTPUT_TOKENS_MAX = 16_384
+
+export function computeSingleTidyMaxTokens(contentLength: number): number {
+  return computeDynamicOutputTokens(contentLength, {
+    min: SINGLE_TIDY_OUTPUT_TOKENS_MIN,
+    max: SINGLE_TIDY_OUTPUT_TOKENS_MAX,
+    overhead: 2_000,
+  })
+}
 
 export type SingleTidyStage = 'preclean' | 'llm' | 'verify'
 
@@ -95,13 +105,14 @@ export async function previewSingleTidy(
   const preCleanedRow = { ...target, content: preCleanedContent }
   const promptItem = toPromptItem(preCleanedRow, SINGLE_TIDY_CONTENT_LIMIT)
   const tidyMessages = buildTidyMessages(promptItem)
+  const maxTokens = computeSingleTidyMaxTokens(promptItem.content.length)
 
   let rawContent: string
   try {
     const res = await chatComplete(conn, tidyMessages, {
       temperature: 0.1,
       jsonMode: true,
-      maxTokens: 4_000,
+      maxTokens,
       timeoutMs: SINGLE_TIDY_TIMEOUT_MS,
       stream: true,
       taskKind: 'organize',
@@ -130,7 +141,7 @@ export async function previewSingleTidy(
       const repaired = await chatComplete(conn, repairMessages, {
         temperature: 0,
         jsonMode: true,
-        maxTokens: 4_000,
+        maxTokens,
         timeoutMs: SINGLE_TIDY_TIMEOUT_MS,
         stream: true,
         taskKind: 'organize',
