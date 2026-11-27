@@ -723,6 +723,380 @@ describe.skipIf(!testDatabaseUrl)('扁平记忆 CRUD、双链、筛选、回收�
       'realm_forbidden',
     )
   })
+
+  it('常驻列表支持按 pinnedGroup 分组筛选并兼容关键词组合搜索', async () => {
+    const masterKey = testMasterKey()
+    const app = createTestApp(database, { masterKey })
+    const { cookie } = await createOwnerSession(database)
+    const credSvc = new CredentialService(database.db, masterKey)
+    const entrySvc = new EntryService(database.db, masterKey, credSvc, null)
+    const consoleScope = { kind: 'console' as const, accountId: 'acc', sessionId: 'sess' }
+
+    const marker = '常驻分组哨兵'
+    const globalFull = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '全局全文规范',
+        content: `${marker}：所有场景均全文展开。`,
+        bootMode: 'full',
+      }),
+    )
+    const scopedProject = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '项目专属常驻',
+        content: `${marker}：仅项目生效。`,
+        bootMode: 'full',
+        projects: ['kioku'],
+      }),
+    )
+    const scopedEnv = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '环境专属常驻',
+        content: `${marker}：仅 mac 生效。`,
+        bootMode: 'full',
+        envs: ['mac'],
+      }),
+    )
+    const scopedRealm = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '场域专属常驻',
+        content: `${marker}：仅工作场域生效。`,
+        bootMode: 'full',
+        realms: ['work'],
+      }),
+    )
+    const scopedRuntime = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '客户端专属常驻',
+        content: `${marker}：仅 claudecode 生效。`,
+        bootMode: 'full',
+        runtimes: ['claudecode'],
+      }),
+    )
+    const indexGlobal = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '目录常驻通用',
+        content: `${marker}：仅目录索引。`,
+        bootMode: 'index',
+      }),
+    )
+    const indexScoped = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '目录常驻项目',
+        content: `${marker}：按项目索引。`,
+        bootMode: 'index',
+        projects: ['kioku'],
+      }),
+    )
+    const regularEntry = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '普通按需词条',
+        content: `${marker}：不常驻。`,
+        bootMode: 'none',
+      }),
+    )
+
+    const scopedExpected = [
+      scopedProject.entry.shortId,
+      scopedEnv.entry.shortId,
+      scopedRealm.entry.shortId,
+      scopedRuntime.entry.shortId,
+    ].sort()
+    const indexExpected = [indexGlobal.entry.shortId, indexScoped.entry.shortId].sort()
+
+    // 普通分页路径校验三种 pinnedGroup 分组
+    const globalList = EntryListResponse.parse(
+      await (
+        await app.request('/v1/console/entries?tab=pinned&pinnedGroup=global_full', {
+          headers: { cookie },
+        })
+      ).json(),
+    )
+    expect(globalList.items.map((i) => i.shortId)).toEqual([globalFull.entry.shortId])
+    expect(globalList.counts).toMatchObject({
+      pinned: 7,
+      globalFullPinnedCount: 1,
+      scopedFullPinnedCount: 4,
+      indexPinnedCount: 2,
+    })
+
+    const scopedList = EntryListResponse.parse(
+      await (
+        await app.request('/v1/console/entries?tab=pinned&pinnedGroup=scoped_full', {
+          headers: { cookie },
+        })
+      ).json(),
+    )
+    expect(scopedList.items.map((i) => i.shortId).sort()).toEqual(scopedExpected)
+
+    const indexList = EntryListResponse.parse(
+      await (
+        await app.request('/v1/console/entries?tab=pinned&pinnedGroup=index', {
+          headers: { cookie },
+        })
+      ).json(),
+    )
+    expect(indexList.items.map((i) => i.shortId).sort()).toEqual(indexExpected)
+
+    // 关键词搜索路径同样遵守 pinnedGroup 分组条件
+    const encodedQ = encodeURIComponent(marker)
+    const globalSearch = EntryListResponse.parse(
+      await (
+        await app.request(`/v1/console/entries?tab=pinned&pinnedGroup=global_full&q=${encodedQ}`, {
+          headers: { cookie },
+        })
+      ).json(),
+    )
+    expect(globalSearch.items.map((i) => i.shortId)).toEqual([globalFull.entry.shortId])
+
+    const scopedSearch = EntryListResponse.parse(
+      await (
+        await app.request(`/v1/console/entries?tab=pinned&pinnedGroup=scoped_full&q=${encodedQ}`, {
+          headers: { cookie },
+        })
+      ).json(),
+    )
+    expect(scopedSearch.items.map((i) => i.shortId).sort()).toEqual(scopedExpected)
+
+    const indexSearch = EntryListResponse.parse(
+      await (
+        await app.request(`/v1/console/entries?tab=pinned&pinnedGroup=index&q=${encodedQ}`, {
+          headers: { cookie },
+        })
+      ).json(),
+    )
+    expect(indexSearch.items.map((i) => i.shortId).sort()).toEqual(indexExpected)
+
+    // 非 pinned 标签页忽略 pinnedGroup，避免误过滤普通记忆
+    const nonPinnedTab = EntryListResponse.parse(
+      await (
+        await app.request('/v1/console/entries?tab=all&pinnedGroup=index', {
+          headers: { cookie },
+        })
+      ).json(),
+    )
+    expect(nonPinnedTab.items.map((i) => i.shortId)).toContain(regularEntry.entry.shortId)
+    expect(nonPinnedTab.items.map((i) => i.shortId)).toContain(globalFull.entry.shortId)
+  })
+
+  it('列表、详情与历史接口批量解析双链标题并过滤已删除目标，无引用时省略 linkedTitles', async () => {
+    const masterKey = testMasterKey()
+    const app = createTestApp(database, { masterKey })
+    const { cookie } = await createOwnerSession(database)
+    const credSvc = new CredentialService(database.db, masterKey)
+    const entrySvc = new EntryService(database.db, masterKey, credSvc, null)
+    const consoleScope = { kind: 'console' as const, accountId: 'acc', sessionId: 'sess' }
+
+    const aliveTarget = await entrySvc.create(
+      consoleScope,
+      entryInput({ title: '活跃双链目标', content: '目标正文。' }),
+    )
+    const summaryTarget = await entrySvc.create(
+      consoleScope,
+      entryInput({ title: '概要关联目标', content: '概要引用目标正文。' }),
+    )
+    const olderHistoryTarget = await entrySvc.create(
+      consoleScope,
+      entryInput({ title: '早期历史引用目标', content: '早期历史引用的目标正文。' }),
+    )
+    const deletedTarget = await entrySvc.create(
+      consoleScope,
+      entryInput({ title: '已删目标标题', content: '即将被软删除。' }),
+    )
+
+    const source = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '双链来源词条',
+        summary: `现行概要引用 [[${summaryTarget.entry.shortId}]]`,
+        content: '初始正文内容。',
+        changeSummary: `初版关联 [[${olderHistoryTarget.entry.shortId}]]`,
+      }),
+    )
+
+    const searchToken = '双链标题解析哨兵'
+    await entrySvc.update(consoleScope, source.entry.shortId, {
+      content: `${searchToken}：正文已同步更新。`,
+      changeSummary: `补全双链：[[${aliveTarget.entry.shortId}]]、[[${deletedTarget.entry.shortId}]]`,
+    })
+    await entrySvc.remove(consoleScope, deletedTarget.entry.shortId)
+
+    const plain = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '无双链词条',
+        summary: '普通概要，不含双链',
+        content: '普通正文内容。',
+        changeSummary: '普通变更说明',
+      }),
+    )
+
+    // 普通分页列表路径
+    const pagedList = EntryListResponse.parse(
+      await (
+        await app.request('/v1/console/entries?tab=all', {
+          headers: { cookie },
+        })
+      ).json(),
+    )
+    expect(pagedList.linkedTitles).toEqual({
+      [aliveTarget.entry.shortId]: '活跃双链目标',
+      [summaryTarget.entry.shortId]: '概要关联目标',
+    })
+    expect(pagedList.linkedTitles?.[deletedTarget.entry.shortId]).toBeUndefined()
+
+    // 关键词搜索列表路径
+    const searchedList = EntryListResponse.parse(
+      await (
+        await app.request(`/v1/console/entries?tab=all&q=${encodeURIComponent(searchToken)}`, {
+          headers: { cookie },
+        })
+      ).json(),
+    )
+    expect(searchedList.items.map((i) => i.shortId)).toContain(source.entry.shortId)
+    expect(searchedList.linkedTitles).toEqual({
+      [aliveTarget.entry.shortId]: '活跃双链目标',
+      [summaryTarget.entry.shortId]: '概要关联目标',
+    })
+    expect(searchedList.linkedTitles?.[deletedTarget.entry.shortId]).toBeUndefined()
+
+    // 词条详情接口：汇总 lastChangeSummary、summary 与 recentHistory 中的双链
+    const detail = EntryDetailResponse.parse(
+      await (
+        await app.request(`/v1/console/entries/${source.entry.shortId}`, {
+          headers: { cookie },
+        })
+      ).json(),
+    )
+    expect(detail.linkedTitles).toEqual({
+      [aliveTarget.entry.shortId]: '活跃双链目标',
+      [summaryTarget.entry.shortId]: '概要关联目标',
+      [olderHistoryTarget.entry.shortId]: '早期历史引用目标',
+    })
+    expect(detail.linkedTitles?.[deletedTarget.entry.shortId]).toBeUndefined()
+
+    // 历史接口：汇总变更说明中的双链
+    const history = EntryHistoryResponse.parse(
+      await (
+        await app.request(`/v1/console/entries/${source.entry.shortId}/history`, {
+          headers: { cookie },
+        })
+      ).json(),
+    )
+    expect(history.linkedTitles).toEqual({
+      [aliveTarget.entry.shortId]: '活跃双链目标',
+      [olderHistoryTarget.entry.shortId]: '早期历史引用目标',
+    })
+    expect(history.linkedTitles?.[deletedTarget.entry.shortId]).toBeUndefined()
+
+    // 无双链目标时响应中不写入 linkedTitles 键
+    const plainDetailRaw = (await (
+      await app.request(`/v1/console/entries/${plain.entry.shortId}`, {
+        headers: { cookie },
+      })
+    ).json()) as Record<string, unknown>
+    expect(Object.prototype.hasOwnProperty.call(plainDetailRaw, 'linkedTitles')).toBe(false)
+
+    const plainHistoryRaw = (await (
+      await app.request(`/v1/console/entries/${plain.entry.shortId}/history`, {
+        headers: { cookie },
+      })
+    ).json()) as Record<string, unknown>
+    expect(Object.prototype.hasOwnProperty.call(plainHistoryRaw, 'linkedTitles')).toBe(false)
+  })
+
+  it('场域受限的 API Key 调用详情与历史接口时 linkedTitles 不泄露越权场域词条标题', async () => {
+    const masterKey = testMasterKey()
+    const credSvc = new CredentialService(database.db, masterKey)
+    const entrySvc = new EntryService(database.db, masterKey, credSvc, null)
+    const consoleScope = { kind: 'console' as const, accountId: 'acc', sessionId: 'sess' }
+
+    const workTarget = await entrySvc.create(
+      consoleScope,
+      entryInput({ title: '工作区可见目标', content: '工作场域正文。', realms: ['work'] }),
+    )
+    const universalTarget = await entrySvc.create(
+      consoleScope,
+      entryInput({ title: '无场域通用目标', content: '通用正文。', realms: [] }),
+    )
+    const personalTarget = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '私有个人场域机密标题',
+        content: '个人场域正文。',
+        realms: ['personal'],
+      }),
+    )
+
+    const workEntry = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '工作区词条',
+        summary: `参考 [[${universalTarget.entry.shortId}]] 与 [[${personalTarget.entry.shortId}]]`,
+        content: '工作正文。',
+        realms: ['work'],
+        changeSummary: `补全双链：[[${workTarget.entry.shortId}]]、[[${personalTarget.entry.shortId}]]`,
+      }),
+    )
+    const onlyForbiddenRefEntry = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '仅引用越权目标的工作词条',
+        content: '工作正文。',
+        realms: ['work'],
+        changeSummary: `补全双链：[[${personalTarget.entry.shortId}]]`,
+      }),
+    )
+
+    const workKey = await issueTestApiKey(database, { allowedRealms: ['work'] })
+    const workScope = {
+      kind: 'key' as const,
+      keyId: workKey.id,
+      name: 'Work Restricted Key',
+      prefix: workKey.prefix,
+      runtimeFamily: 'claudecode' as const,
+      envs: [],
+      allowedRealms: ['work'],
+      canWrite: false,
+      canResolveCredentials: false,
+    }
+
+    const keyDetail = await entrySvc.get(workScope, workEntry.entry.shortId)
+    expect(keyDetail.linkedTitles).toEqual({
+      [workTarget.entry.shortId]: '工作区可见目标',
+      [universalTarget.entry.shortId]: '无场域通用目标',
+    })
+    expect(keyDetail.linkedTitles?.[personalTarget.entry.shortId]).toBeUndefined()
+    expect(JSON.stringify(keyDetail)).not.toContain('私有个人场域机密标题')
+
+    const keyHistory = await entrySvc.history(workScope, workEntry.entry.shortId)
+    expect(keyHistory.linkedTitles).toEqual({
+      [workTarget.entry.shortId]: '工作区可见目标',
+    })
+    expect(keyHistory.linkedTitles?.[personalTarget.entry.shortId]).toBeUndefined()
+    expect(JSON.stringify(keyHistory)).not.toContain('私有个人场域机密标题')
+
+    // 当全部引用目标均越权时，省略 linkedTitles 键
+    const forbiddenOnlyDetail = await entrySvc.get(workScope, onlyForbiddenRefEntry.entry.shortId)
+    expect(Object.prototype.hasOwnProperty.call(forbiddenOnlyDetail, 'linkedTitles')).toBe(false)
+
+    const forbiddenOnlyHistory = await entrySvc.history(
+      workScope,
+      onlyForbiddenRefEntry.entry.shortId,
+    )
+    expect(Object.prototype.hasOwnProperty.call(forbiddenOnlyHistory, 'linkedTitles')).toBe(false)
+
+    // 控制台会话可正常解析全部场域目标
+    const consoleDetail = await entrySvc.get(consoleScope, workEntry.entry.shortId)
+    expect(consoleDetail.linkedTitles?.[personalTarget.entry.shortId]).toBe('私有个人场域机密标题')
+  })
 })
 
 describe.skipIf(!testDatabaseUrl)('随手记局部补丁归并（POST /v1/console/entries/capture）', () => {
