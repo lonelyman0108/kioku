@@ -1032,7 +1032,7 @@ describe.skipIf(!testDatabaseUrl)('扁平记忆 CRUD、双链、筛选、回收�
     })
     expect(detail.linkedTitles?.[deletedTarget.entry.shortId]).toBeUndefined()
 
-    // 历史接口：汇总变更说明中的双链
+    // 历史接口：默认含快照时一并解析快照内的双链；关闭快照时仅解析变更说明中的双链
     const history = EntryHistoryResponse.parse(
       await (
         await app.request(`/v1/console/entries/${source.entry.shortId}/history`, {
@@ -1042,9 +1042,23 @@ describe.skipIf(!testDatabaseUrl)('扁平记忆 CRUD、双链、筛选、回收�
     )
     expect(history.linkedTitles).toEqual({
       [aliveTarget.entry.shortId]: '活跃双链目标',
+      [summaryTarget.entry.shortId]: '概要关联目标',
       [olderHistoryTarget.entry.shortId]: '早期历史引用目标',
     })
     expect(history.linkedTitles?.[deletedTarget.entry.shortId]).toBeUndefined()
+
+    const historyNoSnap = EntryHistoryResponse.parse(
+      await (
+        await app.request(
+          `/v1/console/entries/${source.entry.shortId}/history?includeSnapshots=false`,
+          { headers: { cookie } },
+        )
+      ).json(),
+    )
+    expect(historyNoSnap.linkedTitles).toEqual({
+      [aliveTarget.entry.shortId]: '活跃双链目标',
+      [olderHistoryTarget.entry.shortId]: '早期历史引用目标',
+    })
 
     // 无双链目标时响应中不写入 linkedTitles 键
     const plainDetailRaw = (await (
