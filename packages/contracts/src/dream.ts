@@ -177,6 +177,7 @@ export const DreamEntrySnapshot = z.object({
   projects: z.array(z.string()),
   runtimes: z.array(z.string()),
   topics: z.array(z.string()),
+  deviceKey: z.string().nullable().optional(),
   verifiedAt: z.string().nullable().optional(),
   lastChangeSummary: z.string().nullable().optional(),
   version: z.number().int(),

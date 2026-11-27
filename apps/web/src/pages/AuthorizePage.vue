@@ -341,7 +341,7 @@ async function deny() {
           <SectionHeading title="终端环境与权限" :level="2" :icon="icons.sliders">
             <template #hint>
               <Hint>
-                终端环境用于启动加载与召回时自动匹配当前系统；限定场域是硬边界，仅返回允许场域及通用记忆。
+                终端环境用于启动加载与召回时匹配系统或自定义主机标识；限定场域是硬边界，仅返回允许场域及通用记忆。
               </Hint>
             </template>
           </SectionHeading>
@@ -377,7 +377,7 @@ async function deny() {
                 <UInput
                   v-model="customEnv"
                   size="xs"
-                  placeholder="自定义环境"
+                  placeholder="如 home-24"
                   class="w-28"
                   @keydown.enter.prevent="addCustomEnv"
                   @blur="addCustomEnv"
@@ -394,6 +394,10 @@ async function deny() {
                 </UButton>
               </div>
             </div>
+            <p class="text-xs text-muted">
+              可填系统名（mac、linux、win）或自定义主机标识（如
+              home-24）。多标签按任一命中；单机专用记忆若需隔离，仅标主机标识。
+            </p>
           </div>
 
           <div class="space-y-2">

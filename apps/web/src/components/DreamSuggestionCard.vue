@@ -13,6 +13,7 @@ import {
   EntryTitle,
   extractCredentialPlaceholders,
   extractTargetShortIds,
+  normalizeSlugList,
   type ApplySuggestionRequest,
   type BootMode,
   type CaptureIntegrity,
@@ -28,8 +29,10 @@ import {
   dreamKindIcons,
   dreamKindLabels,
   entryKindLabels,
+  envDisplayName,
 } from '../labels'
 import { entryRoute } from '../routes'
+import { runtimeName } from '../runtimes'
 import { detectSecretPrefixes } from '../secretHint'
 import { formatRelative, formatShort, formatTime } from '../time'
 import SceneScopePicker, { type SceneScopeValue } from './SceneScopePicker.vue'
@@ -106,6 +109,147 @@ const isAdjustBootMode = computed(() => props.suggestion.kind === 'adjust_boot_m
 const isMergeDuplicates = computed(() => props.suggestion.kind === 'merge_duplicates')
 const isMarkStale = computed(() => props.suggestion.kind === 'mark_stale')
 const isDistillEpisode = computed(() => props.suggestion.kind === 'distill_episode')
+const isUpdate = computed(() => props.suggestion.kind === 'update')
+
+// 计算直接应用时实际落库的适用场景，与服务端应用时的继承回退口径一致
+const effectiveScope = computed<SceneScopeValue>(() => {
+  const s = props.suggestion
+  const base = baseEntry.value
+  if (s.kind === 'distill_episode') {
+    const fallbackRealms = base?.realms.length
+      ? base.realms
+      : normalizeSlugList(s.entries.flatMap((e) => e.realms))
+    return {
+      envs: s.proposedEnvs?.length ? [...s.proposedEnvs] : [...(base?.envs ?? [])],
+      realms: s.proposedRealms?.length ? [...s.proposedRealms] : [...fallbackRealms],
+      projects: s.proposedProjects?.length ? [...s.proposedProjects] : [...(base?.projects ?? [])],
+      runtimes: s.proposedRuntimes?.length ? [...s.proposedRuntimes] : [],
+    }
+  }
+  if (s.kind === 'merge_duplicates') {
+    return {
+      envs: s.proposedEnvs?.length
+        ? [...s.proposedEnvs]
+        : normalizeSlugList(s.entries.flatMap((e) => e.envs)),
+      realms: [...(base?.realms ?? [])],
+      projects: s.proposedProjects?.length
+        ? [...s.proposedProjects]
+        : normalizeSlugList(s.entries.flatMap((e) => e.projects)),
+      runtimes: s.proposedRuntimes?.length
+        ? [...s.proposedRuntimes]
+        : normalizeSlugList(s.entries.flatMap((e) => e.runtimes)),
+    }
+  }
+  if (s.kind === 'update' || s.kind === 'tidy') {
+    return {
+      envs: s.proposedEnvs?.length ? [...s.proposedEnvs] : [...(base?.envs ?? [])],
+      realms: s.proposedRealms?.length ? [...s.proposedRealms] : [...(base?.realms ?? [])],
+      projects: s.proposedProjects?.length ? [...s.proposedProjects] : [...(base?.projects ?? [])],
+      runtimes: s.proposedRuntimes?.length ? [...s.proposedRuntimes] : [...(base?.runtimes ?? [])],
+    }
+  }
+  return {
+    envs: [...(base?.envs ?? [])],
+    realms: [...(base?.realms ?? [])],
+    projects: [...(base?.projects ?? [])],
+    runtimes: [...(base?.runtimes ?? [])],
+  }
+})
+
+const effectiveDisclosure = computed<string | null>(() => {
+  if (isMarkStale.value || isLinkEntries.value || isAdjustBootMode.value) {
+    return baseEntry.value?.disclosure?.trim() || null
+  }
+  const proposed = props.suggestion.proposedDisclosure?.trim()
+  if (proposed) return proposed
+  if (isDistillEpisode.value) return null
+  return baseEntry.value?.disclosure?.trim() || null
+})
+
+const isProposedDisclosureNew = computed(() => {
+  const proposed = props.suggestion.proposedDisclosure?.trim()
+  if (!proposed) return false
+  if (isDistillEpisode.value) return true
+  return proposed !== (baseEntry.value?.disclosure?.trim() ?? '')
+})
+
+const sourceDeviceKeys = computed(() => {
+  const seen = new Set<string>()
+  const list: string[] = []
+  for (const entry of props.suggestion.entries) {
+    const key = entry.deviceKey?.trim()
+    if (key && !seen.has(key)) {
+      seen.add(key)
+      list.push(key)
+    }
+  }
+  return list
+})
+
+interface ScopeTagGroup {
+  key: 'envs' | 'projects' | 'realms' | 'runtimes'
+  label: string
+  icon: string
+  items: string[]
+}
+
+const scopeTagGroups = computed<ScopeTagGroup[]>(() => {
+  const groups: ScopeTagGroup[] = []
+  if (effectiveScope.value.envs.length) {
+    groups.push({
+      key: 'envs',
+      label: '环境',
+      icon: icons.env,
+      items: effectiveScope.value.envs.map((slug) => envDisplayName(slug)),
+    })
+  }
+  if (effectiveScope.value.projects.length) {
+    groups.push({
+      key: 'projects',
+      label: '项目',
+      icon: icons.project,
+      items: effectiveScope.value.projects,
+    })
+  }
+  if (effectiveScope.value.realms.length) {
+    groups.push({
+      key: 'realms',
+      label: '场域',
+      icon: icons.realm,
+      items: effectiveScope.value.realms,
+    })
+  }
+  if (effectiveScope.value.runtimes.length) {
+    groups.push({
+      key: 'runtimes',
+      label: '客户端',
+      icon: icons.terminal,
+      items: effectiveScope.value.runtimes.map((slug) => runtimeName(slug)),
+    })
+  }
+  return groups
+})
+
+const hasProposedMeta = computed(() =>
+  Boolean(
+    props.suggestion.proposedEnvs?.length ||
+    props.suggestion.proposedRealms?.length ||
+    props.suggestion.proposedProjects?.length ||
+    props.suggestion.proposedRuntimes?.length ||
+    props.suggestion.proposedDisclosure?.trim(),
+  ),
+)
+
+const showScopeReview = computed(() => {
+  if (isMarkStale.value || isLinkEntries.value || isAdjustBootMode.value) return false
+  return (
+    isDistillEpisode.value ||
+    isUpdate.value ||
+    isMergeDuplicates.value ||
+    hasProposedMeta.value ||
+    sourceDeviceKeys.value.length > 0
+  )
+})
 const bootModeChoices = BOOT_MODES.map((value) => ({
   value,
   label: bootModeLabels[value],
@@ -186,16 +330,16 @@ function openEditor() {
   draft.title = s.proposedTitle ?? base?.title ?? ''
   draft.summary = s.proposedSummary ?? base?.summary ?? ''
   draft.content = s.proposedContent ?? base?.content ?? ''
-  draft.disclosure = s.proposedDisclosure ?? base?.disclosure ?? ''
+  draft.disclosure = effectiveDisclosure.value ?? ''
   draft.changeSummary = s.proposedChangeSummary ?? ''
   draft.applyArchivedNotes = Boolean(s.archivedNotes?.length)
   draft.topics = [...(s.proposedTopics ?? base?.topics ?? [])]
   draft.bootMode = s.proposedBootMode ?? (base ? effectiveBootMode(base) : 'none')
   draftScope.value = {
-    envs: [...(s.proposedEnvs ?? base?.envs ?? [])],
-    realms: [...(s.proposedRealms ?? base?.realms ?? [])],
-    projects: [...(s.proposedProjects ?? base?.projects ?? [])],
-    runtimes: [...(s.proposedRuntimes ?? base?.runtimes ?? [])],
+    envs: [...effectiveScope.value.envs],
+    realms: [...effectiveScope.value.realms],
+    projects: [...effectiveScope.value.projects],
+    runtimes: [...effectiveScope.value.runtimes],
   }
   editing.value = true
 }
@@ -759,6 +903,48 @@ function applyEdited() {
           <p class="summary-preview-text">{{ suggestion.proposedSummary }}</p>
         </div>
 
+        <div v-if="showScopeReview" class="scope-review">
+          <div class="scope-review-row">
+            <span class="scope-review-label">
+              <UIcon :name="icons.sliders" class="scope-review-icon" aria-hidden="true" />
+              <span>将写入场景</span>
+            </span>
+            <div class="scope-review-chips">
+              <template v-if="scopeTagGroups.length">
+                <span v-for="group in scopeTagGroups" :key="group.key" class="scope-group">
+                  <span class="scope-group-name">
+                    <UIcon :name="group.icon" class="scope-chip-icon" aria-hidden="true" />
+                    <span>{{ group.label }}</span>
+                  </span>
+                  <span v-for="val in group.items" :key="`${group.key}:${val}`" class="scope-chip">
+                    {{ val }}
+                  </span>
+                </span>
+              </template>
+              <span v-else class="scope-chip is-universal">
+                <UIcon :name="icons.globe" class="scope-chip-icon" aria-hidden="true" />
+                <span>所有环境（未限定场景）</span>
+              </span>
+              <span
+                v-for="dev in sourceDeviceKeys"
+                :key="`dev:${dev}`"
+                class="scope-chip is-device"
+              >
+                <UIcon :name="icons.deviceDesktop" class="scope-chip-icon" aria-hidden="true" />
+                <span>来源设备</span>
+                <span class="font-mono">{{ dev }}</span>
+              </span>
+            </div>
+          </div>
+          <div v-if="effectiveDisclosure" class="scope-review-row">
+            <span class="scope-review-label">
+              <UIcon :name="icons.trigger" class="scope-review-icon" aria-hidden="true" />
+              <span>{{ isProposedDisclosureNew ? '建议触发场景' : '触发场景' }}</span>
+            </span>
+            <span class="scope-disclosure-text">{{ effectiveDisclosure }}</span>
+          </div>
+        </div>
+
         <DiffViewer
           v-if="effectiveProposedContent !== null && hasDiffChanges"
           :before="baseEntry?.content ?? ''"
@@ -781,6 +967,47 @@ function applyEdited() {
             <span>建议现行概要</span>
           </span>
           <p class="summary-preview-text">{{ suggestion.proposedSummary }}</p>
+        </div>
+        <div v-if="showScopeReview" class="scope-review">
+          <div class="scope-review-row">
+            <span class="scope-review-label">
+              <UIcon :name="icons.sliders" class="scope-review-icon" aria-hidden="true" />
+              <span>将写入场景</span>
+            </span>
+            <div class="scope-review-chips">
+              <template v-if="scopeTagGroups.length">
+                <span v-for="group in scopeTagGroups" :key="group.key" class="scope-group">
+                  <span class="scope-group-name">
+                    <UIcon :name="group.icon" class="scope-chip-icon" aria-hidden="true" />
+                    <span>{{ group.label }}</span>
+                  </span>
+                  <span v-for="val in group.items" :key="`${group.key}:${val}`" class="scope-chip">
+                    {{ val }}
+                  </span>
+                </span>
+              </template>
+              <span v-else class="scope-chip is-universal">
+                <UIcon :name="icons.globe" class="scope-chip-icon" aria-hidden="true" />
+                <span>所有环境（未限定场景）</span>
+              </span>
+              <span
+                v-for="dev in sourceDeviceKeys"
+                :key="`dev:${dev}`"
+                class="scope-chip is-device"
+              >
+                <UIcon :name="icons.deviceDesktop" class="scope-chip-icon" aria-hidden="true" />
+                <span>来源设备</span>
+                <span class="font-mono">{{ dev }}</span>
+              </span>
+            </div>
+          </div>
+          <div v-if="effectiveDisclosure" class="scope-review-row">
+            <span class="scope-review-label">
+              <UIcon :name="icons.trigger" class="scope-review-icon" aria-hidden="true" />
+              <span>{{ isProposedDisclosureNew ? '建议触发场景' : '触发场景' }}</span>
+            </span>
+            <span class="scope-disclosure-text">{{ effectiveDisclosure }}</span>
+          </div>
         </div>
         <pre v-if="suggestion.proposedContent" class="preview-box">{{
           suggestion.proposedContent
@@ -848,6 +1075,48 @@ function applyEdited() {
           <p class="summary-preview-text">{{ suggestion.proposedSummary }}</p>
         </div>
 
+        <div v-if="showScopeReview" class="scope-review">
+          <div class="scope-review-row">
+            <span class="scope-review-label">
+              <UIcon :name="icons.sliders" class="scope-review-icon" aria-hidden="true" />
+              <span>将写入场景</span>
+            </span>
+            <div class="scope-review-chips">
+              <template v-if="scopeTagGroups.length">
+                <span v-for="group in scopeTagGroups" :key="group.key" class="scope-group">
+                  <span class="scope-group-name">
+                    <UIcon :name="group.icon" class="scope-chip-icon" aria-hidden="true" />
+                    <span>{{ group.label }}</span>
+                  </span>
+                  <span v-for="val in group.items" :key="`${group.key}:${val}`" class="scope-chip">
+                    {{ val }}
+                  </span>
+                </span>
+              </template>
+              <span v-else class="scope-chip is-universal">
+                <UIcon :name="icons.globe" class="scope-chip-icon" aria-hidden="true" />
+                <span>所有环境（未限定场景）</span>
+              </span>
+              <span
+                v-for="dev in sourceDeviceKeys"
+                :key="`dev:${dev}`"
+                class="scope-chip is-device"
+              >
+                <UIcon :name="icons.deviceDesktop" class="scope-chip-icon" aria-hidden="true" />
+                <span>来源设备</span>
+                <span class="font-mono">{{ dev }}</span>
+              </span>
+            </div>
+          </div>
+          <div v-if="effectiveDisclosure" class="scope-review-row">
+            <span class="scope-review-label">
+              <UIcon :name="icons.trigger" class="scope-review-icon" aria-hidden="true" />
+              <span>{{ isProposedDisclosureNew ? '建议触发场景' : '触发场景' }}</span>
+            </span>
+            <span class="scope-disclosure-text">{{ effectiveDisclosure }}</span>
+          </div>
+        </div>
+
         <p v-if="isTidy && hasContentChange && !parts.content" class="skip-content-note">
           已跳过正文改动
         </p>
@@ -905,6 +1174,10 @@ function applyEdited() {
             <div class="involved-meta">
               <span class="font-mono text-xs text-muted">{{ entry.shortId }}</span>
               <span class="text-xs text-muted">{{ entryKindLabels[entry.kind] }}</span>
+              <span v-if="entry.deviceKey" class="keep-tag">
+                <UIcon :name="icons.deviceDesktop" class="keep-tag-icon" aria-hidden="true" />
+                <span class="font-mono">{{ entry.deviceKey }}</span>
+              </span>
               <span v-if="entry.isPinned" class="keep-tag">
                 <UIcon
                   :name="bootModeIcons[effectiveBootMode(entry)]"
@@ -1285,6 +1558,49 @@ function applyEdited() {
           <p class="summary-preview-text">{{ suggestion.proposedSummary }}</p>
         </div>
 
+        <!-- 非编辑审阅态适用场景、来源设备与触发场景 -->
+        <div v-if="showScopeReview" class="scope-review">
+          <div class="scope-review-row">
+            <span class="scope-review-label">
+              <UIcon :name="icons.sliders" class="scope-review-icon" aria-hidden="true" />
+              <span>将写入场景</span>
+            </span>
+            <div class="scope-review-chips">
+              <template v-if="scopeTagGroups.length">
+                <span v-for="group in scopeTagGroups" :key="group.key" class="scope-group">
+                  <span class="scope-group-name">
+                    <UIcon :name="group.icon" class="scope-chip-icon" aria-hidden="true" />
+                    <span>{{ group.label }}</span>
+                  </span>
+                  <span v-for="val in group.items" :key="`${group.key}:${val}`" class="scope-chip">
+                    {{ val }}
+                  </span>
+                </span>
+              </template>
+              <span v-else class="scope-chip is-universal">
+                <UIcon :name="icons.globe" class="scope-chip-icon" aria-hidden="true" />
+                <span>所有环境（未限定场景）</span>
+              </span>
+              <span
+                v-for="dev in sourceDeviceKeys"
+                :key="`dev:${dev}`"
+                class="scope-chip is-device"
+              >
+                <UIcon :name="icons.deviceDesktop" class="scope-chip-icon" aria-hidden="true" />
+                <span>来源设备</span>
+                <span class="font-mono">{{ dev }}</span>
+              </span>
+            </div>
+          </div>
+          <div v-if="effectiveDisclosure" class="scope-review-row">
+            <span class="scope-review-label">
+              <UIcon :name="icons.trigger" class="scope-review-icon" aria-hidden="true" />
+              <span>{{ isProposedDisclosureNew ? '建议触发场景' : '触发场景' }}</span>
+            </span>
+            <span class="scope-disclosure-text">{{ effectiveDisclosure }}</span>
+          </div>
+        </div>
+
         <!-- 正文对比 / 预览 -->
         <p v-if="isTidy && hasContentChange && !parts.content" class="skip-content-note">
           已跳过正文改动
@@ -1343,6 +1659,10 @@ function applyEdited() {
           </RouterLink>
           <span class="font-mono text-xs text-muted">{{ entry.shortId }}</span>
           <span class="text-xs text-muted">{{ entryKindLabels[entry.kind] }}</span>
+          <span v-if="entry.deviceKey" class="keep-tag">
+            <UIcon :name="icons.deviceDesktop" class="keep-tag-icon" aria-hidden="true" />
+            <span class="font-mono">{{ entry.deviceKey }}</span>
+          </span>
           <span v-if="entry.isPinned" class="keep-tag">
             <UIcon
               :name="bootModeIcons[effectiveBootMode(entry)]"
@@ -1846,6 +2166,92 @@ function applyEdited() {
   font-size: 14px;
   line-height: 1.6;
   color: var(--ui-text-highlighted);
+  overflow-wrap: anywhere;
+}
+
+.scope-review {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 1px solid var(--ui-border);
+  background: var(--ui-bg);
+}
+.scope-review-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+  font-size: 13px;
+  line-height: 1.55;
+}
+.scope-review-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ui-text-muted);
+}
+.scope-review-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+}
+.scope-review-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  min-width: 0;
+  flex: 1;
+}
+.scope-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.scope-group-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.scope-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  border: 1px solid var(--ui-border-accented);
+  background: var(--ui-bg-bright);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ui-text-highlighted);
+}
+.scope-chip.is-universal {
+  border-style: dashed;
+  color: var(--ui-text-muted);
+}
+.scope-chip.is-device {
+  border-color: var(--ui-info);
+  background: color-mix(in srgb, var(--ui-info) 8%, var(--ui-bg-bright));
+  color: var(--ui-info);
+}
+.scope-chip-icon {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
+}
+.scope-disclosure-text {
+  min-width: 0;
+  flex: 1;
+  font-size: 13px;
+  color: var(--ui-text);
   overflow-wrap: anywhere;
 }
 

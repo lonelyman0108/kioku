@@ -316,7 +316,7 @@ export function createKiokuMcpServer(
     'kioku_create',
     {
       description:
-        '新建一条扁平长期记忆；标题应简短稳定且不含日期/更新日志，正文只写现行状态与长期原因，支持 [[m-xxxxxx|语境]] 双链与 {{cred:<slug>}} 占位符',
+        '新建一条扁平长期记忆；标题应简短稳定且不含日期/更新日志，正文只写现行状态与长期原因，单机特例须写清适用主机与前提避免泛化，支持 [[m-xxxxxx|语境]] 双链与 {{cred:<slug>}} 占位符',
       inputSchema: {
         title: z
           .string()
@@ -333,14 +333,18 @@ export function createKiokuMcpServer(
           .string()
           .min(1)
           .max(ENTRY_CONTENT_MAX)
-          .describe('Markdown 正文（维护现行状态与长期原因，无需在首行重复标题）'),
+          .describe(
+            'Markdown 正文（维护现行状态与长期原因，单机配置/本机路径或有前提条件的结论须写明适用主机与前提，无需在首行重复标题）',
+          ),
         change_summary: z
           .string()
           .max(CHANGE_SUMMARY_MAX)
           .optional()
           .describe('初始建立背景说明（单行，写入版本历史）'),
         topics: McpTopicList.optional().describe('主题标签列表'),
-        envs: McpTagList.optional().describe('适用环境/系统，如 ["mac", "linux"]'),
+        envs: McpTagList.optional().describe(
+          '适用环境或主机标识，除系统名（如 ["mac", "linux", "win"]）外亦支持自定义主机标识（如 ["home-24"]）；envs 按交集匹配，专属单机隔离时仅标主机标识、勿同时混标通用系统名',
+        ),
         realms: McpTagList.optional().describe('适用场域，如 ["work"]；留空表示通用'),
         projects: McpTagList.optional().describe('适用项目标识列表'),
         runtimes: McpTagList.optional().describe('适用客户端标识列表（支持自定义客户端标识）'),
@@ -357,7 +361,7 @@ export function createKiokuMcpServer(
           .string()
           .max(DISCLOSURE_MAX)
           .optional()
-          .describe('何时需要想起此条的简短说明'),
+          .describe('何时需要想起此条的简短说明（单机或有前提条件的结论应标明适用主机与前提）'),
         valid_to: z.string().optional().describe('过期时间（ISO 8601 带时区），留空长期有效'),
       },
     },
@@ -387,7 +391,7 @@ export function createKiokuMcpServer(
     'kioku_update',
     {
       description:
-        '修改已有记忆的现行状态、概要或元数据；修改长文档时优先使用 patch 局部补丁以免误覆盖主体，并填写 change_summary 记录变更原因',
+        '修改已有记忆的现行状态、概要或元数据；也适用于主对话中根据用户纠偏收紧记忆适用范围或修正前提，优先使用 patch 局部补丁以免误覆盖主体，同步调整 envs/projects/disclosure 并填写 change_summary 记录变更原因',
       inputSchema: {
         id: z.string().min(1).max(200).describe('记忆短 ID（如 m-234abc）或精确标题'),
         expected_version: z.number().int().min(1).optional().describe('期望版本号（乐观锁）'),
@@ -419,7 +423,9 @@ export function createKiokuMcpServer(
           .describe('本次改了什么及原因（单行），写入版本历史并在召回/列表中展示'),
         verified: z.boolean().optional().describe('设为 true 刷新事实最近核实时间'),
         topics: McpTopicList.optional().describe('覆盖主题标签列表'),
-        envs: McpTagList.optional().describe('覆盖适用环境列表'),
+        envs: McpTagList.optional().describe(
+          '覆盖适用环境或主机标识列表（支持 mac/linux/win 与自定义主机标识如 home-24；交集匹配，单机隔离仅标主机标识）',
+        ),
         realms: McpTagList.optional().describe('覆盖适用场域列表'),
         projects: McpTagList.optional().describe('覆盖适用项目列表'),
         runtimes: McpTagList.optional().describe('覆盖适用客户端列表（支持自定义客户端标识）'),

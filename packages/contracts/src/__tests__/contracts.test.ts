@@ -3,12 +3,14 @@ import { describe, expect, it } from 'vitest'
 import {
   API_GENERATION,
   ApplySuggestionResponse,
+  BootResponse,
   CreateApiKeyRequest,
   DeviceAuthorizeRequest,
   DeviceGrantApproveRequest,
   DeviceGrantApproveResponse,
   DeviceTokenResponse,
   DREAM_KINDS,
+  DreamEntrySnapshot,
   HealthResponse,
   LifecycleEventRequest,
   RecallRequest,
@@ -186,5 +188,39 @@ describe('wire-compatible contracts', () => {
     expect(ApplySuggestionResponse.parse({ entry: null }).entry).toBeNull()
     expect(RotateApiKeyRequest.parse({ name: 'New Mac' }).name).toBe('New Mac')
     expect(RebuildEmbeddingsResponse.parse({ queued: 12 }).queued).toBe(12)
+    expect(
+      DreamEntrySnapshot.parse({
+        id: '00000000-0000-4000-8000-000000000001',
+        shortId: 'm-234abc',
+        kind: 'episode',
+        title: '会话摘要',
+        content: '单机配置',
+        disclosure: null,
+        isPinned: false,
+        envs: ['mac'],
+        realms: [],
+        projects: [],
+        runtimes: [],
+        topics: [],
+        deviceKey: 'home-24',
+        version: 1,
+        updatedAt: '2026-10-01T00:00:00Z',
+      }).deviceKey,
+    ).toBe('home-24')
+    expect(
+      BootResponse.parse({
+        entries: [
+          {
+            shortId: 'm-234abc',
+            title: '单机规则',
+            kind: 'entry',
+            content: '内容',
+            envs: ['home-24'],
+          },
+        ],
+        omitted: ['m-345bcd'],
+        omittedItems: [{ shortId: 'm-345bcd', title: '手册', envs: ['mac'] }],
+      }).entries[0]?.envs,
+    ).toEqual(['home-24'])
   })
 })
