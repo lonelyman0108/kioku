@@ -43,6 +43,7 @@ const resolvedIcon = computed(() => {
 
 <style scoped>
 .note-line {
+  flex-shrink: 0;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -59,7 +60,7 @@ const resolvedIcon = computed(() => {
   border-top: 0;
 }
 .note-line.flush {
-  min-height: 0;
+  min-height: auto;
   margin-bottom: 0;
   border-top: 0;
 }

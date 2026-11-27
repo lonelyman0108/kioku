@@ -673,6 +673,9 @@ function resetOverrides() {
   flex-direction: column;
   gap: 16px;
 }
+.preview-scroll > * {
+  flex-shrink: 0;
+}
 .stats-strip {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

@@ -1013,81 +1013,91 @@ defineExpose({
                       </span>
                     </div>
 
-                    <div class="pin-mode-list" role="radiogroup" aria-label="选择启动加载方式">
-                      <button
-                        v-for="modeOpt in BOOT_MODES"
-                        :key="modeOpt"
-                        type="button"
-                        role="radio"
-                        class="pin-mode-card"
-                        :class="{ active: pinDraft.bootMode === modeOpt }"
-                        :aria-checked="pinDraft.bootMode === modeOpt"
-                        @click="pinDraft.bootMode = modeOpt"
-                      >
-                        <span class="pin-mode-head">
-                          <span class="pin-mode-name">
+                    <div class="pin-popover-body">
+                      <div class="pin-mode-list" role="radiogroup" aria-label="选择启动加载方式">
+                        <button
+                          v-for="modeOpt in BOOT_MODES"
+                          :key="modeOpt"
+                          type="button"
+                          role="radio"
+                          class="pin-mode-card"
+                          :class="{ active: pinDraft.bootMode === modeOpt }"
+                          :aria-checked="pinDraft.bootMode === modeOpt"
+                          @click="pinDraft.bootMode = modeOpt"
+                        >
+                          <span class="pin-mode-head">
+                            <span class="pin-mode-name">
+                              <UIcon
+                                :name="bootModeIcons[modeOpt]"
+                                class="pin-mode-icon"
+                                aria-hidden="true"
+                              />
+                              <span>{{ bootModeLabels[modeOpt] }}</span>
+                            </span>
                             <UIcon
-                              :name="bootModeIcons[modeOpt]"
-                              class="pin-mode-icon"
+                              v-if="pinDraft.bootMode === modeOpt"
+                              :name="icons.check"
+                              class="pin-mode-check"
                               aria-hidden="true"
                             />
-                            <span>{{ bootModeLabels[modeOpt] }}</span>
                           </span>
+                          <span class="pin-mode-desc">{{ bootModeDescriptions[modeOpt] }}</span>
+                        </button>
+                      </div>
+
+                      <p v-if="pinDraft.recommendedIndex" class="text-xs text-muted">
+                        正文超过 1,200 字，已默认推荐目录常驻。
+                      </p>
+
+                      <NoteLine v-if="pinDraftWarnings.length" tone="warning" flush>
+                        {{ pinDraftWarnings.map((w) => w.message).join('；') }}
+                      </NoteLine>
+
+                      <div v-if="pinDraft.bootMode === 'index'" class="space-y-1">
+                        <label for="pin-summary-input" class="pin-field-label">
                           <UIcon
-                            v-if="pinDraft.bootMode === modeOpt"
-                            :name="icons.check"
-                            class="pin-mode-check"
+                            :name="icons.summary"
+                            class="field-label-icon"
                             aria-hidden="true"
                           />
-                        </span>
-                        <span class="pin-mode-desc">{{ bootModeDescriptions[modeOpt] }}</span>
-                      </button>
-                    </div>
-
-                    <p v-if="pinDraft.recommendedIndex" class="text-xs text-muted">
-                      正文超过 1,200 字，已默认推荐目录常驻。
-                    </p>
-
-                    <NoteLine v-if="pinDraftWarnings.length" tone="warning" flush>
-                      {{ pinDraftWarnings.map((w) => w.message).join('；') }}
-                    </NoteLine>
-
-                    <div v-if="pinDraft.bootMode === 'index'" class="space-y-1">
-                      <label for="pin-summary-input" class="pin-field-label">
-                        <UIcon :name="icons.summary" class="field-label-icon" aria-hidden="true" />
-                        <span>现行概要（用于启动目录行）</span>
-                      </label>
-                      <UTextarea
-                        id="pin-summary-input"
-                        v-model="pinDraft.summary"
-                        :rows="2"
-                        autoresize
-                        :maxrows="3"
-                        :maxlength="ENTRY_SUMMARY_MAX"
-                        placeholder="1–2 句概括当前结论，便于会话启动判断是否展开全文"
-                        class="w-full"
-                      />
-                    </div>
-
-                    <div v-if="pinDraft.bootMode !== 'none'" class="pin-scope-box">
-                      <button
-                        type="button"
-                        class="pin-scope-toggle"
-                        :aria-expanded="pinDraft.scopeExpanded"
-                        @click="pinDraft.scopeExpanded = !pinDraft.scopeExpanded"
-                      >
-                        <span class="pin-scope-lead">
-                          <UIcon :name="icons.sliders" class="pin-scope-icon" aria-hidden="true" />
-                          <span>确认适用场景</span>
-                        </span>
-                        <UIcon
-                          :name="pinDraft.scopeExpanded ? icons.chevronDown : icons.chevronRight"
-                          class="attrs-chevron"
-                          aria-hidden="true"
+                          <span>现行概要（用于启动目录行）</span>
+                        </label>
+                        <UTextarea
+                          id="pin-summary-input"
+                          v-model="pinDraft.summary"
+                          :rows="2"
+                          autoresize
+                          :maxrows="3"
+                          :maxlength="ENTRY_SUMMARY_MAX"
+                          placeholder="1–2 句概括当前结论，便于会话启动判断是否展开全文"
+                          class="w-full"
                         />
-                      </button>
-                      <div v-if="pinDraft.scopeExpanded" class="pin-scope-body">
-                        <SceneScopePicker v-model="pinDraft.scope" :facets="facets" />
+                      </div>
+
+                      <div v-if="pinDraft.bootMode !== 'none'" class="pin-scope-box">
+                        <button
+                          type="button"
+                          class="pin-scope-toggle"
+                          :aria-expanded="pinDraft.scopeExpanded"
+                          @click="pinDraft.scopeExpanded = !pinDraft.scopeExpanded"
+                        >
+                          <span class="pin-scope-lead">
+                            <UIcon
+                              :name="icons.sliders"
+                              class="pin-scope-icon"
+                              aria-hidden="true"
+                            />
+                            <span>确认适用场景</span>
+                          </span>
+                          <UIcon
+                            :name="pinDraft.scopeExpanded ? icons.chevronDown : icons.chevronRight"
+                            class="attrs-chevron"
+                            aria-hidden="true"
+                          />
+                        </button>
+                        <div v-if="pinDraft.scopeExpanded" class="pin-scope-body">
+                          <SceneScopePicker v-model="pinDraft.scope" :facets="facets" />
+                        </div>
                       </div>
                     </div>
 
@@ -1943,18 +1953,28 @@ defineExpose({
 .pin-popover {
   display: flex;
   flex-direction: column;
-  gap: 10px;
   width: min(26rem, calc(100vw - 2rem));
-  max-height: 75vh;
-  overflow-y: auto;
-  padding: 14px 16px;
+  max-height: min(75vh, calc(var(--reka-popover-content-available-height, 75vh) - 12px));
 }
 .pin-popover-head {
+  flex: none;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding-bottom: 6px;
+  padding: 12px 16px 8px;
   border-bottom: 1px solid var(--ui-border);
+}
+.pin-popover-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 16px;
+}
+.pin-popover-body > * {
+  flex-shrink: 0;
 }
 .pin-popover-title {
   display: inline-flex;
@@ -1981,7 +2001,7 @@ defineExpose({
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 8px 10px 8px 12px;
+  padding: 8px 10px;
   border: 1px solid var(--ui-border-accented);
   background: var(--ui-bg);
   text-align: left;
@@ -1995,15 +2015,6 @@ defineExpose({
   border-color: var(--ui-rule);
   background: var(--ui-selected);
   color: var(--ui-on-selected);
-}
-.pin-mode-card.active::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 3px;
-  background: var(--ui-on-selected);
 }
 .pin-mode-head {
   display: flex;
@@ -2090,10 +2101,11 @@ defineExpose({
   background: var(--ui-bg);
 }
 .pin-popover-foot {
+  flex: none;
   display: flex;
   justify-content: flex-end;
   gap: 6px;
-  padding-top: 8px;
+  padding: 8px 16px 12px;
   border-top: 1px solid var(--ui-border);
 }
 .head-actions {
@@ -2345,6 +2357,9 @@ defineExpose({
     gap: 20px;
     padding-left: 18px;
     border-left: 1px solid var(--ui-border);
+  }
+  .read-layout.has-rail .read-rail > * {
+    flex-shrink: 0;
   }
   .read-layout.has-rail .read-below-only {
     display: none;

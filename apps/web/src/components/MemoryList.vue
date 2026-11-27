@@ -927,9 +927,12 @@ defineExpose({ filterOpen, exitBatchMode })
   flex-direction: column;
   gap: 12px;
   width: min(32rem, calc(100vw - 2rem));
-  max-height: 70vh;
+  max-height: min(70vh, calc(var(--reka-popover-content-available-height, 70vh) - 12px));
   overflow-y: auto;
   padding: 14px 16px;
+}
+.filter-popover > * {
+  flex-shrink: 0;
 }
 .popover-head {
   display: flex;
