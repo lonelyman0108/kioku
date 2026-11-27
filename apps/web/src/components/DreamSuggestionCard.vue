@@ -960,8 +960,10 @@ function applyEdited() {
             <UIcon :name="icons.bookmark" class="sub-eyebrow-icon" aria-hidden="true" />
             <span>启动目录条目预览</span>
           </span>
-          <div class="index-preview-line tabular-nums">
-            <span class="font-mono text-xs text-muted">{{ baseEntry.shortId }}</span>
+          <div
+            class="index-preview-line tabular-nums"
+            :title="`${baseEntry.title}（${baseEntry.shortId}）`"
+          >
             <strong class="index-preview-title">{{ baseEntry.title }}</strong>
             <span>（{{ baseEntry.content.length.toLocaleString() }} 字）</span>
             <template v-if="indexPreviewSummary">：{{ indexPreviewSummary }}</template>
@@ -987,10 +989,17 @@ function applyEdited() {
               />
               <span class="link-check-body">
                 <span class="link-check-top">
-                  <RouterLink :to="entryRoute(link.targetShortId)" class="text-primary font-medium">
+                  <RouterLink
+                    :to="entryRoute(link.targetShortId)"
+                    class="text-primary font-medium"
+                    :title="
+                      link.targetTitle
+                        ? `${link.targetTitle}（${link.targetShortId}）`
+                        : link.targetShortId
+                    "
+                  >
                     {{ link.targetTitle || link.targetShortId }}
                   </RouterLink>
-                  <span class="font-mono text-xs text-muted">{{ link.targetShortId }}</span>
                   <span v-if="link.relation" class="link-relation-tag">{{ link.relation }}</span>
                   <span v-if="link.anchorHeading" class="text-xs text-muted">
                     小节：{{ link.anchorHeading }}
@@ -1025,14 +1034,16 @@ function applyEdited() {
       <template v-else-if="isMergeDuplicates">
         <div v-if="baseEntry && mergedSourceEntries.length" class="structure-strip">
           <span class="strip-role">保留目标</span>
-          <span class="strip-new">{{ baseEntry.title }}</span>
-          <span class="font-mono text-xs text-muted">{{ baseEntry.shortId }}</span>
+          <span class="strip-new" :title="`${baseEntry.title}（${baseEntry.shortId}）`">
+            {{ baseEntry.title }}
+          </span>
           <UIcon :name="icons.back" class="compare-arrow" aria-hidden="true" />
           <span class="strip-role">并入来源</span>
           <template v-for="(src, idx) in mergedSourceEntries" :key="src.id">
             <span v-if="idx > 0" class="text-muted">、</span>
-            <span class="strip-old">{{ src.title }}</span>
-            <span class="font-mono text-xs text-muted">{{ src.shortId }}</span>
+            <span class="strip-old" :title="`${src.title}（${src.shortId}）`">
+              {{ src.title }}
+            </span>
           </template>
         </div>
 
@@ -1169,8 +1180,9 @@ function applyEdited() {
             <UIcon :name="icons.remove" class="strip-role-icon is-danger" aria-hidden="true" />
             <span>待移入回收站</span>
           </span>
-          <span class="strip-new">{{ baseEntry.title }}</span>
-          <span class="font-mono text-xs text-muted">{{ baseEntry.shortId }}</span>
+          <span class="strip-new" :title="`${baseEntry.title}（${baseEntry.shortId}）`">
+            {{ baseEntry.title }}
+          </span>
           <span class="text-xs text-muted">{{ baseEntry.content.length.toLocaleString() }} 字</span>
           <span v-if="baseEntry.isPinned" class="keep-tag">
             <UIcon
@@ -1344,11 +1356,14 @@ function applyEdited() {
         </h3>
         <ul class="involved-list">
           <li v-for="entry in suggestion.entries" :key="entry.id" class="involved-item">
-            <RouterLink :to="entryRoute(entry.shortId)" class="text-primary font-medium">
+            <RouterLink
+              :to="entryRoute(entry.shortId)"
+              class="text-primary font-medium"
+              :title="`${entry.title}（${entry.shortId}）`"
+            >
               {{ entry.title }}
             </RouterLink>
             <div class="involved-meta">
-              <span class="font-mono text-xs text-muted">{{ entry.shortId }}</span>
               <span class="text-xs text-muted">{{ entryKindLabels[entry.kind] }}</span>
               <span v-if="entry.deviceKey" class="keep-tag">
                 <UIcon :name="icons.deviceDesktop" class="keep-tag-icon" aria-hidden="true" />
@@ -1495,8 +1510,12 @@ function applyEdited() {
           <UIcon :name="dreamKindIcons[suggestion.kind]" class="kind-tag-icon" aria-hidden="true" />
           <span>{{ dreamKindLabels[suggestion.kind] }}</span>
         </span>
-        <span class="card-target-title">{{ displayTitle }}</span>
-        <span v-if="baseEntry" class="font-mono text-xs text-muted">{{ baseEntry.shortId }}</span>
+        <span
+          class="card-target-title"
+          :title="baseEntry ? `${displayTitle}（${baseEntry.shortId}）` : displayTitle"
+        >
+          {{ displayTitle }}
+        </span>
         <span v-if="baseEntry?.isPinned" class="keep-tag">
           <UIcon
             :name="bootModeIcons[effectiveBootMode(baseEntry)]"
@@ -1647,14 +1666,16 @@ function applyEdited() {
           class="structure-strip"
         >
           <span class="strip-role">保留目标</span>
-          <span class="strip-new">{{ baseEntry.title }}</span>
-          <span class="font-mono text-xs text-muted">{{ baseEntry.shortId }}</span>
+          <span class="strip-new" :title="`${baseEntry.title}（${baseEntry.shortId}）`">
+            {{ baseEntry.title }}
+          </span>
           <UIcon :name="icons.back" class="compare-arrow" aria-hidden="true" />
           <span class="strip-role">并入来源</span>
           <template v-for="(src, idx) in mergedSourceEntries" :key="src.id">
             <span v-if="idx > 0" class="text-muted">、</span>
-            <span class="strip-old">{{ src.title }}</span>
-            <span class="font-mono text-xs text-muted">{{ src.shortId }}</span>
+            <span class="strip-old" :title="`${src.title}（${src.shortId}）`">
+              {{ src.title }}
+            </span>
           </template>
         </div>
 
@@ -1708,10 +1729,14 @@ function applyEdited() {
                     <RouterLink
                       :to="entryRoute(link.targetShortId)"
                       class="text-primary font-medium"
+                      :title="
+                        link.targetTitle
+                          ? `${link.targetTitle}（${link.targetShortId}）`
+                          : link.targetShortId
+                      "
                     >
                       {{ link.targetTitle || link.targetShortId }}
                     </RouterLink>
-                    <span class="font-mono text-xs text-muted">{{ link.targetShortId }}</span>
                     <span v-if="link.relation" class="link-relation-tag">{{ link.relation }}</span>
                     <span v-if="link.anchorHeading" class="text-xs text-muted">
                       小节：{{ link.anchorHeading }}
@@ -1888,10 +1913,13 @@ function applyEdited() {
       </span>
       <ul class="card-affected-list">
         <li v-for="entry in suggestion.entries" :key="entry.id">
-          <RouterLink :to="entryRoute(entry.shortId)" class="text-primary">
+          <RouterLink
+            :to="entryRoute(entry.shortId)"
+            class="text-primary"
+            :title="`${entry.title}（${entry.shortId}）`"
+          >
             {{ entry.title }}
           </RouterLink>
-          <span class="font-mono text-xs text-muted">{{ entry.shortId }}</span>
           <span class="text-xs text-muted">{{ entryKindLabels[entry.kind] }}</span>
           <span v-if="entry.deviceKey" class="keep-tag">
             <UIcon :name="icons.deviceDesktop" class="keep-tag-icon" aria-hidden="true" />
@@ -2185,7 +2213,6 @@ function applyEdited() {
   overflow-wrap: anywhere;
 }
 .index-preview-title {
-  margin-left: 8px;
   font-weight: 600;
   color: var(--ui-text-highlighted);
 }

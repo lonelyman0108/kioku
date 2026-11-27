@@ -23,13 +23,15 @@ const emit = defineEmits<{ open: [shortId: string] }>()
       <SectionHeading title="出链" :icon="icons.promote" :level="3" />
       <ul class="links-list">
         <li v-for="item in outboundLinks" :key="`out-${item.shortId}`">
-          <button type="button" class="link-row" @click="emit('open', item.shortId)">
+          <button
+            type="button"
+            class="link-row"
+            :title="`${item.title}（${item.shortId}）`"
+            @click="emit('open', item.shortId)"
+          >
             <span class="link-head">
               <span class="link-title">{{ item.title }}</span>
-              <span class="link-meta">
-                <span class="font-mono">{{ item.shortId }}</span>
-                <span v-if="!compact">{{ entryKindLabels[item.kind] }}</span>
-              </span>
+              <span v-if="!compact" class="link-meta">{{ entryKindLabels[item.kind] }}</span>
             </span>
             <span v-if="item.relation || item.contextSnippet" class="link-context">
               <span v-if="item.relation" class="link-relation">{{ item.relation }}</span>
@@ -45,13 +47,15 @@ const emit = defineEmits<{ open: [shortId: string] }>()
       <SectionHeading title="反向链接" :icon="icons.backlink" :level="3" />
       <ul class="links-list">
         <li v-for="item in backlinks" :key="`in-${item.shortId}`">
-          <button type="button" class="link-row" @click="emit('open', item.shortId)">
+          <button
+            type="button"
+            class="link-row"
+            :title="`${item.title}（${item.shortId}）`"
+            @click="emit('open', item.shortId)"
+          >
             <span class="link-head">
               <span class="link-title">{{ item.title }}</span>
-              <span class="link-meta">
-                <span class="font-mono">{{ item.shortId }}</span>
-                <span v-if="!compact">{{ entryKindLabels[item.kind] }}</span>
-              </span>
+              <span v-if="!compact" class="link-meta">{{ entryKindLabels[item.kind] }}</span>
             </span>
             <span v-if="item.relation || item.contextSnippet" class="link-context">
               <span v-if="item.relation" class="link-relation">{{ item.relation }}</span>

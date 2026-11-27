@@ -1203,12 +1203,12 @@ async function batchDismissSelected() {
                       <div class="failure-top">
                         <RouterLink
                           :to="entryRoute(item.shortId)"
-                          class="text-primary font-mono text-xs"
+                          class="failure-title text-primary font-medium"
+                          :title="item.title ? `${item.title}（${item.shortId}）` : item.shortId"
                           @click="statusPopoverOpen = false"
                         >
-                          {{ item.shortId }}
+                          {{ item.title || item.shortId }}
                         </RouterLink>
-                        <span class="failure-title">{{ item.title }}</span>
                       </div>
                       <p class="failure-reason">{{ item.reason }}</p>
                     </li>
@@ -1425,10 +1425,13 @@ async function batchDismissSelected() {
 
           <ul v-if="failedDetailsOpen && latestFailedItems.length > 0" class="banner-failure-list">
             <li v-for="item in latestFailedItems" :key="item.shortId" class="banner-failure-item">
-              <RouterLink :to="entryRoute(item.shortId)" class="text-primary font-mono text-xs">
-                {{ item.shortId }}
+              <RouterLink
+                :to="entryRoute(item.shortId)"
+                class="banner-failure-title text-primary"
+                :title="item.title ? `${item.title}（${item.shortId}）` : item.shortId"
+              >
+                {{ item.title || item.shortId }}
               </RouterLink>
-              <span class="banner-failure-title">{{ item.title }}</span>
               <span class="banner-failure-reason">{{ item.reason }}</span>
             </li>
           </ul>
@@ -1561,12 +1564,22 @@ async function batchDismissSelected() {
                           @click.stop
                           @change="toggleSelectRow(s.id)"
                         />
-                        <div class="target-info">
+                        <div
+                          class="target-info"
+                          :title="
+                            baseEntryOf(s)
+                              ? `${targetTitleOf(s)}（${baseEntryOf(s)!.shortId}）`
+                              : targetTitleOf(s)
+                          "
+                        >
                           <span class="target-title">{{ targetTitleOf(s) }}</span>
-                          <span class="target-sub">
-                            <span v-if="baseEntryOf(s)" class="short-id font-mono">
-                              {{ baseEntryOf(s)!.shortId }}
-                            </span>
+                          <span
+                            v-if="
+                              baseEntryOf(s)?.isPinned ||
+                              (s.kind === 'merge_duplicates' && s.entries.length > 1)
+                            "
+                            class="target-sub"
+                          >
                             <span v-if="baseEntryOf(s)?.isPinned" class="tiny-cue">
                               <UIcon
                                 :name="
@@ -1660,7 +1673,14 @@ async function batchDismissSelected() {
                               class="delta-arrow-icon"
                               aria-hidden="true"
                             />
-                            <span class="delta-target-name">
+                            <span
+                              class="delta-target-name"
+                              :title="
+                                s.proposedLinks[0]!.targetTitle
+                                  ? `${s.proposedLinks[0]!.targetTitle}（${s.proposedLinks[0]!.targetShortId}）`
+                                  : s.proposedLinks[0]!.targetShortId
+                              "
+                            >
                               {{
                                 s.proposedLinks[0]!.targetTitle ||
                                 s.proposedLinks[0]!.targetShortId
@@ -2251,7 +2271,6 @@ async function batchDismissSelected() {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 12px;
-  color: var(--ui-text-highlighted);
 }
 .failure-reason {
   font-size: 12px;
@@ -2394,7 +2413,6 @@ async function batchDismissSelected() {
 }
 .banner-failure-title {
   font-weight: 500;
-  color: var(--ui-text-highlighted);
 }
 .banner-failure-reason {
   color: var(--ui-text-muted);
@@ -2620,10 +2638,6 @@ async function batchDismissSelected() {
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
-  color: var(--ui-text-muted);
-}
-.short-id {
   font-size: 12px;
   color: var(--ui-text-muted);
 }
