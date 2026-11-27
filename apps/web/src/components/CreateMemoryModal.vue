@@ -30,7 +30,7 @@ import SceneScopePicker, { type SceneScopeValue } from './SceneScopePicker.vue'
 import SegmentedChoice from './SegmentedChoice.vue'
 import NoteLine from './ui/NoteLine.vue'
 
-const props = withDefaults(
+withDefaults(
   defineProps<{
     facets?: EntryFacetsSummary | null
   }>(),
@@ -114,14 +114,7 @@ const bootWarnings = computed(() =>
     realms: scope.value.realms,
     projects: scope.value.projects,
     runtimes: scope.value.runtimes,
-    knownProjects: props.facets?.projects,
-    knownRuntimes: props.facets?.runtimes,
-  }).filter(
-    (w) =>
-      w.code === 'pinned_oversized' ||
-      w.code === 'pinned_scope_hint' ||
-      w.code === 'pinned_missing_summary',
-  ),
+  }).filter((w) => w.code === 'pinned_oversized' || w.code === 'pinned_missing_summary'),
 )
 const titleHint = computed(() => analyzeTitleHint(form.title, form.content, 'create'))
 
@@ -343,16 +336,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onModalKeydown))
 
         <NoteLine v-if="bootWarnings.length" tone="warning">
           {{ bootWarnings.map((w) => w.message).join('；') }}
-          <template
-            v-if="
-              bootWarnings.some(
-                (w) => w.code === 'pinned_oversized' || w.code === 'pinned_scope_hint',
-              )
-            "
-            #actions
-          >
+          <template v-if="bootWarnings.some((w) => w.code === 'pinned_oversized')" #actions>
             <UButton
-              v-if="bootWarnings.some((w) => w.code === 'pinned_oversized')"
               size="xs"
               color="neutral"
               variant="outline"
@@ -360,16 +345,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onModalKeydown))
               @click="form.bootMode = 'index'"
             >
               改为目录常驻
-            </UButton>
-            <UButton
-              v-if="bootWarnings.some((w) => w.code === 'pinned_scope_hint')"
-              size="xs"
-              color="neutral"
-              variant="outline"
-              :icon="icons.sliders"
-              @click="attrsOpen = true"
-            >
-              限定场景
             </UButton>
           </template>
         </NoteLine>

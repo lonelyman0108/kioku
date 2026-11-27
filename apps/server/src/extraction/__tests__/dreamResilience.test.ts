@@ -115,7 +115,7 @@ function makeFakeCrossCheckDb(target: EntryRow, neighbor: EntryRow): Db {
 
   return {
     select,
-    execute: () => Promise.resolve([]),
+    execute: () => Promise.resolve([{ entry_a: target.id, entry_b: neighbor.id, sim: 0.9 }]),
   } as unknown as Db
 }
 

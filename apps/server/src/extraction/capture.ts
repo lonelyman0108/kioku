@@ -31,7 +31,7 @@ import {
   type CapturePlanResponse,
   type CaptureProposedNew,
 } from '@kioku/contracts'
-import { and, asc, desc, eq, inArray, notInArray, sql } from 'drizzle-orm'
+import { and, eq, inArray } from 'drizzle-orm'
 
 import { readableEntrySql, synthesizeFocus, type AccessScope } from '../access/scope'
 import type { MasterKey } from '../crypto/keyring'
@@ -51,12 +51,9 @@ import { canFlowRealmInto } from './dreamPrompt'
 
 type EntryRow = typeof entries.$inferSelect
 
-export const CAPTURE_RECALL_LIMIT = 5
-export const CAPTURE_PRIMARY_RECALL_SLOTS = 4
-export const CAPTURE_RESERVED_PINNED_SLOTS = 2
+export const CAPTURE_RECALL_LIMIT = 6
 export const CAPTURE_CANDIDATE_MAX = 6
 export const CAPTURE_RECALL_MIN_SCORE = 0.12
-export const CAPTURE_PINNED_FALLBACK_SCORE = 0.05
 export const CAPTURE_PROMPT_CHAR_BUDGET = 28_000
 
 const CAPTURE_CHAT_TIMEOUT_MS = 30_000
@@ -1449,67 +1446,12 @@ async function loadCaptureCandidates(
     }
   }
 
-  // 除显式目标外优先保留前 4 条召回，并为未命中的通用常驻核心块预留至少 2 个保底名额
-  const remainingSlots = CAPTURE_CANDIDATE_MAX - candidates.length
-  const primaryRecallQuota = Math.min(
-    CAPTURE_PRIMARY_RECALL_SLOTS,
-    Math.max(0, remainingSlots - CAPTURE_RESERVED_PINNED_SLOTS),
-  )
-  const primaryRecalled = recalledItems.slice(0, primaryRecallQuota)
-  const overflowRecalled = recalledItems.slice(primaryRecallQuota)
-
-  for (const item of primaryRecalled) {
-    seenIds.add(item.row.id)
-    candidates.push(toCaptureCandidate(item.row, item.score))
-  }
-
-  const pinnedQuota = Math.min(
-    CAPTURE_CANDIDATE_MAX - candidates.length,
-    Math.max(CAPTURE_RESERVED_PINNED_SLOTS, CAPTURE_RECALL_LIMIT - candidates.length),
-  )
-
-  const pinnedRows =
-    pinnedQuota > 0
-      ? await db
-          .select()
-          .from(entries)
-          .where(
-            and(
-              eq(entries.kind, 'entry'),
-              eq(entries.isPinned, true),
-              sql`cardinality(${entries.projects}) = 0`,
-              readableEntrySql(scope),
-              seenIds.size ? notInArray(entries.id, [...seenIds]) : undefined,
-            ),
-          )
-          .orderBy(desc(entries.updatedAt), asc(entries.shortId))
-          .limit(pinnedQuota)
-      : []
-
-  // 若溢出召回中本身包含常驻核心块，则保留其真实召回分数，其余名额优先补足未命中的常驻核心块
-  const overflowById = new Map(overflowRecalled.map((item) => [item.row.id, item]))
-  const unhitPinned = pinnedRows.filter((row) => !overflowById.has(row.id))
-
-  for (const row of pinnedRows) {
-    const matchedOverflow = overflowById.get(row.id)
-    if (!matchedOverflow || seenIds.has(row.id)) continue
-    if (candidates.length >= CAPTURE_CANDIDATE_MAX - unhitPinned.length) break
-    seenIds.add(row.id)
-    candidates.push(toCaptureCandidate(matchedOverflow.row, matchedOverflow.score))
-  }
-
-  for (const item of overflowRecalled) {
-    if (candidates.length >= CAPTURE_CANDIDATE_MAX - unhitPinned.length) break
+  // 除显式目标外，将全部候选槽交给混合检索真实命中结果，不再强塞无关的全局常驻词条
+  for (const item of recalledItems) {
+    if (candidates.length >= CAPTURE_CANDIDATE_MAX) break
     if (seenIds.has(item.row.id)) continue
     seenIds.add(item.row.id)
     candidates.push(toCaptureCandidate(item.row, item.score))
-  }
-
-  for (const row of unhitPinned) {
-    if (candidates.length >= CAPTURE_CANDIDATE_MAX) break
-    if (seenIds.has(row.id)) continue
-    seenIds.add(row.id)
-    candidates.push(toCaptureCandidate(row, CAPTURE_PINNED_FALLBACK_SCORE))
   }
 
   return candidates.slice(0, CAPTURE_CANDIDATE_MAX)

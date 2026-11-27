@@ -455,26 +455,6 @@ export class EntryService {
     return row ?? null
   }
 
-  private async loadKnownScopeHints(
-    tx: Db | Tx,
-    scope: AccessScope,
-    now: Date,
-  ): Promise<{ knownProjects: string[]; knownRuntimes: string[] }> {
-    const visible = readableEntrySql(scope, { now })
-    const [row] = await tx.execute<{
-      projects: string[] | null
-      runtimes: string[] | null
-    }>(sql`
-      select
-        (select array_agg(distinct v order by v) from ${entries}, unnest(${entries.projects}) v where ${visible}) as projects,
-        (select array_agg(distinct v order by v) from ${entries}, unnest(${entries.runtimes}) v where ${visible}) as runtimes
-    `)
-    return {
-      knownProjects: row?.projects ?? [],
-      knownRuntimes: row?.runtimes ?? [],
-    }
-  }
-
   async create(scope: AccessScope, input: CreateEntryRequest): Promise<EntryDetailResponse> {
     const realms = resolveCreateRealms(scope, input.realms)
     assertEntryWriteAllowed(scope, realms)
@@ -537,14 +517,6 @@ export class EntryService {
         createdAt: now,
       })
 
-      const isGlobalFull =
-        row.bootMode === 'full' &&
-        row.envs.length === 0 &&
-        row.realms.length === 0 &&
-        row.projects.length === 0 &&
-        row.runtimes.length === 0
-      const scopeHints = isGlobalFull ? await this.loadKnownScopeHints(tx, scope, now) : undefined
-
       const warnings = lintEntryHygiene({
         title: row.title,
         content: row.content,
@@ -555,7 +527,7 @@ export class EntryService {
         realms: row.realms,
         projects: row.projects,
         runtimes: row.runtimes,
-        ...(scopeHints ?? {}),
+        topics: row.topics,
         isUpdate: false,
       })
       return this.hydrateDetail(tx, scope, row, warnings)
@@ -730,14 +702,6 @@ export class EntryService {
         createdAt: now,
       })
 
-      const isGlobalFull =
-        updated.bootMode === 'full' &&
-        updated.envs.length === 0 &&
-        updated.realms.length === 0 &&
-        updated.projects.length === 0 &&
-        updated.runtimes.length === 0
-      const scopeHints = isGlobalFull ? await this.loadKnownScopeHints(tx, scope, now) : undefined
-
       const warnings = lintEntryHygiene({
         title: updated.title,
         content: updated.content,
@@ -748,7 +712,7 @@ export class EntryService {
         realms: updated.realms,
         projects: updated.projects,
         runtimes: updated.runtimes,
-        ...(scopeHints ?? {}),
+        topics: updated.topics,
         isUpdate: true,
         contentChanged,
         changeSummary: explicitChangeSummary,

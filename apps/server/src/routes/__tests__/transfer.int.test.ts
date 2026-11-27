@@ -377,7 +377,8 @@ describe.skipIf(!testDatabaseUrl)('数据导入导出与外部 Lore 导入', () 
     expect(archItem.isPinned).toBe(false)
     expect(archItem.bootMode).toBe('none')
     expect(archItem.projects).toEqual(['kioku'])
-    expect(archItem.topics).toEqual(['arch', 'schema'])
+    // 不再将旧版 glossary_keywords（如 schema）灌入 entries.topics
+    expect(archItem.topics).toEqual(['arch'])
 
     const emptyItem = preview.items.find((i) => i.sourceRef === 'preferences://empty-node')!
     expect(emptyItem.skippedReason).toBe('节点正文为空')

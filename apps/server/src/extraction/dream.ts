@@ -628,8 +628,8 @@ interface TidyCandidateSelection {
   tidyChecked: Record<string, number>
 }
 
-// 规范整理只修改标题/概要/正文，不自动改常驻层级或场景标签；忽略这两项提示避免无效候选反复排队
-const TIDY_IGNORED_HYGIENE_CODES = new Set(['pinned_oversized', 'pinned_scope_hint'])
+// 规范整理不直接调整常驻层级；忽略 pinned_oversized 避免仅因篇幅偏长反复排队
+const TIDY_IGNORED_HYGIENE_CODES = new Set(['pinned_oversized'])
 
 function isTidyCandidate(
   row: {
@@ -643,6 +643,7 @@ function isTidyCandidate(
     realms: readonly string[]
     projects: readonly string[]
     runtimes: readonly string[]
+    topics: readonly string[]
     version: number
   },
   tidyChecked: Readonly<Record<string, number>>,
@@ -662,6 +663,7 @@ function isTidyCandidate(
     realms: row.realms,
     projects: row.projects,
     runtimes: row.runtimes,
+    topics: row.topics,
     isUpdate: false,
   }).filter((w) => !TIDY_IGNORED_HYGIENE_CODES.has(w.code))
   return (
@@ -747,6 +749,7 @@ async function countTidyPending(db: Db): Promise<number> {
         realms: entries.realms,
         projects: entries.projects,
         runtimes: entries.runtimes,
+        topics: entries.topics,
         version: entries.version,
       })
       .from(entries)

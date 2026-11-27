@@ -19,9 +19,10 @@ import {
   entryEmbeddings,
   turnBuffer,
 } from '../../db/schema'
+import { embedEntryIds } from '../../embedding/worker'
 import type { Deps, KeyPrincipal } from '../../http/env'
 import { EntryService } from '../../memory/service'
-import { CHAT_LLM_SETTING_KEY, saveModelEndpoint } from '../../models/store'
+import { CHAT_LLM_SETTING_KEY, EMBEDDING_SETTING_KEY, saveModelEndpoint } from '../../models/store'
 import {
   consoleHeaders,
   createOwnerSession,
@@ -996,6 +997,93 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
     )
     const inboxMissingSummary = await loadInbox(database.db, false)
     expect(inboxMissingSummary.tidyPendingCount).toBe(1)
+
+    // 主题标签超过 8 个的词条应自动计入待规范存量
+    await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '主题膨胀词条',
+        summary: '已有概要。',
+        content: '简明正文。',
+        topics: ['t1', 't2', 't3', 't4', 't5', 't6', 't7', 't8', 't9'],
+      }),
+    )
+    const inboxOverTopics = await loadInbox(database.db, false)
+    expect(inboxOverTopics.tidyPendingCount).toBe(2)
+  })
+
+  it('跨记忆查重簇严格拒绝合并 envs 或 projects 互斥的高相似词条', async () => {
+    const masterKey = testMasterKey()
+    await saveModelEndpoint(database.db, masterKey, CHAT_LLM_SETTING_KEY, {
+      baseUrl: fakeAi.baseUrl,
+      model: 'fake-chat',
+      apiKey: 'sk-chat',
+      enabled: true,
+    })
+    await saveModelEndpoint(database.db, masterKey, EMBEDDING_SETTING_KEY, {
+      baseUrl: fakeAi.baseUrl,
+      model: 'fake-embed-1024',
+      apiKey: 'sk-embed',
+      enabled: true,
+    })
+    const credSvc = new CredentialService(database.db, masterKey)
+    const entrySvc = new EntryService(database.db, masterKey, credSvc, null)
+    const consoleScope = { kind: 'console' as const, accountId: 'acc', sessionId: 'sess' }
+
+    const homeGit = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: 'Git 提交流程规范',
+        content: '提交代码前必须按职责拆分 PR，合并后清理工作区与本地分支。',
+        envs: ['home'],
+      }),
+    )
+    const officeGit = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: 'Git 提交流程规范',
+        content: '提交代码前不提 PR，直接提交到目标开发分支并触发构建。',
+        envs: ['company'],
+      }),
+    )
+    const projA = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '仓库构建命令',
+        content: '本地统一执行标准构建命令并校验产物。',
+        projects: ['repo-alpha'],
+      }),
+    )
+    const projB = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '仓库构建命令',
+        content: '本地统一执行标准构建命令并校验产物。',
+        projects: ['repo-beta'],
+      }),
+    )
+    await embedEntryIds(database.db, masterKey, [
+      homeGit.entry.id,
+      officeGit.entry.id,
+      projA.entry.id,
+      projB.entry.id,
+    ])
+
+    let clusterCalled = false
+    fakeAi.setChatHandler((messages) => {
+      const sys = messages[0]?.content ?? ''
+      if (sys.includes('跨记忆查重与冲突审阅助手')) {
+        clusterCalled = true
+      }
+      return JSON.stringify({ suggestions: [] })
+    })
+
+    await runDream(database.db, masterKey, {
+      runId: 'cross-disjoint-guard',
+      trigger: 'manual',
+      mode: 'cross_memory',
+    })
+    expect(clusterCalled).toBe(false)
   })
 
   it('跨记忆四阶段整理覆盖长文查重、反链自动重定向、场域硬边界、补全双链、会话对账与启动降级', async () => {

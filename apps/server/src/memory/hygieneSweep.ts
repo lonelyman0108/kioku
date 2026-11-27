@@ -31,8 +31,6 @@ type EntryRow = typeof entries.$inferSelect
 
 const FENCE_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/
 const INLINE_CODE_SPLIT_RE = /(`+[^`\r\n]*?`+)/g
-const OBSOLETE_TITLE_RE =
-  /(?:已于\s*20\d{2}[^）)]*(?:卸载|退役|下线|停用)|已卸载|已退役|已下线|阶段\s*\d|开发完成|收尾完成|已合并并上线|合进\s*main)/i
 
 export interface TargetEntry {
   id: string
@@ -327,17 +325,6 @@ export async function previewHygieneSweep(db: Db): Promise<HygieneSweepPreviewRe
         isPinned: row.isPinned,
         charCount: row.content.length,
         reason: '标题较长但正文不足 220 字，疑似曾被单次简短更新覆盖主体，建议人工核对',
-      })
-    }
-
-    if (OBSOLETE_TITLE_RE.test(row.title)) {
-      suspectObsolete.push({
-        id: row.id,
-        shortId: row.shortId,
-        title: row.title,
-        isPinned: row.isPinned,
-        charCount: row.content.length,
-        reason: '标题含已卸载、退役或阶段完成信号，建议确认是否归档、设有效期或移入回收站',
       })
     }
   }

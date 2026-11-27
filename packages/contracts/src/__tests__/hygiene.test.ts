@@ -59,7 +59,9 @@ describe('entry hygiene helpers', () => {
       extractedNote: '已于 2026-10-22 卸载',
     })
     expect(splitTitleLogSuffix('家庭网络架构总览（RouterOS）')).toBeNull()
+    expect(splitTitleLogSuffix('Redis 集群（迁移方案）')).toBeNull()
     expect(isTitleDirty('家庭网络架构总览（2026-09-16 更新）')).toBe(true)
+    expect(isTitleDirty('Redis 集群（迁移方案）')).toBe(false)
     expect(isTitleDirty('家庭网络架构总览')).toBe(false)
   })
 
@@ -110,7 +112,7 @@ describe('entry hygiene helpers', () => {
     expect(fencedWarnings.map((w) => w.code)).not.toContain('content_has_legacy_glossary')
     expect(fencedWarnings.map((w) => w.code)).toContain('severe_shrink_or_lost_refs')
 
-    // 三态常驻软提醒：全文常驻超 1,200 字报 pinned_oversized；无场景但标题涉及客户端/已知项目报 pinned_scope_hint
+    // 三态常驻与主题数量客观软提醒：全文常驻超 1,200 字报 pinned_oversized；主题超 8 个报 topics_too_many
     const fullOversized = lintEntryHygiene({
       title: 'Codex 运行时约束',
       content: '规则说明。'.repeat(300),
@@ -120,34 +122,25 @@ describe('entry hygiene helpers', () => {
       realms: [],
       projects: [],
       runtimes: [],
-      knownProjects: ['alpha-app'],
-      knownRuntimes: ['custom-ide'],
+      topics: ['t1', 't2', 't3', 't4', 't5', 't6', 't7', 't8', 't9'],
     })
     expect(fullOversized.map((w) => w.code)).toContain('pinned_oversized')
-    expect(fullOversized.map((w) => w.code)).toContain('pinned_scope_hint')
+    expect(fullOversized.map((w) => w.code)).toContain('topics_too_many')
 
-    // 内置运行时 ZCode 无需依赖 knownRuntimes 与短语触发词即可精确命中客户端提示
-    const zcodeUnscoped = lintEntryHygiene({
-      title: 'ZCode 终端约定',
-      content: '仅在 ZCode 终端生效。',
-      bootMode: 'full',
-    })
-    const zcodeHint = zcodeUnscoped.find((w) => w.code === 'pinned_scope_hint')
-    expect(zcodeHint?.message).toContain('「ZCode」')
-
-    // 改为目录常驻并补齐 runtimes 与概要后，上述两项提醒均消失
+    // 改为目录常驻并收敛主题至 5 个以内且补齐概要后，提醒全部消失
     const indexScoped = lintEntryHygiene({
       title: 'Codex 运行时约束',
       content: '规则说明。'.repeat(300),
       bootMode: 'index',
       summary: '说明客户端约束边界。',
       runtimes: ['codex'],
+      topics: ['codex', 'runtime'],
     })
     expect(indexScoped.map((w) => w.code)).not.toContain('pinned_oversized')
-    expect(indexScoped.map((w) => w.code)).not.toContain('pinned_scope_hint')
+    expect(indexScoped.map((w) => w.code)).not.toContain('topics_too_many')
     expect(indexScoped.map((w) => w.code)).not.toContain('pinned_missing_summary')
 
-    // 目录常驻缺概要报 pinned_missing_summary；无场景全文常驻命中已知项目名报 pinned_scope_hint
+    // 目录常驻缺概要报 pinned_missing_summary
     const indexNoSummary = lintEntryHygiene({
       title: '参考手册',
       content: '简短内容',
@@ -155,13 +148,5 @@ describe('entry hygiene helpers', () => {
       summary: null,
     })
     expect(indexNoSummary.map((w) => w.code)).toContain('pinned_missing_summary')
-
-    const projectTitleUnscoped = lintEntryHygiene({
-      title: 'alpha-app 部署约定',
-      content: '简短规则',
-      bootMode: 'full',
-      knownProjects: ['alpha-app'],
-    })
-    expect(projectTitleUnscoped.map((w) => w.code)).toContain('pinned_scope_hint')
   })
 })

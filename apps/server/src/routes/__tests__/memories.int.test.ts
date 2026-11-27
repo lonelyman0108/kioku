@@ -1480,7 +1480,7 @@ describe.skipIf(!testDatabaseUrl)('随手记局部补丁归并（POST /v1/consol
     expect(emptyPlan.patchKind).toBe('create')
     expect(emptyPlan.candidates).toEqual([])
 
-    // 写入一条通用常驻记忆与一条项目专属常驻记忆：无召回命中时仅补充通用常驻（低基线分 0.05）
+    // 写入一条通用常驻记忆与一条项目专属常驻记忆：无关输入不应强塞全局常驻候选，直接新建
     const pinned = await entrySvc.create(
       consoleScope,
       entryInput({
@@ -1500,24 +1500,35 @@ describe.skipIf(!testDatabaseUrl)('随手记局部补丁归并（POST /v1/consol
       }),
     )
 
-    const noModelRes = await app.request('/v1/console/entries/capture', {
+    const unrelatedNoModelRes = await app.request('/v1/console/entries/capture', {
       method: 'POST',
       headers: consoleHeaders(cookie, true),
       body: JSON.stringify({ text: '周末骑行路线记录' }),
     })
-    expect(noModelRes.status).toBe(200)
-    const noModelPlan = CapturePlanResponse.parse(await noModelRes.json())
-    expect(noModelPlan.mode).toBe('manual')
-    expect(noModelPlan.fallbackReason).toContain('未配置对话模型')
-    expect(noModelPlan.action).toBe('update')
-    expect(noModelPlan.targetShortId).toBe(pinned.entry.shortId)
-    expect(noModelPlan.candidates.map((c) => c.shortId)).toEqual([pinned.entry.shortId])
-    expect(noModelPlan.candidates.some((c) => c.shortId === projectPinned.entry.shortId)).toBe(
-      false,
-    )
-    expect(noModelPlan.candidates[0]?.score).toBe(0.05)
-    expect(noModelPlan.proposedContent).toContain('- 周末骑行路线记录')
-    expect(noModelPlan.integrity?.intact).toBe(true)
+    expect(unrelatedNoModelRes.status).toBe(200)
+    const unrelatedNoModelPlan = CapturePlanResponse.parse(await unrelatedNoModelRes.json())
+    expect(unrelatedNoModelPlan.mode).toBe('manual')
+    expect(unrelatedNoModelPlan.fallbackReason).toContain('未配置对话模型')
+    expect(unrelatedNoModelPlan.action).toBe('create')
+    expect(unrelatedNoModelPlan.candidates).toEqual([])
+
+    const matchedNoModelRes = await app.request('/v1/console/entries/capture', {
+      method: 'POST',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({ text: '常用工具补充：Neovim 默认开启相对行号' }),
+    })
+    expect(matchedNoModelRes.status).toBe(200)
+    const matchedNoModelPlan = CapturePlanResponse.parse(await matchedNoModelRes.json())
+    expect(matchedNoModelPlan.mode).toBe('manual')
+    expect(matchedNoModelPlan.fallbackReason).toContain('未配置对话模型')
+    expect(matchedNoModelPlan.action).toBe('update')
+    expect(matchedNoModelPlan.targetShortId).toBe(pinned.entry.shortId)
+    expect(matchedNoModelPlan.candidates.map((c) => c.shortId)).toEqual([pinned.entry.shortId])
+    expect(
+      matchedNoModelPlan.candidates.some((c) => c.shortId === projectPinned.entry.shortId),
+    ).toBe(false)
+    expect(matchedNoModelPlan.proposedContent).toContain('- 常用工具补充：Neovim 默认开启相对行号')
+    expect(matchedNoModelPlan.integrity?.intact).toBe(true)
 
     // 2. 对话模型返回无法解析的非 JSON 文本 -> 降级为 manual
     await saveModelEndpoint(database.db, masterKey, CHAT_LLM_SETTING_KEY, {
@@ -1531,14 +1542,14 @@ describe.skipIf(!testDatabaseUrl)('随手记局部补丁归并（POST /v1/consol
     const badJsonRes = await app.request('/v1/console/entries/capture', {
       method: 'POST',
       headers: consoleHeaders(cookie, true),
-      body: JSON.stringify({ text: '终端配色采用浅色纸墨' }),
+      body: JSON.stringify({ text: '个人偏好备忘：终端配色采用浅色纸墨' }),
     })
     expect(badJsonRes.status).toBe(200)
     const badJsonPlan = CapturePlanResponse.parse(await badJsonRes.json())
     expect(badJsonPlan.mode).toBe('manual')
     expect(badJsonPlan.fallbackReason).toBeTruthy()
     expect(badJsonPlan.action).toBe('update')
-    expect(badJsonPlan.proposedContent).toContain('- 终端配色采用浅色纸墨')
+    expect(badJsonPlan.proposedContent).toContain('- 个人偏好备忘：终端配色采用浅色纸墨')
 
     // 3. 对话模型上游 HTTP 500 报错 -> 降级为 manual 且不泄露上游内部地址或错误堆栈
     const brokenServer = createServer((_, res) => {
@@ -1559,7 +1570,7 @@ describe.skipIf(!testDatabaseUrl)('随手记局部补丁归并（POST /v1/consol
       const errRes = await app.request('/v1/console/entries/capture', {
         method: 'POST',
         headers: consoleHeaders(cookie, true),
-        body: JSON.stringify({ text: '字体保持系统默认栈' }),
+        body: JSON.stringify({ text: '个人偏好备忘：字体保持系统默认栈' }),
       })
       expect(errRes.status).toBe(200)
       const errPlan = CapturePlanResponse.parse(await errRes.json())
@@ -1569,7 +1580,7 @@ describe.skipIf(!testDatabaseUrl)('随手记局部补丁归并（POST /v1/consol
       expect(errPlan.fallbackReason).not.toContain('9090')
       expect(errPlan.fallbackReason).not.toContain('secret-stack')
       expect(errPlan.fallbackReason).not.toContain('500')
-      expect(errPlan.proposedContent).toContain('- 字体保持系统默认栈')
+      expect(errPlan.proposedContent).toContain('- 个人偏好备忘：字体保持系统默认栈')
     } finally {
       await new Promise<void>((resolve, reject) =>
         brokenServer.close((err) => (err ? reject(err) : resolve())),
@@ -1577,7 +1588,7 @@ describe.skipIf(!testDatabaseUrl)('随手记局部补丁归并（POST /v1/consol
     }
   })
 
-  it('过期 targetShortId 返 404、BM25 下预留通用常驻保底名额，且客户端取消请求静默中止不打 warn/500', async () => {
+  it('过期 targetShortId 返 404、BM25 下 6 个候选槽全部归还相关性检索，且客户端取消请求静默中止不打 warn/500', async () => {
     const masterKey = testMasterKey()
     const app = createTestApp(database, { masterKey })
     const { cookie } = await createOwnerSession(database)
@@ -1606,9 +1617,9 @@ describe.skipIf(!testDatabaseUrl)('随手记局部补丁归并（POST /v1/consol
     })
     expect(expiredRes.status).toBe(404)
 
-    // 2. 仅 BM25 场景：5 条普通词条弱命中关键词，仍为 2 条未命中的通用常驻核心块预留保底名额（总计 6 条）
+    // 2. 仅 BM25 场景：6 条普通词条命中关键词，6 个候选槽全部归还相关性检索，不被无关全局常驻挤占
     const ordinaryIds: string[] = []
-    for (let idx = 0; idx < 5; idx++) {
+    for (let idx = 0; idx < 6; idx++) {
       const item = await entrySvc.create(
         consoleScope,
         entryInput({
@@ -1647,15 +1658,12 @@ describe.skipIf(!testDatabaseUrl)('随手记局部补丁归并（POST /v1/consol
     expect(bm25Res.status).toBe(200)
     const bm25Plan = CapturePlanResponse.parse(await bm25Res.json())
     expect(bm25Plan.candidates).toHaveLength(6)
-    // 前 4 条来自 BM25 召回，后 2 条为保底通用常驻核心块（低基线 0.05），且正文 CRLF 均已归一化
-    expect(bm25Plan.candidates.slice(0, 4).every((c) => ordinaryIds.includes(c.shortId))).toBe(true)
+    expect(bm25Plan.candidates.every((c) => ordinaryIds.includes(c.shortId))).toBe(true)
     expect(
-      bm25Plan.candidates
-        .slice(4)
-        .map((c) => c.shortId)
-        .sort(),
-    ).toEqual([coreOne.entry.shortId, coreTwo.entry.shortId].sort())
-    expect(bm25Plan.candidates.slice(4).every((c) => c.score === 0.05)).toBe(true)
+      bm25Plan.candidates.some(
+        (c) => c.shortId === coreOne.entry.shortId || c.shortId === coreTwo.entry.shortId,
+      ),
+    ).toBe(false)
     expect(bm25Plan.beforeContent).not.toContain('\r\n')
     expect(bm25Plan.candidates.every((c) => !c.content.includes('\r\n'))).toBe(true)
 

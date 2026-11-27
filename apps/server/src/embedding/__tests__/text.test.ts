@@ -36,6 +36,9 @@ describe('buildEmbeddingText', () => {
     expect(text).toContain('禁止在数据节点挂载宿主机容器套接字。')
     expect(text).not.toContain('# 服务部署规范')
     expect(text).not.toContain('旧工具已退役')
+    // topics 不进入向量文本，避免冗余或脏主题稀释正文语义；场景标签仍保留
+    expect(text).not.toContain('docker deploy')
+    expect(text).toContain('kioku linux work')
   })
 
   it('closes H3 changelog skip at sibling H3 heading without swallowing valid H3 sections', () => {
@@ -61,19 +64,29 @@ describe('buildEmbeddingText', () => {
     expect(text).toContain('每日凌晨逻辑备份并校验还原')
   })
 
-  it('caps oversized content length to preserve semantic signal', () => {
+  it('caps oversized content length while appending markdown outline for trailing sections', () => {
+    const longWithHeadings = [
+      '## 架构总览',
+      '基础拓扑说明。'.repeat(420),
+      '',
+      '## 灾难恢复与冷备步骤',
+      '位于 2,500 字之后的冷备流程说明。',
+    ].join('\n')
     const text = buildEmbeddingText({
       shortId: 'm-234abc',
       title: '长文档测试',
       summary: '核心结论',
       disclosure: null,
-      topics: [],
+      topics: ['noise-tag-ignored'],
       envs: [],
       realms: [],
       projects: [],
       runtimes: [],
-      content: '正文'.repeat(3000),
+      content: longWithHeadings,
     })
-    expect(text.length).toBeLessThan(2_600)
+    expect(text.length).toBeLessThan(3_000)
+    expect(text).not.toContain('noise-tag-ignored')
+    expect(text).toContain('小节纲要：')
+    expect(text).toContain('灾难恢复与冷备步骤')
   })
 })
