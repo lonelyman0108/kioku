@@ -637,14 +637,17 @@ const FREQUENT_TOPICS_LIMIT = 40
 // 汇总库内出现 ≥ 2 次的高频主题标签（Top 40），供规范整理收敛主题时优先复用
 export async function loadFrequentTopics(db: Db, limit = FREQUENT_TOPICS_LIMIT): Promise<string[]> {
   const rows = await db.execute<{ topic: string }>(sql`
-    select t as topic
-    from entries, unnest(entries.topics) as t
-    where entries.deleted_at is null
-      and entries.kind = 'entry'
-      and (entries.valid_to is null or entries.valid_to > statement_timestamp())
-    group by t
-    having count(*) >= ${FREQUENT_TOPICS_MIN_COUNT}
-    order by count(*) desc, t asc
+    select norm.topic
+    from entries
+    cross join lateral unnest(${entries.topics}) as raw(t)
+    cross join lateral (select btrim(lower(raw.t)) as topic) as norm
+    where ${entries.deletedAt} is null
+      and ${entries.kind} = 'entry'
+      and ${stillValidSql()}
+      and norm.topic <> ''
+    group by norm.topic
+    having count(distinct ${entries.id}) >= ${FREQUENT_TOPICS_MIN_COUNT}
+    order by count(distinct ${entries.id}) desc, norm.topic asc
     limit ${limit}
   `)
   return [...rows].map((r) => r.topic).filter(Boolean)

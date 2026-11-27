@@ -7,6 +7,7 @@ import {
 } from '@kioku/contracts'
 import { and, asc, eq, isNull } from 'drizzle-orm'
 
+import { stillValidSql } from '../access/scope'
 import type { MasterKey } from '../crypto/keyring'
 import type { Db } from '../db/client'
 import { entries } from '../db/schema'
@@ -92,7 +93,7 @@ export async function previewSingleTidy(
       projects: entries.projects,
     })
     .from(entries)
-    .where(and(eq(entries.kind, 'entry'), isNull(entries.deletedAt)))
+    .where(and(eq(entries.kind, 'entry'), isNull(entries.deletedAt), stillValidSql()))
     .orderBy(asc(entries.shortId))
 
   const slugIndex = buildUniqueSlugIndex(activeTargets)
@@ -109,7 +110,7 @@ export async function previewSingleTidy(
   }
   const frequentTopics = [...topicCounts.entries()]
     .filter(([, count]) => count >= 2)
-    .sort((a, b) => (b[1] !== a[1] ? b[1] - a[1] : a[0].localeCompare(b[0])))
+    .sort((a, b) => (b[1] !== a[1] ? b[1] - a[1] : a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
     .slice(0, 40)
     .map(([tag]) => tag)
 

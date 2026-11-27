@@ -17,11 +17,11 @@ import { testModelConnection } from '../models/client'
 import {
   CHAT_LLM_SETTING_KEY,
   EMBEDDING_SETTING_KEY,
-  isDreamConfiguredByUser,
   loadDreamState,
   loadSavedModelApiKey,
   loadStoredModel,
   saveModelEndpoint,
+  shouldAutoEnableDream,
   toPublicModelEndpoint,
   updateDreamConfig,
 } from '../models/store'
@@ -143,6 +143,7 @@ export function settingsRoutes(deps: Deps) {
       }
 
       let chatNewlyEnabled = false
+      let hadPreviousChatLlm = false
       if (body.chatLlm !== undefined) {
         const { previous, next } = await saveModelEndpoint(
           deps.db,
@@ -150,12 +151,13 @@ export function settingsRoutes(deps: Deps) {
           CHAT_LLM_SETTING_KEY,
           body.chatLlm,
         )
+        hadPreviousChatLlm = previous !== null
         chatNewlyEnabled = !previous?.enabled && Boolean(next?.enabled)
       }
 
       if (body.dream !== undefined) {
         await updateDreamConfig(deps.db, body.dream, { markConfiguredByUser: true })
-      } else if (chatNewlyEnabled && !(await isDreamConfiguredByUser(deps.db))) {
+      } else if (chatNewlyEnabled && (await shouldAutoEnableDream(deps.db, hadPreviousChatLlm))) {
         // 首次启用对话模型且用户未手工配置过定时整理时，联动默认开启增量整理（24h）
         await updateDreamConfig(deps.db, { enabled: true }, { markConfiguredByUser: false })
       }

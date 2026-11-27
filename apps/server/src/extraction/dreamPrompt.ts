@@ -114,7 +114,7 @@ const CLUSTER_AUDIT_SYSTEM_PROMPT = [
   '- "update"：若一条较新词条明确推翻或修正了另一条的旧配置/旧路径，对旧词条输出 update（须保留所有原有双链与凭据占位符）。',
   '- "mark_stale"：若某条已完全被另一条替代且无独立价值，输出 mark_stale。',
   '',
-  '反膨胀守卫：合并或更新后的正文应提炼抽象规则、决策结论与防踩坑依据，去掉重复段落，不得无故拉长或引入日志流水。',
+  '反膨胀守卫：合并或更新后的正文应提炼抽象规则、决策结论与防踩坑依据，去掉重复段落，不得无故拉长或引入日志流水。不需要调整作用域或主题时直接省略对应字段，勿填占位空数组 []。',
 ].join('\n')
 
 const LINK_AUDIT_SYSTEM_PROMPT = [
@@ -135,7 +135,7 @@ const EPISODE_RECONCILE_SYSTEM_PROMPT = [
   '3. 若摘要仅为一次性临时排错且未推翻既有记忆，输出 {"suggestions":[]}。',
   '4. 禁止将特定机器、局域网主机、本机路径/端口或单次环境特例泛化为全局或整个操作系统规则；提炼与更新时必须在 title、summary、disclosure 与正文中明确保留适用机器与前提条件，并在 envs 中避免给单机特例盲目打上过于宽泛的通用标签。',
   '',
-  '只输出 JSON：{"suggestions":[...]}。所有结论须提炼为稳定规则与防踩坑原因，严禁写入逐轮对话流水账。',
+  '只输出 JSON：{"suggestions":[...]}。所有结论须提炼为稳定规则与防踩坑原因，严禁写入逐轮对话流水账；不调整作用域或主题时直接省略对应字段，勿填占位空数组 []。',
 ].join('\n')
 
 const BOOT_AUDIT_SYSTEM_PROMPT = [
@@ -648,6 +648,12 @@ export function evaluateDreamResponse(
       keepId = keepItem && seenIds.has(keepItem.id) ? keepItem.id : resolved[0]!.id
     }
 
+    // 仅 distill_episode 允许模型用显式 [] 放宽单会话来源的 envs/projects/runtimes；
+    // update 与 merge_duplicates 面向已定型正式记忆，占位 [] 一律视为未改动（null），防止静默泛化为全局
+    const parseScopeList = kind === 'distill_episode' ? asOptionalSlugArray : asNonEmptyStringArray
+    const allowMetaFields =
+      kind === 'distill_episode' || kind === 'merge_duplicates' || kind === 'update'
+
     proposals.push({
       kind,
       entryIds: resolved.map((r) => r.id),
@@ -658,11 +664,11 @@ export function evaluateDreamResponse(
       proposedDisclosure,
       proposedChangeSummary,
       archivedNotes: null,
-      proposedTopics: asNonEmptyTopicArray(rec.topics),
-      proposedEnvs: asOptionalSlugArray(rec.envs),
-      proposedRealms,
-      proposedProjects: asOptionalSlugArray(rec.projects),
-      proposedRuntimes: asOptionalSlugArray(rec.runtimes),
+      proposedTopics: allowMetaFields ? asNonEmptyTopicArray(rec.topics) : null,
+      proposedEnvs: allowMetaFields ? parseScopeList(rec.envs) : null,
+      proposedRealms: allowMetaFields ? proposedRealms : null,
+      proposedProjects: allowMetaFields ? parseScopeList(rec.projects) : null,
+      proposedRuntimes: allowMetaFields ? parseScopeList(rec.runtimes) : null,
       proposedLinks,
       proposedBootMode,
       ...(actionDiscriminator ? { actionDiscriminator } : {}),

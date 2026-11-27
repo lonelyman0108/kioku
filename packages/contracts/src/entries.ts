@@ -110,7 +110,7 @@ export function mergeFallbackTopics(
       const aKeep = keepSet.has(a[0]) ? 1 : 0
       const bKeep = keepSet.has(b[0]) ? 1 : 0
       if (bKeep !== aKeep) return bKeep - aKeep
-      return a[0].localeCompare(b[0])
+      return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0
     })
     .slice(0, Math.max(0, limit))
     .map(([tag]) => tag)

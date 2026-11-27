@@ -8,7 +8,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { CredentialService } from '../../credential/service'
 import type { Database } from '../../db/client'
-import { deviceGrants, entries, entryEmbeddings, sessions } from '../../db/schema'
+import { deviceGrants, entries, entryEmbeddings, sessions, settings } from '../../db/schema'
 import { embedEntryIds } from '../../embedding/worker'
 import { getDueScheduledDreamModes } from '../../extraction/dream'
 import { cleanupExpired } from '../../jobs/cleanup'
@@ -381,5 +381,44 @@ describe.skipIf(!testDatabaseUrl)('模型设置、向量回填、数据导出与
     })
     expect(reEnableRes.status).toBe(200)
     expect(ModelsSettingsResponse.parse(await reEnableRes.json()).dream.enabled).toBe(false)
+
+    // 4. 模拟升级前老库：已有无 configuredByUser 的 dream_state 行且之前已配置过 chat_llm（处于关闭态）
+    await resetDatabase(database)
+    const { cookie: legacyCookie } = await createOwnerSession(database)
+    await database.db.insert(settings).values([
+      {
+        key: 'chat_llm',
+        value: {
+          baseUrl: fakeAi.baseUrl,
+          model: 'legacy-chat',
+          enabled: false,
+          apiKey: null,
+        },
+      },
+      {
+        key: 'dream_state',
+        value: {
+          enabled: false,
+          intervalHours: 24,
+          lastRunAt: null,
+          lastOutcome: null,
+          lastError: null,
+          recentRuns: [],
+        },
+      },
+    ])
+    const legacyReEnable = await app.request('/v1/console/settings/models', {
+      method: 'PUT',
+      headers: consoleHeaders(legacyCookie, true),
+      body: JSON.stringify({
+        chatLlm: {
+          baseUrl: fakeAi.baseUrl,
+          model: 'legacy-chat',
+          enabled: true,
+        },
+      }),
+    })
+    expect(legacyReEnable.status).toBe(200)
+    expect(ModelsSettingsResponse.parse(await legacyReEnable.json()).dream.enabled).toBe(false)
   })
 })

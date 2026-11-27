@@ -345,8 +345,8 @@ const hasProposedMeta = computed(() =>
     props.suggestion.proposedRealms?.length ||
     props.suggestion.proposedProjects !== null ||
     props.suggestion.proposedRuntimes !== null ||
-    props.suggestion.proposedTopics !== null ||
-    props.suggestion.proposedDisclosure?.trim() ||
+    (isDistillEpisode.value && props.suggestion.proposedTopics?.length) ||
+    (props.suggestion.proposedDisclosure?.trim() && (!isTidy.value || parts.disclosure)) ||
     distillBootMode.value,
   ),
 )
@@ -791,10 +791,16 @@ function applyDirect() {
       const body: ApplySuggestionRequest = {
         title: applyTitle ? s.proposedTitle!.trim() : base.title,
         summary: applySummary ? s.proposedSummary?.trim() || null : (base.summary ?? null),
-        topics: applyTopics ? [...(s.proposedTopics ?? base.topics)] : [...base.topics],
-        disclosure: applyDisclosure
-          ? s.proposedDisclosure?.trim() || null
-          : (base.disclosure ?? null),
+        ...(hasTopicsChange.value
+          ? { topics: applyTopics ? [...(s.proposedTopics ?? base.topics)] : [...base.topics] }
+          : {}),
+        ...(isProposedDisclosureNew.value
+          ? {
+              disclosure: applyDisclosure
+                ? s.proposedDisclosure?.trim() || null
+                : (base.disclosure ?? null),
+            }
+          : {}),
         content: applyContent && s.proposedContent ? s.proposedContent : base.content,
         applyArchivedNotes: applyContent && hasArchivedNotes.value,
         ...(changeSummary ? { changeSummary } : {}),
@@ -1246,32 +1252,7 @@ function applyEdited() {
               </span>
             </div>
           </div>
-          <div v-if="distillBootMode" class="scope-review-row">
-            <span class="scope-review-label">
-              <UIcon :name="icons.pin" class="scope-review-icon" aria-hidden="true" />
-              <span>建议启动加载</span>
-            </span>
-            <span class="scope-chip is-boot">
-              <UIcon
-                :name="bootModeIcons[distillBootMode]"
-                class="scope-chip-icon"
-                aria-hidden="true"
-              />
-              <span>{{ bootModeLabels[distillBootMode] }}</span>
-            </span>
-          </div>
-          <div v-if="isDistillEpisode && effectiveTopics.length" class="scope-review-row">
-            <span class="scope-review-label">
-              <UIcon :name="icons.topic" class="scope-review-icon" aria-hidden="true" />
-              <span>主题</span>
-            </span>
-            <div class="scope-review-chips">
-              <span v-for="tag in effectiveTopics" :key="`topic:${tag}`" class="scope-chip">
-                {{ tag }}
-              </span>
-            </div>
-          </div>
-          <div v-if="effectiveDisclosure && (!isTidy || parts.disclosure)" class="scope-review-row">
+          <div v-if="effectiveDisclosure" class="scope-review-row">
             <span class="scope-review-label">
               <UIcon :name="icons.trigger" class="scope-review-icon" aria-hidden="true" />
               <span>{{ isProposedDisclosureNew ? '建议触发场景' : '触发场景' }}</span>
@@ -1520,31 +1501,6 @@ function applyEdited() {
                 <UIcon :name="icons.deviceDesktop" class="scope-chip-icon" aria-hidden="true" />
                 <span>来源设备</span>
                 <span class="font-mono">{{ dev }}</span>
-              </span>
-            </div>
-          </div>
-          <div v-if="distillBootMode" class="scope-review-row">
-            <span class="scope-review-label">
-              <UIcon :name="icons.pin" class="scope-review-icon" aria-hidden="true" />
-              <span>建议启动加载</span>
-            </span>
-            <span class="scope-chip is-boot">
-              <UIcon
-                :name="bootModeIcons[distillBootMode]"
-                class="scope-chip-icon"
-                aria-hidden="true"
-              />
-              <span>{{ bootModeLabels[distillBootMode] }}</span>
-            </span>
-          </div>
-          <div v-if="isDistillEpisode && effectiveTopics.length" class="scope-review-row">
-            <span class="scope-review-label">
-              <UIcon :name="icons.topic" class="scope-review-icon" aria-hidden="true" />
-              <span>主题</span>
-            </span>
-            <div class="scope-review-chips">
-              <span v-for="tag in effectiveTopics" :key="`topic:${tag}`" class="scope-chip">
-                {{ tag }}
               </span>
             </div>
           </div>

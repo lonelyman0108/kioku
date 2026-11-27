@@ -464,13 +464,31 @@ function parseStoredDreamState(raw: unknown): StoredDreamState {
   }
 }
 
-export async function isDreamConfiguredByUser(db: Db | Tx): Promise<boolean> {
+// 判断首次启用对话模型时是否应联动开启默认增量整理（兼容老库无 configuredByUser 标记的既有配置）
+export async function shouldAutoEnableDream(
+  db: Db | Tx,
+  hadPreviousChatLlm: boolean,
+): Promise<boolean> {
   const [row] = await db
     .select()
     .from(settings)
     .where(eq(settings.key, DREAM_STATE_SETTING_KEY))
     .limit(1)
-  return parseStoredDreamState(row?.value).configuredByUser === true
+  if (!row) return true
+  const stored = parseStoredDreamState(row.value)
+  if (stored.configuredByUser === true) return false
+  const hasNonDefaultSchedule =
+    stored.enabled ||
+    stored.intervalHours !== DEFAULT_DREAM_INTERVAL_HOURS ||
+    stored.schedules.crossMemory.enabled ||
+    stored.schedules.crossMemory.intervalHours !== DEFAULT_CROSS_MEMORY_INTERVAL_HOURS ||
+    stored.schedules.tidy.enabled ||
+    stored.schedules.tidy.intervalHours !== DEFAULT_TIDY_INTERVAL_HOURS
+  if (hasNonDefaultSchedule || stored.lastRunAt !== null || stored.recentRuns.length > 0) {
+    return false
+  }
+  // 老库若同时已有历史 chat_llm 与历史 dream_state 行，视为旧版已保存过定时整理设置，不覆写用户意愿
+  return !hadPreviousChatLlm
 }
 
 export async function loadDreamState(

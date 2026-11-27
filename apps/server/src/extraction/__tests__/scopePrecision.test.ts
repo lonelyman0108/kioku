@@ -203,6 +203,77 @@ describe('会话摘要与整理提示词的主机边界透传', () => {
       expect(prop.proposedTopics).toEqual(['git', 'workflow'])
       expect(prop.proposedBootMode).toBe('full')
     }
+
+    // update 与 merge_duplicates 输出占位 envs: [] / projects: [] / runtimes: [] / topics: [] 时一律视作 null，严禁静默清空既有作用域
+    const entryA = toPromptItem(
+      makeRow({
+        id: '00000000-0000-4000-8000-000000000011',
+        shortId: 'm-456cde',
+        kind: 'entry',
+        title: '单机服务规范 A',
+        envs: ['home-24'],
+        projects: ['kioku'],
+        runtimes: ['claudecode'],
+        topics: ['docker'],
+      }),
+    )
+    const entryB = toPromptItem(
+      makeRow({
+        id: '00000000-0000-4000-8000-000000000012',
+        shortId: 'm-567def',
+        kind: 'entry',
+        title: '单机服务规范 B',
+        envs: ['home-24'],
+        projects: ['kioku'],
+        runtimes: ['claudecode'],
+        topics: ['deploy'],
+      }),
+    )
+    const entryCatalog = new Map([
+      [entryA.shortId, entryA],
+      [entryB.shortId, entryB],
+    ])
+    const evaluatedEntry = evaluateDreamResponse(
+      JSON.stringify({
+        suggestions: [
+          {
+            kind: 'update',
+            target_short_ids: [entryA.shortId],
+            content: '补充监听端口说明。',
+            envs: [],
+            projects: [],
+            runtimes: [],
+            topics: [],
+            realms: [],
+            reason: '补充端口',
+          },
+          {
+            kind: 'merge_duplicates',
+            target_short_ids: [entryA.shortId, entryB.shortId],
+            keep_short_id: entryA.shortId,
+            title: '单机服务规范',
+            content: '合并后的完整单机服务规范。',
+            envs: [],
+            projects: [],
+            runtimes: [],
+            topics: [],
+            reason: '合并重复',
+          },
+        ],
+      }),
+      entryCatalog,
+    )
+    expect(evaluatedEntry.status).toBe('ok')
+    if (evaluatedEntry.status === 'ok') {
+      expect(evaluatedEntry.proposals).toHaveLength(2)
+      for (const p of evaluatedEntry.proposals) {
+        expect(p.proposedEnvs).toBeNull()
+        expect(p.proposedProjects).toBeNull()
+        expect(p.proposedRuntimes).toBeNull()
+        expect(p.proposedTopics).toBeNull()
+        expect(p.proposedRealms).toBeNull()
+      }
+    }
   })
 
   it('buildTidyMessages 透传高频主题参考，evaluateTidyResponse 支持仅调整 topics 或 disclosure', () => {

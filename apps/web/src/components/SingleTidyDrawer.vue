@@ -233,8 +233,6 @@ async function submitSingleTidy(stageToInbox: boolean) {
     const applyContent = hasContentChange.value && parts.content
     const nextTitle = applyTitle ? res.proposed.title : res.before.title
     const nextSummary = applySummary ? res.proposed.summary : res.before.summary
-    const nextTopics = applyTopics ? res.proposed.topics : res.before.topics
-    const nextDisclosure = applyDisclosure ? res.proposed.disclosure : res.before.disclosure
     const nextContent = applyContent ? res.proposed.content : res.before.content
     const applyArchived = parts.content && parts.archivedNotes && hasArchivedNotes.value
     const effectiveChangeSummary = applyContent
@@ -252,8 +250,8 @@ async function submitSingleTidy(stageToInbox: boolean) {
       title: nextTitle,
       summary: nextSummary,
       content: nextContent,
-      topics: nextTopics,
-      disclosure: nextDisclosure,
+      ...(applyTopics ? { topics: res.proposed.topics } : {}),
+      ...(applyDisclosure ? { disclosure: res.proposed.disclosure } : {}),
       changeSummary: effectiveChangeSummary,
       archivedNotes: applyArchived ? res.proposed.archivedNotes : [],
       applyArchivedNotes: applyArchived,

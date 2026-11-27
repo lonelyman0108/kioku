@@ -35,7 +35,7 @@ import {
 } from '../../testing/db'
 import { FakeHttpError, startFakeOpenAi, type FakeOpenAiServer } from '../../testing/fakeOpenAi'
 import { bufferTurn } from '../buffer'
-import { loadInbox, runDream } from '../dream'
+import { loadFrequentTopics, loadInbox, runDream } from '../dream'
 import { extractEpisodeBatch } from '../extract'
 
 describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建议闭环', () => {
@@ -1037,11 +1037,42 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
       }),
     )
 
+    // 已过期词条的主题不得计入高频主题参考（批量 SQL 与单条预览口径一致）
+    const expiredA = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '过期主题样本甲',
+        summary: '临时记录。',
+        content: '过期正文。',
+        topics: ['expired-only'],
+        validTo: new Date(Date.now() + 3_600_000).toISOString(),
+      }),
+    )
+    const expiredB = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '过期主题样本乙',
+        summary: '临时记录。',
+        content: '过期正文。',
+        topics: ['expired-only'],
+        validTo: new Date(Date.now() + 3_600_000).toISOString(),
+      }),
+    )
+    await database.db
+      .update(entries)
+      .set({ validTo: sql`now() - interval '1 hour'` })
+      .where(sql`${entries.id} in (${expiredA.entry.id}, ${expiredB.entry.id})`)
+    expect(await loadFrequentTopics(database.db)).toEqual(['docker'])
+
     let seenFrequentTopicsHint = false
+    let sawExpiredTopic = false
     fakeAi.setChatHandler((messages) => {
       const userText = messages[1]?.content ?? ''
       if (userText.includes('库内高频主题参考') && userText.includes('docker')) {
         seenFrequentTopicsHint = true
+      }
+      if (userText.includes('expired-only')) {
+        sawExpiredTopic = true
       }
       return JSON.stringify({
         needed: true,
@@ -1065,6 +1096,7 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
     expect(tidyRun.outcome).toBe('ok')
     expect(tidyRun.suggested).toBe(1)
     expect(seenFrequentTopicsHint).toBe(true)
+    expect(sawExpiredTopic).toBe(false)
 
     const inboxWithTidy = await loadInbox(database.db, false)
     const tidyCard = inboxWithTidy.items.find(
@@ -1081,20 +1113,79 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
     const inboxAfterApply = await loadInbox(database.db, false)
     expect(inboxAfterApply.tidyPendingCount).toBe(1)
 
-    // 单条快速规范预览与暂存/应用同样透传 topics 与 disclosure
+    // 另一条 topics > 8 但模型判定 needed: false 时应推进 tidyChecked 水位，不反复排队
+    const keepManyTopics = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '保留多主题词条',
+        summary: '已有概要。',
+        content: '简明正文。',
+        topics: ['a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7', 'a8', 'a9'],
+      }),
+    )
+    expect((await loadInbox(database.db, false)).tidyPendingCount).toBe(2)
+    fakeAi.setChatHandler(() => JSON.stringify({ needed: false }))
+    const noNeedRun = await runDream(database.db, masterKey, {
+      runId: 'tidy-topics-not-needed',
+      trigger: 'manual',
+      mode: 'tidy',
+      targetShortIds: [keepManyTopics.entry.shortId],
+    })
+    expect(noNeedRun.outcome).toBe('ok')
+    expect(noNeedRun.suggested).toBe(0)
+    expect((await loadInbox(database.db, false)).tidyPendingCount).toBe(1)
+
+    // 单条快速规范预览排除过期主题，且暂存至待处理与直接应用均透传 topics 与 disclosure
+    let singlePreviewSawExpired = false
+    fakeAi.setChatHandler((messages) => {
+      if ((messages[1]?.content ?? '').includes('expired-only')) {
+        singlePreviewSawExpired = true
+      }
+      return JSON.stringify({
+        needed: true,
+        title: afterTidy.entry.title,
+        summary: afterTidy.entry.summary,
+        content: afterTidy.entry.content,
+        topics: ['docker'],
+        disclosure: '调整容器运维配置时参考',
+        change_summary: '精简主题并调整触发场景',
+        archived_notes: [],
+        reason: '进一步收敛主题',
+      })
+    })
     const singlePreview = await entrySvc.previewSingleTidy(overTopics.entry.shortId)
+    expect(singlePreviewSawExpired).toBe(false)
     expect(singlePreview.before.topics).toEqual(['docker', 'ops'])
     expect(singlePreview.before.disclosure).toBe('排查容器与日常运维配置时查阅')
-    const singleApplied = await entrySvc.applySingleTidy(consoleScope, overTopics.entry.shortId, {
+    expect(singlePreview.proposed.topics).toEqual(['docker'])
+    expect(singlePreview.proposed.disclosure).toBe('调整容器运维配置时参考')
+
+    const staged = await entrySvc.applySingleTidy(consoleScope, overTopics.entry.shortId, {
       expectedVersion: afterTidy.entry.version,
       title: afterTidy.entry.title,
       summary: afterTidy.entry.summary ?? null,
       content: afterTidy.entry.content,
       topics: ['docker'],
       disclosure: '调整容器运维配置时参考',
+      stageToInbox: true,
+    })
+    expect(staged.stagedSuggestionId).toBeTruthy()
+    // 从待处理应用暂存卡片，验证暂存的 topics 与 disclosure 真实生效
+    await entrySvc.applySuggestion(staged.stagedSuggestionId!, {})
+    const afterStagedApply = await entrySvc.get(consoleScope, overTopics.entry.shortId)
+    expect(afterStagedApply.entry.topics).toEqual(['docker'])
+    expect(afterStagedApply.entry.disclosure).toBe('调整容器运维配置时参考')
+
+    // 直接应用单条规范省略 topics 时保持原值
+    const singleApplied = await entrySvc.applySingleTidy(consoleScope, overTopics.entry.shortId, {
+      expectedVersion: afterStagedApply.entry.version,
+      title: afterStagedApply.entry.title,
+      summary: afterStagedApply.entry.summary ?? null,
+      content: afterStagedApply.entry.content,
+      disclosure: '排查容器运行时参数时参考',
     })
     expect(singleApplied.entry?.entry.topics).toEqual(['docker'])
-    expect(singleApplied.entry?.entry.disclosure).toBe('调整容器运维配置时参考')
+    expect(singleApplied.entry?.entry.disclosure).toBe('排查容器运行时参数时参考')
 
     // distill_episode 显式传 projects: []、envs: [] 与 proposed_boot_mode: 'full' 应真实生效，且 realms: [] 保持 fail-closed
     const ep = await entrySvc.writeEpisode({
