@@ -39,6 +39,7 @@ import { useDebounced } from '../composables/useDebounced'
 import { useMarkdownSyncScroll } from '../composables/useMarkdownSyncScroll'
 import { useNow } from '../composables/useNow'
 import { useSession } from '../composables/useSession'
+import { useViewport } from '../composables/useViewport'
 import { icons } from '../icons'
 import {
   bootModeDescriptions,
@@ -157,6 +158,9 @@ const EDIT_VIEW_OPTIONS: { value: EditViewMode; label: string; icon: string; tit
   { value: 'split', label: '分栏', icon: icons.splitPane, title: '源码与预览左右分栏' },
   { value: 'preview', label: '预览', icon: icons.reveal, title: '渲染预览' },
 ]
+
+const viewport = useViewport()
+const isPhone = computed(() => viewport.value.width < 768)
 
 const BOOT_MODE_OPTIONS: { value: BootMode; label: string; icon: string }[] = BOOT_MODES.map(
   (value) => ({
@@ -1076,6 +1080,57 @@ const organizeMenuItems = computed<DropdownMenuItem[][]>(() => {
   ]
 })
 
+const canSplitEdit = computed(
+  () => !isPhone.value && (editorScrollWidth.value === 0 || editorScrollWidth.value >= 680),
+)
+const visibleEditViewOptions = computed(() =>
+  canSplitEdit.value ? EDIT_VIEW_OPTIONS : EDIT_VIEW_OPTIONS.filter((opt) => opt.value !== 'split'),
+)
+watch(canSplitEdit, (allowed) => {
+  if (!allowed && editView.value === 'split') editView.value = 'edit'
+})
+
+// 手机端阅读态顶栏「更多」菜单，将次级操作收拢释放首屏空间
+const mobileMoreMenuItems = computed<DropdownMenuItem[][]>(() => {
+  const e = entry.value
+  if (!e) return []
+  const primaryGroup: DropdownMenuItem[] = []
+  if (!isDeleted.value && e.kind === 'episode') {
+    primaryGroup.push({
+      label: '提炼为正式记忆',
+      icon: icons.promote,
+      disabled: quickBusy.value,
+      onSelect: () => void promoteEpisode(),
+    })
+  }
+  primaryGroup.push({
+    label: '历史',
+    icon: icons.history,
+    onSelect: () => openHistory(),
+  })
+  if (isDeleted.value) {
+    primaryGroup.push({
+      label: '恢复',
+      icon: icons.undelete,
+      disabled: restoring.value,
+      onSelect: () => void restoreFromTrash(),
+    })
+  }
+  const dangerGroup: DropdownMenuItem[] = [
+    {
+      label: isDeleted.value ? '彻底删除' : '删除',
+      icon: icons.remove,
+      color: 'error',
+      disabled: quickBusy.value,
+      onSelect: () => {
+        deleteModal.value = isDeleted.value ? 'permanent' : 'soft'
+        deleteError.value = null
+      },
+    },
+  ]
+  return [primaryGroup, dangerGroup]
+})
+
 function onSingleTidyApplied(updated: EntryDetailResponse) {
   queryClient.setQueryData(queryKey.value, updated)
   loadDetail(updated)
@@ -1225,10 +1280,81 @@ defineExpose({
     }"
   >
     <div v-if="showBack" class="mobile-back-bar">
-      <UButton size="xs" color="neutral" variant="ghost" :icon="icons.back" @click="emit('back')">
+      <UButton
+        v-if="mode === 'edit'"
+        size="sm"
+        color="neutral"
+        variant="ghost"
+        :icon="icons.cancel"
+        :disabled="saving"
+        @click="requestCancelEditing"
+      >
+        退出编辑
+      </UButton>
+      <UButton
+        v-else
+        size="sm"
+        color="neutral"
+        variant="ghost"
+        :icon="icons.back"
+        @click="emit('back')"
+      >
         返回列表
       </UButton>
-      <span v-if="entry" class="font-mono text-xs text-muted">{{ entry.shortId }}</span>
+
+      <div v-if="entry" class="mobile-bar-actions">
+        <template v-if="mode === 'read'">
+          <UButton
+            v-if="!isDeleted"
+            size="xs"
+            :variant="entry.kind === 'episode' ? 'outline' : 'solid'"
+            :icon="icons.edit"
+            :disabled="quickBusy"
+            @click="startEditing"
+          >
+            编辑
+          </UButton>
+          <UDropdownMenu
+            v-if="!isDeleted && entry.kind === 'entry'"
+            :items="organizeMenuItems"
+            :content="{ align: 'end' }"
+            :ui="{ content: 'min-w-44' }"
+          >
+            <UButton
+              size="xs"
+              color="neutral"
+              variant="outline"
+              :icon="icons.tidy"
+              :trailing-icon="icons.chevronDown"
+              :disabled="!hasChatModel || quickBusy"
+            >
+              整理
+            </UButton>
+          </UDropdownMenu>
+          <UDropdownMenu
+            :items="mobileMoreMenuItems"
+            :content="{ align: 'end' }"
+            :ui="{ content: 'min-w-40' }"
+          >
+            <UButton
+              size="xs"
+              color="neutral"
+              variant="outline"
+              :trailing-icon="icons.chevronDown"
+              aria-label="更多操作"
+            >
+              更多
+            </UButton>
+          </UDropdownMenu>
+        </template>
+        <SegmentedChoice
+          v-else
+          v-model="editView"
+          :items="visibleEditViewOptions"
+          label="编辑区视图模式"
+          compact
+        />
+      </div>
     </div>
     <div v-if="detailQuery.isPending.value && !entry" class="p-6 space-y-4">
       <USkeleton class="h-7 w-1/2" />
@@ -1919,7 +2045,7 @@ defineExpose({
                 </UButton>
                 <SegmentedChoice
                   v-model="editView"
-                  :items="EDIT_VIEW_OPTIONS"
+                  :items="visibleEditViewOptions"
                   label="编辑区视图模式"
                   compact
                 />
@@ -1973,6 +2099,17 @@ defineExpose({
               </div>
             </div>
 
+            <UFormField v-if="isPhone" label="变更说明（可选）" class="mobile-change-note-field">
+              <UInput
+                id="entry-change-summary"
+                v-model="form.changeSummary"
+                size="sm"
+                :maxlength="CHANGE_SUMMARY_MAX"
+                placeholder="简述本次改动原因，留空可直接保存"
+                class="w-full"
+              />
+            </UFormField>
+
             <SaveBar
               :count="dirtyCount"
               :saving="saving"
@@ -1985,7 +2122,7 @@ defineExpose({
               @discard="requestCancelEditing"
               @save="save"
             >
-              <template #extra>
+              <template v-if="!isPhone" #extra>
                 <div class="change-note-bar">
                   <label for="entry-change-summary" class="change-note-label">变更说明</label>
                   <UInput
@@ -2385,6 +2522,11 @@ defineExpose({
   padding: 0 16px;
   border-bottom: 1px solid var(--ui-border);
   background: var(--ui-bg-muted);
+}
+.mobile-bar-actions {
+  display: none;
+  align-items: center;
+  gap: 6px;
 }
 .inline-chip {
   display: inline-flex;
@@ -3385,6 +3527,12 @@ defineExpose({
   .editor-head {
     padding: 12px 16px;
   }
+  .head-status-line {
+    gap: 6px 12px;
+  }
+  .status-sep {
+    display: none;
+  }
   .editor-scroll {
     padding: 14px 16px 24px;
   }
@@ -3395,6 +3543,50 @@ defineExpose({
     flex-direction: column;
     align-items: stretch;
     gap: 4px;
+  }
+}
+@media (max-width: 767.98px) {
+  /* 手机端由详情面板整体滚动，只吸顶单行操作条，避免大头栏与底栏锁死正文高度 */
+  .editor-pane {
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .mobile-back-bar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    height: auto;
+    min-height: 44px;
+    padding: 6px 12px;
+  }
+  .mobile-bar-actions {
+    display: inline-flex;
+  }
+  .editor-head .head-actions {
+    display: none;
+  }
+  .editor-pane.is-editing .editor-head {
+    display: none;
+  }
+  .editor-scroll {
+    flex: none;
+    overflow: visible;
+    padding: 12px 14px 20px;
+  }
+  .editor-scroll.is-editing {
+    padding-bottom: 0;
+  }
+  .edit-toolbar .toolbar-right {
+    display: none;
+  }
+  .inline-chip {
+    height: auto;
+    min-height: 32px;
+    padding: 4px 9px;
+  }
+  .status-copy-id,
+  .status-history-link {
+    min-height: 28px;
   }
 }
 </style>

@@ -9,6 +9,7 @@ import dataTransferPanel from '../components/DataTransferPanel.vue?raw'
 import dreamSuggestionCard from '../components/DreamSuggestionCard.vue?raw'
 import entryLinksPanel from '../components/EntryLinksPanel.vue?raw'
 import hygieneSweepDrawer from '../components/HygieneSweepDrawer.vue?raw'
+import keysSettings from '../components/KeysSettings.vue?raw'
 import memoryContent from '../components/MemoryContent.vue?raw'
 import memoryEditor from '../components/MemoryEditor.vue?raw'
 import memoryHistoryDrawer from '../components/MemoryHistoryDrawer.vue?raw'
@@ -22,6 +23,7 @@ import singleTidyDrawer from '../components/SingleTidyDrawer.vue?raw'
 import diffViewer from '../components/ui/DiffViewer.vue?raw'
 import emptyState from '../components/ui/EmptyState.vue?raw'
 import noteLine from '../components/ui/NoteLine.vue?raw'
+import saveBar from '../components/ui/SaveBar.vue?raw'
 import shortIdLine from '../components/ui/ShortIdLine.vue?raw'
 import wikiText from '../components/ui/WikiText.vue?raw'
 import consoleSearch from '../composables/useConsoleSearch.ts?raw'
@@ -359,6 +361,21 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(entryLinksPanel).toContain('<WikiText')
     expect(entryLinksPanel).not.toContain('{{ item.shortId }}')
     expect(bootPreviewDrawer).not.toContain('class="item-id')
+  })
+
+  it('手机窄屏提供卡片式凭据与密钥列表、整页详情滚动、紧凑单行号对比与上下条切换', () => {
+    expect(credentialsPage).toContain('cred-card-list')
+    expect(keysSettings).toContain('keys-card-list')
+    expect(keysSettings).toContain('shrink-0 whitespace-nowrap')
+    expect(memoryEditor).toContain('mobileMoreMenuItems')
+    expect(memoryEditor).toContain('visibleEditViewOptions')
+    expect(memoryEditor).toContain('mobile-change-note-field')
+    expect(saveBar).toContain('@media (max-width: 767.98px), (pointer: coarse)')
+    expect(diffViewer).toContain('isCompactUnified')
+    expect(diffViewer).toContain('col-w-ln-compact')
+    expect(dreamSuggestionCard).toContain('mobile-back-nav')
+    expect(inboxPage).toContain('stepSuggestion')
+    expect(inboxPage).toContain('q-checkbox-hit')
   })
 
   it('界面中引用的全部 icons.* 均已在 icons.ts 注册，且没有直接写死未打包的 i-lucide-*', () => {

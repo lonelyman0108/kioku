@@ -160,101 +160,191 @@ watch(highlightSlug, (slug) => {
           <USkeleton v-for="n in 4" :key="n" class="h-14 w-full" />
         </div>
 
-        <div v-else-if="items.length" class="table-wrap">
-          <table class="cred-table">
-            <thead>
-              <tr>
-                <th scope="col">标识与占位符</th>
-                <th scope="col">名称与说明</th>
-                <th scope="col">允许场域</th>
-                <th scope="col">更新时间</th>
-                <th scope="col" class="actions-col">操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr
-                v-for="item in items"
-                :key="item.id"
-                :class="{ highlighted: item.slug === highlightSlug }"
-              >
-                <td>
-                  <div class="slug-cell">
-                    <code class="font-mono text-sm font-medium">{{ item.slug }}</code>
-                    <UButton
-                      :icon="icons.copy"
-                      size="xs"
-                      color="neutral"
-                      variant="ghost"
-                      :aria-label="`复制占位符 ${item.slug}`"
-                      @click="copy(placeholderOf(item.slug), '已复制占位符')"
+        <template v-else-if="items.length">
+          <div class="table-wrap">
+            <table class="cred-table">
+              <thead>
+                <tr>
+                  <th scope="col">标识与占位符</th>
+                  <th scope="col">名称与说明</th>
+                  <th scope="col">允许场域</th>
+                  <th scope="col">更新时间</th>
+                  <th scope="col" class="actions-col">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr
+                  v-for="item in items"
+                  :key="item.id"
+                  :class="{ highlighted: item.slug === highlightSlug }"
+                >
+                  <td>
+                    <div class="slug-cell">
+                      <code class="font-mono text-sm font-medium">{{ item.slug }}</code>
+                      <UButton
+                        :icon="icons.copy"
+                        size="xs"
+                        color="neutral"
+                        variant="ghost"
+                        :aria-label="`复制占位符 ${item.slug}`"
+                        class="shrink-0 whitespace-nowrap"
+                        @click="copy(placeholderOf(item.slug), '已复制占位符')"
+                      >
+                        占位符
+                      </UButton>
+                    </div>
+                  </td>
+                  <td>
+                    <p class="font-medium">{{ item.label }}</p>
+                    <p v-if="item.description" class="text-xs text-muted">{{ item.description }}</p>
+                  </td>
+                  <td>
+                    <span v-if="item.allowedRealms === null" class="text-xs text-muted">不限</span>
+                    <span v-else-if="!item.allowedRealms.length" class="realm-tag">
+                      <UIcon :name="icons.lock" class="tag-icon" aria-hidden="true" />
+                      <span>仅无场域</span>
+                    </span>
+                    <div v-else class="flex flex-wrap gap-1">
+                      <span v-for="r in item.allowedRealms" :key="r" class="realm-tag">
+                        <UIcon :name="icons.realm" class="tag-icon" aria-hidden="true" />
+                        <span>{{ r }}</span>
+                      </span>
+                    </div>
+                  </td>
+                  <td>
+                    <time
+                      class="text-xs text-muted whitespace-nowrap"
+                      :datetime="item.updatedAt"
+                      :title="formatTime(item.updatedAt)"
                     >
-                      占位符
-                    </UButton>
-                  </div>
-                </td>
-                <td>
-                  <p class="font-medium">{{ item.label }}</p>
-                  <p v-if="item.description" class="text-xs text-muted">{{ item.description }}</p>
-                </td>
-                <td>
-                  <span v-if="item.allowedRealms === null" class="text-xs text-muted">不限</span>
+                      {{ formatRelative(item.updatedAt) }}
+                    </time>
+                  </td>
+                  <td>
+                    <div class="row-actions">
+                      <UButton
+                        size="xs"
+                        color="neutral"
+                        variant="outline"
+                        :icon="icons.reveal"
+                        :disabled="!hasMasterKey"
+                        @click="openReveal(item)"
+                      >
+                        查看值
+                      </UButton>
+                      <UButton
+                        size="xs"
+                        color="neutral"
+                        variant="outline"
+                        :icon="icons.edit"
+                        :disabled="!hasMasterKey"
+                        @click="openEdit(item)"
+                      >
+                        编辑
+                      </UButton>
+                      <UButton
+                        size="xs"
+                        color="error"
+                        variant="ghost"
+                        :icon="icons.remove"
+                        @click="((deleting = item), (deleteError = null))"
+                      >
+                        删除
+                      </UButton>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- 手机窄屏改用卡片列表，避免多列表格挤压按钮与文字 -->
+          <ul class="cred-card-list" aria-label="凭据列表">
+            <li
+              v-for="item in items"
+              :key="`card-${item.id}`"
+              class="cred-card"
+              :class="{ highlighted: item.slug === highlightSlug }"
+            >
+              <div class="cred-card-head">
+                <p class="cred-card-title">{{ item.label }}</p>
+                <p v-if="item.description" class="cred-card-desc">{{ item.description }}</p>
+              </div>
+              <div class="cred-card-slug-row">
+                <code class="cred-card-slug font-mono">{{ item.slug }}</code>
+                <UButton
+                  :icon="icons.copy"
+                  size="xs"
+                  color="neutral"
+                  variant="outline"
+                  :aria-label="`复制占位符 ${item.slug}`"
+                  class="shrink-0 whitespace-nowrap"
+                  @click="copy(placeholderOf(item.slug), '已复制占位符')"
+                >
+                  复制占位符
+                </UButton>
+              </div>
+              <div class="cred-card-meta">
+                <div class="cred-card-realms">
+                  <span v-if="item.allowedRealms === null" class="text-xs text-muted"
+                    >不限场域</span
+                  >
                   <span v-else-if="!item.allowedRealms.length" class="realm-tag">
                     <UIcon :name="icons.lock" class="tag-icon" aria-hidden="true" />
                     <span>仅无场域</span>
                   </span>
-                  <div v-else class="flex flex-wrap gap-1">
+                  <template v-else>
                     <span v-for="r in item.allowedRealms" :key="r" class="realm-tag">
                       <UIcon :name="icons.realm" class="tag-icon" aria-hidden="true" />
                       <span>{{ r }}</span>
                     </span>
-                  </div>
-                </td>
-                <td>
-                  <time
-                    class="text-xs text-muted whitespace-nowrap"
-                    :datetime="item.updatedAt"
-                    :title="formatTime(item.updatedAt)"
-                  >
-                    {{ formatRelative(item.updatedAt) }}
-                  </time>
-                </td>
-                <td>
-                  <div class="row-actions">
-                    <UButton
-                      size="xs"
-                      color="neutral"
-                      variant="outline"
-                      :icon="icons.reveal"
-                      :disabled="!hasMasterKey"
-                      @click="openReveal(item)"
-                    >
-                      查看值
-                    </UButton>
-                    <UButton
-                      size="xs"
-                      color="neutral"
-                      variant="outline"
-                      :icon="icons.edit"
-                      :disabled="!hasMasterKey"
-                      @click="openEdit(item)"
-                    >
-                      编辑
-                    </UButton>
-                    <UButton
-                      size="xs"
-                      color="error"
-                      variant="ghost"
-                      :icon="icons.remove"
-                      @click="((deleting = item), (deleteError = null))"
-                    >
-                      删除
-                    </UButton>
-                  </div>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
+                  </template>
+                </div>
+                <time
+                  class="text-xs text-muted whitespace-nowrap"
+                  :datetime="item.updatedAt"
+                  :title="formatTime(item.updatedAt)"
+                >
+                  {{ formatRelative(item.updatedAt) }}
+                </time>
+              </div>
+              <div class="cred-card-actions">
+                <UButton
+                  size="sm"
+                  color="neutral"
+                  variant="outline"
+                  :icon="icons.reveal"
+                  :disabled="!hasMasterKey"
+                  class="cred-card-act-grow"
+                  @click="openReveal(item)"
+                >
+                  查看值
+                </UButton>
+                <UButton
+                  size="sm"
+                  color="neutral"
+                  variant="outline"
+                  :icon="icons.edit"
+                  :disabled="!hasMasterKey"
+                  class="cred-card-act-grow"
+                  @click="openEdit(item)"
+                >
+                  编辑
+                </UButton>
+                <UButton
+                  size="sm"
+                  color="error"
+                  variant="outline"
+                  :icon="icons.remove"
+                  class="shrink-0 whitespace-nowrap"
+                  @click="((deleting = item), (deleteError = null))"
+                >
+                  删除
+                </UButton>
+              </div>
+            </li>
+          </ul>
+        </template>
 
         <EmptyState
           v-else-if="!credentialsQuery.isError.value"
@@ -293,6 +383,7 @@ watch(highlightSlug, (slug) => {
                 color="neutral"
                 variant="outline"
                 :icon="icons.copy"
+                class="shrink-0 whitespace-nowrap"
                 @click="copy(revealedValue, '已复制凭据值')"
               >
                 复制
@@ -462,9 +553,89 @@ watch(highlightSlug, (slug) => {
   white-space: pre-wrap;
   word-break: break-all;
 }
+.cred-card-list {
+  display: none;
+  flex-direction: column;
+  border-top: 1px solid var(--ui-rule);
+}
+.cred-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--ui-border);
+}
+.cred-card.highlighted {
+  margin-inline: -10px;
+  padding-inline: 10px;
+  background: var(--ui-bg-elevated);
+}
+.cred-card-head {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.cred-card-title {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--ui-text-highlighted);
+}
+.cred-card-desc {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ui-text-muted);
+}
+.cred-card-slug-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--ui-border);
+  background: var(--ui-bg-muted);
+}
+.cred-card-slug {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 500;
+}
+.cred-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 10px;
+}
+.cred-card-realms {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.cred-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.cred-card-act-grow {
+  flex: 1;
+  justify-content: center;
+}
 @media (max-width: 1023.98px) {
   .credentials-body {
     padding: 0 16px 36px;
+  }
+}
+@media (max-width: 767.98px) {
+  .table-wrap {
+    display: none;
+  }
+  .cred-card-list {
+    display: flex;
   }
 }
 </style>

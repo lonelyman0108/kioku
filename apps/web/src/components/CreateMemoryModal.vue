@@ -517,4 +517,9 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onModalKeydown))
   font-family: var(--font-mono);
   font-size: 12px;
 }
+@media (max-width: 767.98px), (pointer: coarse) {
+  .shortcut-hint {
+    display: none;
+  }
+}
 </style>

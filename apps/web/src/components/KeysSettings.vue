@@ -111,6 +111,7 @@ async function confirmRevoke() {
               color="neutral"
               variant="outline"
               :icon="icons.copy"
+              class="shrink-0 whitespace-nowrap"
               @click="copy(mcpUrl, '已复制 MCP 地址')"
             >
               复制
@@ -129,6 +130,7 @@ async function confirmRevoke() {
               color="neutral"
               variant="outline"
               :icon="icons.copy"
+              class="shrink-0 whitespace-nowrap"
               @click="copy(loginCmd, '已复制登录命令')"
             >
               复制
@@ -150,115 +152,208 @@ async function confirmRevoke() {
         <USkeleton v-for="n in 3" :key="n" class="h-14 w-full" />
       </div>
 
-      <div v-else-if="activeKeys.length" class="table-wrap">
-        <table class="keys-table">
-          <thead>
-            <tr>
-              <th scope="col">名称与客户端</th>
-              <th scope="col">前缀</th>
-              <th scope="col">终端环境与场域</th>
-              <th scope="col">权限</th>
-              <th scope="col">最近使用</th>
-              <th scope="col" class="actions-col">操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="item in activeKeys" :key="item.id">
-              <td>
-                <p class="font-medium">{{ item.name }}</p>
-                <p class="mt-0.5 text-xs text-muted">
+      <template v-else-if="activeKeys.length">
+        <div class="table-wrap">
+          <table class="keys-table">
+            <thead>
+              <tr>
+                <th scope="col">名称与客户端</th>
+                <th scope="col">前缀</th>
+                <th scope="col">终端环境与场域</th>
+                <th scope="col">权限</th>
+                <th scope="col">最近使用</th>
+                <th scope="col" class="actions-col">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="item in activeKeys" :key="item.id">
+                <td>
+                  <p class="font-medium">{{ item.name }}</p>
+                  <p class="mt-0.5 text-xs text-muted">
+                    <RuntimeLabel :family="item.runtimeFamily" :size="13" />
+                  </p>
+                </td>
+                <td>
+                  <code class="font-mono text-xs">{{ item.prefix }}</code>
+                </td>
+                <td>
+                  <div class="tag-list">
+                    <span v-for="e in item.envs" :key="`e:${e}`" class="tag">
+                      <UIcon :name="icons.env" class="tag-icon" aria-hidden="true" />
+                      <span>{{ envDisplayName(e) }}</span>
+                    </span>
+                    <span v-if="item.allowedRealms === null" class="text-xs text-muted"
+                      >全部场域</span
+                    >
+                    <span v-else-if="!item.allowedRealms.length" class="tag">
+                      <UIcon :name="icons.lock" class="tag-icon" aria-hidden="true" />
+                      <span>仅通用</span>
+                    </span>
+                    <span v-for="r in item.allowedRealms ?? []" :key="`r:${r}`" class="tag">
+                      <UIcon :name="icons.realm" class="tag-icon" aria-hidden="true" />
+                      <span>场域:{{ r }}</span>
+                    </span>
+                    <span v-for="f in item.focusRealms ?? []" :key="`f:${f}`" class="tag tag-focus">
+                      <UIcon :name="icons.focus" class="tag-icon" aria-hidden="true" />
+                      <span>聚焦:{{ f }}</span>
+                    </span>
+                  </div>
+                </td>
+                <td>
+                  <div class="tag-list">
+                    <span class="tag">
+                      <UIcon
+                        :name="item.canWrite ? icons.edit : icons.reveal"
+                        class="tag-icon"
+                        aria-hidden="true"
+                      />
+                      <span>{{ item.canWrite ? '读写' : '只读' }}</span>
+                    </span>
+                    <span v-if="item.canResolveCredentials" class="tag">
+                      <UIcon :name="icons.credentials" class="tag-icon" aria-hidden="true" />
+                      <span>解析凭据</span>
+                    </span>
+                  </div>
+                </td>
+                <td>
+                  <time
+                    v-if="item.lastUsedAt"
+                    class="text-xs text-muted whitespace-nowrap"
+                    :datetime="item.lastUsedAt"
+                    :title="formatTime(item.lastUsedAt)"
+                  >
+                    {{ formatRelative(item.lastUsedAt) }}
+                  </time>
+                  <span v-else class="text-xs text-muted">尚未使用</span>
+                </td>
+                <td>
+                  <div class="row-actions">
+                    <UButton
+                      size="xs"
+                      color="neutral"
+                      variant="outline"
+                      :icon="icons.edit"
+                      @click="openEdit(item)"
+                    >
+                      编辑
+                    </UButton>
+                    <UButton
+                      size="xs"
+                      color="neutral"
+                      variant="outline"
+                      :icon="icons.rotate"
+                      :loading="rotatingId === item.id"
+                      @click="rotate(item)"
+                    >
+                      轮换
+                    </UButton>
+                    <UButton
+                      size="xs"
+                      color="error"
+                      variant="ghost"
+                      :icon="icons.revoked"
+                      @click="((revoking = item), (revokeError = null))"
+                    >
+                      吊销
+                    </UButton>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- 手机窄屏改用卡片列表，展示全部标签与操作入口 -->
+        <ul class="keys-card-list" aria-label="有效访问密钥列表">
+          <li v-for="item in activeKeys" :key="`card-${item.id}`" class="key-card">
+            <div class="key-card-top">
+              <div class="min-w-0">
+                <p class="key-card-name">{{ item.name }}</p>
+                <p class="key-card-sub">
                   <RuntimeLabel :family="item.runtimeFamily" :size="13" />
+                  <span aria-hidden="true">·</span>
+                  <code class="font-mono text-xs">{{ item.prefix }}</code>
                 </p>
-              </td>
-              <td>
-                <code class="font-mono text-xs">{{ item.prefix }}</code>
-              </td>
-              <td>
-                <div class="tag-list">
-                  <span v-for="e in item.envs" :key="`e:${e}`" class="tag">
-                    <UIcon :name="icons.env" class="tag-icon" aria-hidden="true" />
-                    <span>{{ envDisplayName(e) }}</span>
-                  </span>
-                  <span v-if="item.allowedRealms === null" class="text-xs text-muted"
-                    >全部场域</span
-                  >
-                  <span v-else-if="!item.allowedRealms.length" class="tag">
-                    <UIcon :name="icons.lock" class="tag-icon" aria-hidden="true" />
-                    <span>仅通用</span>
-                  </span>
-                  <span v-for="r in item.allowedRealms ?? []" :key="`r:${r}`" class="tag">
-                    <UIcon :name="icons.realm" class="tag-icon" aria-hidden="true" />
-                    <span>场域:{{ r }}</span>
-                  </span>
-                  <span v-for="f in item.focusRealms ?? []" :key="`f:${f}`" class="tag tag-focus">
-                    <UIcon :name="icons.focus" class="tag-icon" aria-hidden="true" />
-                    <span>聚焦:{{ f }}</span>
-                  </span>
-                </div>
-              </td>
-              <td>
-                <div class="tag-list">
-                  <span class="tag">
-                    <UIcon
-                      :name="item.canWrite ? icons.edit : icons.reveal"
-                      class="tag-icon"
-                      aria-hidden="true"
-                    />
-                    <span>{{ item.canWrite ? '读写' : '只读' }}</span>
-                  </span>
-                  <span v-if="item.canResolveCredentials" class="tag">
-                    <UIcon :name="icons.credentials" class="tag-icon" aria-hidden="true" />
-                    <span>解析凭据</span>
-                  </span>
-                </div>
-              </td>
-              <td>
-                <time
-                  v-if="item.lastUsedAt"
-                  class="text-xs text-muted whitespace-nowrap"
-                  :datetime="item.lastUsedAt"
-                  :title="formatTime(item.lastUsedAt)"
-                >
-                  {{ formatRelative(item.lastUsedAt) }}
-                </time>
-                <span v-else class="text-xs text-muted">尚未使用</span>
-              </td>
-              <td>
-                <div class="row-actions">
-                  <UButton
-                    size="xs"
-                    color="neutral"
-                    variant="outline"
-                    :icon="icons.edit"
-                    @click="openEdit(item)"
-                  >
-                    编辑
-                  </UButton>
-                  <UButton
-                    size="xs"
-                    color="neutral"
-                    variant="outline"
-                    :icon="icons.rotate"
-                    :loading="rotatingId === item.id"
-                    @click="rotate(item)"
-                  >
-                    轮换
-                  </UButton>
-                  <UButton
-                    size="xs"
-                    color="error"
-                    variant="ghost"
-                    :icon="icons.revoked"
-                    @click="((revoking = item), (revokeError = null))"
-                  >
-                    吊销
-                  </UButton>
-                </div>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
+              </div>
+              <time
+                v-if="item.lastUsedAt"
+                class="shrink-0 text-xs text-muted whitespace-nowrap"
+                :datetime="item.lastUsedAt"
+                :title="formatTime(item.lastUsedAt)"
+              >
+                {{ formatRelative(item.lastUsedAt) }}
+              </time>
+              <span v-else class="shrink-0 text-xs text-muted whitespace-nowrap">尚未使用</span>
+            </div>
+
+            <div class="tag-list">
+              <span v-for="e in item.envs" :key="`ce:${e}`" class="tag">
+                <UIcon :name="icons.env" class="tag-icon" aria-hidden="true" />
+                <span>{{ envDisplayName(e) }}</span>
+              </span>
+              <span v-if="item.allowedRealms === null" class="tag">全部场域</span>
+              <span v-else-if="!item.allowedRealms.length" class="tag">
+                <UIcon :name="icons.lock" class="tag-icon" aria-hidden="true" />
+                <span>仅通用</span>
+              </span>
+              <span v-for="r in item.allowedRealms ?? []" :key="`cr:${r}`" class="tag">
+                <UIcon :name="icons.realm" class="tag-icon" aria-hidden="true" />
+                <span>场域:{{ r }}</span>
+              </span>
+              <span v-for="f in item.focusRealms ?? []" :key="`cf:${f}`" class="tag tag-focus">
+                <UIcon :name="icons.focus" class="tag-icon" aria-hidden="true" />
+                <span>聚焦:{{ f }}</span>
+              </span>
+              <span class="tag">
+                <UIcon
+                  :name="item.canWrite ? icons.edit : icons.reveal"
+                  class="tag-icon"
+                  aria-hidden="true"
+                />
+                <span>{{ item.canWrite ? '读写' : '只读' }}</span>
+              </span>
+              <span v-if="item.canResolveCredentials" class="tag">
+                <UIcon :name="icons.credentials" class="tag-icon" aria-hidden="true" />
+                <span>解析凭据</span>
+              </span>
+            </div>
+
+            <div class="key-card-actions">
+              <UButton
+                size="sm"
+                color="neutral"
+                variant="outline"
+                :icon="icons.edit"
+                class="key-card-act-grow"
+                @click="openEdit(item)"
+              >
+                编辑
+              </UButton>
+              <UButton
+                size="sm"
+                color="neutral"
+                variant="outline"
+                :icon="icons.rotate"
+                :loading="rotatingId === item.id"
+                class="key-card-act-grow"
+                @click="rotate(item)"
+              >
+                轮换
+              </UButton>
+              <UButton
+                size="sm"
+                color="error"
+                variant="outline"
+                :icon="icons.revoked"
+                class="shrink-0 whitespace-nowrap"
+                @click="((revoking = item), (revokeError = null))"
+              >
+                吊销
+              </UButton>
+            </div>
+          </li>
+        </ul>
+      </template>
 
       <EmptyState
         v-else-if="!keysQuery.isError.value"
@@ -316,6 +411,7 @@ async function confirmRevoke() {
               color="neutral"
               variant="outline"
               :icon="icons.copy"
+              class="shrink-0 whitespace-nowrap"
               @click="copy(rotatedSecret.key, '已复制新访问密钥')"
             >
               复制
@@ -492,9 +588,57 @@ async function confirmRevoke() {
   font-size: 13px;
   word-break: break-all;
 }
+.keys-card-list {
+  display: none;
+  flex-direction: column;
+  border-top: 1px solid var(--ui-border-accented);
+}
+.key-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 13px 0;
+  border-bottom: 1px solid var(--ui-border);
+}
+.key-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+.key-card-name {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--ui-text-highlighted);
+}
+.key-card-sub {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.key-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.key-card-act-grow {
+  flex: 1;
+  justify-content: center;
+}
 @media (max-width: 767.98px) {
   .connect-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+  .table-wrap {
+    display: none;
+  }
+  .keys-card-list {
+    display: flex;
   }
 }
 </style>

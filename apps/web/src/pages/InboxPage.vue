@@ -1243,6 +1243,26 @@ function hasOpenOverlay(): boolean {
   return Boolean(document.querySelector('[role="dialog"], [data-reka-popper-content-wrapper]'))
 }
 
+function stepSuggestion(delta: -1 | 1) {
+  const list = orderedVisibleItems.value
+  if (!list.length) return
+  const currentIndex = activeIndex.value
+  const nextIndex =
+    delta > 0
+      ? currentIndex < 0
+        ? 0
+        : Math.min(list.length - 1, currentIndex + 1)
+      : currentIndex <= 0
+        ? 0
+        : currentIndex - 1
+  const target = list[nextIndex]
+  if (target && target.id !== selectedId.value) {
+    if (!confirmSwitchAway()) return
+    selectedId.value = target.id
+    scrollSelectedRowIntoView(target.id)
+  }
+}
+
 function onKeydown(event: KeyboardEvent) {
   if (event.defaultPrevented || event.isComposing || hasOpenOverlay()) return
   const editing = Boolean(cardRef.value?.isEditing())
@@ -1545,14 +1565,16 @@ onBeforeUnmount(() => {
                 class="queue-item is-safe"
                 :class="{ 'is-selected': activeSuggestion?.id === s.id }"
               >
-                <input
-                  type="checkbox"
-                  class="q-checkbox"
-                  :aria-label="`选择安全快批项「${targetTitleOf(s)}」`"
-                  :checked="selectedSafeIds.includes(s.id)"
-                  :disabled="batchBusy || batchDismissBusy || activeCardBusyOrEditing"
-                  @change="toggleSafeRow(s.id)"
-                />
+                <label class="q-checkbox-hit" @click.stop>
+                  <input
+                    type="checkbox"
+                    class="q-checkbox"
+                    :aria-label="`选择安全快批项「${targetTitleOf(s)}」`"
+                    :checked="selectedSafeIds.includes(s.id)"
+                    :disabled="batchBusy || batchDismissBusy || activeCardBusyOrEditing"
+                    @change="toggleSafeRow(s.id)"
+                  />
+                </label>
 
                 <button
                   type="button"
@@ -1665,6 +1687,8 @@ onBeforeUnmount(() => {
         :position="activeIndex + 1"
         :total-count="orderedVisibleItems.length"
         :show-back="narrow"
+        :has-prev="activeIndex > 0"
+        :has-next="activeIndex >= 0 && activeIndex < orderedVisibleItems.length - 1"
         :busy="busyId === activeSuggestion.id"
         :disabled="
           batchBusy || batchDismissBusy || (busyId !== null && busyId !== activeSuggestion.id)
@@ -1672,6 +1696,8 @@ onBeforeUnmount(() => {
         @apply="onApply"
         @dismiss="onDismiss"
         @back="backToQueue"
+        @prev="stepSuggestion(-1)"
+        @next="stepSuggestion(1)"
         @dirty-change="activeCardDirty = $event"
       />
 
@@ -2079,11 +2105,18 @@ onBeforeUnmount(() => {
   width: 11px;
   height: 11px;
 }
+.q-checkbox-hit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  margin-top: 2px;
+  cursor: pointer;
+}
 .q-checkbox {
   flex: none;
   width: 15px;
   height: 15px;
-  margin-top: 3px;
   accent-color: var(--ui-primary);
   cursor: pointer;
 }
@@ -2381,6 +2414,17 @@ onBeforeUnmount(() => {
   }
   .organize-layout:not(.has-selection) .review-col {
     display: none;
+  }
+}
+@media (max-width: 767.98px), (pointer: coarse) {
+  .q-checkbox-hit {
+    width: 36px;
+    height: 36px;
+    margin: -8px -4px -8px -8px;
+  }
+  .group-mini-btn {
+    min-height: 32px;
+    padding: 4px 10px;
   }
 }
 </style>
