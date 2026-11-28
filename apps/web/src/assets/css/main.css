@@ -256,3 +256,12 @@
 .rounded {
   border-radius: 0;
 }
+
+/* 手机端表单控件保持不低于 16px，避免 iOS Safari 聚焦输入框时强制放大页面 */
+@media (max-width: 767.98px) {
+  input:not([type='checkbox']):not([type='radio']):not([type='file']),
+  textarea,
+  select {
+    font-size: max(16px, 1em);
+  }
+}

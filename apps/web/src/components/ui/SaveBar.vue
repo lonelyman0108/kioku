@@ -161,6 +161,20 @@ watch(
   font-family: var(--font-mono);
   font-size: 12px;
 }
+@media (max-width: 767.98px), (pointer: coarse) {
+  .save-kbd {
+    display: none;
+  }
+}
+@media (max-width: 767.98px) {
+  .save-bar {
+    margin-top: 16px;
+  }
+  .save-main {
+    gap: 8px;
+    padding: 8px 12px;
+  }
+}
 .save-diff-wrap {
   display: flex;
   flex-direction: column;

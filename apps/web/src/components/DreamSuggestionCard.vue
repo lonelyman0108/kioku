@@ -58,6 +58,8 @@ const props = withDefaults(
     position?: number
     totalCount?: number
     showBack?: boolean
+    hasPrev?: boolean
+    hasNext?: boolean
   }>(),
   {
     disabled: false,
@@ -66,6 +68,8 @@ const props = withDefaults(
     position: 0,
     totalCount: 0,
     showBack: false,
+    hasPrev: false,
+    hasNext: false,
   },
 )
 
@@ -73,6 +77,8 @@ const emit = defineEmits<{
   apply: [id: string, body: ApplySuggestionRequest]
   dismiss: [id: string]
   back: []
+  prev: []
+  next: []
   dirtyChange: [dirty: boolean]
 }>()
 
@@ -931,12 +937,43 @@ defineExpose({
   <!-- 全高审校台态（整理页右栏：顶部依据与护栏 + 中央宽幅变更对比 + 底部固定决断栏） -->
   <div v-if="isInspector" class="workbench-shell">
     <div v-if="showBack" class="mobile-back-bar">
-      <UButton size="xs" color="neutral" variant="ghost" :icon="icons.back" @click="emit('back')">
+      <UButton
+        size="sm"
+        color="neutral"
+        variant="ghost"
+        :icon="icons.back"
+        class="shrink-0 whitespace-nowrap"
+        @click="emit('back')"
+      >
         返回队列
       </UButton>
-      <span v-if="position && totalCount" class="mobile-back-pos tabular-nums">
-        {{ position }} / {{ totalCount }}
-      </span>
+      <div v-if="position && totalCount" class="mobile-back-nav">
+        <UButton
+          v-if="totalCount > 1"
+          size="xs"
+          color="neutral"
+          variant="outline"
+          :icon="icons.up"
+          :disabled="!hasPrev || busy || disabled || reviseBusy"
+          class="shrink-0 whitespace-nowrap"
+          @click="emit('prev')"
+        >
+          上一条
+        </UButton>
+        <span class="mobile-back-pos tabular-nums">{{ position }} / {{ totalCount }}</span>
+        <UButton
+          v-if="totalCount > 1"
+          size="xs"
+          color="neutral"
+          variant="outline"
+          :icon="icons.down"
+          :disabled="!hasNext || busy || disabled || reviseBusy"
+          class="shrink-0 whitespace-nowrap"
+          @click="emit('next')"
+        >
+          下一条
+        </UButton>
+      </div>
     </div>
 
     <div class="workbench-scroll">
@@ -2648,10 +2685,15 @@ defineExpose({
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  height: 40px;
-  padding: 0 12px;
+  min-height: 44px;
+  padding: 6px 12px;
   border-bottom: 1px solid var(--ui-border);
   background: var(--ui-bg);
+}
+.mobile-back-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 .mobile-back-pos {
   font-size: 12px;

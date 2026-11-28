@@ -106,6 +106,8 @@ let tableObserver: ResizeObserver | null = null
 const isSplit = computed(
   () => props.allowSplit && activeLayout.value === 'split' && containerWidth.value >= 640,
 )
+// 极窄容器下合并旧/新行号列为单列，释放更多正文可读宽度
+const isCompactUnified = computed(() => !isSplit.value && containerWidth.value < 480)
 
 const isHeightClamped = computed(() => activeContext.value === 'folded' && Boolean(props.maxHeight))
 
@@ -379,6 +381,11 @@ defineExpose({
           <col class="col-w-sign" />
           <col />
         </colgroup>
+        <colgroup v-else-if="isCompactUnified">
+          <col class="col-w-ln-compact" />
+          <col class="col-w-sign-compact" />
+          <col />
+        </colgroup>
         <colgroup v-else>
           <col class="col-w-ln" />
           <col class="col-w-ln" />
@@ -393,7 +400,7 @@ defineExpose({
           >
             <!-- 可交互折叠区间：支持向上/向下按需多看上下文，无需离开对比视图 -->
             <tr v-if="chunk.kind === 'gap'" class="row-gap">
-              <td :colspan="isSplit ? 6 : 4">
+              <td :colspan="isSplit ? 6 : isCompactUnified ? 3 : 4">
                 <div class="gap-bar">
                   <div class="gap-actions">
                     <button
@@ -489,8 +496,15 @@ defineExpose({
                 :data-line-idx="line.index"
                 :class="[`row-${line.kind}`, { 'row-focus': line.index === focusedLineIndex }]"
               >
-                <td class="cell-ln tabular-nums">{{ line.oldLine ?? '' }}</td>
-                <td class="cell-ln tabular-nums">{{ line.newLine ?? '' }}</td>
+                <template v-if="isCompactUnified">
+                  <td class="cell-ln cell-ln-compact tabular-nums">
+                    {{ line.newLine ?? line.oldLine ?? '' }}
+                  </td>
+                </template>
+                <template v-else>
+                  <td class="cell-ln tabular-nums">{{ line.oldLine ?? '' }}</td>
+                  <td class="cell-ln tabular-nums">{{ line.newLine ?? '' }}</td>
+                </template>
                 <td class="cell-sign">
                   {{ line.kind === 'add' ? '+' : line.kind === 'remove' ? '−' : '' }}
                 </td>
@@ -608,8 +622,14 @@ defineExpose({
 .col-w-ln {
   width: 44px;
 }
+.col-w-ln-compact {
+  width: 36px;
+}
 .col-w-sign {
   width: 22px;
+}
+.col-w-sign-compact {
+  width: 16px;
 }
 .cell-ln {
   padding: 1px 8px 1px 4px;
@@ -620,6 +640,9 @@ defineExpose({
   font-size: 12px;
   color: var(--ui-text-dimmed);
   user-select: none;
+}
+.cell-ln-compact {
+  padding-inline: 2px 4px;
 }
 .cell-sign {
   padding: 1px 0;

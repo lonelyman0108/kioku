@@ -317,18 +317,44 @@ defineExpose({ filterOpen, exitBatchMode, displayItems })
 
 <template>
   <section class="list-pane" aria-label="记忆列表">
-    <!-- 窄屏目录抽屉入口条 -->
+    <!-- 窄屏目录抽屉入口条（合并视图计数与批量开关，避免下方重复一行） -->
     <div class="mobile-rail-bar">
-      <UButton
-        size="xs"
-        color="neutral"
-        variant="outline"
-        :icon="icons.menu"
-        @click="emit('openRail')"
-      >
-        目录与状态
-      </UButton>
-      <span class="mobile-view-label tabular-nums">{{ viewContextLabel }}</span>
+      <div class="mobile-rail-left">
+        <UButton
+          size="xs"
+          color="neutral"
+          variant="outline"
+          :icon="icons.menu"
+          class="shrink-0 whitespace-nowrap"
+          @click="emit('openRail')"
+        >
+          目录
+        </UButton>
+        <span class="mobile-view-label tabular-nums" :title="viewContextLabel">
+          {{ viewContextLabel }}
+        </span>
+      </div>
+      <div class="meta-right">
+        <button
+          v-if="hasFilters || search.trim() || pinnedGroup !== null"
+          type="button"
+          class="meta-link"
+          @click="emit('resetFilters')"
+        >
+          清除筛选
+        </button>
+        <UButton
+          v-if="canUseBatch && (batchMode || displayItems.length >= 2)"
+          size="xs"
+          :color="batchMode ? 'primary' : 'neutral'"
+          :variant="batchMode ? 'solid' : 'ghost'"
+          :icon="batchMode ? icons.cancel : icons.listChecks"
+          class="shrink-0 whitespace-nowrap"
+          @click="toggleBatchMode"
+        >
+          {{ batchMode ? '退出批量' : '批量整理' }}
+        </UButton>
+      </div>
     </div>
 
     <!-- 中栏顶部：精简筛选框 + 多维筛选 + 新建 -->
@@ -862,7 +888,17 @@ defineExpose({ filterOpen, exitBatchMode, displayItems })
   border-bottom: 1px solid var(--ui-border);
   background: var(--ui-bg-muted);
 }
+.mobile-rail-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
 .mobile-view-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 12px;
   color: var(--ui-text-muted);
 }
@@ -1339,6 +1375,18 @@ defineExpose({ filterOpen, exitBatchMode, displayItems })
 @media (max-width: 1023.98px) {
   .mobile-rail-bar {
     display: flex;
+  }
+  .list-meta-bar {
+    display: none;
+  }
+}
+@media (max-width: 767.98px), (pointer: coarse) {
+  .mobile-rail-bar {
+    min-height: 44px;
+  }
+  .chip {
+    min-height: 32px;
+    padding: 4px 9px;
   }
 }
 </style>
