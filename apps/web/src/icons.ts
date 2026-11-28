@@ -12,6 +12,7 @@ export const icons = {
   // 外壳与通用交互
   search: 'i-lucide-search',
   menu: 'i-lucide-menu',
+  panelLeft: 'i-lucide-panel-left',
   chevronDown: 'i-lucide-chevron-down',
   chevronUp: 'i-lucide-chevron-up',
   chevronRight: 'i-lucide-chevron-right',

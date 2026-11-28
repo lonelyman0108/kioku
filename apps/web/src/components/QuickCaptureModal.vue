@@ -32,10 +32,15 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { useSession } from '../composables/useSession'
+import { maskSecretSnippet, replaceMatchAtRange } from '../credentials'
 import { icons } from '../icons'
 import { envDisplayName } from '../labels'
 import { runtimeName } from '../runtimes'
-import { detectSecretPrefixes } from '../secretHint'
+import { findSecretMatches, type SecretMatch } from '../secretHint'
+import ConsequenceModal from './ConsequenceModal.vue'
+import InlineCredentialCaptureModal, {
+  type InlineCredentialSavedPayload,
+} from './InlineCredentialCaptureModal.vue'
 import MemoryContent from './MemoryContent.vue'
 import SceneScopePicker, { type SceneScopeValue } from './SceneScopePicker.vue'
 import DiffViewer from './ui/DiffViewer.vue'
@@ -145,6 +150,9 @@ const createForm = reactive({
 })
 
 const inputRef = ref<{ textareaRef?: HTMLTextAreaElement } | null>(null)
+const plainConfirmOpen = ref(false)
+const captureModalOpen = ref(false)
+const captureTarget = ref<{ source: 'input' | 'create' | 'draft'; match: SecretMatch } | null>(null)
 const undoingIds = new Set<string>()
 let controller: AbortController | null = null
 let loadingReturnStep: 'input' | 'preview' = 'input'
@@ -192,6 +200,9 @@ function resetState(prefill: string) {
   metaDraft.disclosure = ''
   metaDraft.changeSummary = ''
   metaScope.value = { envs: [], realms: [], projects: [], runtimes: [] }
+  plainConfirmOpen.value = false
+  captureModalOpen.value = false
+  captureTarget.value = null
 }
 
 async function focusInput() {
@@ -263,15 +274,48 @@ const hasCustomDraft = computed(
   () => viewAction.value === 'update' && draftContent.value !== baselineDraft.value,
 )
 
-const inputSecretWarnings = computed(() => detectSecretPrefixes(rawText.value))
-const editSecretWarnings = computed(() => {
+const inputSecretMatches = computed(() => findSecretMatches(rawText.value))
+const editSecretMatches = computed(() => {
   if (step.value !== 'preview') return []
-  if (viewAction.value === 'create') return detectSecretPrefixes(createForm.content)
-  if (viewAction.value === 'update' && editingDiff.value) {
-    return detectSecretPrefixes(draftContent.value)
+  if (viewAction.value === 'create') return findSecretMatches(createForm.content)
+  if (viewAction.value === 'update') {
+    return findSecretMatches(draftContent.value)
   }
   return []
 })
+
+function openInlineCapture(source: 'input' | 'create' | 'draft', match: SecretMatch) {
+  captureTarget.value = { source, match }
+  captureModalOpen.value = true
+}
+
+function onInlineCredentialSaved(payload: InlineCredentialSavedPayload) {
+  const target = captureTarget.value
+  captureTarget.value = null
+  if (!target) return
+  if (target.source === 'input') {
+    rawText.value = replaceMatchAtRange(rawText.value, target.match, payload.placeholder)
+  } else if (target.source === 'create') {
+    createForm.content = replaceMatchAtRange(createForm.content, target.match, payload.placeholder)
+  } else {
+    draftContent.value = replaceMatchAtRange(draftContent.value, target.match, payload.placeholder)
+  }
+  toast.add({ title: `已转存并替换为 ${payload.placeholder}`, color: 'success' })
+}
+
+function requestRunCapturePlan() {
+  if (!rawText.value.trim()) return
+  if (inputSecretMatches.value.length > 0) {
+    plainConfirmOpen.value = true
+    return
+  }
+  void runCapturePlan()
+}
+
+function confirmSendPlaintext() {
+  plainConfirmOpen.value = false
+  void runCapturePlan()
+}
 
 const integrity = computed<CaptureIntegrity | null>(() => {
   if (step.value !== 'preview' || viewAction.value !== 'update' || !targetShortId.value) {
@@ -588,7 +632,7 @@ function cancelLoading() {
 
 function onModalOpenChange(next: boolean) {
   if (!next) {
-    if (applyBusy.value) return
+    if (applyBusy.value || captureModalOpen.value || plainConfirmOpen.value) return
     if (step.value === 'loading') {
       cancelLoading()
       return
@@ -862,6 +906,8 @@ function onModalKeydown(event: KeyboardEvent) {
     event.defaultPrevented ||
     event.isComposing ||
     !open.value ||
+    captureModalOpen.value ||
+    plainConfirmOpen.value ||
     !(event.metaKey || event.ctrlKey) ||
     event.shiftKey ||
     event.altKey ||
@@ -872,7 +918,7 @@ function onModalKeydown(event: KeyboardEvent) {
   if (step.value === 'input') {
     if (!rawText.value.trim()) return
     event.preventDefault()
-    void runCapturePlan()
+    requestRunCapturePlan()
     return
   }
   if (step.value === 'preview') {
@@ -902,7 +948,7 @@ onBeforeUnmount(() => {
         ? `针对「${targetEntry.title}」生成单轮修订方案`
         : '自动匹配并归并至既有记忆'
     "
-    :dismissible="!applyBusy && step !== 'loading'"
+    :dismissible="!applyBusy && step !== 'loading' && !captureModalOpen && !plainConfirmOpen"
     :close="!applyBusy"
     :ui="{
       content: step === 'preview' ? 'w-[92vw] max-w-5xl sm:max-w-5xl' : 'max-w-2xl sm:max-w-2xl',
@@ -951,23 +997,36 @@ onBeforeUnmount(() => {
           />
         </UFormField>
 
-        <NoteLine v-if="inputSecretWarnings.length" tone="warning" flush>
-          内容疑似包含{{
-            inputSecretWarnings.map((w) => w.label).join('、')
-          }}，建议改存凭据并用占位符引用。
-          <template #actions>
-            <UButton
-              size="xs"
-              color="neutral"
-              variant="outline"
-              :icon="icons.credentials"
-              :to="{ name: 'credentials' }"
-              @click="open = false"
+        <div v-if="inputSecretMatches.length" class="secret-alert-box is-danger" role="status">
+          <p class="secret-alert-head">
+            <UIcon :name="icons.shieldAlert" class="secret-alert-icon" aria-hidden="true" />
+            <span>
+              检测到
+              {{ inputSecretMatches.length }} 处疑似明文凭据，建议先转存为托管凭据并用占位符替换
+            </span>
+          </p>
+          <ul class="secret-match-list">
+            <li
+              v-for="(m, idx) in inputSecretMatches"
+              :key="`${m.start}-${idx}`"
+              class="secret-match-row"
             >
-              前往凭据
-            </UButton>
-          </template>
-        </NoteLine>
+              <span class="secret-match-info">
+                <span class="secret-match-label">{{ m.label }}</span>
+                <code class="secret-match-snippet font-mono">{{ maskSecretSnippet(m.match) }}</code>
+              </span>
+              <UButton
+                size="xs"
+                color="neutral"
+                variant="outline"
+                :icon="icons.credentials"
+                @click="openInlineCapture('input', m)"
+              >
+                转存为凭据
+              </UButton>
+            </li>
+          </ul>
+        </div>
 
         <p v-if="error" class="text-sm text-error" role="alert">{{ error }}</p>
       </div>
@@ -1095,11 +1154,39 @@ onBeforeUnmount(() => {
             />
           </UFormField>
 
-          <NoteLine v-if="editSecretWarnings.length" tone="warning" flush>
-            正文疑似包含{{
-              editSecretWarnings.map((w) => w.label).join('、')
-            }}，建议改存凭据并用占位符引用。
-          </NoteLine>
+          <div v-if="editSecretMatches.length" class="secret-alert-box" role="status">
+            <p class="secret-alert-head">
+              <UIcon :name="icons.shieldAlert" class="secret-alert-icon" aria-hidden="true" />
+              <span>
+                正文疑似包含
+                {{ editSecretMatches.length }} 处明文凭据，建议改存托管凭据并用占位符替换
+              </span>
+            </p>
+            <ul class="secret-match-list">
+              <li
+                v-for="(m, idx) in editSecretMatches"
+                :key="`${m.start}-${idx}`"
+                class="secret-match-row"
+              >
+                <span class="secret-match-info">
+                  <span class="secret-match-label">{{ m.label }}</span>
+                  <code class="secret-match-snippet font-mono">{{
+                    maskSecretSnippet(m.match)
+                  }}</code>
+                </span>
+                <UButton
+                  size="xs"
+                  color="neutral"
+                  variant="outline"
+                  :icon="icons.credentials"
+                  :disabled="applyBusy"
+                  @click="openInlineCapture('create', m)"
+                >
+                  转存为凭据
+                </UButton>
+              </li>
+            </ul>
+          </div>
 
           <UFormField label="正文（Markdown）" name="content">
             <UTextarea
@@ -1193,11 +1280,39 @@ onBeforeUnmount(() => {
             </span>
           </div>
 
-          <NoteLine v-if="editSecretWarnings.length" tone="warning" flush>
-            正文疑似包含{{
-              editSecretWarnings.map((w) => w.label).join('、')
-            }}，建议改存凭据并用占位符引用。
-          </NoteLine>
+          <div v-if="editSecretMatches.length" class="secret-alert-box" role="status">
+            <p class="secret-alert-head">
+              <UIcon :name="icons.shieldAlert" class="secret-alert-icon" aria-hidden="true" />
+              <span>
+                正文疑似包含
+                {{ editSecretMatches.length }} 处明文凭据，建议改存托管凭据并用占位符替换
+              </span>
+            </p>
+            <ul class="secret-match-list">
+              <li
+                v-for="(m, idx) in editSecretMatches"
+                :key="`${m.start}-${idx}`"
+                class="secret-match-row"
+              >
+                <span class="secret-match-info">
+                  <span class="secret-match-label">{{ m.label }}</span>
+                  <code class="secret-match-snippet font-mono">{{
+                    maskSecretSnippet(m.match)
+                  }}</code>
+                </span>
+                <UButton
+                  size="xs"
+                  color="neutral"
+                  variant="outline"
+                  :icon="icons.credentials"
+                  :disabled="applyBusy"
+                  @click="openInlineCapture('draft', m)"
+                >
+                  转存为凭据
+                </UButton>
+              </li>
+            </ul>
+          </div>
 
           <!-- 可选元信息变更预览与编辑 -->
           <div v-if="hasMetaChanges || editingMeta" class="meta-revision-box">
@@ -1368,11 +1483,39 @@ onBeforeUnmount(() => {
     </template>
 
     <template #footer>
-      <!-- 输入态底部 -->
-      <div v-if="step === 'input'" class="modal-foot is-end">
+      <!-- 输入态底部：命中疑似明文时反转安全默认，将主按钮切为转存为凭据 -->
+      <div
+        v-if="step === 'input'"
+        class="modal-foot"
+        :class="{ 'is-end': !inputSecretMatches.length }"
+      >
+        <div v-if="inputSecretMatches.length" class="foot-group">
+          <UButton
+            color="neutral"
+            variant="ghost"
+            size="sm"
+            :disabled="!rawText.trim()"
+            @click="plainConfirmOpen = true"
+          >
+            仍以明文发送
+          </UButton>
+        </div>
         <div class="foot-group">
           <UButton color="neutral" variant="ghost" size="sm" @click="open = false">取消</UButton>
           <UButton
+            v-if="inputSecretMatches.length"
+            size="sm"
+            :icon="icons.credentials"
+            @click="openInlineCapture('input', inputSecretMatches[0]!)"
+          >
+            {{
+              inputSecretMatches.length > 1
+                ? `转存为凭据（${inputSecretMatches.length} 处）`
+                : '转存为凭据'
+            }}
+          </UButton>
+          <UButton
+            v-else
             size="sm"
             :icon="isRefineMode ? icons.sparkles : hasChatModel ? icons.capture : icons.search"
             :disabled="!rawText.trim()"
@@ -1517,6 +1660,32 @@ onBeforeUnmount(() => {
       </div>
     </template>
   </UModal>
+
+  <InlineCredentialCaptureModal
+    v-model:open="captureModalOpen"
+    :initial-value="captureTarget?.match.match ?? ''"
+    :initial-match="captureTarget?.match ?? null"
+    :default-realms="viewAction === 'create' ? createForm.realms : metaScope.realms"
+    title="转存为托管凭据并替换"
+    action-label="保存并替换"
+    @saved="onInlineCredentialSaved"
+  />
+
+  <ConsequenceModal
+    :open="plainConfirmOpen"
+    :title="hasChatModel ? '仍以明文发送给对话模型？' : '仍以明文继续检索？'"
+    :consequences="[
+      `当前输入检测到 ${inputSecretMatches.length} 处疑似明文凭据（${inputSecretMatches.map((m) => m.label).join('、')}）。`,
+      hasChatModel
+        ? '继续发送会将明文提交至已配置的对话模型接口，并可能随草稿写入记忆正文。'
+        : '继续操作可能将明文随草稿写入记忆正文，建议先转存为托管凭据。',
+    ]"
+    action="确认以明文继续"
+    :action-icon="icons.warning"
+    tone="error"
+    @confirm="confirmSendPlaintext"
+    @close="plainConfirmOpen = false"
+  />
 </template>
 
 <style scoped>
@@ -1906,6 +2075,72 @@ onBeforeUnmount(() => {
 .shortcut-hint {
   font-family: var(--font-mono);
   font-size: 12px;
+}
+.secret-alert-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--ui-warning);
+  border-left-width: 3px;
+  background: var(--ui-bg-muted);
+}
+.secret-alert-box.is-danger {
+  border-color: var(--ui-error);
+  background: color-mix(in srgb, var(--ui-error) 6%, var(--ui-bg));
+}
+.secret-alert-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--ui-warning);
+}
+.secret-alert-box.is-danger .secret-alert-head {
+  color: var(--ui-error);
+}
+.secret-alert-icon {
+  display: inline-block;
+  flex: none;
+  width: 15px;
+  height: 15px;
+  margin-top: 2px;
+}
+.secret-match-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.secret-match-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--ui-border);
+}
+.secret-match-info {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.secret-match-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ui-text-highlighted);
+}
+.secret-match-snippet {
+  padding: 0 6px;
+  border: 1px solid var(--ui-border-accented);
+  background: var(--ui-bg-bright);
+  font-size: 12px;
+  color: var(--ui-text-toned);
+  overflow-wrap: anywhere;
 }
 @media (max-width: 767.98px), (pointer: coarse) {
   .shortcut-hint {

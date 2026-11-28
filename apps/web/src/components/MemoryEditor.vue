@@ -40,11 +40,13 @@ import { useMarkdownSyncScroll } from '../composables/useMarkdownSyncScroll'
 import { useNow } from '../composables/useNow'
 import { useSession } from '../composables/useSession'
 import { useViewport } from '../composables/useViewport'
+import { formatCredentialPlaceholder, maskSecretSnippet, replaceMatchAtRange } from '../credentials'
 import { icons } from '../icons'
 import {
   bootModeDescriptions,
   bootModeIcons,
   bootModeLabels,
+  credentialFieldLabel,
   envDisplayName,
   eventTypeIcons,
   eventTypeLabels,
@@ -56,7 +58,6 @@ import {
   type CredentialLinks,
   type WikiLinkTargets,
 } from '../markdown'
-import { placeholderOf } from '../placeholders'
 import {
   clampRailWidth,
   computeMaxRailWidth,
@@ -67,7 +68,7 @@ import {
 } from '../readRail'
 import { credentialRoute, entryRoute } from '../routes'
 import { runtimeName } from '../runtimes'
-import { detectSecretPrefixes } from '../secretHint'
+import { findSecretMatches, type SecretMatch } from '../secretHint'
 import {
   earliestValidTo,
   formatRelative,
@@ -89,6 +90,9 @@ import {
 } from '../uiState'
 import ConsequenceModal from './ConsequenceModal.vue'
 import EntryLinksPanel from './EntryLinksPanel.vue'
+import InlineCredentialCaptureModal, {
+  type InlineCredentialSavedPayload,
+} from './InlineCredentialCaptureModal.vue'
 import MemoryContent from './MemoryContent.vue'
 import MemoryHistoryDrawer from './MemoryHistoryDrawer.vue'
 import QuickCaptureModal from './QuickCaptureModal.vue'
@@ -362,9 +366,7 @@ watch(
 const now = useNow(30_000)
 const expiredNow = computed(() => Boolean(entry.value && isExpired(entry.value.validTo, now.value)))
 const isDeleted = computed(() => Boolean(entry.value?.deletedAt))
-const secretWarnings = computed(() =>
-  mode.value === 'edit' ? detectSecretPrefixes(form.content) : [],
-)
+const secretMatches = computed(() => (mode.value === 'edit' ? findSecretMatches(form.content) : []))
 const editBootWarnings = computed(() => {
   if (mode.value !== 'edit' || entry.value?.kind !== 'entry') return []
   return lintEntryHygiene({
@@ -819,15 +821,216 @@ function insertWikiLink(shortId: string) {
 }
 
 const credPickerOpen = ref(false)
+const credQuery = ref('')
 const credentialsList = useQuery({
   queryKey: ['credentials'] as const,
   queryFn: () => api.credentials(),
   enabled: credPickerOpen,
 })
 
-function insertCredential(slug: string) {
-  insertAtCursor(placeholderOf(slug))
+const filteredCredentials = computed(() => {
+  const items = credentialsList.data.value?.items ?? []
+  const q = credQuery.value.trim().toLowerCase()
+  if (!q) return items
+  return items.filter(
+    (c) =>
+      c.label.toLowerCase().includes(q) ||
+      c.slug.toLowerCase().includes(q) ||
+      (c.description ?? '').toLowerCase().includes(q) ||
+      c.fieldMeta.some(
+        (f) => f.name.toLowerCase().includes(q) || (f.label ?? '').toLowerCase().includes(q),
+      ),
+  )
+})
+
+function insertCredentialPlaceholder(snippet: string) {
+  insertAtCursor(snippet)
   credPickerOpen.value = false
+  credQuery.value = ''
+}
+
+const editorSelection = ref<{ start: number; end: number; text: string }>({
+  start: 0,
+  end: 0,
+  text: '',
+})
+function syncEditorSelection() {
+  const el = contentRef.value?.textareaRef
+  if (!el) return
+  const start = el.selectionStart ?? 0
+  const end = el.selectionEnd ?? start
+  const text = end > start ? form.content.slice(start, end) : ''
+  editorSelection.value = { start, end, text }
+}
+const hasSelectedText = computed(() => editorSelection.value.text.trim().length > 0)
+
+interface InlineCaptureContext {
+  purpose: 'match' | 'selection' | 'insert' | 'missing'
+  match: SecretMatch | null
+  selectionRange: { start: number; end: number } | null
+  initialValue: string
+  initialSlug: string
+  initialField: string | null
+  initialMode: 'new' | 'append'
+  targetCredentialId: string | null
+  lockTarget: boolean
+  preserveDefaultRef: boolean
+  title: string
+  actionLabel: string
+}
+
+const inlineCaptureOpen = ref(false)
+const inlineCapture = ref<InlineCaptureContext>({
+  purpose: 'insert',
+  match: null,
+  selectionRange: null,
+  initialValue: '',
+  initialSlug: '',
+  initialField: null,
+  initialMode: 'new',
+  targetCredentialId: null,
+  lockTarget: false,
+  preserveDefaultRef: false,
+  title: '转存为托管凭据',
+  actionLabel: '保存并替换',
+})
+
+function openCaptureForMatch(match: SecretMatch) {
+  inlineCapture.value = {
+    purpose: 'match',
+    match,
+    selectionRange: null,
+    initialValue: match.match,
+    initialSlug: '',
+    initialField: null,
+    initialMode: 'new',
+    targetCredentialId: null,
+    lockTarget: false,
+    preserveDefaultRef: false,
+    title: '转存为托管凭据并替换',
+    actionLabel: '保存并替换',
+  }
+  inlineCaptureOpen.value = true
+}
+
+function openCaptureForSelection() {
+  syncEditorSelection()
+  const sel = editorSelection.value
+  const trimmed = sel.text.trim()
+  if (!trimmed) {
+    toast.add({ title: '请先在正文选中一段敏感文本', color: 'neutral' })
+    return
+  }
+  const leading = sel.text.indexOf(trimmed)
+  const start = sel.start + Math.max(0, leading)
+  const end = start + trimmed.length
+  const detected = findSecretMatches(trimmed)[0] ?? null
+  inlineCapture.value = {
+    purpose: 'selection',
+    match: detected,
+    selectionRange: { start, end },
+    initialValue: trimmed,
+    initialSlug: '',
+    initialField: null,
+    initialMode: 'new',
+    targetCredentialId: null,
+    lockTarget: false,
+    preserveDefaultRef: false,
+    title: '转存选中内容为托管凭据',
+    actionLabel: '保存并替换选中内容',
+  }
+  inlineCaptureOpen.value = true
+}
+
+function openCaptureToInsert() {
+  credPickerOpen.value = false
+  credQuery.value = ''
+  inlineCapture.value = {
+    purpose: 'insert',
+    match: null,
+    selectionRange: null,
+    initialValue: '',
+    initialSlug: '',
+    initialField: null,
+    initialMode: 'new',
+    targetCredentialId: null,
+    lockTarget: false,
+    preserveDefaultRef: false,
+    title: '新建托管凭据并插入',
+    actionLabel: '保存并插入',
+  }
+  inlineCaptureOpen.value = true
+}
+
+async function openMissingCredentialCapture(refItem: { slug: string; field: string | null }) {
+  if (isDeleted.value) return
+  let items = credentialsList.data.value?.items ?? []
+  if (!items.length) {
+    try {
+      const res = await queryClient.ensureQueryData({
+        queryKey: ['credentials'] as const,
+        queryFn: () => api.credentials(),
+      })
+      items = res.items
+    } catch {
+      items = []
+    }
+  }
+  const existing = items.find((c) => c.slug === refItem.slug) ?? null
+  if (existing && refItem.field) {
+    inlineCapture.value = {
+      purpose: 'missing',
+      match: null,
+      selectionRange: null,
+      initialValue: '',
+      initialSlug: existing.slug,
+      initialField: refItem.field,
+      initialMode: 'append',
+      targetCredentialId: existing.id,
+      lockTarget: true,
+      preserveDefaultRef: false,
+      title: `补建凭据字段 ${existing.slug}#${refItem.field}`,
+      actionLabel: '保存并补建',
+    }
+  } else {
+    inlineCapture.value = {
+      purpose: 'missing',
+      match: null,
+      selectionRange: null,
+      initialValue: '',
+      initialSlug: refItem.slug,
+      initialField: refItem.field,
+      initialMode: 'new',
+      targetCredentialId: null,
+      lockTarget: true,
+      preserveDefaultRef: refItem.field === null,
+      title: refItem.field
+        ? `补建缺失凭据 ${refItem.slug}#${refItem.field}`
+        : `补建缺失凭据 ${refItem.slug}`,
+      actionLabel: '保存并补建',
+    }
+  }
+  inlineCaptureOpen.value = true
+}
+
+function onInlineCredentialSaved(payload: InlineCredentialSavedPayload) {
+  const ctx = inlineCapture.value
+  if (ctx.purpose === 'match' && ctx.match) {
+    form.content = replaceMatchAtRange(form.content, ctx.match, payload.placeholder)
+    toast.add({ title: `已转存并替换为 ${payload.placeholder}`, color: 'success' })
+  } else if (ctx.purpose === 'selection' && ctx.selectionRange) {
+    const { start, end } = ctx.selectionRange
+    form.content = `${form.content.slice(0, start)}${payload.placeholder}${form.content.slice(end)}`
+    editorSelection.value = { start: 0, end: 0, text: '' }
+    toast.add({ title: `已替换为 ${payload.placeholder}`, color: 'success' })
+  } else if (ctx.purpose === 'insert') {
+    insertAtCursor(payload.placeholder)
+    toast.add({ title: `已插入 ${payload.placeholder}`, color: 'success' })
+  } else if (ctx.purpose === 'missing') {
+    void queryClient.invalidateQueries({ queryKey: queryKey.value })
+    void detailQuery.refetch()
+    toast.add({ title: `已补建凭据 ${payload.slug}`, color: 'success' })
+  }
 }
 
 // 渲染正文的链接目标映射与展示归一化
@@ -888,6 +1091,8 @@ watch(
   () => props.shortId,
   () => {
     railHistoryExpanded.value = false
+    inlineCaptureOpen.value = false
+    editorSelection.value = { start: 0, end: 0, text: '' }
   },
 )
 
@@ -1186,18 +1391,37 @@ const wikiLinks = computed<WikiLinkTargets>(() => ({
 
 const credentialLinks = computed<CredentialLinks>(() => {
   const bySlug = new Map<string, { slug: string; label: string | null; available: boolean }>()
+  const byRef = new Map<
+    string,
+    { slug: string; field: string | null; label: string | null; available: boolean }
+  >()
   for (const refItem of detail.value?.credentialRefs ?? []) {
-    bySlug.set(refItem.slug, {
+    const field = refItem.field ?? null
+    byRef.set(`${refItem.slug}#${field ?? ''}`, {
       slug: refItem.slug,
+      field,
       label: refItem.label,
       available: refItem.available,
     })
+    const existing = bySlug.get(refItem.slug)
+    if (!existing || !refItem.available) {
+      bySlug.set(refItem.slug, {
+        slug: refItem.slug,
+        label: refItem.label,
+        available: refItem.available,
+      })
+    }
   }
   return {
     bySlug,
+    byRef,
     href: (slug) => router.resolve(credentialRoute(slug)).href,
   }
 })
+
+const missingCredentialRefs = computed(() =>
+  (detail.value?.credentialRefs ?? []).filter((r) => !r.available),
+)
 
 function openCredential(slug: string) {
   void router.push(credentialRoute(slug))
@@ -1238,6 +1462,7 @@ function onEditorKeydown(event: KeyboardEvent) {
   if (
     historyOpen.value ||
     deleteModal.value !== null ||
+    inlineCaptureOpen.value ||
     document.querySelector('[role="dialog"]')
   ) {
     return
@@ -1945,22 +2170,38 @@ defineExpose({
               </template>
             </NoteLine>
 
-            <NoteLine v-if="secretWarnings.length" tone="warning">
-              正文疑似包含{{
-                secretWarnings.map((w) => w.label).join('、')
-              }}，建议改存凭据并用占位符引用。
-              <template #actions>
-                <UButton
-                  size="xs"
-                  color="neutral"
-                  variant="outline"
-                  :icon="icons.credentials"
-                  :to="{ name: 'credentials' }"
+            <div v-if="secretMatches.length" class="secret-alert-box" role="status">
+              <p class="secret-alert-head">
+                <UIcon :name="icons.shieldAlert" class="secret-alert-icon" aria-hidden="true" />
+                <span>
+                  正文疑似包含 {{ secretMatches.length }} 处明文凭据，建议改存托管凭据并用占位符替换
+                </span>
+              </p>
+              <ul class="secret-match-list">
+                <li
+                  v-for="(m, idx) in secretMatches"
+                  :key="`${m.start}-${idx}`"
+                  class="secret-match-row"
                 >
-                  前往凭据
-                </UButton>
-              </template>
-            </NoteLine>
+                  <span class="secret-match-info">
+                    <span class="secret-match-label">{{ m.label }}</span>
+                    <code class="secret-match-snippet font-mono">{{
+                      maskSecretSnippet(m.match)
+                    }}</code>
+                  </span>
+                  <UButton
+                    type="button"
+                    size="xs"
+                    color="neutral"
+                    variant="outline"
+                    :icon="icons.credentials"
+                    @click="openCaptureForMatch(m)"
+                  >
+                    转存为凭据并替换
+                  </UButton>
+                </li>
+              </ul>
+            </div>
 
             <div class="edit-toolbar">
               <UPopover v-model:open="linkPickerOpen">
@@ -2020,31 +2261,95 @@ defineExpose({
                   插入凭据
                 </UButton>
                 <template #content>
-                  <div class="w-72 p-2.5">
-                    <ul class="max-h-52 divide-y divide-default overflow-y-auto text-sm">
-                      <li v-for="cred in credentialsList.data.value?.items ?? []" :key="cred.id">
+                  <div class="cred-picker-pop">
+                    <UInput
+                      v-model="credQuery"
+                      size="xs"
+                      :icon="icons.search"
+                      placeholder="按名称、标识或字段查找"
+                      class="w-full"
+                    />
+                    <ul class="cred-picker-list">
+                      <li
+                        v-for="cred in filteredCredentials"
+                        :key="cred.id"
+                        class="cred-picker-item"
+                      >
                         <button
                           type="button"
-                          class="flex w-full items-baseline justify-between gap-2 px-1.5 py-1.5 text-left hover:bg-elevated"
-                          @click="insertCredential(cred.slug)"
+                          class="cred-picker-main"
+                          @click="insertCredentialPlaceholder(formatCredentialPlaceholder(cred))"
                         >
-                          <span class="truncate">{{ cred.label }}</span>
+                          <span class="truncate font-medium">{{ cred.label }}</span>
                           <span class="shrink-0 font-mono text-xs text-muted">{{ cred.slug }}</span>
                         </button>
+                        <div v-if="cred.fieldMeta.length > 1" class="cred-picker-fields">
+                          <button
+                            v-for="field in cred.fieldMeta"
+                            :key="field.name"
+                            type="button"
+                            class="cred-field-chip"
+                            :title="`插入 ${formatCredentialPlaceholder(cred, field.name)}`"
+                            @click="
+                              insertCredentialPlaceholder(
+                                formatCredentialPlaceholder(cred, field.name),
+                              )
+                            "
+                          >
+                            <span>{{
+                              credentialFieldLabel(cred.kind, field.name, field.label)
+                            }}</span>
+                            <span
+                              v-if="field.name !== cred.primaryField"
+                              class="font-mono text-dimmed"
+                            >
+                              #{{ field.name }}
+                            </span>
+                          </button>
+                        </div>
                       </li>
                       <li
-                        v-if="
-                          !credentialsList.isPending.value &&
-                          !credentialsList.data.value?.items.length
-                        "
+                        v-if="!credentialsList.isPending.value && !filteredCredentials.length"
                         class="py-3 text-center text-xs text-muted"
                       >
-                        暂无凭据
+                        {{ credQuery.trim() ? '暂无匹配凭据' : '暂无凭据' }}
                       </li>
                     </ul>
+                    <div class="cred-picker-foot">
+                      <UButton
+                        type="button"
+                        size="xs"
+                        color="neutral"
+                        variant="outline"
+                        :icon="icons.add"
+                        class="w-full justify-center"
+                        @click="openCaptureToInsert"
+                      >
+                        新建凭据并插入
+                      </UButton>
+                    </div>
                   </div>
                 </template>
               </UPopover>
+
+              <UButton
+                v-if="editView !== 'preview'"
+                type="button"
+                size="xs"
+                :color="hasSelectedText ? 'primary' : 'neutral'"
+                variant="outline"
+                :icon="icons.lock"
+                :disabled="!hasSelectedText"
+                :title="
+                  hasSelectedText
+                    ? '将当前选中文本转存为托管凭据并原地替换为占位符'
+                    : '先在正文选中一段敏感文本再点击转存'
+                "
+                @mousedown.prevent
+                @click="openCaptureForSelection"
+              >
+                转存选中内容
+              </UButton>
 
               <div class="toolbar-right">
                 <UButton
@@ -2088,6 +2393,10 @@ defineExpose({
                   :maxrows="editView === 'edit' ? 36 : undefined"
                   class="source-input w-full font-mono"
                   aria-label="正文"
+                  @select="syncEditorSelection"
+                  @mouseup="syncEditorSelection"
+                  @keyup="syncEditorSelection"
+                  @input="syncEditorSelection"
                 />
               </div>
 
@@ -2110,6 +2419,7 @@ defineExpose({
                     :credentials="credentialLinks"
                     @open="(sid) => emit('open', sid)"
                     @credential="openCredential"
+                    @missing-credential="openMissingCredentialCapture"
                   />
                 </div>
               </div>
@@ -2238,6 +2548,28 @@ defineExpose({
                 </p>
               </section>
 
+              <NoteLine v-if="!isDeleted && missingCredentialRefs.length" tone="warning">
+                正文引用了
+                {{ missingCredentialRefs.length }}
+                处未找到的凭据或字段，点击正文中的橙色标记可就地补建。
+                <template #actions>
+                  <UButton
+                    size="xs"
+                    color="neutral"
+                    variant="outline"
+                    :icon="icons.credentials"
+                    @click="
+                      openMissingCredentialCapture({
+                        slug: missingCredentialRefs[0]!.slug,
+                        field: missingCredentialRefs[0]!.field ?? null,
+                      })
+                    "
+                  >
+                    补建缺失凭据
+                  </UButton>
+                </template>
+              </NoteLine>
+
               <MemoryContent
                 ref="readContentRef"
                 :content="displayContent"
@@ -2246,6 +2578,7 @@ defineExpose({
                 :credentials="credentialLinks"
                 @open="(sid) => emit('open', sid)"
                 @credential="openCredential"
+                @missing-credential="openMissingCredentialCapture"
               />
 
               <!-- 窄容器下在正文下方纵向呈现近期演进与双链 -->
@@ -2481,6 +2814,7 @@ defineExpose({
         :mode="organizeMode"
         @applied="onSingleTidyApplied"
         @staged="onSingleTidyStaged"
+        @edit="startEditing"
       />
 
       <QuickCaptureModal
@@ -2504,6 +2838,22 @@ defineExpose({
         :error="deleteError"
         @confirm="confirmDelete"
         @close="deleteModal = null"
+      />
+
+      <InlineCredentialCaptureModal
+        v-model:open="inlineCaptureOpen"
+        :initial-value="inlineCapture.initialValue"
+        :initial-match="inlineCapture.match"
+        :initial-slug="inlineCapture.initialSlug"
+        :initial-field="inlineCapture.initialField"
+        :initial-mode="inlineCapture.initialMode"
+        :target-credential-id="inlineCapture.targetCredentialId"
+        :lock-target="inlineCapture.lockTarget"
+        :preserve-default-ref="inlineCapture.preserveDefaultRef"
+        :default-realms="mode === 'edit' ? scope.realms : (entry.realms ?? [])"
+        :title="inlineCapture.title"
+        :action-label="inlineCapture.actionLabel"
+        @saved="onInlineCredentialSaved"
       />
     </template>
   </article>
@@ -3535,6 +3885,122 @@ defineExpose({
   align-items: center;
   gap: 8px;
   padding-bottom: 4px;
+}
+.secret-alert-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--ui-warning);
+  border-left-width: 3px;
+  background: var(--ui-bg-muted);
+}
+.secret-alert-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--ui-warning);
+}
+.secret-alert-icon {
+  display: inline-block;
+  flex: none;
+  width: 15px;
+  height: 15px;
+  margin-top: 2px;
+}
+.secret-match-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.secret-match-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--ui-border);
+}
+.secret-match-info {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.secret-match-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ui-text-highlighted);
+}
+.secret-match-snippet {
+  padding: 0 6px;
+  border: 1px solid var(--ui-border-accented);
+  background: var(--ui-bg-bright);
+  font-size: 12px;
+  color: var(--ui-text-toned);
+  overflow-wrap: anywhere;
+}
+.cred-picker-pop {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(21rem, calc(100vw - 2rem));
+  padding: 10px;
+}
+.cred-picker-list {
+  max-height: 15rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+.cred-picker-item {
+  padding: 6px 2px;
+  border-bottom: 1px solid var(--ui-border-muted);
+}
+.cred-picker-main {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 3px 4px;
+  text-align: left;
+  font-size: 13px;
+  cursor: pointer;
+}
+.cred-picker-main:hover {
+  background: var(--ui-bg-elevated);
+}
+.cred-picker-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+  padding-left: 4px;
+}
+.cred-field-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border: 1px solid var(--ui-border-accented);
+  background: var(--ui-bg-muted);
+  font-size: 12px;
+  color: var(--ui-text-toned);
+  cursor: pointer;
+}
+.cred-field-chip:hover {
+  border-color: var(--ui-rule);
+  color: var(--ui-text-highlighted);
+}
+.cred-picker-foot {
+  padding-top: 6px;
+  border-top: 1px solid var(--ui-border);
 }
 @media (max-width: 1023.98px) {
   .editor-head {
