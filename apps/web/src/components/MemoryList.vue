@@ -330,7 +330,9 @@ defineExpose({ filterOpen, exitBatchMode, displayItems })
         >
           目录
         </UButton>
-        <span class="mobile-view-label tabular-nums">{{ viewContextLabel }}</span>
+        <span class="mobile-view-label tabular-nums" :title="viewContextLabel">
+          {{ viewContextLabel }}
+        </span>
       </div>
       <div class="meta-right">
         <button
@@ -347,6 +349,7 @@ defineExpose({ filterOpen, exitBatchMode, displayItems })
           :color="batchMode ? 'primary' : 'neutral'"
           :variant="batchMode ? 'solid' : 'ghost'"
           :icon="batchMode ? icons.cancel : icons.listChecks"
+          class="shrink-0 whitespace-nowrap"
           @click="toggleBatchMode"
         >
           {{ batchMode ? '退出批量' : '批量整理' }}
@@ -892,6 +895,10 @@ defineExpose({ filterOpen, exitBatchMode, displayItems })
   min-width: 0;
 }
 .mobile-view-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 12px;
   color: var(--ui-text-muted);
 }

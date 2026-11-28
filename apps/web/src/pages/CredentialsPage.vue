@@ -580,11 +580,13 @@ watch(highlightSlug, (slug) => {
   font-weight: 600;
   line-height: 1.4;
   color: var(--ui-text-highlighted);
+  overflow-wrap: anywhere;
 }
 .cred-card-desc {
   font-size: 12px;
   line-height: 1.5;
   color: var(--ui-text-muted);
+  overflow-wrap: anywhere;
 }
 .cred-card-slug-row {
   display: flex;

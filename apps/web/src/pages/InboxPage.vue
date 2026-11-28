@@ -1244,6 +1244,7 @@ function hasOpenOverlay(): boolean {
 }
 
 function stepSuggestion(delta: -1 | 1) {
+  if (busyId.value || batchBusy.value || batchDismissBusy.value) return
   const list = orderedVisibleItems.value
   if (!list.length) return
   const currentIndex = activeIndex.value
@@ -1288,24 +1289,9 @@ function onKeydown(event: KeyboardEvent) {
 
   const key = event.key.toLowerCase()
   if (key === 'j' || event.key === 'ArrowDown' || key === 'k' || event.key === 'ArrowUp') {
-    const list = orderedVisibleItems.value
-    if (!list.length) return
+    if (!orderedVisibleItems.value.length) return
     event.preventDefault()
-    const currentIndex = activeIndex.value
-    const nextIndex =
-      key === 'j' || event.key === 'ArrowDown'
-        ? currentIndex < 0
-          ? 0
-          : Math.min(list.length - 1, currentIndex + 1)
-        : currentIndex <= 0
-          ? 0
-          : currentIndex - 1
-    const target = list[nextIndex]
-    if (target && target.id !== selectedId.value) {
-      if (!confirmSwitchAway()) return
-      selectedId.value = target.id
-      scrollSelectedRowIntoView(target.id)
-    }
+    stepSuggestion(key === 'j' || event.key === 'ArrowDown' ? 1 : -1)
     return
   }
 

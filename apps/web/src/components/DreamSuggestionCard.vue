@@ -937,7 +937,14 @@ defineExpose({
   <!-- 全高审校台态（整理页右栏：顶部依据与护栏 + 中央宽幅变更对比 + 底部固定决断栏） -->
   <div v-if="isInspector" class="workbench-shell">
     <div v-if="showBack" class="mobile-back-bar">
-      <UButton size="sm" color="neutral" variant="ghost" :icon="icons.back" @click="emit('back')">
+      <UButton
+        size="sm"
+        color="neutral"
+        variant="ghost"
+        :icon="icons.back"
+        class="shrink-0 whitespace-nowrap"
+        @click="emit('back')"
+      >
         返回队列
       </UButton>
       <div v-if="position && totalCount" class="mobile-back-nav">
@@ -947,7 +954,8 @@ defineExpose({
           color="neutral"
           variant="outline"
           :icon="icons.up"
-          :disabled="!hasPrev || busy"
+          :disabled="!hasPrev || busy || disabled || reviseBusy"
+          class="shrink-0 whitespace-nowrap"
           @click="emit('prev')"
         >
           上一条
@@ -959,7 +967,8 @@ defineExpose({
           color="neutral"
           variant="outline"
           :icon="icons.down"
-          :disabled="!hasNext || busy"
+          :disabled="!hasNext || busy || disabled || reviseBusy"
+          class="shrink-0 whitespace-nowrap"
           @click="emit('next')"
         >
           下一条

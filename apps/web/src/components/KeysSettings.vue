@@ -611,6 +611,7 @@ async function confirmRevoke() {
   font-weight: 600;
   line-height: 1.4;
   color: var(--ui-text-highlighted);
+  overflow-wrap: anywhere;
 }
 .key-card-sub {
   display: flex;

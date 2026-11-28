@@ -161,6 +161,13 @@ const EDIT_VIEW_OPTIONS: { value: EditViewMode; label: string; icon: string; tit
 
 const viewport = useViewport()
 const isPhone = computed(() => viewport.value.width < 768)
+const editorScrollWidth = ref(0)
+const canSplitEdit = computed(
+  () => !isPhone.value && (editorScrollWidth.value === 0 || editorScrollWidth.value >= 680),
+)
+const visibleEditViewOptions = computed(() =>
+  canSplitEdit.value ? EDIT_VIEW_OPTIONS : EDIT_VIEW_OPTIONS.filter((opt) => opt.value !== 'split'),
+)
 
 const BOOT_MODE_OPTIONS: { value: BootMode; label: string; icon: string }[] = BOOT_MODES.map(
   (value) => ({
@@ -177,9 +184,20 @@ const entryBootMode = computed<BootMode>(() =>
 )
 const PERSISTED_EDIT_VIEWS = ['edit', 'split'] as const
 const mode = ref<'read' | 'edit'>('read')
-const editView = ref<EditViewMode>(
+const preferredEditView = ref<EditViewMode>(
   readStoredEnum(UI_STORAGE_KEYS.editorView, PERSISTED_EDIT_VIEWS, 'edit'),
 )
+const editView = computed<EditViewMode>({
+  get: () =>
+    preferredEditView.value === 'split' && !canSplitEdit.value ? 'edit' : preferredEditView.value,
+  set: (next) => {
+    const resolved = next === 'split' && !canSplitEdit.value ? 'edit' : next
+    preferredEditView.value = resolved
+    if (resolved === 'edit' || resolved === 'split') {
+      writeStoredString(UI_STORAGE_KEYS.editorView, resolved)
+    }
+  },
+})
 const syncScroll = ref(readStoredBoolean(UI_STORAGE_KEYS.editorSyncScroll, true))
 const attrsOpen = ref(false)
 const historyOpen = ref(false)
@@ -190,9 +208,6 @@ const previewScrollRef = ref<HTMLElement | null>(null)
 const workbenchRef = ref<HTMLElement | null>(null)
 
 watch(editView, async (next) => {
-  if (next === 'edit' || next === 'split') {
-    writeStoredString(UI_STORAGE_KEYS.editorView, next)
-  }
   if (next === 'split' && mode.value === 'edit') {
     await nextTick()
     workbenchRef.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
@@ -408,8 +423,12 @@ function startEditing() {
   minValidTo.value = earliestValidTo()
   attrsOpen.value = false
   form.changeSummary = ''
-  if (editView.value === 'preview') {
-    editView.value = readStoredEnum(UI_STORAGE_KEYS.editorView, PERSISTED_EDIT_VIEWS, 'edit')
+  if (preferredEditView.value === 'preview') {
+    preferredEditView.value = readStoredEnum(
+      UI_STORAGE_KEYS.editorView,
+      PERSISTED_EDIT_VIEWS,
+      'edit',
+    )
   }
   mode.value = 'edit'
 }
@@ -875,7 +894,6 @@ watch(
 // 右侧辅助轨默认按容器弹性自适应，拖拽后持久化像素宽度，双击分隔线恢复自适应
 const editorScrollRef = ref<HTMLElement | null>(null)
 const readRailRef = ref<HTMLElement | null>(null)
-const editorScrollWidth = ref(0)
 const editorScrollHeight = ref(0)
 const storedRailWidth = ref<number | null>(
   parseStoredRailWidth(readStoredString(UI_STORAGE_KEYS.readRailWidth)),
@@ -1080,16 +1098,6 @@ const organizeMenuItems = computed<DropdownMenuItem[][]>(() => {
   ]
 })
 
-const canSplitEdit = computed(
-  () => !isPhone.value && (editorScrollWidth.value === 0 || editorScrollWidth.value >= 680),
-)
-const visibleEditViewOptions = computed(() =>
-  canSplitEdit.value ? EDIT_VIEW_OPTIONS : EDIT_VIEW_OPTIONS.filter((opt) => opt.value !== 'split'),
-)
-watch(canSplitEdit, (allowed) => {
-  if (!allowed && editView.value === 'split') editView.value = 'edit'
-})
-
 // 手机端阅读态顶栏「更多」菜单，将次级操作收拢释放首屏空间
 const mobileMoreMenuItems = computed<DropdownMenuItem[][]>(() => {
   const e = entry.value
@@ -1281,12 +1289,13 @@ defineExpose({
   >
     <div v-if="showBack" class="mobile-back-bar">
       <UButton
-        v-if="mode === 'edit'"
+        v-if="mode === 'edit' && isPhone"
         size="sm"
         color="neutral"
         variant="ghost"
         :icon="icons.cancel"
         :disabled="saving"
+        class="shrink-0 whitespace-nowrap"
         @click="requestCancelEditing"
       >
         退出编辑
@@ -1297,6 +1306,7 @@ defineExpose({
         color="neutral"
         variant="ghost"
         :icon="icons.back"
+        class="shrink-0 whitespace-nowrap"
         @click="emit('back')"
       >
         返回列表
@@ -1310,6 +1320,7 @@ defineExpose({
             :variant="entry.kind === 'episode' ? 'outline' : 'solid'"
             :icon="icons.edit"
             :disabled="quickBusy"
+            class="shrink-0 whitespace-nowrap"
             @click="startEditing"
           >
             编辑
@@ -1327,6 +1338,10 @@ defineExpose({
               :icon="icons.tidy"
               :trailing-icon="icons.chevronDown"
               :disabled="!hasChatModel || quickBusy"
+              :title="
+                hasChatModel ? '按说明修订、规范此条或查重与关联' : '请先在设置中配置对话模型'
+              "
+              class="shrink-0 whitespace-nowrap"
             >
               整理
             </UButton>
@@ -1342,6 +1357,7 @@ defineExpose({
               variant="outline"
               :trailing-icon="icons.chevronDown"
               aria-label="更多操作"
+              class="shrink-0 whitespace-nowrap"
             >
               更多
             </UButton>
@@ -3578,6 +3594,9 @@ defineExpose({
   }
   .edit-toolbar .toolbar-right {
     display: none;
+  }
+  .source-input :deep(textarea) {
+    font-size: 16px;
   }
   .inline-chip {
     height: auto;

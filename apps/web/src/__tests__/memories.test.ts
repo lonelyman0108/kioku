@@ -369,6 +369,8 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(keysSettings).toContain('shrink-0 whitespace-nowrap')
     expect(memoryEditor).toContain('mobileMoreMenuItems')
     expect(memoryEditor).toContain('visibleEditViewOptions')
+    expect(memoryEditor).toContain("preferredEditView.value === 'split' && !canSplitEdit.value")
+    expect(memoryEditor).toContain('.source-input :deep(textarea) {\n    font-size: 16px;\n  }')
     expect(memoryEditor).toContain('mobile-change-note-field')
     expect(saveBar).toContain('@media (max-width: 767.98px), (pointer: coarse)')
     expect(diffViewer).toContain('isCompactUnified')

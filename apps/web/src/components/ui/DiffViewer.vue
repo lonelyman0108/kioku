@@ -623,7 +623,7 @@ defineExpose({
   width: 44px;
 }
 .col-w-ln-compact {
-  width: 30px;
+  width: 36px;
 }
 .col-w-sign {
   width: 22px;
