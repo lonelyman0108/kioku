@@ -219,6 +219,9 @@ watch(
   async (visible) => {
     if (!visible) {
       abortPending()
+      plainConfirmOpen.value = false
+      captureModalOpen.value = false
+      captureTarget.value = null
       return
     }
     resetState(props.initialText)
@@ -226,6 +229,10 @@ watch(
   },
   { immediate: true },
 )
+
+watch(captureModalOpen, (visible) => {
+  if (!visible) captureTarget.value = null
+})
 
 watch(
   () => props.initialText,
@@ -935,6 +942,7 @@ function onModalKeydown(event: KeyboardEvent) {
 onMounted(() => window.addEventListener('keydown', onModalKeydown))
 onBeforeUnmount(() => {
   abortPending()
+  captureTarget.value = null
   window.removeEventListener('keydown', onModalKeydown)
 })
 </script>
@@ -1666,6 +1674,7 @@ onBeforeUnmount(() => {
     :initial-value="captureTarget?.match.match ?? ''"
     :initial-match="captureTarget?.match ?? null"
     :default-realms="viewAction === 'create' ? createForm.realms : metaScope.realms"
+    silent-success-toast
     title="转存为托管凭据并替换"
     action-label="保存并替换"
     @saved="onInlineCredentialSaved"

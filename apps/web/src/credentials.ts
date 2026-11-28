@@ -1,13 +1,174 @@
 import {
+  CREDENTIAL_FIELDS_MAX,
   CREDENTIAL_TEMPLATES,
+  CredentialFieldName,
   normalizeSlugList,
   type ApiKeyView,
+  type CredentialFieldMeta,
   type CredentialKind,
   type CredentialMeta,
   type SecretMatch,
 } from '@kioku/contracts'
 
 import { placeholderOf } from './placeholders'
+
+// 左侧场域筛选哨兵值，避开合法场域标识字符集，防止与真实场域重名
+export const CREDENTIAL_REALM_ALL = '__all__'
+export const CREDENTIAL_REALM_UNSCOPED = '__unscoped__'
+export const CREDENTIAL_REALM_EMPTY = '__empty__'
+
+export interface EditableCredentialFieldRow {
+  name: string
+  label: string
+  secret: boolean
+  multiline: boolean
+  preset: boolean
+  existingKey: string | null
+  existingUnloaded: boolean
+  originalPlainValue: string | null
+  value: string
+}
+
+export interface CredentialUpdateFieldsPlan {
+  fieldsToSet: Record<string, string>
+  fieldMeta: CredentialFieldMeta[]
+  removeFields: string[]
+  primaryField: string
+  effectiveFieldCount: number
+  touchedFieldCount: number
+}
+
+// 将受控读取返回的字段值回填至编辑行：不依赖当前 secret 开关，且保留用户已手工输入的新值
+export function applyRevealedValuesToEditRows<T extends EditableCredentialFieldRow>(
+  rows: readonly T[],
+  revealed: Readonly<Record<string, string>>,
+): number {
+  let filled = 0
+  for (const row of rows) {
+    if (!row.existingKey || !row.existingUnloaded) continue
+    if (!Object.hasOwn(revealed, row.existingKey)) continue
+    const val = revealed[row.existingKey]!
+    if (!row.value) row.value = val
+    row.originalPlainValue = val
+    row.existingUnloaded = false
+    filled++
+  }
+  return filled
+}
+
+// 校验编辑态字段行：非敏感字段仍在加载时阻断保存；未加载字段留空视为保留原值，已加载字段留空视为移除
+export function validateCredentialEditRows(
+  rows: readonly EditableCredentialFieldRow[],
+  options: { plainLoading: boolean },
+): string | null {
+  if (options.plainLoading) return '正在读取非敏感字段，请稍候保存'
+  const seenNames = new Set<string>()
+  let effectiveFieldCount = 0
+
+  for (const row of rows) {
+    if (row.existingKey) {
+      if (!row.existingUnloaded && !row.value.length) continue
+      if (seenNames.has(row.existingKey)) return `字段键名 ${row.existingKey} 重复`
+      seenNames.add(row.existingKey)
+      effectiveFieldCount++
+      continue
+    }
+    const cleanName = row.name.trim().toLowerCase()
+    const hasVal = row.value.length > 0
+    if (!cleanName && !hasVal) continue
+    const nameCheck = CredentialFieldName.safeParse(cleanName)
+    if (!nameCheck.success) return nameCheck.error.issues[0]?.message ?? '字段键名格式有误'
+    if (!hasVal) return `请填写新增字段 ${cleanName} 的值`
+    if (seenNames.has(cleanName)) return `字段键名 ${cleanName} 重复`
+    seenNames.add(cleanName)
+    effectiveFieldCount++
+  }
+
+  if (effectiveFieldCount === 0) return '请至少保留一个非空凭据字段'
+  if (effectiveFieldCount > CREDENTIAL_FIELDS_MAX) return `字段最多 ${CREDENTIAL_FIELDS_MAX} 个`
+  return null
+}
+
+// 构建编辑态 PATCH 所需的字段更新、元数据、删除清单与变动统计，防止未加载字段被误删，并支持移除后重建同名字段
+export function buildCredentialUpdateFields(
+  cred: Pick<CredentialMeta, 'kind' | 'primaryField' | 'fieldMeta'>,
+  rows: readonly EditableCredentialFieldRow[],
+  requestedPrimaryField: string,
+  resolveFieldLabel: (kind: CredentialKind, fieldName: string, explicitLabel?: string) => string,
+): CredentialUpdateFieldsPlan {
+  const origMetaMap = new Map(cred.fieldMeta.map((f) => [f.name, f]))
+  const fieldsToSet: Record<string, string> = {}
+  const fieldMeta: CredentialFieldMeta[] = []
+  let touchedFieldCount = 0
+
+  for (const row of rows) {
+    if (row.existingKey) {
+      if (!row.existingUnloaded && !row.value) {
+        continue
+      }
+      const nextLabel = row.label.trim() || resolveFieldLabel(cred.kind, row.existingKey)
+      const nextMultiline = row.multiline || row.value.includes('\n')
+      fieldMeta.push({
+        name: row.existingKey,
+        label: nextLabel,
+        secret: row.secret,
+        ...(nextMultiline ? { multiline: true } : {}),
+      })
+
+      const orig = origMetaMap.get(row.existingKey)
+      const metaChanged = Boolean(
+        orig && (orig.secret !== row.secret || Boolean(orig.multiline) !== nextMultiline),
+      )
+      let valueChanged = false
+      if (row.existingUnloaded) {
+        if (row.value.length > 0) {
+          fieldsToSet[row.existingKey] = row.value
+          valueChanged = true
+        }
+      } else if (row.originalPlainValue === null || row.value !== row.originalPlainValue) {
+        if (row.value.length > 0) {
+          fieldsToSet[row.existingKey] = row.value
+          valueChanged = true
+        }
+      }
+      if (metaChanged || valueChanged) touchedFieldCount++
+    } else {
+      const cleanName = row.name.trim().toLowerCase()
+      if (!cleanName || !row.value) continue
+      fieldsToSet[cleanName] = row.value
+      fieldMeta.push({
+        name: cleanName,
+        label: row.label.trim() || resolveFieldLabel(cred.kind, cleanName),
+        secret: row.secret,
+        ...(row.multiline || row.value.includes('\n') ? { multiline: true } : {}),
+      })
+      touchedFieldCount++
+    }
+  }
+
+  const keptNames = new Set(fieldMeta.map((f) => f.name))
+  const removeFields: string[] = []
+  for (const orig of cred.fieldMeta) {
+    if (!keptNames.has(orig.name) && !removeFields.includes(orig.name)) {
+      removeFields.push(orig.name)
+      touchedFieldCount++
+    }
+  }
+
+  const normalizedPrimary = requestedPrimaryField.trim().toLowerCase()
+  const primaryField = keptNames.has(normalizedPrimary)
+    ? normalizedPrimary
+    : (fieldMeta[0]?.name ?? cred.primaryField)
+
+  return {
+    fieldsToSet,
+    fieldMeta,
+    removeFields,
+    primaryField,
+    effectiveFieldCount: fieldMeta.length,
+    touchedFieldCount,
+  }
+}
 
 // 与服务端 access/scope.ts 保持一致的失败即拒绝判定，用于实时统计有权解析凭据的访问密钥数量
 export function canKeyAccessCredential(
@@ -218,12 +379,13 @@ export function buildKiokuRunCommand(
   const isDefault = !fieldName || fieldName === cred.primaryField
   const preset = DEFAULT_ENV_BY_KIND[cred.kind]
   const ref = isDefault ? cred.slug : `${cred.slug}#${fieldName}`
-  const envVar = isDefault
+  const rawEnv = isDefault
     ? preset.env
     : `${cred.slug}_${fieldName}`
         .toUpperCase()
         .replace(/[^A-Z0-9]+/g, '_')
         .replace(/^_+|_+$/g, '')
+  const envVar = !rawEnv ? 'CRED_VALUE' : /^[0-9]/.test(rawEnv) ? `CRED_${rawEnv}` : rawEnv
   const cmd = isDefault ? preset.cmd : 'env'
   return `kioku run -e ${envVar}=${ref} -- ${cmd}`
 }

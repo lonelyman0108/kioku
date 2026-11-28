@@ -100,7 +100,11 @@ const attrsSummary = computed(() => {
 watch(
   open,
   (visible) => {
-    if (!visible) return
+    if (!visible) {
+      captureModalOpen.value = false
+      captureTarget.value = null
+      return
+    }
     form.title = ''
     form.summary = ''
     form.content = ''
@@ -265,8 +269,15 @@ function onModalKeydown(event: KeyboardEvent) {
   void submit()
 }
 
+watch(captureModalOpen, (visible) => {
+  if (!visible) captureTarget.value = null
+})
+
 onMounted(() => window.addEventListener('keydown', onModalKeydown))
-onBeforeUnmount(() => window.removeEventListener('keydown', onModalKeydown))
+onBeforeUnmount(() => {
+  captureTarget.value = null
+  window.removeEventListener('keydown', onModalKeydown)
+})
 </script>
 
 <template>
@@ -506,6 +517,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onModalKeydown))
     :initial-value="captureTarget?.match ?? ''"
     :initial-match="captureTarget"
     :default-realms="scope.realms"
+    silent-success-toast
     :title="captureMode === 'replace' ? '转存为托管凭据并替换' : '新建凭据并插入'"
     :action-label="captureMode === 'replace' ? '保存并替换' : '保存并插入'"
     @saved="onInlineCredentialSaved"

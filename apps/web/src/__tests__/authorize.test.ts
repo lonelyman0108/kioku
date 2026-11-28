@@ -26,8 +26,8 @@ describe('浏览器授权与一次性访问密钥弹窗约束', () => {
   })
 
   it('签发与轮换访问密钥的一次性明文弹窗禁止误关', () => {
-    expect(issueKeyModal).toContain(':dismissible="!saving && !issued"')
-    expect(issueKeyModal).toContain(':close="!issued"')
+    expect(issueKeyModal).toContain(':dismissible="false"')
+    expect(issueKeyModal).toContain(':close="false"')
     expect(keysSettings).toContain(':dismissible="false"')
     expect(keysSettings).toContain(':close="false"')
   })

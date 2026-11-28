@@ -960,8 +960,8 @@ async function retryHistoryItem(item: TaskHistoryItem, scope?: 'failed_only' | '
 
           <div v-else-if="modelsSettingsQuery.data.value" class="vec-unconfigured">
             <span class="section-empty-line">尚未启用嵌入模型</span>
-            <RouterLink :to="settingsRoute('models')" class="text-link-btn" @click="open = false">
-              模型设置
+            <RouterLink :to="settingsRoute('embed')" class="text-link-btn" @click="open = false">
+              嵌入与索引
             </RouterLink>
           </div>
         </section>

@@ -25,9 +25,13 @@ import { api } from '../api/endpoints'
 import { confirmDiscard, hasUnsavedChanges } from '../composables/unsavedChanges'
 import { useCopy } from '../composables/useCopy'
 import {
+  applyRevealedValuesToEditRows,
+  buildCredentialUpdateFields,
   canKeyAccessCredential,
   deriveCredentialSlug,
   formatCredentialPlaceholder,
+  validateCredentialEditRows,
+  type EditableCredentialFieldRow,
 } from '../credentials'
 import { icons } from '../icons'
 import {
@@ -44,17 +48,8 @@ import NoteLine from './ui/NoteLine.vue'
 import SaveBar, { type SaveBarChange } from './ui/SaveBar.vue'
 import SectionHeading from './ui/SectionHeading.vue'
 
-interface FormFieldRow {
+interface FormFieldRow extends EditableCredentialFieldRow {
   uid: string
-  name: string
-  label: string
-  secret: boolean
-  multiline: boolean
-  preset: boolean
-  existingKey: string | null
-  existingSecretUnloaded: boolean
-  originalPlainValue: string | null
-  value: string
   showPlain: boolean
 }
 
@@ -96,20 +91,28 @@ const copy = useCopy()
 const plainValues = ref<Record<string, string>>({})
 const revealedSecrets = ref<Record<string, string>>({})
 const plainLoading = ref(false)
-const revealingField = ref<string | null>(null)
+const plainLoadFailed = ref(false)
+const formLoadingSecrets = ref(false)
+const revealingFields = ref<Record<string, boolean>>({})
 const revealingAll = ref(false)
 const copyingField = ref<string | null>(null)
 const revealError = ref<string | null>(null)
 let revealSeq = 0
+let secretRevealSeq = 0
+let copySeq = 0
 
 function clearLocalSecrets() {
   revealSeq++
+  secretRevealSeq++
+  copySeq++
   plainValues.value = {}
   revealedSecrets.value = {}
   plainLoading.value = false
-  revealingField.value = null
+  plainLoadFailed.value = false
+  revealingFields.value = {}
   revealingAll.value = false
   copyingField.value = null
+  formLoadingSecrets.value = false
   revealError.value = null
 }
 
@@ -167,41 +170,58 @@ async function toggleSecretField(fieldName: string) {
   const cred = props.credential
   if (!cred || !props.hasMasterKey) return
   if (Object.hasOwn(revealedSecrets.value, fieldName)) {
+    secretRevealSeq++
     const next = { ...revealedSecrets.value }
     delete next[fieldName]
     revealedSecrets.value = next
+    if (revealingFields.value[fieldName]) {
+      const nextLoading = { ...revealingFields.value }
+      delete nextLoading[fieldName]
+      revealingFields.value = nextLoading
+    }
     return
   }
-  const seq = revealSeq
-  revealingField.value = fieldName
+  if (revealingFields.value[fieldName]) return
+  const rSeq = revealSeq
+  const sSeq = secretRevealSeq
+  revealingFields.value = { ...revealingFields.value, [fieldName]: true }
   revealError.value = null
   try {
     const res = await api.revealCredential(cred.id, { field: fieldName })
-    if (seq !== revealSeq) return
+    if (rSeq !== revealSeq || sSeq !== secretRevealSeq) return
     if (res.value !== undefined) {
       revealedSecrets.value = { ...revealedSecrets.value, [fieldName]: res.value }
     }
   } catch (err) {
-    if (seq !== revealSeq) return
+    if (rSeq !== revealSeq || sSeq !== secretRevealSeq) return
     revealError.value = err instanceof ApiError ? err.message : '读取机密字段失败'
   } finally {
-    if (seq === revealSeq && revealingField.value === fieldName) revealingField.value = null
+    if (rSeq === revealSeq && sSeq === secretRevealSeq && revealingFields.value[fieldName]) {
+      const nextLoading = { ...revealingFields.value }
+      delete nextLoading[fieldName]
+      revealingFields.value = nextLoading
+    }
   }
 }
 
 async function toggleAllSecrets() {
   const cred = props.credential
-  if (!cred || !props.hasMasterKey || revealingAll.value) return
+  if (!cred || !props.hasMasterKey) return
   if (allSecretsShown.value) {
+    secretRevealSeq++
     revealedSecrets.value = {}
+    revealingFields.value = {}
+    revealingAll.value = false
     return
   }
-  const seq = revealSeq
+  if (revealingAll.value) return
+  const rSeq = revealSeq
+  const sSeq = secretRevealSeq
   revealingAll.value = true
   revealError.value = null
   try {
     const res = await api.revealCredential(cred.id, { scope: 'all' })
-    if (seq !== revealSeq) return
+    if (rSeq !== revealSeq || sSeq !== secretRevealSeq) return
     const next: Record<string, string> = {}
     const all = res.fields ?? {}
     for (const f of secretFieldList.value) {
@@ -209,10 +229,10 @@ async function toggleAllSecrets() {
     }
     revealedSecrets.value = next
   } catch (err) {
-    if (seq !== revealSeq) return
+    if (rSeq !== revealSeq || sSeq !== secretRevealSeq) return
     revealError.value = err instanceof ApiError ? err.message : '读取机密字段失败'
   } finally {
-    if (seq === revealSeq) revealingAll.value = false
+    if (rSeq === revealSeq && sSeq === secretRevealSeq) revealingAll.value = false
   }
 }
 
@@ -220,28 +240,31 @@ async function toggleAllSecrets() {
 async function copyFieldValue(field: CredentialFieldMeta) {
   const cred = props.credential
   if (!cred || !props.hasMasterKey) return
+  const rSeq = revealSeq
+  const cSeq = ++copySeq
   if (!field.secret && Object.hasOwn(plainValues.value, field.name)) {
+    copyingField.value = null
     await copy(plainValues.value[field.name]!)
     return
   }
   if (field.secret && Object.hasOwn(revealedSecrets.value, field.name)) {
+    copyingField.value = null
     await copy(revealedSecrets.value[field.name]!)
     return
   }
-  const seq = revealSeq
   copyingField.value = field.name
   revealError.value = null
   try {
     const res = await api.revealCredential(cred.id, { field: field.name })
-    if (seq !== revealSeq) return
+    if (rSeq !== revealSeq || cSeq !== copySeq) return
     if (res.value !== undefined) {
       await copy(res.value)
     }
   } catch (err) {
-    if (seq !== revealSeq) return
+    if (rSeq !== revealSeq || cSeq !== copySeq) return
     revealError.value = err instanceof ApiError ? err.message : '复制字段值失败'
   } finally {
-    if (seq === revealSeq && copyingField.value === field.name) copyingField.value = null
+    if (cSeq === copySeq) copyingField.value = null
   }
 }
 
@@ -363,12 +386,15 @@ const formFields = ref<FormFieldRow[]>([])
 const formCustomRealm = ref('')
 const formSaving = ref(false)
 const formError = ref<string | null>(null)
-const formLoadingSecrets = ref(false)
 
-function clearFormSensitiveValues() {
+function clearFormSensitiveValues(dropRows = false) {
   for (const row of formFields.value) {
     row.value = ''
+    row.originalPlainValue = null
     row.showPlain = false
+  }
+  if (dropRows) {
+    formFields.value = []
   }
 }
 
@@ -386,7 +412,7 @@ function buildRowsForTemplate(
     multiline: Boolean(meta.multiline),
     preset: true,
     existingKey: null,
-    existingSecretUnloaded: false,
+    existingUnloaded: false,
     originalPlainValue: null,
     value: preservedValues.get(meta.name) ?? '',
     showPlain: false,
@@ -399,6 +425,7 @@ function buildRowsForTemplate(
 }
 
 function initNewForm(kind: CredentialKind) {
+  clearFormSensitiveValues(true)
   clearLocalSecrets()
   form.kind = kind
   form.label = ''
@@ -414,7 +441,27 @@ function initNewForm(kind: CredentialKind) {
   formError.value = null
 }
 
+async function loadPlainFieldsForEdit(cred: CredentialMeta) {
+  if (!props.hasMasterKey) return
+  const seq = ++revealSeq
+  plainLoading.value = true
+  plainLoadFailed.value = false
+  formError.value = null
+  try {
+    const res = await api.revealCredential(cred.id, { scope: 'plain' })
+    if (seq !== revealSeq) return
+    applyRevealedValuesToEditRows(formFields.value, res.fields ?? {})
+  } catch (err) {
+    if (seq !== revealSeq) return
+    plainLoadFailed.value = true
+    formError.value = err instanceof ApiError ? err.message : '读取非敏感字段失败'
+  } finally {
+    if (seq === revealSeq) plainLoading.value = false
+  }
+}
+
 async function initEditForm(cred: CredentialMeta) {
+  clearFormSensitiveValues(true)
   clearLocalSecrets()
   scopePopoverOpen.value = false
   form.kind = cred.kind
@@ -433,6 +480,7 @@ async function initEditForm(cred: CredentialMeta) {
     ? cred.fieldMeta
     : [{ name: cred.primaryField || 'value', secret: true }]
 
+  // 所有已有字段统一以未回填态初始化，仅在受控读取回填后才标记为已加载，杜绝加载中或失败保存时误删
   formFields.value = metaList.map((meta) => ({
     uid: makeRowUid(),
     name: meta.name,
@@ -441,7 +489,7 @@ async function initEditForm(cred: CredentialMeta) {
     multiline: Boolean(meta.multiline),
     preset: true,
     existingKey: meta.name,
-    existingSecretUnloaded: meta.secret,
+    existingUnloaded: true,
     originalPlainValue: null,
     value: '',
     showPlain: false,
@@ -449,29 +497,14 @@ async function initEditForm(cred: CredentialMeta) {
 
   // 进入编辑态仅加载非机密字段回填，机密字段默认保持留空不覆盖
   if (props.hasMasterKey && metaList.some((m) => !m.secret)) {
-    const seq = ++revealSeq
-    plainLoading.value = true
-    try {
-      const res = await api.revealCredential(cred.id, { scope: 'plain' })
-      if (seq !== revealSeq) return
-      const plain = res.fields ?? {}
-      for (const row of formFields.value) {
-        if (!row.secret && row.existingKey && Object.hasOwn(plain, row.existingKey)) {
-          row.value = plain[row.existingKey]!
-          row.originalPlainValue = plain[row.existingKey]!
-        }
-      }
-    } catch (err) {
-      if (seq !== revealSeq) return
-      formError.value = err instanceof ApiError ? err.message : '读取非敏感字段失败'
-    } finally {
-      if (seq === revealSeq) plainLoading.value = false
-    }
+    await loadPlainFieldsForEdit(cred)
   }
 }
 
 const hasUnloadedSecretRows = computed(() =>
-  formFields.value.some((row) => row.existingSecretUnloaded && !row.value),
+  formFields.value.some(
+    (row) => row.existingKey && row.existingUnloaded && row.secret && !row.value,
+  ),
 )
 
 async function loadAllSecretsForEdit() {
@@ -483,14 +516,8 @@ async function loadAllSecretsForEdit() {
   try {
     const res = await api.revealCredential(cred.id, { scope: 'all' })
     if (seq !== revealSeq) return
-    const all = res.fields ?? {}
-    for (const row of formFields.value) {
-      if (row.existingKey && row.existingSecretUnloaded && Object.hasOwn(all, row.existingKey)) {
-        if (!row.value) row.value = all[row.existingKey]!
-        row.originalPlainValue = all[row.existingKey]!
-        row.existingSecretUnloaded = false
-      }
-    }
+    applyRevealedValuesToEditRows(formFields.value, res.fields ?? {})
+    plainLoadFailed.value = false
   } catch (err) {
     if (seq !== revealSeq) return
     formError.value = err instanceof ApiError ? err.message : '加载机密字段失败'
@@ -535,7 +562,7 @@ function addCustomField() {
     multiline: false,
     preset: false,
     existingKey: null,
-    existingSecretUnloaded: false,
+    existingUnloaded: false,
     originalPlainValue: null,
     value: '',
     showPlain: false,
@@ -546,9 +573,9 @@ function removeFormField(uid: string) {
   if (formFields.value.length <= 1) return
   const target = formFields.value.find((r) => r.uid === uid)
   formFields.value = formFields.value.filter((r) => r.uid !== uid)
-  if (target && target.name === form.primaryField) {
+  if (target && target.name.trim().toLowerCase() === form.primaryField.trim().toLowerCase()) {
     const firstValid = formFields.value.find((r) => r.name.trim()) ?? formFields.value[0]
-    if (firstValid) form.primaryField = firstValid.name
+    if (firstValid) form.primaryField = firstValid.name.trim().toLowerCase()
   }
 }
 
@@ -619,10 +646,22 @@ const formMatchedKeyCount = computed(
       .length,
 )
 
+const editUpdatePlan = computed(() =>
+  props.mode === 'edit' && props.credential
+    ? buildCredentialUpdateFields(
+        props.credential,
+        formFields.value,
+        form.primaryField,
+        credentialFieldLabel,
+      )
+    : null,
+)
+
 // 核对编辑态变动项，接入 SaveBar 变更预览与离开确认
 const editDirtyChanges = computed<SaveBarChange[]>(() => {
-  if (props.mode !== 'edit' || !props.credential) return []
+  if (props.mode !== 'edit' || !props.credential || !editUpdatePlan.value) return []
   const cred = props.credential
+  const plan = editUpdatePlan.value
   const list: SaveBarChange[] = []
 
   if (form.label.trim() !== cred.label) {
@@ -657,38 +696,14 @@ const editDirtyChanges = computed<SaveBarChange[]>(() => {
       after: form.passkeyManualOnly ? '开启' : '关闭',
     })
   }
-  if (form.primaryField !== cred.primaryField) {
-    list.push({ label: '默认引用字段', before: cred.primaryField, after: form.primaryField })
+  if (plan.primaryField !== cred.primaryField) {
+    list.push({ label: '默认引用字段', before: cred.primaryField, after: plan.primaryField })
   }
-
-  const origMetaMap = new Map(cred.fieldMeta.map((f) => [f.name, f]))
-  const activeExisting = new Set<string>()
-  let touchedFieldCount = 0
-
-  for (const row of formFields.value) {
-    const cleanName = row.name.trim().toLowerCase()
-    if (row.existingKey) {
-      activeExisting.add(row.existingKey)
-      const orig = origMetaMap.get(row.existingKey)
-      if (orig && (orig.secret !== row.secret || Boolean(orig.multiline) !== row.multiline)) {
-        touchedFieldCount++
-      } else if (row.existingSecretUnloaded) {
-        if (row.value.length > 0) touchedFieldCount++
-      } else if (row.originalPlainValue !== null && row.value !== row.originalPlainValue) {
-        touchedFieldCount++
-      }
-    } else if (cleanName || row.value) {
-      touchedFieldCount++
-    }
-  }
-  for (const orig of cred.fieldMeta) {
-    if (!activeExisting.has(orig.name)) touchedFieldCount++
-  }
-  if (touchedFieldCount > 0) {
+  if (plan.touchedFieldCount > 0) {
     list.push({
       label: '凭据字段',
       before: `${cred.fieldMeta.length} 个字段`,
-      after: `变动 ${touchedFieldCount} 项`,
+      after: `变动 ${plan.touchedFieldCount} 项`,
     })
   }
 
@@ -731,39 +746,24 @@ const formValidationProblem = computed(() => {
     return '请至少选择一个允许场域，或切换为不限场域'
   }
 
+  if (props.mode === 'edit') {
+    return validateCredentialEditRows(formFields.value, { plainLoading: plainLoading.value })
+  }
+
   const seenNames = new Set<string>()
   let effectiveFieldCount = 0
 
   for (const row of formFields.value) {
     const cleanName = row.name.trim().toLowerCase()
     const hasVal = row.value.length > 0
-    if (props.mode === 'new') {
-      if (!hasVal && row.preset) continue
-      if (!hasVal && !cleanName) continue
-      const nameCheck = CredentialFieldName.safeParse(cleanName)
-      if (!nameCheck.success) return nameCheck.error.issues[0]?.message ?? '字段键名格式有误'
-      if (!hasVal) return `请填写自定义字段 ${cleanName} 的值`
-      if (seenNames.has(cleanName)) return `字段键名 ${cleanName} 重复`
-      seenNames.add(cleanName)
-      effectiveFieldCount++
-    } else {
-      if (row.existingKey) {
-        if (!row.existingSecretUnloaded && !hasVal) {
-          // 已有非敏感字段清空时在提交中视为移除
-          continue
-        }
-        seenNames.add(row.existingKey)
-        effectiveFieldCount++
-      } else {
-        if (!cleanName && !hasVal) continue
-        const nameCheck = CredentialFieldName.safeParse(cleanName)
-        if (!nameCheck.success) return nameCheck.error.issues[0]?.message ?? '字段键名格式有误'
-        if (!hasVal) return `请填写新增字段 ${cleanName} 的值`
-        if (seenNames.has(cleanName)) return `字段键名 ${cleanName} 重复`
-        seenNames.add(cleanName)
-        effectiveFieldCount++
-      }
-    }
+    if (!hasVal && row.preset) continue
+    if (!hasVal && !cleanName) continue
+    const nameCheck = CredentialFieldName.safeParse(cleanName)
+    if (!nameCheck.success) return nameCheck.error.issues[0]?.message ?? '字段键名格式有误'
+    if (!hasVal) return `请填写自定义字段 ${cleanName} 的值`
+    if (seenNames.has(cleanName)) return `字段键名 ${cleanName} 重复`
+    seenNames.add(cleanName)
+    effectiveFieldCount++
   }
 
   if (effectiveFieldCount === 0) return '请至少保留一个非空凭据字段'
@@ -778,7 +778,7 @@ const saveBarCount = computed(() => {
 })
 
 async function submitForm() {
-  if (formSaving.value || formValidationProblem.value) return
+  if (formSaving.value || plainLoading.value || formValidationProblem.value) return
   if (props.mode === 'edit' && editDirtyChanges.value.length === 0) return
   formSaving.value = true
   formError.value = null
@@ -798,8 +798,9 @@ async function submitForm() {
           ...(row.multiline || row.value.includes('\n') ? { multiline: true } : {}),
         })
       }
-      const primaryField = Object.hasOwn(fieldsPayload, form.primaryField)
-        ? form.primaryField
+      const normalizedPrimary = form.primaryField.trim().toLowerCase()
+      const primaryField = Object.hasOwn(fieldsPayload, normalizedPrimary)
+        ? normalizedPrimary
         : fieldMeta[0]!.name
       const created = await api.createCredential({
         slug: form.slug.trim().toLowerCase(),
@@ -812,7 +813,7 @@ async function submitForm() {
         passkeyManualOnly: form.kind === 'login' ? form.passkeyManualOnly : false,
         allowedRealms: formRealmsValue.value,
       })
-      clearFormSensitiveValues()
+      clearFormSensitiveValues(true)
       hasUnsavedChanges.value = false
       toast.add({ title: `已保存凭据 ${created.slug}`, color: 'success' })
       emit('saved', created, true)
@@ -820,67 +821,22 @@ async function submitForm() {
     }
 
     const cred = props.credential
-    if (!cred) return
-    const nextFieldsToSet: Record<string, string> = {}
-    const nextFieldMeta: CredentialFieldMeta[] = []
-    const keptExistingKeys = new Set<string>()
-    const removeFields: string[] = []
-
-    for (const row of formFields.value) {
-      if (row.existingKey) {
-        if (!row.existingSecretUnloaded && !row.value) {
-          removeFields.push(row.existingKey)
-          continue
-        }
-        keptExistingKeys.add(row.existingKey)
-        nextFieldMeta.push({
-          name: row.existingKey,
-          label: row.label.trim() || credentialFieldLabel(cred.kind, row.existingKey),
-          secret: row.secret,
-          ...(row.multiline || row.value.includes('\n') ? { multiline: true } : {}),
-        })
-        if (row.existingSecretUnloaded) {
-          if (row.value) nextFieldsToSet[row.existingKey] = row.value
-        } else if (row.originalPlainValue === null || row.value !== row.originalPlainValue) {
-          if (row.value) nextFieldsToSet[row.existingKey] = row.value
-        }
-      } else {
-        const cleanName = row.name.trim().toLowerCase()
-        if (!cleanName || !row.value) continue
-        nextFieldsToSet[cleanName] = row.value
-        nextFieldMeta.push({
-          name: cleanName,
-          label: row.label.trim() || credentialFieldLabel(cred.kind, cleanName),
-          secret: row.secret,
-          ...(row.multiline || row.value.includes('\n') ? { multiline: true } : {}),
-        })
-      }
-    }
-
-    for (const orig of cred.fieldMeta) {
-      if (!keptExistingKeys.has(orig.name) && !removeFields.includes(orig.name)) {
-        removeFields.push(orig.name)
-      }
-    }
-
-    const keptNames = new Set(nextFieldMeta.map((f) => f.name))
-    const nextPrimary = keptNames.has(form.primaryField)
-      ? form.primaryField
-      : (nextFieldMeta[0]?.name ?? cred.primaryField)
+    const plan = editUpdatePlan.value
+    if (!cred || !plan) return
 
     const payload: UpdateCredentialRequest = {
       label: form.label.trim(),
       description: form.description.trim() || null,
-      primaryField: nextPrimary,
-      fieldMeta: nextFieldMeta,
+      primaryField: plan.primaryField,
+      fieldMeta: plan.fieldMeta,
       allowedRealms: formRealmsValue.value,
       ...(cred.kind === 'login' ? { passkeyManualOnly: form.passkeyManualOnly } : {}),
-      ...(Object.keys(nextFieldsToSet).length ? { fields: nextFieldsToSet } : {}),
-      ...(removeFields.length ? { removeFields } : {}),
+      ...(Object.keys(plan.fieldsToSet).length ? { fields: plan.fieldsToSet } : {}),
+      ...(plan.removeFields.length ? { removeFields: plan.removeFields } : {}),
     }
 
     const updated = await api.updateCredential(cred.id, payload)
-    clearFormSensitiveValues()
+    clearFormSensitiveValues(true)
     hasUnsavedChanges.value = false
     toast.add({ title: `已更新凭据 ${updated.slug}`, color: 'success' })
     emit('saved', updated, false)
@@ -893,7 +849,7 @@ async function submitForm() {
 
 function requestCancelForm() {
   if (isFormDirty.value && !confirmDiscard()) return
-  clearFormSensitiveValues()
+  clearFormSensitiveValues(true)
   clearLocalSecrets()
   emit('cancelForm')
 }
@@ -907,9 +863,11 @@ watch(
     } else if (nextMode === 'edit' && props.credential) {
       void initEditForm(props.credential)
     } else if (nextMode === 'read' && props.credential) {
+      clearFormSensitiveValues(true)
       clearLocalSecrets()
       void loadPlainFieldsFor(props.credential)
     } else {
+      clearFormSensitiveValues(true)
       clearLocalSecrets()
     }
   },
@@ -918,7 +876,7 @@ watch(
 
 onBeforeUnmount(() => {
   clearLocalSecrets()
-  clearFormSensitiveValues()
+  clearFormSensitiveValues(true)
   if (slugCopyTimer) {
     clearTimeout(slugCopyTimer)
     slugCopyTimer = null
@@ -1340,7 +1298,7 @@ defineExpose({
                       color="neutral"
                       variant="ghost"
                       :icon="field.name in revealedSecrets ? icons.hide : icons.reveal"
-                      :loading="revealingField === field.name"
+                      :loading="Boolean(revealingFields[field.name])"
                       :disabled="!hasMasterKey"
                       @click="toggleSecretField(field.name)"
                     >
@@ -1512,6 +1470,17 @@ defineExpose({
             <SectionHeading title="凭据字段" :icon="icons.keys">
               <template #actions>
                 <UButton
+                  v-if="mode === 'edit' && plainLoadFailed && credential && hasMasterKey"
+                  size="xs"
+                  color="neutral"
+                  variant="outline"
+                  :icon="icons.refresh"
+                  :loading="plainLoading"
+                  @click="loadPlainFieldsForEdit(credential)"
+                >
+                  重试读取非敏感字段
+                </UButton>
+                <UButton
                   v-if="mode === 'edit' && hasUnloadedSecretRows && hasMasterKey"
                   size="xs"
                   color="neutral"
@@ -1535,6 +1504,22 @@ defineExpose({
               </template>
             </SectionHeading>
 
+            <NoteLine v-if="mode === 'edit' && plainLoadFailed && credential" tone="warning" flush>
+              未能回填部分非敏感字段，已自动保留原值且不会在保存时清除。
+              <template #actions>
+                <UButton
+                  size="xs"
+                  color="neutral"
+                  variant="outline"
+                  :icon="icons.refresh"
+                  :loading="plainLoading"
+                  @click="loadPlainFieldsForEdit(credential)"
+                >
+                  重试读取
+                </UButton>
+              </template>
+            </NoteLine>
+
             <div class="edit-field-list">
               <div v-for="row in formFields" :key="row.uid" class="edit-field-row">
                 <div class="edit-field-key-col">
@@ -1542,7 +1527,10 @@ defineExpose({
                     <span class="kv-label-top">
                       <span>{{ row.label || credentialFieldLabel(form.kind, row.name) }}</span>
                       <span
-                        v-if="row.name === form.primaryField && formFields.length > 1"
+                        v-if="
+                          row.name.trim().toLowerCase() ===
+                            form.primaryField.trim().toLowerCase() && formFields.length > 1
+                        "
                         class="default-pill"
                       >
                         默认
@@ -1570,7 +1558,13 @@ defineExpose({
                     :rows="3"
                     autoresize
                     :maxrows="10"
-                    :placeholder="row.existingSecretUnloaded ? '留空保持原值' : '输入字段值'"
+                    :placeholder="
+                      row.existingUnloaded && !row.secret && plainLoading
+                        ? '正在读取字段值…'
+                        : row.existingUnloaded
+                          ? '留空保持原值'
+                          : '输入字段值'
+                    "
                     :aria-label="`${row.label || row.name || '字段'}值`"
                     class="w-full font-mono"
                     autocomplete="off"
@@ -1581,7 +1575,13 @@ defineExpose({
                       v-model="row.value"
                       size="sm"
                       :type="row.secret && !row.showPlain ? 'password' : 'text'"
-                      :placeholder="row.existingSecretUnloaded ? '留空保持原值' : '输入字段值'"
+                      :placeholder="
+                        row.existingUnloaded && !row.secret && plainLoading
+                          ? '正在读取字段值…'
+                          : row.existingUnloaded
+                            ? '留空保持原值'
+                            : '输入字段值'
+                      "
                       :aria-label="`${row.label || row.name || '字段'}值`"
                       class="flex-1 font-mono"
                       autocomplete="off"

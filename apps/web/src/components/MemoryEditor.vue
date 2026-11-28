@@ -439,6 +439,7 @@ function cancelEditing() {
   if (detail.value) loadDetail(detail.value)
   mode.value = 'read'
   attrsOpen.value = false
+  editorSelection.value = { start: 0, end: 0, text: '' }
 }
 
 function requestCancelEditing() {
@@ -473,6 +474,7 @@ async function save() {
     loadDetail(updated)
     mode.value = 'read'
     attrsOpen.value = false
+    editorSelection.value = { start: 0, end: 0, text: '' }
     toast.add({ title: '已保存', color: 'success' })
     void queryClient.invalidateQueries({ queryKey: ['entry-history', current.shortId] })
     emit('changed', updated)
@@ -879,20 +881,32 @@ interface InlineCaptureContext {
   actionLabel: string
 }
 
+function createEmptyInlineCapture(): InlineCaptureContext {
+  return {
+    purpose: 'insert',
+    match: null,
+    selectionRange: null,
+    initialValue: '',
+    initialSlug: '',
+    initialField: null,
+    initialMode: 'new',
+    targetCredentialId: null,
+    lockTarget: false,
+    preserveDefaultRef: false,
+    title: '转存为托管凭据',
+    actionLabel: '保存并替换',
+  }
+}
+
 const inlineCaptureOpen = ref(false)
-const inlineCapture = ref<InlineCaptureContext>({
-  purpose: 'insert',
-  match: null,
-  selectionRange: null,
-  initialValue: '',
-  initialSlug: '',
-  initialField: null,
-  initialMode: 'new',
-  targetCredentialId: null,
-  lockTarget: false,
-  preserveDefaultRef: false,
-  title: '转存为托管凭据',
-  actionLabel: '保存并替换',
+const inlineCapture = ref<InlineCaptureContext>(createEmptyInlineCapture())
+
+function clearInlineCaptureContext() {
+  inlineCapture.value = createEmptyInlineCapture()
+}
+
+watch(inlineCaptureOpen, (visible) => {
+  if (!visible) clearInlineCaptureContext()
 })
 
 function openCaptureForMatch(match: SecretMatch) {
@@ -965,16 +979,15 @@ function openCaptureToInsert() {
 async function openMissingCredentialCapture(refItem: { slug: string; field: string | null }) {
   if (isDeleted.value) return
   let items = credentialsList.data.value?.items ?? []
-  if (!items.length) {
-    try {
-      const res = await queryClient.ensureQueryData({
-        queryKey: ['credentials'] as const,
-        queryFn: () => api.credentials(),
-      })
-      items = res.items
-    } catch {
-      items = []
-    }
+  try {
+    const res = await queryClient.fetchQuery({
+      queryKey: ['credentials'] as const,
+      queryFn: () => api.credentials(),
+      staleTime: 5_000,
+    })
+    items = res.items
+  } catch {
+    // 拉取失败时回退本地已有列表
   }
   const existing = items.find((c) => c.slug === refItem.slug) ?? null
   if (existing && refItem.field) {
@@ -1027,10 +1040,10 @@ function onInlineCredentialSaved(payload: InlineCredentialSavedPayload) {
     insertAtCursor(payload.placeholder)
     toast.add({ title: `已插入 ${payload.placeholder}`, color: 'success' })
   } else if (ctx.purpose === 'missing') {
-    void queryClient.invalidateQueries({ queryKey: queryKey.value })
-    void detailQuery.refetch()
+    void queryClient.invalidateQueries({ queryKey: ['entry'] })
     toast.add({ title: `已补建凭据 ${payload.slug}`, color: 'success' })
   }
+  clearInlineCaptureContext()
 }
 
 // 渲染正文的链接目标映射与展示归一化
@@ -1092,6 +1105,7 @@ watch(
   () => {
     railHistoryExpanded.value = false
     inlineCaptureOpen.value = false
+    clearInlineCaptureContext()
     editorSelection.value = { start: 0, end: 0, text: '' }
   },
 )
@@ -1481,6 +1495,8 @@ function onEditorKeydown(event: KeyboardEvent) {
 onMounted(() => window.addEventListener('keydown', onEditorKeydown))
 onBeforeUnmount(() => {
   stopRailResize()
+  clearInlineCaptureContext()
+  editorSelection.value = { start: 0, end: 0, text: '' }
   editorScrollObserver?.disconnect()
   editorScrollObserver = null
   window.removeEventListener('keydown', onEditorKeydown)
@@ -2851,6 +2867,7 @@ defineExpose({
         :lock-target="inlineCapture.lockTarget"
         :preserve-default-ref="inlineCapture.preserveDefaultRef"
         :default-realms="mode === 'edit' ? scope.realms : (entry.realms ?? [])"
+        silent-success-toast
         :title="inlineCapture.title"
         :action-label="inlineCapture.actionLabel"
         @saved="onInlineCredentialSaved"

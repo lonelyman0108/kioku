@@ -2,6 +2,11 @@
 import type { CredentialKind, CredentialMeta } from '@kioku/contracts'
 import { computed } from 'vue'
 
+import {
+  CREDENTIAL_REALM_ALL,
+  CREDENTIAL_REALM_EMPTY,
+  CREDENTIAL_REALM_UNSCOPED,
+} from '../credentials'
 import { icons } from '../icons'
 import { CREDENTIAL_KIND_ORDER, credentialKindIcons, credentialKindLabels } from '../labels'
 
@@ -59,11 +64,11 @@ const genericOnlyCount = computed(
 
 function selectKind(next: 'all' | CredentialKind) {
   emit('update:kindFilter', next)
-  if (next === 'all') emit('update:realmFilter', 'all')
+  if (next === 'all') emit('update:realmFilter', CREDENTIAL_REALM_ALL)
 }
 
 function toggleRealm(next: string) {
-  emit('update:realmFilter', props.realmFilter === next ? 'all' : next)
+  emit('update:realmFilter', props.realmFilter === next ? CREDENTIAL_REALM_ALL : next)
 }
 </script>
 
@@ -75,8 +80,10 @@ function toggleRealm(next: string) {
         <button
           type="button"
           class="tree-item"
-          :class="{ 'is-active': kindFilter === 'all' && realmFilter === 'all' }"
-          :aria-current="kindFilter === 'all' && realmFilter === 'all' ? 'page' : undefined"
+          :class="{ 'is-active': kindFilter === 'all' && realmFilter === CREDENTIAL_REALM_ALL }"
+          :aria-current="
+            kindFilter === 'all' && realmFilter === CREDENTIAL_REALM_ALL ? 'page' : undefined
+          "
           @click="selectKind('all')"
         >
           <span class="tree-item-lead">
@@ -125,9 +132,9 @@ function toggleRealm(next: string) {
         <button
           type="button"
           class="tree-item"
-          :class="{ 'is-active': realmFilter === 'unscoped' }"
-          :aria-pressed="realmFilter === 'unscoped'"
-          @click="toggleRealm('unscoped')"
+          :class="{ 'is-active': realmFilter === CREDENTIAL_REALM_UNSCOPED }"
+          :aria-pressed="realmFilter === CREDENTIAL_REALM_UNSCOPED"
+          @click="toggleRealm(CREDENTIAL_REALM_UNSCOPED)"
         >
           <span class="tree-item-lead">
             <UIcon :name="icons.globe" class="tree-icon" aria-hidden="true" />
@@ -140,9 +147,9 @@ function toggleRealm(next: string) {
           v-if="genericOnlyCount > 0"
           type="button"
           class="tree-item"
-          :class="{ 'is-active': realmFilter === 'empty' }"
-          :aria-pressed="realmFilter === 'empty'"
-          @click="toggleRealm('empty')"
+          :class="{ 'is-active': realmFilter === CREDENTIAL_REALM_EMPTY }"
+          :aria-pressed="realmFilter === CREDENTIAL_REALM_EMPTY"
+          @click="toggleRealm(CREDENTIAL_REALM_EMPTY)"
         >
           <span class="tree-item-lead">
             <UIcon :name="icons.lock" class="tree-icon" aria-hidden="true" />

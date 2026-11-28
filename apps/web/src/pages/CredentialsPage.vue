@@ -20,7 +20,12 @@ import {
 } from '../composables/unsavedChanges'
 import { useSession } from '../composables/useSession'
 import { useViewport } from '../composables/useViewport'
-import { collectKnownRealms } from '../credentials'
+import {
+  collectKnownRealms,
+  CREDENTIAL_REALM_ALL,
+  CREDENTIAL_REALM_EMPTY,
+  CREDENTIAL_REALM_UNSCOPED,
+} from '../credentials'
 import { icons } from '../icons'
 import { credentialKindIcons, credentialKindLabels } from '../labels'
 
@@ -53,9 +58,10 @@ const knownRealms = computed(() => collectKnownRealms(items.value, apiKeys.value
 
 // 左侧筛选与中间清单搜索
 const kindFilter = ref<'all' | CredentialKind>('all')
-const realmFilter = ref<string>('all')
+const realmFilter = ref<string>(CREDENTIAL_REALM_ALL)
 const searchInput = ref('')
 const railOpen = ref(false)
+const newFormInitialKind = ref<CredentialKind>('secret')
 
 function textQuery(key: string): string | null {
   const v = route.query[key]
@@ -88,25 +94,24 @@ const formDirty = ref(false)
 const workbenchRef = ref<InstanceType<typeof CredentialWorkbench> | null>(null)
 
 const { leaving } = useUnsavedChangesGuard(formDirty, {
-  leavesOn: (to, from) =>
-    to.query.id !== from.query.id || to.query.new !== from.query.new || to.name !== from.name,
+  leavesOn: (to, from) => to.query.id !== from.query.id || to.name !== from.name,
 })
 
 const filteredItems = computed(() => {
   const q = searchInput.value.trim().toLowerCase()
   return items.value.filter((item) => {
     if (kindFilter.value !== 'all' && item.kind !== kindFilter.value) return false
-    if (realmFilter.value === 'unscoped' && item.allowedRealms !== null) return false
+    if (realmFilter.value === CREDENTIAL_REALM_UNSCOPED && item.allowedRealms !== null) return false
     if (
-      realmFilter.value === 'empty' &&
+      realmFilter.value === CREDENTIAL_REALM_EMPTY &&
       !(item.allowedRealms !== null && item.allowedRealms.length === 0)
     ) {
       return false
     }
     if (
-      realmFilter.value !== 'all' &&
-      realmFilter.value !== 'unscoped' &&
-      realmFilter.value !== 'empty'
+      realmFilter.value !== CREDENTIAL_REALM_ALL &&
+      realmFilter.value !== CREDENTIAL_REALM_UNSCOPED &&
+      realmFilter.value !== CREDENTIAL_REALM_EMPTY
     ) {
       if (!item.allowedRealms?.includes(realmFilter.value)) return false
     }
@@ -128,16 +133,18 @@ const filteredItems = computed(() => {
 
 const isFiltered = computed(
   () =>
-    kindFilter.value !== 'all' || realmFilter.value !== 'all' || searchInput.value.trim() !== '',
+    kindFilter.value !== 'all' ||
+    realmFilter.value !== CREDENTIAL_REALM_ALL ||
+    searchInput.value.trim() !== '',
 )
 
 const filterSummary = computed(() => {
   const parts: string[] = [
     kindFilter.value === 'all' ? '全部凭据' : credentialKindLabels[kindFilter.value],
   ]
-  if (realmFilter.value === 'unscoped') parts.push('不限场域')
-  else if (realmFilter.value === 'empty') parts.push('仅无场域')
-  else if (realmFilter.value !== 'all') parts.push(realmFilter.value)
+  if (realmFilter.value === CREDENTIAL_REALM_UNSCOPED) parts.push('不限场域')
+  else if (realmFilter.value === CREDENTIAL_REALM_EMPTY) parts.push('仅无场域')
+  else if (realmFilter.value !== CREDENTIAL_REALM_ALL) parts.push(realmFilter.value)
   return parts.join(' · ')
 })
 
@@ -146,24 +153,27 @@ const selectedCred = computed<CredentialMeta | null>(() => {
   return items.value.find((item) => item.slug === routeSlug.value) ?? null
 })
 
-// URL ?new=1 同步到新建态
+// URL ?new=1 触发新建态（受 hasMasterKey 守卫）并立即清理查询参数，防止刷新重复触发
 watch(
-  routeNewFlag,
-  (isNew) => {
-    if (isNew) {
+  [() => route.query.new, () => me.data.value],
+  ([rawNew, meData]) => {
+    const newFlag = typeof rawNew === 'string' ? rawNew.trim() : ''
+    if ((newFlag !== '1' && newFlag !== 'true') || !meData) return
+    if (meData.hasMasterKey) {
+      formDirty.value = false
+      newFormInitialKind.value = routeNewKind.value
       mode.value = 'new'
-    } else if (mode.value === 'new') {
-      mode.value = 'read'
     }
+    void router.replace(withQuery({ new: null, kind: null }))
   },
   { immediate: true },
 )
 
 // 桌面和平板下列表就绪后若无选中项且非新建态，默认定位首条
 watch(
-  [filteredItems, routeSlug, routeNewFlag, isPhone, () => credentialsQuery.isPending.value],
-  ([list, slug, isNew, phone, pending]) => {
-    if (phone || pending || isNew || slug || list.length === 0) return
+  [filteredItems, routeSlug, routeNewFlag, mode, isPhone, () => credentialsQuery.isPending.value],
+  ([list, slug, isNew, currentMode, phone, pending]) => {
+    if (phone || pending || isNew || currentMode === 'new' || slug || list.length === 0) return
     const first = list[0]
     if (first) void router.replace(withQuery({ id: first.slug, new: null }))
   },
@@ -182,7 +192,7 @@ const hasSelection = computed(() => mode.value === 'new' || Boolean(selectedCred
 
 function resetFilters() {
   kindFilter.value = 'all'
-  realmFilter.value = 'all'
+  realmFilter.value = CREDENTIAL_REALM_ALL
   searchInput.value = ''
 }
 
@@ -207,8 +217,8 @@ function openCreate() {
   if (!hasMasterKey.value) return
   if (formDirty.value && !confirmDiscard()) return
   formDirty.value = false
+  newFormInitialKind.value = 'secret'
   mode.value = 'new'
-  void router.replace(withQuery({ new: '1' }))
 }
 
 function enterEdit() {
@@ -217,26 +227,27 @@ function enterEdit() {
 }
 
 function onCancelForm() {
+  const wasNew = mode.value === 'new'
   formDirty.value = false
   mode.value = 'read'
-  if (routeNewFlag.value) {
+  if (wasNew || routeNewFlag.value) {
     const fallbackSlug =
       selectedCred.value?.slug ?? (!isPhone.value ? (items.value[0]?.slug ?? null) : null)
     void router.replace(withQuery({ new: null, kind: null, id: fallbackSlug }))
   }
 }
 
-function onSaved(saved: CredentialMeta, isNew: boolean) {
+async function onSaved(saved: CredentialMeta, isNew: boolean) {
   formDirty.value = false
-  mode.value = 'read'
   if (isNew) {
     kindFilter.value = 'all'
-    realmFilter.value = 'all'
+    realmFilter.value = CREDENTIAL_REALM_ALL
     searchInput.value = ''
   }
-  void queryClient.invalidateQueries({ queryKey: ['credentials'] })
+  await queryClient.invalidateQueries({ queryKey: ['credentials'] })
   void queryClient.invalidateQueries({ queryKey: ['credential-references', saved.id] })
-  void router.replace(withQuery({ id: saved.slug, new: null, kind: null }))
+  mode.value = 'read'
+  await router.replace(withQuery({ id: saved.slug, new: null, kind: null }))
 }
 
 function onUpdated(updated: CredentialMeta) {
@@ -682,7 +693,7 @@ onBeforeUnmount(() => {
         ref="workbenchRef"
         :mode="mode"
         :credential="selectedCred"
-        :initial-kind="routeNewKind"
+        :initial-kind="newFormInitialKind"
         :has-master-key="hasMasterKey"
         :known-realms="knownRealms"
         :api-keys="apiKeys"

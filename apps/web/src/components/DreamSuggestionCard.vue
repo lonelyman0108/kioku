@@ -124,7 +124,10 @@ function abortRevise() {
   }
 }
 
-onBeforeUnmount(abortRevise)
+onBeforeUnmount(() => {
+  abortRevise()
+  captureTarget.value = null
+})
 
 const baseEntry = computed(() => {
   if (props.suggestion.keepId) {
@@ -698,6 +701,10 @@ const suggestionSecretWarnings = computed(() => props.suggestion.secretWarnings 
 const editSecretMatches = computed(() => (editing.value ? findSecretMatches(draft.content) : []))
 const captureModalOpen = ref(false)
 const captureTarget = ref<SecretMatch | null>(null)
+
+watch(captureModalOpen, (visible) => {
+  if (!visible) captureTarget.value = null
+})
 
 function openEditSecretCapture(match: SecretMatch) {
   captureTarget.value = match
@@ -2866,6 +2873,7 @@ defineExpose({
     :initial-value="captureTarget?.match ?? ''"
     :initial-match="captureTarget"
     :default-realms="draftScope.realms"
+    silent-success-toast
     title="转存为托管凭据并替换"
     action-label="保存并替换"
     @saved="onEditSecretSaved"

@@ -330,6 +330,7 @@ function isHighRisk(s: DreamSuggestionView): boolean {
 
 function isSafeForBatch(s: DreamSuggestionView): boolean {
   if (s.kind === 'merge_duplicates' || s.kind === 'mark_stale') return false
+  if (s.secretWarnings?.length) return false
   if (hasIntegrityAlert(s)) return false
   if (s.kind === 'adjust_boot_mode') return true
   if (s.kind === 'link_entries') return Boolean(s.proposedLinks?.length)

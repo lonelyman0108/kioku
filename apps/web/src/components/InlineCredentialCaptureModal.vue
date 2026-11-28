@@ -56,6 +56,7 @@ const props = withDefaults(
     targetCredentialId?: string | null
     lockTarget?: boolean
     preserveDefaultRef?: boolean
+    silentSuccessToast?: boolean
     title?: string
     actionLabel?: string
   }>(),
@@ -71,6 +72,7 @@ const props = withDefaults(
     targetCredentialId: null,
     lockTarget: false,
     preserveDefaultRef: false,
+    silentSuccessToast: false,
     title: '转存为托管凭据',
     actionLabel: '保存并替换',
   },
@@ -358,7 +360,9 @@ async function save() {
             : formatCredentialPlaceholder(saved, cleanField)
       clearSensitiveDraft()
       open.value = false
-      toast.add({ title: `已保存凭据 ${saved.slug}`, color: 'success' })
+      if (!props.silentSuccessToast) {
+        toast.add({ title: `已保存凭据 ${saved.slug}`, color: 'success' })
+      }
       emit('saved', {
         credential: saved,
         slug: saved.slug,
@@ -392,7 +396,9 @@ async function save() {
         : formatCredentialPlaceholder(saved, cleanField)
     clearSensitiveDraft()
     open.value = false
-    toast.add({ title: `已更新凭据 ${saved.slug}#${cleanField}`, color: 'success' })
+    if (!props.silentSuccessToast) {
+      toast.add({ title: `已更新凭据 ${saved.slug}#${cleanField}`, color: 'success' })
+    }
     emit('saved', {
       credential: saved,
       slug: saved.slug,
