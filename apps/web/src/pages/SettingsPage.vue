@@ -49,47 +49,49 @@ function setTab(value: string | number) {
 
 <template>
   <div class="settings-page">
-    <div class="settings-head-bar">
-      <div class="settings-head-inner">
-        <PageHead title="设置" />
+    <div class="settings-shell">
+      <div class="settings-head-bar">
+        <div class="settings-head-inner">
+          <PageHead title="设置" />
+        </div>
       </div>
-    </div>
 
-    <div class="settings-mobile-tabs">
-      <UTabs
-        :model-value="tab"
-        :items="tabItems"
-        :content="false"
-        variant="link"
-        size="md"
-        :ui="{ root: 'min-w-0', list: 'border-0', trigger: 'px-3 py-0 h-11 text-sm/5' }"
-        @update:model-value="setTab"
-      />
-    </div>
+      <div class="settings-mobile-tabs">
+        <UTabs
+          :model-value="tab"
+          :items="tabItems"
+          :content="false"
+          variant="link"
+          size="md"
+          :ui="{ root: 'min-w-0', list: 'border-0', trigger: 'px-3 py-0 h-11 text-sm/5' }"
+          @update:model-value="setTab"
+        />
+      </div>
 
-    <div class="settings-workspace">
-      <nav class="settings-vnav" aria-label="设置分组">
-        <button
-          v-for="item in navGroups"
-          :key="item.value"
-          type="button"
-          class="vnav-item"
-          :class="{ active: tab === item.value }"
-          :aria-current="tab === item.value ? 'page' : undefined"
-          @click="setTab(item.value)"
-        >
-          <UIcon :name="item.icon" class="vnav-icon" aria-hidden="true" />
-          <span class="vnav-text">
-            <span class="vnav-label">{{ item.label }}</span>
-            <span class="vnav-desc">{{ item.desc }}</span>
-          </span>
-        </button>
-      </nav>
+      <div class="settings-workspace">
+        <nav class="settings-vnav" aria-label="设置分组">
+          <button
+            v-for="item in navGroups"
+            :key="item.value"
+            type="button"
+            class="vnav-item"
+            :class="{ active: tab === item.value }"
+            :aria-current="tab === item.value ? 'page' : undefined"
+            @click="setTab(item.value)"
+          >
+            <UIcon :name="item.icon" class="vnav-icon" aria-hidden="true" />
+            <span class="vnav-text">
+              <span class="vnav-label">{{ item.label }}</span>
+              <span class="vnav-desc">{{ item.desc }}</span>
+            </span>
+          </button>
+        </nav>
 
-      <div class="settings-content">
-        <KeysSettings v-if="tab === 'keys'" />
-        <ModelSettings v-else-if="tab === 'models'" v-model:dirty="modelsDirty" />
-        <AccountDataSettings v-else />
+        <div class="settings-content">
+          <KeysSettings v-if="tab === 'keys'" />
+          <ModelSettings v-else-if="tab === 'models'" v-model:dirty="modelsDirty" />
+          <AccountDataSettings v-else />
+        </div>
       </div>
     </div>
   </div>
@@ -101,13 +103,23 @@ function setTab(value: string | number) {
   min-width: 0;
   overflow-y: auto;
 }
+.settings-shell {
+  width: 100%;
+  max-width: 1840px;
+  min-height: 100%;
+  margin-inline: auto;
+}
+@media (min-width: 1841px) {
+  .settings-shell {
+    border-inline: 1px solid var(--ui-border-muted);
+  }
+}
 .settings-head-bar {
   border-bottom: 1px solid var(--ui-rule);
 }
 .settings-head-inner {
   width: 100%;
-  max-width: 76rem;
-  margin-inline: auto;
+  max-width: 80rem;
 }
 .settings-mobile-tabs {
   display: none;
@@ -120,8 +132,7 @@ function setTab(value: string | number) {
   gap: 40px;
   align-items: start;
   width: 100%;
-  max-width: 76rem;
-  margin-inline: auto;
+  max-width: 80rem;
   padding: 28px 32px 56px;
 }
 .settings-vnav {

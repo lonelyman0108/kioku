@@ -104,7 +104,7 @@ let rootObserver: ResizeObserver | null = null
 let tableObserver: ResizeObserver | null = null
 
 const isSplit = computed(
-  () => props.allowSplit && activeLayout.value === 'split' && containerWidth.value >= 640,
+  () => props.allowSplit && activeLayout.value === 'split' && containerWidth.value >= 600,
 )
 // 极窄容器下合并旧/新行号列为单列，释放更多正文可读宽度
 const isCompactUnified = computed(() => !isSplit.value && containerWidth.value < 480)
@@ -820,7 +820,7 @@ defineExpose({
 }
 
 /* 窄容器下隐藏双栏切换，避免过窄断行 */
-@container (max-width: 639.98px) {
+@container (max-width: 599.98px) {
   .layout-switch {
     display: none;
   }

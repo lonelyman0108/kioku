@@ -380,6 +380,37 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(inboxPage).toContain('q-checkbox-hit')
   })
 
+  it('三段响应式断层、双栏对比阈值下调、整理页全屏审校与 1840px 宽屏画布对齐完整', () => {
+    expect(consoleLayout).toContain('(min-width: 768px)')
+    expect(consoleLayout).toContain('desktop-nav')
+    expect(consoleLayout).toContain('mobile-nav-trigger')
+    expect(consoleLayout).not.toContain('max-[1120px]:hidden')
+
+    expect(memoriesPage).toContain('compactRail')
+    expect(memoriesPage).toContain('isPhone')
+    expect(memoriesPage).toContain('max-width: 1279.98px')
+    expect(memoriesPage).toContain('max-width: 767.98px')
+    expect(memoryList).toContain('max-width: 1279.98px')
+
+    expect(inboxPage).toContain('compactRail')
+    expect(inboxPage).toContain('isPhone')
+    expect(inboxPage).toContain('is-fullscreen')
+    expect(inboxPage).toContain('toggleFullscreen')
+    expect(inboxPage).toContain('max-width: 1279.98px')
+    expect(inboxPage).toContain('max-width: 767.98px')
+
+    expect(dreamSuggestionCard).toContain('toggleFullscreen')
+    expect(dreamSuggestionCard).toContain('退出全屏')
+    expect(dreamSuggestionCard).toContain('decision-bar-inner')
+
+    expect(diffViewer).toContain('containerWidth.value >= 600')
+    expect(diffViewer).toContain('max-width: 599.98px')
+    expect(memoryHistoryDrawer).toContain('max-width: 599.98px')
+
+    expect(credentialsPage).toContain('max-width: 1840px')
+    expect(settingsPage).toContain('max-width: 1840px')
+  })
+
   it('界面中引用的全部 icons.* 均已在 icons.ts 注册，且没有直接写死未打包的 i-lucide-*', () => {
     const registered = new Set(Object.keys(icons))
     const missing: string[] = []

@@ -85,7 +85,9 @@ const toast = useToast()
 const queryClient = useQueryClient()
 const { me } = useSession()
 const viewport = useViewport()
-const narrow = computed(() => viewport.value.width < 1024)
+const isPhone = computed(() => viewport.value.width < 768)
+const compactRail = computed(() => viewport.value.width < 1280)
+const fullscreen = ref(false)
 
 const inboxQuery = useQuery({
   queryKey: ['inbox'] as const,
@@ -536,17 +538,17 @@ const cardRef = ref<InstanceType<typeof DreamSuggestionCard> | null>(null)
 const queueScrollRef = ref<HTMLElement | null>(null)
 
 watch(
-  [orderedVisibleItems, narrow],
-  ([list, isNarrow]) => {
+  [orderedVisibleItems, isPhone],
+  ([list, phone]) => {
     const safeValid = new Set(visibleSafeItems.value.map((i) => i.id))
     selectedSafeIds.value = selectedSafeIds.value.filter((id) => safeValid.has(id))
 
     const allValid = new Set(list.map((i) => i.id))
     if (selectedId.value && !allValid.has(selectedId.value)) {
-      selectedId.value = !isNarrow ? (list[0]?.id ?? null) : null
+      selectedId.value = !phone ? (list[0]?.id ?? null) : null
       return
     }
-    if (!isNarrow && !selectedId.value && list.length > 0) {
+    if (!phone && !selectedId.value && list.length > 0) {
       selectedId.value = list[0]!.id
     }
   },
@@ -613,19 +615,21 @@ function scrollSelectedRowIntoView(id: string) {
   })
 }
 
-// ---- 三栏队列拖拽调宽（与记忆页 216px | 336px | 1fr 像素对齐） ----
+// ---- 三栏/双栏队列拖拽调宽与全屏审校（与记忆页 216px | 336px | 1fr 像素对齐） ----
 const layoutRef = ref<HTMLElement | null>(null)
 const INDEX_RAIL_WIDTH = 216
 const QUEUE_WIDTH_STORAGE_KEY = 'kioku:organize-queue-width'
 const QUEUE_WIDTH_DEFAULT = 336
 const QUEUE_WIDTH_MIN = 280
+const QUEUE_WIDTH_MIN_COMPACT = 256
 const QUEUE_WIDTH_MAX = 480
 const REVIEW_MIN_WIDTH = 520
+const REVIEW_MIN_WIDTH_COMPACT = 480
 
 function readStoredQueueWidth(): number {
   try {
     const raw = Number(window.localStorage.getItem(QUEUE_WIDTH_STORAGE_KEY))
-    if (Number.isFinite(raw) && raw >= QUEUE_WIDTH_MIN && raw <= QUEUE_WIDTH_MAX) {
+    if (Number.isFinite(raw) && raw >= QUEUE_WIDTH_MIN_COMPACT && raw <= QUEUE_WIDTH_MAX) {
       return Math.round(raw)
     }
   } catch {
@@ -647,18 +651,35 @@ const containerWidth = ref<number>(0)
 const resizing = ref(false)
 let layoutObserver: ResizeObserver | null = null
 
+const activeRailWidth = computed(() => (compactRail.value ? 0 : INDEX_RAIL_WIDTH))
+const queueMinWidth = computed(() =>
+  viewport.value.width < 1024 ? QUEUE_WIDTH_MIN_COMPACT : QUEUE_WIDTH_MIN,
+)
+const reviewMinWidth = computed(() =>
+  viewport.value.width < 1024 ? REVIEW_MIN_WIDTH_COMPACT : REVIEW_MIN_WIDTH,
+)
+
 const maxAllowedQueueWidth = computed(() => {
   const viewportFallback = Math.min(viewport.value.width, 1840)
   const effectiveContainer = containerWidth.value > 0 ? containerWidth.value : viewportFallback
   return Math.max(
-    QUEUE_WIDTH_MIN,
-    Math.min(QUEUE_WIDTH_MAX, effectiveContainer - INDEX_RAIL_WIDTH - REVIEW_MIN_WIDTH),
+    queueMinWidth.value,
+    Math.min(QUEUE_WIDTH_MAX, effectiveContainer - activeRailWidth.value - reviewMinWidth.value),
   )
 })
 
 const effectiveQueueWidth = computed(() =>
-  Math.max(QUEUE_WIDTH_MIN, Math.min(storedQueueWidth.value, maxAllowedQueueWidth.value)),
+  Math.max(queueMinWidth.value, Math.min(storedQueueWidth.value, maxAllowedQueueWidth.value)),
 )
+
+const isFullscreen = computed(
+  () => Boolean(activeSuggestion.value) && fullscreen.value && !isPhone.value,
+)
+
+function toggleFullscreen() {
+  if (!activeSuggestion.value || isPhone.value) return
+  fullscreen.value = !fullscreen.value
+}
 
 let dragStartX = 0
 let dragStartWidth = QUEUE_WIDTH_DEFAULT
@@ -667,7 +688,7 @@ function onPointerMove(event: PointerEvent) {
   if (!resizing.value) return
   storedQueueWidth.value = Math.round(
     Math.max(
-      QUEUE_WIDTH_MIN,
+      queueMinWidth.value,
       Math.min(maxAllowedQueueWidth.value, dragStartWidth + (event.clientX - dragStartX)),
     ),
   )
@@ -684,7 +705,7 @@ function stopResize() {
 }
 
 function startResize(event: PointerEvent) {
-  if (narrow.value || event.button !== 0) return
+  if (isPhone.value || isFullscreen.value || event.button !== 0) return
   event.preventDefault()
   dragStartX = event.clientX
   dragStartWidth = effectiveQueueWidth.value
@@ -701,11 +722,11 @@ function resetQueueWidth() {
 }
 
 function onSplitterKeydown(event: KeyboardEvent) {
-  if (narrow.value) return
+  if (isPhone.value || isFullscreen.value) return
   const step = event.shiftKey ? 40 : 16
   if (event.key === 'ArrowLeft') {
     event.preventDefault()
-    storedQueueWidth.value = Math.max(QUEUE_WIDTH_MIN, effectiveQueueWidth.value - step)
+    storedQueueWidth.value = Math.max(queueMinWidth.value, effectiveQueueWidth.value - step)
     saveQueueWidth(storedQueueWidth.value)
   } else if (event.key === 'ArrowRight') {
     event.preventDefault()
@@ -717,9 +738,17 @@ function onSplitterKeydown(event: KeyboardEvent) {
   }
 }
 
-watch(narrow, (isNarrow) => {
-  if (isNarrow) stopResize()
-  if (!isNarrow) railOpen.value = false
+watch([isPhone, isFullscreen], ([phone, fs]) => {
+  if (phone || fs) stopResize()
+  if (phone) fullscreen.value = false
+})
+
+watch(compactRail, (compact) => {
+  if (!compact) railOpen.value = false
+})
+
+watch(activeSuggestion, (curr) => {
+  if (!curr) fullscreen.value = false
 })
 
 // ---- 触发后台整理、分级确认与取消 ----
@@ -930,7 +959,7 @@ function advanceAfterRemovingSet(removedIds: ReadonlySet<string>) {
     const idx = list.findIndex((item) => item.id === currentSelected)
     const remaining = list.filter((item) => !removedIds.has(item.id))
     const next =
-      !narrow.value && remaining.length > 0
+      !isPhone.value && remaining.length > 0
         ? (remaining[Math.min(Math.max(0, idx), remaining.length - 1)] ?? null)
         : null
     nextSelected = next ? next.id : null
@@ -1277,7 +1306,10 @@ function onKeydown(event: KeyboardEvent) {
       return
     }
     if (isEditableElement(event.target)) return
-    if (narrow.value && selectedId.value) {
+    if (isFullscreen.value) {
+      event.preventDefault()
+      fullscreen.value = false
+    } else if (isPhone.value && selectedId.value) {
       event.preventDefault()
       backToQueue()
     }
@@ -1357,9 +1389,10 @@ onBeforeUnmount(() => {
     class="organize-layout"
     :class="{
       'has-selection': Boolean(activeSuggestion),
+      'is-fullscreen': isFullscreen,
       'is-resizing': resizing,
     }"
-    :style="!narrow ? { '--queue-width': `${effectiveQueueWidth}px` } : undefined"
+    :style="!isFullscreen && !isPhone ? { '--queue-width': `${effectiveQueueWidth}px` } : undefined"
   >
     <!-- 左栏 216px：目录、发起整理与运行底账（同记忆页左侧等宽对齐） -->
     <div class="rail-col">
@@ -1594,7 +1627,7 @@ onBeforeUnmount(() => {
           <p class="queue-empty-title">暂无待确认建议</p>
           <p class="queue-empty-desc">可在目录中发起增量整理、规范整理、查重与关联或结构检查。</p>
           <UButton
-            v-if="narrow"
+            v-if="compactRail"
             size="xs"
             color="neutral"
             variant="outline"
@@ -1648,13 +1681,13 @@ onBeforeUnmount(() => {
     <!-- 右栏 1fr：全高审校台（或空态整理底账） -->
     <section class="review-col" aria-label="建议审校工作台">
       <div
-        v-if="!narrow"
+        v-if="!isFullscreen && !isPhone"
         class="pane-splitter"
         role="separator"
         aria-orientation="vertical"
         aria-label="拖动调节队列与审校台宽度"
         :aria-valuenow="effectiveQueueWidth"
-        :aria-valuemin="QUEUE_WIDTH_MIN"
+        :aria-valuemin="queueMinWidth"
         :aria-valuemax="maxAllowedQueueWidth"
         tabindex="0"
         title="拖动调节宽度，双击恢复默认"
@@ -1672,7 +1705,8 @@ onBeforeUnmount(() => {
         :risk-level="riskLevelOf(activeSuggestion)"
         :position="activeIndex + 1"
         :total-count="orderedVisibleItems.length"
-        :show-back="narrow"
+        :show-back="isPhone"
+        :fullscreen="isFullscreen"
         :has-prev="activeIndex > 0"
         :has-next="activeIndex >= 0 && activeIndex < orderedVisibleItems.length - 1"
         :busy="busyId === activeSuggestion.id"
@@ -1684,6 +1718,7 @@ onBeforeUnmount(() => {
         @back="backToQueue"
         @prev="stepSuggestion(-1)"
         @next="stepSuggestion(1)"
+        @toggle-fullscreen="toggleFullscreen"
         @dirty-change="activeCardDirty = $event"
       />
 
@@ -2379,18 +2414,38 @@ onBeforeUnmount(() => {
   color: var(--ui-text-muted);
 }
 
-/* ---- 窄屏 < 1024px 降级为单栏切换 + 左目录抽屉 ---- */
-@media (max-width: 1023.98px) {
+.organize-layout.is-fullscreen {
+  grid-template-columns: minmax(0, 1fr);
+}
+.organize-layout.is-fullscreen .rail-col,
+.organize-layout.is-fullscreen .queue-col {
+  display: none;
+}
+
+/* ---- 平板与窄窗 < 1280px 降级为双栏（队列 + 审校台）+ 左目录抽屉 ---- */
+@media (max-width: 1279.98px) {
   .organize-layout {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: var(--queue-width, 288px) minmax(0, 1fr);
     max-width: none;
   }
-  .rail-col,
-  .pane-splitter {
+  .rail-col {
     display: none;
   }
   .mobile-rail-btn {
     display: inline-flex;
+  }
+  .organize-layout.is-fullscreen {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ---- 手机 < 768px 降级为单栏切换 ---- */
+@media (max-width: 767.98px) {
+  .organize-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .pane-splitter {
+    display: none;
   }
   .queue-col {
     border-right: 0;

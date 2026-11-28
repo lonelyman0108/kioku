@@ -1426,7 +1426,7 @@ async function confirmRestore() {
 .mobile-back {
   display: none;
 }
-@container (max-width: 639.98px) {
+@container (max-width: 599.98px) {
   .split-toggle {
     display: none;
   }

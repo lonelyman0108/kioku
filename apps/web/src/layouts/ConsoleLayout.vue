@@ -80,7 +80,7 @@ watch(
   },
 )
 
-const wideScreen = window.matchMedia('(min-width: 1024px)')
+const wideScreen = window.matchMedia('(min-width: 768px)')
 function closeNavOnWideScreen(event: MediaQueryListEvent) {
   if (event.matches) navOpen.value = false
 }
@@ -213,21 +213,19 @@ provide(LOGOUT, logout)
 <template>
   <UDashboardGroup class="flex-col">
     <header class="shrink-0 border-b border-rule">
-      <div
-        class="console-header-inner flex h-13 items-stretch gap-4 px-4 min-[1121px]:gap-6 min-[1121px]:px-8"
-      >
+      <div class="console-header-inner flex h-13 items-stretch">
         <RouterLink :to="{ name: 'memories' }" class="flex shrink-0 items-center">
           <KiokuMark />
         </RouterLink>
 
-        <nav class="flex shrink-0 items-stretch max-[1024px]:hidden" aria-label="主导航">
+        <nav class="desktop-nav shrink-0 items-stretch" aria-label="主导航">
           <RouterLink
             v-for="item in navItems"
             :key="item.routeName"
             :to="item.to"
             :title="item.count ? `${item.label}（${item.count} 条待确认建议）` : undefined"
             :aria-current="isCurrent(item) ? 'page' : undefined"
-            class="nav-link flex items-center gap-1.5 px-2.5 whitespace-nowrap"
+            class="nav-link flex items-center gap-1.5 whitespace-nowrap"
           >
             <UIcon :name="item.icon" class="nav-icon" aria-hidden="true" />
             {{ item.label }}
@@ -237,7 +235,7 @@ provide(LOGOUT, logout)
           </RouterLink>
         </nav>
 
-        <div class="flex min-w-0 flex-1 items-center justify-end gap-1.5">
+        <div class="header-actions flex min-w-0 flex-1 items-center justify-end">
           <BackgroundTasksIndicator
             :dream-state="inbox.data.value?.dreamState ?? null"
             :embedding-backfill="inbox.data.value?.embeddingBackfill ?? null"
@@ -246,23 +244,23 @@ provide(LOGOUT, logout)
             size="sm"
             :icon="icons.capture"
             :title="`记录一条习惯、约定或事实更新，自动归并至既有记忆（${captureShortcut}）`"
-            class="shrink-0"
+            class="shrink-0 whitespace-nowrap"
             @click="openQuickCapture"
           >
             <span>随手记</span>
             <span class="capture-kbd" aria-hidden="true">{{ captureShortcut }}</span>
           </UButton>
           <UDashboardSearchButton
+            size="sm"
             label="搜索"
             aria-label="搜索"
             color="neutral"
-            class="shrink-0"
+            class="shrink-0 whitespace-nowrap"
             :ui="{
-              label: 'max-[1120px]:hidden',
               trailing: 'hidden min-[1024px]:flex items-center gap-0.5 ms-1',
             }"
           />
-          <div class="flex min-w-0 items-center max-[1024px]:hidden">
+          <div class="desktop-account min-w-0 items-center">
             <UDropdownMenu
               :items="userMenu"
               :content="{ align: 'end' }"
@@ -276,7 +274,7 @@ provide(LOGOUT, logout)
                 :trailing-icon="icons.chevronDown"
                 color="neutral"
                 variant="ghost"
-                class="max-w-48 min-w-0"
+                class="account-trigger min-w-0"
                 aria-label="账号菜单"
               />
             </UDropdownMenu>
@@ -290,11 +288,12 @@ provide(LOGOUT, logout)
             :ui="{ content: 'max-w-72 sm:max-w-72', body: 'p-0 sm:p-0' }"
           >
             <UButton
+              size="sm"
               :icon="icons.menu"
               label="导航"
               color="neutral"
               variant="ghost"
-              class="shrink-0 min-[1024px]:hidden"
+              class="mobile-nav-trigger shrink-0 whitespace-nowrap"
               aria-label="打开导航"
             />
             <template #body>
@@ -382,6 +381,26 @@ provide(LOGOUT, logout)
   width: 100%;
   max-width: 1840px;
   margin-inline: auto;
+  gap: 24px;
+  padding-inline: 32px;
+}
+.desktop-nav {
+  display: flex;
+}
+.desktop-account {
+  display: flex;
+}
+.mobile-nav-trigger {
+  display: none;
+}
+.header-actions {
+  gap: 6px;
+}
+.account-trigger {
+  max-width: 12rem;
+}
+.nav-link {
+  padding-inline: 10px;
 }
 .nav-link:hover {
   box-shadow: inset 0 -1px 0 var(--ui-text-highlighted);
@@ -413,9 +432,42 @@ provide(LOGOUT, logout)
   font-size: 12px;
   opacity: 0.78;
 }
+@media (max-width: 1120px) {
+  .console-header-inner {
+    gap: 12px;
+    padding-inline: 16px;
+  }
+}
 @media (max-width: 1023.98px) {
+  .nav-link {
+    padding-inline: 8px;
+  }
+  .account-trigger {
+    max-width: 8.5rem;
+  }
   .capture-kbd {
     display: none;
+  }
+}
+@media (pointer: coarse) {
+  .capture-kbd {
+    display: none;
+  }
+}
+@media (max-width: 767.98px) {
+  .console-header-inner {
+    gap: 6px;
+    padding-inline: 10px;
+  }
+  .header-actions {
+    gap: 4px;
+  }
+  .desktop-nav,
+  .desktop-account {
+    display: none;
+  }
+  .mobile-nav-trigger {
+    display: inline-flex;
   }
 }
 </style>
