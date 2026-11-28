@@ -7,8 +7,10 @@ import {
   createDefaultKeyFilter,
   filterActiveKeys,
   hasActiveKeyFilter,
+  KEY_FILTER_ALL,
   KEY_REALM_GENERIC,
   KEY_REALM_UNRESTRICTED,
+  pruneStaleKeyFilter,
 } from '../keyFilters'
 
 function makeKey(overrides: Partial<ApiKeyView> & { id: string; name: string }): ApiKeyView {
@@ -145,6 +147,48 @@ describe('访问密钥多维筛选', () => {
     expect(hasActiveKeyFilter(combined)).toBe(true)
     expect(filterActiveKeys(sampleKeys, combined).map((k) => k.prefix)).toEqual(['kk_live_hom4'])
     expect(filterActiveKeys(sampleKeys, { ...combined, runtime: 'codex' })).toEqual([])
+  })
+
+  it('有效密钥变化导致动态筛选项消失时自动回退失效维度且保留仍有效的条件', () => {
+    const remainingKeys = sampleKeys.filter((k) => k.runtimeFamily !== 'openclaw')
+    const opts = buildKeyFilterOptions(remainingKeys)
+
+    const pruned = pruneStaleKeyFilter(
+      {
+        runtime: 'openclaw',
+        env: 'home-24',
+        realm: 'personal',
+        permission: 'credentials',
+        q: 'mbp',
+      },
+      opts,
+    )
+    expect(pruned).toEqual({
+      runtime: KEY_FILTER_ALL,
+      env: KEY_FILTER_ALL,
+      realm: KEY_FILTER_ALL,
+      permission: 'credentials',
+      q: 'mbp',
+    })
+
+    // 仍存在的动态选项保持不变
+    const kept = pruneStaleKeyFilter(
+      {
+        runtime: 'claudecode',
+        env: 'mac',
+        realm: 'work',
+        permission: 'all',
+        q: '',
+      },
+      opts,
+    )
+    expect(kept).toEqual({
+      runtime: 'claudecode',
+      env: 'mac',
+      realm: 'work',
+      permission: 'all',
+      q: '',
+    })
   })
 })
 

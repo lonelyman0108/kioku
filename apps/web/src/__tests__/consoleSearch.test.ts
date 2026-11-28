@@ -77,9 +77,11 @@ describe('全局命令面板搜索与凭据元数据匹配', () => {
     ])
   })
 
-  it('仅匹配凭据元数据（label、slug、description 与 fieldMeta），绝不调用 reveal 解密', () => {
+  it('仅匹配凭据元数据（label、slug、description 与 fieldMeta），受登录态守卫且绝不调用 reveal 解密', () => {
     expect(consoleSearchSource).not.toContain('revealCredential')
     expect(consoleSearchSource).toContain('api.credentials()')
+    expect(consoleSearchSource).toContain('useSession')
+    expect(consoleSearchSource).toContain('Boolean(me.data.value) && term.value.trim().length > 0')
     expect(consoleSearchSource).toContain('newCredentialRoute')
 
     expect(matchCredentialsForSearch(sampleCreds, '')).toEqual([])

@@ -22,6 +22,7 @@ import {
   settingsRoute,
 } from '../routes'
 import { formatRelative } from '../time'
+import { useSession } from './useSession'
 
 const SEARCH_DELAY_MS = 250
 const CREDENTIAL_SEARCH_LIMIT = 10
@@ -119,6 +120,7 @@ function entrySearchSuffix(entry: EntryListItem): string {
 // ⌘K 搜索：页面跳转与凭据元数据由本地过滤，记忆经服务端混合检索返回
 export function useConsoleSearch(pages: Ref<CommandPaletteItem[]>) {
   const route = useRoute()
+  const { me } = useSession()
   const term = ref('')
   const loading = ref(false)
   const items = ref<EntryListItem[] | null>(null)
@@ -126,11 +128,11 @@ export function useConsoleSearch(pages: Ref<CommandPaletteItem[]>) {
   let timer: ReturnType<typeof setTimeout> | undefined
   let seq = 0
 
-  // 仅在输入关键词时按需复用凭据元数据缓存，绝不调用 reveal
+  // 仅在已登录且输入关键词时按需复用凭据元数据缓存，绝不调用 reveal
   const credentialsQuery = useQuery({
     queryKey: ['credentials'] as const,
     queryFn: () => api.credentials(),
-    enabled: computed(() => term.value.trim().length > 0),
+    enabled: computed(() => Boolean(me.data.value) && term.value.trim().length > 0),
     staleTime: 60_000,
   })
 

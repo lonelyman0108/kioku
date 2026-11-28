@@ -186,9 +186,11 @@ async function confirmKickOthers() {
   kickOthersError.value = null
   try {
     const results = await Promise.allSettled(targets.map((s) => api.revokeSession(s.id)))
-    const failed = results.filter((r) => r.status === 'rejected').length
+    const failed = results.filter(
+      (r) => r.status === 'rejected' && !(r.reason instanceof ApiError && r.reason.status === 404),
+    ).length
     const succeeded = results.length - failed
-    void queryClient.invalidateQueries({ queryKey: ['auth-sessions'] })
+    await queryClient.invalidateQueries({ queryKey: ['auth-sessions'] })
     if (failed === 0) {
       kickOthersOpen.value = false
       toast.add({ title: `已下线其余 ${succeeded} 台设备`, color: 'success' })

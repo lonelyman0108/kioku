@@ -506,10 +506,11 @@ const filteredPreviewItems = computed(() => {
               v-for="card in exportModeCards"
               :key="card.value"
               type="button"
+              role="radio"
               class="mode-option"
               :class="{ 'is-active': exportMode === card.value, 'is-disabled': card.disabled }"
               :disabled="card.disabled || exporting !== null"
-              :aria-pressed="exportMode === card.value"
+              :aria-checked="exportMode === card.value"
               @click="exportMode = card.value"
             >
               <span class="mode-option-title">

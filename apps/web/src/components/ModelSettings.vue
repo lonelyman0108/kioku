@@ -196,10 +196,12 @@ watch(
   { immediate: true },
 )
 
-// 切换子视图且路由守卫放行后，将当前草稿与已保存值对齐
+// 切换子视图且路由守卫放行后，将当前草稿与已保存值对齐并清理旧连通测试状态
 watch(
   () => props.section,
   () => {
+    delete testResults.embedding
+    delete testResults.chat_llm
     if (settingsQuery.data.value) syncFromSaved(settingsQuery.data.value)
   },
 )
@@ -585,6 +587,8 @@ async function save() {
     }
     queryClient.setQueryData(['models-settings'], saved)
     syncFromSaved(saved)
+    if (props.section === 'embed') delete testResults.embedding
+    else if (props.section === 'chat') delete testResults.chat_llm
     void queryClient.invalidateQueries({ queryKey: ME_KEY })
     void queryClient.invalidateQueries({ queryKey: ['inbox'] })
     if (props.section === 'chat' && !wasDreamEnabled && saved.dream.enabled) {
@@ -606,9 +610,15 @@ async function save() {
 function discardSection() {
   const saved = settingsQuery.data.value
   if (!saved) return
-  if (props.section === 'embed') syncEmbeddingFromSaved(saved)
-  else if (props.section === 'chat') syncChatFromSaved(saved)
-  else syncDreamFromSaved(saved)
+  if (props.section === 'embed') {
+    syncEmbeddingFromSaved(saved)
+    delete testResults.embedding
+  } else if (props.section === 'chat') {
+    syncChatFromSaved(saved)
+    delete testResults.chat_llm
+  } else {
+    syncDreamFromSaved(saved)
+  }
 }
 
 interface ModelTestDisplay extends TestModelResponse {

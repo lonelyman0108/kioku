@@ -168,6 +168,21 @@ export function buildKeyFilterOptions(keys: readonly ApiKeyView[]): {
   return { runtimes, envs, realms, permissions }
 }
 
+export function pruneStaleKeyFilter(
+  filter: KeyFilterState,
+  options: ReturnType<typeof buildKeyFilterOptions>,
+): KeyFilterState {
+  const validRuntimes = new Set(options.runtimes.map((o) => o.value))
+  const validEnvs = new Set(options.envs.map((o) => o.value))
+  const validRealms = new Set(options.realms.map((o) => o.value))
+  return {
+    ...filter,
+    runtime: validRuntimes.has(filter.runtime) ? filter.runtime : KEY_FILTER_ALL,
+    env: validEnvs.has(filter.env) ? filter.env : KEY_FILTER_ALL,
+    realm: validRealms.has(filter.realm) ? filter.realm : KEY_FILTER_ALL,
+  }
+}
+
 // 与服务端凭据边界规则保持一致（失败即拒绝）：限定场域密钥不能访问未限定场域的凭据
 export function countMatchingCredentials(
   scope: { canResolveCredentials: boolean; allowedRealms: readonly string[] | null },

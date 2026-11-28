@@ -2,7 +2,7 @@
 import { normalizeSlugList, type ApiKeyView, type IssuedApiKeyResponse } from '@kioku/contracts'
 import { useToast } from '@nuxt/ui/composables'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
@@ -13,6 +13,7 @@ import {
   createDefaultKeyFilter,
   filterActiveKeys,
   hasActiveKeyFilter,
+  pruneStaleKeyFilter,
   type KeyFilterState,
 } from '../keyFilters'
 import { envDisplayName } from '../labels'
@@ -59,6 +60,20 @@ const filter = reactive<KeyFilterState>(createDefaultKeyFilter())
 const filterOptions = computed(() => buildKeyFilterOptions(activeKeys.value))
 const filterActive = computed(() => hasActiveKeyFilter(filter))
 const filteredKeys = computed(() => filterActiveKeys(activeKeys.value, filter))
+
+watch(filterOptions, (opts) => {
+  if (!keysQuery.data.value) return
+  const pruned = pruneStaleKeyFilter(filter, opts)
+  if (
+    pruned.runtime !== filter.runtime ||
+    pruned.env !== filter.env ||
+    pruned.realm !== filter.realm
+  ) {
+    filter.runtime = pruned.runtime
+    filter.env = pruned.env
+    filter.realm = pruned.realm
+  }
+})
 
 function resetFilter() {
   Object.assign(filter, createDefaultKeyFilter())
@@ -246,7 +261,11 @@ async function confirmRevoke() {
                         aria-label="清空搜索词"
                         @click="filter.q = ''"
                       >
-                        <UIcon :name="icons.cancel" class="inline-block size-3.5" />
+                        <UIcon
+                          :name="icons.cancel"
+                          class="inline-block size-3.5"
+                          aria-hidden="true"
+                        />
                       </button>
                     </template>
                   </UInput>
@@ -1098,6 +1117,10 @@ async function confirmRevoke() {
   .key-ledger-row {
     flex-direction: column;
     gap: 10px;
+  }
+  .key-ledger-main {
+    flex: none;
+    width: 100%;
   }
   .key-ledger-aside {
     flex-direction: row;

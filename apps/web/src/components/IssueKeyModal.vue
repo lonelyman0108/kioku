@@ -436,6 +436,9 @@ function closeOnce() {
                   <strong class="tabular-nums">{{ matchingCredentialCount }}</strong>
                   条托管凭据 ·
                 </template>
+                <template v-else-if="credentialsQuery.isError.value">
+                  暂无法统计当前场域边界内的托管凭据 ·
+                </template>
                 <template v-else>正在统计当前场域边界内的托管凭据 · </template>
                 <RouterLink
                   :to="{ name: 'credentials' }"
