@@ -1372,7 +1372,7 @@ defineExpose({ filterOpen, exitBatchMode, displayItems })
   align-items: center;
   gap: 6px;
 }
-@media (max-width: 1023.98px) {
+@media (max-width: 1279.98px) {
   .mobile-rail-bar {
     display: flex;
   }

@@ -154,19 +154,22 @@ const layoutRef = ref<HTMLElement | null>(null)
 const listRef = ref<InstanceType<typeof MemoryList> | null>(null)
 const editorRef = ref<InstanceType<typeof MemoryEditor> | null>(null)
 const viewport = useViewport()
-const narrow = computed(() => viewport.value.width < 1024)
+const isPhone = computed(() => viewport.value.width < 768)
+const compactRail = computed(() => viewport.value.width < 1280)
 
 const INDEX_RAIL_WIDTH = 216
 const LIST_WIDTH_STORAGE_KEY = 'kioku:memories-list-width'
 const LIST_WIDTH_DEFAULT = 336
 const LIST_WIDTH_MIN = 280
+const LIST_WIDTH_MIN_COMPACT = 256
 const LIST_WIDTH_MAX = 520
 const DETAIL_MIN_WIDTH = 520
+const DETAIL_MIN_WIDTH_COMPACT = 480
 
 function readStoredListWidth(): number {
   try {
     const raw = Number(window.localStorage.getItem(LIST_WIDTH_STORAGE_KEY))
-    if (Number.isFinite(raw) && raw >= LIST_WIDTH_MIN && raw <= LIST_WIDTH_MAX) {
+    if (Number.isFinite(raw) && raw >= LIST_WIDTH_MIN_COMPACT && raw <= LIST_WIDTH_MAX) {
       return Math.round(raw)
     }
   } catch {
@@ -188,20 +191,28 @@ const containerWidth = ref<number>(0)
 const resizing = ref(false)
 let layoutObserver: ResizeObserver | null = null
 
+const activeRailWidth = computed(() => (compactRail.value ? 0 : INDEX_RAIL_WIDTH))
+const listMinWidth = computed(() =>
+  viewport.value.width < 1024 ? LIST_WIDTH_MIN_COMPACT : LIST_WIDTH_MIN,
+)
+const detailMinWidth = computed(() =>
+  viewport.value.width < 1024 ? DETAIL_MIN_WIDTH_COMPACT : DETAIL_MIN_WIDTH,
+)
+
 const maxAllowedWidth = computed(() => {
   const viewportFallback = Math.min(viewport.value.width, 1840)
   const effectiveContainer = containerWidth.value > 0 ? containerWidth.value : viewportFallback
   return Math.max(
-    LIST_WIDTH_MIN,
-    Math.min(LIST_WIDTH_MAX, effectiveContainer - INDEX_RAIL_WIDTH - DETAIL_MIN_WIDTH),
+    listMinWidth.value,
+    Math.min(LIST_WIDTH_MAX, effectiveContainer - activeRailWidth.value - detailMinWidth.value),
   )
 })
 
 const effectiveListWidth = computed(() =>
-  Math.max(LIST_WIDTH_MIN, Math.min(storedListWidth.value, maxAllowedWidth.value)),
+  Math.max(listMinWidth.value, Math.min(storedListWidth.value, maxAllowedWidth.value)),
 )
 
-const isFullscreen = computed(() => Boolean(selectedId.value) && fullscreen.value && !narrow.value)
+const isFullscreen = computed(() => Boolean(selectedId.value) && fullscreen.value && !isPhone.value)
 
 let dragStartX = 0
 let dragStartWidth = LIST_WIDTH_DEFAULT
@@ -210,7 +221,7 @@ function onPointerMove(event: PointerEvent) {
   if (!resizing.value) return
   const next = Math.round(
     Math.max(
-      LIST_WIDTH_MIN,
+      listMinWidth.value,
       Math.min(maxAllowedWidth.value, dragStartWidth + (event.clientX - dragStartX)),
     ),
   )
@@ -228,7 +239,7 @@ function stopResize() {
 }
 
 function startResize(event: PointerEvent) {
-  if (narrow.value || isFullscreen.value || event.button !== 0) return
+  if (isPhone.value || isFullscreen.value || event.button !== 0) return
   event.preventDefault()
   dragStartX = event.clientX
   dragStartWidth = effectiveListWidth.value
@@ -245,11 +256,11 @@ function resetListWidth() {
 }
 
 function onSplitterKeydown(event: KeyboardEvent) {
-  if (narrow.value || isFullscreen.value) return
+  if (isPhone.value || isFullscreen.value) return
   const step = event.shiftKey ? 40 : 16
   if (event.key === 'ArrowLeft') {
     event.preventDefault()
-    storedListWidth.value = Math.max(LIST_WIDTH_MIN, effectiveListWidth.value - step)
+    storedListWidth.value = Math.max(listMinWidth.value, effectiveListWidth.value - step)
     saveListWidth(storedListWidth.value)
   } else if (event.key === 'ArrowRight') {
     event.preventDefault()
@@ -261,25 +272,28 @@ function onSplitterKeydown(event: KeyboardEvent) {
   }
 }
 
-watch([narrow, isFullscreen], ([isNarrow, fs]) => {
-  if (isNarrow || fs) stopResize()
-  if (isNarrow) fullscreen.value = false
-  if (!isNarrow) railOpen.value = false
+watch([isPhone, isFullscreen], ([phone, fs]) => {
+  if (phone || fs) stopResize()
+  if (phone) fullscreen.value = false
 })
 
-// 宽屏默认保持三栏展开：未选中记忆且真实列表就绪、无地址栏弹窗参数时自动定位首条
+watch(compactRail, (compact) => {
+  if (!compact) railOpen.value = false
+})
+
+// 平板双栏与桌面三栏默认保持右侧展开：未选中记忆且真实列表就绪、无地址栏弹窗参数时自动定位首条
 watch(
   [
     items,
     selectedId,
-    narrow,
+    isPhone,
     () => entriesQuery.isPending.value,
     () => entriesQuery.isPlaceholderData.value,
     () => route.query.capture,
     () => route.query.create,
   ],
-  ([list, sid, isNarrow, pending, placeholder, captureFlag, createFlag]) => {
-    if (isNarrow || pending || placeholder || sid || list.length === 0) return
+  ([list, sid, phone, pending, placeholder, captureFlag, createFlag]) => {
+    if (phone || pending || placeholder || sid || list.length === 0) return
     if (
       captureFlag === '1' ||
       captureFlag === 'true' ||
@@ -299,7 +313,7 @@ watch(selectedId, async (id) => {
     fullscreen.value = false
     return
   }
-  if (narrow.value) {
+  if (isPhone.value) {
     await nextTick()
     editorRef.value?.focusTitle()
   }
@@ -346,7 +360,7 @@ function openEntryFromCapture(shortId: string) {
 }
 
 function toggleFullscreen() {
-  if (!selectedId.value) return
+  if (!selectedId.value || isPhone.value) return
   fullscreen.value = !fullscreen.value
 }
 
@@ -488,7 +502,7 @@ function onDeleted(shortId: string) {
   const deletedIdx = currentList.findIndex((item) => item.shortId === shortId)
   const remaining = currentList.filter((item) => item.shortId !== shortId)
   const nextItem =
-    !narrow.value && remaining.length > 0
+    !isPhone.value && remaining.length > 0
       ? remaining[Math.min(Math.max(0, deletedIdx), remaining.length - 1)]
       : null
   queryClient.setQueriesData<InfiniteData<EntryListResponse>>({ queryKey: ['entries'] }, (old) =>
@@ -540,7 +554,7 @@ function onKeydown(event: KeyboardEvent) {
     if (isFullscreen.value) {
       event.preventDefault()
       fullscreen.value = false
-    } else if (narrow.value && selectedId.value) {
+    } else if (isPhone.value && selectedId.value) {
       event.preventDefault()
       select(null)
     }
@@ -600,7 +614,7 @@ onBeforeUnmount(() => {
       'is-fullscreen': isFullscreen,
       'is-resizing': resizing,
     }"
-    :style="!isFullscreen && !narrow ? { '--list-width': `${effectiveListWidth}px` } : undefined"
+    :style="!isFullscreen && !isPhone ? { '--list-width': `${effectiveListWidth}px` } : undefined"
   >
     <div class="rail-col">
       <MemoryIndexRail
@@ -664,13 +678,13 @@ onBeforeUnmount(() => {
 
     <section class="detail-col" aria-label="记忆详情">
       <div
-        v-if="!isFullscreen && !narrow"
+        v-if="!isFullscreen && !isPhone"
         class="pane-splitter"
         role="separator"
         aria-orientation="vertical"
         aria-label="拖动调节列表与详情宽度"
         :aria-valuenow="effectiveListWidth"
-        :aria-valuemin="LIST_WIDTH_MIN"
+        :aria-valuemin="listMinWidth"
         :aria-valuemax="maxAllowedWidth"
         tabindex="0"
         title="拖动调节宽度，双击恢复默认"
@@ -685,8 +699,8 @@ onBeforeUnmount(() => {
         ref="editorRef"
         :short-id="selectedId"
         :facets="facets"
-        :fullscreen="fullscreen"
-        :show-back="narrow"
+        :fullscreen="isFullscreen"
+        :show-back="isPhone"
         @changed="onChanged"
         @deleted="onDeleted"
         @restored="onRestored"
@@ -869,12 +883,22 @@ onBeforeUnmount(() => {
 .pane-splitter:focus-visible {
   outline: 0;
 }
-@media (max-width: 1023.98px) {
+@media (max-width: 1279.98px) {
   .memories-layout {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: var(--list-width, 288px) minmax(0, 1fr);
     max-width: none;
   }
-  .rail-col,
+  .rail-col {
+    display: none;
+  }
+  .memories-layout.is-fullscreen {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 767.98px) {
+  .memories-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
   .pane-splitter {
     display: none;
   }

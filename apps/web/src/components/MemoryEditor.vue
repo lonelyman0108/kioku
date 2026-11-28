@@ -3537,9 +3537,6 @@ defineExpose({
   padding-bottom: 4px;
 }
 @media (max-width: 1023.98px) {
-  .desktop-fullscreen-btn {
-    display: none;
-  }
   .editor-head {
     padding: 12px 16px;
   }
@@ -3562,6 +3559,9 @@ defineExpose({
   }
 }
 @media (max-width: 767.98px) {
+  .desktop-fullscreen-btn {
+    display: none;
+  }
   /* 手机端由详情面板整体滚动，只吸顶单行操作条，避免大头栏与底栏锁死正文高度 */
   .editor-pane {
     overflow-y: auto;

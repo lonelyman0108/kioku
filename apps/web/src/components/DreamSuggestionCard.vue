@@ -58,6 +58,7 @@ const props = withDefaults(
     position?: number
     totalCount?: number
     showBack?: boolean
+    fullscreen?: boolean
     hasPrev?: boolean
     hasNext?: boolean
   }>(),
@@ -68,6 +69,7 @@ const props = withDefaults(
     position: 0,
     totalCount: 0,
     showBack: false,
+    fullscreen: false,
     hasPrev: false,
     hasNext: false,
   },
@@ -79,6 +81,7 @@ const emit = defineEmits<{
   back: []
   prev: []
   next: []
+  toggleFullscreen: []
   dirtyChange: [dirty: boolean]
 }>()
 
@@ -935,7 +938,7 @@ defineExpose({
 
 <template>
   <!-- 全高审校台态（整理页右栏：顶部依据与护栏 + 中央宽幅变更对比 + 底部固定决断栏） -->
-  <div v-if="isInspector" class="workbench-shell">
+  <div v-if="isInspector" class="workbench-shell" :class="{ 'is-fullscreen': fullscreen }">
     <div v-if="showBack" class="mobile-back-bar">
       <UButton
         size="sm"
@@ -1013,6 +1016,17 @@ defineExpose({
                 <UIcon :name="icons.promote" class="open-entry-icon" aria-hidden="true" />
                 <span>查看原记忆</span>
               </RouterLink>
+              <UButton
+                v-if="!showBack"
+                size="xs"
+                color="neutral"
+                variant="outline"
+                :icon="fullscreen ? icons.minimize : icons.maximize"
+                class="desktop-fullscreen-btn shrink-0 whitespace-nowrap"
+                @click="emit('toggleFullscreen')"
+              >
+                {{ fullscreen ? '退出全屏' : '全屏' }}
+              </UButton>
               <time
                 class="workbench-time"
                 :datetime="suggestion.createdAt"
@@ -2713,6 +2727,10 @@ defineExpose({
   max-width: 980px;
   margin-inline: auto;
 }
+.workbench-shell.is-fullscreen .workbench-inner,
+.workbench-shell.is-fullscreen .decision-bar-inner {
+  max-width: 1360px;
+}
 .workbench-head {
   display: flex;
   flex-direction: column;
@@ -2735,8 +2753,9 @@ defineExpose({
 }
 .workbench-head-meta {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  gap: 8px 10px;
   flex: none;
 }
 .open-entry-link {
@@ -3751,6 +3770,14 @@ defineExpose({
   padding-top: 4px;
 }
 
+@media (max-width: 1279.98px) {
+  .workbench-scroll {
+    padding: 16px 20px 24px;
+  }
+  .workbench-decision-bar {
+    padding: 10px 20px;
+  }
+}
 @media (max-width: 960px) {
   .workbench-scroll {
     padding: 14px 16px 24px;
@@ -3774,6 +3801,11 @@ defineExpose({
   .summary-row {
     grid-template-columns: 1fr;
     gap: 4px;
+  }
+}
+@media (max-width: 767.98px) {
+  .desktop-fullscreen-btn {
+    display: none;
   }
 }
 </style>

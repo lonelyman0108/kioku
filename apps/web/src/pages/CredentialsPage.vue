@@ -135,227 +135,233 @@ watch(highlightSlug, (slug) => {
 <template>
   <div class="credentials-page">
     <div class="credentials-shell">
-      <PageHead title="凭据">
-        <template #note>
-          密码与令牌加密托管在 Kioku，记忆正文只写占位符，例如
-          <code v-pre class="font-mono text-[13px]">{{cred:prod-db}}</code
-          >。
-          <Hint> Agent 无法读取明文值；执行命令时通过 kioku run 在本地进程中注入环境变量。 </Hint>
-        </template>
-        <template #actions>
-          <UButton :icon="icons.add" size="sm" :disabled="!hasMasterKey" @click="openCreate">
-            新建凭据
-          </UButton>
-        </template>
-      </PageHead>
+      <div class="credentials-content">
+        <PageHead title="凭据">
+          <template #note>
+            密码与令牌加密托管在 Kioku，记忆正文只写占位符，例如
+            <code v-pre class="font-mono text-[13px]">{{cred:prod-db}}</code
+            >。
+            <Hint> Agent 无法读取明文值；执行命令时通过 kioku run 在本地进程中注入环境变量。 </Hint>
+          </template>
+          <template #actions>
+            <UButton :icon="icons.add" size="sm" :disabled="!hasMasterKey" @click="openCreate">
+              新建凭据
+            </UButton>
+          </template>
+        </PageHead>
 
-      <div class="credentials-body">
-        <NoteLine v-if="!hasMasterKey" tone="warning">
-          未配置主密钥 KIOKU_MASTER_KEY，无法创建或读取加密凭据。
-        </NoteLine>
+        <div class="credentials-body">
+          <NoteLine v-if="!hasMasterKey" tone="warning">
+            未配置主密钥 KIOKU_MASTER_KEY，无法创建或读取加密凭据。
+          </NoteLine>
 
-        <ReadFailureNote v-if="credentialsQuery.isError.value" :query="credentialsQuery" />
+          <ReadFailureNote v-if="credentialsQuery.isError.value" :query="credentialsQuery" />
 
-        <div v-if="credentialsQuery.isPending.value" class="space-y-2">
-          <USkeleton v-for="n in 4" :key="n" class="h-14 w-full" />
-        </div>
+          <div v-if="credentialsQuery.isPending.value" class="space-y-2">
+            <USkeleton v-for="n in 4" :key="n" class="h-14 w-full" />
+          </div>
 
-        <template v-else-if="items.length">
-          <div class="table-wrap">
-            <table class="cred-table">
-              <thead>
-                <tr>
-                  <th scope="col">标识与占位符</th>
-                  <th scope="col">名称与说明</th>
-                  <th scope="col">允许场域</th>
-                  <th scope="col">更新时间</th>
-                  <th scope="col" class="actions-col">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr
-                  v-for="item in items"
-                  :key="item.id"
-                  :class="{ highlighted: item.slug === highlightSlug }"
-                >
-                  <td>
-                    <div class="slug-cell">
-                      <code class="font-mono text-sm font-medium">{{ item.slug }}</code>
-                      <UButton
-                        :icon="icons.copy"
-                        size="xs"
-                        color="neutral"
-                        variant="ghost"
-                        :aria-label="`复制占位符 ${item.slug}`"
-                        class="shrink-0 whitespace-nowrap"
-                        @click="copy(placeholderOf(item.slug), '已复制占位符')"
+          <template v-else-if="items.length">
+            <div class="table-wrap">
+              <table class="cred-table">
+                <thead>
+                  <tr>
+                    <th scope="col">标识与占位符</th>
+                    <th scope="col">名称与说明</th>
+                    <th scope="col">允许场域</th>
+                    <th scope="col">更新时间</th>
+                    <th scope="col" class="actions-col">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr
+                    v-for="item in items"
+                    :key="item.id"
+                    :class="{ highlighted: item.slug === highlightSlug }"
+                  >
+                    <td>
+                      <div class="slug-cell">
+                        <code class="font-mono text-sm font-medium">{{ item.slug }}</code>
+                        <UButton
+                          :icon="icons.copy"
+                          size="xs"
+                          color="neutral"
+                          variant="ghost"
+                          :aria-label="`复制占位符 ${item.slug}`"
+                          class="shrink-0 whitespace-nowrap"
+                          @click="copy(placeholderOf(item.slug), '已复制占位符')"
+                        >
+                          占位符
+                        </UButton>
+                      </div>
+                    </td>
+                    <td>
+                      <p class="font-medium">{{ item.label }}</p>
+                      <p v-if="item.description" class="text-xs text-muted">
+                        {{ item.description }}
+                      </p>
+                    </td>
+                    <td>
+                      <span v-if="item.allowedRealms === null" class="text-xs text-muted"
+                        >不限</span
                       >
-                        占位符
-                      </UButton>
-                    </div>
-                  </td>
-                  <td>
-                    <p class="font-medium">{{ item.label }}</p>
-                    <p v-if="item.description" class="text-xs text-muted">{{ item.description }}</p>
-                  </td>
-                  <td>
-                    <span v-if="item.allowedRealms === null" class="text-xs text-muted">不限</span>
+                      <span v-else-if="!item.allowedRealms.length" class="realm-tag">
+                        <UIcon :name="icons.lock" class="tag-icon" aria-hidden="true" />
+                        <span>仅无场域</span>
+                      </span>
+                      <div v-else class="flex flex-wrap gap-1">
+                        <span v-for="r in item.allowedRealms" :key="r" class="realm-tag">
+                          <UIcon :name="icons.realm" class="tag-icon" aria-hidden="true" />
+                          <span>{{ r }}</span>
+                        </span>
+                      </div>
+                    </td>
+                    <td>
+                      <time
+                        class="text-xs text-muted whitespace-nowrap"
+                        :datetime="item.updatedAt"
+                        :title="formatTime(item.updatedAt)"
+                      >
+                        {{ formatRelative(item.updatedAt) }}
+                      </time>
+                    </td>
+                    <td>
+                      <div class="row-actions">
+                        <UButton
+                          size="xs"
+                          color="neutral"
+                          variant="outline"
+                          :icon="icons.reveal"
+                          :disabled="!hasMasterKey"
+                          @click="openReveal(item)"
+                        >
+                          查看值
+                        </UButton>
+                        <UButton
+                          size="xs"
+                          color="neutral"
+                          variant="outline"
+                          :icon="icons.edit"
+                          :disabled="!hasMasterKey"
+                          @click="openEdit(item)"
+                        >
+                          编辑
+                        </UButton>
+                        <UButton
+                          size="xs"
+                          color="error"
+                          variant="ghost"
+                          :icon="icons.remove"
+                          @click="((deleting = item), (deleteError = null))"
+                        >
+                          删除
+                        </UButton>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <!-- 手机窄屏改用卡片列表，避免多列表格挤压按钮与文字 -->
+            <ul class="cred-card-list" aria-label="凭据列表">
+              <li
+                v-for="item in items"
+                :key="`card-${item.id}`"
+                class="cred-card"
+                :class="{ highlighted: item.slug === highlightSlug }"
+              >
+                <div class="cred-card-head">
+                  <p class="cred-card-title">{{ item.label }}</p>
+                  <p v-if="item.description" class="cred-card-desc">{{ item.description }}</p>
+                </div>
+                <div class="cred-card-slug-row">
+                  <code class="cred-card-slug font-mono">{{ item.slug }}</code>
+                  <UButton
+                    :icon="icons.copy"
+                    size="xs"
+                    color="neutral"
+                    variant="outline"
+                    :aria-label="`复制占位符 ${item.slug}`"
+                    class="shrink-0 whitespace-nowrap"
+                    @click="copy(placeholderOf(item.slug), '已复制占位符')"
+                  >
+                    复制占位符
+                  </UButton>
+                </div>
+                <div class="cred-card-meta">
+                  <div class="cred-card-realms">
+                    <span v-if="item.allowedRealms === null" class="text-xs text-muted"
+                      >不限场域</span
+                    >
                     <span v-else-if="!item.allowedRealms.length" class="realm-tag">
                       <UIcon :name="icons.lock" class="tag-icon" aria-hidden="true" />
                       <span>仅无场域</span>
                     </span>
-                    <div v-else class="flex flex-wrap gap-1">
+                    <template v-else>
                       <span v-for="r in item.allowedRealms" :key="r" class="realm-tag">
                         <UIcon :name="icons.realm" class="tag-icon" aria-hidden="true" />
                         <span>{{ r }}</span>
                       </span>
-                    </div>
-                  </td>
-                  <td>
-                    <time
-                      class="text-xs text-muted whitespace-nowrap"
-                      :datetime="item.updatedAt"
-                      :title="formatTime(item.updatedAt)"
-                    >
-                      {{ formatRelative(item.updatedAt) }}
-                    </time>
-                  </td>
-                  <td>
-                    <div class="row-actions">
-                      <UButton
-                        size="xs"
-                        color="neutral"
-                        variant="outline"
-                        :icon="icons.reveal"
-                        :disabled="!hasMasterKey"
-                        @click="openReveal(item)"
-                      >
-                        查看值
-                      </UButton>
-                      <UButton
-                        size="xs"
-                        color="neutral"
-                        variant="outline"
-                        :icon="icons.edit"
-                        :disabled="!hasMasterKey"
-                        @click="openEdit(item)"
-                      >
-                        编辑
-                      </UButton>
-                      <UButton
-                        size="xs"
-                        color="error"
-                        variant="ghost"
-                        :icon="icons.remove"
-                        @click="((deleting = item), (deleteError = null))"
-                      >
-                        删除
-                      </UButton>
-                    </div>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-
-          <!-- 手机窄屏改用卡片列表，避免多列表格挤压按钮与文字 -->
-          <ul class="cred-card-list" aria-label="凭据列表">
-            <li
-              v-for="item in items"
-              :key="`card-${item.id}`"
-              class="cred-card"
-              :class="{ highlighted: item.slug === highlightSlug }"
-            >
-              <div class="cred-card-head">
-                <p class="cred-card-title">{{ item.label }}</p>
-                <p v-if="item.description" class="cred-card-desc">{{ item.description }}</p>
-              </div>
-              <div class="cred-card-slug-row">
-                <code class="cred-card-slug font-mono">{{ item.slug }}</code>
-                <UButton
-                  :icon="icons.copy"
-                  size="xs"
-                  color="neutral"
-                  variant="outline"
-                  :aria-label="`复制占位符 ${item.slug}`"
-                  class="shrink-0 whitespace-nowrap"
-                  @click="copy(placeholderOf(item.slug), '已复制占位符')"
-                >
-                  复制占位符
-                </UButton>
-              </div>
-              <div class="cred-card-meta">
-                <div class="cred-card-realms">
-                  <span v-if="item.allowedRealms === null" class="text-xs text-muted"
-                    >不限场域</span
+                    </template>
+                  </div>
+                  <time
+                    class="text-xs text-muted whitespace-nowrap"
+                    :datetime="item.updatedAt"
+                    :title="formatTime(item.updatedAt)"
                   >
-                  <span v-else-if="!item.allowedRealms.length" class="realm-tag">
-                    <UIcon :name="icons.lock" class="tag-icon" aria-hidden="true" />
-                    <span>仅无场域</span>
-                  </span>
-                  <template v-else>
-                    <span v-for="r in item.allowedRealms" :key="r" class="realm-tag">
-                      <UIcon :name="icons.realm" class="tag-icon" aria-hidden="true" />
-                      <span>{{ r }}</span>
-                    </span>
-                  </template>
+                    {{ formatRelative(item.updatedAt) }}
+                  </time>
                 </div>
-                <time
-                  class="text-xs text-muted whitespace-nowrap"
-                  :datetime="item.updatedAt"
-                  :title="formatTime(item.updatedAt)"
-                >
-                  {{ formatRelative(item.updatedAt) }}
-                </time>
-              </div>
-              <div class="cred-card-actions">
-                <UButton
-                  size="sm"
-                  color="neutral"
-                  variant="outline"
-                  :icon="icons.reveal"
-                  :disabled="!hasMasterKey"
-                  class="cred-card-act-grow"
-                  @click="openReveal(item)"
-                >
-                  查看值
-                </UButton>
-                <UButton
-                  size="sm"
-                  color="neutral"
-                  variant="outline"
-                  :icon="icons.edit"
-                  :disabled="!hasMasterKey"
-                  class="cred-card-act-grow"
-                  @click="openEdit(item)"
-                >
-                  编辑
-                </UButton>
-                <UButton
-                  size="sm"
-                  color="error"
-                  variant="outline"
-                  :icon="icons.remove"
-                  class="shrink-0 whitespace-nowrap"
-                  @click="((deleting = item), (deleteError = null))"
-                >
-                  删除
-                </UButton>
-              </div>
-            </li>
-          </ul>
-        </template>
-
-        <EmptyState
-          v-else-if="!credentialsQuery.isError.value"
-          :icon="icons.credentials"
-          title="暂无凭据"
-          description="新建凭据后，可在记忆正文里插入占位符，避免明文密码进入上下文。"
-        >
-          <template v-if="hasMasterKey" #actions>
-            <UButton size="sm" :icon="icons.add" @click="openCreate">新建凭据</UButton>
+                <div class="cred-card-actions">
+                  <UButton
+                    size="sm"
+                    color="neutral"
+                    variant="outline"
+                    :icon="icons.reveal"
+                    :disabled="!hasMasterKey"
+                    class="cred-card-act-grow"
+                    @click="openReveal(item)"
+                  >
+                    查看值
+                  </UButton>
+                  <UButton
+                    size="sm"
+                    color="neutral"
+                    variant="outline"
+                    :icon="icons.edit"
+                    :disabled="!hasMasterKey"
+                    class="cred-card-act-grow"
+                    @click="openEdit(item)"
+                  >
+                    编辑
+                  </UButton>
+                  <UButton
+                    size="sm"
+                    color="error"
+                    variant="outline"
+                    :icon="icons.remove"
+                    class="shrink-0 whitespace-nowrap"
+                    @click="((deleting = item), (deleteError = null))"
+                  >
+                    删除
+                  </UButton>
+                </div>
+              </li>
+            </ul>
           </template>
-        </EmptyState>
+
+          <EmptyState
+            v-else-if="!credentialsQuery.isError.value"
+            :icon="icons.credentials"
+            title="暂无凭据"
+            description="新建凭据后，可在记忆正文里插入占位符，避免明文密码进入上下文。"
+          >
+            <template v-if="hasMasterKey" #actions>
+              <UButton size="sm" :icon="icons.add" @click="openCreate">新建凭据</UButton>
+            </template>
+          </EmptyState>
+        </div>
       </div>
     </div>
 
@@ -451,8 +457,18 @@ watch(highlightSlug, (slug) => {
 }
 .credentials-shell {
   width: 100%;
-  max-width: 76rem;
+  max-width: 1840px;
+  min-height: 100%;
   margin-inline: auto;
+}
+@media (min-width: 1841px) {
+  .credentials-shell {
+    border-inline: 1px solid var(--ui-border-muted);
+  }
+}
+.credentials-content {
+  width: 100%;
+  max-width: 80rem;
 }
 .credentials-body {
   padding: 0 32px 48px;

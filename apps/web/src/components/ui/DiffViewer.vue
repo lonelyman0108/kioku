@@ -103,9 +103,8 @@ const resolvedMaxHeightPx = ref<number | null>(null)
 let rootObserver: ResizeObserver | null = null
 let tableObserver: ResizeObserver | null = null
 
-const isSplit = computed(
-  () => props.allowSplit && activeLayout.value === 'split' && containerWidth.value >= 640,
-)
+const canSplit = computed(() => props.allowSplit && containerWidth.value >= 600)
+const isSplit = computed(() => canSplit.value && activeLayout.value === 'split')
 // 极窄容器下合并旧/新行号列为单列，释放更多正文可读宽度
 const isCompactUnified = computed(() => !isSplit.value && containerWidth.value < 480)
 
@@ -288,6 +287,7 @@ defineExpose({
   removedCount: computed(() => structured.value.removedCount),
   focusedHunk: computed(() => focusedHunk.value),
   hasFoldableGaps,
+  canSplit,
   canToggleContext,
   manualExpanded: computed(() => manualExpanded.value),
 })
@@ -820,7 +820,7 @@ defineExpose({
 }
 
 /* 窄容器下隐藏双栏切换，避免过窄断行 */
-@container (max-width: 639.98px) {
+@container (max-width: 599.98px) {
   .layout-switch {
     display: none;
   }
