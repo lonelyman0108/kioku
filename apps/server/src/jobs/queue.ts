@@ -24,7 +24,13 @@ import type { BufferedBucket } from '../extraction/buffer'
 import { getDueScheduledDreamModes, runDream } from '../extraction/dream'
 import { extractEpisodeBatch } from '../extraction/extract'
 import { EntryService } from '../memory/service'
-import { CHAT_LLM_SETTING_KEY, loadStoredModel, recordDreamRun } from '../models/store'
+import {
+  CHAT_LLM_SETTING_KEY,
+  clearDreamRunRetriedBy,
+  loadStoredModel,
+  recordDreamRun,
+  recordDreamRuns,
+} from '../models/store'
 import { cleanupExpired } from './cleanup'
 
 const EMBED_ENTRY = 'embed-entry'
@@ -523,7 +529,8 @@ export async function startJobs(options: {
     pruneStalePendingActive()
     const running =
       dreamRunning ||
-      (activeDream !== null && (activePendingUntil === 0 || Date.now() < activePendingUntil))
+      (activeDream !== null &&
+        (dreamQueue.length > 0 || activePendingUntil === 0 || Date.now() < activePendingUntil))
     return {
       running,
       activeJobId: running && activeDream ? activeDream.id : null,
@@ -618,12 +625,11 @@ export async function startJobs(options: {
     getDreamProgress: async () => (dreamRunning ? dreamProgress : null),
     getDreamQueueSnapshot,
     cancelDream: async () => {
-      if (dreamRunning && dreamAbortController) {
-        dreamAbortController.abort('user_cancelled')
-        await waitBriefly(dreamRunPromise)
-        return true
-      }
-      return withDreamLock(async () => {
+      const outcome = await withDreamLock(async () => {
+        if (dreamRunning && dreamAbortController) {
+          dreamAbortController.abort('user_cancelled')
+          return { cancelled: true, runPromise: dreamRunPromise }
+        }
         pruneStalePendingActive()
         if (activeDream !== null && !dreamRunning && !handledDreamIds.has(activeDream.id)) {
           const pending = activeDream
@@ -644,10 +650,14 @@ export async function startJobs(options: {
             ...(pending.params ? { params: pending.params } : {}),
             createdAt: new Date().toISOString(),
           }).catch(() => undefined)
-          return true
+          return { cancelled: true, runPromise: null }
         }
-        return false
+        return { cancelled: false, runPromise: null }
       })
+      if (outcome.runPromise) {
+        await waitBriefly(outcome.runPromise)
+      }
+      return outcome.cancelled
     },
     removeQueuedDream: (jobId) =>
       withDreamLock(async () => {
@@ -656,6 +666,7 @@ export async function startJobs(options: {
         const [removed] = dreamQueue.splice(idx, 1)
         trackIdSet(cancelledDreamIds, removed!.id)
         await boss.cancel(DREAM, removed!.id).catch(() => undefined)
+        await clearDreamRunRetriedBy(options.db, [removed!.id]).catch(() => undefined)
         return true
       }),
     clearDreamQueue: () =>
@@ -665,6 +676,7 @@ export async function startJobs(options: {
         const ids = removedItems.map((item) => item.id)
         for (const id of ids) trackIdSet(cancelledDreamIds, id)
         await boss.cancel(DREAM, ids).catch(() => undefined)
+        await clearDreamRunRetriedBy(options.db, ids).catch(() => undefined)
         return ids.length
       }),
     triggerScheduledDreamProbe: runScheduledDreamProbe,
@@ -796,15 +808,24 @@ export async function startJobs(options: {
           return null
         }
 
-        const qIdx = dreamQueue.findIndex((item) => item.id === job.id)
         let task: TrackedDreamTask
         if (activeDream?.id === job.id) {
           task = activeDream
-        } else if (qIdx >= 0) {
-          task = dreamQueue.splice(qIdx, 1)[0]!
-          activeDream = task
         } else {
-          task = trackedTaskFromJobData(job.id, job.data, new Date().toISOString())
+          if (
+            activeDream !== null &&
+            !handledDreamIds.has(activeDream.id) &&
+            !cancelledDreamIds.has(activeDream.id) &&
+            !dreamQueue.some((item) => item.id === activeDream!.id)
+          ) {
+            dreamQueue.unshift(activeDream)
+          }
+          const nextIdx = dreamQueue.findIndex((item) => item.id === job.id)
+          if (nextIdx >= 0) {
+            task = dreamQueue.splice(nextIdx, 1)[0]!
+          } else {
+            task = trackedTaskFromJobData(job.id, job.data, new Date().toISOString())
+          }
           activeDream = task
         }
         activePendingUntil = 0
@@ -888,24 +909,21 @@ export async function startJobs(options: {
               await boss.cancel(DREAM, ids).catch(() => undefined)
               const nowIso = new Date().toISOString()
               const abortText = `因前序任务触发上游故障已中止：${fatalReason}`.slice(0, 300)
-              for (const item of abortedItems) {
-                await recordDreamRun(
-                  options.db,
-                  {
-                    id: item.id,
-                    trigger: item.trigger,
-                    mode: item.mode,
-                    outcome: 'cancelled',
-                    considered: 0,
-                    suggested: 0,
-                    error: null,
-                    abortedReason: abortText,
-                    ...(item.params ? { params: item.params } : {}),
-                    createdAt: nowIso,
-                  },
-                  { preserveLastOutcome: true },
-                ).catch(() => undefined)
-              }
+              const abortedSummaries = abortedItems.map((item) => ({
+                id: item.id,
+                trigger: item.trigger,
+                mode: item.mode,
+                outcome: 'cancelled' as const,
+                considered: 0,
+                suggested: 0,
+                error: null,
+                abortedReason: abortText,
+                ...(item.params ? { params: item.params } : {}),
+                createdAt: nowIso,
+              }))
+              await recordDreamRuns(options.db, abortedSummaries, {
+                preserveLastOutcome: true,
+              }).catch(() => undefined)
               console.error(
                 `整理队列触发上游故障熔断，已中止剩余 ${abortedItems.length} 项等待任务：${fatalReason}`,
               )

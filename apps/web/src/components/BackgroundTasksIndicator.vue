@@ -19,11 +19,12 @@ import {
   collectNewDreamRuns,
   computeOverallProgress,
   filterVisibleHistory,
+  findLatestInboxFailureRun,
   formatDreamTaskScope,
   isActiveTaskIssue,
   isAfterWatermark,
+  isCascadeAbortedRun,
   latestFailedTimestamp,
-  latestInboxFailureTimestamp,
   mergeTaskHistory,
   parseDismissedIssueKeys,
   serializeDismissedIssueKeys,
@@ -112,20 +113,14 @@ const hasBusyTasks = computed(() => activeCount.value > 0 || queuedCount.value >
 const ringCount = computed(() => (activeCount.value > 0 ? activeCount.value : queuedCount.value))
 
 const allHistory = computed(() => mergeTaskHistory(props.dreamState, props.embeddingBackfill))
-const visibleHistory = computed(() => filterVisibleHistory(allHistory.value, clearedBefore.value))
-const splitHistory = computed(() =>
-  splitTaskHistory(visibleHistory.value, dismissedIssueKeys.value),
-)
+const splitHistory = computed(() => splitTaskHistory(allHistory.value, dismissedIssueKeys.value))
 const pinnedIssues = computed(() => splitHistory.value.issues)
-const archivedHistory = computed(() => splitHistory.value.recent)
+const archivedHistory = computed(() =>
+  filterVisibleHistory(splitHistory.value.recent, clearedBefore.value),
+)
 
 const unreadIssues = computed(() =>
-  allHistory.value.filter(
-    (item) =>
-      isActiveTaskIssue(item, dismissedIssueKeys.value) &&
-      isAfterWatermark(item.finishedAt, clearedBefore.value) &&
-      isAfterWatermark(item.finishedAt, ackErrorAt.value),
-  ),
+  pinnedIssues.value.filter((item) => isAfterWatermark(item.finishedAt, ackErrorAt.value)),
 )
 const unreadFailedCount = computed(() => unreadIssues.value.length)
 const unreadOnlyPartial = computed(
@@ -211,7 +206,7 @@ function advanceWatermark(target: typeof ackErrorAt, storageKey: string, candida
 }
 
 function acknowledgeErrors() {
-  const latestFail = latestFailedTimestamp(visibleHistory.value, dismissedIssueKeys.value)
+  const latestFail = latestFailedTimestamp(pinnedIssues.value, dismissedIssueKeys.value)
   advanceWatermark(ackErrorAt, UI_STORAGE_KEYS.tasksAckErrorAt, latestFail)
 }
 
@@ -223,7 +218,7 @@ watch(open, (visible) => {
   }
 })
 
-watch(visibleHistory, () => {
+watch(pinnedIssues, () => {
   if (open.value) acknowledgeErrors()
 })
 
@@ -237,7 +232,8 @@ function persistDismissedKey(key: string) {
 
 function dismissIssue(item: TaskHistoryItem) {
   persistDismissedKey(item.key)
-  if (item.source === 'dream' && item.id === props.dreamState?.recentRuns[0]?.id) {
+  const latestFailure = findLatestInboxFailureRun(props.dreamState)
+  if (item.source === 'dream' && latestFailure && item.id === latestFailure.id) {
     const prevDismissed = readStoredString(UI_STORAGE_KEYS.inboxFailureDismissedAt)
     if (!prevDismissed || isAfterWatermark(item.finishedAt, prevDismissed)) {
       writeStoredString(UI_STORAGE_KEYS.inboxFailureDismissedAt, item.finishedAt)
@@ -267,19 +263,9 @@ function toggleFailedItemsExpand(key: string) {
 }
 
 function clearHistory() {
-  const newest = archivedHistory.value[0]?.finishedAt ?? visibleHistory.value[0]?.finishedAt ?? null
+  const newest = archivedHistory.value[0]?.finishedAt ?? null
   if (!newest) return
   advanceWatermark(clearedBefore, UI_STORAGE_KEYS.tasksClearedBefore, newest)
-  advanceWatermark(ackErrorAt, UI_STORAGE_KEYS.tasksAckErrorAt, newest)
-  if (pinnedIssues.value.length === 0) {
-    const latestFailure = latestInboxFailureTimestamp(props.dreamState)
-    const dismissTarget =
-      latestFailure && isAfterWatermark(latestFailure, newest) ? latestFailure : newest
-    const prevDismissed = readStoredString(UI_STORAGE_KEYS.inboxFailureDismissedAt)
-    if (!prevDismissed || isAfterWatermark(dismissTarget, prevDismissed)) {
-      writeStoredString(UI_STORAGE_KEYS.inboxFailureDismissedAt, dismissTarget)
-    }
-  }
 }
 
 function outcomeTone(outcome: DreamOutcome): string {
@@ -295,7 +281,20 @@ function outcomeTagText(item: TaskHistoryItem): string {
   return dreamOutcomeLabels[item.outcome]
 }
 
+function isRetryButtonDisabled(item: TaskHistoryItem): boolean {
+  if (retryingKey.value && retryingKey.value !== item.key) return true
+  if (item.source === 'backfill' && (backfillRunning.value || startingBackfill.value)) return true
+  return false
+}
+
+function isRerunButtonDisabled(item: TaskHistoryItem): boolean {
+  if (retryingKey.value) return true
+  if (item.source === 'backfill' && (backfillRunning.value || startingBackfill.value)) return true
+  return false
+}
+
 function retryButtonLabel(item: TaskHistoryItem): string {
+  if (item.source === 'backfill' && backfillRunning.value) return '补齐进行中'
   if (item.source === 'dream' && item.outcome === 'partial' && item.failedItems?.length) {
     return `重试失败项 (${item.failedItems.length})`
   }
@@ -368,9 +367,10 @@ function notifyDreamRunCompletion(run: DreamRunSummary) {
   }
 }
 
-// 按 recentRuns 增量推送每条新完成记录，确保队列连续衔接时不漏报任何任务结果
+// 按 recentRuns 增量推送每条新完成记录，结合时间水位防止游标掉出保留窗或批量积压时轰炸提示
 const initializedDream = ref(false)
 const lastSeenDreamRunId = ref<string | null>(null)
+const lastSeenDreamRunAt = ref<string | null>(null)
 watch(
   () => props.dreamState?.recentRuns,
   (runs) => {
@@ -379,21 +379,54 @@ watch(
     if (!initializedDream.value) {
       initializedDream.value = true
       lastSeenDreamRunId.value = list[0]?.id ?? null
+      lastSeenDreamRunAt.value = list[0]?.createdAt ?? new Date().toISOString()
       return
     }
-    const newRuns = collectNewDreamRuns(list, lastSeenDreamRunId.value)
+    const newRuns = collectNewDreamRuns(list, lastSeenDreamRunId.value, lastSeenDreamRunAt.value)
     if (!newRuns.length) return
     lastSeenDreamRunId.value = list[0]!.id
+    lastSeenDreamRunAt.value = list[0]!.createdAt
     let cascadeAbortedCount = 0
+    const directRuns: DreamRunSummary[] = []
     for (const run of newRuns) {
-      if (
-        run.outcome === 'cancelled' &&
-        run.abortedReason?.startsWith('因前序任务触发上游故障已中止')
-      ) {
+      if (isCascadeAbortedRun(run)) {
         cascadeAbortedCount++
         continue
       }
-      notifyDreamRunCompletion(run)
+      directRuns.push(run)
+    }
+    if (directRuns.length > 3) {
+      const suggestedTotal = directRuns.reduce((sum, run) => sum + run.suggested, 0)
+      const failedCount = directRuns.filter((run) => run.outcome === 'failed').length
+      const partialCount = directRuns.filter((run) => run.outcome === 'partial').length
+      const onOrganize = route.name === 'organize'
+      const descBits: string[] = []
+      if (suggestedTotal > 0) descBits.push(`新增 ${suggestedTotal} 条待确认建议`)
+      if (failedCount > 0) descBits.push(`${failedCount} 项失败`)
+      if (partialCount > 0) descBits.push(`${partialCount} 项部分失败`)
+      toast.add({
+        title: `已完成 ${directRuns.length} 项后台整理`,
+        ...(descBits.length ? { description: descBits.join(' · ') } : {}),
+        color: failedCount > 0 ? 'error' : partialCount > 0 ? 'warning' : 'success',
+        orientation: 'horizontal',
+        ...(!onOrganize
+          ? {
+              actions: [
+                {
+                  label: '前往整理',
+                  icon: icons.listChecks,
+                  color: 'neutral' as const,
+                  variant: 'outline' as const,
+                  onClick: () => void router.push({ name: 'organize' }),
+                },
+              ],
+            }
+          : {}),
+      })
+    } else {
+      for (const run of directRuns) {
+        notifyDreamRunCompletion(run)
+      }
     }
     if (cascadeAbortedCount > 0) {
       toast.add({
@@ -721,7 +754,7 @@ async function retryHistoryItem(item: TaskHistoryItem, scope?: 'failed_only' | '
                   variant="outline"
                   :icon="icons.refresh"
                   :loading="retryingKey === item.key"
-                  :disabled="Boolean(retryingKey && retryingKey !== item.key)"
+                  :disabled="isRetryButtonDisabled(item)"
                   class="ink-outline-btn"
                   @click="retryHistoryItem(item)"
                 >
@@ -999,7 +1032,7 @@ async function retryHistoryItem(item: TaskHistoryItem, scope?: 'failed_only' | '
                   v-if="item.outcome === 'cancelled' && !item.retriedByRunId"
                   type="button"
                   class="quiet-action shrink-0"
-                  :disabled="Boolean(retryingKey)"
+                  :disabled="isRerunButtonDisabled(item)"
                   @click="retryHistoryItem(item, 'full')"
                 >
                   <UIcon :name="icons.refresh" class="quiet-icon" aria-hidden="true" />

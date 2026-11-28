@@ -13,6 +13,7 @@ import { icons } from './icons'
 import { dreamModeLabels } from './labels'
 
 export const TASK_HISTORY_LIMIT = 20
+export const CASCADE_ABORT_REASON_PREFIX = '因前序任务触发上游故障已中止'
 const DISMISSED_ISSUES_LIMIT = 60
 
 export type TaskSource = 'dream' | 'backfill'
@@ -86,17 +87,31 @@ export function splitTaskHistory(
   return { issues, recent }
 }
 
-// 按时间先后提取位于 lastSeenRunId 之后的新增完成记录，避免连续排队任务衔接时漏推完成提示
+export function isCascadeAbortedRun(
+  run: Pick<DreamRunSummary, 'outcome' | 'abortedReason'>,
+): boolean {
+  return (
+    run.outcome === 'cancelled' &&
+    Boolean(run.abortedReason?.startsWith(CASCADE_ABORT_REASON_PREFIX))
+  )
+}
+
+// 按时间先后提取位于 lastSeenRunId 之后的新增完成记录；当游标滑出保留窗口或无游标时退回时间水位防历史导入轰炸
 export function collectNewDreamRuns(
   recentRuns: readonly DreamRunSummary[],
   lastSeenRunId: string | null,
+  lastSeenAt: string | null = null,
 ): DreamRunSummary[] {
   if (!recentRuns.length) return []
-  if (!lastSeenRunId) return [...recentRuns].reverse()
-  const idx = recentRuns.findIndex((run) => run.id === lastSeenRunId)
-  if (idx === 0) return []
-  if (idx > 0) return recentRuns.slice(0, idx).reverse()
-  return [...recentRuns].reverse()
+  if (lastSeenRunId) {
+    const idx = recentRuns.findIndex((run) => run.id === lastSeenRunId)
+    if (idx === 0) return []
+    if (idx > 0) return recentRuns.slice(0, idx).reverse()
+  }
+  const filtered = lastSeenAt
+    ? recentRuns.filter((run) => isAfterWatermark(run.createdAt, lastSeenAt))
+    : recentRuns
+  return [...filtered].reverse()
 }
 
 export function formatDreamTaskScope(
@@ -354,9 +369,23 @@ export function latestFailedTimestamp(
   return null
 }
 
+// 定位整理页最近一条真实的失败/部分失败记录，跳过因前序上游故障熔断而压在头部的联动取消记录
+export function findLatestInboxFailureRun(dreamState: DreamState | null): DreamRunSummary | null {
+  if (!dreamState) return null
+  if (dreamState.lastOutcome !== 'failed' && dreamState.lastOutcome !== 'partial') return null
+  for (const run of dreamState.recentRuns) {
+    if (isCascadeAbortedRun(run)) continue
+    return isTaskIssueOutcome(run.outcome) ? run : null
+  }
+  return null
+}
+
 export function latestInboxFailureTimestamp(dreamState: DreamState | null): string | null {
   if (!dreamState) return null
-  return dreamState.recentRuns[0]?.createdAt ?? dreamState.lastRunAt ?? null
+  const failureRun = findLatestInboxFailureRun(dreamState)
+  return (
+    failureRun?.createdAt ?? dreamState.recentRuns[0]?.createdAt ?? dreamState.lastRunAt ?? null
+  )
 }
 
 export function shouldShowInboxFailureBanner(
@@ -365,11 +394,12 @@ export function shouldShowInboxFailureBanner(
   clearedBefore: string | null,
 ): boolean {
   if (!dreamState || dreamState.running) return false
-  if (dreamState.lastOutcome === 'skipped') return false
-  const latestRun = dreamState.recentRuns[0] ?? null
-  if (latestRun?.retriedByRunId) return false
-  const hasFailedItems = (latestRun?.failedItems?.length ?? 0) > 0
-  const hasError = Boolean(dreamState.lastError)
+  if (dreamState.lastOutcome !== 'failed' && dreamState.lastOutcome !== 'partial') return false
+  const failureRun = findLatestInboxFailureRun(dreamState)
+  if (dreamState.recentRuns.length > 0 && !failureRun) return false
+  if (failureRun?.retriedByRunId) return false
+  const hasFailedItems = (failureRun?.failedItems?.length ?? 0) > 0
+  const hasError = Boolean(failureRun?.error || dreamState.lastError)
   if (!hasFailedItems && !hasError) return false
 
   const failureAt = latestInboxFailureTimestamp(dreamState)

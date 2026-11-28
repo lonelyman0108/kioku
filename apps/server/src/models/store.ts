@@ -627,38 +627,61 @@ async function updateDreamStateRow(
   })
 }
 
-export async function recordDreamRun(
+export async function recordDreamRuns(
   db: Db | Tx,
-  summary: DreamRunSummary,
+  summaries: readonly DreamRunSummary[],
   options: { preserveLastOutcome?: boolean | undefined } = {},
 ): Promise<void> {
+  if (!summaries.length) return
   await updateDreamStateRow(db, (current) => {
-    const runMode = summary.mode ?? 'standard'
     const nextSchedules = {
       standard: { ...current.schedules.standard },
       crossMemory: { ...current.schedules.crossMemory },
       tidy: { ...current.schedules.tidy },
     }
-    if (summary.outcome !== 'cancelled') {
-      if (runMode === 'cross_memory') {
-        nextSchedules.crossMemory.lastRunAt = summary.createdAt
-      } else if (runMode === 'tidy') {
-        nextSchedules.tidy.lastRunAt = summary.createdAt
-      } else {
-        nextSchedules.standard.lastRunAt = summary.createdAt
+    let lastRunAt = current.lastRunAt
+    let lastOutcome = current.lastOutcome
+    let lastError = current.lastError
+    const prepended: DreamRunSummary[] = []
+
+    for (const summary of summaries) {
+      if (summary.outcome !== 'cancelled') {
+        const runMode = summary.mode ?? 'standard'
+        if (runMode === 'cross_memory') {
+          nextSchedules.crossMemory.lastRunAt = summary.createdAt
+        } else if (runMode === 'tidy') {
+          nextSchedules.tidy.lastRunAt = summary.createdAt
+        } else {
+          nextSchedules.standard.lastRunAt = summary.createdAt
+        }
       }
+      if (!options.preserveLastOutcome) {
+        lastRunAt = summary.createdAt
+        lastOutcome = summary.outcome
+        lastError = summary.error
+      } else if (lastRunAt === null) {
+        lastRunAt = summary.createdAt
+      }
+      prepended.unshift(summary)
     }
+
     return {
       ...current,
       schedules: nextSchedules,
-      lastRunAt: options.preserveLastOutcome
-        ? (current.lastRunAt ?? summary.createdAt)
-        : summary.createdAt,
-      lastOutcome: options.preserveLastOutcome ? current.lastOutcome : summary.outcome,
-      lastError: options.preserveLastOutcome ? current.lastError : summary.error,
-      recentRuns: [summary, ...current.recentRuns].slice(0, RECENT_RUNS_LIMIT),
+      lastRunAt,
+      lastOutcome,
+      lastError,
+      recentRuns: [...prepended, ...current.recentRuns].slice(0, RECENT_RUNS_LIMIT),
     }
   })
+}
+
+export async function recordDreamRun(
+  db: Db | Tx,
+  summary: DreamRunSummary,
+  options: { preserveLastOutcome?: boolean | undefined } = {},
+): Promise<void> {
+  await recordDreamRuns(db, [summary], options)
 }
 
 export async function markDreamRunRetried(
@@ -679,6 +702,33 @@ export async function markDreamRunRetried(
       recentRuns: nextRuns,
     }
   })
+}
+
+// 当等待中的重试任务被手动移出或清空时，回滚原记录的 retriedByRunId，使其重新进入待恢复异常视图
+export async function clearDreamRunRetriedBy(
+  db: Db | Tx,
+  retriedByRunIds: readonly string[],
+): Promise<number> {
+  const targets = new Set(retriedByRunIds.filter((id) => id.trim().length > 0))
+  if (!targets.size) return 0
+  let cleared = 0
+  await updateDreamStateRow(db, (current) => {
+    let changed = false
+    const nextRuns = current.recentRuns.map((run) => {
+      if (!run.retriedByRunId || !targets.has(run.retriedByRunId)) return run
+      changed = true
+      cleared++
+      const next = { ...run }
+      delete next.retriedByRunId
+      return next
+    })
+    if (!changed) return null
+    return {
+      ...current,
+      recentRuns: nextRuns,
+    }
+  })
+  return cleared
 }
 
 export interface TidyCheckedVersionTransition {

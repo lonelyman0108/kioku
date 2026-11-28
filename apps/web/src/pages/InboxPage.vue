@@ -56,6 +56,7 @@ import {
 } from '../labels'
 import { entryRoute, settingsRoute } from '../routes'
 import {
+  findLatestInboxFailureRun,
   isAfterWatermark,
   latestInboxFailureTimestamp,
   shouldShowInboxFailureBanner,
@@ -110,12 +111,14 @@ const tidyPendingCount = computed(() => data.value?.tidyPendingCount ?? 0)
 const state = computed(() => data.value?.dreamState ?? null)
 const progress = computed(() => state.value?.progress ?? null)
 const latestRun = computed(() => state.value?.recentRuns[0] ?? null)
-const latestFailedItems = computed(() => latestRun.value?.failedItems ?? [])
+const latestFailureRun = computed(() => findLatestInboxFailureRun(state.value))
+const latestFailedItems = computed(() => latestFailureRun.value?.failedItems ?? [])
 const latestRetryableShortIds = computed(() => [
   ...new Set(latestFailedItems.value.map((item) => item.shortId)),
 ])
 const latestRunMode = computed<DreamMode>(
   () =>
+    latestFailureRun.value?.mode ??
     latestRun.value?.mode ??
     (latestFailedItems.value[0]?.kind === 'tidy'
       ? 'tidy'
@@ -170,17 +173,21 @@ const progressPercent = computed(() =>
     : 0,
 )
 
+const activeRunningMode = computed<DreamMode>(
+  () => progress.value?.mode ?? state.value?.activeTask?.mode ?? 'standard',
+)
+
 const runningStageLabel = computed(() => {
   if (progress.value?.stage) return `${progress.value.stage}中`
-  if (progress.value?.mode === 'tidy') return '规范整理中'
-  if (progress.value?.mode === 'cross_memory') return '查重与关联中'
+  if (activeRunningMode.value === 'tidy') return '规范整理中'
+  if (activeRunningMode.value === 'cross_memory') return '查重与关联中'
   return '增量整理中'
 })
 
 const runningModeIcon = computed(() =>
-  progress.value?.mode === 'tidy'
+  activeRunningMode.value === 'tidy'
     ? icons.tidy
-    : progress.value?.mode === 'cross_memory'
+    : activeRunningMode.value === 'cross_memory'
       ? icons.links
       : icons.sparkles,
 )
@@ -998,7 +1005,7 @@ async function triggerDream(
 async function triggerRetryFailed() {
   if (!latestRetryableShortIds.value.length || triggeringMode.value) return
   railOpen.value = false
-  const run = latestRun.value
+  const run = latestFailureRun.value ?? latestRun.value
   if (!run) {
     void triggerDream({
       mode: latestRunMode.value,

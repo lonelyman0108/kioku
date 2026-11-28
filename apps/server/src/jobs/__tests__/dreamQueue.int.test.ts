@@ -968,4 +968,311 @@ describe.skipIf(!testDatabaseUrl)('后台顺序整理队列、失败重试、熔
       return Boolean(snap && !snap.running && snap.queued.length === 0)
     })
   })
+
+  it('并发提交同签名任务与并发重试均原子去重，移出或清空队列中的重试项回滚 retriedByRunId', async () => {
+    const { jobs, app, cookie, entrySvc, consoleScope } = await bootStack()
+
+    const e1 = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '并发去重测试记忆一（2026-10-18 记录）',
+        content: '用于验证并发入队与并发重试的去重锁。',
+      }),
+    )
+    const e2 = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '并发去重测试记忆二（2026-10-19 记录）',
+        content: '用于验证清空等待队列时批量回滚重试标记。',
+      }),
+    )
+
+    const blockerEntered = createDeferred<void>()
+    const releaseBlocker = createDeferred<void>()
+    let blockFirst = true
+    fakeAi.setChatHandler(async (messages) => {
+      const text = messages.map((m) => m.content).join('\n')
+      if (blockFirst) {
+        blockFirst = false
+        blockerEntered.resolve()
+        await releaseBlocker.promise
+      }
+      return text.includes('needed')
+        ? JSON.stringify({ needed: false })
+        : JSON.stringify({ suggestions: [] })
+    })
+
+    // 启动占位任务阻塞队列，让后续并发请求都在等待队列内竞争
+    const blocker = TriggerDreamResponse.parse(
+      await (
+        await app.request('/v1/console/dream/run', {
+          method: 'POST',
+          headers: consoleHeaders(cookie, true),
+          body: JSON.stringify({ mode: 'standard' }),
+        })
+      ).json(),
+    )
+    expect(blocker.started).toBe(true)
+    await blockerEntered.promise
+
+    // 4 个并发同签名 /dream/run 请求只能入队 1 项，其余 3 项必须被拒绝
+    const concurrentRuns = await Promise.all(
+      Array.from({ length: 4 }, async () => {
+        const res = await app.request('/v1/console/dream/run', {
+          method: 'POST',
+          headers: consoleHeaders(cookie, true),
+          body: JSON.stringify({ mode: 'tidy', limit: 10, pinnedFirst: true }),
+        })
+        return TriggerDreamResponse.parse(await res.json())
+      }),
+    )
+    const acceptedRuns = concurrentRuns.filter((r) => r.started)
+    const rejectedRuns = concurrentRuns.filter((r) => !r.started)
+    expect(acceptedRuns).toHaveLength(1)
+    expect(acceptedRuns[0]?.status).toBe('queued')
+    expect(rejectedRuns).toHaveLength(3)
+    expect(rejectedRuns.every((r) => r.status === 'rejected')).toBe(true)
+
+    // 先移出上面的测试等待项，腾出清晰队列验证并发重试与 retriedByRunId 回滚
+    const removedSetup = RemoveQueuedDreamResponse.parse(
+      await (
+        await app.request(`/v1/console/dream/queue/${acceptedRuns[0]!.jobId}`, {
+          method: 'DELETE',
+          headers: consoleHeaders(cookie),
+        })
+      ).json(),
+    )
+    expect(removedSetup.removed).toBe(true)
+
+    await recordDreamRun(database.db, {
+      id: 'failed-race-a',
+      trigger: 'manual',
+      mode: 'tidy',
+      outcome: 'failed',
+      considered: 1,
+      suggested: 0,
+      error: '网关超时',
+      params: { targetShortIds: [e1.entry.shortId] },
+      createdAt: '2026-11-28T01:00:00.000Z',
+    })
+    await recordDreamRun(database.db, {
+      id: 'failed-race-b',
+      trigger: 'manual',
+      mode: 'tidy',
+      outcome: 'failed',
+      considered: 1,
+      suggested: 0,
+      error: '网关超时',
+      params: { targetShortIds: [e2.entry.shortId] },
+      createdAt: '2026-11-28T01:01:00.000Z',
+    })
+
+    // 4 个并发重试同一失败记录：仅 1 个入队并回写 retriedByRunId，其余 3 个被去重拒绝
+    const concurrentRetries = await Promise.all(
+      Array.from({ length: 4 }, async () => {
+        const res = await app.request('/v1/console/dream/runs/failed-race-a/retry', {
+          method: 'POST',
+          headers: consoleHeaders(cookie, true),
+          body: JSON.stringify({ scope: 'full' }),
+        })
+        return TriggerDreamResponse.parse(await res.json())
+      }),
+    )
+    const wonRetries = concurrentRetries.filter((r) => r.started)
+    expect(wonRetries).toHaveLength(1)
+    expect(concurrentRetries.filter((r) => !r.started && r.status === 'rejected')).toHaveLength(3)
+    const retryJobA1 = wonRetries[0]!.jobId!
+
+    const inboxAfterRetryA = InboxResponse.parse(
+      await (await app.request('/v1/console/inbox', { headers: { cookie } })).json(),
+    )
+    expect(
+      inboxAfterRetryA.dreamState.recentRuns.find((r) => r.id === 'failed-race-a')?.retriedByRunId,
+    ).toBe(retryJobA1)
+
+    // 单项移出等待中的重试任务后，原失败记录的 retriedByRunId 必须回滚为空
+    const removedRetryA = RemoveQueuedDreamResponse.parse(
+      await (
+        await app.request(`/v1/console/dream/queue/${retryJobA1}`, {
+          method: 'DELETE',
+          headers: consoleHeaders(cookie),
+        })
+      ).json(),
+    )
+    expect(removedRetryA.removed).toBe(true)
+
+    const inboxAfterRemoveA = InboxResponse.parse(
+      await (await app.request('/v1/console/inbox', { headers: { cookie } })).json(),
+    )
+    expect(
+      inboxAfterRemoveA.dreamState.recentRuns.find((r) => r.id === 'failed-race-a')?.retriedByRunId,
+    ).toBeUndefined()
+
+    // 再次发起两条重试并批量清空等待队列，两条原记录的 retriedByRunId 必须全部回滚
+    const retryAgainA = TriggerDreamResponse.parse(
+      await (
+        await app.request('/v1/console/dream/runs/failed-race-a/retry', {
+          method: 'POST',
+          headers: consoleHeaders(cookie, true),
+          body: JSON.stringify({ scope: 'full' }),
+        })
+      ).json(),
+    )
+    const retryAgainB = TriggerDreamResponse.parse(
+      await (
+        await app.request('/v1/console/dream/runs/failed-race-b/retry', {
+          method: 'POST',
+          headers: consoleHeaders(cookie, true),
+          body: JSON.stringify({ scope: 'full' }),
+        })
+      ).json(),
+    )
+    expect(retryAgainA.started).toBe(true)
+    expect(retryAgainB.started).toBe(true)
+
+    const clearedQueue = ClearDreamQueueResponse.parse(
+      await (
+        await app.request('/v1/console/dream/queue', {
+          method: 'DELETE',
+          headers: consoleHeaders(cookie),
+        })
+      ).json(),
+    )
+    expect(clearedQueue.removed).toBe(2)
+
+    const inboxAfterClear = InboxResponse.parse(
+      await (await app.request('/v1/console/inbox', { headers: { cookie } })).json(),
+    )
+    expect(
+      inboxAfterClear.dreamState.recentRuns.find((r) => r.id === 'failed-race-a')?.retriedByRunId,
+    ).toBeUndefined()
+    expect(
+      inboxAfterClear.dreamState.recentRuns.find((r) => r.id === 'failed-race-b')?.retriedByRunId,
+    ).toBeUndefined()
+
+    releaseBlocker.resolve()
+    await waitFor(() => {
+      const snap = jobs.getDreamQueueSnapshot?.()
+      return Boolean(snap && !snap.running && snap.queued.length === 0)
+    })
+  })
+
+  it('队列移出、清空与失败重试接口严格执行未登录拦截、跨站防护与参数校验', async () => {
+    const { app, cookie } = await bootStack()
+
+    await recordDreamRun(database.db, {
+      id: 'ok-run-guard',
+      trigger: 'manual',
+      mode: 'standard',
+      outcome: 'ok',
+      considered: 2,
+      suggested: 1,
+      error: null,
+      createdAt: '2026-11-28T02:00:00.000Z',
+    })
+    await recordDreamRun(database.db, {
+      id: 'partial-empty-items',
+      trigger: 'manual',
+      mode: 'tidy',
+      outcome: 'partial',
+      considered: 2,
+      suggested: 1,
+      error: '部分失败但无条目明细',
+      createdAt: '2026-11-28T02:01:00.000Z',
+    })
+
+    // 未登录请求一律返回 401
+    expect(
+      (await app.request('/v1/console/dream/queue/non-existent', { method: 'DELETE' })).status,
+    ).toBe(401)
+    expect((await app.request('/v1/console/dream/queue', { method: 'DELETE' })).status).toBe(401)
+    expect(
+      (await app.request('/v1/console/dream/runs/ok-run-guard/retry', { method: 'POST' })).status,
+    ).toBe(401)
+
+    // 带登录态但跨站来源（CSRF）一律返回 403
+    const crossSiteHeaders = {
+      cookie,
+      'sec-fetch-site': 'cross-site',
+      'content-type': 'application/json',
+    }
+    expect(
+      (
+        await app.request('/v1/console/dream/queue/non-existent', {
+          method: 'DELETE',
+          headers: crossSiteHeaders,
+        })
+      ).status,
+    ).toBe(403)
+    expect(
+      (
+        await app.request('/v1/console/dream/queue', {
+          method: 'DELETE',
+          headers: crossSiteHeaders,
+        })
+      ).status,
+    ).toBe(403)
+    expect(
+      (
+        await app.request('/v1/console/dream/runs/ok-run-guard/retry', {
+          method: 'POST',
+          headers: crossSiteHeaders,
+          body: JSON.stringify({ scope: 'full' }),
+        })
+      ).status,
+    ).toBe(403)
+
+    // 重试不存在的 runId 返回 404
+    expect(
+      (
+        await app.request('/v1/console/dream/runs/missing-run-id/retry', {
+          method: 'POST',
+          headers: consoleHeaders(cookie, true),
+          body: JSON.stringify({ scope: 'full' }),
+        })
+      ).status,
+    ).toBe(404)
+
+    // 非法 JSON、非法 scope 与对成功记录发起重试均返回 400
+    expect(
+      (
+        await app.request('/v1/console/dream/runs/partial-empty-items/retry', {
+          method: 'POST',
+          headers: consoleHeaders(cookie, true),
+          body: '{invalid-json',
+        })
+      ).status,
+    ).toBe(400)
+    expect(
+      (
+        await app.request('/v1/console/dream/runs/partial-empty-items/retry', {
+          method: 'POST',
+          headers: consoleHeaders(cookie, true),
+          body: JSON.stringify({ scope: 'unknown_scope' }),
+        })
+      ).status,
+    ).toBe(400)
+    expect(
+      (
+        await app.request('/v1/console/dream/runs/ok-run-guard/retry', {
+          method: 'POST',
+          headers: consoleHeaders(cookie, true),
+          body: JSON.stringify({ scope: 'full' }),
+        })
+      ).status,
+    ).toBe(400)
+
+    // 无 failedItems 时指定 failed_only 返回业务拒绝（started: false, status: 'rejected'）
+    const rejectedNoItems = TriggerDreamResponse.parse(
+      await (
+        await app.request('/v1/console/dream/runs/partial-empty-items/retry', {
+          method: 'POST',
+          headers: consoleHeaders(cookie, true),
+          body: JSON.stringify({ scope: 'failed_only' }),
+        })
+      ).json(),
+    )
+    expect(rejectedNoItems.started).toBe(false)
+    expect(rejectedNoItems.status).toBe('rejected')
+  })
 })
