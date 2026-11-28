@@ -3,9 +3,11 @@ import {
   CreateCredentialRequest,
   CredentialListResponse,
   CredentialMeta,
+  CredentialReferencesResponse,
   ErrorResponse,
   ResolveCredentialsRequest,
   ResolveCredentialsResponse,
+  RevealCredentialRequest,
   RevealCredentialResponse,
   UpdateCredentialRequest,
 } from '@kioku/contracts'
@@ -14,6 +16,7 @@ import { requireKey } from '../auth/middleware'
 import type { CredentialService } from '../credential/service'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
+import { MemoryError } from '../memory/errors'
 
 const errors = {
   400: jsonResponse('请求不合法', ErrorResponse),
@@ -30,7 +33,7 @@ const listRoute = createRoute({
   method: 'get',
   path: '/console/credentials',
   tags: ['credentials'],
-  summary: '列出全部凭据元数据（不含明文值）',
+  summary: '列出全部凭据元数据（不含任何字段值）',
   responses: { 200: jsonResponse('凭据列表', CredentialListResponse), ...errors },
 })
 
@@ -47,7 +50,7 @@ const updateRoute = createRoute({
   method: 'patch',
   path: '/console/credentials/{id}',
   tags: ['credentials'],
-  summary: '更新凭据说明、允许场域或轮换凭据值',
+  summary: '更新凭据元信息、允许场域或原地更新字段值',
   request: { params: IdParams, body: jsonBody(UpdateCredentialRequest) },
   responses: { 200: jsonResponse('已更新', CredentialMeta), ...errors },
 })
@@ -56,9 +59,24 @@ const revealRoute = createRoute({
   method: 'post',
   path: '/console/credentials/{id}/reveal',
   tags: ['credentials'],
-  summary: '临时解密查看凭据原值（禁止缓存）',
-  request: { params: IdParams },
+  summary: '分层受控解密查看凭据字段值（禁止缓存）',
+  request: {
+    params: IdParams,
+    body: {
+      required: false,
+      content: { 'application/json': { schema: RevealCredentialRequest } },
+    },
+  },
   responses: { 200: jsonResponse('凭据值', RevealCredentialResponse), ...errors },
+})
+
+const referencesRoute = createRoute({
+  method: 'get',
+  path: '/console/credentials/{id}/references',
+  tags: ['credentials'],
+  summary: '反查在活跃正式记忆中引用了该凭据的记录列表',
+  request: { params: IdParams },
+  responses: { 200: jsonResponse('引用记忆列表', CredentialReferencesResponse), ...errors },
 })
 
 const deleteRoute = createRoute({
@@ -90,10 +108,28 @@ export function credentialRoutes(deps: Deps, credentials: CredentialService) {
       c.json(await credentials.update(c.req.valid('param').id, c.req.valid('json')), 200),
     )
     .openapi(revealRoute, async (c) => {
-      const revealed = await credentials.reveal(c.req.valid('param').id)
+      let options: RevealCredentialRequest = {}
+      const rawText = await c.req.text()
+      if (rawText.trim()) {
+        let json: unknown
+        try {
+          json = JSON.parse(rawText)
+        } catch {
+          throw new MemoryError(400, '请求体不是合法的 JSON')
+        }
+        const parsed = RevealCredentialRequest.safeParse(json)
+        if (!parsed.success) {
+          throw new MemoryError(400, parsed.error.issues[0]?.message ?? '请求参数不合法')
+        }
+        options = parsed.data
+      }
+      const revealed = await credentials.reveal(c.req.valid('param').id, options)
       c.header('Cache-Control', 'no-store')
       return c.json(revealed, 200)
     })
+    .openapi(referencesRoute, async (c) =>
+      c.json({ items: await credentials.references(c.req.valid('param').id) }, 200),
+    )
     .openapi(deleteRoute, async (c) => {
       await credentials.remove(c.req.valid('param').id)
       return c.body(null, 204)

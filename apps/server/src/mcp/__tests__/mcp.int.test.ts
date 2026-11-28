@@ -68,6 +68,30 @@ describe.skipIf(!testDatabaseUrl)('无状态 MCP 服务与 9 个扁平工具', (
       allowedRealms: ['work'],
     })
     await credSvc.create({
+      slug: 'prod-pg',
+      label: '生产主库',
+      description: '核心业务数据库',
+      kind: 'database',
+      fields: {
+        host: 'pg-hidden-host.internal',
+        username: 'svc_hidden_user',
+        password: 'DB_SECRET_NEVER_IN_MCP',
+        url: 'postgres://svc_hidden_user:DB_SECRET_NEVER_IN_MCP@pg-hidden-host.internal:5432/app',
+      },
+      allowedRealms: ['work'],
+    })
+    await credSvc.create({
+      slug: 'github-passkey',
+      label: 'GitHub 管理员',
+      kind: 'login',
+      fields: {
+        url: 'https://github.com/login',
+        username: 'admin-hidden-login',
+      },
+      passkeyManualOnly: true,
+      allowedRealms: ['work'],
+    })
+    await credSvc.create({
       slug: 'personal-token',
       label: 'Personal Token',
       value: 'PERSONAL_SECRET',
@@ -266,12 +290,29 @@ describe.skipIf(!testDatabaseUrl)('无状态 MCP 服务与 9 个扁平工具', (
     }
     const credsText = credsResult.content[0]!.text
     expect(credsText).toContain('work-token')
+    expect(credsText).toContain('prod-pg')
+    expect(credsText).toContain('数据库连接')
+    expect(credsText).toContain('`url`（机密，默认）')
+    expect(credsText).toContain('`host`（明文）')
+    expect(credsText).toContain('`password`（机密）')
+    expect(credsText).toContain('github-passkey')
+    expect(credsText).toContain('需人工 Passkey 登录')
+    expect(credsText).toContain('{{cred:<slug>#<field>}}')
     expect(credsText).not.toContain('personal-token')
     expect(credsText).not.toContain('SUPER_SECRET_NEVER_IN_MCP')
+    expect(credsText).not.toContain('DB_SECRET_NEVER_IN_MCP')
+    expect(credsText).not.toContain('pg-hidden-host.internal')
+    expect(credsText).not.toContain('svc_hidden_user')
+    expect(credsText).not.toContain('admin-hidden-login')
     const credItems = (credsResult.structuredContent?.items ?? []).map((item) =>
       CredentialMeta.parse(item),
     )
-    expect(credItems.map((c) => c.slug)).toEqual(['work-token'])
+    expect(credItems.map((c) => c.slug)).toEqual(['github-passkey', 'prod-pg', 'work-token'])
+    const pgMeta = credItems.find((c) => c.slug === 'prod-pg')!
+    expect(pgMeta.kind).toBe('database')
+    expect(pgMeta.primaryField).toBe('url')
+    expect(pgMeta.fieldMeta.map((f) => f.name)).toEqual(['url', 'host', 'username', 'password'])
+    expect(credItems.find((c) => c.slug === 'github-passkey')?.passkeyManualOnly).toBe(true)
 
     const noCredPerm = await mcpRpc(app, readOnlyKey.key, 'tools/call', {
       name: 'kioku_list_credentials',

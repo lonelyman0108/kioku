@@ -70,7 +70,7 @@ async function openReveal(item: CredentialMeta) {
   revealing.value = true
   try {
     const res = await api.revealCredential(item.id)
-    if (revealTarget.value?.id === item.id) revealedValue.value = res.value
+    if (revealTarget.value?.id === item.id) revealedValue.value = res.value ?? null
   } catch (err) {
     revealError.value = err instanceof ApiError ? err.message : '读取凭据值失败'
   } finally {

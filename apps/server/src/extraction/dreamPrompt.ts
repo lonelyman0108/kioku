@@ -5,12 +5,17 @@ import {
   CREDENTIAL_PLACEHOLDER_PREFIX,
   DISCLOSURE_MAX,
   DREAM_KINDS,
+  DREAM_SECRET_WARNING_LABEL_MAX,
+  DREAM_SECRET_WARNING_LOCATION_MAX,
+  DREAM_SECRET_WARNING_SNIPPET_MAX,
+  DREAM_SECRET_WARNINGS_MAX,
   ENTRY_CONTENT_MAX,
   ENTRY_SUMMARY_MAX,
   ENTRY_TITLE_MAX,
   ENTRY_TITLE_NEW_MAX,
   extractCredentialPlaceholders,
   extractMarkdownOutline,
+  findSecretMatches,
   normalizeShortId,
   normalizeSlugList,
   parseEpisodeSignals,
@@ -20,6 +25,7 @@ import {
   TopicTag,
   type ArchivedHistoryNote,
   type BootMode,
+  type DreamSecretWarning,
   type DreamSuggestionKind,
   type EntryKind,
   type ProposedLinkItem,
@@ -137,6 +143,7 @@ export interface ParsedDreamProposal {
   proposedRuntimes: string[] | null
   proposedLinks: ProposedLinkItem[] | null
   proposedBootMode: BootMode | null
+  secretWarnings?: DreamSecretWarning[] | null | undefined
   actionDiscriminator?: string | undefined
   reason: string
 }
@@ -167,6 +174,8 @@ const SYSTEM_PROMPT = [
   '- 严禁编造任何密码、API Key 或令牌；原文中的 [[m-xxxxxx]] 双链与 {{cred:...}} 占位符必须完整保留。',
   '- target_short_ids 与 links[].target_short_id 必须全部取自下方提供的列表。',
   '- 不需要调整 envs、projects、runtimes、topics 时请直接省略对应字段，勿填占位空数组；仅在明确要放宽为跨项目、跨环境或跨客户端时才显式传 []（realms 严禁放宽）。',
+  '- 若审阅的正文中出现疑似真实非示例的明文密码、密钥、令牌或含密码连接串，可在对应建议中附带可选字段 "secret_warnings":[{"label":"类型说明","location":"所在小节","masked_snippet":"仅保留前3字符并打码的短提示"}]；无疑似明文时省略。',
+  '- secret_warnings 严禁原样输出完整明文密码或密钥，必须打码或仅标注所在小节。',
 ].join('\n')
 
 const CLUSTER_AUDIT_SYSTEM_PROMPT = [
@@ -244,6 +253,7 @@ const TIDY_SYSTEM_PROMPT = [
   '4. topics（可选）：将膨胀、杂乱、同义重复或含路径/句子的旧主题收敛为 1–5 个粗粒度小写分类标签（优先复用下方给出的库内高频主题参考，避免新造同义词；无须改动时可省略该字段）。',
   '5. disclosure（可选）：对于按需召回（boot_mode=none）或目录常驻（boot_mode=index）词条，若当前缺少触发场景或过于笼统，用 1 句简明描述「何时需要召回此记忆」（≤120 字）；已有清晰触发场景或全文常驻（boot_mode=full）词条可省略或填 null。',
   '6. archived_notes：每条只写精炼单行（≤200 字），日期已知时填 ISO 8601（如 2026-10-21T00:00:00Z），未知填 null；无剥离历史时给 []。',
+  '7. secret_warnings（可选）：仅当正文存在疑似真实非示例的明文密码、密钥、令牌或含密码连接串时附带数组 [{"label":"类型说明","location":"所在小节","masked_snippet":"仅保留前3字符并打码的短提示"}]；无疑似明文时省略。严禁在 secret_warnings 中原样输出完整明文，必须打码或仅标注所在小节。',
 ].join('\n')
 
 const RECONCILE_LOCATE_SYSTEM_PROMPT = [
@@ -584,6 +594,12 @@ function normalizeOccurredAt(raw: unknown): string | null {
 const CRED_PLACEHOLDER_STRIP_RE = /\{\{cred:[^}]*\}\}/gi
 const CRED_PREFIX_STRIP_RE = /\{\{cred:/gi
 const CONTROL_CHAR_RE = /\p{Cc}+/gu
+const URI_AUTH_REDACT_RE = /([a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi
+const MASK_CHAR_RE = /[*…•]/
+const LONG_UNMASKED_RUN_RE = /[A-Za-z0-9_+/=-]{7,}/g
+const ASSIGN_SECRET_TOKEN_RE = /^([A-Za-z_][A-Za-z0-9_.-]{0,15})=(.{6,})$/
+const PLAIN_CONTEXT_WORD_RE = /^[a-z]{1,10}[:：]?$/
+const RAW_SECRET_LIKE_TOKEN_RE = /[A-Za-z0-9_+/=!@#$%^&~-]{8,}/
 
 // 净化模型产出的非正文单行文本：移除凭据占位符与全部控制字符，保证落库后可安全通过契约校验
 function sanitizeDreamPlainField(raw: unknown, maxChars: number): string {
@@ -595,6 +611,83 @@ function sanitizeDreamPlainField(raw: unknown, maxChars: number): string {
   const normalized = inlineText(stripped)
   if (!normalized || normalized.includes(CREDENTIAL_PLACEHOLDER_PREFIX)) return ''
   return clipChars(normalized, maxChars).trim()
+}
+
+function redactMatchedSecrets(text: string): string {
+  if (!text) return ''
+  const hits = findSecretMatches(text)
+  let out = text
+  if (hits.length) {
+    const chunks: string[] = []
+    let cursor = 0
+    for (const hit of hits) {
+      chunks.push(text.slice(cursor, hit.start))
+      chunks.push(hit.label === '私钥块' ? '私钥***' : `${hit.match.slice(0, 3)}***`)
+      cursor = hit.end
+    }
+    chunks.push(text.slice(cursor))
+    out = chunks.join('')
+  }
+  return out.replace(URI_AUTH_REDACT_RE, '$1***@')
+}
+
+function sanitizeWarningSnippet(raw: unknown): string | undefined {
+  const plain = sanitizeDreamPlainField(raw, 200)
+  if (!plain) return undefined
+  const redacted = redactMatchedSecrets(plain)
+  const sanitizedTokens = redacted.split(/\s+/).map((token) => {
+    if (!token) return ''
+    if (MASK_CHAR_RE.test(token)) {
+      return token.replace(LONG_UNMASKED_RUN_RE, (seg) => seg.slice(0, 3))
+    }
+    const assignMatch = ASSIGN_SECRET_TOKEN_RE.exec(token)
+    if (assignMatch) {
+      return `${assignMatch[1]}=${assignMatch[2]!.slice(0, 3)}***`
+    }
+    if (PLAIN_CONTEXT_WORD_RE.test(token)) return token
+    if (RAW_SECRET_LIKE_TOKEN_RE.test(token)) {
+      return `${token.slice(0, 3)}***`
+    }
+    return token
+  })
+  const joined = sanitizedTokens.filter(Boolean).join(' ').trim()
+  if (!joined) return undefined
+  return clipChars(joined, DREAM_SECRET_WARNING_SNIPPET_MAX).trim() || undefined
+}
+
+// 严格清洗并脱敏整理阶段搭便车返回的疑似明文告警，防止模型违规回显完整密码或长密钥
+export function parseSecretWarnings(raw: unknown): DreamSecretWarning[] {
+  if (!Array.isArray(raw)) return []
+  const warnings: DreamSecretWarning[] = []
+  const seen = new Set<string>()
+  for (const item of raw) {
+    if (warnings.length >= DREAM_SECRET_WARNINGS_MAX) break
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+    const rec = item as Record<string, unknown>
+    const rawLabel = sanitizeDreamPlainField(rec.label, DREAM_SECRET_WARNING_LABEL_MAX * 2)
+    const label = clipChars(redactMatchedSecrets(rawLabel), DREAM_SECRET_WARNING_LABEL_MAX).trim()
+    if (!label) continue
+
+    const rawLoc = sanitizeDreamPlainField(
+      rec.location ?? rec.section,
+      DREAM_SECRET_WARNING_LOCATION_MAX * 2,
+    )
+    const location =
+      clipChars(redactMatchedSecrets(rawLoc), DREAM_SECRET_WARNING_LOCATION_MAX).trim() || undefined
+    const maskedSnippet = sanitizeWarningSnippet(
+      rec.masked_snippet ?? rec.maskedSnippet ?? rec.snippet,
+    )
+
+    const key = `${label.toLowerCase()}\0${(location ?? '').toLowerCase()}\0${(maskedSnippet ?? '').toLowerCase()}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    warnings.push({
+      label,
+      ...(location ? { location } : {}),
+      ...(maskedSnippet ? { maskedSnippet } : {}),
+    })
+  }
+  return warnings
 }
 
 function parseArchivedNotes(raw: unknown): ArchivedHistoryNote[] {
@@ -862,6 +955,7 @@ export function evaluateDreamResponse(
     const parseScopeList = kind === 'distill_episode' ? asOptionalSlugArray : asNonEmptyStringArray
     const allowMetaFields =
       kind === 'distill_episode' || kind === 'merge_duplicates' || kind === 'update'
+    const secretWarnings = parseSecretWarnings(rec.secret_warnings ?? rec.secretWarnings)
 
     proposals.push({
       kind,
@@ -880,6 +974,7 @@ export function evaluateDreamResponse(
       proposedRuntimes: allowMetaFields ? parseScopeList(rec.runtimes) : null,
       proposedLinks,
       proposedBootMode,
+      secretWarnings: secretWarnings.length ? secretWarnings : null,
       ...(actionDiscriminator ? { actionDiscriminator } : {}),
       reason,
     })
@@ -936,6 +1031,7 @@ export function evaluateTidyResponse(raw: string, target: DreamPromptItem): Tidy
     sanitizeDreamPlainField(rec.change_summary, CHANGE_SUMMARY_MAX) ||
     '规范标题与正文结构，归档旧日志'
   const archivedNotes = parseArchivedNotes(rec.archived_notes ?? rec.archivedNotes)
+  const secretWarnings = parseSecretWarnings(rec.secret_warnings ?? rec.secretWarnings)
   const reason =
     sanitizeDreamPlainField(rec.reason, MAX_REASON_CHARS) || '规范标题与结构并补充现行概要'
 
@@ -978,6 +1074,7 @@ export function evaluateTidyResponse(raw: string, target: DreamPromptItem): Tidy
       proposedRuntimes: null,
       proposedLinks: null,
       proposedBootMode: null,
+      secretWarnings: secretWarnings.length ? secretWarnings : null,
       reason,
     },
   }

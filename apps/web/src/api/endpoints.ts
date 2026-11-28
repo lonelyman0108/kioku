@@ -8,6 +8,7 @@ import {
   ClearDreamQueueResponse,
   CredentialListResponse,
   CredentialMeta,
+  CredentialReferencesResponse,
   DatabaseCheck,
   DatabaseConnected,
   DeviceGrantApproveResponse,
@@ -54,6 +55,7 @@ import {
   type ImportPreviewRequest,
   type RestoreEntryRequest,
   type RetryDreamRunRequest,
+  type RevealCredentialRequest,
   type ReviseSuggestionRequest,
   type RotateApiKeyRequest,
   type SetupRequest,
@@ -316,9 +318,14 @@ export const api = {
       body,
       schema: CredentialMeta,
     }),
-  revealCredential: (id: string) =>
+  revealCredential: (id: string, body?: RevealCredentialRequest) =>
     request('POST', `/console/credentials/${encodeURIComponent(id)}/reveal`, {
+      ...(body ? { body } : {}),
       schema: RevealCredentialResponse,
+    }),
+  credentialReferences: (id: string) =>
+    request('GET', `/console/credentials/${encodeURIComponent(id)}/references`, {
+      schema: CredentialReferencesResponse,
     }),
   deleteCredential: (id: string) =>
     request('DELETE', `/console/credentials/${encodeURIComponent(id)}`),

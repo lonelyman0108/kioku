@@ -25,8 +25,9 @@ import {
 } from '@kioku/contracts'
 import { asc, desc, eq, isNull } from 'drizzle-orm'
 
-import { decryptSecret, encryptSecret } from '../crypto/envelope'
-import { decryptionKey, encryptionKey, type MasterKey } from '../crypto/keyring'
+import { openCredentialPayload, prepareCredentialWrite } from '../credential/service'
+import { encryptSecret } from '../crypto/envelope'
+import { encryptionKey, type MasterKey } from '../crypto/keyring'
 import { credentialAad } from '../crypto/rotation'
 import { withTx, type Db } from '../db/client'
 import { credentials, entries, entryEvents } from '../db/schema'
@@ -146,35 +147,18 @@ function openCredentialForExport(
   masterKey: MasterKey,
   row: typeof credentials.$inferSelect,
 ): ExportedCredentialRecord {
-  const key = decryptionKey(masterKey, row.keyId)
-  const raw = decryptSecret(
-    key,
-    { ciphertext: row.ciphertext, wrappedKey: row.wrappedKey },
-    credentialAad(row.id),
-  )
-  const parsed = JSON.parse(raw) as unknown
-  let value: string
-  let fields: Record<string, string> | undefined
-  if (typeof parsed === 'string') {
-    value = parsed
-  } else if (
-    parsed &&
-    typeof parsed === 'object' &&
-    typeof (parsed as { value?: unknown }).value === 'string'
-  ) {
-    const rec = parsed as { value: string; fields?: Record<string, string> }
-    value = rec.value
-    fields = rec.fields
-  } else {
-    throw new MemoryError(500, `凭据 ${row.slug} 密文格式无法识别`)
-  }
+  const payload = openCredentialPayload(masterKey, row)
   return {
     slug: row.slug,
     label: row.label,
     description: row.description,
+    kind: row.kind,
+    primaryField: row.primaryField,
+    ...(row.fieldMeta.length ? { fieldMeta: row.fieldMeta } : {}),
+    ...(row.passkeyManualOnly ? { passkeyManualOnly: true } : {}),
     allowedRealms: row.allowedRealms,
-    value,
-    ...(fields && Object.keys(fields).length ? { fields } : {}),
+    value: payload.value,
+    ...(Object.keys(payload.fields).length ? { fields: payload.fields } : {}),
   }
 }
 
@@ -445,13 +429,22 @@ export async function previewTransferImport(
   })
 
   // 预览绝不返回凭据明文，仅返回元数据与冲突状态
-  const previewCredentials: ImportPreviewCredential[] = resolved.credentials.map((cred) => ({
-    slug: cred.slug,
-    label: cred.label,
-    description: cred.description ?? null,
-    allowedRealms: cred.allowedRealms ?? null,
-    exists: existingCredSlugs.has(cred.slug),
-  }))
+  const previewCredentials: ImportPreviewCredential[] = resolved.credentials.map((cred) => {
+    const fieldCount = cred.fieldMeta?.length
+      ? cred.fieldMeta.length
+      : cred.fields
+        ? Object.keys(cred.fields).length
+        : 1
+    return {
+      slug: cred.slug,
+      label: cred.label,
+      description: cred.description ?? null,
+      kind: cred.kind ?? 'secret',
+      fieldCount,
+      allowedRealms: cred.allowedRealms ?? null,
+      exists: existingCredSlugs.has(cred.slug),
+    }
+  })
 
   const skipped = items.filter((i) => i.skippedReason !== null).length
   const conflicts = items.filter((i) => i.skippedReason === null && i.conflict !== 'none').length
@@ -734,16 +727,26 @@ export async function applyTransferImport(
           continue
         }
         const id = randomUUID()
-        const payload =
-          cred.fields && Object.keys(cred.fields).length
-            ? { value: cred.value, fields: cred.fields }
-            : { value: cred.value }
-        const sealed = encryptSecret(key, JSON.stringify(payload), credentialAad(id))
+        const prepared = prepareCredentialWrite({
+          kind: cred.kind,
+          primaryField: cred.primaryField,
+          fieldMeta: cred.fieldMeta,
+          value: cred.value,
+          fields: cred.fields,
+          passkeyManualOnly: cred.passkeyManualOnly,
+        })
+        const sealed = encryptSecret(key, JSON.stringify(prepared.payload), credentialAad(id))
         await tx.insert(credentials).values({
           id,
           slug: cred.slug,
           label: cred.label,
           description: cred.description ?? null,
+          kind: prepared.kind,
+          primaryField: prepared.primaryField,
+          fieldMeta: prepared.fieldMeta,
+          passkeyManualOnly: prepared.passkeyManualOnly,
+          provider: 'builtin',
+          externalRef: null,
           allowedRealms: cred.allowedRealms ?? null,
           ciphertext: sealed.ciphertext,
           wrappedKey: sealed.wrappedKey,

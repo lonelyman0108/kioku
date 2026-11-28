@@ -273,5 +273,6 @@ export async function previewSingleTidy(
       archivedNotes: prop.archivedNotes ?? [],
     },
     integrity,
+    ...(prop.secretWarnings?.length ? { secretWarnings: prop.secretWarnings } : {}),
   }
 }
