@@ -15,6 +15,7 @@ import { CredentialService } from '../../credential/service'
 import type { Database } from '../../db/client'
 import { entries, entryLinks } from '../../db/schema'
 import { EntryService } from '../../memory/service'
+import { encryptExportCredentials } from '../../transfer/crypto'
 import {
   consoleHeaders,
   createOwnerSession,
@@ -509,6 +510,195 @@ describe.skipIf(!testDatabaseUrl)('数据导入导出与外部 Lore 导入', () 
     expect(rows.find((r) => r.shortId === 'm-234abd')).toMatchObject({
       bootMode: 'none',
       isPinned: false,
+    })
+  })
+
+  it('导出并跨主密钥导入复合凭据保留类型/字段元数据与 Passkey 标记，且兼容导入旧版无结构字段加密凭据包', async () => {
+    const masterKeyA = testMasterKey()
+    const masterKeyB = testMasterKey()
+    const appA = createTestApp(database, { masterKey: masterKeyA })
+    const { cookie: cookieA } = await createOwnerSession(database)
+    const credSvcA = new CredentialService(database.db, masterKeyA)
+
+    await credSvcA.create({
+      slug: 'prod-pg-export',
+      label: '生产数据库',
+      description: '主库连接',
+      kind: 'database',
+      fields: {
+        host: 'pg.export.internal',
+        port: '5432',
+        password: 'ExportDbSecret99',
+        url: 'postgres://app:ExportDbSecret99@pg.export.internal:5432/prod',
+      },
+      allowedRealms: ['work'],
+    })
+    await credSvcA.create({
+      slug: 'github-passkey-export',
+      label: 'GitHub 管理员',
+      kind: 'login',
+      fields: {
+        url: 'https://github.com/login',
+        username: 'export-admin',
+      },
+      passkeyManualOnly: true,
+    })
+
+    const exportRes = await appA.request('/v1/console/export', {
+      method: 'POST',
+      headers: consoleHeaders(cookieA, true),
+      body: JSON.stringify({
+        format: 'json',
+        includeCredentials: true,
+        passphrase: 'composite-backup-pass',
+      }),
+    })
+    expect(exportRes.status).toBe(200)
+    const exportedText = await exportRes.text()
+    expect(exportedText).not.toContain('ExportDbSecret99')
+    expect(exportedText).not.toContain('pg.export.internal')
+    const bundle = KiokuExportBundle.parse(JSON.parse(exportedText))
+
+    // 切换干净实例与新主密钥 masterKeyB 导入
+    await resetDatabase(database)
+    const appB = createTestApp(database, { masterKey: masterKeyB })
+    const { cookie: cookieB } = await createOwnerSession(database)
+
+    const previewRes = await appB.request('/v1/console/import/preview', {
+      method: 'POST',
+      headers: consoleHeaders(cookieB, true),
+      body: JSON.stringify({
+        source: {
+          kind: 'kioku',
+          bundle,
+          includeCredentials: true,
+          passphrase: 'composite-backup-pass',
+        },
+      }),
+    })
+    expect(previewRes.status).toBe(200)
+    const previewRaw = await previewRes.text()
+    expect(previewRaw).not.toContain('ExportDbSecret99')
+    expect(previewRaw).not.toContain('pg.export.internal')
+    const preview = ImportPreviewResponse.parse(JSON.parse(previewRaw))
+    expect(preview.credentials.find((c) => c.slug === 'prod-pg-export')).toMatchObject({
+      kind: 'database',
+      fieldCount: 4,
+    })
+
+    const applyRes = await appB.request('/v1/console/import/apply', {
+      method: 'POST',
+      headers: consoleHeaders(cookieB, true),
+      body: JSON.stringify({
+        source: {
+          kind: 'kioku',
+          bundle,
+          includeCredentials: true,
+          passphrase: 'composite-backup-pass',
+        },
+      }),
+    })
+    expect(applyRes.status).toBe(200)
+    expect(ImportApplyResponse.parse(await applyRes.json()).createdCredentials).toBe(2)
+
+    const credSvcB = new CredentialService(database.db, masterKeyB)
+    const importedMetas = await credSvcB.list()
+    const importedPg = importedMetas.find((c) => c.slug === 'prod-pg-export')!
+    expect(importedPg.kind).toBe('database')
+    expect(importedPg.primaryField).toBe('url')
+    expect(importedPg.fieldMeta.map((f) => `${f.name}:${f.secret ? 's' : 'p'}`)).toEqual([
+      'url:s',
+      'host:p',
+      'port:p',
+      'password:s',
+    ])
+    const revealedPg = await credSvcB.reveal(importedPg.id, { scope: 'all' })
+    expect(revealedPg.fields).toEqual({
+      host: 'pg.export.internal',
+      port: '5432',
+      password: 'ExportDbSecret99',
+      url: 'postgres://app:ExportDbSecret99@pg.export.internal:5432/prod',
+    })
+    const importedLogin = importedMetas.find((c) => c.slug === 'github-passkey-export')!
+    expect(importedLogin.kind).toBe('login')
+    expect(importedLogin.passkeyManualOnly).toBe(true)
+
+    // 兼容导入不含 kind/primaryField/fieldMeta/passkeyManualOnly 且携带附加 fields 的旧版加密凭据包
+    const legacyEncrypted = await encryptExportCredentials(
+      [
+        {
+          slug: 'legacy-backup-key',
+          label: '旧版导出密钥',
+          description: '老格式备份',
+          allowedRealms: ['work'],
+          value: 'LEGACY_BACKUP_SECRET_888',
+          fields: { webhook: 'whsec_legacy_extra' },
+        },
+      ],
+      'legacy-backup-pass',
+    )
+    const legacyPreviewRes = await appB.request('/v1/console/import/preview', {
+      method: 'POST',
+      headers: consoleHeaders(cookieB, true),
+      body: JSON.stringify({
+        source: {
+          kind: 'kioku',
+          bundle: {
+            format: KIOKU_EXPORT_FORMAT,
+            schemaVersion: 2,
+            exportedAt: '2026-10-01T00:00:00.000Z',
+            count: 0,
+            entries: [],
+            encryptedCredentials: legacyEncrypted,
+          },
+          includeCredentials: true,
+          passphrase: 'legacy-backup-pass',
+        },
+      }),
+    })
+    expect(legacyPreviewRes.status).toBe(200)
+    const legacyPreview = ImportPreviewResponse.parse(await legacyPreviewRes.json())
+    expect(legacyPreview.credentials[0]).toMatchObject({
+      slug: 'legacy-backup-key',
+      kind: 'secret',
+      fieldCount: 2,
+    })
+
+    const legacyApply = await appB.request('/v1/console/import/apply', {
+      method: 'POST',
+      headers: consoleHeaders(cookieB, true),
+      body: JSON.stringify({
+        source: {
+          kind: 'kioku',
+          bundle: {
+            format: KIOKU_EXPORT_FORMAT,
+            schemaVersion: 2,
+            exportedAt: '2026-10-01T00:00:00.000Z',
+            count: 0,
+            entries: [],
+            encryptedCredentials: legacyEncrypted,
+          },
+          includeCredentials: true,
+          passphrase: 'legacy-backup-pass',
+        },
+      }),
+    })
+    expect(legacyApply.status).toBe(200)
+    expect(ImportApplyResponse.parse(await legacyApply.json()).createdCredentials).toBe(1)
+
+    const legacyMeta = (await credSvcB.list()).find((c) => c.slug === 'legacy-backup-key')!
+    expect(legacyMeta.kind).toBe('secret')
+    expect(legacyMeta.primaryField).toBe('value')
+    expect(legacyMeta.fieldMeta).toEqual([
+      { name: 'value', label: '值', secret: true },
+      { name: 'webhook', secret: true },
+    ])
+    expect(await credSvcB.reveal(legacyMeta.id)).toEqual({
+      value: 'LEGACY_BACKUP_SECRET_888',
+      fields: {
+        value: 'LEGACY_BACKUP_SECRET_888',
+        webhook: 'whsec_legacy_extra',
+      },
     })
   })
 })

@@ -1,6 +1,10 @@
 import type {
   ArchivedHistoryNote,
   BootMode,
+  CredentialFieldMeta,
+  CredentialKind,
+  CredentialProvider,
+  DreamSecretWarning,
   DreamSuggestionKind,
   DreamSuggestionStatus,
   EntryDiffMeta,
@@ -283,6 +287,15 @@ export const credentials = pgTable(
     slug: text().notNull().unique(),
     label: text().notNull(),
     description: text(),
+    kind: text().$type<CredentialKind>().notNull().default('secret'),
+    primaryField: text().notNull().default('value'),
+    fieldMeta: jsonb()
+      .$type<CredentialFieldMeta[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    passkeyManualOnly: boolean().notNull().default(false),
+    provider: text().$type<CredentialProvider>().notNull().default('builtin'),
+    externalRef: text(),
     allowedRealms: text().array(),
     ciphertext: bytea().notNull(),
     wrappedKey: bytea().notNull(),
@@ -293,6 +306,18 @@ export const credentials = pgTable(
   (t) => [
     index('credentials_key_id_idx').on(t.keyId),
     check('credentials_slug_format', sql`${t.slug} ~ '^[a-z0-9][a-z0-9._-]{0,63}$'`),
+    check(
+      'credentials_kind_check',
+      sql`${t.kind} in ('secret', 'login', 'api', 'database', 'ssh')`,
+    ),
+    check(
+      'credentials_provider_check',
+      sql`${t.provider} in ('builtin', 'bitwarden', '1password')`,
+    ),
+    check(
+      'credentials_primary_field_format',
+      sql`${t.primaryField} ~ '^[a-z0-9][a-z0-9_-]{0,63}$'`,
+    ),
   ],
 )
 
@@ -336,6 +361,7 @@ export const dreamSuggestions = pgTable(
     proposedRuntimes: text().array(),
     proposedLinks: jsonb().$type<ProposedLinkItem[] | null>(),
     proposedBootMode: text().$type<BootMode | null>(),
+    secretWarnings: jsonb().$type<DreamSecretWarning[] | null>(),
     reason: text().notNull(),
     fingerprint: text().notNull().unique(),
     status: text().$type<DreamSuggestionStatus>().notNull().default('pending'),

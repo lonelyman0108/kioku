@@ -4,6 +4,7 @@ import {
   extractMarkdownSection,
   stripDuplicateLeadingHeading,
   type BootMode,
+  type CredentialKind,
   type CredentialMeta,
   type EntryBrowseResponse,
   type EntryDetailResponse,
@@ -214,17 +215,41 @@ export function formatBrowseResponse(res: EntryBrowseResponse): string {
   return lines.join('\n').trim()
 }
 
+const CREDENTIAL_KIND_LABELS: Record<CredentialKind, string> = {
+  secret: '通用密文',
+  login: '账号与密码',
+  api: 'API / 服务',
+  database: '数据库连接',
+  ssh: 'SSH / 密钥对',
+}
+
 export function formatCredentialMetadataList(items: readonly CredentialMeta[]): string {
   if (!items.length) return '无可用凭据。'
   const lines: string[] = ['## 可用凭据清单（仅元数据）', '']
   for (const item of items) {
+    const kindLabel = CREDENTIAL_KIND_LABELS[item.kind] ?? item.kind
     const desc = item.description ? ` — ${inlineText(item.description)}` : ''
     const realms = item.allowedRealms?.length ? ` [场域: ${item.allowedRealms.join(', ')}]` : ''
-    lines.push(`- \`${item.slug}\`（${inlineText(item.label)}）${realms}${desc}`)
+    lines.push(`- \`${item.slug}\`（${inlineText(item.label)} · ${kindLabel}）${realms}${desc}`)
+    if (item.fieldMeta.length) {
+      const fieldSummary = item.fieldMeta
+        .map((field) => {
+          const level = field.secret ? '机密' : '明文'
+          const primary = field.name === item.primaryField ? '，默认' : ''
+          return `\`${field.name}\`（${level}${primary}）`
+        })
+        .join('、')
+      lines.push(`  - 可用字段：${fieldSummary}`)
+    } else {
+      lines.push(`  - 默认字段：\`${item.primaryField}\``)
+    }
+    if (item.passkeyManualOnly) {
+      lines.push('  - 提示：该账号需人工 Passkey 登录，不可自动注入。')
+    }
   }
   lines.push(
     '',
-    '提示：凭据原值不可直接读取，请用 `kioku run -e VAR=<slug> -- <命令>` 注入环境变量，记忆正文只写 `{{cred:<slug>}}`。',
+    '提示：全部字段值均加密托管，不可通过 MCP 读取；执行命令时请用 `kioku run -e VAR=<slug> -- <命令>`（取默认字段）或 `kioku run -e VAR=<slug>#<field> -- <命令>`（取指定字段，不存在的字段将直接报错），记忆正文只写 `{{cred:<slug>}}` 或 `{{cred:<slug>#<field>}}`。',
   )
   return lines.join('\n')
 }

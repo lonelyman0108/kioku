@@ -536,7 +536,8 @@ export function createKiokuMcpServer(
   server.registerTool(
     'kioku_list_credentials',
     {
-      description: '列出当前访问密钥允许使用的凭据标识与说明（仅元数据，绝不返回明文值）',
+      description:
+        '列出当前访问密钥允许使用的凭据标识、类型、可用字段名（含明文/机密标注）与说明（仅元数据，绝不返回任何字段值）；正文引用支持 {{cred:<slug>}} 与 {{cred:<slug>#<field>}}',
       annotations: { readOnlyHint: true },
       inputSchema: {},
     },

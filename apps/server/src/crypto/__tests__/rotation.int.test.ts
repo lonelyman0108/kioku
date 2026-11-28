@@ -81,7 +81,7 @@ describe.skipIf(!testDatabaseUrl)('主密钥启动校验与同步重封轮换', 
     const newCreds = new CredentialService(database.db, newOnlyRing)
     const revealed = await newCreds.reveal(created.id)
     expect(revealed.value).toBe('sk-secret-value-123')
-    expect(revealed.fields).toEqual({ org: 'org-test' })
+    expect(revealed.fields).toEqual({ value: 'sk-secret-value-123', org: 'org-test' })
 
     const resolvedEmbed = await loadResolvedModel(database.db, newOnlyRing, EMBEDDING_SETTING_KEY)
     const resolvedChat = await loadResolvedModel(database.db, newOnlyRing, CHAT_LLM_SETTING_KEY)

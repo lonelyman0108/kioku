@@ -120,6 +120,35 @@ describe.skipIf(!testDatabaseUrl)('数据库迁移与探针', () => {
     expect(kindDef).toContain('adjust_boot_mode')
   })
 
+  it('增量迁移新增了复合凭据结构元数据列、约束与整理告警列', async () => {
+    const cols = await database.db.execute<{ table_name: string; column_name: string }>(sql`
+      select table_name, column_name
+      from information_schema.columns
+      where table_schema = 'public'
+        and (
+          (table_name = 'credentials' and column_name in ('kind', 'primary_field', 'field_meta', 'passkey_manual_only', 'provider', 'external_ref'))
+          or (table_name = 'dream_suggestions' and column_name = 'secret_warnings')
+        )
+    `)
+    expect([...cols]).toHaveLength(7)
+
+    const checks = await database.db.execute<{ conname: string }>(sql`
+      select conname
+      from pg_constraint
+      where conname in (
+        'credentials_kind_check',
+        'credentials_provider_check',
+        'credentials_primary_field_format'
+      )
+      order by conname
+    `)
+    expect([...checks].map((r) => r.conname)).toEqual([
+      'credentials_kind_check',
+      'credentials_primary_field_format',
+      'credentials_provider_check',
+    ])
+  })
+
   it('probeDatabase 对已迁移的库返回 ready 且允许超级用户或普通角色接入', async () => {
     const result = await probeDatabase(testDatabaseUrl!, migrationsFolder)
     expect(result.ready).toBe(true)

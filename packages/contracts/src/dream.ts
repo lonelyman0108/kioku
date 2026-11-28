@@ -56,6 +56,18 @@ export const ProposedLinkItem = z.object({
 })
 export type ProposedLinkItem = z.infer<typeof ProposedLinkItem>
 
+export const DREAM_SECRET_WARNINGS_MAX = 8
+export const DREAM_SECRET_WARNING_LABEL_MAX = 64
+export const DREAM_SECRET_WARNING_LOCATION_MAX = 80
+export const DREAM_SECRET_WARNING_SNIPPET_MAX = 48
+
+export const DreamSecretWarning = z.object({
+  label: z.string().trim().min(1).max(DREAM_SECRET_WARNING_LABEL_MAX),
+  location: z.string().trim().min(1).max(DREAM_SECRET_WARNING_LOCATION_MAX).optional(),
+  maskedSnippet: z.string().trim().min(1).max(DREAM_SECRET_WARNING_SNIPPET_MAX).optional(),
+})
+export type DreamSecretWarning = z.infer<typeof DreamSecretWarning>
+
 export const DREAM_STATUSES = ['pending', 'applied', 'rejected'] as const
 export const DreamSuggestionStatus = z.enum(DREAM_STATUSES)
 export type DreamSuggestionStatus = z.infer<typeof DreamSuggestionStatus>
@@ -288,6 +300,7 @@ export const DreamSuggestionView = z.object({
   proposedRuntimes: z.array(z.string()).nullable(),
   proposedLinks: z.array(ProposedLinkItem).nullable().optional(),
   proposedBootMode: BootMode.nullable().optional(),
+  secretWarnings: z.array(DreamSecretWarning).nullable().optional(),
   affectedBacklinkCount: z.number().int().min(0).optional(),
   reason: z.string(),
   status: DreamSuggestionStatus,
@@ -406,6 +419,7 @@ export const SingleTidyPreviewResponse = z.object({
     archivedNotes: z.array(ArchivedHistoryNote),
   }),
   integrity: CaptureIntegrity,
+  secretWarnings: z.array(DreamSecretWarning).optional(),
 })
 export type SingleTidyPreviewResponse = z.infer<typeof SingleTidyPreviewResponse>
 
@@ -421,6 +435,7 @@ export const SingleTidyApplyRequest = z.object({
   applyArchivedNotes: z.boolean().optional(),
   stageToInbox: z.boolean().optional(),
   reason: z.string().trim().max(300).optional(),
+  secretWarnings: z.array(DreamSecretWarning).max(DREAM_SECRET_WARNINGS_MAX).optional(),
 })
 export type SingleTidyApplyRequest = z.infer<typeof SingleTidyApplyRequest>
 

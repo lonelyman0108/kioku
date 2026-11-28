@@ -120,6 +120,7 @@ function makeSuggestionRow(overrides: Record<string, unknown> = {}) {
     proposedRuntimes: [],
     proposedLinks: null,
     proposedBootMode: 'none',
+    secretWarnings: null,
     reason: '将近期排错经验沉淀为正式记忆',
     fingerprint: 'fp-1',
     status: 'pending',
