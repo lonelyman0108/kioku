@@ -15,6 +15,7 @@ import memoryHistoryDrawer from '../components/MemoryHistoryDrawer.vue?raw'
 import memoryIndexRail from '../components/MemoryIndexRail.vue?raw'
 import memoryList from '../components/MemoryList.vue?raw'
 import modelSettings from '../components/ModelSettings.vue?raw'
+import organizeIndexRail from '../components/OrganizeIndexRail.vue?raw'
 import quickCaptureModal from '../components/QuickCaptureModal.vue?raw'
 import sceneScopePicker from '../components/SceneScopePicker.vue?raw'
 import singleTidyDrawer from '../components/SingleTidyDrawer.vue?raw'
@@ -148,13 +149,14 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(wikiText).toContain('stripInlineMarkdownSegments')
   })
 
-  it('宽屏采用居中画布对齐，整理页采用全宽待确认列表，设置采用双栏侧边导航结构，弹窗与抽屉幅面匹配内容密度', () => {
+  it('宽屏采用居中画布对齐，整理页与记忆页保持同构三栏工作台，设置采用双栏侧边导航结构，弹窗与抽屉幅面匹配内容密度', () => {
     expect(consoleLayout).toContain('console-header-inner')
     expect(memoriesPage).toContain('margin-inline: auto')
     expect(credentialsPage).toContain('credentials-shell')
     expect(credentialsPage).toContain('margin-inline: auto')
-    expect(inboxPage).toContain('command-bar')
-    expect(inboxPage).toContain('ledger-table')
+    expect(inboxPage).toContain('216px var(--queue-width, 336px) minmax(0, 1fr)')
+    expect(inboxPage).toContain('<OrganizeIndexRail')
+    expect(inboxPage).toContain('pane-splitter')
     expect(inboxPage).toContain('margin-inline: auto')
     expect(settingsPage).toContain('settings-workspace')
     expect(settingsPage).toContain('settings-vnav')
@@ -204,16 +206,18 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(hygieneSweepDrawer).toContain('<DiffViewer')
   })
 
-  it('整理页采用四列待确认列表、行内双栏审校面板、高风险展开护栏、批量安全应用、结构检查抽屉与 8 秒撤销，且消除逐卡免责套话', () => {
-    expect(inboxPage).toContain('结构检查')
-    expect(inboxPage).toContain('规范整理')
-    expect(inboxPage).toContain('增量整理')
+  it('整理页采用同构三栏审校工作台、双组风险分区队列、安全快批、结构检查抽屉与 8 秒撤销，且消除逐卡免责套话', () => {
+    expect(organizeIndexRail).toContain('结构检查')
+    expect(organizeIndexRail).toContain('规范整理')
+    expect(organizeIndexRail).toContain('增量整理')
+    expect(organizeIndexRail).toContain('查重与关联')
+    expect(organizeIndexRail).toContain('须逐条核对')
+    expect(organizeIndexRail).toContain('安全快批')
     expect(inboxPage).toContain('批量应用安全项')
-    expect(inboxPage).toContain('展开核对')
+    expect(inboxPage).toContain('须逐条核对')
+    expect(inboxPage).toContain('安全快批')
     expect(inboxPage).toContain('layout="inspector"')
-    expect(inboxPage).toContain('ledger-footnote')
     expect(inboxPage).toContain('dreamKindIcons')
-    expect(inboxPage).toContain('.inspector-row > td::before')
     expect(inboxPage).toContain('duration: 8000')
     expect(inboxPage).toContain('api.restoreEntry')
     expect(inboxPage).toContain('<HygieneSweepDrawer')
@@ -221,6 +225,8 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(dreamSuggestionCard).toContain('checkCaptureIntegrity')
     expect(dreamSuggestionCard).toContain('title-compare')
     expect(dreamSuggestionCard).toContain('guard-strip')
+    expect(dreamSuggestionCard).toContain('workbench-decision-bar')
+    expect(dreamSuggestionCard).toContain('支持 8 秒内撤销')
     expect(dreamSuggestionCard).toContain('规范标题')
     expect(dreamSuggestionCard).toContain('整理依据')
     expect(dreamSuggestionCard).not.toContain('原有完整内容保留在版本历史中')
@@ -242,7 +248,7 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(inboxPage).toContain('redirectedBacklinkCount')
     expect(inboxPage).toContain('link_entries')
     expect(inboxPage).toContain('adjust_boot_mode')
-    expect(inboxPage).toContain('popover-schedules')
+    expect(organizeIndexRail).toContain('popover-schedules')
 
     expect(dreamSuggestionCard).toContain('affectedBacklinkCount')
     expect(dreamSuggestionCard).toContain('proposedLinks')

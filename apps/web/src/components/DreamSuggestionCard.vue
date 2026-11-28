@@ -54,17 +54,40 @@ const props = withDefaults(
     busy: boolean
     disabled?: boolean
     layout?: 'card' | 'inspector'
+    riskLevel?: 'high' | 'medium' | 'safe'
+    position?: number
+    totalCount?: number
+    showBack?: boolean
   }>(),
-  { disabled: false, layout: 'card' },
+  {
+    disabled: false,
+    layout: 'card',
+    riskLevel: 'medium',
+    position: 0,
+    totalCount: 0,
+    showBack: false,
+  },
 )
 
 const emit = defineEmits<{
   apply: [id: string, body: ApplySuggestionRequest]
   dismiss: [id: string]
+  back: []
+  dirtyChange: [dirty: boolean]
 }>()
 
 const editing = ref(false)
 const isInspector = computed(() => props.layout === 'inspector')
+
+const riskBadge = computed(() => {
+  if (props.riskLevel === 'high') {
+    return { label: '高风险 · 须核对', icon: icons.lock }
+  }
+  if (props.riskLevel === 'safe') {
+    return { label: '安全快批', icon: icons.shieldCheck }
+  }
+  return { label: '须逐条核对', icon: icons.reveal }
+})
 
 const { me } = useSession()
 const hasChatModel = computed(() => Boolean(me.data.value?.hasChatModel))
@@ -450,6 +473,39 @@ const draft = reactive({
   bootMode: 'none' as BootMode,
 })
 const draftScope = ref<SceneScopeValue>({ envs: [], realms: [], projects: [], runtimes: [] })
+const initialEditSnapshot = ref('')
+
+function serializeDraftSnapshot(): string {
+  return JSON.stringify({
+    title: draft.title,
+    summary: draft.summary,
+    content: draft.content,
+    disclosure: draft.disclosure,
+    changeSummary: draft.changeSummary,
+    applyArchivedNotes: draft.applyArchivedNotes,
+    topics: draft.topics,
+    bootMode: draft.bootMode,
+    scope: draftScope.value,
+  })
+}
+
+const hasUnsavedDraft = computed(
+  () =>
+    editing.value &&
+    (revisedReason.value !== null || serializeDraftSnapshot() !== initialEditSnapshot.value),
+)
+
+watch(
+  hasUnsavedDraft,
+  (dirty) => {
+    emit('dirtyChange', dirty)
+  },
+  { immediate: true },
+)
+
+onBeforeUnmount(() => {
+  emit('dirtyChange', false)
+})
 
 function openEditor() {
   const s = props.suggestion
@@ -468,13 +524,26 @@ function openEditor() {
     projects: [...effectiveScope.value.projects],
     runtimes: [...effectiveScope.value.runtimes],
   }
+  initialEditSnapshot.value = serializeDraftSnapshot()
   editing.value = true
 }
 
 function closeEditor() {
+  if (props.busy || props.disabled || reviseBusy.value) return
   editing.value = false
   revisedReason.value = null
   reviseError.value = null
+}
+
+function requestCloseEditor() {
+  if (!editing.value || props.busy || props.disabled || reviseBusy.value) return
+  if (
+    hasUnsavedDraft.value &&
+    !window.confirm('有未保存的草稿改动，取消编辑后将丢失。确定取消？')
+  ) {
+    return
+  }
+  closeEditor()
 }
 
 async function submitRevise() {
@@ -678,21 +747,6 @@ const showCredsMetric = computed(() =>
   ),
 )
 
-const hasNotableLengthChange = computed(() =>
-  Boolean(
-    lengthDelta.value &&
-    (Math.abs(lengthDelta.value.pct) >= 10 || Math.abs(lengthDelta.value.delta) >= 80),
-  ),
-)
-
-const showCompactGuardOnly = computed(
-  () =>
-    isGuardNormal.value &&
-    !showLinksMetric.value &&
-    !showCredsMetric.value &&
-    !hasNotableLengthChange.value,
-)
-
 const integrityMessage = computed(() => {
   const check = integrity.value
   if (!check) return null
@@ -844,844 +898,125 @@ function applyEdited() {
   }
   emit('apply', props.suggestion.id, body)
 }
+
+const decisionFooterHint = computed(() => {
+  if (isMergeDuplicates.value) return '待并入记忆移入回收站，不支持一键撤销'
+  if (isMarkStale.value) return '移入后可随时在回收站恢复'
+  if (isDistillEpisode.value) return '原会话摘要移入回收站，可随时恢复'
+  return '支持 8 秒内撤销'
+})
+
+defineExpose({
+  isEditing: () => editing.value,
+  isReviseBusy: () => reviseBusy.value,
+  hasUnsavedDraft: () => hasUnsavedDraft.value,
+  canApplyDirect: () =>
+    !editing.value && !reviseBusy.value && !props.busy && !props.disabled && anyPartSelected.value,
+  canOpenEditor: () =>
+    !editing.value &&
+    !reviseBusy.value &&
+    !props.busy &&
+    !props.disabled &&
+    !isMarkStale.value &&
+    !isLinkEntries.value,
+  canCloseEditor: () => editing.value && !props.busy && !props.disabled && !reviseBusy.value,
+  applyDirect,
+  openEditor,
+  closeEditor,
+  requestCloseEditor,
+})
 </script>
 
 <template>
-  <!-- 展开态：65% 纯亮纸变更区 + 35% 整理依据与护栏 -->
-  <div v-if="isInspector" class="inspector-grid">
-    <section class="inspector-main" aria-label="建议改动详情">
-      <div class="section-eyebrow">
-        <span class="eyebrow-lead">
-          <UIcon
-            :name="editing ? icons.edit : dreamKindIcons[suggestion.kind]"
-            class="eyebrow-icon"
-            aria-hidden="true"
-          />
-          <span>{{ deltaSectionTitle }}</span>
-        </span>
-        <span v-if="editing" class="eyebrow-sub">修改仅对本次写入生效</span>
-        <span v-else-if="isLinkEntries && suggestion.proposedLinks?.length" class="tabular-nums">
-          已选 {{ selectedLinkShortIds.length }} / {{ suggestion.proposedLinks.length }} 条
-        </span>
-      </div>
+  <!-- 全高审校台态（整理页右栏：顶部依据与护栏 + 中央宽幅变更对比 + 底部固定决断栏） -->
+  <div v-if="isInspector" class="workbench-shell">
+    <div v-if="showBack" class="mobile-back-bar">
+      <UButton size="xs" color="neutral" variant="ghost" :icon="icons.back" @click="emit('back')">
+        返回队列
+      </UButton>
+      <span v-if="position && totalCount" class="mobile-back-pos tabular-nums">
+        {{ position }} / {{ totalCount }}
+      </span>
+    </div>
 
-      <!-- 编辑后应用表单（不用 form 标签防误回车提交） -->
-      <div v-if="editing" class="edit-box">
-        <div v-if="revisedReason" class="revise-preview-panel">
-          <div class="revise-preview-head">
-            <span class="revise-preview-lead">
-              <UIcon :name="icons.sparkles" class="revise-preview-icon" aria-hidden="true" />
-              <span>已按说明修订草稿</span>
-            </span>
-            <UButton
-              size="xs"
-              color="neutral"
-              variant="ghost"
-              :icon="showRevisedDiff ? icons.chevronUp : icons.compare"
-              @click="showRevisedDiff = !showRevisedDiff"
-            >
-              {{ showRevisedDiff ? '收起对比' : '查看对比' }}
-            </UButton>
-          </div>
-          <p class="revise-preview-reason">
-            <WikiText :text="revisedReason" :titles="knownTitles" :mark-missing="false" compact />
-          </p>
-          <NoteLine v-if="hasLostRefs || integrity?.severeShrink" tone="warning" flush>
-            {{ integrityMessage }}
-          </NoteLine>
-          <DiffViewer
-            v-if="showRevisedDiff"
-            :before="reviseDiffBefore"
-            :after="draft.content"
-            :context="3"
-            :expand-step="10"
-            max-height="18rem"
-            empty-text="正文无变更，已更新草稿属性"
-          />
-        </div>
-        <div class="grid gap-3 sm:grid-cols-2">
-          <UFormField label="标题">
-            <template #label>
-              <span class="field-label">
-                <UIcon :name="icons.heading" class="field-label-icon" aria-hidden="true" />
-                <span>标题</span>
-              </span>
-            </template>
-            <UInput v-model="draft.title" :maxlength="ENTRY_TITLE_MAX" class="w-full" />
-          </UFormField>
-          <UFormField label="主题">
-            <template #label>
-              <span class="field-label">
-                <UIcon :name="icons.topic" class="field-label-icon" aria-hidden="true" />
-                <span>主题</span>
-              </span>
-            </template>
-            <UInputTags
-              v-model="draft.topics"
-              add-on-blur
-              placeholder="输入后回车"
-              class="w-full"
-            />
-          </UFormField>
-        </div>
-        <UFormField label="现行概要（可选）">
-          <template #label>
-            <span class="field-label">
-              <UIcon :name="icons.summary" class="field-label-icon" aria-hidden="true" />
-              <span>现行概要（可选）</span>
-            </span>
-          </template>
-          <UTextarea
-            v-model="draft.summary"
-            :rows="2"
-            autoresize
-            :maxrows="4"
-            :maxlength="ENTRY_SUMMARY_MAX"
-            class="w-full"
-          />
-        </UFormField>
-        <NoteLine v-if="editSecretWarnings.length" tone="warning" flush>
-          正文疑似包含{{
-            editSecretWarnings.map((w) => w.label).join('、')
-          }}，建议改存凭据并用占位符引用。
-        </NoteLine>
-        <UFormField label="正文">
-          <template #label>
-            <span class="field-label">
-              <UIcon :name="icons.file" class="field-label-icon" aria-hidden="true" />
-              <span>正文</span>
-            </span>
-          </template>
-          <UTextarea v-model="draft.content" :rows="8" autoresize class="w-full font-mono" />
-        </UFormField>
-        <div class="grid gap-3 sm:grid-cols-2">
-          <UFormField label="召回时机（可选）">
-            <UInput v-model="draft.disclosure" :maxlength="DISCLOSURE_MAX" class="w-full" />
-          </UFormField>
-          <UFormField label="变更说明（可选）">
-            <UInput v-model="draft.changeSummary" :maxlength="CHANGE_SUMMARY_MAX" class="w-full" />
-          </UFormField>
-        </div>
-        <UFormField label="适用场景">
-          <SceneScopePicker v-model="draftScope" />
-        </UFormField>
-        <div class="flex flex-wrap items-center gap-6">
-          <UFormField label="启动加载方式">
-            <template #label>
-              <span class="field-label">
-                <UIcon :name="icons.pin" class="field-label-icon" aria-hidden="true" />
-                <span>启动加载方式</span>
-              </span>
-            </template>
-            <SegmentedChoice
-              v-model="draft.bootMode"
-              :items="bootModeChoices"
-              label="选择启动加载方式"
-              compact
-            />
-          </UFormField>
-          <USwitch
-            v-if="hasArchivedNotes"
-            v-model="draft.applyArchivedNotes"
-            label="将剥离的历史说明写入版本历史"
-          />
-        </div>
-        <p v-if="editValidationProblem" class="text-xs text-error" role="alert">
-          {{ editValidationProblem }}
-        </p>
-        <div class="edit-actions">
-          <UButton
-            size="sm"
-            :icon="icons.check"
-            :loading="busy"
-            :disabled="disabled || reviseBusy || Boolean(editValidationProblem)"
-            @click="applyEdited"
-          >
-            保存并应用
-          </UButton>
-          <UButton
-            size="sm"
-            color="neutral"
-            variant="ghost"
-            :disabled="busy || disabled || reviseBusy"
-            @click="closeEditor"
-          >
-            取消编辑
-          </UButton>
-        </div>
-      </div>
-
-      <!-- 调整启动加载 -->
-      <template v-else-if="isAdjustBootMode && baseEntry && suggestion.proposedBootMode">
-        <div class="boot-transition">
-          <div class="boot-state-col">
-            <span class="boot-state-kicker">变更前</span>
-            <span class="boot-state-name">
-              <UIcon
-                :name="bootModeIcons[currentBootMode]"
-                class="boot-state-icon"
-                aria-hidden="true"
-              />
-              <span>{{ bootModeLabels[currentBootMode] }}</span>
-            </span>
-            <span class="boot-state-detail tabular-nums">
-              {{
-                currentBootMode === 'full'
-                  ? `每次会话全量注入 ${baseEntry.content.length.toLocaleString()} 字`
-                  : bootModeDescriptions[currentBootMode]
-              }}
-            </span>
-          </div>
-          <div class="boot-arrow-mid" aria-hidden="true">
-            <UIcon :name="icons.inherits" class="transition-arrow" />
-          </div>
-          <div class="boot-state-col is-target">
-            <span class="boot-state-kicker">变更后</span>
-            <span class="boot-state-name">
-              <UIcon
-                :name="bootModeIcons[suggestion.proposedBootMode]"
-                class="boot-state-icon"
-                aria-hidden="true"
-              />
-              <span>{{ bootModeLabels[suggestion.proposedBootMode] }}</span>
-            </span>
-            <span class="boot-state-detail">
-              {{ bootModeDescriptions[suggestion.proposedBootMode] }}
-            </span>
-          </div>
-        </div>
-
-        <div v-if="hasSummaryChange || suggestion.proposedSummary?.trim()" class="summary-change">
-          <span class="sub-eyebrow">
-            <UIcon :name="icons.summary" class="sub-eyebrow-icon" aria-hidden="true" />
-            <span>附带现行概要变更</span>
-          </span>
-          <div class="summary-diff-grid">
-            <div class="summary-row">
-              <span class="summary-tag">原概要</span>
-              <span class="summary-old">
-                <WikiText
-                  v-if="baseEntry.summary?.trim()"
-                  :text="baseEntry.summary.trim()"
-                  :titles="knownTitles"
-                  :mark-missing="false"
-                  compact
-                />
-                <template v-else>暂无</template>
-              </span>
-            </div>
-            <div class="summary-row">
-              <span class="summary-tag">建议概要</span>
-              <span class="summary-new">
-                <WikiText
-                  :text="suggestion.proposedSummary ?? ''"
-                  :titles="knownTitles"
-                  :mark-missing="false"
-                  compact
-                />
-              </span>
-            </div>
-          </div>
-        </div>
-
-        <div v-if="suggestion.proposedBootMode === 'index'" class="summary-change">
-          <span class="sub-eyebrow">
-            <UIcon :name="icons.bookmark" class="sub-eyebrow-icon" aria-hidden="true" />
-            <span>启动目录条目预览</span>
-          </span>
-          <div
-            class="index-preview-line tabular-nums"
-            :title="`${baseEntry.title}（${baseEntry.shortId}）`"
-          >
-            <strong class="index-preview-title">{{ baseEntry.title }}</strong>
-            <span>（{{ baseEntry.content.length.toLocaleString() }} 字）</span>
-            <template v-if="indexPreviewSummary"
-              >：<WikiText
-                :text="indexPreviewSummary"
-                :titles="knownTitles"
-                :mark-missing="false"
-                compact
-            /></template>
-          </div>
-        </div>
-      </template>
-
-      <!-- 补全双链 -->
-      <template v-else-if="isLinkEntries && suggestion.proposedLinks?.length">
-        <ul class="link-checklist">
-          <li
-            v-for="link in suggestion.proposedLinks"
-            :key="link.targetShortId"
-            class="link-check-item"
-          >
-            <div class="link-check-label">
-              <input
-                type="checkbox"
-                class="square-check"
-                :aria-label="`选择关联「${link.targetTitle || link.targetShortId}」`"
-                :checked="selectedLinkShortIds.includes(link.targetShortId)"
-                :disabled="busy"
-                @change="toggleProposedLink(link.targetShortId)"
-              />
-              <span class="link-check-body">
-                <span class="link-check-top">
-                  <RouterLink
-                    :to="entryRoute(link.targetShortId)"
-                    class="text-primary font-medium"
-                    :title="
-                      link.targetTitle
-                        ? `${link.targetTitle}（${link.targetShortId}）`
-                        : link.targetShortId
-                    "
-                  >
-                    {{ link.targetTitle || link.targetShortId }}
-                  </RouterLink>
-                  <span v-if="link.relation" class="link-relation-tag">{{ link.relation }}</span>
-                  <span v-if="link.anchorHeading" class="text-xs text-muted">
-                    小节：{{ link.anchorHeading }}
-                  </span>
-                </span>
-                <p v-if="link.reason" class="link-reason">
-                  <WikiText
-                    :text="link.reason"
-                    :titles="knownTitles"
-                    :mark-missing="false"
-                    compact
-                  />
-                </p>
-              </span>
-            </div>
-          </li>
-        </ul>
-
-        <div class="link-write-preview">
-          <span class="sub-eyebrow">
-            <UIcon :name="icons.code" class="sub-eyebrow-icon" aria-hidden="true" />
-            <span>写入预览</span>
-          </span>
-          <pre v-if="selectedProposedLinks.length" class="link-preview-code">{{
-            selectedProposedLinks
-              .map((l) => {
-                const label = l.relation?.trim() || l.targetTitle?.trim() || ''
-                const wiki = label ? `[[${l.targetShortId}|${label}]]` : `[[${l.targetShortId}]]`
-                const reason = l.reason?.trim() ? `：${l.reason.trim()}` : ''
-                return `+ - ${wiki}${reason}`
-              })
-              .join('\n')
-          }}</pre>
-          <p v-else class="skip-content-note">尚未勾选双链项，至少勾选 1 条后可应用。</p>
-        </div>
-      </template>
-
-      <!-- 合并重复记忆 -->
-      <template v-else-if="isMergeDuplicates">
-        <div v-if="baseEntry && mergedSourceEntries.length" class="structure-strip">
-          <span class="strip-role">保留目标</span>
-          <span class="strip-new" :title="`${baseEntry.title}（${baseEntry.shortId}）`">
-            {{ baseEntry.title }}
-          </span>
-          <UIcon :name="icons.back" class="compare-arrow" aria-hidden="true" />
-          <span class="strip-role">并入来源</span>
-          <template v-for="(src, idx) in mergedSourceEntries" :key="src.id">
-            <span v-if="idx > 0" class="text-muted">、</span>
-            <span class="strip-old" :title="`${src.title}（${src.shortId}）`">
-              {{ src.title }}
-            </span>
-          </template>
-        </div>
-
-        <div v-if="hasTitleChange && baseEntry" class="title-compare">
-          <span class="compare-label">合并后标题</span>
-          <span class="compare-old">{{ baseEntry.title }}</span>
-          <UIcon :name="icons.inherits" class="compare-arrow" aria-hidden="true" />
-          <span class="compare-new">{{ suggestion.proposedTitle }}</span>
-        </div>
-
-        <div v-if="hasTopicsChange && baseEntry" class="title-compare">
-          <span class="compare-label">主题收敛</span>
-          <span class="compare-old">
-            {{ baseEntry.topics.length ? baseEntry.topics.join('、') : '未设主题' }}
-          </span>
-          <UIcon :name="icons.inherits" class="compare-arrow" aria-hidden="true" />
-          <span class="compare-new">
-            {{ effectiveTopics.length ? effectiveTopics.join('、') : '清空主题' }}
-          </span>
-        </div>
-
-        <div v-if="suggestion.proposedSummary?.trim()" class="summary-preview">
-          <span class="summary-preview-label">
-            <UIcon :name="icons.summary" class="summary-preview-icon" aria-hidden="true" />
-            <span>建议现行概要</span>
-          </span>
-          <p class="summary-preview-text">
-            <WikiText
-              :text="suggestion.proposedSummary ?? ''"
-              :titles="knownTitles"
-              :mark-missing="false"
-              compact
-            />
-          </p>
-        </div>
-
-        <div v-if="showScopeReview" class="scope-review">
-          <div class="scope-review-row">
-            <span class="scope-review-label">
-              <UIcon :name="icons.sliders" class="scope-review-icon" aria-hidden="true" />
-              <span>将写入场景</span>
-            </span>
-            <div class="scope-review-chips">
-              <template v-if="scopeTagGroups.length">
-                <span v-for="group in scopeTagGroups" :key="group.key" class="scope-group">
-                  <span class="scope-group-name">
-                    <UIcon :name="group.icon" class="scope-chip-icon" aria-hidden="true" />
-                    <span>{{ group.label }}</span>
-                  </span>
-                  <span v-for="val in group.items" :key="`${group.key}:${val}`" class="scope-chip">
-                    {{ val }}
-                  </span>
-                </span>
-              </template>
-              <span v-else class="scope-chip is-universal">
-                <UIcon :name="icons.globe" class="scope-chip-icon" aria-hidden="true" />
-                <span>全局通用</span>
-              </span>
-              <span
-                v-for="label in widenedScopeLabels"
-                :key="`widen:${label}`"
-                class="scope-chip is-widened"
-              >
-                <UIcon :name="icons.globe" class="scope-chip-icon" aria-hidden="true" />
-                <span>{{ label }}</span>
-              </span>
-              <span
-                v-for="dev in sourceDeviceKeys"
-                :key="`dev:${dev}`"
-                class="scope-chip is-device"
-              >
-                <UIcon :name="icons.deviceDesktop" class="scope-chip-icon" aria-hidden="true" />
-                <span>来源设备</span>
-                <span class="font-mono">{{ dev }}</span>
-              </span>
-            </div>
-          </div>
-          <div v-if="effectiveDisclosure" class="scope-review-row">
-            <span class="scope-review-label">
-              <UIcon :name="icons.trigger" class="scope-review-icon" aria-hidden="true" />
-              <span>{{ isProposedDisclosureNew ? '建议召回时机' : '召回时机' }}</span>
-            </span>
-            <span class="scope-disclosure-text">{{ effectiveDisclosure }}</span>
-          </div>
-        </div>
-
-        <DiffViewer
-          v-if="effectiveProposedContent !== null && hasDiffChanges"
-          :before="baseEntry?.content ?? ''"
-          :after="effectiveProposedContent"
-          :context="3"
-          :expand-step="10"
-          max-height="24rem"
-        />
-      </template>
-
-      <!-- 提炼会话摘要 -->
-      <template v-else-if="isDistillEpisode">
-        <div v-if="suggestion.proposedTitle" class="structure-strip">
-          <span class="strip-role">新记忆标题</span>
-          <span class="strip-new">{{ suggestion.proposedTitle }}</span>
-        </div>
-        <div v-if="suggestion.proposedSummary?.trim()" class="summary-preview">
-          <span class="summary-preview-label">
-            <UIcon :name="icons.summary" class="summary-preview-icon" aria-hidden="true" />
-            <span>建议现行概要</span>
-          </span>
-          <p class="summary-preview-text">
-            <WikiText
-              :text="suggestion.proposedSummary ?? ''"
-              :titles="knownTitles"
-              :mark-missing="false"
-              compact
-            />
-          </p>
-        </div>
-        <div v-if="showScopeReview" class="scope-review">
-          <div class="scope-review-row">
-            <span class="scope-review-label">
-              <UIcon :name="icons.sliders" class="scope-review-icon" aria-hidden="true" />
-              <span>将写入场景</span>
-            </span>
-            <div class="scope-review-chips">
-              <template v-if="scopeTagGroups.length">
-                <span v-for="group in scopeTagGroups" :key="group.key" class="scope-group">
-                  <span class="scope-group-name">
-                    <UIcon :name="group.icon" class="scope-chip-icon" aria-hidden="true" />
-                    <span>{{ group.label }}</span>
-                  </span>
-                  <span v-for="val in group.items" :key="`${group.key}:${val}`" class="scope-chip">
-                    {{ val }}
-                  </span>
-                </span>
-              </template>
-              <span v-else class="scope-chip is-universal">
-                <UIcon :name="icons.globe" class="scope-chip-icon" aria-hidden="true" />
-                <span>全局通用</span>
-              </span>
-              <span
-                v-for="label in widenedScopeLabels"
-                :key="`widen:${label}`"
-                class="scope-chip is-widened"
-              >
-                <UIcon :name="icons.globe" class="scope-chip-icon" aria-hidden="true" />
-                <span>{{ label }}</span>
-              </span>
-              <span
-                v-for="dev in sourceDeviceKeys"
-                :key="`dev:${dev}`"
-                class="scope-chip is-device"
-              >
-                <UIcon :name="icons.deviceDesktop" class="scope-chip-icon" aria-hidden="true" />
-                <span>来源设备</span>
-                <span class="font-mono">{{ dev }}</span>
-              </span>
-            </div>
-          </div>
-          <div v-if="sourceEpisodeProvenance" class="scope-review-row">
-            <span class="scope-review-label">
-              <UIcon :name="icons.history" class="scope-review-icon" aria-hidden="true" />
-              <span>聚合来源</span>
-            </span>
-            <div class="scope-review-chips tabular-nums">
-              <span class="scope-chip">
-                来自 {{ sourceEpisodeProvenance.episodeCount }} 条会话摘要
-              </span>
-              <span v-if="sourceEpisodeProvenance.projects.length" class="scope-chip">
-                涉及项目 {{ sourceEpisodeProvenance.projects.join('、') }}
-              </span>
-              <span v-if="sourceEpisodeProvenance.dateRange" class="scope-chip">
-                {{ sourceEpisodeProvenance.dateRange }}
-              </span>
-            </div>
-          </div>
-          <div v-if="distillBootMode" class="scope-review-row">
-            <span class="scope-review-label">
-              <UIcon :name="icons.pin" class="scope-review-icon" aria-hidden="true" />
-              <span>建议启动加载</span>
-            </span>
-            <span class="scope-chip is-boot">
-              <UIcon
-                :name="bootModeIcons[distillBootMode]"
-                class="scope-chip-icon"
-                aria-hidden="true"
-              />
-              <span>{{ bootModeLabels[distillBootMode] }}</span>
-            </span>
-          </div>
-          <div v-if="isDistillEpisode && effectiveTopics.length" class="scope-review-row">
-            <span class="scope-review-label">
-              <UIcon :name="icons.topic" class="scope-review-icon" aria-hidden="true" />
-              <span>主题</span>
-            </span>
-            <div class="scope-review-chips">
-              <span v-for="tag in effectiveTopics" :key="`topic:${tag}`" class="scope-chip">
-                {{ tag }}
-              </span>
-            </div>
-          </div>
-          <div v-if="effectiveDisclosure && (!isTidy || parts.disclosure)" class="scope-review-row">
-            <span class="scope-review-label">
-              <UIcon :name="icons.trigger" class="scope-review-icon" aria-hidden="true" />
-              <span>{{ isProposedDisclosureNew ? '建议召回时机' : '召回时机' }}</span>
-            </span>
-            <span class="scope-disclosure-text">{{ effectiveDisclosure }}</span>
-          </div>
-        </div>
-        <pre v-if="suggestion.proposedContent" class="preview-box">{{
-          suggestion.proposedContent
-        }}</pre>
-      </template>
-
-      <!-- 标记过时记忆 -->
-      <template v-else-if="isMarkStale">
-        <div v-if="baseEntry" class="structure-strip tabular-nums">
-          <span class="strip-role">
-            <UIcon :name="icons.remove" class="strip-role-icon is-danger" aria-hidden="true" />
-            <span>待移入回收站</span>
-          </span>
-          <span class="strip-new" :title="`${baseEntry.title}（${baseEntry.shortId}）`">
-            {{ baseEntry.title }}
-          </span>
-          <span class="text-xs text-muted">{{ baseEntry.content.length.toLocaleString() }} 字</span>
-          <span v-if="baseEntry.isPinned" class="keep-tag">
-            <UIcon
-              :name="bootModeIcons[effectiveBootMode(baseEntry)]"
-              class="keep-tag-icon"
-              aria-hidden="true"
-            />
-            <span>{{ bootModeLabels[effectiveBootMode(baseEntry)] }}</span>
-          </span>
-        </div>
-        <pre v-if="baseEntry?.content" class="preview-box">{{ baseEntry.content }}</pre>
-      </template>
-
-      <!-- 规范与精简 / 更新记忆内容 -->
-      <template v-else>
-        <div v-if="showPartialChecks" class="partial-row" role="group" aria-label="分项应用选择">
-          <span class="partial-label">
-            <UIcon :name="icons.listChecks" class="partial-label-icon" aria-hidden="true" />
-            <span>分项应用</span>
-          </span>
-          <label v-if="hasTitleChange" class="part-check">
-            <input v-model="parts.title" type="checkbox" class="square-check" :disabled="busy" />
-            <span>规范标题</span>
-          </label>
-          <label v-if="hasSummaryChange" class="part-check">
-            <input v-model="parts.summary" type="checkbox" class="square-check" :disabled="busy" />
-            <span>更新现行概要</span>
-          </label>
-          <label v-if="hasTopicsChange" class="part-check">
-            <input v-model="parts.topics" type="checkbox" class="square-check" :disabled="busy" />
-            <span>收敛主题</span>
-          </label>
-          <label v-if="isProposedDisclosureNew" class="part-check">
-            <input
-              v-model="parts.disclosure"
-              type="checkbox"
-              class="square-check"
-              :disabled="busy"
-            />
-            <span>更新召回时机</span>
-          </label>
-          <label v-if="hasContentChange || hasArchivedNotes" class="part-check">
-            <input v-model="parts.content" type="checkbox" class="square-check" :disabled="busy" />
-            <span>{{ hasArchivedNotes ? '精简正文并归档历史说明' : '精简正文' }}</span>
-          </label>
-        </div>
-
-        <div v-if="hasTitleChange && baseEntry && (!isTidy || parts.title)" class="title-compare">
-          <span class="compare-label">标题调整</span>
-          <span class="compare-old">{{ baseEntry.title }}</span>
-          <UIcon :name="icons.inherits" class="compare-arrow" aria-hidden="true" />
-          <span class="compare-new">{{ suggestion.proposedTitle }}</span>
-        </div>
-
-        <div v-if="hasTopicsChange && baseEntry && (!isTidy || parts.topics)" class="title-compare">
-          <span class="compare-label">主题收敛</span>
-          <span class="compare-old">
-            {{ baseEntry.topics.length ? baseEntry.topics.join('、') : '未设主题' }}
-          </span>
-          <UIcon :name="icons.inherits" class="compare-arrow" aria-hidden="true" />
-          <span class="compare-new">
-            {{ effectiveTopics.length ? effectiveTopics.join('、') : '清空主题' }}
-          </span>
-        </div>
-
-        <div
-          v-if="suggestion.proposedSummary?.trim() && (!isTidy || parts.summary)"
-          class="summary-preview"
-        >
-          <span class="summary-preview-label">
-            <UIcon :name="icons.summary" class="summary-preview-icon" aria-hidden="true" />
-            <span>建议现行概要</span>
-          </span>
-          <p class="summary-preview-text">
-            <WikiText
-              :text="suggestion.proposedSummary ?? ''"
-              :titles="knownTitles"
-              :mark-missing="false"
-              compact
-            />
-          </p>
-        </div>
-
-        <div v-if="showScopeReview" class="scope-review">
-          <div class="scope-review-row">
-            <span class="scope-review-label">
-              <UIcon :name="icons.sliders" class="scope-review-icon" aria-hidden="true" />
-              <span>将写入场景</span>
-            </span>
-            <div class="scope-review-chips">
-              <template v-if="scopeTagGroups.length">
-                <span v-for="group in scopeTagGroups" :key="group.key" class="scope-group">
-                  <span class="scope-group-name">
-                    <UIcon :name="group.icon" class="scope-chip-icon" aria-hidden="true" />
-                    <span>{{ group.label }}</span>
-                  </span>
-                  <span v-for="val in group.items" :key="`${group.key}:${val}`" class="scope-chip">
-                    {{ val }}
-                  </span>
-                </span>
-              </template>
-              <span v-else class="scope-chip is-universal">
-                <UIcon :name="icons.globe" class="scope-chip-icon" aria-hidden="true" />
-                <span>全局通用</span>
-              </span>
-              <span
-                v-for="label in widenedScopeLabels"
-                :key="`widen:${label}`"
-                class="scope-chip is-widened"
-              >
-                <UIcon :name="icons.globe" class="scope-chip-icon" aria-hidden="true" />
-                <span>{{ label }}</span>
-              </span>
-              <span
-                v-for="dev in sourceDeviceKeys"
-                :key="`dev:${dev}`"
-                class="scope-chip is-device"
-              >
-                <UIcon :name="icons.deviceDesktop" class="scope-chip-icon" aria-hidden="true" />
-                <span>来源设备</span>
-                <span class="font-mono">{{ dev }}</span>
-              </span>
-            </div>
-          </div>
-          <div v-if="effectiveDisclosure && (!isTidy || parts.disclosure)" class="scope-review-row">
-            <span class="scope-review-label">
-              <UIcon :name="icons.trigger" class="scope-review-icon" aria-hidden="true" />
-              <span>{{ isProposedDisclosureNew ? '建议召回时机' : '召回时机' }}</span>
-            </span>
-            <span class="scope-disclosure-text">{{ effectiveDisclosure }}</span>
-          </div>
-        </div>
-
-        <p v-if="isTidy && hasContentChange && !parts.content" class="skip-content-note">
-          已跳过正文改动
-        </p>
-        <DiffViewer
-          v-else-if="effectiveProposedContent !== null && hasDiffChanges"
-          :before="baseEntry?.content ?? ''"
-          :after="effectiveProposedContent"
-          :context="3"
-          :expand-step="10"
-          max-height="24rem"
-        />
-      </template>
-
-      <!-- 归档说明折叠预览 -->
-      <details
-        v-if="hasArchivedNotes && (editing ? draft.applyArchivedNotes : !isTidy || parts.content)"
-        class="archived-notes"
-      >
-        <summary class="archived-summary">
-          <UIcon :name="icons.chevronRight" class="archived-chevron" aria-hidden="true" />
-          <UIcon :name="icons.history" class="archived-icon" aria-hidden="true" />
-          <span>将写入版本历史的归档说明（{{ suggestion.archivedNotes!.length }} 条）</span>
-        </summary>
-        <ul class="archived-list">
-          <li v-for="(item, idx) in suggestion.archivedNotes" :key="idx">
-            <span v-if="item.occurredAt" class="archived-date font-mono">
-              {{ formatShort(item.occurredAt) }}
-            </span>
-            <WikiText :text="item.note" :titles="knownTitles" :mark-missing="false" compact />
-          </li>
-        </ul>
-      </details>
-
-      <!-- 单轮无状态按说明修订指令栏 -->
-      <div v-if="showReviseBar" class="revise-bar">
-        <div class="revise-bar-row">
-          <UInput
-            v-model="reviseInstruction"
-            size="sm"
-            :maxlength="REVISE_INSTRUCTION_MAX"
-            :disabled="busy || disabled || reviseBusy"
-            placeholder="输入一句修订说明，如：仅限家里 home-24 主机，收紧环境标签"
-            aria-label="修订说明"
-            class="revise-input"
-            @keydown="onReviseKeydown"
-          />
-          <UButton
-            size="sm"
-            color="neutral"
-            variant="outline"
-            :icon="icons.sparkles"
-            :loading="reviseBusy"
-            :disabled="busy || disabled || reviseBusy || !reviseInstruction.trim()"
-            @click="submitRevise"
-          >
-            按说明修订
-          </UButton>
-        </div>
-        <p v-if="reviseError" class="text-xs text-error" role="alert">{{ reviseError }}</p>
-      </div>
-    </section>
-
-    <!-- 右栏 35%：整理依据、涉及记忆、护栏与操作 -->
-    <aside class="inspector-side" aria-label="整理依据与护栏">
-      <div class="side-block">
-        <h3 class="side-heading">
-          <UIcon :name="icons.lightbulb" class="side-heading-icon" aria-hidden="true" />
-          <span>整理依据</span>
-        </h3>
-        <p class="side-reason">
-          <WikiText :text="suggestion.reason" :titles="knownTitles" :mark-missing="false" compact />
-        </p>
-      </div>
-
-      <div v-if="suggestion.entries.length" class="side-block">
-        <h3 class="side-heading">
-          <UIcon :name="icons.file" class="side-heading-icon" aria-hidden="true" />
-          <span>涉及记忆</span>
-        </h3>
-        <ul class="involved-list">
-          <li v-for="entry in suggestion.entries" :key="entry.id" class="involved-item">
-            <RouterLink
-              :to="entryRoute(entry.shortId)"
-              class="text-primary font-medium"
-              :title="`${entry.title}（${entry.shortId}）`"
-            >
-              {{ entry.title }}
-            </RouterLink>
-            <div class="involved-meta">
-              <span class="text-xs text-muted">{{ entryKindLabels[entry.kind] }}</span>
-              <span v-if="entry.deviceKey" class="keep-tag">
-                <UIcon :name="icons.deviceDesktop" class="keep-tag-icon" aria-hidden="true" />
-                <span class="font-mono">{{ entry.deviceKey }}</span>
-              </span>
-              <span v-if="entry.isPinned" class="keep-tag">
+    <div class="workbench-scroll">
+      <div class="workbench-inner">
+        <header class="workbench-head">
+          <div class="workbench-head-top">
+            <div class="workbench-badges">
+              <span class="kind-tag" :class="`is-${riskLevel}`">
                 <UIcon
-                  :name="bootModeIcons[effectiveBootMode(entry)]"
+                  :name="dreamKindIcons[suggestion.kind]"
+                  class="kind-tag-icon"
+                  aria-hidden="true"
+                />
+                <span>{{ dreamKindLabels[suggestion.kind] }}</span>
+              </span>
+              <span class="risk-pill" :class="`is-${riskLevel}`">
+                <UIcon :name="riskBadge.icon" class="risk-pill-icon" aria-hidden="true" />
+                <span>{{ riskBadge.label }}</span>
+              </span>
+              <span v-if="baseEntry?.isPinned" class="keep-tag">
+                <UIcon
+                  :name="bootModeIcons[effectiveBootMode(baseEntry)]"
                   class="keep-tag-icon"
                   aria-hidden="true"
                 />
-                <span>常驻</span>
-              </span>
-              <span v-if="entry.id === suggestion.keepId" class="keep-tag">
-                <UIcon :name="icons.check" class="keep-tag-icon" aria-hidden="true" />
-                <span>保留目标</span>
-              </span>
-              <span v-else-if="isMergeDuplicates" class="keep-tag">
-                <UIcon :name="icons.merge" class="keep-tag-icon" aria-hidden="true" />
-                <span>待并入</span>
+                <span>{{ bootModeLabels[effectiveBootMode(baseEntry)] }}</span>
               </span>
             </div>
-          </li>
-        </ul>
-      </div>
 
-      <!-- 合并重复时的全库反链自动重定向提示 -->
-      <div
-        v-if="isMergeDuplicates && (suggestion.affectedBacklinkCount ?? 0) > 0"
-        class="side-block"
-      >
-        <NoteLine tone="warning" flush>
+            <div class="workbench-head-meta">
+              <RouterLink
+                v-if="baseEntry && !isDistillEpisode"
+                :to="entryRoute(baseEntry.shortId)"
+                class="open-entry-link"
+                :title="`打开原记忆：${baseEntry.title}（${baseEntry.shortId}）`"
+              >
+                <UIcon :name="icons.promote" class="open-entry-icon" aria-hidden="true" />
+                <span>查看原记忆</span>
+              </RouterLink>
+              <time
+                class="workbench-time"
+                :datetime="suggestion.createdAt"
+                :title="formatTime(suggestion.createdAt)"
+              >
+                {{ formatRelative(suggestion.createdAt) }}
+              </time>
+            </div>
+          </div>
+
+          <h2 class="workbench-title">{{ displayTitle }}</h2>
+
+          <p class="workbench-reason">
+            <span class="workbench-reason-label">
+              <UIcon :name="icons.lightbulb" class="workbench-reason-icon" aria-hidden="true" />
+              <span>整理依据：</span>
+            </span>
+            <WikiText
+              :text="suggestion.reason"
+              :titles="knownTitles"
+              :mark-missing="false"
+              compact
+            />
+          </p>
+        </header>
+
+        <!-- 合并重复时的全库反链自动重定向提示 -->
+        <NoteLine
+          v-if="isMergeDuplicates && (suggestion.affectedBacklinkCount ?? 0) > 0"
+          tone="warning"
+          flush
+        >
           另有
           {{ suggestion.affectedBacklinkCount }}
           条记忆引用了待合并记忆，应用合并时会自动将反链重定向至保留目标。
         </NoteLine>
-      </div>
 
-      <!-- 完整性护栏 / 改动影响 -->
-      <div v-if="integrity || nonContentImpactNote" class="side-block">
-        <h3 class="side-heading">
-          <UIcon
-            :name="hasLostRefs || integrity?.severeShrink ? icons.shieldAlert : icons.shieldCheck"
-            class="side-heading-icon"
-            aria-hidden="true"
-          />
-          <span>{{ integrity ? '完整性护栏' : '改动影响' }}</span>
-        </h3>
+        <!-- 完整性护栏 / 改动影响条 -->
         <div
           v-if="integrity"
-          class="guard-strip is-inspector tabular-nums"
+          class="guard-strip tabular-nums"
           :class="{
             'is-alert': hasLostRefs || (!isTidy && integrity.severeShrink),
             'is-warn': !hasLostRefs && isTidy && integrity.severeShrink,
@@ -1701,72 +1036,966 @@ function applyEdited() {
             />
             <span>{{ integrityMessage }}</span>
           </span>
-          <dl v-if="!showCompactGuardOnly" class="guard-dl">
-            <template v-if="showLinksMetric">
-              <dt>双链</dt>
-              <dd>{{ integrity.linksBefore }} → {{ integrity.linksAfter }}</dd>
-            </template>
-            <template v-if="showCredsMetric">
-              <dt>凭据占位符</dt>
-              <dd>{{ integrity.credsBefore }} → {{ integrity.credsAfter }}</dd>
-            </template>
-            <template v-if="lengthDelta">
-              <dt>篇幅</dt>
-              <dd>
-                {{ lengthDelta.before.toLocaleString() }} →
-                {{ lengthDelta.after.toLocaleString() }} 字（{{ lengthDelta.deltaText }}）
-              </dd>
-            </template>
-          </dl>
-          <span v-else-if="lengthDelta" class="guard-meta">
+          <span v-if="showLinksMetric" class="guard-meta">
+            双链 {{ integrity.linksBefore }} → {{ integrity.linksAfter }}
+          </span>
+          <span v-if="showCredsMetric" class="guard-meta">
+            凭据占位符 {{ integrity.credsBefore }} → {{ integrity.credsAfter }}
+          </span>
+          <span v-if="lengthDelta" class="guard-meta">
             篇幅 {{ lengthDelta.before.toLocaleString() }} →
             {{ lengthDelta.after.toLocaleString() }} 字（{{ lengthDelta.deltaText }}）
           </span>
         </div>
-        <p v-else-if="nonContentImpactNote" class="impact-note" :class="{ 'is-warn': isMarkStale }">
+        <div
+          v-else-if="nonContentImpactNote"
+          class="impact-bar"
+          :class="{ 'is-warn': isMarkStale }"
+        >
           <UIcon
-            :name="isMarkStale ? icons.warning : icons.check"
+            :name="isMarkStale ? icons.warning : icons.shieldCheck"
             class="impact-icon"
             aria-hidden="true"
           />
           <span>{{ nonContentImpactNote }}</span>
-        </p>
-      </div>
+        </div>
 
-      <footer v-if="!editing" class="side-actions">
-        <UButton
-          size="sm"
-          :color="isMarkStale ? 'error' : 'primary'"
-          :icon="primaryApplyIcon"
-          :loading="busy"
-          :disabled="disabled || reviseBusy || !anyPartSelected"
-          @click="applyDirect"
+        <!-- 涉及记忆（多条或会话摘要提炼时呈现可跳转卡片） -->
+        <section
+          v-if="suggestion.entries.length > 1 || isDistillEpisode"
+          class="involved-panel"
+          aria-label="涉及记忆"
         >
-          {{ primaryApplyLabel }}
-        </UButton>
-        <UButton
-          v-if="!isMarkStale && !isLinkEntries"
-          size="sm"
-          color="neutral"
-          variant="outline"
-          :icon="icons.edit"
-          :disabled="busy || disabled || reviseBusy"
-          @click="openEditor"
-        >
-          编辑后应用
-        </UButton>
-        <UButton
-          size="sm"
-          color="neutral"
-          variant="ghost"
-          :icon="icons.cancel"
-          :disabled="busy || disabled || reviseBusy"
-          @click="emit('dismiss', suggestion.id)"
-        >
-          忽略
-        </UButton>
-      </footer>
-    </aside>
+          <div class="involved-panel-head">
+            <span class="sub-eyebrow">
+              <UIcon :name="icons.file" class="sub-eyebrow-icon" aria-hidden="true" />
+              <span class="tabular-nums">涉及记忆（{{ suggestion.entries.length }} 条）</span>
+            </span>
+          </div>
+          <ul class="involved-grid">
+            <li v-for="entry in suggestion.entries" :key="entry.id" class="involved-card">
+              <div class="involved-card-top">
+                <RouterLink
+                  :to="entryRoute(entry.shortId)"
+                  class="involved-card-link text-primary font-medium"
+                  :title="`${entry.title}（${entry.shortId}）`"
+                >
+                  {{ entry.title }}
+                </RouterLink>
+                <span v-if="entry.id === suggestion.keepId" class="keep-tag is-keep">
+                  <UIcon :name="icons.check" class="keep-tag-icon" aria-hidden="true" />
+                  <span>保留目标</span>
+                </span>
+                <span v-else-if="isMergeDuplicates" class="keep-tag is-archive">
+                  <UIcon :name="icons.merge" class="keep-tag-icon" aria-hidden="true" />
+                  <span>待并入</span>
+                </span>
+              </div>
+              <div class="involved-meta">
+                <span class="text-xs text-muted">{{ entryKindLabels[entry.kind] }}</span>
+                <span class="text-xs text-muted tabular-nums">
+                  {{ entry.content.length.toLocaleString() }} 字
+                </span>
+                <span v-if="entry.deviceKey" class="keep-tag">
+                  <UIcon :name="icons.deviceDesktop" class="keep-tag-icon" aria-hidden="true" />
+                  <span class="font-mono">{{ entry.deviceKey }}</span>
+                </span>
+                <span v-if="entry.isPinned" class="keep-tag">
+                  <UIcon
+                    :name="bootModeIcons[effectiveBootMode(entry)]"
+                    class="keep-tag-icon"
+                    aria-hidden="true"
+                  />
+                  <span>常驻</span>
+                </span>
+              </div>
+            </li>
+          </ul>
+        </section>
+
+        <section class="workbench-delta" aria-label="建议改动详情">
+          <div class="section-eyebrow">
+            <span class="eyebrow-lead">
+              <UIcon
+                :name="editing ? icons.edit : dreamKindIcons[suggestion.kind]"
+                class="eyebrow-icon"
+                aria-hidden="true"
+              />
+              <span>{{ deltaSectionTitle }}</span>
+            </span>
+            <span v-if="editing" class="eyebrow-sub">修改仅对本次写入生效</span>
+            <span
+              v-else-if="isLinkEntries && suggestion.proposedLinks?.length"
+              class="tabular-nums"
+            >
+              已选 {{ selectedLinkShortIds.length }} / {{ suggestion.proposedLinks.length }} 条
+            </span>
+          </div>
+
+          <!-- 编辑后应用表单（不用 form 标签防误回车提交） -->
+          <div v-if="editing" class="edit-box">
+            <div v-if="revisedReason" class="revise-preview-panel">
+              <div class="revise-preview-head">
+                <span class="revise-preview-lead">
+                  <UIcon :name="icons.sparkles" class="revise-preview-icon" aria-hidden="true" />
+                  <span>已按说明修订草稿</span>
+                </span>
+                <UButton
+                  size="xs"
+                  color="neutral"
+                  variant="ghost"
+                  :icon="showRevisedDiff ? icons.chevronUp : icons.compare"
+                  @click="showRevisedDiff = !showRevisedDiff"
+                >
+                  {{ showRevisedDiff ? '收起对比' : '查看对比' }}
+                </UButton>
+              </div>
+              <p class="revise-preview-reason">
+                <WikiText
+                  :text="revisedReason"
+                  :titles="knownTitles"
+                  :mark-missing="false"
+                  compact
+                />
+              </p>
+              <NoteLine v-if="hasLostRefs || integrity?.severeShrink" tone="warning" flush>
+                {{ integrityMessage }}
+              </NoteLine>
+              <DiffViewer
+                v-if="showRevisedDiff"
+                :before="reviseDiffBefore"
+                :after="draft.content"
+                :context="3"
+                :expand-step="10"
+                max-height="18rem"
+                empty-text="正文无变更，已更新草稿属性"
+              />
+            </div>
+            <div class="grid gap-3 sm:grid-cols-2">
+              <UFormField label="标题">
+                <template #label>
+                  <span class="field-label">
+                    <UIcon :name="icons.heading" class="field-label-icon" aria-hidden="true" />
+                    <span>标题</span>
+                  </span>
+                </template>
+                <UInput v-model="draft.title" :maxlength="ENTRY_TITLE_MAX" class="w-full" />
+              </UFormField>
+              <UFormField label="主题">
+                <template #label>
+                  <span class="field-label">
+                    <UIcon :name="icons.topic" class="field-label-icon" aria-hidden="true" />
+                    <span>主题</span>
+                  </span>
+                </template>
+                <UInputTags
+                  v-model="draft.topics"
+                  add-on-blur
+                  placeholder="输入后回车"
+                  class="w-full"
+                />
+              </UFormField>
+            </div>
+            <UFormField label="现行概要（可选）">
+              <template #label>
+                <span class="field-label">
+                  <UIcon :name="icons.summary" class="field-label-icon" aria-hidden="true" />
+                  <span>现行概要（可选）</span>
+                </span>
+              </template>
+              <UTextarea
+                v-model="draft.summary"
+                :rows="2"
+                autoresize
+                :maxrows="4"
+                :maxlength="ENTRY_SUMMARY_MAX"
+                class="w-full"
+              />
+            </UFormField>
+            <NoteLine v-if="editSecretWarnings.length" tone="warning" flush>
+              正文疑似包含{{
+                editSecretWarnings.map((w) => w.label).join('、')
+              }}，建议改存凭据并用占位符引用。
+            </NoteLine>
+            <UFormField label="正文">
+              <template #label>
+                <span class="field-label">
+                  <UIcon :name="icons.file" class="field-label-icon" aria-hidden="true" />
+                  <span>正文</span>
+                </span>
+              </template>
+              <UTextarea v-model="draft.content" :rows="8" autoresize class="w-full font-mono" />
+            </UFormField>
+            <div class="grid gap-3 sm:grid-cols-2">
+              <UFormField label="召回时机（可选）">
+                <UInput v-model="draft.disclosure" :maxlength="DISCLOSURE_MAX" class="w-full" />
+              </UFormField>
+              <UFormField label="变更说明（可选）">
+                <UInput
+                  v-model="draft.changeSummary"
+                  :maxlength="CHANGE_SUMMARY_MAX"
+                  class="w-full"
+                />
+              </UFormField>
+            </div>
+            <UFormField label="适用场景">
+              <SceneScopePicker v-model="draftScope" />
+            </UFormField>
+            <div class="flex flex-wrap items-center gap-6">
+              <UFormField label="启动加载方式">
+                <template #label>
+                  <span class="field-label">
+                    <UIcon :name="icons.pin" class="field-label-icon" aria-hidden="true" />
+                    <span>启动加载方式</span>
+                  </span>
+                </template>
+                <SegmentedChoice
+                  v-model="draft.bootMode"
+                  :items="bootModeChoices"
+                  label="选择启动加载方式"
+                  compact
+                />
+              </UFormField>
+              <USwitch
+                v-if="hasArchivedNotes"
+                v-model="draft.applyArchivedNotes"
+                label="将剥离的历史说明写入版本历史"
+              />
+            </div>
+            <p v-if="editValidationProblem" class="text-xs text-error" role="alert">
+              {{ editValidationProblem }}
+            </p>
+          </div>
+
+          <!-- 调整启动加载 -->
+          <template v-else-if="isAdjustBootMode && baseEntry && suggestion.proposedBootMode">
+            <div class="boot-transition">
+              <div class="boot-state-col">
+                <span class="boot-state-kicker">变更前</span>
+                <span class="boot-state-name">
+                  <UIcon
+                    :name="bootModeIcons[currentBootMode]"
+                    class="boot-state-icon"
+                    aria-hidden="true"
+                  />
+                  <span>{{ bootModeLabels[currentBootMode] }}</span>
+                </span>
+                <span class="boot-state-detail tabular-nums">
+                  {{
+                    currentBootMode === 'full'
+                      ? `每次会话全量注入 ${baseEntry.content.length.toLocaleString()} 字`
+                      : bootModeDescriptions[currentBootMode]
+                  }}
+                </span>
+              </div>
+              <div class="boot-arrow-mid" aria-hidden="true">
+                <UIcon :name="icons.inherits" class="transition-arrow" />
+              </div>
+              <div class="boot-state-col is-target">
+                <span class="boot-state-kicker">变更后</span>
+                <span class="boot-state-name">
+                  <UIcon
+                    :name="bootModeIcons[suggestion.proposedBootMode]"
+                    class="boot-state-icon"
+                    aria-hidden="true"
+                  />
+                  <span>{{ bootModeLabels[suggestion.proposedBootMode] }}</span>
+                </span>
+                <span class="boot-state-detail">
+                  {{ bootModeDescriptions[suggestion.proposedBootMode] }}
+                </span>
+              </div>
+            </div>
+
+            <div
+              v-if="hasSummaryChange || suggestion.proposedSummary?.trim()"
+              class="summary-change"
+            >
+              <span class="sub-eyebrow">
+                <UIcon :name="icons.summary" class="sub-eyebrow-icon" aria-hidden="true" />
+                <span>附带现行概要变更</span>
+              </span>
+              <div class="summary-diff-grid">
+                <div class="summary-row">
+                  <span class="summary-tag">原概要</span>
+                  <span class="summary-old">
+                    <WikiText
+                      v-if="baseEntry.summary?.trim()"
+                      :text="baseEntry.summary.trim()"
+                      :titles="knownTitles"
+                      :mark-missing="false"
+                      compact
+                    />
+                    <template v-else>暂无</template>
+                  </span>
+                </div>
+                <div class="summary-row">
+                  <span class="summary-tag">建议概要</span>
+                  <span class="summary-new">
+                    <WikiText
+                      :text="suggestion.proposedSummary ?? ''"
+                      :titles="knownTitles"
+                      :mark-missing="false"
+                      compact
+                    />
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div v-if="suggestion.proposedBootMode === 'index'" class="summary-change">
+              <span class="sub-eyebrow">
+                <UIcon :name="icons.bookmark" class="sub-eyebrow-icon" aria-hidden="true" />
+                <span>启动目录条目预览</span>
+              </span>
+              <div
+                class="index-preview-line tabular-nums"
+                :title="`${baseEntry.title}（${baseEntry.shortId}）`"
+              >
+                <strong class="index-preview-title">{{ baseEntry.title }}</strong>
+                <span>（{{ baseEntry.content.length.toLocaleString() }} 字）</span>
+                <template v-if="indexPreviewSummary"
+                  >：<WikiText
+                    :text="indexPreviewSummary"
+                    :titles="knownTitles"
+                    :mark-missing="false"
+                    compact
+                /></template>
+              </div>
+            </div>
+          </template>
+
+          <!-- 补全双链 -->
+          <template v-else-if="isLinkEntries && suggestion.proposedLinks?.length">
+            <ul class="link-checklist">
+              <li
+                v-for="link in suggestion.proposedLinks"
+                :key="link.targetShortId"
+                class="link-check-item"
+              >
+                <div class="link-check-label">
+                  <input
+                    type="checkbox"
+                    class="square-check"
+                    :aria-label="`选择关联「${link.targetTitle || link.targetShortId}」`"
+                    :checked="selectedLinkShortIds.includes(link.targetShortId)"
+                    :disabled="busy"
+                    @change="toggleProposedLink(link.targetShortId)"
+                  />
+                  <span class="link-check-body">
+                    <span class="link-check-top">
+                      <RouterLink
+                        :to="entryRoute(link.targetShortId)"
+                        class="text-primary font-medium"
+                        :title="
+                          link.targetTitle
+                            ? `${link.targetTitle}（${link.targetShortId}）`
+                            : link.targetShortId
+                        "
+                      >
+                        {{ link.targetTitle || link.targetShortId }}
+                      </RouterLink>
+                      <span v-if="link.relation" class="link-relation-tag">{{
+                        link.relation
+                      }}</span>
+                      <span v-if="link.anchorHeading" class="text-xs text-muted">
+                        小节：{{ link.anchorHeading }}
+                      </span>
+                    </span>
+                    <p v-if="link.reason" class="link-reason">
+                      <WikiText
+                        :text="link.reason"
+                        :titles="knownTitles"
+                        :mark-missing="false"
+                        compact
+                      />
+                    </p>
+                  </span>
+                </div>
+              </li>
+            </ul>
+
+            <div class="link-write-preview">
+              <span class="sub-eyebrow">
+                <UIcon :name="icons.code" class="sub-eyebrow-icon" aria-hidden="true" />
+                <span>写入预览</span>
+              </span>
+              <pre v-if="selectedProposedLinks.length" class="link-preview-code">{{
+                selectedProposedLinks
+                  .map((l) => {
+                    const label = l.relation?.trim() || l.targetTitle?.trim() || ''
+                    const wiki = label
+                      ? `[[${l.targetShortId}|${label}]]`
+                      : `[[${l.targetShortId}]]`
+                    const reason = l.reason?.trim() ? `：${l.reason.trim()}` : ''
+                    return `+ - ${wiki}${reason}`
+                  })
+                  .join('\n')
+              }}</pre>
+              <p v-else class="skip-content-note">尚未勾选双链项，至少勾选 1 条后可应用。</p>
+            </div>
+          </template>
+
+          <!-- 合并重复记忆 -->
+          <template v-else-if="isMergeDuplicates">
+            <div v-if="baseEntry && mergedSourceEntries.length" class="structure-strip">
+              <span class="strip-role">保留目标</span>
+              <span class="strip-new" :title="`${baseEntry.title}（${baseEntry.shortId}）`">
+                {{ baseEntry.title }}
+              </span>
+              <UIcon :name="icons.back" class="compare-arrow" aria-hidden="true" />
+              <span class="strip-role">并入来源</span>
+              <template v-for="(src, idx) in mergedSourceEntries" :key="src.id">
+                <span v-if="idx > 0" class="text-muted">、</span>
+                <span class="strip-old" :title="`${src.title}（${src.shortId}）`">
+                  {{ src.title }}
+                </span>
+              </template>
+            </div>
+
+            <div v-if="hasTitleChange && baseEntry" class="title-compare">
+              <span class="compare-label">合并后标题</span>
+              <span class="compare-old">{{ baseEntry.title }}</span>
+              <UIcon :name="icons.inherits" class="compare-arrow" aria-hidden="true" />
+              <span class="compare-new">{{ suggestion.proposedTitle }}</span>
+            </div>
+
+            <div v-if="hasTopicsChange && baseEntry" class="title-compare">
+              <span class="compare-label">主题收敛</span>
+              <span class="compare-old">
+                {{ baseEntry.topics.length ? baseEntry.topics.join('、') : '未设主题' }}
+              </span>
+              <UIcon :name="icons.inherits" class="compare-arrow" aria-hidden="true" />
+              <span class="compare-new">
+                {{ effectiveTopics.length ? effectiveTopics.join('、') : '清空主题' }}
+              </span>
+            </div>
+
+            <div v-if="suggestion.proposedSummary?.trim()" class="summary-preview">
+              <span class="summary-preview-label">
+                <UIcon :name="icons.summary" class="summary-preview-icon" aria-hidden="true" />
+                <span>建议现行概要</span>
+              </span>
+              <p class="summary-preview-text">
+                <WikiText
+                  :text="suggestion.proposedSummary ?? ''"
+                  :titles="knownTitles"
+                  :mark-missing="false"
+                  compact
+                />
+              </p>
+            </div>
+
+            <div v-if="showScopeReview" class="scope-review">
+              <div class="scope-review-row">
+                <span class="scope-review-label">
+                  <UIcon :name="icons.sliders" class="scope-review-icon" aria-hidden="true" />
+                  <span>将写入场景</span>
+                </span>
+                <div class="scope-review-chips">
+                  <template v-if="scopeTagGroups.length">
+                    <span v-for="group in scopeTagGroups" :key="group.key" class="scope-group">
+                      <span class="scope-group-name">
+                        <UIcon :name="group.icon" class="scope-chip-icon" aria-hidden="true" />
+                        <span>{{ group.label }}</span>
+                      </span>
+                      <span
+                        v-for="val in group.items"
+                        :key="`${group.key}:${val}`"
+                        class="scope-chip"
+                      >
+                        {{ val }}
+                      </span>
+                    </span>
+                  </template>
+                  <span v-else class="scope-chip is-universal">
+                    <UIcon :name="icons.globe" class="scope-chip-icon" aria-hidden="true" />
+                    <span>全局通用</span>
+                  </span>
+                  <span
+                    v-for="label in widenedScopeLabels"
+                    :key="`widen:${label}`"
+                    class="scope-chip is-widened"
+                  >
+                    <UIcon :name="icons.globe" class="scope-chip-icon" aria-hidden="true" />
+                    <span>{{ label }}</span>
+                  </span>
+                  <span
+                    v-for="dev in sourceDeviceKeys"
+                    :key="`dev:${dev}`"
+                    class="scope-chip is-device"
+                  >
+                    <UIcon :name="icons.deviceDesktop" class="scope-chip-icon" aria-hidden="true" />
+                    <span>来源设备</span>
+                    <span class="font-mono">{{ dev }}</span>
+                  </span>
+                </div>
+              </div>
+              <div v-if="effectiveDisclosure" class="scope-review-row">
+                <span class="scope-review-label">
+                  <UIcon :name="icons.trigger" class="scope-review-icon" aria-hidden="true" />
+                  <span>{{ isProposedDisclosureNew ? '建议召回时机' : '召回时机' }}</span>
+                </span>
+                <span class="scope-disclosure-text">{{ effectiveDisclosure }}</span>
+              </div>
+            </div>
+
+            <DiffViewer
+              v-if="effectiveProposedContent !== null && hasDiffChanges"
+              :before="baseEntry?.content ?? ''"
+              :after="effectiveProposedContent"
+              :context="3"
+              :expand-step="10"
+              max-height="24rem"
+            />
+          </template>
+
+          <!-- 提炼会话摘要 -->
+          <template v-else-if="isDistillEpisode">
+            <div v-if="suggestion.proposedTitle" class="structure-strip">
+              <span class="strip-role">新记忆标题</span>
+              <span class="strip-new">{{ suggestion.proposedTitle }}</span>
+            </div>
+            <div v-if="suggestion.proposedSummary?.trim()" class="summary-preview">
+              <span class="summary-preview-label">
+                <UIcon :name="icons.summary" class="summary-preview-icon" aria-hidden="true" />
+                <span>建议现行概要</span>
+              </span>
+              <p class="summary-preview-text">
+                <WikiText
+                  :text="suggestion.proposedSummary ?? ''"
+                  :titles="knownTitles"
+                  :mark-missing="false"
+                  compact
+                />
+              </p>
+            </div>
+            <div v-if="showScopeReview" class="scope-review">
+              <div class="scope-review-row">
+                <span class="scope-review-label">
+                  <UIcon :name="icons.sliders" class="scope-review-icon" aria-hidden="true" />
+                  <span>将写入场景</span>
+                </span>
+                <div class="scope-review-chips">
+                  <template v-if="scopeTagGroups.length">
+                    <span v-for="group in scopeTagGroups" :key="group.key" class="scope-group">
+                      <span class="scope-group-name">
+                        <UIcon :name="group.icon" class="scope-chip-icon" aria-hidden="true" />
+                        <span>{{ group.label }}</span>
+                      </span>
+                      <span
+                        v-for="val in group.items"
+                        :key="`${group.key}:${val}`"
+                        class="scope-chip"
+                      >
+                        {{ val }}
+                      </span>
+                    </span>
+                  </template>
+                  <span v-else class="scope-chip is-universal">
+                    <UIcon :name="icons.globe" class="scope-chip-icon" aria-hidden="true" />
+                    <span>全局通用</span>
+                  </span>
+                  <span
+                    v-for="label in widenedScopeLabels"
+                    :key="`widen:${label}`"
+                    class="scope-chip is-widened"
+                  >
+                    <UIcon :name="icons.globe" class="scope-chip-icon" aria-hidden="true" />
+                    <span>{{ label }}</span>
+                  </span>
+                  <span
+                    v-for="dev in sourceDeviceKeys"
+                    :key="`dev:${dev}`"
+                    class="scope-chip is-device"
+                  >
+                    <UIcon :name="icons.deviceDesktop" class="scope-chip-icon" aria-hidden="true" />
+                    <span>来源设备</span>
+                    <span class="font-mono">{{ dev }}</span>
+                  </span>
+                </div>
+              </div>
+              <div v-if="sourceEpisodeProvenance" class="scope-review-row">
+                <span class="scope-review-label">
+                  <UIcon :name="icons.history" class="scope-review-icon" aria-hidden="true" />
+                  <span>聚合来源</span>
+                </span>
+                <div class="scope-review-chips tabular-nums">
+                  <span class="scope-chip">
+                    来自 {{ sourceEpisodeProvenance.episodeCount }} 条会话摘要
+                  </span>
+                  <span v-if="sourceEpisodeProvenance.projects.length" class="scope-chip">
+                    涉及项目 {{ sourceEpisodeProvenance.projects.join('、') }}
+                  </span>
+                  <span v-if="sourceEpisodeProvenance.dateRange" class="scope-chip">
+                    {{ sourceEpisodeProvenance.dateRange }}
+                  </span>
+                </div>
+              </div>
+              <div v-if="distillBootMode" class="scope-review-row">
+                <span class="scope-review-label">
+                  <UIcon :name="icons.pin" class="scope-review-icon" aria-hidden="true" />
+                  <span>建议启动加载</span>
+                </span>
+                <span class="scope-chip is-boot">
+                  <UIcon
+                    :name="bootModeIcons[distillBootMode]"
+                    class="scope-chip-icon"
+                    aria-hidden="true"
+                  />
+                  <span>{{ bootModeLabels[distillBootMode] }}</span>
+                </span>
+              </div>
+              <div v-if="isDistillEpisode && effectiveTopics.length" class="scope-review-row">
+                <span class="scope-review-label">
+                  <UIcon :name="icons.topic" class="scope-review-icon" aria-hidden="true" />
+                  <span>主题</span>
+                </span>
+                <div class="scope-review-chips">
+                  <span v-for="tag in effectiveTopics" :key="`topic:${tag}`" class="scope-chip">
+                    {{ tag }}
+                  </span>
+                </div>
+              </div>
+              <div
+                v-if="effectiveDisclosure && (!isTidy || parts.disclosure)"
+                class="scope-review-row"
+              >
+                <span class="scope-review-label">
+                  <UIcon :name="icons.trigger" class="scope-review-icon" aria-hidden="true" />
+                  <span>{{ isProposedDisclosureNew ? '建议召回时机' : '召回时机' }}</span>
+                </span>
+                <span class="scope-disclosure-text">{{ effectiveDisclosure }}</span>
+              </div>
+            </div>
+            <pre v-if="suggestion.proposedContent" class="preview-box">{{
+              suggestion.proposedContent
+            }}</pre>
+          </template>
+
+          <!-- 标记过时记忆 -->
+          <template v-else-if="isMarkStale">
+            <div v-if="baseEntry" class="structure-strip tabular-nums">
+              <span class="strip-role">
+                <UIcon :name="icons.remove" class="strip-role-icon is-danger" aria-hidden="true" />
+                <span>待移入回收站</span>
+              </span>
+              <span class="strip-new" :title="`${baseEntry.title}（${baseEntry.shortId}）`">
+                {{ baseEntry.title }}
+              </span>
+              <span class="text-xs text-muted"
+                >{{ baseEntry.content.length.toLocaleString() }} 字</span
+              >
+              <span v-if="baseEntry.isPinned" class="keep-tag">
+                <UIcon
+                  :name="bootModeIcons[effectiveBootMode(baseEntry)]"
+                  class="keep-tag-icon"
+                  aria-hidden="true"
+                />
+                <span>{{ bootModeLabels[effectiveBootMode(baseEntry)] }}</span>
+              </span>
+            </div>
+            <pre v-if="baseEntry?.content" class="preview-box">{{ baseEntry.content }}</pre>
+          </template>
+
+          <!-- 规范与精简 / 更新记忆内容 -->
+          <template v-else>
+            <div
+              v-if="showPartialChecks"
+              class="partial-row"
+              role="group"
+              aria-label="分项应用选择"
+            >
+              <span class="partial-label">
+                <UIcon :name="icons.listChecks" class="partial-label-icon" aria-hidden="true" />
+                <span>分项应用</span>
+              </span>
+              <label v-if="hasTitleChange" class="part-check">
+                <input
+                  v-model="parts.title"
+                  type="checkbox"
+                  class="square-check"
+                  :disabled="busy"
+                />
+                <span>规范标题</span>
+              </label>
+              <label v-if="hasSummaryChange" class="part-check">
+                <input
+                  v-model="parts.summary"
+                  type="checkbox"
+                  class="square-check"
+                  :disabled="busy"
+                />
+                <span>更新现行概要</span>
+              </label>
+              <label v-if="hasTopicsChange" class="part-check">
+                <input
+                  v-model="parts.topics"
+                  type="checkbox"
+                  class="square-check"
+                  :disabled="busy"
+                />
+                <span>收敛主题</span>
+              </label>
+              <label v-if="isProposedDisclosureNew" class="part-check">
+                <input
+                  v-model="parts.disclosure"
+                  type="checkbox"
+                  class="square-check"
+                  :disabled="busy"
+                />
+                <span>更新召回时机</span>
+              </label>
+              <label v-if="hasContentChange || hasArchivedNotes" class="part-check">
+                <input
+                  v-model="parts.content"
+                  type="checkbox"
+                  class="square-check"
+                  :disabled="busy"
+                />
+                <span>{{ hasArchivedNotes ? '精简正文并归档历史说明' : '精简正文' }}</span>
+              </label>
+            </div>
+
+            <div
+              v-if="hasTitleChange && baseEntry && (!isTidy || parts.title)"
+              class="title-compare"
+            >
+              <span class="compare-label">标题调整</span>
+              <span class="compare-old">{{ baseEntry.title }}</span>
+              <UIcon :name="icons.inherits" class="compare-arrow" aria-hidden="true" />
+              <span class="compare-new">{{ suggestion.proposedTitle }}</span>
+            </div>
+
+            <div
+              v-if="hasTopicsChange && baseEntry && (!isTidy || parts.topics)"
+              class="title-compare"
+            >
+              <span class="compare-label">主题收敛</span>
+              <span class="compare-old">
+                {{ baseEntry.topics.length ? baseEntry.topics.join('、') : '未设主题' }}
+              </span>
+              <UIcon :name="icons.inherits" class="compare-arrow" aria-hidden="true" />
+              <span class="compare-new">
+                {{ effectiveTopics.length ? effectiveTopics.join('、') : '清空主题' }}
+              </span>
+            </div>
+
+            <div
+              v-if="suggestion.proposedSummary?.trim() && (!isTidy || parts.summary)"
+              class="summary-preview"
+            >
+              <span class="summary-preview-label">
+                <UIcon :name="icons.summary" class="summary-preview-icon" aria-hidden="true" />
+                <span>建议现行概要</span>
+              </span>
+              <p class="summary-preview-text">
+                <WikiText
+                  :text="suggestion.proposedSummary ?? ''"
+                  :titles="knownTitles"
+                  :mark-missing="false"
+                  compact
+                />
+              </p>
+            </div>
+
+            <div v-if="showScopeReview" class="scope-review">
+              <div class="scope-review-row">
+                <span class="scope-review-label">
+                  <UIcon :name="icons.sliders" class="scope-review-icon" aria-hidden="true" />
+                  <span>将写入场景</span>
+                </span>
+                <div class="scope-review-chips">
+                  <template v-if="scopeTagGroups.length">
+                    <span v-for="group in scopeTagGroups" :key="group.key" class="scope-group">
+                      <span class="scope-group-name">
+                        <UIcon :name="group.icon" class="scope-chip-icon" aria-hidden="true" />
+                        <span>{{ group.label }}</span>
+                      </span>
+                      <span
+                        v-for="val in group.items"
+                        :key="`${group.key}:${val}`"
+                        class="scope-chip"
+                      >
+                        {{ val }}
+                      </span>
+                    </span>
+                  </template>
+                  <span v-else class="scope-chip is-universal">
+                    <UIcon :name="icons.globe" class="scope-chip-icon" aria-hidden="true" />
+                    <span>全局通用</span>
+                  </span>
+                  <span
+                    v-for="label in widenedScopeLabels"
+                    :key="`widen:${label}`"
+                    class="scope-chip is-widened"
+                  >
+                    <UIcon :name="icons.globe" class="scope-chip-icon" aria-hidden="true" />
+                    <span>{{ label }}</span>
+                  </span>
+                  <span
+                    v-for="dev in sourceDeviceKeys"
+                    :key="`dev:${dev}`"
+                    class="scope-chip is-device"
+                  >
+                    <UIcon :name="icons.deviceDesktop" class="scope-chip-icon" aria-hidden="true" />
+                    <span>来源设备</span>
+                    <span class="font-mono">{{ dev }}</span>
+                  </span>
+                </div>
+              </div>
+              <div
+                v-if="effectiveDisclosure && (!isTidy || parts.disclosure)"
+                class="scope-review-row"
+              >
+                <span class="scope-review-label">
+                  <UIcon :name="icons.trigger" class="scope-review-icon" aria-hidden="true" />
+                  <span>{{ isProposedDisclosureNew ? '建议召回时机' : '召回时机' }}</span>
+                </span>
+                <span class="scope-disclosure-text">{{ effectiveDisclosure }}</span>
+              </div>
+            </div>
+
+            <p v-if="isTidy && hasContentChange && !parts.content" class="skip-content-note">
+              已跳过正文改动
+            </p>
+            <DiffViewer
+              v-else-if="effectiveProposedContent !== null && hasDiffChanges"
+              :before="baseEntry?.content ?? ''"
+              :after="effectiveProposedContent"
+              :context="3"
+              :expand-step="10"
+              max-height="24rem"
+            />
+          </template>
+
+          <!-- 归档说明折叠预览 -->
+          <details
+            v-if="
+              hasArchivedNotes && (editing ? draft.applyArchivedNotes : !isTidy || parts.content)
+            "
+            class="archived-notes"
+          >
+            <summary class="archived-summary">
+              <UIcon :name="icons.chevronRight" class="archived-chevron" aria-hidden="true" />
+              <UIcon :name="icons.history" class="archived-icon" aria-hidden="true" />
+              <span>将写入版本历史的归档说明（{{ suggestion.archivedNotes!.length }} 条）</span>
+            </summary>
+            <ul class="archived-list">
+              <li v-for="(item, idx) in suggestion.archivedNotes" :key="idx">
+                <span v-if="item.occurredAt" class="archived-date font-mono">
+                  {{ formatShort(item.occurredAt) }}
+                </span>
+                <WikiText :text="item.note" :titles="knownTitles" :mark-missing="false" compact />
+              </li>
+            </ul>
+          </details>
+
+          <!-- 单轮无状态按说明修订指令栏 -->
+          <div v-if="showReviseBar" class="revise-bar">
+            <div class="revise-bar-row">
+              <UInput
+                v-model="reviseInstruction"
+                size="sm"
+                :maxlength="REVISE_INSTRUCTION_MAX"
+                :disabled="busy || disabled || reviseBusy"
+                placeholder="输入一句修订说明，如：仅限家里 home-24 主机，收紧环境标签"
+                aria-label="修订说明"
+                class="revise-input"
+                @keydown="onReviseKeydown"
+              />
+              <UButton
+                size="sm"
+                color="neutral"
+                variant="outline"
+                :icon="icons.sparkles"
+                :loading="reviseBusy"
+                :disabled="busy || disabled || reviseBusy || !reviseInstruction.trim()"
+                @click="submitRevise"
+              >
+                按说明修订
+              </UButton>
+            </div>
+            <p v-if="reviseError" class="text-xs text-error" role="alert">{{ reviseError }}</p>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <footer class="workbench-decision-bar" aria-label="审校操作">
+      <div class="decision-bar-inner">
+        <div class="decision-actions">
+          <template v-if="!editing">
+            <UButton
+              size="sm"
+              :color="isMarkStale ? 'error' : 'primary'"
+              :icon="primaryApplyIcon"
+              :loading="busy"
+              :disabled="disabled || reviseBusy || !anyPartSelected"
+              @click="applyDirect"
+            >
+              <span>{{ primaryApplyLabel }}</span>
+              <span v-if="riskLevel !== 'high'" class="action-kbd" aria-hidden="true">A</span>
+            </UButton>
+            <UButton
+              v-if="!isMarkStale && !isLinkEntries"
+              size="sm"
+              color="neutral"
+              variant="outline"
+              :icon="icons.edit"
+              :disabled="busy || disabled || reviseBusy"
+              @click="openEditor"
+            >
+              <span>编辑后应用</span>
+              <span class="action-kbd is-outline" aria-hidden="true">E</span>
+            </UButton>
+            <UButton
+              size="sm"
+              color="neutral"
+              variant="ghost"
+              :icon="icons.cancel"
+              :disabled="busy || disabled || reviseBusy"
+              @click="emit('dismiss', suggestion.id)"
+            >
+              <span>忽略</span>
+              <span class="action-kbd is-outline" aria-hidden="true">D</span>
+            </UButton>
+          </template>
+          <template v-else>
+            <UButton
+              size="sm"
+              :icon="icons.check"
+              :loading="busy"
+              :disabled="disabled || reviseBusy || Boolean(editValidationProblem)"
+              @click="applyEdited"
+            >
+              保存并应用
+            </UButton>
+            <UButton
+              size="sm"
+              color="neutral"
+              variant="ghost"
+              :icon="icons.cancel"
+              :disabled="busy || disabled || reviseBusy"
+              @click="requestCloseEditor"
+            >
+              <span>取消编辑</span>
+              <span class="action-kbd is-outline" aria-hidden="true">Esc</span>
+            </UButton>
+          </template>
+        </div>
+
+        <div class="decision-meta tabular-nums">
+          <span v-if="position && totalCount" class="decision-pos">
+            第 {{ position }} / {{ totalCount }} 条
+          </span>
+          <span class="decision-hint">
+            <UIcon :name="icons.history" class="decision-hint-icon" aria-hidden="true" />
+            <span>{{ decisionFooterHint }}</span>
+          </span>
+        </div>
+      </div>
+    </footer>
   </div>
 
   <!-- 独立卡片态（用于单条深度查重抽屉等场景） -->
@@ -2404,28 +2633,281 @@ function applyEdited() {
 </template>
 
 <style scoped>
-/* ---- 65% / 35% 纸墨审校面板 ---- */
-.inspector-grid {
-  display: grid;
-  grid-template-columns: 65fr 35fr;
-  background: var(--ui-bg);
-}
-.inspector-main {
+/* ---- 全高审校台态（整理页右栏） ---- */
+.workbench-shell {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  flex: 1;
   min-width: 0;
-  padding: 18px 22px 20px;
-  border-right: 1px solid var(--ui-border-accented);
+  min-height: 0;
   background: var(--ui-bg-bright);
 }
-.inspector-side {
+.mobile-back-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 40px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-bg);
+}
+.mobile-back-pos {
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.workbench-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 18px 28px 28px;
+}
+.workbench-inner {
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  min-width: 0;
-  padding: 18px 20px 20px;
+  gap: 12px;
+  width: 100%;
+  max-width: 980px;
+  margin-inline: auto;
+}
+.workbench-head {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.workbench-head-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+}
+.workbench-badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.workbench-head-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+}
+.open-entry-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border: 1px solid var(--ui-border-accented);
   background: var(--ui-bg);
+  font-size: 12px;
+  color: var(--ui-text-toned);
+}
+.open-entry-link:hover {
+  border-color: var(--ui-rule);
+  color: var(--ui-text-highlighted);
+}
+.open-entry-icon {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
+}
+.workbench-time {
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.workbench-title {
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--ui-text-highlighted);
+  overflow-wrap: anywhere;
+}
+.workbench-reason {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--ui-text-toned);
+  overflow-wrap: anywhere;
+}
+.workbench-reason-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  vertical-align: text-bottom;
+  font-weight: 600;
+  color: var(--ui-text-muted);
+}
+.workbench-reason-icon {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 14px;
+}
+.risk-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border: 1px solid var(--ui-border-accented);
+  background: var(--ui-bg);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ui-text-muted);
+}
+.risk-pill.is-high {
+  border-color: var(--ui-error);
+  background: color-mix(in srgb, var(--ui-error) 7%, var(--ui-bg-bright));
+  color: var(--ui-error);
+}
+.risk-pill.is-medium {
+  border-color: var(--ui-warning);
+  background: color-mix(in srgb, var(--ui-warning) 8%, var(--ui-bg-bright));
+  color: var(--ui-warning);
+}
+.risk-pill.is-safe {
+  border-color: var(--ui-success);
+  background: color-mix(in srgb, var(--ui-success) 8%, var(--ui-bg-bright));
+  color: var(--ui-success);
+}
+.risk-pill-icon {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
+}
+.impact-bar {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 7px 11px;
+  border: 1px solid var(--ui-border-accented);
+  border-left: 3px solid var(--ui-success);
+  background: var(--ui-bg);
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ui-text-toned);
+}
+.impact-bar.is-warn {
+  border-color: var(--ui-error);
+  border-left-width: 3px;
+  background: color-mix(in srgb, var(--ui-error) 6%, var(--ui-bg));
+  color: var(--ui-error);
+}
+.involved-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--ui-border);
+  background: var(--ui-bg);
+}
+.involved-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.involved-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+}
+.involved-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--ui-border);
+  background: var(--ui-bg-bright);
+  min-width: 0;
+}
+.involved-card-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.involved-card-link {
+  font-size: 13px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.workbench-delta {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--ui-border);
+  background: var(--ui-bg-bright);
+  min-width: 0;
+}
+.workbench-decision-bar {
+  flex: none;
+  padding: 10px 28px;
+  border-top: 1px solid var(--ui-rule);
+  background: var(--ui-bg);
+}
+.decision-bar-inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  width: 100%;
+  max-width: 980px;
+  margin-inline: auto;
+}
+.decision-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.action-kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 16px;
+  padding: 0 4px;
+  border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0.85;
+}
+.action-kbd.is-outline {
+  border-color: var(--ui-border-accented);
+  color: var(--ui-text-dimmed);
+  opacity: 1;
+}
+.decision-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.decision-pos {
+  font-weight: 500;
+  color: var(--ui-text-toned);
+}
+.decision-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.decision-hint-icon {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
 }
 .section-eyebrow {
   display: flex;
@@ -2974,13 +3456,6 @@ function applyEdited() {
   height: 13px;
   color: var(--ui-text-muted);
 }
-.edit-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  padding-top: 4px;
-}
 
 .archived-notes {
   border-top: 1px solid var(--ui-border);
@@ -3035,47 +3510,6 @@ function applyEdited() {
   color: var(--ui-text-muted);
 }
 
-/* 右栏：依据、涉及记忆、护栏与动作 */
-.side-block {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.side-block + .side-block {
-  padding-top: 12px;
-  border-top: 1px solid var(--ui-border);
-}
-.side-heading {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--ui-text-muted);
-}
-.side-heading-icon {
-  display: inline-block;
-  flex: none;
-  width: 13px;
-  height: 13px;
-}
-.side-reason {
-  font-size: 14px;
-  line-height: 1.65;
-  color: var(--ui-text);
-  overflow-wrap: anywhere;
-}
-.involved-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.involved-item {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  font-size: 14px;
-}
 .involved-meta {
   display: flex;
   flex-wrap: wrap;
@@ -3092,6 +3526,14 @@ function applyEdited() {
   line-height: 1.4;
   color: var(--ui-text-muted);
 }
+.keep-tag.is-keep {
+  border-color: var(--ui-success);
+  color: var(--ui-success);
+}
+.keep-tag.is-archive {
+  border-color: var(--ui-error);
+  color: var(--ui-error);
+}
 .keep-tag-icon {
   display: inline-block;
   flex: none;
@@ -3105,17 +3547,11 @@ function applyEdited() {
   flex-wrap: wrap;
   align-items: center;
   gap: 6px 14px;
-  padding: 6px 10px;
+  padding: 7px 11px;
   border: 1px solid var(--ui-border-accented);
+  border-left: 3px solid var(--ui-success);
   background: var(--ui-bg);
   font-size: 12px;
-}
-.guard-strip.is-inspector {
-  flex-direction: column;
-  align-items: stretch;
-  gap: 6px;
-  padding: 8px 10px;
-  background: var(--ui-bg-bright);
 }
 .guard-status {
   display: inline-flex;
@@ -3126,19 +3562,6 @@ function applyEdited() {
 }
 .guard-meta {
   color: var(--ui-text-muted);
-}
-.guard-dl {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 4px 12px;
-  font-size: 12px;
-}
-.guard-dl dt {
-  color: var(--ui-text-muted);
-}
-.guard-dl dd {
-  text-align: right;
-  color: var(--ui-text-highlighted);
 }
 .guard-strip.is-warn {
   border-color: var(--ui-warning);
@@ -3152,8 +3575,7 @@ function applyEdited() {
   background: color-mix(in srgb, var(--ui-error) 6%, var(--ui-bg));
 }
 .guard-strip.is-alert .guard-status,
-.guard-strip.is-alert .guard-meta,
-.guard-strip.is-alert .guard-dl dd {
+.guard-strip.is-alert .guard-meta {
   color: var(--ui-error);
 }
 .guard-icon {
@@ -3163,14 +3585,6 @@ function applyEdited() {
   height: 14px;
   margin-top: 2px;
 }
-.impact-note {
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  font-size: 13px;
-  line-height: 1.55;
-  color: var(--ui-text-toned);
-}
 .impact-icon {
   display: inline-block;
   flex: none;
@@ -3179,18 +3593,8 @@ function applyEdited() {
   margin-top: 3px;
   color: var(--ui-success);
 }
-.impact-note.is-warn .impact-icon {
-  color: var(--ui-warning);
-}
-
-.side-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  margin-top: auto;
-  padding-top: 12px;
-  border-top: 1px solid var(--ui-border-accented);
+.impact-bar.is-warn .impact-icon {
+  color: var(--ui-error);
 }
 
 /* ---- 独立卡片态 ---- */
@@ -3225,6 +3629,18 @@ function applyEdited() {
   font-size: 12px;
   font-weight: 500;
   color: var(--ui-text-highlighted);
+}
+.kind-tag.is-high {
+  border-color: var(--ui-error);
+  color: var(--ui-error);
+}
+.kind-tag.is-medium {
+  border-color: var(--ui-warning);
+  color: var(--ui-warning);
+}
+.kind-tag.is-safe {
+  border-color: var(--ui-success);
+  color: var(--ui-success);
 }
 .kind-tag-icon {
   display: inline-block;
@@ -3294,16 +3710,14 @@ function applyEdited() {
 }
 
 @media (max-width: 960px) {
-  .inspector-grid {
-    grid-template-columns: 1fr;
+  .workbench-scroll {
+    padding: 14px 16px 24px;
   }
-  .inspector-main {
-    padding: 14px 16px;
-    border-right: 0;
-    border-bottom: 1px solid var(--ui-border-accented);
+  .workbench-decision-bar {
+    padding: 10px 16px;
   }
-  .inspector-side {
-    padding: 14px 16px;
+  .action-kbd {
+    display: none;
   }
   .boot-transition {
     grid-template-columns: 1fr;
