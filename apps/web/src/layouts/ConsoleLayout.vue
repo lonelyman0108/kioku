@@ -336,7 +336,7 @@ provide(LOGOUT, logout)
                   </div>
                 </div>
                 <div class="border-t border-default pt-3">
-                  <p class="flex items-center gap-2 pb-1 text-sm" :title="displayName">
+                  <p class="flex items-center gap-2 pb-1 text-sm font-medium" :title="displayName">
                     <UIcon
                       :name="icons.account"
                       class="inline-block size-4 shrink-0 text-muted"
@@ -344,6 +344,18 @@ provide(LOGOUT, logout)
                     />
                     <span class="truncate">{{ displayName }}</span>
                   </p>
+                  <RouterLink
+                    :to="settingsRoute('account')"
+                    class="flex w-full items-center gap-2 py-1.5 text-left text-sm/6"
+                    @click="navOpen = false"
+                  >
+                    <UIcon
+                      :name="icons.settings"
+                      class="inline-block size-4 shrink-0 text-muted"
+                      aria-hidden="true"
+                    />
+                    <span>账号与数据</span>
+                  </RouterLink>
                   <button
                     type="button"
                     class="flex w-full cursor-pointer items-center gap-2 py-1.5 text-left text-sm/6"
@@ -369,7 +381,7 @@ provide(LOGOUT, logout)
       v-model:search-term="searchTerm"
       :groups="searchGroups"
       :loading="searching"
-      placeholder="搜索记忆或跳转页面"
+      placeholder="搜索记忆、凭据或跳转页面"
     >
       <template #empty>{{ searching ? '搜索中' : '暂无匹配' }}</template>
     </UDashboardSearch>

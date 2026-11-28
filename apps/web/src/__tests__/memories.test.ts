@@ -365,7 +365,8 @@ describe('记忆布局、随手记与图标清单', () => {
 
   it('手机窄屏提供卡片式凭据与密钥列表、整页详情滚动、紧凑单行号对比与上下条切换', () => {
     expect(credentialsPage).toContain('cred-card-list')
-    expect(keysSettings).toContain('keys-card-list')
+    expect(keysSettings).toContain('key-ledger-list')
+    expect(keysSettings).toContain('key-filter-bar')
     expect(keysSettings).toContain('shrink-0 whitespace-nowrap')
     expect(memoryEditor).toContain('mobileMoreMenuItems')
     expect(memoryEditor).toContain('visibleEditViewOptions')

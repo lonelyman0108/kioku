@@ -594,12 +594,12 @@ function onRetryFromPopover() {
             <div class="popover-foot">
               <span>确认后才写入记忆</span>
               <RouterLink
-                :to="settingsRoute('models')"
+                :to="settingsRoute('schedule')"
                 class="popover-foot-link text-primary"
                 @click="statusPopoverOpen = false"
               >
-                <UIcon :name="icons.models" class="popover-foot-icon" aria-hidden="true" />
-                <span>前往模型设置</span>
+                <UIcon :name="icons.clock" class="popover-foot-icon" aria-hidden="true" />
+                <span>管理定时计划</span>
               </RouterLink>
             </div>
           </div>

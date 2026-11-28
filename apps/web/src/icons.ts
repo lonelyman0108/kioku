@@ -14,6 +14,7 @@ export const icons = {
   menu: 'i-lucide-menu',
   chevronDown: 'i-lucide-chevron-down',
   chevronUp: 'i-lucide-chevron-up',
+  chevronLeft: 'i-lucide-chevron-left',
   chevronRight: 'i-lucide-chevron-right',
   themeSystem: 'i-lucide-monitor',
   themeLight: 'i-lucide-sun',
@@ -113,6 +114,8 @@ export const icons = {
   globe: 'i-lucide-globe',
   plug: 'i-lucide-plug-zap',
   database: 'i-lucide-database',
+  archive: 'i-lucide-archive',
+  activity: 'i-lucide-activity',
   arrowLeftRight: 'i-lucide-arrow-left-right',
   calendarClock: 'i-lucide-calendar-clock',
   // 状态提示与设备

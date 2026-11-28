@@ -130,6 +130,18 @@ watch(highlightSlug, (slug) => {
   const matched = items.value.find((item) => item.slug === slug)
   if (matched) void router.replace({ query: { id: matched.slug } })
 })
+
+watch(
+  [() => route.query.new, () => me.data.value],
+  ([newFlag, meData]) => {
+    if (newFlag !== '1' || !meData) return
+    if (meData.hasMasterKey) openCreate()
+    const nextQuery = { ...route.query }
+    delete nextQuery.new
+    void router.replace({ query: nextQuery })
+  },
+  { immediate: true },
+)
 </script>
 
 <template>
