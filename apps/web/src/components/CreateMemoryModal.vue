@@ -88,26 +88,35 @@ const attrsSummary = computed(() => {
   return parts.join(' · ')
 })
 
-watch(open, (visible) => {
-  if (!visible) return
-  form.title = ''
-  form.summary = ''
-  form.content = ''
-  form.disclosure = ''
-  form.bootMode = 'none'
-  form.topics = []
-  form.validTo = ''
-  scope.value = {
-    envs: [...(props.initialScope?.envs ?? [])],
-    realms: [...(props.initialScope?.realms ?? [])],
-    projects: [...(props.initialScope?.projects ?? [])],
-    runtimes: [...(props.initialScope?.runtimes ?? [])],
-  }
-  attrsOpen.value = false
-  contentTab.value = 'edit'
-  minValidTo.value = earliestValidTo()
-  error.value = null
-})
+watch(
+  open,
+  (visible) => {
+    if (!visible) return
+    form.title = ''
+    form.summary = ''
+    form.content = ''
+    form.disclosure = ''
+    form.bootMode = 'none'
+    form.topics = []
+    form.validTo = ''
+    const nextScope: SceneScopeValue = {
+      envs: [...(props.initialScope?.envs ?? [])],
+      realms: [...(props.initialScope?.realms ?? [])],
+      projects: [...(props.initialScope?.projects ?? [])],
+      runtimes: [...(props.initialScope?.runtimes ?? [])],
+    }
+    scope.value = nextScope
+    attrsOpen.value =
+      nextScope.envs.length > 0 ||
+      nextScope.realms.length > 0 ||
+      nextScope.projects.length > 0 ||
+      nextScope.runtimes.length > 0
+    contentTab.value = 'edit'
+    minValidTo.value = earliestValidTo()
+    error.value = null
+  },
+  { immediate: true },
+)
 
 const secretWarnings = computed(() => detectSecretPrefixes(form.content))
 const bootWarnings = computed(() =>

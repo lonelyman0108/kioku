@@ -397,7 +397,7 @@ const validationProblem = computed(() => {
 })
 
 function startEditing() {
-  if (!entry.value || isDeleted.value) return
+  if (!entry.value || isDeleted.value || quickBusy.value) return
   pinPopoverOpen.value = false
   scopePopoverOpen.value = false
   organizeOpen.value = false
@@ -462,6 +462,7 @@ async function save() {
 // 阅读态常驻分层 Popover 与将「会话摘要」一键提炼为正式记忆
 const quickBusy = ref(false)
 const pinPopoverOpen = ref(false)
+const pinBaseVersion = ref<number | null>(null)
 const pinDraft = reactive({
   bootMode: 'none' as BootMode,
   summary: '',
@@ -474,6 +475,7 @@ watch(pinPopoverOpen, (visible) => {
   const current = entry.value
   if (!visible || !current) return
   scopePopoverOpen.value = false
+  pinBaseVersion.value = current.version
   const currentMode = effectiveBootMode(current)
   const overSoftCap = current.content.length > PINNED_FULL_SOFT_WARN_CHARS
   pinDraft.recommendedIndex = currentMode === 'none' && overSoftCap
@@ -546,7 +548,7 @@ async function applyPinDraft() {
       editingSummary && (pinDraft.summary.trim() || '') !== (current.summary?.trim() || '')
     const includeScope = pinDraft.bootMode !== 'none'
     const updated = await api.updateEntry(current.shortId, {
-      expectedVersion: current.version,
+      expectedVersion: pinBaseVersion.value ?? current.version,
       bootMode: pinDraft.bootMode,
       isPinned: pinDraft.bootMode !== 'none',
       ...(includeScope
@@ -562,7 +564,10 @@ async function applyPinDraft() {
     queryClient.setQueryData(queryKey.value, updated)
     loadDetail(updated)
     pinPopoverOpen.value = false
-    toast.add({ title: `已设为${bootModeLabels[pinDraft.bootMode]}`, color: 'success' })
+    toast.add({
+      title: `已设为${bootModeLabels[effectiveBootMode(updated.entry)]}`,
+      color: 'success',
+    })
     void queryClient.invalidateQueries({ queryKey: ['entry-history', current.shortId] })
     emit('changed', updated)
   } catch (err) {
@@ -578,18 +583,43 @@ async function applyPinDraft() {
 
 // 阅读态适用场景行内直改 Popover
 const scopePopoverOpen = ref(false)
+const scopeBaseVersion = ref<number | null>(null)
 const scopeDraft = ref<SceneScopeValue>({ envs: [], realms: [], projects: [], runtimes: [] })
 
 watch(scopePopoverOpen, (visible) => {
   const current = entry.value
   if (!visible || !current) return
   pinPopoverOpen.value = false
+  scopeBaseVersion.value = current.version
   scopeDraft.value = {
     envs: [...current.envs],
     realms: [...current.realms],
     projects: [...current.projects],
     runtimes: [...current.runtimes],
   }
+})
+
+const scopeDraftCount = computed(
+  () =>
+    scopeDraft.value.envs.length +
+    scopeDraft.value.realms.length +
+    scopeDraft.value.projects.length +
+    scopeDraft.value.runtimes.length,
+)
+
+const scopeDraftWarnings = computed(() => {
+  const current = entry.value
+  if (!scopePopoverOpen.value || !current) return []
+  return lintEntryHygiene({
+    title: current.title,
+    content: current.content,
+    summary: current.summary ?? '',
+    bootMode: effectiveBootMode(current),
+    envs: scopeDraft.value.envs,
+    realms: scopeDraft.value.realms,
+    projects: scopeDraft.value.projects,
+    runtimes: scopeDraft.value.runtimes,
+  }).filter((w) => w.code === 'pinned_oversized')
 })
 
 const scopeDraftDirty = computed(() => {
@@ -623,7 +653,7 @@ async function applyScopeDraft() {
   quickBusy.value = true
   try {
     const updated = await api.updateEntry(current.shortId, {
-      expectedVersion: current.version,
+      expectedVersion: scopeBaseVersion.value ?? current.version,
       envs: scopeDraft.value.envs,
       realms: scopeDraft.value.realms,
       projects: scopeDraft.value.projects,
@@ -1228,6 +1258,7 @@ defineExpose({
               <template v-if="mode === 'read' && !isDeleted && entry.kind === 'entry'">
                 <UPopover
                   v-model:open="pinPopoverOpen"
+                  :dismissible="!quickBusy"
                   :content="{ align: 'start', sideOffset: 6 }"
                 >
                   <button
@@ -1282,6 +1313,7 @@ defineExpose({
                             class="pin-mode-card"
                             :class="{ active: pinDraft.bootMode === modeOpt }"
                             :aria-checked="pinDraft.bootMode === modeOpt"
+                            :disabled="quickBusy"
                             @click="pinDraft.bootMode = modeOpt"
                           >
                             <span class="pin-mode-head">
@@ -1328,6 +1360,7 @@ defineExpose({
                             autoresize
                             :maxrows="3"
                             :maxlength="ENTRY_SUMMARY_MAX"
+                            :disabled="quickBusy"
                             placeholder="1–2 句概括当前结论，便于会话启动判断是否展开全文"
                             class="w-full"
                           />
@@ -1357,7 +1390,11 @@ defineExpose({
                             />
                           </button>
                           <div v-if="pinDraft.scopeExpanded" class="pin-scope-body">
-                            <SceneScopePicker v-model="pinDraft.scope" :facets="facets" />
+                            <SceneScopePicker
+                              v-model="pinDraft.scope"
+                              :facets="facets"
+                              :disabled="quickBusy"
+                            />
                           </div>
                         </div>
                       </div>
@@ -1388,6 +1425,7 @@ defineExpose({
 
                 <UPopover
                   v-model:open="scopePopoverOpen"
+                  :dismissible="!quickBusy"
                   :content="{ align: 'start', sideOffset: 6 }"
                 >
                   <button
@@ -1417,11 +1455,18 @@ defineExpose({
                           <span>适用场景</span>
                         </span>
                         <span class="text-xs text-muted">
-                          {{ scopeTags.length ? '已限定场景' : '全局通用' }}
+                          {{ scopeDraftCount ? '已限定场景' : '全局通用' }}
                         </span>
                       </div>
                       <div class="pin-popover-body">
-                        <SceneScopePicker v-model="scopeDraft" :facets="facets" />
+                        <SceneScopePicker
+                          v-model="scopeDraft"
+                          :facets="facets"
+                          :disabled="quickBusy"
+                        />
+                        <NoteLine v-if="scopeDraftWarnings.length" tone="warning" flush>
+                          {{ scopeDraftWarnings.map((w) => w.message).join('；') }}
+                        </NoteLine>
                       </div>
                       <div class="pin-popover-foot">
                         <UButton
@@ -1515,6 +1560,7 @@ defineExpose({
                 size="sm"
                 :variant="entry.kind === 'episode' ? 'outline' : 'solid'"
                 :icon="icons.edit"
+                :disabled="quickBusy"
                 @click="startEditing"
               >
                 编辑
@@ -1531,7 +1577,7 @@ defineExpose({
                   variant="outline"
                   :icon="icons.tidy"
                   :trailing-icon="icons.chevronDown"
-                  :disabled="!hasChatModel"
+                  :disabled="!hasChatModel || quickBusy"
                   :title="
                     hasChatModel ? '按说明修订、规范此条或查重与关联' : '请先在设置中配置对话模型'
                   "
@@ -1573,6 +1619,7 @@ defineExpose({
                 color="error"
                 variant="outline"
                 :icon="icons.remove"
+                :disabled="quickBusy"
                 @click="((deleteModal = isDeleted ? 'permanent' : 'soft'), (deleteError = null))"
               >
                 {{ isDeleted ? '彻底删除' : '删除' }}
@@ -2363,6 +2410,10 @@ defineExpose({
   border-color: var(--ui-rule);
   color: var(--ui-text-highlighted);
 }
+.inline-chip.is-index {
+  border-color: var(--ui-border-accented);
+  color: var(--ui-text-highlighted);
+}
 .inline-chip-icon {
   display: inline-block;
   flex: none;
@@ -2493,12 +2544,6 @@ defineExpose({
   font-weight: 500;
   line-height: 1.45;
   white-space: nowrap;
-}
-.pill.status-pinned {
-  color: var(--ui-text-highlighted);
-}
-.pill.status-pinned-index {
-  color: var(--ui-text-toned);
 }
 .pill.status-episode {
   border-color: var(--ui-info);

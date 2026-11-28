@@ -4,12 +4,19 @@ import {
   PINNED_GROUPS,
   PROJECT_SCOPES,
   type EntryDetailResponse,
+  type EntryListResponse,
   type EntryTab,
   type PinnedGroup,
   type ProjectScope,
 } from '@kioku/contracts'
 import { useToast } from '@nuxt/ui/composables'
-import { keepPreviousData, useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/vue-query'
+import {
+  keepPreviousData,
+  useInfiniteQuery,
+  useQuery,
+  useQueryClient,
+  type InfiniteData,
+} from '@tanstack/vue-query'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -256,15 +263,32 @@ function onSplitterKeydown(event: KeyboardEvent) {
 
 watch([narrow, isFullscreen], ([isNarrow, fs]) => {
   if (isNarrow || fs) stopResize()
+  if (isNarrow) fullscreen.value = false
   if (!isNarrow) railOpen.value = false
 })
 
-// 宽屏默认保持三栏展开：未选中记忆且列表有数据时自动定位首条
+// 宽屏默认保持三栏展开：未选中记忆且真实列表就绪、无地址栏弹窗参数时自动定位首条
 watch(
-  [items, selectedId, narrow, () => entriesQuery.isPending.value],
-  ([list, sid, isNarrow, pending]) => {
-    if (isNarrow || pending || sid || list.length === 0) return
-    const first = list[0]
+  [
+    items,
+    selectedId,
+    narrow,
+    () => entriesQuery.isPending.value,
+    () => entriesQuery.isPlaceholderData.value,
+    () => route.query.capture,
+    () => route.query.create,
+  ],
+  ([list, sid, isNarrow, pending, placeholder, captureFlag, createFlag]) => {
+    if (isNarrow || pending || placeholder || sid || list.length === 0) return
+    if (
+      captureFlag === '1' ||
+      captureFlag === 'true' ||
+      createFlag === '1' ||
+      createFlag === 'true'
+    ) {
+      return
+    }
+    const first = listRef.value?.displayItems[0] ?? list[0]
     if (first) void router.replace(withQuery({ id: first.shortId }))
   },
   { immediate: true },
@@ -331,7 +355,7 @@ function setTab(next: EntryTab) {
   void router.replace(
     withQuery({
       tab: next === 'all' ? null : next,
-      ...(next !== 'pinned' ? { pinnedGroup: null } : {}),
+      pinnedGroup: null,
     }),
   )
 }
@@ -467,6 +491,17 @@ function onDeleted(shortId: string) {
     !narrow.value && remaining.length > 0
       ? remaining[Math.min(Math.max(0, deletedIdx), remaining.length - 1)]
       : null
+  queryClient.setQueriesData<InfiniteData<EntryListResponse>>({ queryKey: ['entries'] }, (old) =>
+    old
+      ? {
+          ...old,
+          pages: old.pages.map((page) => ({
+            ...page,
+            items: page.items.filter((item) => item.shortId !== shortId),
+          })),
+        }
+      : old,
+  )
   queryClient.removeQueries({ queryKey: ['entry', shortId], exact: true })
   invalidateEntries()
   select(nextItem ? nextItem.shortId : null)
@@ -502,7 +537,7 @@ function onKeydown(event: KeyboardEvent) {
       return
     }
     if (isEditableElement(event.target)) return
-    if (fullscreen.value) {
+    if (isFullscreen.value) {
       event.preventDefault()
       fullscreen.value = false
     } else if (narrow.value && selectedId.value) {
@@ -685,7 +720,10 @@ onBeforeUnmount(() => {
       v-model:open="railOpen"
       side="left"
       title="目录与状态"
-      :ui="{ content: 'max-w-72 sm:max-w-72', body: 'p-0 sm:p-0 flex flex-col min-h-0' }"
+      :ui="{
+        content: 'max-w-72 sm:max-w-72',
+        body: 'p-0 sm:p-0 flex flex-col min-h-0 overflow-hidden',
+      }"
     >
       <template #body>
         <MemoryIndexRail

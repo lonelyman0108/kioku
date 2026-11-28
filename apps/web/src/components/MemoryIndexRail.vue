@@ -55,6 +55,10 @@ function selectPinnedSub(group: PinnedGroup) {
   emit('update:pinnedGroup', props.pinnedGroup === group && props.tab === 'pinned' ? null : group)
 }
 
+function focusGlobalFull() {
+  emit('update:pinnedGroup', 'global_full')
+}
+
 function toggleFacet(kind: 'project' | 'realm' | 'runtime', value: string) {
   if (kind === 'project') emit('update:project', props.project === value ? null : value)
   else if (kind === 'realm') emit('update:realm', props.realm === value ? null : value)
@@ -105,6 +109,7 @@ function toggleFacet(kind: 'project' | 'realm' | 'runtime', value: string) {
             type="button"
             class="tree-item tree-child"
             :class="{ 'is-active': tab === 'pinned' && pinnedGroup === 'global_full' }"
+            :aria-current="tab === 'pinned' && pinnedGroup === 'global_full' ? 'page' : undefined"
             :title="
               overChars > 0
                 ? `全局全文超出预算 ${overChars.toLocaleString()} 字，点击按字数降序查看`
@@ -117,7 +122,7 @@ function toggleFacet(kind: 'project' | 'realm' | 'runtime', value: string) {
               <span v-if="overChars > 0" class="over-chip tabular-nums">
                 超+{{ overChars.toLocaleString() }}
               </span>
-              <span class="tree-count tabular-nums">{{ globalFullCount }}</span>
+              <span v-if="counts" class="tree-count tabular-nums">{{ globalFullCount }}</span>
             </span>
           </button>
 
@@ -125,22 +130,24 @@ function toggleFacet(kind: 'project' | 'realm' | 'runtime', value: string) {
             type="button"
             class="tree-item tree-child"
             :class="{ 'is-active': tab === 'pinned' && pinnedGroup === 'scoped_full' }"
+            :aria-current="tab === 'pinned' && pinnedGroup === 'scoped_full' ? 'page' : undefined"
             title="带项目、环境、场域或客户端限定的全文常驻记忆"
             @click="selectPinnedSub('scoped_full')"
           >
             <span>场景全文</span>
-            <span class="tree-count tabular-nums">{{ scopedFullCount }}</span>
+            <span v-if="counts" class="tree-count tabular-nums">{{ scopedFullCount }}</span>
           </button>
 
           <button
             type="button"
             class="tree-item tree-child"
             :class="{ 'is-active': tab === 'pinned' && pinnedGroup === 'index' }"
+            :aria-current="tab === 'pinned' && pinnedGroup === 'index' ? 'page' : undefined"
             title="仅在启动目录槽注入标题与概要的长篇记忆"
             @click="selectPinnedSub('index')"
           >
             <span>目录常驻</span>
-            <span class="tree-count tabular-nums">{{ indexPinnedCount }}</span>
+            <span v-if="counts" class="tree-count tabular-nums">{{ indexPinnedCount }}</span>
           </button>
         </div>
 
@@ -272,7 +279,7 @@ function toggleFacet(kind: 'project' | 'realm' | 'runtime', value: string) {
             ? `全局全文超出预算 ${overChars.toLocaleString()} 字，点击定位全局全文常驻记忆`
             : '点击筛选全局全文常驻记忆（默认上限 3,500 字）'
         "
-        @click="selectPinnedSub('global_full')"
+        @click="focusGlobalFull"
       >
         <div class="health-line">
           <span class="health-label">
@@ -285,7 +292,11 @@ function toggleFacet(kind: 'project' | 'realm' | 'runtime', value: string) {
             <span>全局常驻预算</span>
           </span>
           <span class="health-val tabular-nums" :class="{ 'is-warn': overChars > 0 }">
-            {{ globalFullChars.toLocaleString() }} / {{ GLOBAL_FULL_CHAR_CAP.toLocaleString() }}
+            {{
+              counts
+                ? `${globalFullChars.toLocaleString()} / ${GLOBAL_FULL_CHAR_CAP.toLocaleString()}`
+                : '—'
+            }}
           </span>
         </div>
         <div class="meter-track" aria-hidden="true">
@@ -322,6 +333,7 @@ function toggleFacet(kind: 'project' | 'realm' | 'runtime', value: string) {
 <style scoped>
 .index-rail {
   display: flex;
+  flex: 1;
   flex-direction: column;
   width: 100%;
   height: 100%;

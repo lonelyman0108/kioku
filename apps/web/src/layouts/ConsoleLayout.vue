@@ -31,12 +31,22 @@ const captureShortcut = computed(() => {
 })
 
 function openQuickCapture() {
-  const baseQuery = route.name === 'memories' ? route.query : undefined
-  void router.push(captureRoute('', baseQuery))
+  if (route.name === 'memories') {
+    void router.replace(captureRoute('', route.query))
+    return
+  }
+  void router.push(captureRoute())
+}
+
+function isEditableElement(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false
+  if (target.isContentEditable) return true
+  return target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT'
 }
 
 function onGlobalKeydown(event: KeyboardEvent) {
   if (
+    !me.data.value ||
     event.defaultPrevented ||
     event.isComposing ||
     !(event.metaKey || event.ctrlKey) ||
@@ -46,6 +56,7 @@ function onGlobalKeydown(event: KeyboardEvent) {
   ) {
     return
   }
+  if (isEditableElement(event.target)) return
   if (document.querySelector('[role="dialog"], [data-reka-popper-content-wrapper]')) return
   event.preventDefault()
   openQuickCapture()
