@@ -30,11 +30,12 @@ import SceneScopePicker, { type SceneScopeValue } from './SceneScopePicker.vue'
 import SegmentedChoice from './SegmentedChoice.vue'
 import NoteLine from './ui/NoteLine.vue'
 
-withDefaults(
+const props = withDefaults(
   defineProps<{
     facets?: EntryFacetsSummary | null
+    initialScope?: Partial<SceneScopeValue> | null
   }>(),
-  { facets: null },
+  { facets: null, initialScope: null },
 )
 const open = defineModel<boolean>('open', { required: true })
 const emit = defineEmits<{ created: [detail: EntryDetailResponse] }>()
@@ -96,7 +97,12 @@ watch(open, (visible) => {
   form.bootMode = 'none'
   form.topics = []
   form.validTo = ''
-  scope.value = { envs: [], realms: [], projects: [], runtimes: [] }
+  scope.value = {
+    envs: [...(props.initialScope?.envs ?? [])],
+    realms: [...(props.initialScope?.realms ?? [])],
+    projects: [...(props.initialScope?.projects ?? [])],
+    runtimes: [...(props.initialScope?.runtimes ?? [])],
+  }
   attrsOpen.value = false
   contentTab.value = 'edit'
   minValidTo.value = earliestValidTo()

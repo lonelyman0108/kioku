@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { versionLabel } from '@kioku/contracts'
 import type { CommandPaletteItem, DropdownMenuItem } from '@nuxt/ui'
-import { useToast } from '@nuxt/ui/composables'
+import { useKbd, useToast } from '@nuxt/ui/composables'
 import { useQuery } from '@tanstack/vue-query'
 import { computed, onBeforeUnmount, onMounted, provide, ref, watch } from 'vue'
 import { useRoute, useRouter, type RouteLocationRaw } from 'vue-router'
@@ -17,12 +17,39 @@ import { LOGOUT } from '../composables/useLogout'
 import { ME_KEY, useSession } from '../composables/useSession'
 import { icons } from '../icons'
 import { queryClient } from '../query'
-import { settingsRoute } from '../routes'
+import { captureRoute, settingsRoute } from '../routes'
 
 const router = useRouter()
 const route = useRoute()
 const toast = useToast()
+const { getKbdKey } = useKbd()
 const { me } = useSession()
+
+const captureShortcut = computed(() => {
+  const mod = getKbdKey('meta')?.trim() || 'Ctrl'
+  return mod === '⌘' ? '⌘J' : `${mod}+J`
+})
+
+function openQuickCapture() {
+  const baseQuery = route.name === 'memories' ? route.query : undefined
+  void router.push(captureRoute('', baseQuery))
+}
+
+function onGlobalKeydown(event: KeyboardEvent) {
+  if (
+    event.defaultPrevented ||
+    event.isComposing ||
+    !(event.metaKey || event.ctrlKey) ||
+    event.shiftKey ||
+    event.altKey ||
+    event.key.toLowerCase() !== 'j'
+  ) {
+    return
+  }
+  if (document.querySelector('[role="dialog"], [data-reka-popper-content-wrapper]')) return
+  event.preventDefault()
+  openQuickCapture()
+}
 
 let loggingOut = false
 watch(
@@ -46,8 +73,14 @@ const wideScreen = window.matchMedia('(min-width: 1024px)')
 function closeNavOnWideScreen(event: MediaQueryListEvent) {
   if (event.matches) navOpen.value = false
 }
-onMounted(() => wideScreen.addEventListener('change', closeNavOnWideScreen))
-onBeforeUnmount(() => wideScreen.removeEventListener('change', closeNavOnWideScreen))
+onMounted(() => {
+  wideScreen.addEventListener('change', closeNavOnWideScreen)
+  window.addEventListener('keydown', onGlobalKeydown)
+})
+onBeforeUnmount(() => {
+  wideScreen.removeEventListener('change', closeNavOnWideScreen)
+  window.removeEventListener('keydown', onGlobalKeydown)
+})
 
 const accountButton = ref<{ $el: HTMLElement } | null>(null)
 function focusAfterNavClosed(event: Event) {
@@ -198,6 +231,16 @@ provide(LOGOUT, logout)
             :dream-state="inbox.data.value?.dreamState ?? null"
             :embedding-backfill="inbox.data.value?.embeddingBackfill ?? null"
           />
+          <UButton
+            size="sm"
+            :icon="icons.capture"
+            :title="`记录一条习惯、约定或事实更新，自动归并至既有记忆（${captureShortcut}）`"
+            class="shrink-0"
+            @click="openQuickCapture"
+          >
+            <span>随手记</span>
+            <span class="capture-kbd" aria-hidden="true">{{ captureShortcut }}</span>
+          </UButton>
           <UDashboardSearchButton
             label="搜索"
             aria-label="搜索"
@@ -353,5 +396,15 @@ provide(LOGOUT, logout)
   font-weight: 500;
   line-height: 1;
   color: var(--ui-error);
+}
+.capture-kbd {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  opacity: 0.78;
+}
+@media (max-width: 1023.98px) {
+  .capture-kbd {
+    display: none;
+  }
 }
 </style>

@@ -9,7 +9,7 @@ import {
   type ProjectScope,
 } from '@kioku/contracts'
 import { useToast } from '@nuxt/ui/composables'
-import { keepPreviousData, useInfiniteQuery, useQueryClient } from '@tanstack/vue-query'
+import { keepPreviousData, useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -19,8 +19,10 @@ import BootPreviewDrawer from '../components/BootPreviewDrawer.vue'
 import ConsequenceModal from '../components/ConsequenceModal.vue'
 import CreateMemoryModal from '../components/CreateMemoryModal.vue'
 import MemoryEditor from '../components/MemoryEditor.vue'
+import MemoryIndexRail from '../components/MemoryIndexRail.vue'
 import MemoryList from '../components/MemoryList.vue'
 import QuickCaptureModal from '../components/QuickCaptureModal.vue'
+import EmptyState from '../components/ui/EmptyState.vue'
 import { useDebounced } from '../composables/useDebounced'
 import { useSession } from '../composables/useSession'
 import { useViewport } from '../composables/useViewport'
@@ -105,6 +107,14 @@ const entriesQuery = useInfiniteQuery({
   placeholderData: keepPreviousData,
 })
 
+const inboxQuery = useQuery({
+  queryKey: ['inbox'] as const,
+  queryFn: () => api.inbox(),
+  enabled: computed(() => Boolean(me.data.value)),
+  staleTime: 30_000,
+})
+const pendingInboxCount = computed(() => inboxQuery.data.value?.pendingCount ?? 0)
+
 const firstPage = computed(() => entriesQuery.data.value?.pages[0] ?? null)
 const items = computed(() => entriesQuery.data.value?.pages.flatMap((p) => p.items) ?? [])
 const facets = computed(() => firstPage.value?.facets ?? null)
@@ -120,9 +130,17 @@ const linkedTitles = computed<Record<string, string>>(() => {
   return map
 })
 
+const createInitialScope = computed(() => ({
+  projects: project.value ? [project.value] : [],
+  realms: realm.value ? [realm.value] : [],
+  runtimes: runtime.value ? [runtime.value] : [],
+  envs: env.value ? [env.value] : [],
+}))
+
 const createOpen = ref(false)
 const captureOpen = ref(false)
 const bootPreviewOpen = ref(false)
+const railOpen = ref(false)
 const captureDraft = ref('')
 const fullscreen = ref(false)
 const layoutRef = ref<HTMLElement | null>(null)
@@ -131,11 +149,12 @@ const editorRef = ref<InstanceType<typeof MemoryEditor> | null>(null)
 const viewport = useViewport()
 const narrow = computed(() => viewport.value.width < 1024)
 
+const INDEX_RAIL_WIDTH = 216
 const LIST_WIDTH_STORAGE_KEY = 'kioku:memories-list-width'
-const LIST_WIDTH_DEFAULT = 380
+const LIST_WIDTH_DEFAULT = 336
 const LIST_WIDTH_MIN = 280
-const LIST_WIDTH_MAX = 640
-const DETAIL_MIN_WIDTH = 560
+const LIST_WIDTH_MAX = 520
+const DETAIL_MIN_WIDTH = 520
 
 function readStoredListWidth(): number {
   try {
@@ -165,15 +184,17 @@ let layoutObserver: ResizeObserver | null = null
 const maxAllowedWidth = computed(() => {
   const viewportFallback = Math.min(viewport.value.width, 1840)
   const effectiveContainer = containerWidth.value > 0 ? containerWidth.value : viewportFallback
-  return Math.max(LIST_WIDTH_MIN, Math.min(LIST_WIDTH_MAX, effectiveContainer - DETAIL_MIN_WIDTH))
+  return Math.max(
+    LIST_WIDTH_MIN,
+    Math.min(LIST_WIDTH_MAX, effectiveContainer - INDEX_RAIL_WIDTH - DETAIL_MIN_WIDTH),
+  )
 })
 
 const effectiveListWidth = computed(() =>
   Math.max(LIST_WIDTH_MIN, Math.min(storedListWidth.value, maxAllowedWidth.value)),
 )
 
-const isPeek = computed(() => Boolean(selectedId.value) && !fullscreen.value)
-const isFullscreen = computed(() => Boolean(selectedId.value) && fullscreen.value)
+const isFullscreen = computed(() => Boolean(selectedId.value) && fullscreen.value && !narrow.value)
 
 let dragStartX = 0
 let dragStartWidth = LIST_WIDTH_DEFAULT
@@ -200,7 +221,7 @@ function stopResize() {
 }
 
 function startResize(event: PointerEvent) {
-  if (narrow.value || !isPeek.value || event.button !== 0) return
+  if (narrow.value || isFullscreen.value || event.button !== 0) return
   event.preventDefault()
   dragStartX = event.clientX
   dragStartWidth = effectiveListWidth.value
@@ -217,7 +238,7 @@ function resetListWidth() {
 }
 
 function onSplitterKeydown(event: KeyboardEvent) {
-  if (narrow.value || !isPeek.value) return
+  if (narrow.value || isFullscreen.value) return
   const step = event.shiftKey ? 40 : 16
   if (event.key === 'ArrowLeft') {
     event.preventDefault()
@@ -233,9 +254,21 @@ function onSplitterKeydown(event: KeyboardEvent) {
   }
 }
 
-watch([narrow, isPeek], ([isNarrow, peek]) => {
-  if (isNarrow || !peek) stopResize()
+watch([narrow, isFullscreen], ([isNarrow, fs]) => {
+  if (isNarrow || fs) stopResize()
+  if (!isNarrow) railOpen.value = false
 })
+
+// 宽屏默认保持三栏展开：未选中记忆且列表有数据时自动定位首条
+watch(
+  [items, selectedId, narrow, () => entriesQuery.isPending.value],
+  ([list, sid, isNarrow, pending]) => {
+    if (isNarrow || pending || sid || list.length === 0) return
+    const first = list[0]
+    if (first) void router.replace(withQuery({ id: first.shortId }))
+  },
+  { immediate: true },
+)
 
 watch(selectedId, async (id) => {
   if (!id) {
@@ -294,6 +327,7 @@ function toggleFullscreen() {
 }
 
 function setTab(next: EntryTab) {
+  railOpen.value = false
   void router.replace(
     withQuery({
       tab: next === 'all' ? null : next,
@@ -303,13 +337,20 @@ function setTab(next: EntryTab) {
 }
 
 function setPinnedGroup(value: PinnedGroup | null) {
-  void router.replace(withQuery({ pinnedGroup: value }))
+  railOpen.value = false
+  void router.replace(
+    withQuery({
+      ...(value !== null ? { tab: 'pinned' } : {}),
+      pinnedGroup: value,
+    }),
+  )
 }
 
 function setFilter(
   key: 'env' | 'realm' | 'project' | 'runtime' | 'topic' | 'projectScope',
   value: string | null,
 ) {
+  railOpen.value = false
   const changes: Record<string, string | null> = { [key]: value }
   if (key === 'project' && value !== null && projectScope.value === 'unassigned') {
     changes.projectScope = null
@@ -419,9 +460,16 @@ function onChanged(detail: EntryDetailResponse) {
 }
 
 function onDeleted(shortId: string) {
+  const currentList = listRef.value?.displayItems ?? items.value
+  const deletedIdx = currentList.findIndex((item) => item.shortId === shortId)
+  const remaining = currentList.filter((item) => item.shortId !== shortId)
+  const nextItem =
+    !narrow.value && remaining.length > 0
+      ? remaining[Math.min(Math.max(0, deletedIdx), remaining.length - 1)]
+      : null
   queryClient.removeQueries({ queryKey: ['entry', shortId], exact: true })
   invalidateEntries()
-  select(null)
+  select(nextItem ? nextItem.shortId : null)
 }
 
 function onRestored(detail: EntryDetailResponse) {
@@ -437,24 +485,13 @@ function isEditableElement(target: EventTarget | null): boolean {
 }
 
 function hasOpenOverlay(): boolean {
-  if (createOpen.value || captureOpen.value || bootPreviewOpen.value) return true
+  if (createOpen.value || captureOpen.value || bootPreviewOpen.value || railOpen.value) return true
   if (listRef.value?.filterOpen) return true
   return Boolean(document.querySelector('[role="dialog"], [data-reka-popper-content-wrapper]'))
 }
 
 function onKeydown(event: KeyboardEvent) {
   if (event.defaultPrevented || hasOpenOverlay()) return
-
-  if (
-    (event.metaKey || event.ctrlKey) &&
-    !event.shiftKey &&
-    !event.altKey &&
-    event.key.toLowerCase() === 'j'
-  ) {
-    event.preventDefault()
-    openCapture()
-    return
-  }
 
   const editing = Boolean(editorRef.value?.isEditing())
 
@@ -468,7 +505,7 @@ function onKeydown(event: KeyboardEvent) {
     if (fullscreen.value) {
       event.preventDefault()
       fullscreen.value = false
-    } else if (selectedId.value) {
+    } else if (narrow.value && selectedId.value) {
       event.preventDefault()
       select(null)
     }
@@ -525,123 +562,157 @@ onBeforeUnmount(() => {
     class="memories-layout"
     :class="{
       'has-selection': Boolean(selectedId),
-      'is-peek': isPeek,
       'is-fullscreen': isFullscreen,
       'is-resizing': resizing,
     }"
-    :style="isPeek && !narrow ? { '--list-width': `${effectiveListWidth}px` } : undefined"
+    :style="!isFullscreen && !narrow ? { '--list-width': `${effectiveListWidth}px` } : undefined"
   >
-    <MemoryList
-      ref="listRef"
-      :tab="tab"
-      :pinned-group="pinnedGroup"
-      :search="searchInput"
-      :env="env"
-      :realm="realm"
-      :project="project"
-      :runtime="runtime"
-      :topic="topic"
-      :project-scope="projectScope"
-      :selected-id="selectedId"
-      :compact="isPeek"
-      :items="items"
-      :linked-titles="linkedTitles"
-      :facets="facets"
-      :counts="counts"
-      :query="entriesQuery"
-      :has-next-page="Boolean(entriesQuery.hasNextPage.value)"
-      :fetching-next-page="entriesQuery.isFetchingNextPage.value"
-      :has-chat-model="hasChatModel"
-      :batch-busy="batchBusy"
-      @update:tab="setTab"
-      @update:pinned-group="setPinnedGroup"
-      @update:search="(v) => (searchInput = v)"
-      @update:env="(v) => setFilter('env', v)"
-      @update:realm="(v) => setFilter('realm', v)"
-      @update:project="(v) => setFilter('project', v)"
-      @update:runtime="(v) => setFilter('runtime', v)"
-      @update:topic="(v) => setFilter('topic', v)"
-      @update:project-scope="(v) => setFilter('projectScope', v)"
-      @select="select"
-      @capture="openCapture()"
-      @create="createOpen = true"
-      @refresh="entriesQuery.refetch()"
-      @load-more="entriesQuery.fetchNextPage()"
-      @clear-filters="clearFilters"
-      @reset-filters="resetAllFilters"
-      @preview-boot="bootPreviewOpen = true"
-      @batch-organize="onBatchOrganize"
-    />
+    <div class="rail-col">
+      <MemoryIndexRail
+        :tab="tab"
+        :pinned-group="pinnedGroup"
+        :project="project"
+        :realm="realm"
+        :runtime="runtime"
+        :facets="facets"
+        :counts="counts"
+        :pending-inbox-count="pendingInboxCount"
+        @update:tab="setTab"
+        @update:pinned-group="setPinnedGroup"
+        @update:project="(v) => setFilter('project', v)"
+        @update:realm="(v) => setFilter('realm', v)"
+        @update:runtime="(v) => setFilter('runtime', v)"
+        @preview-boot="bootPreviewOpen = true"
+      />
+    </div>
 
-    <Transition name="detail-reveal">
-      <section v-if="selectedId" class="detail-col" aria-label="记忆详情">
-        <div
-          v-if="isPeek && !narrow"
-          class="pane-splitter"
-          role="separator"
-          aria-orientation="vertical"
-          aria-label="拖动调节列表与详情宽度"
-          :aria-valuenow="effectiveListWidth"
-          :aria-valuemin="LIST_WIDTH_MIN"
-          :aria-valuemax="maxAllowedWidth"
-          tabindex="0"
-          title="拖动调节宽度，双击恢复默认"
-          @pointerdown="startResize"
-          @dblclick="resetListWidth"
-          @keydown="onSplitterKeydown"
-        />
-        <MemoryEditor
-          :key="selectedId"
-          ref="editorRef"
-          :short-id="selectedId"
-          :facets="facets"
-          @changed="onChanged"
-          @deleted="onDeleted"
-          @restored="onRestored"
-          @open="select"
+    <div class="list-col">
+      <MemoryList
+        ref="listRef"
+        :tab="tab"
+        :pinned-group="pinnedGroup"
+        :search="searchInput"
+        :env="env"
+        :realm="realm"
+        :project="project"
+        :runtime="runtime"
+        :topic="topic"
+        :project-scope="projectScope"
+        :selected-id="selectedId"
+        :items="items"
+        :linked-titles="linkedTitles"
+        :facets="facets"
+        :counts="counts"
+        :query="entriesQuery"
+        :has-next-page="Boolean(entriesQuery.hasNextPage.value)"
+        :fetching-next-page="entriesQuery.isFetchingNextPage.value"
+        :has-chat-model="hasChatModel"
+        :batch-busy="batchBusy"
+        @update:pinned-group="setPinnedGroup"
+        @update:search="(v) => (searchInput = v)"
+        @update:env="(v) => setFilter('env', v)"
+        @update:realm="(v) => setFilter('realm', v)"
+        @update:project="(v) => setFilter('project', v)"
+        @update:runtime="(v) => setFilter('runtime', v)"
+        @update:topic="(v) => setFilter('topic', v)"
+        @update:project-scope="(v) => setFilter('projectScope', v)"
+        @select="select"
+        @capture="openCapture()"
+        @create="createOpen = true"
+        @open-rail="railOpen = true"
+        @load-more="entriesQuery.fetchNextPage()"
+        @clear-filters="clearFilters"
+        @reset-filters="resetAllFilters"
+        @batch-organize="onBatchOrganize"
+      />
+    </div>
+
+    <section class="detail-col" aria-label="记忆详情">
+      <div
+        v-if="!isFullscreen && !narrow"
+        class="pane-splitter"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="拖动调节列表与详情宽度"
+        :aria-valuenow="effectiveListWidth"
+        :aria-valuemin="LIST_WIDTH_MIN"
+        :aria-valuemax="maxAllowedWidth"
+        tabindex="0"
+        title="拖动调节宽度，双击恢复默认"
+        @pointerdown="startResize"
+        @dblclick="resetListWidth"
+        @keydown="onSplitterKeydown"
+      />
+
+      <MemoryEditor
+        v-if="selectedId"
+        :key="selectedId"
+        ref="editorRef"
+        :short-id="selectedId"
+        :facets="facets"
+        :fullscreen="fullscreen"
+        :show-back="narrow"
+        @changed="onChanged"
+        @deleted="onDeleted"
+        @restored="onRestored"
+        @open="select"
+        @toggle-fullscreen="toggleFullscreen"
+        @back="select(null)"
+      />
+      <div v-else class="detail-empty">
+        <EmptyState
+          :icon="icons.memories"
+          title="选择或新建一条记忆"
+          description="从左侧目录与清单切换记忆，或直接使用随手记与新建沉淀内容。"
         >
-          <template #nav>
-            <div class="nav-group">
-              <UButton
-                size="xs"
-                color="neutral"
-                variant="ghost"
-                :icon="icons.back"
-                class="mobile-back-btn"
-                @click="select(null)"
-              >
-                返回列表
-              </UButton>
-              <UButton
-                size="xs"
-                color="neutral"
-                variant="ghost"
-                :icon="fullscreen ? icons.minimize : icons.maximize"
-                class="desktop-only-btn"
-                @click="toggleFullscreen"
-              >
-                {{ fullscreen ? '退出全屏' : '全屏展开' }}
-              </UButton>
-            </div>
-            <div class="nav-group">
-              <UButton
-                size="xs"
-                color="neutral"
-                variant="ghost"
-                :icon="icons.cancel"
-                class="desktop-only-btn"
-                title="关闭详情（Esc）"
-                @click="select(null)"
-              >
-                关闭
-              </UButton>
-            </div>
+          <template #actions>
+            <UButton size="sm" :icon="icons.capture" @click="openCapture()">随手记</UButton>
+            <UButton
+              size="sm"
+              color="neutral"
+              variant="outline"
+              :icon="icons.add"
+              @click="createOpen = true"
+            >
+              新建记忆
+            </UButton>
           </template>
-        </MemoryEditor>
-      </section>
-    </Transition>
+        </EmptyState>
+      </div>
+    </section>
 
-    <CreateMemoryModal v-model:open="createOpen" :facets="facets" @created="onCreated" />
+    <USlideover
+      v-model:open="railOpen"
+      side="left"
+      title="目录与状态"
+      :ui="{ content: 'max-w-72 sm:max-w-72', body: 'p-0 sm:p-0 flex flex-col min-h-0' }"
+    >
+      <template #body>
+        <MemoryIndexRail
+          :tab="tab"
+          :pinned-group="pinnedGroup"
+          :project="project"
+          :realm="realm"
+          :runtime="runtime"
+          :facets="facets"
+          :counts="counts"
+          :pending-inbox-count="pendingInboxCount"
+          @update:tab="setTab"
+          @update:pinned-group="setPinnedGroup"
+          @update:project="(v) => setFilter('project', v)"
+          @update:realm="(v) => setFilter('realm', v)"
+          @update:runtime="(v) => setFilter('runtime', v)"
+          @preview-boot="((railOpen = false), (bootPreviewOpen = true))"
+        />
+      </template>
+    </USlideover>
+
+    <CreateMemoryModal
+      v-model:open="createOpen"
+      :facets="facets"
+      :initial-scope="createInitialScope"
+      @created="onCreated"
+    />
     <QuickCaptureModal
       v-model:open="captureOpen"
       :initial-text="captureDraft"
@@ -682,51 +753,54 @@ onBeforeUnmount(() => {
 .memories-layout {
   display: grid;
   flex: 1 1 auto;
-  grid-template-rows: auto minmax(0, 1fr);
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: 216px var(--list-width, 336px) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   width: 100%;
-  max-width: 76rem;
+  max-width: 1840px;
   margin-inline: auto;
   min-width: 0;
   min-height: 0;
-  transition: max-width 220ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-.memories-layout.has-selection {
-  max-width: 1840px;
 }
 .memories-layout.is-resizing {
-  transition: none;
   user-select: none;
   cursor: col-resize;
 }
-@media (min-width: 1217px) {
-  .memories-layout:not(.has-selection) {
-    border-inline: 1px solid var(--ui-border-muted);
-  }
-}
 @media (min-width: 1841px) {
-  .memories-layout.has-selection {
+  .memories-layout {
     border-inline: 1px solid var(--ui-border-muted);
   }
 }
-.memories-layout.is-peek {
-  grid-template-columns: var(--list-width, 380px) minmax(0, 1fr);
+.rail-col {
+  min-width: 0;
+  min-height: 0;
+  border-right: 1px solid var(--ui-border-accented);
 }
-.memories-layout.is-peek :deep(.list-pane) {
-  border-right: 1px solid var(--ui-rule);
-}
-.memories-layout.is-fullscreen :deep(.list-pane) {
-  display: none;
+.list-col {
+  min-width: 0;
+  min-height: 0;
+  border-right: 1px solid var(--ui-border-accented);
 }
 .detail-col {
   position: relative;
-  grid-column: 2;
-  grid-row: 2;
   display: flex;
   flex-direction: column;
   min-width: 0;
   min-height: 0;
   background: var(--ui-bg);
+}
+.detail-empty {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.memories-layout.is-fullscreen {
+  grid-template-columns: minmax(0, 1fr);
+}
+.memories-layout.is-fullscreen .rail-col,
+.memories-layout.is-fullscreen .list-col {
+  display: none;
 }
 .pane-splitter {
   position: absolute;
@@ -757,67 +831,22 @@ onBeforeUnmount(() => {
 .pane-splitter:focus-visible {
   outline: 0;
 }
-.detail-reveal-enter-active {
-  transition:
-    opacity 200ms cubic-bezier(0.22, 1, 0.36, 1),
-    transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-.detail-reveal-leave-active {
-  transition: opacity 140ms ease;
-}
-.detail-reveal-enter-from {
-  opacity: 0;
-  transform: translateX(18px);
-}
-.detail-reveal-leave-to {
-  opacity: 0;
-}
-.memories-layout.is-fullscreen .detail-col {
-  grid-column: 1;
-  grid-row: 2;
-}
-.nav-group {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-.mobile-back-btn {
-  display: none;
-}
-@media (prefers-reduced-motion: reduce) {
-  .memories-layout,
-  .detail-reveal-enter-active,
-  .detail-reveal-leave-active {
-    transition: none;
-  }
-}
 @media (max-width: 1023.98px) {
-  .memories-layout,
-  .memories-layout.is-peek {
+  .memories-layout {
     grid-template-columns: minmax(0, 1fr);
     max-width: none;
   }
+  .rail-col,
   .pane-splitter {
     display: none;
   }
-  .memories-layout.is-peek :deep(.list-pane) {
+  .list-col {
     border-right: 0;
   }
-  .memories-layout.has-selection {
-    grid-template-rows: minmax(0, 1fr);
-  }
-  .memories-layout.has-selection :deep(.list-toolbar),
-  .memories-layout.has-selection :deep(.list-pane) {
+  .memories-layout.has-selection .list-col {
     display: none;
   }
-  .memories-layout.has-selection .detail-col {
-    grid-column: 1;
-    grid-row: 1;
-  }
-  .mobile-back-btn {
-    display: inline-flex;
-  }
-  .desktop-only-btn {
+  .memories-layout:not(.has-selection) .detail-col {
     display: none;
   }
 }

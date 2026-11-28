@@ -12,6 +12,7 @@ import hygieneSweepDrawer from '../components/HygieneSweepDrawer.vue?raw'
 import memoryContent from '../components/MemoryContent.vue?raw'
 import memoryEditor from '../components/MemoryEditor.vue?raw'
 import memoryHistoryDrawer from '../components/MemoryHistoryDrawer.vue?raw'
+import memoryIndexRail from '../components/MemoryIndexRail.vue?raw'
 import memoryList from '../components/MemoryList.vue?raw'
 import modelSettings from '../components/ModelSettings.vue?raw'
 import quickCaptureModal from '../components/QuickCaptureModal.vue?raw'
@@ -52,36 +53,36 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(themeSource).toContain('focus-visible:ring-2')
   })
 
-  it('记忆页采用默认居中清单、可拖动分隔栏与平滑展开抽屉，并支持编辑态键盘保护与筛选互斥', () => {
-    expect(memoriesPage).not.toContain('grid-template-columns: 360px minmax(0, 1fr)')
-    expect(memoriesPage).toContain('var(--list-width, 380px) minmax(0, 1fr)')
+  it('记忆页采用默认三栏工作台、可拖动分隔栏与全屏切换，并支持编辑态键盘保护与筛选互斥', () => {
+    expect(memoriesPage).toContain('216px var(--list-width, 336px) minmax(0, 1fr)')
+    expect(memoriesPage).toContain('<MemoryIndexRail')
     expect(memoriesPage).toContain('role="separator"')
     expect(memoriesPage).toContain('pane-splitter')
-    expect(memoriesPage).toContain('detail-reveal')
-    expect(memoriesPage).toContain('is-peek')
     expect(memoriesPage).toContain('is-fullscreen')
-    expect(memoriesPage).toContain('全屏展开')
-    expect(memoriesPage).toContain('退出全屏')
     expect(memoriesPage).toContain('exitEditing')
     expect(memoriesPage).toContain('<QuickCaptureModal')
     expect(memoriesPage).toContain('projectScope')
+    expect(consoleLayout).toContain('随手记')
+    expect(consoleLayout).toContain('captureRoute')
   })
 
-  it('记忆列表收敛多维筛选至下拉面板，统一 30px 工具栏对齐与实线/虚线左缘图例', () => {
-    expect(memoryList).toContain('ENTRY_TABS')
+  it('左目录轨与中栏记忆列表分工清晰，保留多维筛选下拉、实线/虚线左缘图例与常驻预算微条', () => {
+    expect(memoryIndexRail).toContain('全局全文')
+    expect(memoryIndexRail).toContain('场景全文')
+    expect(memoryIndexRail).toContain('目录常驻')
+    expect(memoryIndexRail).toContain('rail-swatch solid')
+    expect(memoryIndexRail).toContain('rail-swatch dashed')
+    expect(memoryIndexRail).toContain('GLOBAL_FULL_CHAR_CAP')
+    expect(memoryIndexRail).toContain('预览终端加载')
+    expect(memoryIndexRail).toContain('facets?.runtimes')
     expect(memoryList).toContain('UPopover')
-    expect(memoryList).toContain('useKbd')
     expect(memoryList).toContain('id="memories-search"')
-    expect(memoryList).toContain('height: 28px')
-    expect(memoryList).toContain('height: 36px')
     expect(memoryList).toContain('无项目归属')
     expect(memoryList).toContain('已关联项目')
     expect(memoryList).toContain('facets?.topics')
     expect(memoryList).toContain('facets?.projects')
     expect(memoryList).toContain('facets?.envs')
     expect(memoryList).toContain('facets?.realms')
-    expect(memoryList).toContain('rail-swatch solid')
-    expect(memoryList).toContain('rail-swatch dashed')
     expect(memoryList).toContain('is-pinned::before')
     expect(memoryList).toContain('is-episode::before')
     expect(memoryList).toContain('随手记')
@@ -166,15 +167,14 @@ describe('记忆布局、随手记与图标清单', () => {
   it('列表保留近改副行与分层常驻水位，支持自定义客户端与终端启动加载预览，历史工作台与 DiffViewer 完整', () => {
     expect(memoryList).toContain('近改：')
     expect(memoryList).toContain('GLOBAL_FULL_CHAR_CAP')
-    expect(memoryList).toContain('pinned-budget')
     expect(memoryList).toContain('facets?.runtimes')
-    expect(memoryList).toContain('预览终端加载')
-    expect(memoryList).not.toMatch(
-      /\.list-pane\.is-compact\s+\.row-disclosure\s*\{[^}]*display:\s*none/,
-    )
+    expect(memoryIndexRail).toContain('health-budget-btn')
+    expect(memoryIndexRail).toContain('预览终端加载')
     expect(memoriesPage).toContain('<BootPreviewDrawer')
     expect(sceneScopePicker).toContain('自定义客户端')
     expect(memoryEditor).toContain('pinPopoverOpen')
+    expect(memoryEditor).toContain('scopePopoverOpen')
+    expect(memoryEditor).toContain('is-single-col')
     expect(memoryEditor).toContain('editBootWarnings')
     expect(bootPreviewDrawer).toContain('api.previewBoot')
     expect(bootPreviewDrawer).toContain('ring-2 ring-rule')
