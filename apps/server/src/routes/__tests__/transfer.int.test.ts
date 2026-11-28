@@ -138,7 +138,13 @@ describe.skipIf(!testDatabaseUrl)('数据导入导出与外部 Lore 导入', () 
         return true
       },
       enqueueExtraction: async () => {},
-      enqueueDream: async () => 'run-1',
+      enqueueDream: async () => ({
+        started: true,
+        status: 'started' as const,
+        position: 0,
+        jobId: 'run-1',
+        runId: 'run-1',
+      }),
       isDreamRunning: async () => false,
       enqueueCleanup: async () => true,
     }

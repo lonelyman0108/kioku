@@ -8,6 +8,7 @@ export const UI_STORAGE_KEYS = {
   historyDiffContext: 'kioku:history:diff-context',
   tasksClearedBefore: 'kioku:tasks:cleared-before',
   tasksAckErrorAt: 'kioku:tasks:ack-error-at',
+  tasksDismissedIssueIds: 'kioku:tasks:dismissed-issue-ids',
   inboxFailureDismissedAt: 'kioku:inbox:failure-dismissed-at',
 } as const
 

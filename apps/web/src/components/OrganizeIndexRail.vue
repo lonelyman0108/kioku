@@ -45,9 +45,15 @@ const props = withDefaults(
     latestFailedItems: readonly DreamFailedItem[]
     latestRetryableShortIds: readonly string[]
     standardBusy: boolean
+    standardLabel: string
+    standardDisabled: boolean
+    tidySingleDisabled: boolean
+    tidyMenuDisabled: boolean
+    crossMemoryDisabled: boolean
     retryFailedBusy: boolean
+    retryFailedDisabled: boolean
     cancellingDream: boolean
-    modelRunDisabled: boolean
+    queuedCount: number
     tidyMenuItems: DropdownMenuItem[][]
     inDrawer?: boolean
   }>(),
@@ -219,11 +225,11 @@ function onRetryFromPopover() {
             size="xs"
             :icon="icons.sparkles"
             :loading="standardBusy"
-            :disabled="modelRunDisabled"
+            :disabled="standardDisabled"
             block
             @click="emit('runStandard')"
           >
-            {{ state?.running ? '整理中' : '增量整理' }}
+            {{ standardLabel || '增量整理' }}
           </UButton>
 
           <UDropdownMenu
@@ -235,7 +241,7 @@ function onRetryFromPopover() {
             <button
               type="button"
               class="rail-action-btn"
-              :disabled="modelRunDisabled"
+              :disabled="tidyMenuDisabled"
               title="逐条规范标题、补概要并归档旧日志"
             >
               <span class="rail-action-lead">
@@ -256,7 +262,7 @@ function onRetryFromPopover() {
             v-else
             type="button"
             class="rail-action-btn"
-            :disabled="modelRunDisabled || tidyPendingCount <= 0"
+            :disabled="tidySingleDisabled"
             :title="
               tidyPendingCount > 0 ? '逐条规范标题、补概要并归档旧日志' : '当前暂无待规范记忆'
             "
@@ -274,7 +280,7 @@ function onRetryFromPopover() {
           <button
             type="button"
             class="rail-action-btn"
-            :disabled="modelRunDisabled"
+            :disabled="crossMemoryDisabled"
             title="全库扫描重复合并、补全双链与常驻巡检"
             @click="emit('runCrossMemory')"
           >
@@ -338,9 +344,13 @@ function onRetryFromPopover() {
           <template v-if="progress">
             已生成 {{ progress.suggested }} 条<template v-if="progress.failed > 0"
               >，失败 {{ progress.failed }} 条</template
-            >
+            ><template v-if="queuedCount > 0"> · 等待 {{ queuedCount }} 项</template>
           </template>
-          <template v-else>正在准备候选记忆…</template>
+          <template v-else
+            >正在准备候选记忆…<template v-if="queuedCount > 0">
+              · 等待 {{ queuedCount }} 项</template
+            ></template
+          >
         </p>
         <div class="status-btn-row">
           <UButton
@@ -393,7 +403,7 @@ function onRetryFromPopover() {
             variant="outline"
             :icon="icons.refresh"
             :loading="retryFailedBusy"
-            :disabled="modelRunDisabled"
+            :disabled="retryFailedDisabled"
             class="flex-1"
             @click="emit('retryFailed')"
           >
@@ -573,7 +583,7 @@ function onRetryFromPopover() {
                 variant="outline"
                 :icon="icons.refresh"
                 :loading="retryFailedBusy"
-                :disabled="modelRunDisabled"
+                :disabled="retryFailedDisabled"
                 block
                 @click="onRetryFromPopover"
               >

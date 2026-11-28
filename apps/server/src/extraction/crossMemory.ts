@@ -2176,7 +2176,11 @@ export async function runCrossMemoryFunnel(
     }
   }
 
-  const abortedReason = guard.abortedReason ?? (options.signal?.aborted ? '任务已中止' : null)
+  const abortedReason =
+    guard.abortedReason ??
+    guard.queueFatalReason(succeededTasks) ??
+    (options.signal?.aborted ? '任务已中止' : null)
+  const fatalAbort = guard.isQueueFatalAbort(succeededTasks)
   let outcome: DreamOutcome = 'ok'
   let error: string | null = null
   if (failedTasks > 0 || abortedReason) {
@@ -2197,6 +2201,7 @@ export async function runCrossMemoryFunnel(
       failedItems,
       retriedCount,
       abortedReason,
+      ...(fatalAbort ? { fatalAbort: true } : {}),
     },
     insertedIds,
     matchedPendingIds,

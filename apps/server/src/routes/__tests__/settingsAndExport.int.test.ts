@@ -56,7 +56,13 @@ describe.skipIf(!testDatabaseUrl)('模型设置、向量回填、数据导出与
           return true
         },
         enqueueExtraction: async () => {},
-        enqueueDream: async () => 'run-1',
+        enqueueDream: async () => ({
+          started: true,
+          status: 'started',
+          position: 0,
+          jobId: 'run-1',
+          runId: 'run-1',
+        }),
         isDreamRunning: async () => false,
         enqueueCleanup: async () => true,
       },

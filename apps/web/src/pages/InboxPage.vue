@@ -8,6 +8,8 @@ let latestInboxToastId: string | null = null
 import {
   checkCaptureIntegrity,
   DREAM_KINDS,
+  DREAM_QUEUE_LIMIT,
+  dreamTaskSignature,
   effectiveBootMode,
   extractCredentialPlaceholders,
   extractTargetShortIds,
@@ -94,7 +96,11 @@ const inboxQuery = useQuery({
   queryFn: () => api.inbox(),
   refetchInterval: (query) => {
     const d = query.state.data
-    return d?.dreamState.running || d?.embeddingBackfill?.running ? 2500 : false
+    return d?.dreamState.running ||
+      (d?.dreamState.queued?.length ?? 0) > 0 ||
+      d?.embeddingBackfill?.running
+      ? 2500
+      : false
   },
 })
 
@@ -764,24 +770,90 @@ const triggeringMode = ref<DreamMode | 'retry' | null>(null)
 const cancellingDream = ref(false)
 const pendingDreamConfirm = ref<PendingDreamConfirm | null>(null)
 const dreamConfirmError = ref<string | null>(null)
-const standardBusy = computed(
-  () =>
-    triggeringMode.value === 'standard' ||
-    (Boolean(state.value?.running) &&
-      progress.value?.mode !== 'tidy' &&
-      progress.value?.mode !== 'cross_memory'),
+
+const queuedDreamTasks = computed(() => state.value?.queued ?? [])
+const queuedCount = computed(() => queuedDreamTasks.value.length)
+const dreamQueueLimit = computed(() => state.value?.queueLimit ?? DREAM_QUEUE_LIMIT)
+const dreamQueueFull = computed(
+  () => Boolean(state.value?.running) && queuedCount.value >= dreamQueueLimit.value,
 )
-const retryFailedBusy = computed(() => triggeringMode.value === 'retry')
-const modelRunDisabled = computed(
+const activeDreamSignatures = computed(() => {
+  const sigs = new Set<string>()
+  const s = state.value
+  if (s?.running) {
+    if (s.activeTask) {
+      sigs.add(dreamTaskSignature({ mode: s.activeTask.mode, ...s.activeTask.params }))
+    } else if (s.progress) {
+      sigs.add(dreamTaskSignature({ mode: s.progress.mode }))
+    }
+  }
+  for (const q of queuedDreamTasks.value) {
+    sigs.add(dreamTaskSignature({ mode: q.mode, ...q.params }))
+  }
+  return sigs
+})
+
+const STANDARD_SIGNATURE = dreamTaskSignature({ mode: 'standard' })
+const CROSS_MEMORY_SIGNATURE = dreamTaskSignature({ mode: 'cross_memory', scope: 'full_corpus' })
+const TIDY_FULL_SIGNATURE = dreamTaskSignature({ mode: 'tidy', pinnedFirst: true, all: true })
+
+function isDreamRequestDisabled(req: Partial<TriggerDreamRequest>): boolean {
+  if (!data.value || !hasChatModel.value || Boolean(triggeringMode.value)) return true
+  if (dreamQueueFull.value) return true
+  return activeDreamSignatures.value.has(dreamTaskSignature(req))
+}
+
+const standardRunning = computed(() => {
+  const s = state.value
+  if (!s?.running) return false
+  if (s.activeTask) {
+    return (
+      dreamTaskSignature({ mode: s.activeTask.mode, ...s.activeTask.params }) === STANDARD_SIGNATURE
+    )
+  }
+  return progress.value?.mode === 'standard'
+})
+const standardQueued = computed(() =>
+  queuedDreamTasks.value.some(
+    (q) => dreamTaskSignature({ mode: q.mode, ...q.params }) === STANDARD_SIGNATURE,
+  ),
+)
+const standardLabel = computed(() => {
+  if (standardRunning.value) return '整理中'
+  if (standardQueued.value) return '排队中'
+  return '增量整理'
+})
+const standardBusy = computed(() => triggeringMode.value === 'standard' || standardRunning.value)
+const standardDisabled = computed(() => isDreamRequestDisabled({ mode: 'standard' }))
+const crossMemoryDisabled = computed(
   () =>
     !data.value ||
     !hasChatModel.value ||
     Boolean(triggeringMode.value) ||
-    Boolean(state.value?.running),
+    dreamQueueFull.value ||
+    activeDreamSignatures.value.has(CROSS_MEMORY_SIGNATURE),
+)
+const tidySingleDisabled = computed(
+  () =>
+    tidyPendingCount.value <= 0 ||
+    !data.value ||
+    !hasChatModel.value ||
+    Boolean(triggeringMode.value) ||
+    dreamQueueFull.value ||
+    activeDreamSignatures.value.has(TIDY_FULL_SIGNATURE),
+)
+const retryFailedBusy = computed(() => triggeringMode.value === 'retry')
+const retryFailedDisabled = computed(
+  () =>
+    latestRetryableShortIds.value.length === 0 ||
+    isDreamRequestDisabled({
+      mode: latestRunMode.value,
+      targetShortIds: [...latestRetryableShortIds.value],
+    }),
 )
 
 function requestHeavyDreamConfirm(confirm: PendingDreamConfirm) {
-  if (modelRunDisabled.value) return
+  if (isDreamRequestDisabled(confirm.req)) return
   railOpen.value = false
   dreamConfirmError.value = null
   pendingDreamConfirm.value = confirm
@@ -791,7 +863,7 @@ function openCrossMemoryConfirm() {
   requestHeavyDreamConfirm({
     req: { mode: 'cross_memory', scope: 'full_corpus' },
     title: '发起全库查重与关联？',
-    action: '开始查重与关联',
+    action: state.value?.running ? '加入整理队列' : '开始查重与关联',
     icon: icons.links,
     consequences: [
       '将对全部活跃记忆扫描重复合并、缺失双链与常驻结构，会触发多轮模型调用并耗时数分钟。',
@@ -807,7 +879,7 @@ function openFullTidyConfirm() {
   requestHeavyDreamConfirm({
     req: { mode: 'tidy', pinnedFirst: true, all: true },
     title: `发起全量规范整理（${count} 条）？`,
-    action: '开始规范整理',
+    action: state.value?.running ? '加入整理队列' : '开始规范整理',
     icon: icons.tidy,
     consequences: [
       `将逐条对全部 ${count} 条待规范记忆执行标题规范、概要补全与旧日志归档，会触发多轮模型调用。`,
@@ -819,40 +891,51 @@ function openFullTidyConfirm() {
 
 const tidyMenuItems = computed<DropdownMenuItem[][]>(() => {
   const count = tidyPendingCount.value
-  const disabledLlm = modelRunDisabled.value
   const list: DropdownMenuItem[] = []
   if (count > 10) {
+    const req10: Partial<TriggerDreamRequest> = { mode: 'tidy', pinnedFirst: true, limit: 10 }
     list.push({
       label: '本批 10 条（常驻优先）',
       icon: icons.tidy,
-      disabled: disabledLlm,
+      disabled: isDreamRequestDisabled(req10),
       onSelect: () => {
         railOpen.value = false
-        void triggerDream({ mode: 'tidy', pinnedFirst: true, limit: 10 })
+        void triggerDream(req10)
       },
     })
   }
   if (count > 20) {
+    const req20: Partial<TriggerDreamRequest> = { mode: 'tidy', pinnedFirst: true, limit: 20 }
     list.push({
       label: '本批 20 条（常驻优先）',
       icon: icons.tidy,
-      disabled: disabledLlm,
+      disabled: isDreamRequestDisabled(req20),
       onSelect: () => {
         railOpen.value = false
-        void triggerDream({ mode: 'tidy', pinnedFirst: true, limit: 20 })
+        void triggerDream(req20)
       },
     })
   }
   if (count > 10) {
+    const reqAll: Partial<TriggerDreamRequest> = { mode: 'tidy', pinnedFirst: true, all: true }
     list.push({
       label: `全部待规范（${count} 条）`,
       icon: icons.listChecks,
-      disabled: disabledLlm,
+      disabled: isDreamRequestDisabled(reqAll),
       onSelect: openFullTidyConfirm,
     })
   }
   return [list]
 })
+
+const tidyMenuDisabled = computed(
+  () =>
+    !data.value ||
+    !hasChatModel.value ||
+    Boolean(triggeringMode.value) ||
+    dreamQueueFull.value ||
+    (tidyMenuItems.value[0]?.every((item) => item.disabled) ?? true),
+)
 
 async function confirmHeavyDream() {
   const pending = pendingDreamConfirm.value
@@ -868,23 +951,31 @@ async function triggerDream(
   req: Partial<TriggerDreamRequest>,
   onError?: (message: string) => void,
 ): Promise<boolean> {
-  if (triggeringMode.value || state.value?.running) return false
+  if (triggeringMode.value) return false
   const mode: DreamMode = req.mode === 'tidy' || req.mode === 'cross_memory' ? req.mode : 'standard'
   const isRetry = Boolean(req.targetShortIds?.length)
   triggeringMode.value = isRetry ? 'retry' : mode
   try {
     const res = await api.runDream(req)
     if (res.started) {
-      const title = isRetry
-        ? `已发起失败项重试（${req.targetShortIds!.length} 条）`
-        : mode === 'cross_memory'
-          ? '已发起查重与关联任务'
-          : mode === 'tidy'
-            ? req.all
-              ? '已发起全部规范整理任务'
-              : `已发起规范整理（本批 ${req.limit ?? 10} 条）`
-            : '已发起增量整理任务'
-      toast.add({ title, color: 'success' })
+      if (res.status === 'queued') {
+        toast.add({
+          title: `已加入整理队列，当前排第 ${res.position ?? 1} 位`,
+          description: dreamModeLabels[mode],
+          color: 'success',
+        })
+      } else {
+        const title = isRetry
+          ? `已发起失败项重试（${req.targetShortIds!.length} 条）`
+          : mode === 'cross_memory'
+            ? '已发起查重与关联任务'
+            : mode === 'tidy'
+              ? req.all
+                ? '已发起全部规范整理任务'
+                : `已发起规范整理（本批 ${req.limit ?? 10} 条）`
+              : '已发起增量整理任务'
+        toast.add({ title, color: 'success' })
+      }
     } else {
       const msg = res.reason ?? '当前无需重复整理'
       if (onError) onError(msg)
@@ -904,13 +995,42 @@ async function triggerDream(
   }
 }
 
-function triggerRetryFailed() {
-  if (!latestRetryableShortIds.value.length) return
+async function triggerRetryFailed() {
+  if (!latestRetryableShortIds.value.length || triggeringMode.value) return
   railOpen.value = false
-  void triggerDream({
-    mode: latestRunMode.value,
-    targetShortIds: latestRetryableShortIds.value,
-  })
+  const run = latestRun.value
+  if (!run) {
+    void triggerDream({
+      mode: latestRunMode.value,
+      targetShortIds: [...latestRetryableShortIds.value],
+    })
+    return
+  }
+  triggeringMode.value = 'retry'
+  try {
+    const res = await api.retryDreamRun(run.id, { scope: 'failed_only' })
+    if (res.started) {
+      if (res.status === 'queued') {
+        toast.add({
+          title: `已加入整理队列，当前排第 ${res.position ?? 1} 位`,
+          description: `失败项重试（${latestRetryableShortIds.value.length} 条）`,
+          color: 'success',
+        })
+      } else {
+        toast.add({
+          title: `已发起失败项重试（${latestRetryableShortIds.value.length} 条）`,
+          color: 'success',
+        })
+      }
+    } else {
+      toast.add({ title: res.reason ?? '当前无法重新发起重试', color: 'neutral' })
+    }
+    await queryClient.invalidateQueries({ queryKey: ['inbox'] })
+  } catch (err) {
+    toast.add({ title: err instanceof ApiError ? err.message : '重试整理失败', color: 'error' })
+  } finally {
+    triggeringMode.value = null
+  }
 }
 
 async function cancelDream() {
@@ -1416,9 +1536,15 @@ onBeforeUnmount(() => {
         :latest-failed-items="latestFailedItems"
         :latest-retryable-short-ids="latestRetryableShortIds"
         :standard-busy="standardBusy"
+        :standard-label="standardLabel"
+        :standard-disabled="standardDisabled"
+        :tidy-single-disabled="tidySingleDisabled"
+        :tidy-menu-disabled="tidyMenuDisabled"
+        :cross-memory-disabled="crossMemoryDisabled"
         :retry-failed-busy="retryFailedBusy"
+        :retry-failed-disabled="retryFailedDisabled"
         :cancelling-dream="cancellingDream"
-        :model-run-disabled="modelRunDisabled"
+        :queued-count="queuedCount"
         :tidy-menu-items="tidyMenuItems"
         @update:scope-filter="setScopeFilter"
         @update:kind-filter="setKindFilter"
@@ -1754,7 +1880,7 @@ onBeforeUnmount(() => {
                 color="neutral"
                 variant="outline"
                 :icon="icons.links"
-                :disabled="modelRunDisabled"
+                :disabled="crossMemoryDisabled"
                 @click="openCrossMemoryConfirm"
               >
                 查重与关联
@@ -1764,10 +1890,10 @@ onBeforeUnmount(() => {
                 size="sm"
                 :icon="icons.sparkles"
                 :loading="standardBusy"
-                :disabled="modelRunDisabled"
+                :disabled="standardDisabled"
                 @click="triggerDream({ mode: 'standard' })"
               >
-                {{ state?.running ? '整理中' : '增量整理' }}
+                {{ standardLabel }}
               </UButton>
               <UButton
                 v-if="me.data.value && !hasChatModel"
@@ -1854,9 +1980,15 @@ onBeforeUnmount(() => {
           :latest-failed-items="latestFailedItems"
           :latest-retryable-short-ids="latestRetryableShortIds"
           :standard-busy="standardBusy"
+          :standard-label="standardLabel"
+          :standard-disabled="standardDisabled"
+          :tidy-single-disabled="tidySingleDisabled"
+          :tidy-menu-disabled="tidyMenuDisabled"
+          :cross-memory-disabled="crossMemoryDisabled"
           :retry-failed-busy="retryFailedBusy"
+          :retry-failed-disabled="retryFailedDisabled"
           :cancelling-dream="cancellingDream"
-          :model-run-disabled="modelRunDisabled"
+          :queued-count="queuedCount"
           :tidy-menu-items="tidyMenuItems"
           in-drawer
           @update:scope-filter="setScopeFilter"

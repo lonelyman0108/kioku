@@ -15,7 +15,7 @@ import {
   SceneSlugList,
   TopicList,
 } from './entries'
-import { ShortId } from './links'
+import { normalizeShortId, ShortId } from './links'
 
 export const DREAM_KINDS = [
   'distill_episode',
@@ -121,6 +121,73 @@ export const DreamFailedItem = z.object({
 })
 export type DreamFailedItem = z.infer<typeof DreamFailedItem>
 
+export const DREAM_QUEUE_LIMIT = 5
+
+export const DreamRunParams = z.object({
+  scope: DreamScope.optional(),
+  limit: z.number().int().min(1).max(200).optional(),
+  all: z.boolean().optional(),
+  pinnedFirst: z.boolean().optional(),
+  targetShortIds: z.array(ShortId).min(1).max(200).optional(),
+})
+export type DreamRunParams = z.infer<typeof DreamRunParams>
+
+export function normalizeDreamRunParams(
+  input:
+    | {
+        scope?: DreamScope | undefined
+        limit?: number | undefined
+        all?: boolean | undefined
+        pinnedFirst?: boolean | undefined
+        targetShortIds?: readonly string[] | undefined
+      }
+    | null
+    | undefined,
+): DreamRunParams | undefined {
+  if (!input) return undefined
+  const targetShortIds = input.targetShortIds?.length
+    ? [...new Set(input.targetShortIds.map(normalizeShortId))].sort()
+    : undefined
+  const params: DreamRunParams = {
+    ...(input.scope !== undefined ? { scope: input.scope } : {}),
+    ...(input.limit !== undefined ? { limit: input.limit } : {}),
+    ...(input.all !== undefined ? { all: input.all } : {}),
+    ...(input.pinnedFirst !== undefined ? { pinnedFirst: input.pinnedFirst } : {}),
+    ...(targetShortIds?.length ? { targetShortIds } : {}),
+  }
+  return Object.keys(params).length > 0 ? params : undefined
+}
+
+export function dreamTaskSignature(input: {
+  mode?: DreamMode | undefined
+  scope?: DreamScope | undefined
+  limit?: number | undefined
+  all?: boolean | undefined
+  pinnedFirst?: boolean | undefined
+  targetShortIds?: readonly string[] | undefined
+}): string {
+  const mode: DreamMode =
+    input.mode === 'tidy' || input.mode === 'cross_memory' ? input.mode : 'standard'
+  const ids = input.targetShortIds?.length
+    ? [...new Set(input.targetShortIds.map(normalizeShortId))].sort()
+    : []
+  const all = Boolean(input.all)
+  const scope =
+    mode === 'cross_memory'
+      ? (input.scope ?? (ids.length ? 'incremental' : 'full_corpus'))
+      : (input.scope ?? '')
+  const pinnedFirst = mode === 'tidy' ? input.pinnedFirst !== false : Boolean(input.pinnedFirst)
+  const limit =
+    mode === 'tidy'
+      ? all || ids.length > 0
+        ? ''
+        : String(input.limit ?? 10)
+      : input.limit !== undefined
+        ? String(input.limit)
+        : ''
+  return `${mode}|scope=${scope}|limit=${limit}|all=${all ? '1' : '0'}|pin=${pinnedFirst ? '1' : '0'}|ids=${ids.join(',')}`
+}
+
 export const DreamRunSummary = z.object({
   id: z.string(),
   trigger: DreamTrigger,
@@ -132,9 +199,21 @@ export const DreamRunSummary = z.object({
   failedItems: z.array(DreamFailedItem).optional(),
   retriedCount: z.number().int().min(0).optional(),
   abortedReason: z.string().nullable().optional(),
+  params: DreamRunParams.optional(),
+  retriedByRunId: z.string().optional(),
   createdAt: z.string(),
 })
 export type DreamRunSummary = z.infer<typeof DreamRunSummary>
+
+export const QueuedDreamTask = z.object({
+  id: z.string(),
+  mode: DreamMode,
+  trigger: DreamTrigger,
+  params: DreamRunParams.optional(),
+  targetCount: z.number().int().min(0).optional(),
+  enqueuedAt: z.string(),
+})
+export type QueuedDreamTask = z.infer<typeof QueuedDreamTask>
 
 export const DreamModeScheduleState = z.object({
   enabled: z.boolean(),
@@ -155,6 +234,10 @@ export const DreamState = z.object({
     .optional(),
   running: z.boolean(),
   progress: DreamProgress.nullable().optional(),
+  activeJobId: z.string().nullable().optional(),
+  activeTask: QueuedDreamTask.nullable().optional(),
+  queued: z.array(QueuedDreamTask).optional(),
+  queueLimit: z.number().int().min(1).optional(),
   lastRunAt: z.string().nullable(),
   lastOutcome: DreamOutcome.nullable(),
   lastError: z.string().nullable(),
@@ -265,12 +348,38 @@ export const TriggerDreamRequest = z.object({
 })
 export type TriggerDreamRequest = z.infer<typeof TriggerDreamRequest>
 
+export const DREAM_ENQUEUE_STATUSES = ['started', 'queued', 'rejected'] as const
+export const DreamEnqueueStatus = z.enum(DREAM_ENQUEUE_STATUSES)
+export type DreamEnqueueStatus = z.infer<typeof DreamEnqueueStatus>
+
 export const TriggerDreamResponse = z.object({
   started: z.boolean(),
+  status: DreamEnqueueStatus.optional(),
+  position: z.number().int().min(0).optional(),
+  jobId: z.string().nullable().optional(),
   runId: z.string().nullable(),
   reason: z.string().nullable().optional(),
 })
 export type TriggerDreamResponse = z.infer<typeof TriggerDreamResponse>
+
+export const RemoveQueuedDreamResponse = z.object({
+  removed: z.boolean(),
+})
+export type RemoveQueuedDreamResponse = z.infer<typeof RemoveQueuedDreamResponse>
+
+export const ClearDreamQueueResponse = z.object({
+  removed: z.number().int().min(0),
+})
+export type ClearDreamQueueResponse = z.infer<typeof ClearDreamQueueResponse>
+
+export const DREAM_RETRY_SCOPES = ['failed_only', 'full'] as const
+export const DreamRetryScope = z.enum(DREAM_RETRY_SCOPES)
+export type DreamRetryScope = z.infer<typeof DreamRetryScope>
+
+export const RetryDreamRunRequest = z.object({
+  scope: DreamRetryScope.optional(),
+})
+export type RetryDreamRunRequest = z.infer<typeof RetryDreamRunRequest>
 
 // ---- 编辑页主动单条规范整理与深度查重关联契约 ----
 

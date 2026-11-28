@@ -5,6 +5,7 @@ import {
   BootPreviewResponse,
   CancelTaskResponse,
   CapturePlanResponse,
+  ClearDreamQueueResponse,
   CredentialListResponse,
   CredentialMeta,
   DatabaseCheck,
@@ -24,6 +25,7 @@ import {
   MeResponse,
   ModelsSettingsResponse,
   RebuildEmbeddingsResponse,
+  RemoveQueuedDreamResponse,
   RevealCredentialResponse,
   ReviseSuggestionResponse,
   SessionsResponse,
@@ -51,6 +53,7 @@ import {
   type ImportApplyRequest,
   type ImportPreviewRequest,
   type RestoreEntryRequest,
+  type RetryDreamRunRequest,
   type ReviseSuggestionRequest,
   type RotateApiKeyRequest,
   type SetupRequest,
@@ -292,6 +295,17 @@ export const api = {
       schema: TriggerDreamResponse,
     }),
   cancelDream: () => request('POST', '/console/dream/cancel', { schema: CancelTaskResponse }),
+  removeQueuedDream: (id: string) =>
+    request('DELETE', `/console/dream/queue/${encodeURIComponent(id)}`, {
+      schema: RemoveQueuedDreamResponse,
+    }),
+  clearDreamQueue: () =>
+    request('DELETE', '/console/dream/queue', { schema: ClearDreamQueueResponse }),
+  retryDreamRun: (runId: string, body?: RetryDreamRunRequest) =>
+    request('POST', `/console/dream/runs/${encodeURIComponent(runId)}/retry`, {
+      ...(body ? { body } : {}),
+      schema: TriggerDreamResponse,
+    }),
 
   // 托管凭据（明文值只在显式查看时返回，不进 TanStack Query 缓存）
   credentials: () => request('GET', '/console/credentials', { schema: CredentialListResponse }),

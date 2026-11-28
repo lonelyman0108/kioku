@@ -109,7 +109,13 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
         enqueueExtraction: async (target, delay) => {
           enqueued.push({ ...target, delay })
         },
-        enqueueDream: async () => 'run-1',
+        enqueueDream: async () => ({
+          started: true,
+          status: 'started',
+          position: 0,
+          jobId: 'run-1',
+          runId: 'run-1',
+        }),
         isDreamRunning: async () => false,
         enqueueCleanup: async () => true,
       },
@@ -2212,7 +2218,13 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
           return true
         },
         enqueueExtraction: async () => undefined,
-        enqueueDream: async () => 'job-1',
+        enqueueDream: async () => ({
+          started: true,
+          status: 'started',
+          position: 0,
+          jobId: 'job-1',
+          runId: 'job-1',
+        }),
         isDreamRunning: async () => false,
         cancelDream: async () => {
           dreamCancelled = true
@@ -2270,7 +2282,13 @@ describe.skipIf(!testDatabaseUrl)('对话缓冲抽取与 4 类 Dream 整理建�
       enqueueEmbed: (id) => enqueuedEmbedIds.push(id),
       enqueueBackfill: async () => true,
       enqueueExtraction: async () => undefined,
-      enqueueDream: async () => null,
+      enqueueDream: async () => ({
+        started: false,
+        status: 'rejected',
+        position: 0,
+        jobId: null,
+        runId: null,
+      }),
       isDreamRunning: async () => false,
       enqueueCleanup: async () => true,
     })

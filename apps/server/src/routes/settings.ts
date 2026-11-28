@@ -192,6 +192,9 @@ export function settingsRoutes(deps: Deps) {
         return c.json({ error: '尚未配置或启用嵌入模型' }, 400)
       }
       const missing = await countMissingEmbeddings(deps.db, coverage.model)
+      if (missing === 0) {
+        return c.json({ queued: 0 }, 200)
+      }
       const enqueued = await deps.jobs?.enqueueBackfill({ total: missing, model: coverage.model })
       return c.json({ queued: enqueued === false ? 0 : missing }, 200)
     })

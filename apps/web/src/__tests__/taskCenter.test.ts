@@ -1,15 +1,26 @@
-import type { DreamState, EmbeddingBackfillState } from '@kioku/contracts'
+import {
+  dreamTaskSignature,
+  normalizeDreamRunParams,
+  type DreamState,
+  type EmbeddingBackfillState,
+} from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
 import {
+  collectNewDreamRuns,
   computeOverallProgress,
   countUnreadFailures,
   filterVisibleHistory,
+  formatDreamTaskScope,
+  isActiveTaskIssue,
   isTaskIssueOutcome,
   latestFailedTimestamp,
   latestInboxFailureTimestamp,
   mergeTaskHistory,
+  parseDismissedIssueKeys,
+  serializeDismissedIssueKeys,
   shouldShowInboxFailureBanner,
+  splitTaskHistory,
   TASK_HISTORY_LIMIT,
 } from '../taskCenter'
 
@@ -428,5 +439,160 @@ describe('taskCenter', () => {
     })
     expect(shouldShowInboxFailureBanner(newerFailState, t1, t1)).toBe(true)
     expect(shouldShowInboxFailureBanner(newerFailState, t2, t1)).toBe(false)
+
+    // 已发起重试的最新失败记录自动隐藏横幅
+    const retriedFailState = makeDreamState({
+      lastRunAt: t2,
+      lastOutcome: 'failed',
+      lastError: '请求超时',
+      recentRuns: [
+        {
+          id: 'fail-2',
+          trigger: 'manual',
+          mode: 'tidy',
+          outcome: 'failed',
+          considered: 1,
+          suggested: 0,
+          error: '请求超时',
+          retriedByRunId: 'retry-job-3',
+          createdAt: t2,
+        },
+      ],
+    })
+    expect(shouldShowInboxFailureBanner(retriedFailState, null, null)).toBe(false)
+  })
+
+  it('保留 mode、failedItems、params 与 retriedByRunId，并按是否已重试或忽略拆分异常任务与近期记录', () => {
+    const t1 = '2026-11-27T01:00:00.000Z'
+    const t2 = '2026-11-27T02:00:00.000Z'
+    const t3 = '2026-11-27T03:00:00.000Z'
+    const t4 = '2026-11-27T04:00:00.000Z'
+
+    const merged = mergeTaskHistory(
+      makeDreamState({
+        recentRuns: [
+          {
+            id: 'r-ok',
+            trigger: 'manual',
+            mode: 'standard',
+            outcome: 'ok',
+            considered: 5,
+            suggested: 2,
+            error: null,
+            createdAt: t4,
+          },
+          {
+            id: 'r-partial',
+            trigger: 'manual',
+            mode: 'tidy',
+            outcome: 'partial',
+            considered: 10,
+            suggested: 8,
+            error: '部分失败',
+            params: { limit: 10, pinnedFirst: true },
+            failedItems: [
+              { shortId: 'm-234abc', title: '架构笔记', kind: 'tidy', reason: '响应超时' },
+            ],
+            createdAt: t3,
+          },
+          {
+            id: 'r-retried',
+            trigger: 'manual',
+            mode: 'cross_memory',
+            outcome: 'failed',
+            considered: 3,
+            suggested: 0,
+            error: '504 超时',
+            params: { scope: 'full_corpus' },
+            retriedByRunId: 'r-ok',
+            createdAt: t2,
+          },
+          {
+            id: 'r-failed',
+            trigger: 'manual',
+            mode: 'standard',
+            outcome: 'failed',
+            considered: 1,
+            suggested: 0,
+            error: '网络中断',
+            createdAt: t1,
+          },
+        ],
+      }),
+      null,
+    )
+
+    const partialItem = merged.find((i) => i.id === 'r-partial')!
+    expect(partialItem.mode).toBe('tidy')
+    expect(partialItem.failedItems).toHaveLength(1)
+    expect(partialItem.params).toEqual({ limit: 10, pinnedFirst: true })
+
+    const retriedItem = merged.find((i) => i.id === 'r-retried')!
+    expect(retriedItem.retriedByRunId).toBe('r-ok')
+    expect(isActiveTaskIssue(retriedItem)).toBe(false)
+
+    // 未忽略时仅有 r-partial 与 r-failed 置顶
+    const split1 = splitTaskHistory(merged)
+    expect(split1.issues.map((i) => i.id)).toEqual(['r-partial', 'r-failed'])
+    expect(split1.recent.map((i) => i.id)).toEqual(['r-ok', 'r-retried'])
+    expect(countUnreadFailures(merged, null, null)).toBe(2)
+    expect(latestFailedTimestamp(merged)).toBe(t3)
+
+    // 本地忽略 r-partial 后自动移入近期记录并从角标排除
+    const rawDismissed = serializeDismissedIssueKeys(['dream:r-partial'])
+    const dismissed = parseDismissedIssueKeys(rawDismissed)
+    expect(parseDismissedIssueKeys('not-json').size).toBe(0)
+
+    const split2 = splitTaskHistory(merged, dismissed)
+    expect(split2.issues.map((i) => i.id)).toEqual(['r-failed'])
+    expect(split2.recent.map((i) => i.id)).toEqual(['r-ok', 'r-partial', 'r-retried'])
+    expect(countUnreadFailures(merged, null, null, dismissed)).toBe(1)
+    expect(latestFailedTimestamp(merged, dismissed)).toBe(t1)
+  })
+
+  it('collectNewDreamRuns 按时间顺序提取连续队列中的全部新增完成记录', () => {
+    const mk = (id: string, sec: number) => ({
+      id,
+      trigger: 'manual' as const,
+      mode: 'standard' as const,
+      outcome: 'ok' as const,
+      considered: 1,
+      suggested: 0,
+      error: null,
+      createdAt: new Date(Date.UTC(2026, 10, 28, 0, 0, sec)).toISOString(),
+    })
+
+    const runs = [mk('r-4', 40), mk('r-3', 30), mk('r-2', 20), mk('r-1', 10)]
+    expect(collectNewDreamRuns(runs, 'r-4')).toEqual([])
+    expect(collectNewDreamRuns(runs, 'r-2').map((r) => r.id)).toEqual(['r-3', 'r-4'])
+    expect(collectNewDreamRuns(runs, 'r-0').map((r) => r.id)).toEqual(['r-1', 'r-2', 'r-3', 'r-4'])
+    expect(collectNewDreamRuns(runs, null).map((r) => r.id)).toEqual(['r-1', 'r-2', 'r-3', 'r-4'])
+    expect(collectNewDreamRuns([], 'r-1')).toEqual([])
+  })
+
+  it('任务签名规范化与队列范围文案准确一致', () => {
+    expect(dreamTaskSignature({ mode: 'tidy' })).toBe(
+      dreamTaskSignature({ mode: 'tidy', limit: 10, pinnedFirst: true }),
+    )
+    expect(dreamTaskSignature({ mode: 'tidy', limit: 10 })).not.toBe(
+      dreamTaskSignature({ mode: 'tidy', limit: 20 }),
+    )
+    expect(dreamTaskSignature({ mode: 'cross_memory' })).toBe(
+      dreamTaskSignature({ mode: 'cross_memory', scope: 'full_corpus' }),
+    )
+    expect(
+      dreamTaskSignature({ mode: 'tidy', targetShortIds: ['m-345XYZ', 'm-234ABC', 'm-234abc'] }),
+    ).toBe(dreamTaskSignature({ mode: 'tidy', targetShortIds: ['m-234abc', 'm-345xyz'] }))
+    expect(normalizeDreamRunParams({})).toBeUndefined()
+
+    expect(formatDreamTaskScope('standard')).toBe('近期会话摘要与新记忆')
+    expect(formatDreamTaskScope('tidy', { all: true })).toBe('全部待规范记忆')
+    expect(formatDreamTaskScope('tidy', { limit: 20, pinnedFirst: true })).toBe(
+      '本批 20 条（常驻优先）',
+    )
+    expect(formatDreamTaskScope('cross_memory', { scope: 'full_corpus' })).toBe('全库范围')
+    expect(formatDreamTaskScope('tidy', { targetShortIds: ['m-234abc', 'm-345xyz'] })).toBe(
+      '指定 2 条记忆重试',
+    )
   })
 })

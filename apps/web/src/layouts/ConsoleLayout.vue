@@ -108,7 +108,11 @@ const inbox = useQuery({
   staleTime: 30_000,
   refetchInterval: (query) => {
     const d = query.state.data
-    return d?.dreamState.running || d?.embeddingBackfill?.running ? 2500 : false
+    return d?.dreamState.running ||
+      (d?.dreamState.queued?.length ?? 0) > 0 ||
+      d?.embeddingBackfill?.running
+      ? 2500
+      : false
   },
 })
 const inboxBadge = computed(() => {
