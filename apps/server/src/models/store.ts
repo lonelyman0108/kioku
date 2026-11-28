@@ -3,6 +3,8 @@ import {
   DEFAULT_DREAM_INTERVAL_HOURS,
   DEFAULT_TIDY_INTERVAL_HOURS,
   DREAM_INTERVAL_HOURS_MAX,
+  DreamRunParams,
+  normalizeDreamRunParams,
   REASONING_EFFORTS,
   type DreamFailedItem,
   type DreamOutcome,
@@ -11,6 +13,7 @@ import {
   type DreamState,
   type ModelEndpointConfig,
   type ModelEndpointInput,
+  type QueuedDreamTask,
   type ReasoningEffort,
   type TaskReasoningEffort,
   type UpdateDreamSettingsInput,
@@ -339,6 +342,13 @@ function parseFailedItems(raw: unknown): DreamFailedItem[] | undefined {
   return out
 }
 
+function parseDreamRunParams(raw: unknown): DreamRunParams | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const parsed = DreamRunParams.safeParse(raw)
+  if (!parsed.success) return undefined
+  return normalizeDreamRunParams(parsed.data)
+}
+
 function parseDreamRunSummary(raw: unknown): DreamRunSummary | null {
   if (!raw || typeof raw !== 'object') return null
   const r = raw as Record<string, unknown>
@@ -369,6 +379,11 @@ function parseDreamRunSummary(raw: unknown): DreamRunSummary | null {
       : r.abortedReason === null
         ? null
         : undefined
+  const params = parseDreamRunParams(r.params)
+  const retriedByRunId =
+    typeof r.retriedByRunId === 'string' && r.retriedByRunId.trim()
+      ? r.retriedByRunId.trim()
+      : undefined
   return {
     id: r.id,
     trigger: r.trigger,
@@ -380,6 +395,8 @@ function parseDreamRunSummary(raw: unknown): DreamRunSummary | null {
     ...(failedItems !== undefined ? { failedItems } : {}),
     ...(retriedCount !== undefined ? { retriedCount } : {}),
     ...(abortedReason !== undefined ? { abortedReason } : {}),
+    ...(params !== undefined ? { params } : {}),
+    ...(retriedByRunId !== undefined ? { retriedByRunId } : {}),
     createdAt: r.createdAt,
   }
 }
@@ -491,10 +508,18 @@ export async function shouldAutoEnableDream(
   return !hadPreviousChatLlm
 }
 
+export interface DreamRuntimeMeta {
+  activeJobId?: string | null | undefined
+  activeTask?: QueuedDreamTask | null | undefined
+  queued?: QueuedDreamTask[] | undefined
+  queueLimit?: number | undefined
+}
+
 export async function loadDreamState(
   db: Db | Tx,
   running = false,
   progress: DreamProgress | null = null,
+  runtime?: DreamRuntimeMeta,
 ): Promise<DreamState> {
   const [row] = await db
     .select()
@@ -512,6 +537,10 @@ export async function loadDreamState(
     recentRuns: stored.recentRuns,
     running,
     progress: running ? progress : null,
+    ...(runtime?.activeJobId !== undefined ? { activeJobId: runtime.activeJobId } : {}),
+    ...(runtime?.activeTask !== undefined ? { activeTask: runtime.activeTask } : {}),
+    ...(runtime?.queued !== undefined ? { queued: runtime.queued } : {}),
+    ...(runtime?.queueLimit !== undefined ? { queueLimit: runtime.queueLimit } : {}),
   }
 }
 
@@ -566,41 +595,140 @@ export async function updateDreamConfig(
   return next
 }
 
-export async function recordDreamRun(db: Db | Tx, summary: DreamRunSummary): Promise<void> {
-  const current = parseStoredDreamState(
-    (await db.select().from(settings).where(eq(settings.key, DREAM_STATE_SETTING_KEY)).limit(1))[0]
-      ?.value,
-  )
-  const runMode = summary.mode ?? 'standard'
-  const nextSchedules = {
-    standard: { ...current.schedules.standard },
-    crossMemory: { ...current.schedules.crossMemory },
-    tidy: { ...current.schedules.tidy },
-  }
-  if (summary.outcome !== 'cancelled') {
-    if (runMode === 'cross_memory') {
-      nextSchedules.crossMemory.lastRunAt = summary.createdAt
-    } else if (runMode === 'tidy') {
-      nextSchedules.tidy.lastRunAt = summary.createdAt
-    } else {
-      nextSchedules.standard.lastRunAt = summary.createdAt
+async function updateDreamStateRow(
+  db: Db | Tx,
+  mutate: (current: StoredDreamState) => StoredDreamState | null,
+): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    let [row] = await tx
+      .select({ value: settings.value })
+      .from(settings)
+      .where(eq(settings.key, DREAM_STATE_SETTING_KEY))
+      .for('update')
+    if (!row) {
+      await tx
+        .insert(settings)
+        .values({ key: DREAM_STATE_SETTING_KEY, value: DEFAULT_DREAM_STATE, updatedAt: sql`now()` })
+        .onConflictDoNothing()
+      ;[row] = await tx
+        .select({ value: settings.value })
+        .from(settings)
+        .where(eq(settings.key, DREAM_STATE_SETTING_KEY))
+        .for('update')
     }
-  }
-  const next: StoredDreamState = {
-    ...current,
-    schedules: nextSchedules,
-    lastRunAt: summary.createdAt,
-    lastOutcome: summary.outcome,
-    lastError: summary.error,
-    recentRuns: [summary, ...current.recentRuns].slice(0, RECENT_RUNS_LIMIT),
-  }
-  await db
-    .insert(settings)
-    .values({ key: DREAM_STATE_SETTING_KEY, value: next, updatedAt: sql`now()` })
-    .onConflictDoUpdate({
-      target: settings.key,
-      set: { value: next, updatedAt: sql`now()` },
+    const current = parseStoredDreamState(row?.value)
+    const next = mutate(current)
+    if (!next) return false
+    await tx
+      .update(settings)
+      .set({ value: next, updatedAt: sql`now()` })
+      .where(eq(settings.key, DREAM_STATE_SETTING_KEY))
+    return true
+  })
+}
+
+export async function recordDreamRuns(
+  db: Db | Tx,
+  summaries: readonly DreamRunSummary[],
+  options: { preserveLastOutcome?: boolean | undefined } = {},
+): Promise<void> {
+  if (!summaries.length) return
+  await updateDreamStateRow(db, (current) => {
+    const nextSchedules = {
+      standard: { ...current.schedules.standard },
+      crossMemory: { ...current.schedules.crossMemory },
+      tidy: { ...current.schedules.tidy },
+    }
+    let lastRunAt = current.lastRunAt
+    let lastOutcome = current.lastOutcome
+    let lastError = current.lastError
+    const prepended: DreamRunSummary[] = []
+
+    for (const summary of summaries) {
+      if (summary.outcome !== 'cancelled') {
+        const runMode = summary.mode ?? 'standard'
+        if (runMode === 'cross_memory') {
+          nextSchedules.crossMemory.lastRunAt = summary.createdAt
+        } else if (runMode === 'tidy') {
+          nextSchedules.tidy.lastRunAt = summary.createdAt
+        } else {
+          nextSchedules.standard.lastRunAt = summary.createdAt
+        }
+      }
+      if (!options.preserveLastOutcome) {
+        lastRunAt = summary.createdAt
+        lastOutcome = summary.outcome
+        lastError = summary.error
+      } else if (lastRunAt === null) {
+        lastRunAt = summary.createdAt
+      }
+      prepended.unshift(summary)
+    }
+
+    return {
+      ...current,
+      schedules: nextSchedules,
+      lastRunAt,
+      lastOutcome,
+      lastError,
+      recentRuns: [...prepended, ...current.recentRuns].slice(0, RECENT_RUNS_LIMIT),
+    }
+  })
+}
+
+export async function recordDreamRun(
+  db: Db | Tx,
+  summary: DreamRunSummary,
+  options: { preserveLastOutcome?: boolean | undefined } = {},
+): Promise<void> {
+  await recordDreamRuns(db, [summary], options)
+}
+
+export async function markDreamRunRetried(
+  db: Db | Tx,
+  runId: string,
+  retriedByRunId: string,
+): Promise<boolean> {
+  return updateDreamStateRow(db, (current) => {
+    let matched = false
+    const nextRuns = current.recentRuns.map((run) => {
+      if (run.id !== runId) return run
+      matched = true
+      return { ...run, retriedByRunId }
     })
+    if (!matched) return null
+    return {
+      ...current,
+      recentRuns: nextRuns,
+    }
+  })
+}
+
+// 当等待中的重试任务被手动移出或清空时，回滚原记录的 retriedByRunId，使其重新进入待恢复异常视图
+export async function clearDreamRunRetriedBy(
+  db: Db | Tx,
+  retriedByRunIds: readonly string[],
+): Promise<number> {
+  const targets = new Set(retriedByRunIds.filter((id) => id.trim().length > 0))
+  if (!targets.size) return 0
+  let cleared = 0
+  await updateDreamStateRow(db, (current) => {
+    let changed = false
+    const nextRuns = current.recentRuns.map((run) => {
+      if (!run.retriedByRunId || !targets.has(run.retriedByRunId)) return run
+      changed = true
+      cleared++
+      const next = { ...run }
+      delete next.retriedByRunId
+      return next
+    })
+    if (!changed) return null
+    return {
+      ...current,
+      recentRuns: nextRuns,
+    }
+  })
+  return cleared
 }
 
 export interface TidyCheckedVersionTransition {

@@ -1,15 +1,29 @@
-import type { DreamState, EmbeddingBackfillState } from '@kioku/contracts'
+import {
+  dreamTaskSignature,
+  normalizeDreamRunParams,
+  type DreamState,
+  type EmbeddingBackfillState,
+} from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
 import {
+  CASCADE_ABORT_REASON_PREFIX,
+  collectNewDreamRuns,
   computeOverallProgress,
   countUnreadFailures,
   filterVisibleHistory,
+  findLatestInboxFailureRun,
+  formatDreamTaskScope,
+  isActiveTaskIssue,
+  isCascadeAbortedRun,
   isTaskIssueOutcome,
   latestFailedTimestamp,
   latestInboxFailureTimestamp,
   mergeTaskHistory,
+  parseDismissedIssueKeys,
+  serializeDismissedIssueKeys,
   shouldShowInboxFailureBanner,
+  splitTaskHistory,
   TASK_HISTORY_LIMIT,
 } from '../taskCenter'
 
@@ -428,5 +442,320 @@ describe('taskCenter', () => {
     })
     expect(shouldShowInboxFailureBanner(newerFailState, t1, t1)).toBe(true)
     expect(shouldShowInboxFailureBanner(newerFailState, t2, t1)).toBe(false)
+
+    // 已发起重试的最新失败记录自动隐藏横幅
+    const retriedFailState = makeDreamState({
+      lastRunAt: t2,
+      lastOutcome: 'failed',
+      lastError: '请求超时',
+      recentRuns: [
+        {
+          id: 'fail-2',
+          trigger: 'manual',
+          mode: 'tidy',
+          outcome: 'failed',
+          considered: 1,
+          suggested: 0,
+          error: '请求超时',
+          retriedByRunId: 'retry-job-3',
+          createdAt: t2,
+        },
+      ],
+    })
+    expect(shouldShowInboxFailureBanner(retriedFailState, null, null)).toBe(false)
+  })
+
+  it('保留 mode、failedItems、params 与 retriedByRunId，并按是否已重试或忽略拆分异常任务与近期记录', () => {
+    const t1 = '2026-11-27T01:00:00.000Z'
+    const t2 = '2026-11-27T02:00:00.000Z'
+    const t3 = '2026-11-27T03:00:00.000Z'
+    const t4 = '2026-11-27T04:00:00.000Z'
+
+    const merged = mergeTaskHistory(
+      makeDreamState({
+        recentRuns: [
+          {
+            id: 'r-ok',
+            trigger: 'manual',
+            mode: 'standard',
+            outcome: 'ok',
+            considered: 5,
+            suggested: 2,
+            error: null,
+            createdAt: t4,
+          },
+          {
+            id: 'r-partial',
+            trigger: 'manual',
+            mode: 'tidy',
+            outcome: 'partial',
+            considered: 10,
+            suggested: 8,
+            error: '部分失败',
+            params: { limit: 10, pinnedFirst: true },
+            failedItems: [
+              { shortId: 'm-234abc', title: '架构笔记', kind: 'tidy', reason: '响应超时' },
+            ],
+            createdAt: t3,
+          },
+          {
+            id: 'r-retried',
+            trigger: 'manual',
+            mode: 'cross_memory',
+            outcome: 'failed',
+            considered: 3,
+            suggested: 0,
+            error: '504 超时',
+            params: { scope: 'full_corpus' },
+            retriedByRunId: 'r-ok',
+            createdAt: t2,
+          },
+          {
+            id: 'r-failed',
+            trigger: 'manual',
+            mode: 'standard',
+            outcome: 'failed',
+            considered: 1,
+            suggested: 0,
+            error: '网络中断',
+            createdAt: t1,
+          },
+        ],
+      }),
+      null,
+    )
+
+    const partialItem = merged.find((i) => i.id === 'r-partial')!
+    expect(partialItem.mode).toBe('tidy')
+    expect(partialItem.failedItems).toHaveLength(1)
+    expect(partialItem.params).toEqual({ limit: 10, pinnedFirst: true })
+
+    const retriedItem = merged.find((i) => i.id === 'r-retried')!
+    expect(retriedItem.retriedByRunId).toBe('r-ok')
+    expect(isActiveTaskIssue(retriedItem)).toBe(false)
+
+    // 未忽略时仅有 r-partial 与 r-failed 置顶
+    const split1 = splitTaskHistory(merged)
+    expect(split1.issues.map((i) => i.id)).toEqual(['r-partial', 'r-failed'])
+    expect(split1.recent.map((i) => i.id)).toEqual(['r-ok', 'r-retried'])
+    expect(countUnreadFailures(merged, null, null)).toBe(2)
+    expect(latestFailedTimestamp(merged)).toBe(t3)
+
+    // 本地忽略 r-partial 后自动移入近期记录并从角标排除
+    const rawDismissed = serializeDismissedIssueKeys(['dream:r-partial'])
+    const dismissed = parseDismissedIssueKeys(rawDismissed)
+    expect(parseDismissedIssueKeys('not-json').size).toBe(0)
+
+    const split2 = splitTaskHistory(merged, dismissed)
+    expect(split2.issues.map((i) => i.id)).toEqual(['r-failed'])
+    expect(split2.recent.map((i) => i.id)).toEqual(['r-ok', 'r-partial', 'r-retried'])
+    expect(countUnreadFailures(merged, null, null, dismissed)).toBe(1)
+    expect(latestFailedTimestamp(merged, dismissed)).toBe(t1)
+  })
+
+  it('collectNewDreamRuns 按时间顺序提取连续队列中的全部新增完成记录', () => {
+    const mk = (id: string, sec: number) => ({
+      id,
+      trigger: 'manual' as const,
+      mode: 'standard' as const,
+      outcome: 'ok' as const,
+      considered: 1,
+      suggested: 0,
+      error: null,
+      createdAt: new Date(Date.UTC(2026, 10, 28, 0, 0, sec)).toISOString(),
+    })
+
+    const runs = [mk('r-4', 40), mk('r-3', 30), mk('r-2', 20), mk('r-1', 10)]
+    expect(collectNewDreamRuns(runs, 'r-4')).toEqual([])
+    expect(collectNewDreamRuns(runs, 'r-2').map((r) => r.id)).toEqual(['r-3', 'r-4'])
+    expect(collectNewDreamRuns(runs, 'r-0').map((r) => r.id)).toEqual(['r-1', 'r-2', 'r-3', 'r-4'])
+    expect(collectNewDreamRuns(runs, null).map((r) => r.id)).toEqual(['r-1', 'r-2', 'r-3', 'r-4'])
+    expect(collectNewDreamRuns([], 'r-1')).toEqual([])
+  })
+
+  it('任务签名规范化与队列范围文案准确一致', () => {
+    expect(dreamTaskSignature({ mode: 'tidy' })).toBe(
+      dreamTaskSignature({ mode: 'tidy', limit: 10, pinnedFirst: true }),
+    )
+    expect(dreamTaskSignature({ mode: 'tidy', limit: 10 })).not.toBe(
+      dreamTaskSignature({ mode: 'tidy', limit: 20 }),
+    )
+    expect(dreamTaskSignature({ mode: 'cross_memory' })).toBe(
+      dreamTaskSignature({ mode: 'cross_memory', scope: 'full_corpus' }),
+    )
+    expect(
+      dreamTaskSignature({ mode: 'tidy', targetShortIds: ['m-345XYZ', 'm-234ABC', 'm-234abc'] }),
+    ).toBe(dreamTaskSignature({ mode: 'tidy', targetShortIds: ['m-234abc', 'm-345xyz'] }))
+    expect(normalizeDreamRunParams({})).toBeUndefined()
+
+    expect(formatDreamTaskScope('standard')).toBe('近期会话摘要与新记忆')
+    expect(formatDreamTaskScope('tidy', { all: true })).toBe('全部待规范记忆')
+    expect(formatDreamTaskScope('tidy', { limit: 20, pinnedFirst: true })).toBe(
+      '本批 20 条（常驻优先）',
+    )
+    expect(formatDreamTaskScope('cross_memory', { scope: 'full_corpus' })).toBe('全库范围')
+    expect(formatDreamTaskScope('tidy', { targetShortIds: ['m-234abc', 'm-345xyz'] })).toBe(
+      '指定 2 条记忆重试',
+    )
+  })
+
+  it('上游故障熔断压入联动取消记录时，仍准确识别真实失败项并联动横幅与忽略水位', () => {
+    const tFail = '2026-11-28T01:00:00.000Z'
+    const tCascade1 = '2026-11-28T01:00:01.000Z'
+    const tCascade2 = '2026-11-28T01:00:02.000Z'
+
+    const cascadeRun1 = {
+      id: 'cancel-cascade-2',
+      trigger: 'manual' as const,
+      mode: 'cross_memory' as const,
+      outcome: 'cancelled' as const,
+      considered: 0,
+      suggested: 0,
+      error: null,
+      abortedReason: `${CASCADE_ABORT_REASON_PREFIX}：401 鉴权失败`,
+      createdAt: tCascade2,
+    }
+    const cascadeRun2 = {
+      id: 'cancel-cascade-1',
+      trigger: 'manual' as const,
+      mode: 'tidy' as const,
+      outcome: 'cancelled' as const,
+      considered: 0,
+      suggested: 0,
+      error: null,
+      abortedReason: `${CASCADE_ABORT_REASON_PREFIX}：401 鉴权失败`,
+      createdAt: tCascade1,
+    }
+    const realFailure = {
+      id: 'partial-root-cause',
+      trigger: 'manual' as const,
+      mode: 'tidy' as const,
+      outcome: 'partial' as const,
+      considered: 4,
+      suggested: 2,
+      error: '鉴权失效',
+      failedItems: [
+        {
+          shortId: 'm-234abc',
+          title: '鉴权测试记忆',
+          kind: 'tidy' as const,
+          reason: '401 无效密钥',
+        },
+      ],
+      createdAt: tFail,
+    }
+
+    expect(isCascadeAbortedRun(cascadeRun1)).toBe(true)
+    expect(isCascadeAbortedRun({ outcome: 'cancelled', abortedReason: '已手动取消' })).toBe(false)
+
+    const cascadedState = makeDreamState({
+      lastRunAt: tFail,
+      lastOutcome: 'partial',
+      lastError: '鉴权失效',
+      recentRuns: [cascadeRun1, cascadeRun2, realFailure],
+    })
+
+    const matched = findLatestInboxFailureRun(cascadedState)
+    expect(matched?.id).toBe('partial-root-cause')
+    expect(matched?.failedItems).toHaveLength(1)
+    expect(latestInboxFailureTimestamp(cascadedState)).toBe(tFail)
+    expect(shouldShowInboxFailureBanner(cascadedState, null, null)).toBe(true)
+    // 以真实失败时间点忽略后，即便联动取消时间更晚也应隐藏横幅
+    expect(shouldShowInboxFailureBanner(cascadedState, tFail, null)).toBe(false)
+
+    // 真实失败记录回写 retriedByRunId 后自动隐藏横幅
+    const retriedCascaded = makeDreamState({
+      ...cascadedState,
+      recentRuns: [cascadeRun1, cascadeRun2, { ...realFailure, retriedByRunId: 'retry-job-9' }],
+    })
+    expect(shouldShowInboxFailureBanner(retriedCascaded, null, null)).toBe(false)
+
+    // 头部出现更新的成功记录或普通取消记录时不再指向历史失败项
+    const recoveredState = makeDreamState({
+      lastRunAt: tCascade2,
+      lastOutcome: 'partial',
+      lastError: '鉴权失效',
+      recentRuns: [
+        {
+          id: 'newer-ok',
+          trigger: 'manual',
+          mode: 'standard',
+          outcome: 'ok',
+          considered: 1,
+          suggested: 0,
+          error: null,
+          createdAt: tCascade2,
+        },
+        realFailure,
+      ],
+    })
+    expect(findLatestInboxFailureRun(recoveredState)).toBeNull()
+    expect(shouldShowInboxFailureBanner(recoveredState, null, null)).toBe(false)
+  })
+
+  it('先拆分异常任务与近期记录再按清空水位过滤近期记录，避免误删未处理异常', () => {
+    const tFail = '2026-11-28T01:00:00.000Z'
+    const tOk = '2026-11-28T02:00:00.000Z'
+
+    const merged = mergeTaskHistory(
+      makeDreamState({
+        recentRuns: [
+          {
+            id: 'run-ok',
+            trigger: 'manual',
+            mode: 'standard',
+            outcome: 'ok',
+            considered: 2,
+            suggested: 1,
+            error: null,
+            createdAt: tOk,
+          },
+          {
+            id: 'run-fail',
+            trigger: 'manual',
+            mode: 'tidy',
+            outcome: 'failed',
+            considered: 2,
+            suggested: 0,
+            error: '上游超时',
+            createdAt: tFail,
+          },
+        ],
+      }),
+      null,
+    )
+
+    const split = splitTaskHistory(merged)
+    const archivedAfterClear = filterVisibleHistory(split.recent, tOk)
+    expect(split.issues.map((item) => item.id)).toEqual(['run-fail'])
+    expect(archivedAfterClear).toEqual([])
+  })
+
+  it('collectNewDreamRuns 在游标掉出保留窗或导入旧记录时按时间水位兜底防提示轰炸', () => {
+    const mk = (id: string, sec: number) => ({
+      id,
+      trigger: 'manual' as const,
+      mode: 'standard' as const,
+      outcome: 'ok' as const,
+      considered: 1,
+      suggested: 0,
+      error: null,
+      createdAt: new Date(Date.UTC(2026, 10, 28, 0, 0, sec)).toISOString(),
+    })
+
+    const watermark = new Date(Date.UTC(2026, 10, 28, 0, 0, 25)).toISOString()
+    const runs = [mk('r-5', 50), mk('r-4', 40), mk('r-3', 30), mk('r-2', 20), mk('r-1', 10)]
+
+    // 游标 r-old 不在当前保留窗内，按 lastSeenAt 仅提取严格晚于水位的记录
+    expect(collectNewDreamRuns(runs, 'r-old', watermark).map((r) => r.id)).toEqual([
+      'r-3',
+      'r-4',
+      'r-5',
+    ])
+
+    // 全部为早于或等于水位的历史导入记录时返回空数组
+    const oldRuns = [mk('h-2', 25), mk('h-1', 10)]
+    expect(collectNewDreamRuns(oldRuns, null, watermark)).toEqual([])
+    expect(collectNewDreamRuns(oldRuns, 'missing-id', watermark)).toEqual([])
   })
 })

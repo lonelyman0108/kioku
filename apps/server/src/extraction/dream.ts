@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 
 import {
   lintEntryHygiene,
+  normalizeDreamRunParams,
   normalizeShortId,
   type DreamEntrySnapshot,
   type DreamFailedItem,
@@ -30,6 +31,7 @@ import {
   loadTidyCheckedVersions,
   mergeTidyCheckedVersions,
   recordDreamRun,
+  type DreamRuntimeMeta,
 } from '../models/store'
 import { anyTermQuery, clipChars, searchTerms } from '../recall/recall'
 import { inlineText } from '../recall/text'
@@ -199,10 +201,15 @@ export async function insertDreamProposal(
   return inserted[0]?.id ?? null
 }
 
+export type FatalUpstreamCategory = 'auth' | 'not_found' | 'quota'
+
 export class BatchResilienceGuard {
   private cooldownUntil = 0
   private throttled = false
   private consecutiveQuotaErrors = 0
+  private sawQuotaError = false
+  private lastQuotaMessage: string | null = null
+  fatalCategory: FatalUpstreamCategory | null = null
   abortedReason: string | null = null
   private readonly cooldownFallbackMs: number
 
@@ -216,6 +223,16 @@ export class BatchResilienceGuard {
 
   get isAborted(): boolean {
     return this.abortedReason !== null
+  }
+
+  // 鉴权失效、模型不存在、连续额度熔断，或整批零成功且命中额度不足时，均判定为上游致命故障
+  isQueueFatalAbort(succeededCount: number): boolean {
+    return this.fatalCategory !== null || (this.sawQuotaError && succeededCount === 0)
+  }
+
+  queueFatalReason(succeededCount: number): string | null {
+    if (!this.isQueueFatalAbort(succeededCount)) return null
+    return this.abortedReason ?? this.lastQuotaMessage
   }
 
   recordSuccess(): void {
@@ -235,12 +252,16 @@ export class BatchResilienceGuard {
       return
     }
     if (err.category === 'auth' || err.category === 'not_found') {
+      this.fatalCategory ??= err.category
       this.abortedReason ??= err.message.slice(0, 300)
       return
     }
     if (err.category === 'quota') {
+      this.sawQuotaError = true
+      this.lastQuotaMessage ??= err.message.slice(0, 300)
       this.consecutiveQuotaErrors++
       if (this.consecutiveQuotaErrors >= QUOTA_CIRCUIT_BREAKER_THRESHOLD) {
+        this.fatalCategory ??= 'quota'
         this.abortedReason ??= `连续 ${this.consecutiveQuotaErrors} 次触发上游额度不足，已中止剩余批次`
       }
     }
@@ -623,6 +644,7 @@ export interface DreamExecutionResult {
   failedItems: DreamFailedItem[]
   retriedCount: number
   abortedReason: string | null
+  fatalAbort?: boolean | undefined
 }
 
 export interface RunDreamOptions {
@@ -875,6 +897,13 @@ export async function runDream(
   const targetShortIds = options.targetShortIds?.length
     ? [...new Set(options.targetShortIds.map(normalizeShortId))]
     : null
+  const savedParams = normalizeDreamRunParams({
+    scope: options.scope,
+    limit: options.limit,
+    all: options.all,
+    pinnedFirst: options.pinnedFirst,
+    targetShortIds: targetShortIds ?? undefined,
+  })
 
   const finish = async (result: DreamExecutionResult): Promise<DreamExecutionResult> => {
     const summary: DreamRunSummary = {
@@ -888,6 +917,7 @@ export async function runDream(
       ...(result.failedItems.length ? { failedItems: result.failedItems } : {}),
       ...(result.retriedCount > 0 ? { retriedCount: result.retriedCount } : {}),
       ...(result.abortedReason ? { abortedReason: result.abortedReason } : {}),
+      ...(savedParams ? { params: savedParams } : {}),
       createdAt: new Date().toISOString(),
     }
     await recordDreamRun(db, summary)
@@ -1155,6 +1185,7 @@ export async function runDream(
       }
 
       const partial = succeededCount > 0
+      const fatalAbort = guard.isQueueFatalAbort(succeededCount)
       return finish({
         mode: 'tidy',
         outcome: partial ? 'partial' : 'failed',
@@ -1163,7 +1194,8 @@ export async function runDream(
         error: formatRunFailures(totalConsidered, failures, partial, abortedReason),
         failedItems,
         retriedCount,
-        abortedReason,
+        abortedReason: abortedReason ?? guard.queueFatalReason(succeededCount),
+        ...(fatalAbort ? { fatalAbort: true } : {}),
       })
     }
 
@@ -1430,6 +1462,7 @@ export async function runDream(
     }
 
     const partial = succeededBatches > 0
+    const fatalAbort = guard.isQueueFatalAbort(succeededBatches)
     return finish({
       mode: 'standard',
       outcome: partial ? 'partial' : 'failed',
@@ -1438,7 +1471,8 @@ export async function runDream(
       error: formatRunFailures(totalConsidered, standardFailures, partial, abortedReason),
       failedItems,
       retriedCount,
-      abortedReason,
+      abortedReason: abortedReason ?? guard.queueFatalReason(succeededBatches),
+      ...(fatalAbort ? { fatalAbort: true } : {}),
     })
   } catch (err) {
     if (options.signal?.aborted && !guard.isAborted) {
@@ -1453,8 +1487,10 @@ export async function runDream(
         abortedReason: '已手动取消',
       })
     }
+    guard.recordFailure(err)
     const message = err instanceof Error ? err.message : String(err)
     const abortedReason = resolveAbortedReason()
+    const fatalAbort = guard.isQueueFatalAbort(totalSucceeded)
     return finish({
       mode: runMode,
       outcome: totalSucceeded > 0 ? 'partial' : 'failed',
@@ -1463,7 +1499,8 @@ export async function runDream(
       error: message.slice(0, 400),
       failedItems,
       retriedCount,
-      abortedReason,
+      abortedReason: abortedReason ?? guard.queueFatalReason(totalSucceeded),
+      ...(fatalAbort ? { fatalAbort: true } : {}),
     })
   }
 }
@@ -1603,6 +1640,7 @@ export async function loadInbox(
   running = false,
   progress: DreamProgress | null = null,
   embeddingBackfill?: EmbeddingBackfillState,
+  runtime?: DreamRuntimeMeta,
 ): Promise<InboxResponse> {
   const [rows, dreamState, tidyPendingCount] = await Promise.all([
     db
@@ -1611,7 +1649,7 @@ export async function loadInbox(
       .where(eq(dreamSuggestions.status, 'pending'))
       .orderBy(desc(dreamSuggestions.createdAt))
       .limit(INBOX_ITEMS_LIMIT),
-    loadDreamState(db, running, progress),
+    loadDreamState(db, running, progress, runtime),
     countTidyPending(db),
   ])
 

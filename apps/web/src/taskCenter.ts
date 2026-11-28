@@ -1,6 +1,9 @@
 import type {
+  DreamFailedItem,
   DreamMode,
   DreamOutcome,
+  DreamRunParams,
+  DreamRunSummary,
   DreamState,
   EmbeddingBackfillRunSummary,
   EmbeddingBackfillState,
@@ -10,6 +13,8 @@ import { icons } from './icons'
 import { dreamModeLabels } from './labels'
 
 export const TASK_HISTORY_LIMIT = 20
+export const CASCADE_ABORT_REASON_PREFIX = '因前序任务触发上游故障已中止'
+const DISMISSED_ISSUES_LIMIT = 60
 
 export type TaskSource = 'dream' | 'backfill'
 
@@ -17,6 +22,7 @@ export interface TaskHistoryItem {
   key: string
   id: string
   source: TaskSource
+  mode?: DreamMode
   title: string
   icon: string
   trigger: 'manual' | 'scheduled'
@@ -24,12 +30,109 @@ export interface TaskHistoryItem {
   summary: string
   error: string | null
   errorDetail?: string | null
+  failedItems?: DreamFailedItem[]
+  params?: DreamRunParams
+  retriedByRunId?: string | null
   finishedAt: string
   routeTarget: 'inbox' | 'models' | null
 }
 
 export function isTaskIssueOutcome(outcome: DreamOutcome): boolean {
   return outcome === 'failed' || outcome === 'partial'
+}
+
+export function isActiveTaskIssue(
+  item: Pick<TaskHistoryItem, 'key' | 'outcome' | 'retriedByRunId'>,
+  dismissedKeys?: ReadonlySet<string>,
+): boolean {
+  if (!isTaskIssueOutcome(item.outcome)) return false
+  if (item.retriedByRunId) return false
+  if (dismissedKeys?.has(item.key)) return false
+  return true
+}
+
+export function parseDismissedIssueKeys(raw: string | null): Set<string> {
+  if (!raw) return new Set()
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    if (!Array.isArray(parsed)) return new Set()
+    const keys = parsed.filter(
+      (item): item is string => typeof item === 'string' && item.trim().length > 0,
+    )
+    return new Set(keys.slice(-DISMISSED_ISSUES_LIMIT))
+  } catch {
+    return new Set()
+  }
+}
+
+export function serializeDismissedIssueKeys(
+  keys: ReadonlySet<string> | readonly string[],
+): string | null {
+  const list = [...new Set([...keys].filter((item) => item.trim().length > 0))].slice(
+    -DISMISSED_ISSUES_LIMIT,
+  )
+  return list.length > 0 ? JSON.stringify(list) : null
+}
+
+export function splitTaskHistory(
+  items: readonly TaskHistoryItem[],
+  dismissedKeys?: ReadonlySet<string>,
+): { issues: TaskHistoryItem[]; recent: TaskHistoryItem[] } {
+  const issues: TaskHistoryItem[] = []
+  const recent: TaskHistoryItem[] = []
+  for (const item of items) {
+    if (isActiveTaskIssue(item, dismissedKeys)) issues.push(item)
+    else recent.push(item)
+  }
+  return { issues, recent }
+}
+
+export function isCascadeAbortedRun(
+  run: Pick<DreamRunSummary, 'outcome' | 'abortedReason'>,
+): boolean {
+  return (
+    run.outcome === 'cancelled' &&
+    Boolean(run.abortedReason?.startsWith(CASCADE_ABORT_REASON_PREFIX))
+  )
+}
+
+// 按时间先后提取位于 lastSeenRunId 之后的新增完成记录；当游标滑出保留窗口或无游标时退回时间水位防历史导入轰炸
+export function collectNewDreamRuns(
+  recentRuns: readonly DreamRunSummary[],
+  lastSeenRunId: string | null,
+  lastSeenAt: string | null = null,
+): DreamRunSummary[] {
+  if (!recentRuns.length) return []
+  if (lastSeenRunId) {
+    const idx = recentRuns.findIndex((run) => run.id === lastSeenRunId)
+    if (idx === 0) return []
+    if (idx > 0) return recentRuns.slice(0, idx).reverse()
+  }
+  const filtered = lastSeenAt
+    ? recentRuns.filter((run) => isAfterWatermark(run.createdAt, lastSeenAt))
+    : recentRuns
+  return [...filtered].reverse()
+}
+
+export function formatDreamTaskScope(
+  mode: DreamMode,
+  params?: DreamRunParams,
+  targetCount?: number,
+): string {
+  const targeted = params?.targetShortIds?.length ?? 0
+  if (targeted > 0) return `指定 ${targeted} 条记忆重试`
+  if (mode === 'tidy') {
+    if (params?.all) return '全部待规范记忆'
+    const count = params?.limit ?? targetCount
+    if (count && count > 0) {
+      return params?.pinnedFirst === false ? `本批 ${count} 条` : `本批 ${count} 条（常驻优先）`
+    }
+    return '待规范记忆批次'
+  }
+  if (mode === 'cross_memory') {
+    return params?.scope === 'incremental' ? '增量范围' : '全库范围'
+  }
+  return '近期会话摘要与新记忆'
 }
 
 function dreamIconFor(mode: DreamMode | undefined): string {
@@ -118,6 +221,7 @@ export function mergeTaskHistory(
         key,
         id: run.id,
         source: 'dream',
+        mode,
         title: dreamModeLabels[mode],
         icon: dreamIconFor(mode),
         trigger: run.trigger,
@@ -125,6 +229,9 @@ export function mergeTaskHistory(
         summary: summarizeDreamRun(run),
         error: run.error,
         errorDetail: resolveDreamErrorDetail(run),
+        ...(run.failedItems?.length ? { failedItems: run.failedItems } : {}),
+        ...(run.params ? { params: run.params } : {}),
+        ...(run.retriedByRunId ? { retriedByRunId: run.retriedByRunId } : {}),
         finishedAt: run.createdAt,
         routeTarget: run.suggested > 0 || isTaskIssueOutcome(run.outcome) ? 'inbox' : null,
       })
@@ -147,6 +254,7 @@ export function mergeTaskHistory(
         key,
         id: fallback.id,
         source: 'dream',
+        mode: 'standard',
         title: '记忆整理',
         icon: icons.sparkles,
         trigger: fallback.trigger,
@@ -239,10 +347,11 @@ export function countUnreadFailures(
   items: readonly TaskHistoryItem[],
   clearedBefore: string | null,
   ackErrorAt: string | null,
+  dismissedKeys?: ReadonlySet<string>,
 ): number {
   let count = 0
   for (const item of items) {
-    if (!isTaskIssueOutcome(item.outcome)) continue
+    if (!isActiveTaskIssue(item, dismissedKeys)) continue
     if (!isAfterWatermark(item.finishedAt, clearedBefore)) continue
     if (!isAfterWatermark(item.finishedAt, ackErrorAt)) continue
     count++
@@ -250,16 +359,33 @@ export function countUnreadFailures(
   return count
 }
 
-export function latestFailedTimestamp(items: readonly TaskHistoryItem[]): string | null {
+export function latestFailedTimestamp(
+  items: readonly TaskHistoryItem[],
+  dismissedKeys?: ReadonlySet<string>,
+): string | null {
   for (const item of items) {
-    if (isTaskIssueOutcome(item.outcome)) return item.finishedAt
+    if (isActiveTaskIssue(item, dismissedKeys)) return item.finishedAt
+  }
+  return null
+}
+
+// 定位整理页最近一条真实的失败/部分失败记录，跳过因前序上游故障熔断而压在头部的联动取消记录
+export function findLatestInboxFailureRun(dreamState: DreamState | null): DreamRunSummary | null {
+  if (!dreamState) return null
+  if (dreamState.lastOutcome !== 'failed' && dreamState.lastOutcome !== 'partial') return null
+  for (const run of dreamState.recentRuns) {
+    if (isCascadeAbortedRun(run)) continue
+    return isTaskIssueOutcome(run.outcome) ? run : null
   }
   return null
 }
 
 export function latestInboxFailureTimestamp(dreamState: DreamState | null): string | null {
   if (!dreamState) return null
-  return dreamState.recentRuns[0]?.createdAt ?? dreamState.lastRunAt ?? null
+  const failureRun = findLatestInboxFailureRun(dreamState)
+  return (
+    failureRun?.createdAt ?? dreamState.recentRuns[0]?.createdAt ?? dreamState.lastRunAt ?? null
+  )
 }
 
 export function shouldShowInboxFailureBanner(
@@ -268,10 +394,12 @@ export function shouldShowInboxFailureBanner(
   clearedBefore: string | null,
 ): boolean {
   if (!dreamState || dreamState.running) return false
-  if (dreamState.lastOutcome === 'skipped') return false
-  const latestRun = dreamState.recentRuns[0] ?? null
-  const hasFailedItems = (latestRun?.failedItems?.length ?? 0) > 0
-  const hasError = Boolean(dreamState.lastError)
+  if (dreamState.lastOutcome !== 'failed' && dreamState.lastOutcome !== 'partial') return false
+  const failureRun = findLatestInboxFailureRun(dreamState)
+  if (dreamState.recentRuns.length > 0 && !failureRun) return false
+  if (failureRun?.retriedByRunId) return false
+  const hasFailedItems = (failureRun?.failedItems?.length ?? 0) > 0
+  const hasError = Boolean(failureRun?.error || dreamState.lastError)
   if (!hasFailedItems && !hasError) return false
 
   const failureAt = latestInboxFailureTimestamp(dreamState)
