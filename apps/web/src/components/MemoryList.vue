@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import {
   effectiveBootMode,
-  ENTRY_TABS,
   type EntryFacetsSummary,
   type EntryListItem,
   type EntryTab,
@@ -9,7 +8,6 @@ import {
   type PinnedGroup,
   type ProjectScope,
 } from '@kioku/contracts'
-import { useKbd } from '@nuxt/ui/composables'
 import { computed, nextTick, ref, watch } from 'vue'
 
 import { icons } from '../icons'
@@ -21,6 +19,9 @@ import { formatRelative, formatTime, isExpired } from '../time'
 import EmptyState from './ui/EmptyState.vue'
 import ReadFailureNote from './ui/ReadFailureNote.vue'
 import WikiText from './ui/WikiText.vue'
+
+const GLOBAL_FULL_CHAR_CAP = 3_500
+const SINGLE_GLOBAL_FULL_WARN_CHARS = 1_200
 
 const props = withDefaults(
   defineProps<{
@@ -34,7 +35,6 @@ const props = withDefaults(
     topic: string | null
     projectScope: ProjectScope | null
     selectedId: string | null
-    compact?: boolean
     items: readonly EntryListItem[]
     linkedTitles?: Readonly<Record<string, string>> | null
     facets: EntryFacetsSummary | null
@@ -48,11 +48,10 @@ const props = withDefaults(
     hasChatModel?: boolean
     batchBusy?: boolean
   }>(),
-  { compact: false, hasChatModel: false, batchBusy: false, pinnedGroup: null, linkedTitles: null },
+  { hasChatModel: false, batchBusy: false, pinnedGroup: null, linkedTitles: null },
 )
 
 const emit = defineEmits<{
-  'update:tab': [value: EntryTab]
   'update:pinnedGroup': [value: PinnedGroup | null]
   'update:search': [value: string]
   'update:env': [value: string | null]
@@ -64,19 +63,12 @@ const emit = defineEmits<{
   select: [shortId: string]
   capture: []
   create: []
-  refresh: []
+  openRail: []
   loadMore: []
   clearFilters: []
   resetFilters: []
-  previewBoot: []
   batchOrganize: [mode: 'tidy' | 'cross_memory', shortIds: string[]]
 }>()
-
-const { getKbdKey } = useKbd()
-const captureShortcut = computed(() => {
-  const mod = getKbdKey('meta')?.trim() || 'Ctrl'
-  return mod === '⌘' ? '⌘J' : `${mod}+J`
-})
 
 const filterOpen = ref(false)
 const listScrollRef = ref<HTMLElement | null>(null)
@@ -196,12 +188,9 @@ function rowTags(item: EntryListItem): RowTag[] {
   }
   for (const e of item.envs) tags.push({ key: `e:${e}`, label: envDisplayName(e), kind: 'scope' })
   for (const r of item.realms) tags.push({ key: `r:${r}`, label: r, kind: 'scope' })
-  if (tags.length > 0) return tags.slice(0, 4)
+  if (tags.length > 0) return tags.slice(0, 3)
   return item.topics.slice(0, 2).map((t) => ({ key: `t:${t}`, label: t, kind: 'topic' as const }))
 }
-
-const GLOBAL_FULL_CHAR_CAP = 3_500
-const SINGLE_GLOBAL_FULL_WARN_CHARS = 1_200
 
 function isGlobalEntry(item: EntryListItem): boolean {
   return (
@@ -222,10 +211,6 @@ const displayItems = computed<readonly EntryListItem[]>(() => {
   }
   return props.items
 })
-
-function togglePinnedGroup(group: PinnedGroup) {
-  emit('update:pinnedGroup', props.pinnedGroup === group ? null : group)
-}
 
 function rowBootStatusLabel(item: EntryListItem): string {
   const mode = effectiveBootMode(item)
@@ -283,29 +268,32 @@ const pinnedWatermark = computed(() => {
   if (props.tab !== 'pinned' || !props.counts) return null
   const globalCount = props.counts.globalFullPinnedCount ?? 0
   const globalChars = props.counts.globalFullPinnedChars ?? 0
-  const scopedCount = props.counts.scopedFullPinnedCount ?? 0
-  const indexCount = props.counts.indexPinnedCount ?? 0
   const overChars = Math.max(0, globalChars - GLOBAL_FULL_CHAR_CAP)
   return {
     globalCount,
     globalChars,
-    scopedCount,
-    indexCount,
     overChars,
     globalOverCap: globalChars > GLOBAL_FULL_CHAR_CAP,
   }
 })
 
-const isFiltered = computed(() => Boolean(props.search.trim()) || hasFilters.value)
+const pinnedGroupLabel: Record<PinnedGroup, string> = {
+  global_full: '全局全文',
+  scoped_full: '场景全文',
+  index: '目录常驻',
+}
 
-const summaryText = computed<string | null>(() => {
+const viewContextLabel = computed(() => {
+  if (props.tab === 'pinned' && props.pinnedGroup) {
+    return `${pinnedGroupLabel[props.pinnedGroup]} · ${props.items.length}${props.hasNextPage ? '+' : ''} 条`
+  }
+  const base = entryTabLabels[props.tab]
   const loaded = props.items.length
   const total = props.counts?.[props.tab]
-  if (!isFiltered.value && total !== undefined) {
-    if (props.tab === 'pinned' && pinnedWatermark.value) return null
-    return props.tab === 'pinned' ? `共 ${total} 条常驻` : `共 ${total} 条记忆`
+  if (!props.search.trim() && !hasFilters.value && total !== undefined) {
+    return `${base} · ${total} 条`
   }
-  return `当前列表 ${loaded}${props.hasNextPage ? '+' : ''} 条记忆`
+  return `${base} · 命中 ${loaded}${props.hasNextPage ? '+' : ''} 条`
 })
 
 watch(
@@ -328,802 +316,582 @@ defineExpose({ filterOpen, exitBatchMode, displayItems })
 </script>
 
 <template>
-  <div class="list-shell">
-    <!-- 收敛式顶栏工具条：视图分段、搜索、多维筛选与主操作 -->
-    <header class="list-toolbar" aria-label="筛选与操作栏">
-      <div class="toolbar-row">
-        <div class="view-tabs" role="tablist" aria-label="记忆视图">
-          <button
-            v-for="value in ENTRY_TABS"
-            :key="value"
-            type="button"
-            role="tab"
-            class="view-tab"
-            :class="{ active: tab === value }"
-            :aria-selected="tab === value"
-            :title="
-              value === 'pinned'
-                ? '实线轨对应列表中的常驻记忆'
-                : value === 'episodes'
-                  ? '虚线轨对应列表中的近期会话摘要'
-                  : undefined
-            "
-            @click="emit('update:tab', value)"
-          >
-            <span v-if="value === 'pinned'" class="rail-swatch solid" aria-hidden="true" />
-            <span v-else-if="value === 'episodes'" class="rail-swatch dashed" aria-hidden="true" />
-            <UIcon :name="entryTabIcons[value]" class="view-tab-icon" aria-hidden="true" />
-            <span>{{ entryTabLabels[value] }}</span>
-            <span v-if="counts?.[value] !== undefined" class="tab-num">{{ counts[value] }}</span>
-          </button>
-        </div>
+  <section class="list-pane" aria-label="记忆列表">
+    <!-- 窄屏目录抽屉入口条 -->
+    <div class="mobile-rail-bar">
+      <UButton
+        size="xs"
+        color="neutral"
+        variant="outline"
+        :icon="icons.menu"
+        @click="emit('openRail')"
+      >
+        目录与状态
+      </UButton>
+      <span class="mobile-view-label tabular-nums">{{ viewContextLabel }}</span>
+    </div>
 
-        <div class="search-wrap">
-          <UInput
-            id="memories-search"
-            name="q"
-            type="text"
-            aria-label="搜索记忆"
-            :model-value="search"
-            :icon="icons.search"
-            placeholder="搜索标题、正文或召回时机"
-            :ui="{ base: search ? 'text-[13px]/5 pe-9' : 'text-[13px]/5' }"
-            class="w-full"
-            @update:model-value="(v) => emit('update:search', String(v ?? ''))"
-          >
-            <template v-if="search" #trailing>
+    <!-- 中栏顶部：精简筛选框 + 多维筛选 + 新建 -->
+    <header class="list-head" aria-label="列表筛选与新建">
+      <div class="search-wrap">
+        <UInput
+          id="memories-search"
+          name="q"
+          type="text"
+          size="sm"
+          aria-label="筛选当前列表"
+          :model-value="search"
+          :icon="icons.search"
+          placeholder="筛选当前列表…"
+          :ui="{ base: search ? 'text-[13px]/5 pe-8' : 'text-[13px]/5' }"
+          class="w-full"
+          @update:model-value="(v) => emit('update:search', String(v ?? ''))"
+        >
+          <template v-if="search" #trailing>
+            <UButton
+              :icon="icons.cancel"
+              size="xs"
+              color="neutral"
+              variant="link"
+              aria-label="清除搜索"
+              @click="emit('update:search', '')"
+            />
+          </template>
+        </UInput>
+      </div>
+
+      <UPopover v-model:open="filterOpen" :content="{ align: 'end', sideOffset: 6 }">
+        <UButton
+          size="sm"
+          color="neutral"
+          variant="outline"
+          :icon="icons.filter"
+          :aria-expanded="filterOpen"
+          class="shrink-0"
+        >
+          <span>筛选</span>
+          <span v-if="activeFilters.length" class="filter-count tabular-nums">
+            {{ activeFilters.length }}
+          </span>
+        </UButton>
+
+        <template #content>
+          <div class="filter-popover">
+            <div class="popover-head">
+              <span class="popover-title">
+                <UIcon :name="icons.filter" class="popover-title-icon" aria-hidden="true" />
+                <span>多维筛选</span>
+              </span>
               <UButton
-                :icon="icons.cancel"
                 size="xs"
                 color="neutral"
-                variant="link"
-                aria-label="清除搜索"
-                @click="emit('update:search', '')"
-              />
-            </template>
-          </UInput>
-        </div>
+                variant="ghost"
+                :icon="icons.restore"
+                :disabled="!hasFilters"
+                @click="emit('clearFilters')"
+              >
+                重置全部
+              </UButton>
+            </div>
 
-        <UPopover v-model:open="filterOpen" :content="{ align: 'start', sideOffset: 6 }">
-          <UButton
-            color="neutral"
-            variant="outline"
-            :icon="icons.filter"
-            :aria-expanded="filterOpen"
-          >
-            筛选
-            <span v-if="activeFilters.length" class="filter-count">{{ activeFilters.length }}</span>
-          </UButton>
-
-          <template #content>
-            <div class="filter-popover">
-              <div class="popover-head">
-                <span class="popover-title">
-                  <UIcon :name="icons.filter" class="popover-title-icon" aria-hidden="true" />
-                  <span>多维筛选</span>
-                </span>
-                <UButton
-                  size="xs"
-                  color="neutral"
-                  variant="ghost"
-                  :icon="icons.restore"
-                  :disabled="!hasFilters"
-                  @click="emit('clearFilters')"
+            <div class="facet-group">
+              <span class="facet-label">
+                <UIcon :name="icons.projectScope" class="facet-icon" aria-hidden="true" />
+                <span>归属范围</span>
+              </span>
+              <div class="facet-chips">
+                <button
+                  v-for="opt in PROJECT_SCOPE_OPTIONS"
+                  :key="opt.value"
+                  type="button"
+                  class="chip"
+                  :class="{ active: projectScope === opt.value }"
+                  @click="emit('update:projectScope', toggleValue(projectScope, opt.value))"
                 >
-                  重置全部
-                </UButton>
-              </div>
-
-              <div class="facet-group">
-                <span class="facet-label">
-                  <UIcon :name="icons.projectScope" class="facet-icon" aria-hidden="true" />
-                  <span>归属范围</span>
-                </span>
-                <div class="facet-chips">
-                  <button
-                    v-for="opt in PROJECT_SCOPE_OPTIONS"
-                    :key="opt.value"
-                    type="button"
-                    class="chip"
-                    :class="{ active: projectScope === opt.value }"
-                    @click="emit('update:projectScope', toggleValue(projectScope, opt.value))"
-                  >
-                    {{ opt.label }}
-                  </button>
-                </div>
-              </div>
-
-              <div v-if="facets?.topics.length" class="facet-group">
-                <span class="facet-label">
-                  <UIcon :name="icons.topic" class="facet-icon" aria-hidden="true" />
-                  <span>主题</span>
-                </span>
-                <div class="facet-chips">
-                  <button
-                    v-for="t in facets.topics"
-                    :key="`t:${t}`"
-                    type="button"
-                    class="chip"
-                    :class="{ active: topic === t }"
-                    @click="emit('update:topic', toggleValue(topic, t))"
-                  >
-                    {{ t }}
-                  </button>
-                </div>
-              </div>
-
-              <div v-if="facets?.projects.length" class="facet-group">
-                <span class="facet-label">
-                  <UIcon :name="icons.project" class="facet-icon" aria-hidden="true" />
-                  <span>项目</span>
-                </span>
-                <div class="facet-chips">
-                  <button
-                    v-for="p in facets.projects"
-                    :key="`p:${p}`"
-                    type="button"
-                    class="chip"
-                    :class="{ active: project === p }"
-                    @click="emit('update:project', toggleValue(project, p))"
-                  >
-                    {{ p }}
-                  </button>
-                </div>
-              </div>
-
-              <div v-if="facets?.runtimes?.length" class="facet-group">
-                <span class="facet-label">
-                  <UIcon :name="icons.terminal" class="facet-icon" aria-hidden="true" />
-                  <span>客户端</span>
-                </span>
-                <div class="facet-chips">
-                  <button
-                    v-for="rt in facets.runtimes"
-                    :key="`rt:${rt}`"
-                    type="button"
-                    class="chip"
-                    :class="{ active: runtime === rt }"
-                    @click="emit('update:runtime', toggleValue(runtime, rt))"
-                  >
-                    {{ runtimeName(rt) }}
-                  </button>
-                </div>
-              </div>
-
-              <div v-if="facets?.envs.length" class="facet-group">
-                <span class="facet-label">
-                  <UIcon :name="icons.env" class="facet-icon" aria-hidden="true" />
-                  <span>环境</span>
-                </span>
-                <div class="facet-chips">
-                  <button
-                    v-for="e in facets.envs"
-                    :key="`e:${e}`"
-                    type="button"
-                    class="chip"
-                    :class="{ active: env === e }"
-                    @click="emit('update:env', toggleValue(env, e))"
-                  >
-                    {{ envDisplayName(e) }}
-                  </button>
-                </div>
-              </div>
-
-              <div v-if="facets?.realms.length" class="facet-group">
-                <span class="facet-label">
-                  <UIcon :name="icons.realm" class="facet-icon" aria-hidden="true" />
-                  <span>场域</span>
-                </span>
-                <div class="facet-chips">
-                  <button
-                    v-for="r in facets.realms"
-                    :key="`r:${r}`"
-                    type="button"
-                    class="chip"
-                    :class="{ active: realm === r }"
-                    @click="emit('update:realm', toggleValue(realm, r))"
-                  >
-                    {{ r }}
-                  </button>
-                </div>
+                  {{ opt.label }}
+                </button>
               </div>
             </div>
-          </template>
-        </UPopover>
 
-        <div class="toolbar-actions">
-          <UButton
-            :icon="icons.refresh"
-            color="neutral"
-            variant="ghost"
-            :loading="query.isFetching.value && !fetchingNextPage"
-            @click="emit('refresh')"
-          >
-            刷新
-          </UButton>
-          <UButton
-            :icon="icons.capture"
-            :title="`记录一条习惯、约定或事实更新，自动归并至既有记忆（${captureShortcut}）`"
-            @click="emit('capture')"
-          >
-            随手记
-            <span class="action-kbd" aria-hidden="true">{{ captureShortcut }}</span>
-          </UButton>
-          <UButton color="neutral" variant="outline" :icon="icons.add" @click="emit('create')">
-            新建
-          </UButton>
-        </div>
-      </div>
+            <div v-if="facets?.topics.length" class="facet-group">
+              <span class="facet-label">
+                <UIcon :name="icons.topic" class="facet-icon" aria-hidden="true" />
+                <span>主题</span>
+              </span>
+              <div class="facet-chips">
+                <button
+                  v-for="t in facets.topics"
+                  :key="`t:${t}`"
+                  type="button"
+                  class="chip"
+                  :class="{ active: topic === t }"
+                  @click="emit('update:topic', toggleValue(topic, t))"
+                >
+                  {{ t }}
+                </button>
+              </div>
+            </div>
 
-      <!-- 仅存在激活筛选时展示已选条件条 -->
-      <div v-if="activeFilters.length" class="active-filters-bar">
-        <span v-for="pill in activeFilters" :key="pill.key" class="active-pill">
-          <UIcon :name="pill.icon" class="pill-dim-icon" aria-hidden="true" />
-          <span>{{ pill.label }}</span>
-          <button
-            type="button"
-            class="pill-remove"
-            :aria-label="`移除${pill.label}`"
-            @click="removeFilter(pill.key)"
-          >
-            <UIcon :name="icons.cancel" class="pill-remove-icon" />
-          </button>
-        </span>
-        <UButton
-          size="xs"
-          color="neutral"
-          variant="ghost"
-          :icon="icons.restore"
-          @click="emit('clearFilters')"
-        >
-          清除全部
-        </UButton>
-      </div>
+            <div v-if="facets?.projects.length" class="facet-group">
+              <span class="facet-label">
+                <UIcon :name="icons.project" class="facet-icon" aria-hidden="true" />
+                <span>项目</span>
+              </span>
+              <div class="facet-chips">
+                <button
+                  v-for="p in facets.projects"
+                  :key="`p:${p}`"
+                  type="button"
+                  class="chip font-mono"
+                  :class="{ active: project === p }"
+                  @click="emit('update:project', toggleValue(project, p))"
+                >
+                  {{ p }}
+                </button>
+              </div>
+            </div>
+
+            <div v-if="facets?.runtimes?.length" class="facet-group">
+              <span class="facet-label">
+                <UIcon :name="icons.terminal" class="facet-icon" aria-hidden="true" />
+                <span>客户端</span>
+              </span>
+              <div class="facet-chips">
+                <button
+                  v-for="rt in facets.runtimes"
+                  :key="`rt:${rt}`"
+                  type="button"
+                  class="chip"
+                  :class="{ active: runtime === rt }"
+                  @click="emit('update:runtime', toggleValue(runtime, rt))"
+                >
+                  {{ runtimeName(rt) }}
+                </button>
+              </div>
+            </div>
+
+            <div v-if="facets?.envs.length" class="facet-group">
+              <span class="facet-label">
+                <UIcon :name="icons.env" class="facet-icon" aria-hidden="true" />
+                <span>环境</span>
+              </span>
+              <div class="facet-chips">
+                <button
+                  v-for="e in facets.envs"
+                  :key="`e:${e}`"
+                  type="button"
+                  class="chip"
+                  :class="{ active: env === e }"
+                  @click="emit('update:env', toggleValue(env, e))"
+                >
+                  {{ envDisplayName(e) }}
+                </button>
+              </div>
+            </div>
+
+            <div v-if="facets?.realms.length" class="facet-group">
+              <span class="facet-label">
+                <UIcon :name="icons.realm" class="facet-icon" aria-hidden="true" />
+                <span>场域</span>
+              </span>
+              <div class="facet-chips">
+                <button
+                  v-for="r in facets.realms"
+                  :key="`r:${r}`"
+                  type="button"
+                  class="chip"
+                  :class="{ active: realm === r }"
+                  @click="emit('update:realm', toggleValue(realm, r))"
+                >
+                  {{ r }}
+                </button>
+              </div>
+            </div>
+          </div>
+        </template>
+      </UPopover>
+
+      <UButton
+        size="sm"
+        color="neutral"
+        variant="outline"
+        :icon="icons.add"
+        title="新建正式记忆"
+        class="shrink-0"
+        @click="emit('create')"
+      >
+        新建
+      </UButton>
     </header>
 
-    <!-- 列表滚动主体 -->
-    <section class="list-pane" :class="{ 'is-compact': compact }" aria-label="记忆列表">
-      <div class="list-meta-bar" :class="{ 'is-pinned-bar': pinnedWatermark !== null }">
-        <div class="meta-summary tabular-nums">
-          <span v-if="summaryText">{{ summaryText }}</span>
-          <template v-if="pinnedWatermark">
-            <span v-if="summaryText" class="meta-sep" aria-hidden="true">·</span>
-            <div class="pinned-group-bar" role="group" aria-label="常驻分组筛选">
-              <button
-                type="button"
-                class="pinned-group-btn pinned-budget"
-                :class="{
-                  active: pinnedGroup === 'global_full',
-                  'is-over': pinnedWatermark.globalOverCap,
-                }"
-                :aria-pressed="pinnedGroup === 'global_full'"
-                :title="
-                  pinnedWatermark.globalOverCap
-                    ? '点击仅查看全局全文常驻记忆并按字数降序排列'
-                    : '无场景限定的全局全文常驻默认上限为 3,500 字，点击筛选查看'
-                "
-                @click="togglePinnedGroup('global_full')"
+    <!-- 上下文薄条：视图计数、清除筛选与低噪批量整理开关 -->
+    <div class="list-meta-bar">
+      <span class="meta-summary tabular-nums">{{ viewContextLabel }}</span>
+      <div class="meta-right">
+        <button
+          v-if="hasFilters || search.trim() || pinnedGroup !== null"
+          type="button"
+          class="meta-link"
+          @click="emit('resetFilters')"
+        >
+          清除筛选
+        </button>
+        <UButton
+          v-if="canUseBatch && (batchMode || displayItems.length >= 2)"
+          size="xs"
+          :color="batchMode ? 'primary' : 'neutral'"
+          :variant="batchMode ? 'solid' : 'ghost'"
+          :icon="batchMode ? icons.cancel : icons.listChecks"
+          @click="toggleBatchMode"
+        >
+          {{ batchMode ? '退出批量' : '批量整理' }}
+        </UButton>
+      </div>
+    </div>
+
+    <!-- 仅在存在激活筛选时显示可移除条件条 -->
+    <div v-if="activeFilters.length" class="active-filters-bar">
+      <span v-for="pill in activeFilters" :key="pill.key" class="active-pill">
+        <UIcon :name="pill.icon" class="pill-dim-icon" aria-hidden="true" />
+        <span>{{ pill.label }}</span>
+        <button
+          type="button"
+          class="pill-remove"
+          :aria-label="`移除${pill.label}`"
+          @click="removeFilter(pill.key)"
+        >
+          <UIcon :name="icons.cancel" class="pill-remove-icon" />
+        </button>
+      </span>
+    </div>
+
+    <!-- 全局全文超预算紧凑提示 -->
+    <div v-if="pinnedWatermark?.globalOverCap" class="pinned-overcap-wrap">
+      <div class="pinned-overcap-banner" role="status">
+        <div class="overcap-body">
+          <UIcon :name="icons.warning" class="overcap-icon" aria-hidden="true" />
+          <p
+            class="overcap-text tabular-nums"
+            :title="`全局全文已超出 ${GLOBAL_FULL_CHAR_CAP.toLocaleString()} 字预算上限（当前 ${pinnedWatermark.globalChars.toLocaleString()} 字），建议改为目录常驻或补充场景限定`"
+          >
+            全局全文超预算 +{{ pinnedWatermark.overChars.toLocaleString() }} 字
+          </p>
+        </div>
+        <button
+          v-if="pinnedGroup !== 'global_full'"
+          type="button"
+          class="meta-link"
+          @click="emit('update:pinnedGroup', 'global_full')"
+        >
+          看这 {{ pinnedWatermark.globalCount }} 条
+        </button>
+        <button v-else type="button" class="meta-link" @click="emit('update:pinnedGroup', null)">
+          全部常驻
+        </button>
+      </div>
+    </div>
+
+    <!-- 列表滚动区 -->
+    <div ref="listScrollRef" class="list-scroll">
+      <div v-if="query.isError.value" class="p-4">
+        <ReadFailureNote :query="query" />
+      </div>
+      <div v-if="query.isPending.value" class="space-y-2 p-3">
+        <USkeleton v-for="n in 7" :key="n" class="h-16 w-full" />
+      </div>
+      <template v-else-if="displayItems.length">
+        <ul role="listbox" aria-label="记忆清单">
+          <li v-for="item in displayItems" :key="item.shortId" role="none">
+            <div
+              role="option"
+              tabindex="0"
+              class="entry-row"
+              :class="{
+                selected: item.shortId === selectedId,
+                'has-batch-check': batchMode && item.kind === 'entry',
+                'is-pinned': effectiveBootMode(item) === 'full',
+                'is-pinned-index': effectiveBootMode(item) === 'index',
+                'is-episode': item.kind === 'episode' && !item.isPinned,
+              }"
+              :data-short-id="item.shortId"
+              :title="`${item.title}（${item.shortId}）`"
+              :aria-selected="
+                batchMode ? selectedBatchIds.includes(item.shortId) : item.shortId === selectedId
+              "
+              :aria-current="!batchMode && item.shortId === selectedId ? 'true' : undefined"
+              @click="onRowClick(item)"
+              @keydown.enter.self="onRowClick(item)"
+              @keydown.space.prevent.self="onRowClick(item)"
+            >
+              <span
+                v-if="batchMode && item.kind === 'entry'"
+                class="batch-check"
+                aria-hidden="true"
               >
-                <UIcon
-                  :name="pinnedWatermark.globalOverCap ? icons.warning : icons.gauge"
-                  class="pinned-budget-icon"
-                  aria-hidden="true"
+                <input
+                  type="checkbox"
+                  tabindex="-1"
+                  :checked="selectedBatchIds.includes(item.shortId)"
+                  :disabled="
+                    !selectedBatchIds.includes(item.shortId) && selectedBatchIds.length >= BATCH_MAX
+                  "
+                  readonly
                 />
-                <span>
-                  全局全文 {{ pinnedWatermark.globalCount }} 条 ·
-                  {{ pinnedWatermark.globalChars.toLocaleString() }} /
-                  {{ GLOBAL_FULL_CHAR_CAP.toLocaleString() }} 字
-                </span>
-              </button>
-              <button
-                type="button"
-                class="pinned-group-btn"
-                :class="{ active: pinnedGroup === 'scoped_full' }"
-                :aria-pressed="pinnedGroup === 'scoped_full'"
-                title="点击仅查看带场景限定的全文常驻记忆"
-                @click="togglePinnedGroup('scoped_full')"
-              >
-                场景全文 {{ pinnedWatermark.scopedCount }} 条
-              </button>
-              <button
-                type="button"
-                class="pinned-group-btn"
-                :class="{ active: pinnedGroup === 'index' }"
-                :aria-pressed="pinnedGroup === 'index'"
-                title="点击仅查看目录常驻记忆"
-                @click="togglePinnedGroup('index')"
-              >
-                目录常驻 {{ pinnedWatermark.indexCount }} 条
-              </button>
-              <button
-                v-if="pinnedGroup !== null"
-                type="button"
-                class="pinned-group-reset"
-                @click="emit('update:pinnedGroup', null)"
-              >
-                全部常驻
-              </button>
-            </div>
-          </template>
-        </div>
-        <div class="meta-right">
-          <UButton
-            v-if="canUseBatch && (batchMode || displayItems.length >= 2)"
-            size="xs"
-            :color="batchMode ? 'primary' : 'neutral'"
-            :variant="batchMode ? 'solid' : 'ghost'"
-            :icon="batchMode ? icons.cancel : icons.listChecks"
-            @click="toggleBatchMode"
-          >
-            {{ batchMode ? '退出批量' : '批量整理' }}
-          </UButton>
-          <UButton
-            v-if="tab === 'pinned'"
-            size="xs"
-            color="neutral"
-            variant="outline"
-            :icon="icons.terminal"
-            @click="emit('previewBoot')"
-          >
-            预览终端加载
-          </UButton>
-          <div v-else-if="!compact && !batchMode" class="list-hint" aria-hidden="true">
-            <span>↑ ↓ 切换</span>
-            <span>Esc 关闭详情</span>
-          </div>
-        </div>
-      </div>
+              </span>
 
-      <div v-if="pinnedWatermark?.globalOverCap" class="pinned-overcap-wrap">
-        <div class="pinned-overcap-banner" role="status">
-          <div class="overcap-body">
-            <UIcon :name="icons.warning" class="overcap-icon" aria-hidden="true" />
-            <p v-if="!compact" class="overcap-text tabular-nums">
-              全局全文已超出 {{ GLOBAL_FULL_CHAR_CAP.toLocaleString() }} 字预算上限（当前
-              {{ pinnedWatermark.globalChars.toLocaleString() }} 字，超出
-              {{ pinnedWatermark.overChars.toLocaleString() }}
-              字），超出部分在会话启动时将自动降为目录常驻。建议将长篇参考改为目录常驻，或为特定项目/客户端补充场景标签。
-            </p>
-            <p
-              v-else
-              class="overcap-text tabular-nums"
-              :title="`全局全文已超出 ${GLOBAL_FULL_CHAR_CAP.toLocaleString()} 字预算上限（当前 ${pinnedWatermark.globalChars.toLocaleString()} 字），建议将长篇参考改为目录常驻或补充场景标签`"
-            >
-              全局全文超预算 +{{ pinnedWatermark.overChars.toLocaleString() }}
-              字，建议改目录或限场景
-            </p>
-          </div>
-          <div class="overcap-actions">
-            <UButton
-              v-if="pinnedGroup !== 'global_full'"
-              size="xs"
-              color="neutral"
-              variant="outline"
-              :icon="icons.filter"
-              @click="emit('update:pinnedGroup', 'global_full')"
-            >
-              {{
-                compact
-                  ? `看这 ${pinnedWatermark.globalCount} 条`
-                  : `查看这 ${pinnedWatermark.globalCount} 条（按字数）`
-              }}
-            </UButton>
-            <UButton
-              v-else
-              size="xs"
-              color="neutral"
-              variant="outline"
-              :icon="icons.restore"
-              @click="emit('update:pinnedGroup', null)"
-            >
-              {{ compact ? '全部常驻' : '显示全部常驻' }}
-            </UButton>
-          </div>
-        </div>
-      </div>
-
-      <div ref="listScrollRef" class="list-scroll">
-        <div v-if="query.isError.value" class="p-4">
-          <ReadFailureNote :query="query" />
-        </div>
-        <div v-if="query.isPending.value" class="space-y-2 p-4">
-          <USkeleton v-for="n in 6" :key="n" class="h-16 w-full" />
-        </div>
-        <template v-else-if="displayItems.length">
-          <ul role="listbox" aria-label="记忆清单">
-            <li v-for="item in displayItems" :key="item.shortId" role="none">
-              <div
-                role="option"
-                tabindex="0"
-                class="entry-row"
-                :class="{
-                  selected: item.shortId === selectedId,
-                  'has-batch-check': batchMode && item.kind === 'entry',
-                  'is-pinned': effectiveBootMode(item) === 'full',
-                  'is-pinned-index': effectiveBootMode(item) === 'index',
-                  'is-episode': item.kind === 'episode' && !item.isPinned,
-                }"
-                :data-short-id="item.shortId"
-                :title="`${item.title}（${item.shortId}）`"
-                :aria-selected="
-                  batchMode ? selectedBatchIds.includes(item.shortId) : item.shortId === selectedId
-                "
-                :aria-current="!batchMode && item.shortId === selectedId ? 'true' : undefined"
-                @click="onRowClick(item)"
-                @keydown.enter.self="onRowClick(item)"
-                @keydown.space.prevent.self="onRowClick(item)"
-              >
-                <span
-                  v-if="batchMode && item.kind === 'entry'"
-                  class="batch-check"
-                  aria-hidden="true"
-                >
-                  <input
-                    type="checkbox"
-                    tabindex="-1"
-                    :checked="selectedBatchIds.includes(item.shortId)"
-                    :disabled="
-                      !selectedBatchIds.includes(item.shortId) &&
-                      selectedBatchIds.length >= BATCH_MAX
-                    "
-                    readonly
-                  />
-                </span>
-                <span class="row-main">
+              <span class="row-main">
+                <span class="row-head">
                   <span class="row-title">{{ item.title }}</span>
-                  <span v-if="hasRowSub(item)" class="row-sub">
-                    <template v-if="item.isPinned">
-                      <span
-                        class="sub-status"
-                        :class="{ 'is-index': effectiveBootMode(item) === 'index' }"
-                      >
-                        <UIcon
-                          :name="effectiveBootMode(item) === 'index' ? icons.bookmark : icons.pin"
-                          class="sub-status-icon"
-                          aria-hidden="true"
-                        />
-                        <span>{{ rowBootStatusLabel(item) }}</span>
-                      </span>
-                      <span
-                        v-if="tab === 'pinned'"
-                        class="sub-chars tabular-nums"
-                        :class="{ 'is-warn': isOversizedGlobalPinned(item) }"
-                        :title="
-                          isOversizedGlobalPinned(item)
-                            ? '单条超过 1,200 字建议上限，建议改为目录常驻或补充场景标签'
-                            : '记忆总字数（含标题与正文）'
-                        "
-                      >
-                        {{ entryBootChars(item).toLocaleString() }} 字
-                      </span>
-                    </template>
-                    <template v-else-if="item.kind === 'episode'">
-                      <span class="sub-status is-episode">
-                        <UIcon
-                          :name="icons.messageSquare"
-                          class="sub-status-icon"
-                          aria-hidden="true"
-                        />
-                        <span>摘要</span>
-                      </span>
-                    </template>
-                    <template v-if="isExpired(item.validTo)">
-                      <span v-if="hasRowLeadingMeta(item)" class="sub-dot" aria-hidden="true"
-                        >·</span
-                      >
-                      <span class="sub-status is-warn">
-                        <UIcon :name="icons.clock" class="sub-status-icon" aria-hidden="true" />
-                        <span>已过期</span>
-                      </span>
-                    </template>
-                    <template v-if="rowSubtitle(item)">
-                      <span
-                        v-if="hasRowLeadingMeta(item) || isExpired(item.validTo)"
-                        class="sub-dot sub-disclosure-sep"
-                        aria-hidden="true"
-                        >·</span
-                      >
-                      <span class="row-disclosure" :title="subtitleTitle(item)">
-                        <span v-if="rowSubtitle(item)!.isChange" class="sub-change-prefix"
-                          >近改：</span
-                        ><WikiText
-                          :text="rowSubtitle(item)!.text"
-                          :titles="linkedTitles"
-                          :interactive="!batchMode"
-                          compact
-                          @open="emit('select', $event)"
-                        />
-                      </span>
-                    </template>
-                  </span>
-                </span>
-
-                <span class="row-aside">
                   <time
-                    class="row-time"
+                    class="row-time tabular-nums"
                     :datetime="item.updatedAt"
                     :title="formatTime(item.updatedAt)"
                   >
                     {{ formatRelative(item.updatedAt) }}
                   </time>
-                  <span v-if="rowTags(item).length" class="row-tags">
+                </span>
+
+                <span v-if="hasRowSub(item)" class="row-sub">
+                  <template v-if="item.isPinned">
                     <span
-                      v-for="tag in rowTags(item)"
-                      :key="tag.key"
-                      class="row-tag"
-                      :class="`is-${tag.kind}`"
+                      class="sub-status"
+                      :class="{ 'is-index': effectiveBootMode(item) === 'index' }"
+                    >
+                      <UIcon
+                        :name="effectiveBootMode(item) === 'index' ? icons.bookmark : icons.pin"
+                        class="sub-status-icon"
+                        aria-hidden="true"
+                      />
+                      <span>{{ rowBootStatusLabel(item) }}</span>
+                    </span>
+                    <span
+                      v-if="tab === 'pinned'"
+                      class="sub-chars tabular-nums"
+                      :class="{ 'is-warn': isOversizedGlobalPinned(item) }"
                       :title="
-                        tag.kind === 'topic'
-                          ? `主题标签：${tag.label}（不限定适用场景）`
-                          : undefined
+                        isOversizedGlobalPinned(item)
+                          ? '单条超过 1,200 字建议上限，建议改为目录常驻或补充场景限定'
+                          : '记忆总字数（含标题与正文）'
                       "
                     >
-                      <template v-if="tag.kind === 'topic'">#{{ tag.label }}</template>
-                      <template v-else>{{ tag.label }}</template>
+                      {{ entryBootChars(item).toLocaleString() }} 字
                     </span>
+                  </template>
+                  <template v-else-if="item.kind === 'episode'">
+                    <span class="sub-status is-episode">
+                      <UIcon
+                        :name="icons.messageSquare"
+                        class="sub-status-icon"
+                        aria-hidden="true"
+                      />
+                      <span>摘要</span>
+                    </span>
+                  </template>
+                  <template v-if="isExpired(item.validTo)">
+                    <span v-if="hasRowLeadingMeta(item)" class="sub-dot" aria-hidden="true">·</span>
+                    <span class="sub-status is-warn">
+                      <UIcon :name="icons.clock" class="sub-status-icon" aria-hidden="true" />
+                      <span>已过期</span>
+                    </span>
+                  </template>
+                  <template v-if="rowSubtitle(item)">
+                    <span
+                      v-if="hasRowLeadingMeta(item) || isExpired(item.validTo)"
+                      class="sub-dot"
+                      aria-hidden="true"
+                      >·</span
+                    >
+                    <span class="row-disclosure" :title="subtitleTitle(item)">
+                      <span v-if="rowSubtitle(item)!.isChange" class="sub-change-prefix"
+                        >近改：</span
+                      ><WikiText
+                        :text="rowSubtitle(item)!.text"
+                        :titles="linkedTitles"
+                        :interactive="!batchMode"
+                        compact
+                        @open="emit('select', $event)"
+                      />
+                    </span>
+                  </template>
+                </span>
+
+                <span v-if="rowTags(item).length" class="row-tags">
+                  <span
+                    v-for="tag in rowTags(item)"
+                    :key="tag.key"
+                    class="row-tag"
+                    :class="`is-${tag.kind}`"
+                    :title="
+                      tag.kind === 'topic' ? `主题标签：${tag.label}（不限定适用场景）` : undefined
+                    "
+                  >
+                    <template v-if="tag.kind === 'topic'">#{{ tag.label }}</template>
+                    <template v-else>{{ tag.label }}</template>
                   </span>
                 </span>
-              </div>
-            </li>
-          </ul>
-          <div v-if="hasNextPage" class="flex justify-center py-3">
-            <UButton
-              size="sm"
-              color="neutral"
-              variant="outline"
-              :icon="icons.chevronsDown"
-              :loading="fetchingNextPage"
-              @click="emit('loadMore')"
-            >
-              加载更多
-            </UButton>
-          </div>
-        </template>
-        <EmptyState
-          v-else-if="!query.isError.value"
-          :icon="search.trim() || hasFilters ? icons.search : entryTabIcons[tab]"
-          :title="
-            search.trim() || hasFilters
-              ? '暂无匹配记忆'
-              : tab === 'pinned' && pinnedGroup
-                ? '当前分组暂无常驻记忆'
-                : tab === 'trash'
-                  ? '回收站为空'
-                  : tab === 'episodes'
-                    ? '暂无近期摘要'
-                    : tab === 'pinned'
-                      ? '暂无常驻记忆'
-                      : tab === 'regular'
-                        ? '暂无按需记忆'
-                        : '暂无记忆'
-          "
-          :description="
-            search.trim() || hasFilters
-              ? '尝试调整关键词或清除筛选条件。'
-              : tab === 'pinned' && pinnedGroup
-                ? '该常驻分组下尚无记忆，可切换回全部常驻查看。'
-                : tab === 'all'
-                  ? '使用随手记快速沉淀，或新建第一条正式记忆。'
-                  : null
-          "
-        >
-          <template v-if="search.trim() || hasFilters" #actions>
-            <UButton
-              size="sm"
-              color="neutral"
-              variant="outline"
-              :icon="icons.restore"
-              @click="emit('resetFilters')"
-            >
-              重置筛选
-            </UButton>
-            <UButton size="sm" :icon="icons.capture" @click="emit('capture')">随手记</UButton>
-          </template>
-          <template v-else-if="tab === 'pinned' && pinnedGroup" #actions>
-            <UButton
-              size="sm"
-              color="neutral"
-              variant="outline"
-              :icon="icons.restore"
-              @click="emit('update:pinnedGroup', null)"
-            >
-              显示全部常驻
-            </UButton>
-          </template>
-          <template v-else-if="tab === 'all'" #actions>
-            <UButton size="sm" :icon="icons.capture" @click="emit('capture')">随手记</UButton>
-            <UButton
-              size="sm"
-              color="neutral"
-              variant="outline"
-              :icon="icons.add"
-              @click="emit('create')"
-            >
-              新建记忆
-            </UButton>
-          </template>
-        </EmptyState>
-      </div>
+              </span>
+            </div>
+          </li>
+        </ul>
 
-      <div v-if="batchMode" class="batch-bar" role="region" aria-label="批量整理操作栏">
-        <span class="batch-status tabular-nums">
-          已选 {{ selectedBatchIds.length }} / {{ BATCH_MAX }} 条（至少选 2 条）
-        </span>
-        <div class="batch-actions">
+        <div v-if="hasNextPage" class="flex justify-center py-3">
           <UButton
-            size="xs"
+            size="sm"
             color="neutral"
             variant="outline"
-            :icon="icons.tidy"
-            :loading="batchBusy"
-            :disabled="selectedBatchIds.length < 2"
-            @click="submitBatch('tidy')"
+            :icon="icons.chevronsDown"
+            :loading="fetchingNextPage"
+            @click="emit('loadMore')"
           >
-            规范所选
-          </UButton>
-          <UButton
-            size="xs"
-            :icon="icons.links"
-            :loading="batchBusy"
-            :disabled="selectedBatchIds.length < 2"
-            @click="submitBatch('cross_memory')"
-          >
-            查重与关联
+            加载更多
           </UButton>
         </div>
+      </template>
+
+      <EmptyState
+        v-else-if="!query.isError.value"
+        :icon="search.trim() || hasFilters ? icons.search : entryTabIcons[tab]"
+        :title="
+          search.trim() || hasFilters
+            ? '暂无匹配记忆'
+            : tab === 'pinned' && pinnedGroup
+              ? '当前分组暂无常驻记忆'
+              : tab === 'trash'
+                ? '回收站为空'
+                : tab === 'episodes'
+                  ? '暂无近期摘要'
+                  : tab === 'pinned'
+                    ? '暂无常驻记忆'
+                    : tab === 'regular'
+                      ? '暂无按需记忆'
+                      : '暂无记忆'
+        "
+        :description="
+          search.trim() || hasFilters
+            ? '尝试调整关键词或清除筛选条件。'
+            : tab === 'pinned' && pinnedGroup
+              ? '该常驻分组下尚无记忆，可切换回全部常驻查看。'
+              : tab === 'all'
+                ? '使用随手记快速沉淀，或新建第一条正式记忆。'
+                : null
+        "
+      >
+        <template v-if="search.trim() || hasFilters" #actions>
+          <UButton
+            size="sm"
+            color="neutral"
+            variant="outline"
+            :icon="icons.restore"
+            @click="emit('resetFilters')"
+          >
+            重置筛选
+          </UButton>
+          <UButton size="sm" :icon="icons.capture" @click="emit('capture')">随手记</UButton>
+        </template>
+        <template v-else-if="tab === 'pinned' && pinnedGroup" #actions>
+          <UButton
+            size="sm"
+            color="neutral"
+            variant="outline"
+            :icon="icons.restore"
+            @click="emit('update:pinnedGroup', null)"
+          >
+            显示全部常驻
+          </UButton>
+        </template>
+        <template v-else-if="tab === 'all'" #actions>
+          <UButton size="sm" :icon="icons.capture" @click="emit('capture')">随手记</UButton>
+          <UButton
+            size="sm"
+            color="neutral"
+            variant="outline"
+            :icon="icons.add"
+            @click="emit('create')"
+          >
+            新建记忆
+          </UButton>
+        </template>
+      </EmptyState>
+    </div>
+
+    <div v-if="batchMode" class="batch-bar" role="region" aria-label="批量整理操作栏">
+      <span class="batch-status tabular-nums">
+        已选 {{ selectedBatchIds.length }} / {{ BATCH_MAX }} 条
+      </span>
+      <div class="batch-actions">
+        <UButton
+          size="xs"
+          color="neutral"
+          variant="outline"
+          :icon="icons.tidy"
+          :loading="batchBusy"
+          :disabled="selectedBatchIds.length < 2"
+          @click="submitBatch('tidy')"
+        >
+          规范所选
+        </UButton>
+        <UButton
+          size="xs"
+          :icon="icons.links"
+          :loading="batchBusy"
+          :disabled="selectedBatchIds.length < 2"
+          @click="submitBatch('cross_memory')"
+        >
+          查重与关联
+        </UButton>
       </div>
-    </section>
-  </div>
+    </div>
+  </section>
 </template>
 
 <style scoped>
-.list-shell {
-  display: contents;
-}
-.batch-check {
-  display: inline-flex;
-  align-items: flex-start;
-  padding-top: 4px;
-  flex: none;
-}
-.batch-check input[type='checkbox'] {
-  pointer-events: none;
-  accent-color: var(--ui-primary);
-}
-.batch-bar {
+.list-pane {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  background: var(--ui-bg);
+}
+.mobile-rail-bar {
+  display: none;
   align-items: center;
   justify-content: space-between;
-  gap: 8px 12px;
-  padding: 8px 16px;
-  border-top: 1px solid var(--ui-rule);
+  gap: 8px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--ui-border);
   background: var(--ui-bg-muted);
 }
-.batch-status {
+.mobile-view-label {
   font-size: 12px;
-  color: var(--ui-text-toned);
+  color: var(--ui-text-muted);
 }
-.batch-actions {
+.list-head {
+  flex: none;
   display: flex;
   align-items: center;
   gap: 6px;
-}
-.list-toolbar {
-  grid-column: 1 / -1;
-  grid-row: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px 20px;
+  padding: 8px 10px;
   border-bottom: 1px solid var(--ui-border);
   background: var(--ui-bg);
 }
-.toolbar-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-}
-.view-tabs {
-  display: inline-flex;
-  align-items: stretch;
-  flex: none;
-  max-width: 100%;
-  overflow-x: auto;
-  border: 1px solid var(--ui-border-accented);
-  background: transparent;
-}
-.view-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 28px;
-  padding: 0 10px;
-  border-right: 1px solid var(--ui-border);
-  font-size: 13px;
-  color: var(--ui-text-muted);
-  white-space: nowrap;
-  cursor: pointer;
-}
-.view-tab:last-child {
-  border-right: 0;
-}
-.view-tab:hover {
-  background: var(--ui-bg-elevated);
-  color: var(--ui-text-highlighted);
-}
-.view-tab.active {
-  background: var(--ui-selected);
-  color: var(--ui-on-selected);
-  font-weight: 500;
-}
-.tab-num {
-  font-size: 12px;
-  color: var(--ui-text-dimmed);
-}
-.view-tab.active .tab-num {
-  color: var(--ui-on-selected-muted);
-}
-.view-tab-icon {
-  display: inline-block;
-  flex: none;
-  width: 13px;
-  height: 13px;
-}
-/* 统一线轨图例：顶栏分段与列表左缘保持一致（实线=常驻，虚线=近期摘要） */
-.rail-swatch {
-  display: inline-block;
-  flex: none;
-  width: 3px;
-  height: 12px;
-}
-.rail-swatch.solid {
-  background: var(--ui-rule);
-}
-.rail-swatch.dashed {
-  background: repeating-linear-gradient(to bottom, var(--ui-info) 0 3px, transparent 3px 6px);
-}
-.view-tab.active .rail-swatch.solid {
-  background: var(--ui-on-selected);
-}
-.view-tab.active .rail-swatch.dashed {
-  background: repeating-linear-gradient(
-    to bottom,
-    var(--ui-on-selected) 0 3px,
-    transparent 3px 6px
-  );
-}
 .search-wrap {
-  flex: 1 1 14rem;
-  min-width: 12rem;
-  max-width: 26rem;
+  flex: 1 1 0;
+  min-width: 0;
 }
 .filter-count {
-  padding: 0 5px;
+  padding: 0 4px;
   background: var(--ui-selected);
   color: var(--ui-on-selected);
   font-family: var(--font-mono);
   font-size: 12px;
-  line-height: 1.4;
-}
-.toolbar-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  flex: none;
-  margin-left: auto;
-}
-.action-kbd {
-  font-family: var(--font-mono);
-  font-size: 12px;
+  line-height: 1.35;
 }
 .filter-popover {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  width: min(32rem, calc(100vw - 2rem));
+  width: min(26rem, calc(100vw - 2rem));
   max-height: min(70vh, calc(var(--reka-popover-content-available-height, 70vh) - 12px));
   overflow-y: auto;
   padding: 14px 16px;
@@ -1196,17 +964,57 @@ defineExpose({ filterOpen, exitBatchMode, displayItems })
   background: var(--ui-selected);
   color: var(--ui-on-selected);
 }
+.list-meta-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 34px;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-bg-muted);
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.meta-summary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.meta-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+.meta-link {
+  font-size: 12px;
+  color: var(--ui-text-toned);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.meta-link:hover {
+  color: var(--ui-text-highlighted);
+}
 .active-filters-bar {
+  flex: none;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-bg);
 }
 .active-pill {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 1px 7px;
+  gap: 4px;
+  padding: 1px 6px;
   border: 1px solid var(--ui-rule);
   background: var(--ui-bg-elevated);
   font-size: 12px;
@@ -1234,178 +1042,54 @@ defineExpose({ filterOpen, exitBatchMode, displayItems })
   width: 12px;
   height: 12px;
 }
-.list-pane {
-  grid-column: 1;
-  grid-row: 2;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 0;
-  background: var(--ui-bg);
-}
-.list-meta-bar {
-  flex: none;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px 12px;
-  min-height: 36px;
-  padding: 5px 20px;
-  border-bottom: 1px solid var(--ui-border);
-  background: var(--ui-bg-muted);
-  font-size: 12px;
-  color: var(--ui-text-muted);
-}
-.list-meta-bar.is-pinned-bar {
-  flex-wrap: wrap;
-}
-.meta-summary {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 6px;
-  min-width: 0;
-}
-.meta-right {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: none;
-  margin-left: auto;
-}
-.meta-sep {
-  color: var(--ui-border-accented);
-}
-.pinned-group-bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 5px;
-  min-width: 0;
-}
-.pinned-group-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  min-width: 0;
-  padding: 2px 8px;
-  border: 1px solid var(--ui-border-accented);
-  background: var(--ui-bg);
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--ui-text-toned);
-  cursor: pointer;
-}
-.pinned-group-btn:hover {
-  border-color: var(--ui-rule);
-  background: var(--ui-bg-elevated);
-  color: var(--ui-text-highlighted);
-}
-.pinned-budget {
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.pinned-budget-icon {
-  display: inline-block;
-  flex: none;
-  width: 13px;
-  height: 13px;
-}
-.pinned-budget.is-over {
-  border-color: var(--ui-warning);
-  color: var(--ui-warning);
-  font-weight: 500;
-}
-.pinned-budget.is-over:hover {
-  border-color: var(--ui-warning);
-  color: var(--ui-warning);
-}
-.pinned-group-btn.active,
-.pinned-group-btn.active:hover,
-.pinned-budget.is-over.active,
-.pinned-budget.is-over.active:hover {
-  border-color: var(--ui-selected);
-  background: var(--ui-selected);
-  color: var(--ui-on-selected);
-  font-weight: 500;
-}
-.pinned-group-reset {
-  padding: 2px 6px;
-  border: 0;
-  background: transparent;
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--ui-text-muted);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  cursor: pointer;
-}
-.pinned-group-reset:hover {
-  color: var(--ui-text-highlighted);
-}
 .pinned-overcap-wrap {
   flex: none;
-  padding: 8px 20px;
+  padding: 6px 10px;
   border-bottom: 1px solid var(--ui-border);
   background: var(--ui-bg);
 }
 .pinned-overcap-banner {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 8px 14px;
-  padding: 8px 12px;
+  gap: 8px;
+  padding: 6px 8px;
   border: 1px solid var(--ui-border);
   border-left: 3px solid var(--ui-warning);
   background: var(--ui-bg-bright);
   font-size: 12px;
-  line-height: 1.6;
+  line-height: 1.5;
   color: var(--ui-text-toned);
 }
 .overcap-body {
-  flex: 1 1 18rem;
   display: flex;
-  align-items: flex-start;
-  gap: 8px;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
 }
 .overcap-icon {
   display: inline-block;
   flex: none;
-  width: 14px;
-  height: 14px;
-  margin-top: 3px;
+  width: 13px;
+  height: 13px;
   color: var(--ui-warning);
 }
 .overcap-text {
   margin: 0;
   min-width: 0;
 }
-.overcap-actions {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-}
-.list-hint {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
 .list-scroll {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
 }
-/* 全宽清单行：主行纯粹放标题以保持左缘严格对齐，左缘 3px 静默线轨不占正文宽度 */
 .entry-row {
   position: relative;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 4px 20px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
   width: 100%;
-  padding: 12px 20px;
+  padding: 10px 12px 10px 14px;
   border-bottom: 1px solid var(--ui-border-muted);
   background: var(--ui-bg);
   text-align: left;
@@ -1413,10 +1097,6 @@ defineExpose({ filterOpen, exitBatchMode, displayItems })
 }
 .entry-row:focus-visible {
   outline-offset: -2px;
-}
-.entry-row.has-batch-check {
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 4px 12px;
 }
 .entry-row.is-pinned::before {
   content: '';
@@ -1479,18 +1159,35 @@ defineExpose({ filterOpen, exitBatchMode, displayItems })
     transparent 5px 9px
   );
 }
+.batch-check {
+  display: inline-flex;
+  align-items: flex-start;
+  padding-top: 3px;
+  flex: none;
+}
+.batch-check input[type='checkbox'] {
+  pointer-events: none;
+  accent-color: var(--ui-primary);
+}
 .row-main {
   display: flex;
   flex-direction: column;
   gap: 3px;
+  flex: 1;
   min-width: 0;
+}
+.row-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
 }
 .row-title {
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 500;
   line-height: 1.45;
   color: var(--ui-text-highlighted);
@@ -1498,15 +1195,24 @@ defineExpose({ filterOpen, exitBatchMode, displayItems })
 .entry-row.selected .row-title {
   color: var(--ui-on-selected);
 }
+.row-time {
+  flex: none;
+  font-size: 12px;
+  color: var(--ui-text-dimmed);
+  white-space: nowrap;
+}
+.entry-row.selected .row-time {
+  color: var(--ui-on-selected-muted);
+}
 .row-sub {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
-  font-size: 13px;
-  line-height: 1.55;
+  font-size: 12px;
+  line-height: 1.5;
   color: var(--ui-text-muted);
 }
 .entry-row.selected .row-sub {
@@ -1583,158 +1289,56 @@ defineExpose({ filterOpen, exitBatchMode, displayItems })
 .entry-row.selected .sub-change-prefix {
   color: var(--ui-on-selected);
 }
-.row-aside {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 6px;
-  flex: none;
-  min-width: 9rem;
-}
-.row-time {
-  font-size: 12px;
-  color: var(--ui-text-dimmed);
-  white-space: nowrap;
-}
-.entry-row.selected .row-time {
-  color: var(--ui-on-selected-muted);
-}
 .row-tags {
   display: flex;
   flex-wrap: wrap;
-  justify-content: flex-end;
   gap: 4px;
+  margin-top: 2px;
 }
 .row-tag {
-  display: inline-flex;
-  align-items: center;
-  padding: 0 6px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 5px;
   border: 1px solid var(--ui-border);
   background: var(--ui-bg-muted);
   font-size: 12px;
-  line-height: 1.5;
-  color: var(--ui-text-toned);
-  white-space: nowrap;
+  line-height: 1.45;
+  color: var(--ui-text-muted);
 }
 .row-tag.is-proj {
-  border-color: var(--ui-border-accented);
   font-family: var(--font-mono);
-}
-.row-tag.is-topic {
-  border-style: dashed;
-  background: transparent;
-  color: var(--ui-text-dimmed);
+  color: var(--ui-text-toned);
 }
 .entry-row.selected .row-tag {
-  border-color: var(--ui-on-selected-muted);
+  border-color: color-mix(in srgb, var(--ui-on-selected) 35%, transparent);
   background: transparent;
   color: var(--ui-on-selected-muted);
 }
-.entry-row.selected .row-tag.is-topic {
-  border-style: dashed;
-}
-/* 抽屉收窄（compact）态：副行换行以保障双链芯片可见，时间与标签转至底部一行 */
-.list-pane.is-compact .list-meta-bar {
-  padding: 6px 16px;
-}
-.list-pane.is-compact .meta-right {
-  margin-left: 0;
-}
-.list-pane.is-compact .pinned-overcap-wrap {
-  padding: 6px 16px;
-}
-.list-pane.is-compact .pinned-overcap-banner {
-  padding: 6px 10px;
-  gap: 6px 10px;
-}
-.list-pane.is-compact .overcap-body {
-  flex: 1 1 10rem;
-}
-.list-pane.is-compact .entry-row {
-  grid-template-columns: minmax(0, 1fr);
-  padding: 11px 16px;
-  gap: 4px;
-}
-.list-pane.is-compact .entry-row.has-batch-check {
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 4px 10px;
-}
-.list-pane.is-compact .entry-row.has-batch-check .row-aside {
-  grid-column: 2;
-}
-.list-pane.is-compact .row-title {
-  font-size: 14px;
-}
-.list-pane.is-compact .row-sub {
+.batch-bar {
+  flex: none;
+  display: flex;
   flex-wrap: wrap;
-  row-gap: 3px;
-  font-size: 12px;
-  --wiki-chip-max-width: 11em;
-}
-.list-pane.is-compact .sub-disclosure-sep {
-  display: none;
-}
-.list-pane.is-compact .row-disclosure {
-  flex: 1 0 100%;
-  width: 100%;
-}
-.list-pane.is-compact .row-aside {
-  flex-direction: row-reverse;
   align-items: center;
   justify-content: space-between;
-  min-width: 0;
-  width: 100%;
+  gap: 6px 10px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--ui-rule);
+  background: var(--ui-bg-muted);
 }
-.list-pane.is-compact .row-tags {
-  justify-content: flex-start;
+.batch-status {
+  font-size: 12px;
+  color: var(--ui-text-toned);
+}
+.batch-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 @media (max-width: 1023.98px) {
-  .list-toolbar {
-    padding: 10px 14px;
-  }
-  .view-tab {
-    padding: 0 8px;
-  }
-  .toolbar-actions {
-    margin-left: 0;
-  }
-  .list-meta-bar {
-    padding: 6px 14px;
-  }
-  .pinned-overcap-wrap {
-    padding: 8px 14px;
-  }
-  .list-hint {
-    display: none;
-  }
-  .entry-row {
-    grid-template-columns: minmax(0, 1fr);
-    padding: 11px 14px;
-    gap: 4px;
-  }
-  .entry-row.has-batch-check {
-    grid-template-columns: auto minmax(0, 1fr);
-    gap: 4px 10px;
-  }
-  .entry-row.has-batch-check .row-aside {
-    grid-column: 2;
-  }
-  .row-title {
-    font-size: 14px;
-  }
-  .row-sub {
-    font-size: 12px;
-  }
-  .row-aside {
-    flex-direction: row-reverse;
-    align-items: center;
-    justify-content: space-between;
-    min-width: 0;
-    width: 100%;
-  }
-  .row-tags {
-    justify-content: flex-start;
+  .mobile-rail-bar {
+    display: flex;
   }
 }
 </style>

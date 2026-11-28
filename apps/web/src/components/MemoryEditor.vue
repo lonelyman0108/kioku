@@ -104,8 +104,10 @@ const props = withDefaults(
   defineProps<{
     shortId: string
     facets?: EntryFacetsSummary | null
+    fullscreen?: boolean
+    showBack?: boolean
   }>(),
-  { facets: null },
+  { facets: null, fullscreen: false, showBack: false },
 )
 
 const emit = defineEmits<{
@@ -113,6 +115,8 @@ const emit = defineEmits<{
   deleted: [shortId: string, permanent: boolean]
   restored: [detail: EntryDetailResponse]
   open: [shortId: string]
+  toggleFullscreen: []
+  back: []
 }>()
 
 const router = useRouter()
@@ -393,8 +397,9 @@ const validationProblem = computed(() => {
 })
 
 function startEditing() {
-  if (!entry.value || isDeleted.value) return
+  if (!entry.value || isDeleted.value || quickBusy.value) return
   pinPopoverOpen.value = false
+  scopePopoverOpen.value = false
   organizeOpen.value = false
   minValidTo.value = earliestValidTo()
   attrsOpen.value = false
@@ -457,6 +462,7 @@ async function save() {
 // 阅读态常驻分层 Popover 与将「会话摘要」一键提炼为正式记忆
 const quickBusy = ref(false)
 const pinPopoverOpen = ref(false)
+const pinBaseVersion = ref<number | null>(null)
 const pinDraft = reactive({
   bootMode: 'none' as BootMode,
   summary: '',
@@ -468,6 +474,8 @@ const pinDraft = reactive({
 watch(pinPopoverOpen, (visible) => {
   const current = entry.value
   if (!visible || !current) return
+  scopePopoverOpen.value = false
+  pinBaseVersion.value = current.version
   const currentMode = effectiveBootMode(current)
   const overSoftCap = current.content.length > PINNED_FULL_SOFT_WARN_CHARS
   pinDraft.recommendedIndex = currentMode === 'none' && overSoftCap
@@ -540,7 +548,7 @@ async function applyPinDraft() {
       editingSummary && (pinDraft.summary.trim() || '') !== (current.summary?.trim() || '')
     const includeScope = pinDraft.bootMode !== 'none'
     const updated = await api.updateEntry(current.shortId, {
-      expectedVersion: current.version,
+      expectedVersion: pinBaseVersion.value ?? current.version,
       bootMode: pinDraft.bootMode,
       isPinned: pinDraft.bootMode !== 'none',
       ...(includeScope
@@ -556,13 +564,111 @@ async function applyPinDraft() {
     queryClient.setQueryData(queryKey.value, updated)
     loadDetail(updated)
     pinPopoverOpen.value = false
-    toast.add({ title: `已设为${bootModeLabels[pinDraft.bootMode]}`, color: 'success' })
+    toast.add({
+      title: `已设为${bootModeLabels[effectiveBootMode(updated.entry)]}`,
+      color: 'success',
+    })
     void queryClient.invalidateQueries({ queryKey: ['entry-history', current.shortId] })
     emit('changed', updated)
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '更新失败', color: 'error' })
     if (err instanceof ApiError && err.status === 409) {
       pinPopoverOpen.value = false
+      void detailQuery.refetch()
+    }
+  } finally {
+    quickBusy.value = false
+  }
+}
+
+// 阅读态适用场景行内直改 Popover
+const scopePopoverOpen = ref(false)
+const scopeBaseVersion = ref<number | null>(null)
+const scopeDraft = ref<SceneScopeValue>({ envs: [], realms: [], projects: [], runtimes: [] })
+
+watch(scopePopoverOpen, (visible) => {
+  const current = entry.value
+  if (!visible || !current) return
+  pinPopoverOpen.value = false
+  scopeBaseVersion.value = current.version
+  scopeDraft.value = {
+    envs: [...current.envs],
+    realms: [...current.realms],
+    projects: [...current.projects],
+    runtimes: [...current.runtimes],
+  }
+})
+
+const scopeDraftCount = computed(
+  () =>
+    scopeDraft.value.envs.length +
+    scopeDraft.value.realms.length +
+    scopeDraft.value.projects.length +
+    scopeDraft.value.runtimes.length,
+)
+
+const scopeDraftWarnings = computed(() => {
+  const current = entry.value
+  if (!scopePopoverOpen.value || !current) return []
+  return lintEntryHygiene({
+    title: current.title,
+    content: current.content,
+    summary: current.summary ?? '',
+    bootMode: effectiveBootMode(current),
+    envs: scopeDraft.value.envs,
+    realms: scopeDraft.value.realms,
+    projects: scopeDraft.value.projects,
+    runtimes: scopeDraft.value.runtimes,
+  }).filter((w) => w.code === 'pinned_oversized')
+})
+
+const scopeDraftDirty = computed(() => {
+  const current = entry.value
+  if (!current) return false
+  return (
+    !sameList(scopeDraft.value.envs, current.envs) ||
+    !sameList(scopeDraft.value.realms, current.realms) ||
+    !sameList(scopeDraft.value.projects, current.projects) ||
+    !sameList(scopeDraft.value.runtimes, current.runtimes)
+  )
+})
+
+const inlineScopeText = computed(() => {
+  const e = entry.value
+  if (!e) return '全局通用'
+  const parts = [
+    ...e.projects,
+    ...e.runtimes.map(runtimeName),
+    ...e.envs.map(envDisplayName),
+    ...e.realms,
+  ]
+  if (!parts.length) return '全局通用'
+  if (parts.length <= 3) return parts.join(' · ')
+  return `${parts.slice(0, 3).join(' · ')} +${parts.length - 3}`
+})
+
+async function applyScopeDraft() {
+  const current = entry.value
+  if (!current || quickBusy.value || isDeleted.value || !scopeDraftDirty.value) return
+  quickBusy.value = true
+  try {
+    const updated = await api.updateEntry(current.shortId, {
+      expectedVersion: scopeBaseVersion.value ?? current.version,
+      envs: scopeDraft.value.envs,
+      realms: scopeDraft.value.realms,
+      projects: scopeDraft.value.projects,
+      runtimes: scopeDraft.value.runtimes,
+    })
+    queryClient.setQueryData(queryKey.value, updated)
+    loadDetail(updated)
+    scopePopoverOpen.value = false
+    toast.add({ title: '已更新适用场景', color: 'success' })
+    void queryClient.invalidateQueries({ queryKey: ['entry-history', current.shortId] })
+    emit('changed', updated)
+  } catch (err) {
+    toast.add({ title: err instanceof ApiError ? err.message : '更新场景失败', color: 'error' })
+    if (err instanceof ApiError && err.status === 409) {
+      scopePopoverOpen.value = false
       void detailQuery.refetch()
     }
   } finally {
@@ -743,6 +849,14 @@ const hasLinks = computed(
 const hasSideRail = computed(
   () => outline.value.length > 0 || recentHistory.value.length > 0 || hasLinks.value,
 )
+const isRailActive = computed(
+  () => mode.value === 'read' && hasSideRail.value && editorScrollWidth.value >= RAIL_CONTAINER_MIN,
+)
+const hasReadMetaStrip = computed(() => {
+  const e = entry.value
+  if (!e) return false
+  return Boolean(e.topics.length || e.disclosure || e.validTo || e.verifiedAt)
+})
 const railHistoryOnly = computed(() => outline.value.length === 0 && !hasLinks.value)
 const railHistoryExpanded = ref(false)
 const railHistoryListId = useId()
@@ -1107,12 +1221,14 @@ defineExpose({
     :class="{
       'is-editing': mode === 'edit',
       'is-split': mode === 'edit' && editView === 'split',
+      'is-single-col': mode === 'read' && !isRailActive,
     }"
   >
-    <div v-if="$slots.nav" class="drawer-nav">
-      <div class="drawer-nav-inner">
-        <slot name="nav" />
-      </div>
+    <div v-if="showBack" class="mobile-back-bar">
+      <UButton size="xs" color="neutral" variant="ghost" :icon="icons.back" @click="emit('back')">
+        返回列表
+      </UButton>
+      <span v-if="entry" class="font-mono text-xs text-muted">{{ entry.shortId }}</span>
     </div>
     <div v-if="detailQuery.isPending.value && !entry" class="p-6 space-y-4">
       <USkeleton class="h-7 w-1/2" />
@@ -1127,14 +1243,6 @@ defineExpose({
           <div class="head-identity">
             <div class="head-title-row">
               <h1 ref="titleEl" tabindex="-1">{{ entry.title }}</h1>
-              <span v-if="entryBootMode === 'full'" class="pill status-pinned">
-                <span class="rail-swatch solid" aria-hidden="true" />
-                全文常驻
-              </span>
-              <span v-else-if="entryBootMode === 'index'" class="pill status-pinned-index">
-                <span class="rail-swatch index" aria-hidden="true" />
-                目录常驻
-              </span>
               <span v-if="entry.kind === 'episode'" class="pill status-episode">
                 <span class="rail-swatch dashed" aria-hidden="true" />
                 会话摘要
@@ -1145,8 +1253,248 @@ defineExpose({
               </span>
             </div>
 
-            <!-- 轻量动态状态行：版本、相对更新时间、来源、常驻字数与低调短 ID 复制入口 -->
+            <!-- 行内常驻/场景直改 + 轻量动态元信息与低调短 ID 复制入口 -->
             <div class="head-status-line">
+              <template v-if="mode === 'read' && !isDeleted && entry.kind === 'entry'">
+                <UPopover
+                  v-model:open="pinPopoverOpen"
+                  :dismissible="!quickBusy"
+                  :content="{ align: 'start', sideOffset: 6 }"
+                >
+                  <button
+                    type="button"
+                    class="inline-chip"
+                    :class="{
+                      'is-pinned': entryBootMode === 'full',
+                      'is-index': entryBootMode === 'index',
+                    }"
+                    :disabled="quickBusy"
+                    :aria-expanded="pinPopoverOpen"
+                    title="点击直接调整启动加载方式"
+                  >
+                    <span
+                      v-if="entryBootMode === 'full'"
+                      class="rail-swatch solid"
+                      aria-hidden="true"
+                    />
+                    <span
+                      v-else-if="entryBootMode === 'index'"
+                      class="rail-swatch index"
+                      aria-hidden="true"
+                    />
+                    <UIcon
+                      v-else
+                      :name="icons.bookOpen"
+                      class="inline-chip-icon"
+                      aria-hidden="true"
+                    />
+                    <span>{{ bootModeLabels[entryBootMode] }}</span>
+                    <UIcon :name="icons.chevronDown" class="inline-chip-caret" aria-hidden="true" />
+                  </button>
+                  <template #content>
+                    <div class="pin-popover">
+                      <div class="pin-popover-head">
+                        <span class="pin-popover-title">
+                          <UIcon :name="icons.pin" class="pin-title-icon" aria-hidden="true" />
+                          <span>启动加载方式</span>
+                        </span>
+                        <span class="text-xs text-muted tabular-nums">
+                          约 {{ entry.content.length.toLocaleString() }} 字
+                        </span>
+                      </div>
+
+                      <div class="pin-popover-body">
+                        <div class="pin-mode-list" role="radiogroup" aria-label="选择启动加载方式">
+                          <button
+                            v-for="modeOpt in BOOT_MODES"
+                            :key="modeOpt"
+                            type="button"
+                            role="radio"
+                            class="pin-mode-card"
+                            :class="{ active: pinDraft.bootMode === modeOpt }"
+                            :aria-checked="pinDraft.bootMode === modeOpt"
+                            :disabled="quickBusy"
+                            @click="pinDraft.bootMode = modeOpt"
+                          >
+                            <span class="pin-mode-head">
+                              <span class="pin-mode-name">
+                                <UIcon
+                                  :name="bootModeIcons[modeOpt]"
+                                  class="pin-mode-icon"
+                                  aria-hidden="true"
+                                />
+                                <span>{{ bootModeLabels[modeOpt] }}</span>
+                              </span>
+                              <UIcon
+                                v-if="pinDraft.bootMode === modeOpt"
+                                :name="icons.check"
+                                class="pin-mode-check"
+                                aria-hidden="true"
+                              />
+                            </span>
+                            <span class="pin-mode-desc">{{ bootModeDescriptions[modeOpt] }}</span>
+                          </button>
+                        </div>
+
+                        <p v-if="pinDraft.recommendedIndex" class="text-xs text-muted">
+                          正文超过 1,200 字，已默认推荐目录常驻。
+                        </p>
+
+                        <NoteLine v-if="pinDraftWarnings.length" tone="warning" flush>
+                          {{ pinDraftWarnings.map((w) => w.message).join('；') }}
+                        </NoteLine>
+
+                        <div v-if="pinDraft.bootMode === 'index'" class="space-y-1">
+                          <label for="pin-summary-input" class="pin-field-label">
+                            <UIcon
+                              :name="icons.summary"
+                              class="field-label-icon"
+                              aria-hidden="true"
+                            />
+                            <span>现行概要（用于启动目录行）</span>
+                          </label>
+                          <UTextarea
+                            id="pin-summary-input"
+                            v-model="pinDraft.summary"
+                            :rows="2"
+                            autoresize
+                            :maxrows="3"
+                            :maxlength="ENTRY_SUMMARY_MAX"
+                            :disabled="quickBusy"
+                            placeholder="1–2 句概括当前结论，便于会话启动判断是否展开全文"
+                            class="w-full"
+                          />
+                        </div>
+
+                        <div v-if="pinDraft.bootMode !== 'none'" class="pin-scope-box">
+                          <button
+                            type="button"
+                            class="pin-scope-toggle"
+                            :aria-expanded="pinDraft.scopeExpanded"
+                            @click="pinDraft.scopeExpanded = !pinDraft.scopeExpanded"
+                          >
+                            <span class="pin-scope-lead">
+                              <UIcon
+                                :name="icons.sliders"
+                                class="pin-scope-icon"
+                                aria-hidden="true"
+                              />
+                              <span>确认适用场景</span>
+                            </span>
+                            <UIcon
+                              :name="
+                                pinDraft.scopeExpanded ? icons.chevronDown : icons.chevronRight
+                              "
+                              class="attrs-chevron"
+                              aria-hidden="true"
+                            />
+                          </button>
+                          <div v-if="pinDraft.scopeExpanded" class="pin-scope-body">
+                            <SceneScopePicker
+                              v-model="pinDraft.scope"
+                              :facets="facets"
+                              :disabled="quickBusy"
+                            />
+                          </div>
+                        </div>
+                      </div>
+
+                      <div class="pin-popover-foot">
+                        <UButton
+                          size="xs"
+                          color="neutral"
+                          variant="ghost"
+                          :disabled="quickBusy"
+                          @click="pinPopoverOpen = false"
+                        >
+                          取消
+                        </UButton>
+                        <UButton
+                          size="xs"
+                          :icon="icons.check"
+                          :loading="quickBusy"
+                          :disabled="!pinDraftDirty"
+                          @click="applyPinDraft"
+                        >
+                          保存设置
+                        </UButton>
+                      </div>
+                    </div>
+                  </template>
+                </UPopover>
+
+                <UPopover
+                  v-model:open="scopePopoverOpen"
+                  :dismissible="!quickBusy"
+                  :content="{ align: 'start', sideOffset: 6 }"
+                >
+                  <button
+                    type="button"
+                    class="inline-chip"
+                    :disabled="quickBusy"
+                    :aria-expanded="scopePopoverOpen"
+                    :title="
+                      scopeTags.length
+                        ? `适用场景：${scopeTags.join('、')}（点击修改）`
+                        : '当前为全局通用（点击限定适用场景）'
+                    "
+                  >
+                    <UIcon
+                      :name="scopeTags.length ? icons.sliders : icons.globe"
+                      class="inline-chip-icon"
+                      aria-hidden="true"
+                    />
+                    <span class="inline-chip-text">{{ inlineScopeText }}</span>
+                    <UIcon :name="icons.chevronDown" class="inline-chip-caret" aria-hidden="true" />
+                  </button>
+                  <template #content>
+                    <div class="pin-popover">
+                      <div class="pin-popover-head">
+                        <span class="pin-popover-title">
+                          <UIcon :name="icons.sliders" class="pin-title-icon" aria-hidden="true" />
+                          <span>适用场景</span>
+                        </span>
+                        <span class="text-xs text-muted">
+                          {{ scopeDraftCount ? '已限定场景' : '全局通用' }}
+                        </span>
+                      </div>
+                      <div class="pin-popover-body">
+                        <SceneScopePicker
+                          v-model="scopeDraft"
+                          :facets="facets"
+                          :disabled="quickBusy"
+                        />
+                        <NoteLine v-if="scopeDraftWarnings.length" tone="warning" flush>
+                          {{ scopeDraftWarnings.map((w) => w.message).join('；') }}
+                        </NoteLine>
+                      </div>
+                      <div class="pin-popover-foot">
+                        <UButton
+                          size="xs"
+                          color="neutral"
+                          variant="ghost"
+                          :disabled="quickBusy"
+                          @click="scopePopoverOpen = false"
+                        >
+                          取消
+                        </UButton>
+                        <UButton
+                          size="xs"
+                          :icon="icons.check"
+                          :loading="quickBusy"
+                          :disabled="!scopeDraftDirty"
+                          @click="applyScopeDraft"
+                        >
+                          保存场景
+                        </UButton>
+                      </div>
+                    </div>
+                  </template>
+                </UPopover>
+
+                <span class="status-sep" aria-hidden="true">·</span>
+              </template>
+
               <span class="tabular-nums">版本 {{ entry.version }}</span>
               <span class="status-sep" aria-hidden="true">·</span>
               <time :datetime="entry.updatedAt" :title="formatTime(entry.updatedAt)">
@@ -1212,148 +1560,11 @@ defineExpose({
                 size="sm"
                 :variant="entry.kind === 'episode' ? 'outline' : 'solid'"
                 :icon="icons.edit"
+                :disabled="quickBusy"
                 @click="startEditing"
               >
                 编辑
               </UButton>
-              <UPopover
-                v-if="!isDeleted && entry.kind === 'entry'"
-                v-model:open="pinPopoverOpen"
-                :content="{ align: 'end', sideOffset: 6 }"
-              >
-                <UButton
-                  size="sm"
-                  color="neutral"
-                  variant="outline"
-                  :icon="entryBootMode === 'index' ? icons.bookmark : icons.pin"
-                  :loading="quickBusy"
-                  :aria-expanded="pinPopoverOpen"
-                >
-                  {{ entryBootMode === 'none' ? '设为常驻' : bootModeLabels[entryBootMode] }}
-                </UButton>
-                <template #content>
-                  <div class="pin-popover">
-                    <div class="pin-popover-head">
-                      <span class="pin-popover-title">
-                        <UIcon :name="icons.pin" class="pin-title-icon" aria-hidden="true" />
-                        <span>启动加载方式</span>
-                      </span>
-                      <span class="text-xs text-muted tabular-nums">
-                        约 {{ entry.content.length.toLocaleString() }} 字
-                      </span>
-                    </div>
-
-                    <div class="pin-popover-body">
-                      <div class="pin-mode-list" role="radiogroup" aria-label="选择启动加载方式">
-                        <button
-                          v-for="modeOpt in BOOT_MODES"
-                          :key="modeOpt"
-                          type="button"
-                          role="radio"
-                          class="pin-mode-card"
-                          :class="{ active: pinDraft.bootMode === modeOpt }"
-                          :aria-checked="pinDraft.bootMode === modeOpt"
-                          @click="pinDraft.bootMode = modeOpt"
-                        >
-                          <span class="pin-mode-head">
-                            <span class="pin-mode-name">
-                              <UIcon
-                                :name="bootModeIcons[modeOpt]"
-                                class="pin-mode-icon"
-                                aria-hidden="true"
-                              />
-                              <span>{{ bootModeLabels[modeOpt] }}</span>
-                            </span>
-                            <UIcon
-                              v-if="pinDraft.bootMode === modeOpt"
-                              :name="icons.check"
-                              class="pin-mode-check"
-                              aria-hidden="true"
-                            />
-                          </span>
-                          <span class="pin-mode-desc">{{ bootModeDescriptions[modeOpt] }}</span>
-                        </button>
-                      </div>
-
-                      <p v-if="pinDraft.recommendedIndex" class="text-xs text-muted">
-                        正文超过 1,200 字，已默认推荐目录常驻。
-                      </p>
-
-                      <NoteLine v-if="pinDraftWarnings.length" tone="warning" flush>
-                        {{ pinDraftWarnings.map((w) => w.message).join('；') }}
-                      </NoteLine>
-
-                      <div v-if="pinDraft.bootMode === 'index'" class="space-y-1">
-                        <label for="pin-summary-input" class="pin-field-label">
-                          <UIcon
-                            :name="icons.summary"
-                            class="field-label-icon"
-                            aria-hidden="true"
-                          />
-                          <span>现行概要（用于启动目录行）</span>
-                        </label>
-                        <UTextarea
-                          id="pin-summary-input"
-                          v-model="pinDraft.summary"
-                          :rows="2"
-                          autoresize
-                          :maxrows="3"
-                          :maxlength="ENTRY_SUMMARY_MAX"
-                          placeholder="1–2 句概括当前结论，便于会话启动判断是否展开全文"
-                          class="w-full"
-                        />
-                      </div>
-
-                      <div v-if="pinDraft.bootMode !== 'none'" class="pin-scope-box">
-                        <button
-                          type="button"
-                          class="pin-scope-toggle"
-                          :aria-expanded="pinDraft.scopeExpanded"
-                          @click="pinDraft.scopeExpanded = !pinDraft.scopeExpanded"
-                        >
-                          <span class="pin-scope-lead">
-                            <UIcon
-                              :name="icons.sliders"
-                              class="pin-scope-icon"
-                              aria-hidden="true"
-                            />
-                            <span>确认适用场景</span>
-                          </span>
-                          <UIcon
-                            :name="pinDraft.scopeExpanded ? icons.chevronDown : icons.chevronRight"
-                            class="attrs-chevron"
-                            aria-hidden="true"
-                          />
-                        </button>
-                        <div v-if="pinDraft.scopeExpanded" class="pin-scope-body">
-                          <SceneScopePicker v-model="pinDraft.scope" :facets="facets" />
-                        </div>
-                      </div>
-                    </div>
-
-                    <div class="pin-popover-foot">
-                      <UButton
-                        size="xs"
-                        color="neutral"
-                        variant="ghost"
-                        :disabled="quickBusy"
-                        @click="pinPopoverOpen = false"
-                      >
-                        取消
-                      </UButton>
-                      <UButton
-                        size="xs"
-                        :icon="icons.check"
-                        :loading="quickBusy"
-                        :disabled="!pinDraftDirty"
-                        @click="applyPinDraft"
-                      >
-                        保存设置
-                      </UButton>
-                    </div>
-                  </div>
-                </template>
-              </UPopover>
               <UDropdownMenu
                 v-if="!isDeleted && entry.kind === 'entry'"
                 :items="organizeMenuItems"
@@ -1366,7 +1577,7 @@ defineExpose({
                   variant="outline"
                   :icon="icons.tidy"
                   :trailing-icon="icons.chevronDown"
-                  :disabled="!hasChatModel"
+                  :disabled="!hasChatModel || quickBusy"
                   :title="
                     hasChatModel ? '按说明修订、规范此条或查重与关联' : '请先在设置中配置对话模型'
                   "
@@ -1384,6 +1595,17 @@ defineExpose({
                 历史
               </UButton>
               <UButton
+                v-if="!showBack"
+                size="sm"
+                color="neutral"
+                variant="outline"
+                :icon="fullscreen ? icons.minimize : icons.maximize"
+                class="desktop-fullscreen-btn"
+                @click="emit('toggleFullscreen')"
+              >
+                {{ fullscreen ? '退出全屏' : '全屏' }}
+              </UButton>
+              <UButton
                 v-if="isDeleted"
                 size="sm"
                 :icon="icons.undelete"
@@ -1397,12 +1619,24 @@ defineExpose({
                 color="error"
                 variant="outline"
                 :icon="icons.remove"
+                :disabled="quickBusy"
                 @click="((deleteModal = isDeleted ? 'permanent' : 'soft'), (deleteError = null))"
               >
                 {{ isDeleted ? '彻底删除' : '删除' }}
               </UButton>
             </template>
             <template v-else>
+              <UButton
+                v-if="!showBack"
+                size="sm"
+                color="neutral"
+                variant="ghost"
+                :icon="fullscreen ? icons.minimize : icons.maximize"
+                class="desktop-fullscreen-btn"
+                @click="emit('toggleFullscreen')"
+              >
+                {{ fullscreen ? '退出全屏' : '全屏' }}
+              </UButton>
               <UButton
                 size="sm"
                 color="neutral"
@@ -1785,8 +2019,11 @@ defineExpose({
             :style="hasSideRail ? readLayoutStyle : undefined"
           >
             <div class="read-main">
-              <dl class="meta-strip">
-                <div>
+              <dl
+                v-if="hasReadMetaStrip || entry.kind === 'episode' || isDeleted"
+                class="meta-strip"
+              >
+                <div v-if="entry.kind === 'episode' || isDeleted">
                   <dt>
                     <UIcon :name="icons.sliders" class="meta-dt-icon" aria-hidden="true" />
                     <span>场景</span>
@@ -1851,6 +2088,7 @@ defineExpose({
               <MemoryContent
                 ref="readContentRef"
                 :content="displayContent"
+                width="full"
                 :wiki-links="wikiLinks"
                 :credentials="credentialLinks"
                 @open="(sid) => emit('open', sid)"
@@ -2127,30 +2365,74 @@ defineExpose({
   min-height: 0;
   flex: 1;
 }
+.editor-pane.is-single-col {
+  --canvas-max: 880px;
+}
 .editor-pane.is-editing {
   --canvas-max: 1120px;
 }
 .editor-pane.is-editing.is-split {
   --canvas-max: 1560px;
 }
-.drawer-nav {
+.mobile-back-bar {
   flex: none;
-  display: flex;
-  align-items: center;
-  height: 36px;
-  min-height: 36px;
-  padding: 0 28px;
-  border-bottom: 1px solid var(--ui-border);
-  background: var(--ui-bg-muted);
-}
-.drawer-nav-inner {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  width: 100%;
-  max-width: var(--canvas-max);
-  margin-inline: auto;
+  height: 36px;
+  min-height: 36px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-bg-muted);
+}
+.inline-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 15rem;
+  height: 22px;
+  padding: 0 7px;
+  border: 1px solid var(--ui-border-accented);
+  background: var(--ui-bg-bright);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  color: var(--ui-text-toned);
+  cursor: pointer;
+}
+.inline-chip:hover:not(:disabled) {
+  border-color: var(--ui-rule);
+  background: var(--ui-bg-muted);
+  color: var(--ui-text-highlighted);
+}
+.inline-chip.is-pinned {
+  border-color: var(--ui-rule);
+  color: var(--ui-text-highlighted);
+}
+.inline-chip.is-index {
+  border-color: var(--ui-border-accented);
+  color: var(--ui-text-highlighted);
+}
+.inline-chip-icon {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
+  color: var(--ui-text-muted);
+}
+.inline-chip-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.inline-chip-caret {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
+  color: var(--ui-text-dimmed);
 }
 .editor-head {
   flex: none;
@@ -2262,12 +2544,6 @@ defineExpose({
   font-weight: 500;
   line-height: 1.45;
   white-space: nowrap;
-}
-.pill.status-pinned {
-  color: var(--ui-text-highlighted);
-}
-.pill.status-pinned-index {
-  color: var(--ui-text-toned);
 }
 .pill.status-episode {
   border-color: var(--ui-info);
@@ -2979,7 +3255,6 @@ defineExpose({
   line-height: 1.5;
 }
 .summary-block {
-  max-width: 58em;
   margin-bottom: 18px;
   padding: 10px 14px;
   border-left: 3px solid var(--ui-rule);
@@ -3104,8 +3379,8 @@ defineExpose({
   padding-bottom: 4px;
 }
 @media (max-width: 1023.98px) {
-  .drawer-nav {
-    padding: 0 16px;
+  .desktop-fullscreen-btn {
+    display: none;
   }
   .editor-head {
     padding: 12px 16px;
