@@ -659,4 +659,35 @@ describe('renderMarkdown 双链芯片渲染', () => {
     expect(html).toContain('<code>[[m-s8a8df]]</code>')
     expect(html).toContain('[[m-2ft6p4]]')
   })
+
+  it('按字段解析凭据占位符，缺失凭据或字段渲染为可点击补建按钮', () => {
+    const html = renderMarkdown(
+      '主值 {{cred:prod-db}} 与缺失字段 {{cred:prod-db#replica}} 与 {{cred:ghost}}',
+      {
+        credentials: {
+          bySlug: new Map([
+            ['prod-db', { slug: 'prod-db', label: '生产数据库', available: true }],
+            ['ghost', { slug: 'ghost', label: null, available: false }],
+          ]),
+          byRef: new Map([
+            ['prod-db#', { slug: 'prod-db', field: null, label: '生产数据库', available: true }],
+            [
+              'prod-db#replica',
+              { slug: 'prod-db', field: 'replica', label: '生产数据库', available: false },
+            ],
+            ['ghost#', { slug: 'ghost', field: null, label: null, available: false }],
+          ]),
+          href: (slug) => `/credentials?id=${slug}`,
+        },
+      },
+    )
+
+    expect(html).toContain('<a class="kioku-cred" href="/credentials?id=prod-db"')
+    expect(html).toContain(
+      '<button type="button" class="kioku-cred kioku-cred-missing" data-credential-missing="1" data-credential-slug="prod-db" data-credential-field="replica"',
+    )
+    expect(html).toContain(
+      '<button type="button" class="kioku-cred kioku-cred-missing" data-credential-missing="1" data-credential-slug="ghost" data-credential-field=""',
+    )
+  })
 })

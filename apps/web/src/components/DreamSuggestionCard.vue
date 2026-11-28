@@ -23,11 +23,13 @@ import {
   type DreamSuggestionView,
   type ReviseSuggestionRequest,
 } from '@kioku/contracts'
+import { useToast } from '@nuxt/ui/composables'
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { useSession } from '../composables/useSession'
+import { maskSecretSnippet, replaceMatchAtRange } from '../credentials'
 import { icons } from '../icons'
 import {
   bootModeDescriptions,
@@ -40,8 +42,11 @@ import {
 } from '../labels'
 import { entryRoute } from '../routes'
 import { runtimeName } from '../runtimes'
-import { detectSecretPrefixes } from '../secretHint'
+import { findSecretMatches, type SecretMatch } from '../secretHint'
 import { formatRelative, formatShort, formatShortRange, formatTime } from '../time'
+import InlineCredentialCaptureModal, {
+  type InlineCredentialSavedPayload,
+} from './InlineCredentialCaptureModal.vue'
 import SceneScopePicker, { type SceneScopeValue } from './SceneScopePicker.vue'
 import SegmentedChoice from './SegmentedChoice.vue'
 import DiffViewer from './ui/DiffViewer.vue'
@@ -119,7 +124,10 @@ function abortRevise() {
   }
 }
 
-onBeforeUnmount(abortRevise)
+onBeforeUnmount(() => {
+  abortRevise()
+  captureTarget.value = null
+})
 
 const baseEntry = computed(() => {
   if (props.suggestion.keepId) {
@@ -183,6 +191,8 @@ watch(
     reviseError.value = null
     revisedReason.value = null
     showRevisedDiff.value = true
+    captureModalOpen.value = false
+    captureTarget.value = null
   },
   { immediate: true },
 )
@@ -686,9 +696,28 @@ const integrity = computed<CaptureIntegrity | null>(() => {
   return checkCaptureIntegrity(base.content, next)
 })
 
-const editSecretWarnings = computed(() =>
-  editing.value ? detectSecretPrefixes(draft.content) : [],
-)
+const toast = useToast()
+const suggestionSecretWarnings = computed(() => props.suggestion.secretWarnings ?? [])
+const editSecretMatches = computed(() => (editing.value ? findSecretMatches(draft.content) : []))
+const captureModalOpen = ref(false)
+const captureTarget = ref<SecretMatch | null>(null)
+
+watch(captureModalOpen, (visible) => {
+  if (!visible) captureTarget.value = null
+})
+
+function openEditSecretCapture(match: SecretMatch) {
+  captureTarget.value = match
+  captureModalOpen.value = true
+}
+
+function onEditSecretSaved(payload: InlineCredentialSavedPayload) {
+  const target = captureTarget.value
+  captureTarget.value = null
+  if (!target) return
+  draft.content = replaceMatchAtRange(draft.content, target, payload.placeholder)
+  toast.add({ title: `已转存并替换为 ${payload.placeholder}`, color: 'success' })
+}
 
 const editValidationProblem = computed(() => {
   if (!editing.value) return null
@@ -1064,6 +1093,63 @@ defineExpose({
           条记忆引用了待合并记忆，应用合并时会自动将反链重定向至保留目标。
         </NoteLine>
 
+        <!-- 整理发现的疑似明文凭据告警 -->
+        <NoteLine
+          v-if="suggestionSecretWarnings.length"
+          tone="warning"
+          flush
+          :icon="icons.shieldAlert"
+        >
+          检测到
+          {{ suggestionSecretWarnings.length }} 处疑似明文凭据，建议改存托管凭据并用占位符替换。
+          <template #detail>
+            <span class="secret-warn-list">
+              <span
+                v-for="(w, idx) in suggestionSecretWarnings"
+                :key="idx"
+                class="secret-warn-item"
+              >
+                <span class="secret-warn-label">{{ w.label }}</span>
+                <span v-if="w.location" class="secret-warn-loc">{{ w.location }}</span>
+                <code v-if="w.maskedSnippet" class="secret-warn-code font-mono">
+                  {{ w.maskedSnippet }}
+                </code>
+              </span>
+            </span>
+          </template>
+          <template #actions>
+            <UButton
+              v-if="baseEntry && !isDistillEpisode"
+              size="xs"
+              color="neutral"
+              variant="outline"
+              :icon="icons.edit"
+              :to="entryRoute(baseEntry.shortId)"
+            >
+              前往编辑并转存
+            </UButton>
+            <UButton
+              v-else-if="!editing && !isMarkStale && !isLinkEntries"
+              size="xs"
+              color="neutral"
+              variant="outline"
+              :icon="icons.edit"
+              @click="openEditor"
+            >
+              编辑并替换
+            </UButton>
+            <UButton
+              size="xs"
+              color="neutral"
+              variant="ghost"
+              :icon="icons.credentials"
+              :to="{ name: 'credentials', query: { new: '1' } }"
+            >
+              新建凭据
+            </UButton>
+          </template>
+        </NoteLine>
+
         <!-- 完整性护栏 / 改动影响条 -->
         <div
           v-if="integrity"
@@ -1263,11 +1349,39 @@ defineExpose({
                 class="w-full"
               />
             </UFormField>
-            <NoteLine v-if="editSecretWarnings.length" tone="warning" flush>
-              正文疑似包含{{
-                editSecretWarnings.map((w) => w.label).join('、')
-              }}，建议改存凭据并用占位符引用。
-            </NoteLine>
+            <div v-if="editSecretMatches.length" class="secret-alert-box" role="status">
+              <p class="secret-alert-head">
+                <UIcon :name="icons.shieldAlert" class="secret-alert-icon" aria-hidden="true" />
+                <span>
+                  正文疑似包含
+                  {{ editSecretMatches.length }} 处明文凭据，建议改存托管凭据并用占位符替换
+                </span>
+              </p>
+              <ul class="secret-match-list">
+                <li
+                  v-for="(m, idx) in editSecretMatches"
+                  :key="`${m.start}-${idx}`"
+                  class="secret-match-row"
+                >
+                  <span class="secret-match-info">
+                    <span class="secret-match-label">{{ m.label }}</span>
+                    <code class="secret-match-snippet font-mono">{{
+                      maskSecretSnippet(m.match)
+                    }}</code>
+                  </span>
+                  <UButton
+                    type="button"
+                    size="xs"
+                    color="neutral"
+                    variant="outline"
+                    :icon="icons.credentials"
+                    @click="openEditSecretCapture(m)"
+                  >
+                    转存为凭据并替换
+                  </UButton>
+                </li>
+              </ul>
+            </div>
             <UFormField label="正文">
               <template #label>
                 <span class="field-label">
@@ -2081,6 +2195,53 @@ defineExpose({
       </time>
     </header>
 
+    <!-- 整理发现的疑似明文凭据告警 -->
+    <NoteLine v-if="suggestionSecretWarnings.length" tone="warning" flush :icon="icons.shieldAlert">
+      检测到 {{ suggestionSecretWarnings.length }} 处疑似明文凭据，建议改存托管凭据并用占位符替换。
+      <template #detail>
+        <span class="secret-warn-list">
+          <span v-for="(w, idx) in suggestionSecretWarnings" :key="idx" class="secret-warn-item">
+            <span class="secret-warn-label">{{ w.label }}</span>
+            <span v-if="w.location" class="secret-warn-loc">{{ w.location }}</span>
+            <code v-if="w.maskedSnippet" class="secret-warn-code font-mono">
+              {{ w.maskedSnippet }}
+            </code>
+          </span>
+        </span>
+      </template>
+      <template #actions>
+        <UButton
+          v-if="baseEntry && !isDistillEpisode"
+          size="xs"
+          color="neutral"
+          variant="outline"
+          :icon="icons.edit"
+          :to="entryRoute(baseEntry.shortId)"
+        >
+          前往编辑并转存
+        </UButton>
+        <UButton
+          v-else-if="!editing && !isMarkStale && !isLinkEntries"
+          size="xs"
+          color="neutral"
+          variant="outline"
+          :icon="icons.edit"
+          @click="openEditor"
+        >
+          编辑并替换
+        </UButton>
+        <UButton
+          size="xs"
+          color="neutral"
+          variant="ghost"
+          :icon="icons.credentials"
+          :to="{ name: 'credentials', query: { new: '1' } }"
+        >
+          新建凭据
+        </UButton>
+      </template>
+    </NoteLine>
+
     <!-- 唯一亮纸核心变更区 -->
     <div class="card-delta-surface">
       <div v-if="editing" class="edit-box">
@@ -2157,11 +2318,36 @@ defineExpose({
             class="w-full"
           />
         </UFormField>
-        <NoteLine v-if="editSecretWarnings.length" tone="warning" flush>
-          正文疑似包含{{
-            editSecretWarnings.map((w) => w.label).join('、')
-          }}，建议改存凭据并用占位符引用。
-        </NoteLine>
+        <div v-if="editSecretMatches.length" class="secret-alert-box" role="status">
+          <p class="secret-alert-head">
+            <UIcon :name="icons.shieldAlert" class="secret-alert-icon" aria-hidden="true" />
+            <span>
+              正文疑似包含 {{ editSecretMatches.length }} 处明文凭据，建议改存托管凭据并用占位符替换
+            </span>
+          </p>
+          <ul class="secret-match-list">
+            <li
+              v-for="(m, idx) in editSecretMatches"
+              :key="`${m.start}-${idx}`"
+              class="secret-match-row"
+            >
+              <span class="secret-match-info">
+                <span class="secret-match-label">{{ m.label }}</span>
+                <code class="secret-match-snippet font-mono">{{ maskSecretSnippet(m.match) }}</code>
+              </span>
+              <UButton
+                type="button"
+                size="xs"
+                color="neutral"
+                variant="outline"
+                :icon="icons.credentials"
+                @click="openEditSecretCapture(m)"
+              >
+                转存为凭据并替换
+              </UButton>
+            </li>
+          </ul>
+        </div>
         <UFormField label="正文">
           <template #label>
             <span class="field-label">
@@ -2681,6 +2867,17 @@ defineExpose({
       </template>
     </footer>
   </article>
+
+  <InlineCredentialCaptureModal
+    v-model:open="captureModalOpen"
+    :initial-value="captureTarget?.match ?? ''"
+    :initial-match="captureTarget"
+    :default-realms="draftScope.realms"
+    silent-success-toast
+    title="转存为托管凭据并替换"
+    action-label="保存并替换"
+    @saved="onEditSecretSaved"
+  />
 </template>
 
 <style scoped>
@@ -3807,5 +4004,91 @@ defineExpose({
   .desktop-fullscreen-btn {
     display: none;
   }
+}
+.secret-warn-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+}
+.secret-warn-item {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.secret-warn-label {
+  font-weight: 500;
+  color: var(--ui-text-highlighted);
+}
+.secret-warn-loc {
+  color: var(--ui-text-muted);
+}
+.secret-warn-code {
+  padding: 0 5px;
+  border: 1px solid var(--ui-border-accented);
+  background: var(--ui-bg-bright);
+  font-size: 12px;
+  color: var(--ui-text-toned);
+}
+.secret-alert-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--ui-warning);
+  border-left-width: 3px;
+  background: var(--ui-bg-muted);
+}
+.secret-alert-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--ui-warning);
+}
+.secret-alert-icon {
+  display: inline-block;
+  flex: none;
+  width: 15px;
+  height: 15px;
+  margin-top: 2px;
+}
+.secret-match-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.secret-match-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--ui-border);
+}
+.secret-match-info {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.secret-match-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ui-text-highlighted);
+}
+.secret-match-snippet {
+  padding: 0 6px;
+  border: 1px solid var(--ui-border-accented);
+  background: var(--ui-bg-bright);
+  font-size: 12px;
+  color: var(--ui-text-toned);
+  overflow-wrap: anywhere;
 }
 </style>

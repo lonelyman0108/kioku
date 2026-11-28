@@ -1,9 +1,11 @@
 import {
+  CREDENTIAL_TEMPLATES,
   DREAM_KIND_NAMES,
   type BootBucket,
   type BootExcludeReason,
   type BootMode,
   type BootOmitReason,
+  type CredentialKind,
   type DreamMode,
   type DreamOutcome,
   type DreamSuggestionKind,
@@ -310,4 +312,57 @@ export const bootExcludeReasonIcons: Record<BootExcludeReason, string> = {
   scene_conflict: icons.filterX,
   project_mismatch: icons.folderX,
   expired: icons.clock,
+}
+
+export const CREDENTIAL_KIND_ORDER: readonly CredentialKind[] = [
+  'login',
+  'api',
+  'database',
+  'ssh',
+  'secret',
+]
+
+export const credentialKindLabels: Record<CredentialKind, string> = {
+  login: '账号与密码',
+  api: 'API 凭据',
+  database: '数据库连接',
+  ssh: 'SSH 密钥',
+  secret: '通用单值',
+}
+
+export const credentialKindIcons: Record<CredentialKind, string> = {
+  login: icons.account,
+  api: icons.plug,
+  database: icons.database,
+  ssh: icons.terminal,
+  secret: icons.keys,
+}
+
+const CREDENTIAL_FIELD_FALLBACK_LABELS: Readonly<Record<string, string>> = {
+  url: '连接串',
+  host: '主机',
+  port: '端口',
+  database: '数据库名',
+  username: '用户名',
+  password: '密码',
+  recovery_codes: '恢复码',
+  endpoint: '接口地址',
+  token: '访问令牌',
+  api_secret: '签名密钥',
+  public_key: '公钥',
+  private_key: '私钥',
+  passphrase: '私钥口令',
+  value: '凭据值',
+}
+
+export function credentialFieldLabel(
+  kind: CredentialKind,
+  fieldName: string,
+  explicitLabel?: string,
+): string {
+  const cleanExplicit = explicitLabel?.trim()
+  if (cleanExplicit) return cleanExplicit
+  const fromTemplate = CREDENTIAL_TEMPLATES[kind].fields.find((f) => f.name === fieldName)?.label
+  if (fromTemplate) return fromTemplate
+  return CREDENTIAL_FIELD_FALLBACK_LABELS[fieldName] ?? fieldName
 }

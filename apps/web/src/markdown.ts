@@ -146,8 +146,16 @@ export function markdownToHtml(source: string): string {
   }
 }
 
+export interface CredentialLinkInfo {
+  slug: string
+  field?: string | null
+  label: string | null
+  available: boolean
+}
+
 export interface CredentialLinks {
-  bySlug: ReadonlyMap<string, { slug: string; label: string | null; available: boolean }>
+  bySlug: ReadonlyMap<string, CredentialLinkInfo>
+  byRef?: ReadonlyMap<string, CredentialLinkInfo>
   href: (slug: string) => string
 }
 
@@ -582,7 +590,7 @@ function textNodes(root: DocumentFragment): Text[] {
   return texts
 }
 
-function markCredentials(root: DocumentFragment, { bySlug, href }: CredentialLinks) {
+function markCredentials(root: DocumentFragment, { bySlug, byRef, href }: CredentialLinks) {
   for (const text of textNodes(root)) {
     const segments = splitPlaceholders(text.data)
     if (!segments.some((s) => s.ref)) continue
@@ -593,20 +601,27 @@ function markCredentials(root: DocumentFragment, { bySlug, href }: CredentialLin
         continue
       }
       const display = `${ref.slug}${ref.field ? `#${ref.field}` : ''}`
-      const found = bySlug.get(ref.slug)
+      const refKey = `${ref.slug}#${ref.field ?? ''}`
+      const found = byRef?.get(refKey) ?? bySlug.get(ref.slug)
       if (!found || found.available) {
         const link = document.createElement('a')
         link.className = 'kioku-cred'
         link.href = href(ref.slug)
         link.dataset.credential = ref.slug
+        if (ref.field) link.dataset.credentialField = ref.field
         link.title = found?.label ? `凭据：${found.label}` : `凭据：${display}`
         link.setAttribute('aria-label', `凭据 ${display}`)
         link.textContent = display
         replacement.append(link)
       } else {
-        const badge = document.createElement('span')
+        const badge = document.createElement('button')
+        badge.setAttribute('type', 'button')
         badge.className = 'kioku-cred kioku-cred-missing'
-        badge.title = '凭据不存在或已删除'
+        badge.dataset.credentialMissing = '1'
+        badge.dataset.credentialSlug = ref.slug
+        badge.dataset.credentialField = ref.field ?? ''
+        badge.title = '凭据或字段缺失，点击就地补建'
+        badge.setAttribute('aria-label', `补建缺失凭据 ${display}`)
         badge.textContent = display
         replacement.append(badge)
       }

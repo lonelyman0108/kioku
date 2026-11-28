@@ -16,7 +16,11 @@ const props = withDefaults(
     width: 'reading',
   },
 )
-const emit = defineEmits<{ open: [shortId: string]; credential: [slug: string] }>()
+const emit = defineEmits<{
+  open: [shortId: string]
+  credential: [slug: string]
+  missingCredential: [ref: { slug: string; field: string | null }]
+}>()
 
 const rootRef = ref<HTMLElement | null>(null)
 
@@ -55,6 +59,16 @@ defineExpose({ scrollToHeading })
 
 function onClick(event: MouseEvent) {
   const target = event.target instanceof Element ? event.target : null
+  const missingCred = target?.closest<HTMLElement>('.kioku-cred-missing')
+  if (missingCred?.dataset.credentialSlug) {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) {
+      return
+    }
+    event.preventDefault()
+    const field = missingCred.dataset.credentialField?.trim() || null
+    emit('missingCredential', { slug: missingCred.dataset.credentialSlug, field })
+    return
+  }
   const credential = target?.closest<HTMLAnchorElement>('a.kioku-cred')
   if (credential?.dataset.credential) {
     if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) {
@@ -347,9 +361,16 @@ function onClick(event: MouseEvent) {
   font-weight: 500;
 }
 .kioku-markdown :deep(.kioku-cred-missing) {
+  padding-left: 0;
+  background: transparent;
   border-color: var(--ui-warning);
   color: var(--ui-warning);
   text-decoration: line-through;
+  cursor: pointer;
+}
+.kioku-markdown :deep(.kioku-cred-missing:hover) {
+  background: color-mix(in srgb, var(--ui-warning) 10%, var(--ui-bg));
+  text-decoration: none;
 }
 .kioku-markdown :deep(.kioku-cred-missing)::before {
   background: var(--ui-warning);

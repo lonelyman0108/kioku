@@ -57,7 +57,13 @@ const open = defineModel<boolean>('open', { required: true })
 const emit = defineEmits<{
   applied: [detail: EntryDetailResponse]
   staged: []
+  edit: []
 }>()
+
+function openEditorForSecrets() {
+  open.value = false
+  emit('edit')
+}
 
 const toast = useToast()
 const queryClient = useQueryClient()
@@ -293,6 +299,7 @@ async function submitSingleTidy(stageToInbox: boolean) {
       applyArchivedNotes: applyArchived,
       stageToInbox,
       reason: res.reason,
+      ...(res.secretWarnings?.length ? { secretWarnings: res.secretWarnings } : {}),
     })
     if (stageToInbox) {
       toast.add({ title: '已暂存至整理，可稍后统一确认', color: 'success' })
@@ -471,6 +478,52 @@ const drawerDescription = computed(() =>
 
         <!-- 模式 1：单条快速规范 -->
         <template v-else-if="mode === 'tidy' && tidyResult">
+          <NoteLine
+            v-if="tidyResult.secretWarnings?.length"
+            tone="warning"
+            flush
+            :icon="icons.shieldAlert"
+          >
+            检测到
+            {{ tidyResult.secretWarnings.length }} 处疑似明文凭据，建议改存托管凭据并用占位符替换。
+            <template #detail>
+              <span class="secret-warn-list">
+                <span
+                  v-for="(w, idx) in tidyResult.secretWarnings"
+                  :key="idx"
+                  class="secret-warn-item"
+                >
+                  <span class="secret-warn-label">{{ w.label }}</span>
+                  <span v-if="w.location" class="secret-warn-loc">{{ w.location }}</span>
+                  <code v-if="w.maskedSnippet" class="secret-warn-code font-mono">
+                    {{ w.maskedSnippet }}
+                  </code>
+                </span>
+              </span>
+            </template>
+            <template #actions>
+              <UButton
+                size="xs"
+                color="neutral"
+                variant="outline"
+                :icon="icons.edit"
+                @click="openEditorForSecrets"
+              >
+                前往编辑并转存
+              </UButton>
+              <UButton
+                size="xs"
+                color="neutral"
+                variant="ghost"
+                :icon="icons.credentials"
+                :to="{ name: 'credentials', query: { new: '1' } }"
+                @click="open = false"
+              >
+                新建凭据
+              </UButton>
+            </template>
+          </NoteLine>
+
           <EmptyState
             v-if="!tidyResult.needed"
             :icon="icons.shieldCheck"
@@ -1095,5 +1148,32 @@ const drawerDescription = computed(() =>
   display: flex;
   align-items: center;
   gap: 8px;
+}
+.secret-warn-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+}
+.secret-warn-item {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.secret-warn-label {
+  font-weight: 500;
+  color: var(--ui-text-highlighted);
+}
+.secret-warn-loc {
+  color: var(--ui-text-muted);
+}
+.secret-warn-code {
+  padding: 0 5px;
+  border: 1px solid var(--ui-border-accented);
+  background: var(--ui-bg-bright);
+  font-size: 12px;
+  color: var(--ui-text-toned);
 }
 </style>

@@ -15,16 +15,20 @@ import {
   type EntryDetailResponse,
   type EntryFacetsSummary,
 } from '@kioku/contracts'
-import { useKbd } from '@nuxt/ui/composables'
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { useKbd, useToast } from '@nuxt/ui/composables'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import { maskSecretSnippet, replaceMatchAtRange } from '../credentials'
 import { icons } from '../icons'
 import { bootModeDescriptions, bootModeIcons, bootModeLabels } from '../labels'
-import { detectSecretPrefixes } from '../secretHint'
+import { findSecretMatches, type SecretMatch } from '../secretHint'
 import { earliestValidTo, fromLocalInput, validToTooSoon } from '../time'
 import { analyzeTitleHint } from '../titleHint'
+import InlineCredentialCaptureModal, {
+  type InlineCredentialSavedPayload,
+} from './InlineCredentialCaptureModal.vue'
 import MemoryContent from './MemoryContent.vue'
 import SceneScopePicker, { type SceneScopeValue } from './SceneScopePicker.vue'
 import SegmentedChoice from './SegmentedChoice.vue'
@@ -55,6 +59,11 @@ const contentTab = ref<'edit' | 'preview'>('edit')
 const minValidTo = ref('')
 const saving = ref(false)
 const error = ref<string | null>(null)
+const toast = useToast()
+const contentInputRef = ref<{ textareaRef?: HTMLTextAreaElement } | null>(null)
+const captureModalOpen = ref(false)
+const captureTarget = ref<SecretMatch | null>(null)
+const captureMode = ref<'replace' | 'insert'>('replace')
 
 const CONTENT_TAB_OPTIONS: { value: 'edit' | 'preview'; label: string; icon: string }[] = [
   { value: 'edit', label: '编辑', icon: icons.edit },
@@ -91,7 +100,11 @@ const attrsSummary = computed(() => {
 watch(
   open,
   (visible) => {
-    if (!visible) return
+    if (!visible) {
+      captureModalOpen.value = false
+      captureTarget.value = null
+      return
+    }
     form.title = ''
     form.summary = ''
     form.content = ''
@@ -114,11 +127,52 @@ watch(
     contentTab.value = 'edit'
     minValidTo.value = earliestValidTo()
     error.value = null
+    captureModalOpen.value = false
+    captureTarget.value = null
   },
   { immediate: true },
 )
 
-const secretWarnings = computed(() => detectSecretPrefixes(form.content))
+const secretMatches = computed(() => findSecretMatches(form.content))
+
+function insertSnippetAtCursor(snippet: string) {
+  const el = contentInputRef.value?.textareaRef
+  if (!el) {
+    form.content = form.content ? `${form.content}\n${snippet}` : snippet
+    return
+  }
+  const start = el.selectionStart ?? form.content.length
+  const end = el.selectionEnd ?? start
+  form.content = `${form.content.slice(0, start)}${snippet}${form.content.slice(end)}`
+  void nextTick(() => {
+    el.focus()
+    const pos = start + snippet.length
+    el.setSelectionRange(pos, pos)
+  })
+}
+
+function openReplaceSecret(match: SecretMatch) {
+  captureMode.value = 'replace'
+  captureTarget.value = match
+  captureModalOpen.value = true
+}
+
+function openInsertNewCredential() {
+  captureMode.value = 'insert'
+  captureTarget.value = null
+  captureModalOpen.value = true
+}
+
+function onInlineCredentialSaved(payload: InlineCredentialSavedPayload) {
+  if (captureMode.value === 'replace' && captureTarget.value) {
+    form.content = replaceMatchAtRange(form.content, captureTarget.value, payload.placeholder)
+    toast.add({ title: `已转存并替换为 ${payload.placeholder}`, color: 'success' })
+  } else {
+    insertSnippetAtCursor(payload.placeholder)
+    toast.add({ title: `已新建凭据并插入 ${payload.placeholder}`, color: 'success' })
+  }
+  captureTarget.value = null
+}
 const bootWarnings = computed(() =>
   lintEntryHygiene({
     title: form.title,
@@ -202,6 +256,7 @@ function onModalKeydown(event: KeyboardEvent) {
     event.defaultPrevented ||
     event.isComposing ||
     !open.value ||
+    captureModalOpen.value ||
     !(event.metaKey || event.ctrlKey) ||
     event.shiftKey ||
     event.altKey ||
@@ -214,18 +269,25 @@ function onModalKeydown(event: KeyboardEvent) {
   void submit()
 }
 
+watch(captureModalOpen, (visible) => {
+  if (!visible) captureTarget.value = null
+})
+
 onMounted(() => window.addEventListener('keydown', onModalKeydown))
-onBeforeUnmount(() => window.removeEventListener('keydown', onModalKeydown))
+onBeforeUnmount(() => {
+  captureTarget.value = null
+  window.removeEventListener('keydown', onModalKeydown)
+})
 </script>
 
 <template>
   <UModal
     :open="open"
     title="新建记忆"
-    :dismissible="!saving"
+    :dismissible="!saving && !captureModalOpen"
     :close="!saving"
     :ui="{ content: 'max-w-3xl sm:max-w-3xl' }"
-    @update:open="(v) => !saving && (open = v)"
+    @update:open="(v) => !saving && !captureModalOpen && (open = v)"
   >
     <template #body>
       <div class="space-y-4">
@@ -286,23 +348,35 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onModalKeydown))
           />
         </UFormField>
 
-        <NoteLine v-if="secretWarnings.length" tone="warning">
-          正文疑似包含{{
-            secretWarnings.map((w) => w.label).join('、')
-          }}，建议改存凭据并用占位符引用。
-          <template #actions>
-            <UButton
-              size="xs"
-              color="neutral"
-              variant="outline"
-              :icon="icons.credentials"
-              :to="{ name: 'credentials' }"
-              @click="open = false"
+        <div v-if="secretMatches.length" class="secret-alert-box" role="status">
+          <p class="secret-alert-head">
+            <UIcon :name="icons.shieldAlert" class="secret-alert-icon" aria-hidden="true" />
+            <span>
+              正文疑似包含 {{ secretMatches.length }} 处明文凭据，建议改存托管凭据并用占位符替换
+            </span>
+          </p>
+          <ul class="secret-match-list">
+            <li
+              v-for="(m, idx) in secretMatches"
+              :key="`${m.start}-${idx}`"
+              class="secret-match-row"
             >
-              前往凭据
-            </UButton>
-          </template>
-        </NoteLine>
+              <span class="secret-match-info">
+                <span class="secret-match-label">{{ m.label }}</span>
+                <code class="secret-match-snippet font-mono">{{ maskSecretSnippet(m.match) }}</code>
+              </span>
+              <UButton
+                size="xs"
+                color="neutral"
+                variant="outline"
+                :icon="icons.credentials"
+                @click="openReplaceSecret(m)"
+              >
+                转存为凭据并替换
+              </UButton>
+            </li>
+          </ul>
+        </div>
 
         <div class="space-y-1.5">
           <div class="content-head">
@@ -310,15 +384,29 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onModalKeydown))
               <UIcon :name="icons.file" class="field-label-icon" aria-hidden="true" />
               <span>正文（Markdown）</span>
             </span>
-            <SegmentedChoice
-              v-model="contentTab"
-              :items="CONTENT_TAB_OPTIONS"
-              label="正文编辑与预览切换"
-              compact
-            />
+            <div class="content-head-actions">
+              <UButton
+                v-if="contentTab === 'edit'"
+                type="button"
+                size="xs"
+                color="neutral"
+                variant="outline"
+                :icon="icons.credentials"
+                @click="openInsertNewCredential"
+              >
+                新建凭据并插入
+              </UButton>
+              <SegmentedChoice
+                v-model="contentTab"
+                :items="CONTENT_TAB_OPTIONS"
+                label="正文编辑与预览切换"
+                compact
+              />
+            </div>
           </div>
           <UTextarea
             v-if="contentTab === 'edit'"
+            ref="contentInputRef"
             v-model="form.content"
             :rows="9"
             autoresize
@@ -423,6 +511,17 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onModalKeydown))
       </div>
     </template>
   </UModal>
+
+  <InlineCredentialCaptureModal
+    v-model:open="captureModalOpen"
+    :initial-value="captureTarget?.match ?? ''"
+    :initial-match="captureTarget"
+    :default-realms="scope.realms"
+    silent-success-toast
+    :title="captureMode === 'replace' ? '转存为托管凭据并替换' : '新建凭据并插入'"
+    :action-label="captureMode === 'replace' ? '保存并替换' : '保存并插入'"
+    @saved="onInlineCredentialSaved"
+  />
 </template>
 
 <style scoped>
@@ -439,9 +538,75 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onModalKeydown))
 }
 .content-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+.content-head-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.secret-alert-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--ui-warning);
+  border-left-width: 3px;
+  background: var(--ui-bg-muted);
+}
+.secret-alert-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--ui-warning);
+}
+.secret-alert-icon {
+  display: inline-block;
+  flex: none;
+  width: 15px;
+  height: 15px;
+  margin-top: 2px;
+}
+.secret-match-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.secret-match-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--ui-border);
+}
+.secret-match-info {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.secret-match-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ui-text-highlighted);
+}
+.secret-match-snippet {
+  padding: 0 6px;
+  border: 1px solid var(--ui-border-accented);
+  background: var(--ui-bg-bright);
+  font-size: 12px;
+  color: var(--ui-text-toned);
+  overflow-wrap: anywhere;
 }
 .field-label {
   display: inline-flex;
