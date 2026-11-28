@@ -1441,12 +1441,15 @@ onBeforeUnmount(() => {
             color="neutral"
             variant="outline"
             :icon="icons.menu"
-            class="mobile-rail-btn"
+            class="mobile-rail-btn shrink-0 whitespace-nowrap"
             @click="railOpen = true"
           >
             目录
           </UButton>
-          <span class="queue-title tabular-nums">
+          <span
+            class="queue-title tabular-nums"
+            :title="`${queueHeading} · ${orderedVisibleItems.length}`"
+          >
             {{ queueHeading }} · {{ orderedVisibleItems.length }}
           </span>
           <span v-if="!isFiltered && items.length > 0" class="queue-breakdown tabular-nums">
@@ -1461,6 +1464,7 @@ onBeforeUnmount(() => {
             color="neutral"
             variant="ghost"
             :icon="icons.filterX"
+            class="shrink-0 whitespace-nowrap"
             @click="resetFilter"
           >
             全部
@@ -1471,6 +1475,7 @@ onBeforeUnmount(() => {
             variant="ghost"
             :icon="icons.refresh"
             :loading="inboxQuery.isFetching.value && !state?.running"
+            class="shrink-0 whitespace-nowrap"
             @click="inboxQuery.refetch()"
           >
             刷新
@@ -1943,7 +1948,7 @@ onBeforeUnmount(() => {
 }
 .queue-head-left {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
   min-width: 0;
 }
@@ -1951,6 +1956,9 @@ onBeforeUnmount(() => {
   display: none;
 }
 .queue-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-size: 13px;
   font-weight: 600;
   color: var(--ui-text-highlighted);

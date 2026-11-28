@@ -360,7 +360,7 @@ function openEntryFromCapture(shortId: string) {
 }
 
 function toggleFullscreen() {
-  if (!selectedId.value) return
+  if (!selectedId.value || isPhone.value) return
   fullscreen.value = !fullscreen.value
 }
 

@@ -3778,11 +3778,6 @@ defineExpose({
     padding: 10px 20px;
   }
 }
-@media (max-width: 767.98px) {
-  .desktop-fullscreen-btn {
-    display: none;
-  }
-}
 @media (max-width: 960px) {
   .workbench-scroll {
     padding: 14px 16px 24px;
@@ -3806,6 +3801,11 @@ defineExpose({
   .summary-row {
     grid-template-columns: 1fr;
     gap: 4px;
+  }
+}
+@media (max-width: 767.98px) {
+  .desktop-fullscreen-btn {
+    display: none;
   }
 }
 </style>

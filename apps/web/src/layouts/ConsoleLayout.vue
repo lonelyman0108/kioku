@@ -257,7 +257,7 @@ provide(LOGOUT, logout)
             color="neutral"
             class="shrink-0 whitespace-nowrap"
             :ui="{
-              trailing: 'hidden min-[1024px]:flex items-center gap-0.5 ms-1',
+              trailing: 'hidden min-[1024px]:flex pointer-coarse:hidden items-center gap-0.5 ms-1',
             }"
           />
           <div class="desktop-account min-w-0 items-center">

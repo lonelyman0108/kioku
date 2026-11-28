@@ -758,6 +758,7 @@ async function confirmRestore() {
                 />
                 <template v-if="inspectorCanShowDiff && inspectorHasContentDiff">
                   <SegmentedChoice
+                    v-if="diffViewerRef?.canSplit"
                     v-model="diffLayout"
                     :items="DIFF_LAYOUT_OPTIONS"
                     label="对比排版方式"
@@ -1426,7 +1427,7 @@ async function confirmRestore() {
 .mobile-back {
   display: none;
 }
-@container (max-width: 599.98px) {
+@container (max-width: 639.98px) {
   .split-toggle {
     display: none;
   }

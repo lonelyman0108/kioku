@@ -402,10 +402,17 @@ describe('记忆布局、随手记与图标清单', () => {
     expect(dreamSuggestionCard).toContain('toggleFullscreen')
     expect(dreamSuggestionCard).toContain('退出全屏')
     expect(dreamSuggestionCard).toContain('decision-bar-inner')
+    expect(dreamSuggestionCard.indexOf('@media (max-width: 1279.98px)')).toBeLessThan(
+      dreamSuggestionCard.indexOf('@media (max-width: 960px)'),
+    )
+    expect(dreamSuggestionCard.indexOf('@media (max-width: 960px)')).toBeLessThan(
+      dreamSuggestionCard.indexOf('@media (max-width: 767.98px)'),
+    )
 
     expect(diffViewer).toContain('containerWidth.value >= 600')
     expect(diffViewer).toContain('max-width: 599.98px')
-    expect(memoryHistoryDrawer).toContain('max-width: 599.98px')
+    expect(diffViewer).toContain('canSplit')
+    expect(memoryHistoryDrawer).toContain('diffViewerRef?.canSplit')
 
     expect(credentialsPage).toContain('max-width: 1840px')
     expect(settingsPage).toContain('max-width: 1840px')
