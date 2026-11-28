@@ -7,6 +7,46 @@ import UnavailablePage from './pages/UnavailablePage.vue'
 export const SETTINGS_TABS = ['keys', 'models', 'account'] as const
 export type SettingsTab = (typeof SETTINGS_TABS)[number]
 
+export const SETTINGS_SECTIONS = [
+  'keys',
+  'embed',
+  'chat',
+  'schedule',
+  'account',
+  'transfer',
+] as const
+export type SettingsSection = (typeof SETTINGS_SECTIONS)[number]
+export type SettingsRouteTarget = SettingsTab | SettingsSection
+
+function normalizeRouteToken(raw: unknown): string | null {
+  if (Array.isArray(raw)) return typeof raw[0] === 'string' ? raw[0].trim().toLowerCase() : null
+  return typeof raw === 'string' && raw.trim() ? raw.trim().toLowerCase() : null
+}
+
+function mapSettingsToken(token: string | null): SettingsSection | null {
+  if (!token) return null
+  if (token === 'keys') return 'keys'
+  if (token === 'embed' || token === 'embedding') return 'embed'
+  if (token === 'chat' || token === 'models') return 'chat'
+  if (token === 'schedule') return 'schedule'
+  if (token === 'account') return 'account'
+  if (token === 'transfer') return 'transfer'
+  return null
+}
+
+export function resolveSettingsSection(
+  tab: unknown,
+  sub?: unknown,
+  querySub?: unknown,
+): SettingsSection {
+  return (
+    mapSettingsToken(normalizeRouteToken(sub)) ??
+    mapSettingsToken(normalizeRouteToken(querySub)) ??
+    mapSettingsToken(normalizeRouteToken(tab)) ??
+    'keys'
+  )
+}
+
 export const routes: RouteRecordRaw[] = [
   { path: '/setup', name: 'setup', component: () => import('./pages/SetupPage.vue') },
   {
@@ -43,7 +83,7 @@ export const routes: RouteRecordRaw[] = [
         component: () => import('./pages/CredentialsPage.vue'),
       },
       {
-        path: 'settings/:tab?',
+        path: 'settings/:tab?/:sub?',
         name: 'settings',
         component: () => import('./pages/SettingsPage.vue'),
       },
@@ -79,7 +119,12 @@ export const credentialRoute = (slug: string) => ({
   query: { id: slug },
 })
 
-export const settingsRoute = (tab: SettingsTab = 'keys') => ({
+export const newCredentialRoute = () => ({
+  name: 'credentials' as const,
+  query: { new: '1' },
+})
+
+export const settingsRoute = (tab: SettingsRouteTarget = 'keys') => ({
   name: 'settings' as const,
   params: { tab },
 })

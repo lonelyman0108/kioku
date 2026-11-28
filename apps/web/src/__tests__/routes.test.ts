@@ -8,7 +8,10 @@ import {
   credentialRoute,
   entryRoute,
   installGuards,
+  newCredentialRoute,
+  resolveSettingsSection,
   routes,
+  SETTINGS_SECTIONS,
   SETTINGS_TABS,
   settingsRoute,
   setupLost,
@@ -43,10 +46,11 @@ afterEach(() => {
 })
 
 describe('路由表与地址辅助函数', () => {
-  it('全部路由不包含旧版记忆圈前缀，设置页仅保留三个分页', () => {
+  it('全部路由不包含旧版记忆圈前缀，设置页兼容三标签并支持六子视图直达', () => {
     const paths = routes.flatMap((r) => [r.path, ...(r.children ?? []).map((c) => c.path)])
     expect(paths.some((p) => p.includes('circle') || p.includes('space'))).toBe(false)
     expect(SETTINGS_TABS).toEqual(['keys', 'models', 'account'])
+    expect(SETTINGS_SECTIONS).toEqual(['keys', 'embed', 'chat', 'schedule', 'account', 'transfer'])
     expect(entryRoute('m-ab2345')).toEqual({ name: 'memories', query: { id: 'm-ab2345' } })
     expect(captureRoute()).toEqual({ name: 'memories', query: { capture: '1' } })
     expect(captureRoute('  偏好表格  ')).toEqual({
@@ -58,7 +62,21 @@ describe('路由表与地址辅助函数', () => {
       query: { id: 'm-ab2345', project: 'kioku', capture: '1', draft: '偏好表格' },
     })
     expect(credentialRoute('prod-db')).toEqual({ name: 'credentials', query: { id: 'prod-db' } })
+    expect(newCredentialRoute()).toEqual({ name: 'credentials', query: { new: '1' } })
     expect(settingsRoute('models')).toEqual({ name: 'settings', params: { tab: 'models' } })
+    expect(settingsRoute('embed')).toEqual({ name: 'settings', params: { tab: 'embed' } })
+    expect(settingsRoute('transfer')).toEqual({ name: 'settings', params: { tab: 'transfer' } })
+
+    expect(resolveSettingsSection(undefined)).toBe('keys')
+    expect(resolveSettingsSection('keys')).toBe('keys')
+    expect(resolveSettingsSection('models')).toBe('chat')
+    expect(resolveSettingsSection('models', 'embed')).toBe('embed')
+    expect(resolveSettingsSection('models', undefined, 'schedule')).toBe('schedule')
+    expect(resolveSettingsSection('embedding')).toBe('embed')
+    expect(resolveSettingsSection('account')).toBe('account')
+    expect(resolveSettingsSection('account', 'transfer')).toBe('transfer')
+    expect(resolveSettingsSection('transfer')).toBe('transfer')
+    expect(resolveSettingsSection('unknown')).toBe('keys')
   })
 })
 
