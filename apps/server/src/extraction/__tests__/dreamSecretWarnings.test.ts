@@ -1,8 +1,10 @@
-import { DreamSuggestionView } from '@kioku/contracts'
+import { DreamSuggestionView, type DreamSecretWarning } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
+import type { CredentialService } from '../../credential/service'
 import type { Db } from '../../db/client'
-import { entries } from '../../db/schema'
+import { dreamSuggestions, entries } from '../../db/schema'
+import { EntryService } from '../../memory/service'
 import { hydrateDreamSuggestions } from '../dream'
 import {
   buildDreamMessages,
@@ -133,6 +135,59 @@ describe('LLM 整理 secret_warnings 提示词、脱敏清洗与建议透传', (
       expect((w.location ?? '').length).toBeLessThanOrEqual(80)
       expect((w.maskedSnippet ?? '').length).toBeLessThanOrEqual(48)
     }
+
+    // 对抗测试：裸 JWT/随机 Hex/含特殊字符强密码/密码含 @ 的连接串/无 END 行私钥块均不得在任意字段逃逸
+    const bareJwt = [
+      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9',
+      'eyJzdWIiOiJhZG1pbi0xMjM0NTYifQ',
+      'K9xM2pQ7wV4nB8zL1tR6yF3cH5dJ0sA',
+    ].join('.')
+    const randomHex = 'deadbeef0123456789abcdef98765432'
+    const starPwd = 'P@ss*w0rd:99.x"y'
+    const atUri = 'postgres://svc:p@ss@word99@db.prod.internal:5432/prod'
+    const unclosedPem = [
+      '-----BEGIN RSA PRIVATE KEY-----',
+      'MIIEpAIBAAKCAQEA1234567890abcdef',
+      'ZXhhbXBsZWtleWJ5dGVzMTIzNDU2Nzg5',
+    ].join('\n')
+
+    const adversarial = parseSecretWarnings([
+      {
+        label: `认证令牌 ${bareJwt}`,
+        location: `## 鉴权 ${randomHex}`,
+        masked_snippet: starPwd,
+      },
+      {
+        label: `密码泄露 ${starPwd}`,
+        location: `## 配置 ${atUri}`,
+        masked_snippet: atUri,
+      },
+      {
+        label: `私钥 ${unclosedPem}`,
+        location: `## 密钥 ${bareJwt}`,
+        masked_snippet: unclosedPem,
+      },
+      {
+        label: '赋值泄露',
+        location: '## 环境变量 API_SECRET=UltraSecretVal999',
+        masked_snippet: 'p*ssw0rdSecret99',
+      },
+    ])
+
+    const advText = JSON.stringify(adversarial)
+    expect(advText).not.toContain(bareJwt)
+    expect(advText).not.toContain('eyJzdWIi')
+    expect(advText).not.toContain(randomHex)
+    expect(advText).not.toContain('w0rd:99')
+    expect(advText).not.toContain('word99')
+    expect(advText).not.toContain('MIIEpAIBAAKCAQEA')
+    expect(advText).not.toContain('ZXhhbXBsZWtleWJ5dGVz')
+    expect(advText).not.toContain('UltraSecretVal999')
+    expect(advText).not.toContain('ssw0rdSecret99')
+    expect(adversarial[0]?.maskedSnippet).toBe('P***')
+    expect(adversarial[1]?.maskedSnippet).toBe('pos***')
+    expect(adversarial[2]?.maskedSnippet).toBe('私钥***')
+    expect(adversarial[3]?.maskedSnippet).toBe('p***')
   })
 
   it('evaluateDreamResponse、evaluateTidyResponse 与 hydrateDreamSuggestions 安全透传 secretWarnings', async () => {
@@ -265,5 +320,107 @@ describe('LLM 整理 secret_warnings 提示词、脱敏清洗与建议透传', (
     expect(validated.secretWarnings).toEqual([
       { label: '数据库密码', location: '## 连接参数', maskedSnippet: 'db-***' },
     ])
+  })
+
+  it('EntryService.applySingleTidy 暂存至整理前对外部传入的 secretWarnings 执行二次清洗', async () => {
+    const now = new Date('2026-11-28T00:00:00.000Z')
+    const entryRow: typeof entries.$inferSelect = {
+      id: '10000000-0000-4000-8000-000000000099',
+      shortId: 'm-234stg',
+      kind: 'entry',
+      title: '部署说明',
+      summary: '部署概要',
+      content: '正文内容',
+      disclosure: null,
+      isPinned: false,
+      bootMode: 'none',
+      envs: [],
+      realms: ['work'],
+      projects: ['kioku'],
+      runtimes: [],
+      topics: ['deploy'],
+      deviceKey: null,
+      projectSlug: null,
+      searchTags: '',
+      validTo: null,
+      verifiedAt: null,
+      lastChangeSummary: null,
+      version: 1,
+      dreamCheckedVersion: 0,
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+      fts: null,
+    }
+
+    let capturedInsertWarnings: DreamSecretWarning[] | null = null
+    let capturedConflictWarnings: DreamSecretWarning[] | null = null
+
+    const tx = {
+      execute: async () => [{ micros: String(BigInt(now.getTime()) * 1000n) }],
+      select: () => ({
+        from: (table: unknown) => ({
+          where: () => {
+            const limit = async () => (table === entries ? [entryRow] : [])
+            return { limit, orderBy: () => ({ limit }) }
+          },
+        }),
+      }),
+      insert: (table: unknown) => ({
+        values: (vals: Record<string, unknown>) => {
+          if (table === dreamSuggestions) {
+            capturedInsertWarnings = (vals.secretWarnings as DreamSecretWarning[] | null) ?? null
+          }
+          return {
+            onConflictDoUpdate: (opts: { set: Record<string, unknown> }) => {
+              if (table === dreamSuggestions) {
+                capturedConflictWarnings =
+                  (opts.set.secretWarnings as DreamSecretWarning[] | null) ?? null
+              }
+              return {
+                returning: async () => [{ id: '20000000-0000-4000-8000-000000000099' }],
+              }
+            },
+          }
+        },
+      }),
+    }
+    const fakeDb = {
+      transaction: async <T>(fn: (t: unknown) => Promise<T>) => fn(tx),
+    } as unknown as Db
+
+    const svc = new EntryService(fakeDb, null, {} as CredentialService, null)
+    const rawApiSecret = ['sk', 'proj', '9876543210abcdefghijkl'].join('-')
+    await svc.applySingleTidy(
+      { kind: 'console', accountId: 'acc', sessionId: 'sess' },
+      'm-234stg',
+      {
+        expectedVersion: 1,
+        title: '部署说明',
+        summary: '部署概要',
+        content: '正文内容（已规范）',
+        stageToInbox: true,
+        secretWarnings: [
+          {
+            label: `密钥 ${rawApiSecret}`,
+            location: '## 认证 P@ss*w0rd:99',
+            maskedSnippet: 'postgres://svc:p@ss@word@db.prod.internal:5432/prod',
+          },
+        ],
+      },
+    )
+
+    const serialized = JSON.stringify({ capturedInsertWarnings, capturedConflictWarnings })
+    expect(serialized).not.toContain(rawApiSecret)
+    expect(serialized).not.toContain('P@ss*w0rd:99')
+    expect(serialized).not.toContain('p@ss@word')
+    expect(capturedInsertWarnings).toEqual([
+      {
+        label: '密钥 sk-***',
+        location: '## 认证 P***',
+        maskedSnippet: 'pos***',
+      },
+    ])
+    expect(capturedConflictWarnings).toEqual(capturedInsertWarnings)
   })
 })

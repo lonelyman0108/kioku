@@ -257,7 +257,7 @@ export const RevealCredentialScope = z.enum(REVEAL_CREDENTIAL_SCOPES)
 export type RevealCredentialScope = z.infer<typeof RevealCredentialScope>
 
 export const RevealCredentialRequest = z
-  .object({
+  .strictObject({
     scope: RevealCredentialScope.optional(),
     field: CredentialFieldName.optional(),
   })

@@ -623,7 +623,7 @@ describe.skipIf(!testDatabaseUrl)('数据导入导出与外部 Lore 导入', () 
     expect(importedLogin.kind).toBe('login')
     expect(importedLogin.passkeyManualOnly).toBe(true)
 
-    // 兼容导入不含 kind/primaryField/fieldMeta/passkeyManualOnly 的旧版加密凭据包
+    // 兼容导入不含 kind/primaryField/fieldMeta/passkeyManualOnly 且携带附加 fields 的旧版加密凭据包
     const legacyEncrypted = await encryptExportCredentials(
       [
         {
@@ -632,10 +632,38 @@ describe.skipIf(!testDatabaseUrl)('数据导入导出与外部 Lore 导入', () 
           description: '老格式备份',
           allowedRealms: ['work'],
           value: 'LEGACY_BACKUP_SECRET_888',
+          fields: { webhook: 'whsec_legacy_extra' },
         },
       ],
       'legacy-backup-pass',
     )
+    const legacyPreviewRes = await appB.request('/v1/console/import/preview', {
+      method: 'POST',
+      headers: consoleHeaders(cookieB, true),
+      body: JSON.stringify({
+        source: {
+          kind: 'kioku',
+          bundle: {
+            format: KIOKU_EXPORT_FORMAT,
+            schemaVersion: 2,
+            exportedAt: '2026-10-01T00:00:00.000Z',
+            count: 0,
+            entries: [],
+            encryptedCredentials: legacyEncrypted,
+          },
+          includeCredentials: true,
+          passphrase: 'legacy-backup-pass',
+        },
+      }),
+    })
+    expect(legacyPreviewRes.status).toBe(200)
+    const legacyPreview = ImportPreviewResponse.parse(await legacyPreviewRes.json())
+    expect(legacyPreview.credentials[0]).toMatchObject({
+      slug: 'legacy-backup-key',
+      kind: 'secret',
+      fieldCount: 2,
+    })
+
     const legacyApply = await appB.request('/v1/console/import/apply', {
       method: 'POST',
       headers: consoleHeaders(cookieB, true),
@@ -661,7 +689,16 @@ describe.skipIf(!testDatabaseUrl)('数据导入导出与外部 Lore 导入', () 
     const legacyMeta = (await credSvcB.list()).find((c) => c.slug === 'legacy-backup-key')!
     expect(legacyMeta.kind).toBe('secret')
     expect(legacyMeta.primaryField).toBe('value')
-    expect(legacyMeta.fieldMeta).toEqual([{ name: 'value', label: '值', secret: true }])
-    expect((await credSvcB.reveal(legacyMeta.id)).value).toBe('LEGACY_BACKUP_SECRET_888')
+    expect(legacyMeta.fieldMeta).toEqual([
+      { name: 'value', label: '值', secret: true },
+      { name: 'webhook', secret: true },
+    ])
+    expect(await credSvcB.reveal(legacyMeta.id)).toEqual({
+      value: 'LEGACY_BACKUP_SECRET_888',
+      fields: {
+        value: 'LEGACY_BACKUP_SECRET_888',
+        webhook: 'whsec_legacy_extra',
+      },
+    })
   })
 })

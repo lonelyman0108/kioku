@@ -23,7 +23,7 @@ import { canAccessCredential, credentialRealmConditionSql, type AccessScope } fr
 import { decryptSecret, encryptSecret } from '../crypto/envelope'
 import { decryptionKey, encryptionKey, type MasterKey } from '../crypto/keyring'
 import { credentialAad } from '../crypto/rotation'
-import { isUniqueViolation, type Db, type Tx } from '../db/client'
+import { isUniqueViolation, withTx, type Db, type Tx } from '../db/client'
 import { credentials, entries } from '../db/schema'
 import { MemoryError } from '../memory/errors'
 
@@ -91,11 +91,19 @@ function buildNormalizedFieldMeta(
 
   return orderedNames.map((name) => {
     const preferred = preferredMap.get(name)
+    if (preferred) {
+      return {
+        name,
+        ...(preferred.label !== undefined ? { label: preferred.label } : {}),
+        secret: preferred.secret,
+        ...(preferred.multiline ? { multiline: true } : {}),
+      }
+    }
     const existing = existingMap.get(name)
     const tpl = templateMap.get(name)
-    const secret = preferred?.secret ?? existing?.secret ?? tpl?.secret ?? true
-    const label = preferred?.label ?? existing?.label ?? tpl?.label
-    const multiline = preferred?.multiline ?? existing?.multiline ?? tpl?.multiline
+    const secret = existing?.secret ?? tpl?.secret ?? true
+    const label = existing?.label ?? tpl?.label
+    const multiline = existing?.multiline ?? tpl?.multiline
     return {
       name,
       ...(label !== undefined ? { label } : {}),
@@ -273,121 +281,139 @@ export class CredentialService {
   }
 
   async update(id: string, input: UpdateCredentialRequest): Promise<CredentialMeta> {
-    const [existing] = await this.db
-      .select()
-      .from(credentials)
-      .where(eq(credentials.id, id))
-      .limit(1)
-    if (!existing) throw new MemoryError(404, '凭据不存在')
+    return withTx(this.db, async (tx, now) => {
+      const [existing] = await tx
+        .select()
+        .from(credentials)
+        .where(eq(credentials.id, id))
+        .for('update')
+      if (!existing) throw new MemoryError(404, '凭据不存在')
 
-    const nextKind = input.kind ?? existing.kind
-    const nextPasskeyManualOnly = input.passkeyManualOnly ?? existing.passkeyManualOnly
-    const touchesSecretValues =
-      input.value !== undefined || input.fields !== undefined || Boolean(input.removeFields?.length)
-    const changesPrimaryField =
-      input.primaryField !== undefined && input.primaryField !== existing.primaryField
-    const needsDecrypt =
-      touchesSecretValues ||
-      changesPrimaryField ||
-      (input.fieldMeta !== undefined && existing.fieldMeta.length === 0)
+      const nextKind = input.kind ?? existing.kind
+      const nextPasskeyManualOnly = input.passkeyManualOnly ?? existing.passkeyManualOnly
+      const touchesSecretValues =
+        input.value !== undefined ||
+        input.fields !== undefined ||
+        Boolean(input.removeFields?.length)
+      const changesPrimaryField =
+        input.primaryField !== undefined && input.primaryField !== existing.primaryField
+      const needsDecrypt =
+        touchesSecretValues ||
+        changesPrimaryField ||
+        (input.fieldMeta !== undefined && existing.fieldMeta.length === 0)
 
-    let nextPrimaryField = existing.primaryField
-    let nextFieldMeta = existing.fieldMeta
-    let nextSealed: { ciphertext: Buffer; wrappedKey: Buffer; keyId: string } | null = null
+      let nextPrimaryField = existing.primaryField
+      let nextFieldMeta = existing.fieldMeta
+      let nextSealed: { ciphertext: Buffer; wrappedKey: Buffer; keyId: string } | null = null
 
-    if (needsDecrypt) {
-      const current = openCredentialPayload(this.masterKey, existing)
-      let nextFields: Record<string, string>
+      if (needsDecrypt) {
+        const current = openCredentialPayload(this.masterKey, existing)
+        let nextFields: Record<string, string>
 
-      if (input.fields === null) {
-        const keepKey = input.primaryField ?? existing.primaryField
-        nextFields = { [keepKey]: input.value ?? current.value }
-      } else {
-        nextFields = { ...current.fields }
-        if (input.removeFields?.length) {
-          for (const keyToRemove of input.removeFields) {
-            delete nextFields[keyToRemove]
-          }
-        }
-        if (input.fields) {
-          for (const [k, v] of Object.entries(input.fields)) {
-            nextFields[k] = v
-          }
-        }
-        if (input.value !== undefined) {
-          const targetKey = input.primaryField ?? existing.primaryField
-          nextFields[targetKey] = input.value
-        }
-      }
-
-      const fieldKeys = Object.keys(nextFields)
-      if (!fieldKeys.length) {
-        throw new MemoryError(400, '凭据至少保留一个非空字段')
-      }
-      if (fieldKeys.length > CREDENTIAL_FIELDS_MAX) {
-        throw new MemoryError(400, `字段最多 ${CREDENTIAL_FIELDS_MAX} 个`)
-      }
-
-      nextFieldMeta = buildNormalizedFieldMeta(
-        nextKind,
-        fieldKeys,
-        input.fieldMeta,
-        existing.fieldMeta,
-      )
-
-      const templateDefault = defaultPrimaryFieldForKind(nextKind)
-      if (input.primaryField !== undefined) {
-        if (!Object.hasOwn(nextFields, input.primaryField)) {
-          throw new MemoryError(400, `默认字段 ${input.primaryField} 不在已填写字段中`)
-        }
-        nextPrimaryField = input.primaryField
-      } else if (Object.hasOwn(nextFields, existing.primaryField)) {
-        nextPrimaryField = existing.primaryField
-      } else if (Object.hasOwn(nextFields, templateDefault)) {
-        nextPrimaryField = templateDefault
-      } else {
-        nextPrimaryField = nextFieldMeta[0]!.name
-      }
-
-      const payload: NormalizedCredentialPayload = {
-        value: nextFields[nextPrimaryField]!,
-        fields: nextFields,
-      }
-      nextSealed = sealPayload(this.masterKey, existing.id, payload)
-    } else if (input.fieldMeta !== undefined && existing.fieldMeta.length > 0) {
-      nextFieldMeta = buildNormalizedFieldMeta(
-        nextKind,
-        existing.fieldMeta.map((f) => f.name),
-        input.fieldMeta,
-        existing.fieldMeta,
-      )
-    }
-
-    const [updated] = await this.db
-      .update(credentials)
-      .set({
-        ...(input.label !== undefined ? { label: input.label } : {}),
-        ...(input.description !== undefined ? { description: input.description } : {}),
-        ...(input.kind !== undefined ? { kind: nextKind } : {}),
-        ...(nextPrimaryField !== existing.primaryField ? { primaryField: nextPrimaryField } : {}),
-        ...(needsDecrypt || input.fieldMeta !== undefined ? { fieldMeta: nextFieldMeta } : {}),
-        ...(input.passkeyManualOnly !== undefined
-          ? { passkeyManualOnly: nextPasskeyManualOnly }
-          : {}),
-        ...(input.allowedRealms !== undefined ? { allowedRealms: input.allowedRealms } : {}),
-        ...(nextSealed
-          ? {
-              ciphertext: nextSealed.ciphertext,
-              wrappedKey: nextSealed.wrappedKey,
-              keyId: nextSealed.keyId,
+        if (input.fields === null) {
+          if (input.value !== undefined) {
+            const keepKey = input.primaryField ?? existing.primaryField
+            nextFields = { [keepKey]: input.value }
+          } else if (input.primaryField !== undefined) {
+            if (!Object.hasOwn(current.fields, input.primaryField)) {
+              throw new MemoryError(400, `默认字段 ${input.primaryField} 不在已填写字段中`)
             }
-          : {}),
-        updatedAt: sql`now()`,
-      })
-      .where(eq(credentials.id, id))
-      .returning()
+            nextFields = { [input.primaryField]: current.fields[input.primaryField]! }
+          } else {
+            const keepKey = existing.primaryField
+            const keepVal = Object.hasOwn(current.fields, keepKey)
+              ? current.fields[keepKey]!
+              : current.value
+            nextFields = { [keepKey]: keepVal }
+          }
+        } else {
+          nextFields = { ...current.fields }
+          if (input.removeFields?.length) {
+            for (const keyToRemove of input.removeFields) {
+              delete nextFields[keyToRemove]
+            }
+          }
+          if (input.value !== undefined) {
+            const targetKey = input.primaryField ?? existing.primaryField
+            nextFields[targetKey] = input.value
+          }
+          if (input.fields) {
+            for (const [k, v] of Object.entries(input.fields)) {
+              nextFields[k] = v
+            }
+          }
+        }
 
-    return toMeta(updated!)
+        const fieldKeys = Object.keys(nextFields)
+        if (!fieldKeys.length) {
+          throw new MemoryError(400, '凭据至少保留一个非空字段')
+        }
+        if (fieldKeys.length > CREDENTIAL_FIELDS_MAX) {
+          throw new MemoryError(400, `字段最多 ${CREDENTIAL_FIELDS_MAX} 个`)
+        }
+
+        nextFieldMeta = buildNormalizedFieldMeta(
+          nextKind,
+          fieldKeys,
+          input.fieldMeta,
+          existing.fieldMeta,
+        )
+
+        const templateDefault = defaultPrimaryFieldForKind(nextKind)
+        if (input.primaryField !== undefined) {
+          if (!Object.hasOwn(nextFields, input.primaryField)) {
+            throw new MemoryError(400, `默认字段 ${input.primaryField} 不在已填写字段中`)
+          }
+          nextPrimaryField = input.primaryField
+        } else if (Object.hasOwn(nextFields, existing.primaryField)) {
+          nextPrimaryField = existing.primaryField
+        } else if (Object.hasOwn(nextFields, templateDefault)) {
+          nextPrimaryField = templateDefault
+        } else {
+          nextPrimaryField = nextFieldMeta[0]!.name
+        }
+
+        const payload: NormalizedCredentialPayload = {
+          value: nextFields[nextPrimaryField]!,
+          fields: nextFields,
+        }
+        nextSealed = sealPayload(this.masterKey, existing.id, payload)
+      } else if (input.fieldMeta !== undefined && existing.fieldMeta.length > 0) {
+        nextFieldMeta = buildNormalizedFieldMeta(
+          nextKind,
+          existing.fieldMeta.map((f) => f.name),
+          input.fieldMeta,
+          existing.fieldMeta,
+        )
+      }
+
+      const [updated] = await tx
+        .update(credentials)
+        .set({
+          ...(input.label !== undefined ? { label: input.label } : {}),
+          ...(input.description !== undefined ? { description: input.description } : {}),
+          ...(input.kind !== undefined ? { kind: nextKind } : {}),
+          ...(nextPrimaryField !== existing.primaryField ? { primaryField: nextPrimaryField } : {}),
+          ...(needsDecrypt || input.fieldMeta !== undefined ? { fieldMeta: nextFieldMeta } : {}),
+          ...(input.passkeyManualOnly !== undefined
+            ? { passkeyManualOnly: nextPasskeyManualOnly }
+            : {}),
+          ...(input.allowedRealms !== undefined ? { allowedRealms: input.allowedRealms } : {}),
+          ...(nextSealed
+            ? {
+                ciphertext: nextSealed.ciphertext,
+                wrappedKey: nextSealed.wrappedKey,
+                keyId: nextSealed.keyId,
+              }
+            : {}),
+          updatedAt: now,
+        })
+        .where(eq(credentials.id, id))
+        .returning()
+
+      if (!updated) throw new MemoryError(404, '凭据不存在')
+      return toMeta(updated)
+    })
   }
 
   async remove(id: string): Promise<void> {
@@ -520,6 +546,20 @@ export class CredentialService {
     const values: ResolveCredentialsResponse['values'] = []
     for (const ref of request.refs) {
       if (ref.field !== undefined) {
+        const row = bySlug.get(ref.identifier)
+        const canAccessPrimary = Boolean(row && canAccessCredential(scope, row))
+        if (canAccessPrimary && row) {
+          const payload = openCredentialPayload(this.masterKey, row)
+          if (Object.hasOwn(payload.fields, ref.field)) {
+            values.push({
+              identifier: ref.identifier,
+              field: ref.field,
+              value: payload.fields[ref.field]!,
+            })
+            continue
+          }
+        }
+
         const compositeRow = bySlug.get(`${ref.identifier}-${ref.field}`)
         if (compositeRow && canAccessCredential(scope, compositeRow)) {
           const payload = openCredentialPayload(this.masterKey, compositeRow)
@@ -534,20 +574,10 @@ export class CredentialService {
           continue
         }
 
-        const row = bySlug.get(ref.identifier)
-        if (!row || !canAccessCredential(scope, row)) {
+        if (!canAccessPrimary) {
           throw new MemoryError(404, `凭据不存在或当前密钥无权访问：${ref.identifier}`)
         }
-        const payload = openCredentialPayload(this.masterKey, row)
-        if (!Object.hasOwn(payload.fields, ref.field)) {
-          throw new MemoryError(404, `凭据 ${ref.identifier} 不存在字段 ${ref.field}`)
-        }
-        values.push({
-          identifier: ref.identifier,
-          field: ref.field,
-          value: payload.fields[ref.field]!,
-        })
-        continue
+        throw new MemoryError(404, `凭据 ${ref.identifier} 不存在字段 ${ref.field}`)
       }
 
       const row = bySlug.get(ref.identifier)
@@ -606,6 +636,21 @@ export class CredentialService {
 
     return deduped.map((item) => {
       if (item.field !== null) {
+        const row = bySlug.get(item.slug)
+        if (row && canAccessCredential(scope, row)) {
+          const fieldExists =
+            row.fieldMeta.length > 0
+              ? row.fieldMeta.some((f) => f.name === item.field)
+              : item.field === 'value' || item.field === row.primaryField
+          if (fieldExists) {
+            return {
+              slug: item.slug,
+              field: item.field,
+              available: true,
+              label: row.label,
+            }
+          }
+        }
         const composite = bySlug.get(`${item.slug}-${item.field}`)
         if (composite && canAccessCredential(scope, composite)) {
           return {
@@ -615,24 +660,11 @@ export class CredentialService {
             label: composite.label,
           }
         }
-        const row = bySlug.get(item.slug)
-        if (!row || !canAccessCredential(scope, row)) {
-          return {
-            slug: item.slug,
-            field: item.field,
-            available: false,
-            label: null,
-          }
-        }
-        const fieldExists =
-          row.fieldMeta.length > 0
-            ? row.fieldMeta.some((f) => f.name === item.field)
-            : item.field === 'value' || item.field === row.primaryField
         return {
           slug: item.slug,
           field: item.field,
-          available: fieldExists,
-          label: fieldExists ? row.label : null,
+          available: false,
+          label: null,
         }
       }
 

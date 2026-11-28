@@ -89,6 +89,8 @@ describe('credential contracts and templates', () => {
     expect(RevealCredentialRequest.safeParse({ scope: 'all' }).success).toBe(true)
     expect(RevealCredentialRequest.safeParse({ field: 'password' }).success).toBe(true)
     expect(RevealCredentialRequest.safeParse({ scope: 'plain', field: 'host' }).success).toBe(false)
+    // 严格拒绝未知键名，防止拼写错误静默降级为全量解密
+    expect(RevealCredentialRequest.safeParse({ scpoe: 'plain' }).success).toBe(false)
 
     expect(
       RevealCredentialResponse.safeParse({ value: 'sec', fields: { value: 'sec' } }).success,

@@ -594,12 +594,25 @@ function normalizeOccurredAt(raw: unknown): string | null {
 const CRED_PLACEHOLDER_STRIP_RE = /\{\{cred:[^}]*\}\}/gi
 const CRED_PREFIX_STRIP_RE = /\{\{cred:/gi
 const CONTROL_CHAR_RE = /\p{Cc}+/gu
-const URI_AUTH_REDACT_RE = /([a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi
-const MASK_CHAR_RE = /[*…•]/
-const LONG_UNMASKED_RUN_RE = /[A-Za-z0-9_+/=-]{7,}/g
-const ASSIGN_SECRET_TOKEN_RE = /^([A-Za-z_][A-Za-z0-9_.-]{0,15})=(.{6,})$/
-const PLAIN_CONTEXT_WORD_RE = /^[a-z]{1,10}[:：]?$/
-const RAW_SECRET_LIKE_TOKEN_RE = /[A-Za-z0-9_+/=!@#$%^&~-]{8,}/
+// 贪婪匹配 authority 中最后一个 @，避免密码自身含 @ 时泄露后半段
+const URI_AUTH_REDACT_RE = /([a-z][a-z0-9+.-]*:\/\/)[^/\s]+@/gi
+const PEM_CLOSED_REDACT_RE =
+  /-----BEGIN [A-Z0-9 ]{0,32}PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]{0,32}PRIVATE KEY-----/gi
+const PEM_UNCLOSED_REDACT_RE =
+  /-----BEGIN [A-Z0-9 ]{0,32}PRIVATE KEY-----(?:\s+[A-Za-z0-9+/=]{6,})*/gi
+const BARE_JWT_REDACT_RE = /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{12,}\b/g
+const HEX_SECRET_REDACT_RE = /\b[0-9a-fA-F]{16,}\b/g
+const BASE64_SECRET_REDACT_RE =
+  /\b(?=[A-Za-z0-9+/_-]*[A-Za-z])(?=[A-Za-z0-9+/_-]*[0-9])[A-Za-z0-9+/_-]{16,}={0,2}\b/g
+const STRICT_MASKED_TOKEN_RE =
+  /^(?:[A-Za-z_][A-Za-z0-9_.-]{0,24}=)?[A-Za-z0-9_-]{1,4}(?:\*{3,}|…|•{3,})$/
+const STRICT_MASKED_VALUE_RE = /^[A-Za-z0-9_-]{1,4}(?:\*{3,}|…|•{3,})$/
+const ASSIGN_PAIR_RE = /^([A-Za-z_][A-Za-z0-9_.-]{0,24})=(.+)$/
+const SAFE_SHORT_CJK_TOKEN_RE = /^[\u4e00-\u9fff]{1,12}[:：]?$/
+const SAFE_SHORT_LOWER_TOKEN_RE = /^[a-z]{1,10}[:：]?$/
+const PEM_MASKED_TOKEN_RE = /^私钥\*{3}$/
+const SECRET_LIKE_META_TOKEN_RE =
+  /^(?:(?=.*[A-Za-z])(?=.*[0-9])(?=.*[^A-Za-z0-9\u4e00-\u9fff]).{6,}|(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9]).{8,}|(?=.*[*!@#$%^&":])(?=.*[A-Za-z0-9]).{6,}|[A-Za-z0-9+/=_-]{20,})$/
 
 // 净化模型产出的非正文单行文本：移除凭据占位符与全部控制字符，保证落库后可安全通过契约校验
 function sanitizeDreamPlainField(raw: unknown, maxChars: number): string {
@@ -613,42 +626,73 @@ function sanitizeDreamPlainField(raw: unknown, maxChars: number): string {
   return clipChars(normalized, maxChars).trim()
 }
 
+function visiblePrefix(token: string): string {
+  const lead = /^[A-Za-z0-9_-]{1,3}/.exec(token)?.[0]
+  return lead ?? ''
+}
+
+function redactSecretLikeToken(token: string): string {
+  if (!token) return ''
+  if (STRICT_MASKED_TOKEN_RE.test(token) || PEM_MASKED_TOKEN_RE.test(token)) return token
+  const assign = ASSIGN_PAIR_RE.exec(token)
+  if (assign) {
+    const [, key, val] = assign
+    if (STRICT_MASKED_VALUE_RE.test(val!)) return token
+    return `${key}=${visiblePrefix(val!)}***`
+  }
+  if (/[\u4e00-\u9fff]/.test(token)) return token
+  if (SECRET_LIKE_META_TOKEN_RE.test(token)) {
+    return `${visiblePrefix(token)}***`
+  }
+  return token
+}
+
 function redactMatchedSecrets(text: string): string {
   if (!text) return ''
-  const hits = findSecretMatches(text)
-  let out = text
+  let out = text.replace(PEM_CLOSED_REDACT_RE, '私钥***').replace(PEM_UNCLOSED_REDACT_RE, '私钥***')
+  const hits = findSecretMatches(out)
   if (hits.length) {
     const chunks: string[] = []
     let cursor = 0
     for (const hit of hits) {
-      chunks.push(text.slice(cursor, hit.start))
-      chunks.push(hit.label === '私钥块' ? '私钥***' : `${hit.match.slice(0, 3)}***`)
+      chunks.push(out.slice(cursor, hit.start))
+      chunks.push(hit.label === '私钥块' ? '私钥***' : `${visiblePrefix(hit.match)}***`)
       cursor = hit.end
     }
-    chunks.push(text.slice(cursor))
+    chunks.push(out.slice(cursor))
     out = chunks.join('')
   }
-  return out.replace(URI_AUTH_REDACT_RE, '$1***@')
+  out = out
+    .replace(URI_AUTH_REDACT_RE, '$1***@')
+    .replace(BARE_JWT_REDACT_RE, 'eyJ***')
+    .replace(HEX_SECRET_REDACT_RE, (m) => `${visiblePrefix(m)}***`)
+    .replace(BASE64_SECRET_REDACT_RE, (m) => `${visiblePrefix(m)}***`)
+
+  return out.split(/\s+/).map(redactSecretLikeToken).filter(Boolean).join(' ')
 }
 
 function sanitizeWarningSnippet(raw: unknown): string | undefined {
   const plain = sanitizeDreamPlainField(raw, 200)
   if (!plain) return undefined
   const redacted = redactMatchedSecrets(plain)
+  // 严格白名单优先：仅保留短纯文本词与严格已打码形态，其余一律截断至最多前 3 字符加 ***
   const sanitizedTokens = redacted.split(/\s+/).map((token) => {
     if (!token) return ''
-    if (MASK_CHAR_RE.test(token)) {
-      return token.replace(LONG_UNMASKED_RUN_RE, (seg) => seg.slice(0, 3))
+    if (
+      STRICT_MASKED_TOKEN_RE.test(token) ||
+      PEM_MASKED_TOKEN_RE.test(token) ||
+      SAFE_SHORT_CJK_TOKEN_RE.test(token) ||
+      SAFE_SHORT_LOWER_TOKEN_RE.test(token)
+    ) {
+      return token
     }
-    const assignMatch = ASSIGN_SECRET_TOKEN_RE.exec(token)
-    if (assignMatch) {
-      return `${assignMatch[1]}=${assignMatch[2]!.slice(0, 3)}***`
+    const assign = ASSIGN_PAIR_RE.exec(token)
+    if (assign) {
+      const [, key, val] = assign
+      return STRICT_MASKED_VALUE_RE.test(val!) ? token : `${key}=${visiblePrefix(val!)}***`
     }
-    if (PLAIN_CONTEXT_WORD_RE.test(token)) return token
-    if (RAW_SECRET_LIKE_TOKEN_RE.test(token)) {
-      return `${token.slice(0, 3)}***`
-    }
-    return token
+    if (token.length < 4 && /^[a-z]+$/.test(token)) return token
+    return `${visiblePrefix(token)}***`
   })
   const joined = sanitizedTokens.filter(Boolean).join(' ').trim()
   if (!joined) return undefined

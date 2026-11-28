@@ -5,6 +5,7 @@ import {
   CredentialMeta,
   CredentialReferencesResponse,
   EntryDetailResponse,
+  InboxResponse,
   ResolveCredentialsResponse,
   RevealCredentialResponse,
 } from '@kioku/contracts'
@@ -228,6 +229,14 @@ describe.skipIf(!testDatabaseUrl)('托管加密凭据：复合字段、受控解
     })
     expect(missingSingle.status).toBe(404)
 
+    // 未知键名（如拼写错误 scpoe）必须返回 400，严禁静默升级为全量解密
+    const typoReveal = await app.request(`/v1/console/credentials/${meta.id}/reveal`, {
+      method: 'POST',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({ scpoe: 'plain' }),
+    })
+    expect(typoReveal.status).toBe(400)
+
     // 3) 仅改元信息不触碰密文字节
     const metaOnlyPatch = await app.request(`/v1/console/credentials/${meta.id}`, {
       method: 'PATCH',
@@ -297,6 +306,63 @@ describe.skipIf(!testDatabaseUrl)('托管加密凭据：复合字段、受控解
       }),
     })
     expect(removeAllRes.status).toBe(400)
+
+    // 显式传 fieldMeta 省略 label 时不回带旧 label；同时传 value 与 fields[primaryField] 以 fields 为准
+    const overrideMetaRes = await app.request(`/v1/console/credentials/${meta.id}`, {
+      method: 'PATCH',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({
+        value: 'ignored-legacy-url',
+        fields: { url: 'postgres://svc_app:NewPass@pg.prod.internal:5432/orders' },
+        fieldMeta: [{ name: 'region', secret: false }],
+      }),
+    })
+    expect(overrideMetaRes.status).toBe(200)
+    const overrideMeta = CredentialMeta.parse(await overrideMetaRes.json())
+    expect(overrideMeta.fieldMeta.find((f) => f.name === 'region')).toEqual({
+      name: 'region',
+      secret: false,
+    })
+    const afterOverrideReveal = RevealCredentialResponse.parse(
+      await (
+        await app.request(`/v1/console/credentials/${meta.id}/reveal`, {
+          method: 'POST',
+          headers: consoleHeaders(cookie, true),
+          body: JSON.stringify({ field: 'url' }),
+        })
+      ).json(),
+    )
+    expect(afterOverrideReveal.value).toBe(
+      'postgres://svc_app:NewPass@pg.prod.internal:5432/orders',
+    )
+
+    // PATCH 传入 fields: null + primaryField（未传 value）只保留该字段原值，绝不将机密主值复制降级为明文
+    const missingPrimaryNull = await app.request(`/v1/console/credentials/${meta.id}`, {
+      method: 'PATCH',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({ fields: null, primaryField: 'nonexistent' }),
+    })
+    expect(missingPrimaryNull.status).toBe(400)
+
+    const clearToPlainHost = await app.request(`/v1/console/credentials/${meta.id}`, {
+      method: 'PATCH',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({ fields: null, primaryField: 'host' }),
+    })
+    expect(clearToPlainHost.status).toBe(200)
+    const clearedMeta = CredentialMeta.parse(await clearToPlainHost.json())
+    expect(clearedMeta.primaryField).toBe('host')
+    expect(clearedMeta.fieldMeta).toEqual([{ name: 'host', label: '主机', secret: false }])
+    const plainAfterClear = RevealCredentialResponse.parse(
+      await (
+        await app.request(`/v1/console/credentials/${meta.id}/reveal`, {
+          method: 'POST',
+          headers: consoleHeaders(cookie, true),
+          body: JSON.stringify({ scope: 'plain' }),
+        })
+      ).json(),
+    )
+    expect(plainAfterClear).toEqual({ fields: { host: 'pg.prod.internal' } })
   })
 
   it('POST /v1/credentials/resolve 严格校验 #field 拒绝静默回退，且兼容裸 slug、独立复合凭据与老密文', async () => {
@@ -304,7 +370,7 @@ describe.skipIf(!testDatabaseUrl)('托管加密凭据：复合字段、受控解
     const app = createTestApp(database, { masterKey })
     const { cookie } = await createOwnerSession(database)
 
-    // 1) work 场域复合凭据（默认字段 url）
+    // 1) work 场域复合凭据（默认字段 url，另含 host 与自定义同名字段 custom）
     await app.request('/v1/console/credentials', {
       method: 'POST',
       headers: consoleHeaders(cookie, true),
@@ -320,7 +386,17 @@ describe.skipIf(!testDatabaseUrl)('托管加密凭据：复合字段、受控解
         allowedRealms: ['work'],
       }),
     })
-    // 2) 独立拆分凭据 <slug>-<field> 兼容优先命中
+    // 2) 同名独立拆分凭据（prod-db-host 不得遮蔽 prod-db 自有 host；prod-db-readonly 作为缺失字段回退命中）
+    await app.request('/v1/console/credentials', {
+      method: 'POST',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({
+        slug: 'prod-db-host',
+        label: '旧拆分主机',
+        value: 'legacy-shadow-host.internal',
+        allowedRealms: ['work'],
+      }),
+    })
     await app.request('/v1/console/credentials', {
       method: 'POST',
       headers: consoleHeaders(cookie, true),
@@ -594,5 +670,41 @@ describe.skipIf(!testDatabaseUrl)('托管加密凭据：复合字段、受控解
       headers: { cookie },
     })
     expect(notFound.status).toBe(404)
+
+    // 单条规范暂存接口对 secretWarnings 执行二次脱敏清洗，落库与 /console/inbox 均不回显明文
+    const rawSecret = ['sk', 'proj', '5566778899abcdefghijkl'].join('-')
+    const stageRes = await app.request(`/v1/console/entries/${hitA.entry.shortId}/tidy/apply`, {
+      method: 'POST',
+      headers: consoleHeaders(cookie, true),
+      body: JSON.stringify({
+        expectedVersion: hitA.entry.version,
+        title: hitA.entry.title,
+        summary: '整理后概要',
+        content: hitA.entry.content,
+        stageToInbox: true,
+        secretWarnings: [
+          {
+            label: `疑似密钥 ${rawSecret}`,
+            location: '## 配置 P@ss*w0rd:99',
+            maskedSnippet: 'postgres://a:p@ss@word@db.internal:5432/p',
+          },
+        ],
+      }),
+    })
+    expect(stageRes.status).toBe(200)
+    const inboxRes = await app.request('/v1/console/inbox', { headers: { cookie } })
+    expect(inboxRes.status).toBe(200)
+    const inboxRaw = await inboxRes.text()
+    expect(inboxRaw).not.toContain(rawSecret)
+    expect(inboxRaw).not.toContain('P@ss*w0rd:99')
+    expect(inboxRaw).not.toContain('p@ss@word')
+    const inbox = InboxResponse.parse(JSON.parse(inboxRaw))
+    expect(inbox.items[0]?.secretWarnings).toEqual([
+      {
+        label: '疑似密钥 sk-***',
+        location: '## 配置 P***',
+        maskedSnippet: 'pos***',
+      },
+    ])
   })
 })

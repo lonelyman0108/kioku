@@ -71,7 +71,7 @@ const SECRET_LABEL_ORDER = [
   'Bearer JWT 令牌',
 ] as const
 
-const PEM_HEADER_RE = /-----BEGIN ([A-Z0-9 ]*)PRIVATE KEY-----/g
+const PEM_HEADER_RE = /-----BEGIN ([A-Z0-9 ]{0,32})PRIVATE KEY-----/g
 const PEM_BLOCK_SCAN_MAX = 16_384
 
 const SIMPLE_SECRET_RULES: readonly {
@@ -120,10 +120,16 @@ const SIMPLE_SECRET_RULES: readonly {
 
 const DB_CONN_URI_RE =
   /\b(?:postgres(?:ql)?|mysql2?|mariadb|mongodb(?:\+srv)?|rediss?|amqps?):\/\/([^/\s:@"'`<>]*):([^/\s@"'`<>]+)@(\[[0-9a-fA-F:]+\]|[^/\s:?#"'`<>]+)(?:[^\s"'`<>)\]]*)/gi
-const TRAILING_PUNCT_RE = /[.,;:!?。，；！？）》」】\])]+$/
+const TRAILING_PUNCT_CHARS = new Set('.,;:!?。，；！？）》」】])')
 const BEARER_JWT_RE =
-  /\bBearer[ \t]+(eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{16,})\b/g
+  /\b[Bb]earer[ \t]+(eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{16,})\b/g
 const JWT_DOC_SAMPLE_SIG = 'SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c'
+
+function trimTrailingPunctuation(raw: string): string {
+  let end = raw.length
+  while (end > 0 && TRAILING_PUNCT_CHARS.has(raw[end - 1]!)) end--
+  return end === raw.length ? raw : raw.slice(0, end)
+}
 
 const PLACEHOLDER_PASSWORDS = new Set([
   'pass',
@@ -313,14 +319,15 @@ export function findSecretMatches(content: string): SecretMatch[] {
   let dbHit: RegExpExecArray | null
   while ((dbHit = dbRe.exec(content)) !== null) {
     const rawFull = dbHit[0]
-    const trimmed = rawFull.replace(TRAILING_PUNCT_RE, '')
+    const trimmed = trimTrailingPunctuation(rawFull)
     const start = dbHit.index
     const end = start + trimmed.length
-    if (trimmed.includes('{{cred:') || trimmed.includes('${')) continue
-    if (overlapsAny(start, end, placeholderRanges)) continue
     const user = dbHit[1] ?? ''
     const password = dbHit[2] ?? ''
     const host = dbHit[3] ?? ''
+    const authSegment = `${user}:${password}@${host}`
+    if (authSegment.includes('{{cred:') || authSegment.includes('${')) continue
+    if (overlapsAny(start, end, placeholderRanges)) continue
     if (isPlaceholderHost(host) || isPlaceholderPassword(user, password)) continue
     candidates.push({
       label: '数据库连接串',

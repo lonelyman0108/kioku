@@ -98,6 +98,7 @@ import {
 import { planCapture as planQuickCapture, type PlanCaptureOptions } from '../extraction/capture'
 import { runSingleCrossCheck } from '../extraction/crossMemory'
 import { suggestionFingerprint } from '../extraction/dream'
+import { parseSecretWarnings } from '../extraction/dreamPrompt'
 import { canFlowRealmInto, sameRealms } from '../extraction/dreamPrompt'
 import {
   previewSingleTidy as runPreviewSingleTidy,
@@ -2554,6 +2555,8 @@ export class EntryService {
         // 复用标准 tidy 指纹并支持同版本重复暂存平滑覆盖，避免唯一键冲突或与批量规范重复入队
         const fingerprint = suggestionFingerprint('tidy', [existing.id], [existing.version])
         const stagedReason = cleanOptionalText(input.reason) ?? '由编辑页主动规范暂存至整理'
+        const sanitizedWarnings = parseSecretWarnings(input.secretWarnings)
+        const stagedSecretWarnings = sanitizedWarnings.length ? sanitizedWarnings : null
         const [staged] = await tx
           .insert(dreamSuggestions)
           .values({
@@ -2574,7 +2577,7 @@ export class EntryService {
             proposedRuntimes: null,
             proposedLinks: null,
             proposedBootMode: null,
-            secretWarnings: input.secretWarnings?.length ? input.secretWarnings : null,
+            secretWarnings: stagedSecretWarnings,
             reason: stagedReason,
             fingerprint,
             status: 'pending',
@@ -2590,7 +2593,7 @@ export class EntryService {
               proposedChangeSummary: changeSummary,
               archivedNotes: archivedNotes.length ? archivedNotes : null,
               proposedTopics: stagedTopics,
-              secretWarnings: input.secretWarnings?.length ? input.secretWarnings : null,
+              secretWarnings: stagedSecretWarnings,
               reason: stagedReason,
               status: 'pending',
               decidedAt: null,

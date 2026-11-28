@@ -129,6 +129,18 @@ describe('transfer contracts', () => {
     ].join('\n')
     expect(findSecretMatches(safeExamples)).toEqual([])
     expect(detectSecretPrefixes(safeExamples)).toEqual([])
+
+    // 路径含 ${DB_NAME} 占位但密码为真实值仍须命中；小写 bearer HTTP 头亦须命中
+    const edgeText = [
+      'postgres://svc_app:R3alPr0dPwd99@db.prod.internal:5432/${DB_NAME}。。)',
+      `authorization: bearer ${jwt}`,
+    ].join('\n')
+    const edgeHits = findSecretMatches(edgeText)
+    expect(edgeHits.map((h) => h.label)).toEqual(['数据库连接串', 'Bearer JWT 令牌'])
+    expect(edgeHits[0]?.match).toBe(
+      'postgres://svc_app:R3alPr0dPwd99@db.prod.internal:5432/${DB_NAME}',
+    )
+    expect(edgeHits[1]?.match).toBe(jwt)
   })
 
   it('validates both legacy and composite ExportedCredentialRecord', () => {

@@ -59,6 +59,26 @@ describe('复合凭据载荷归一化、解密兼容与 MCP 元数据格式化',
     expect(passkeyLogin.passkeyManualOnly).toBe(true)
     expect(passkeyLogin.payload.value).toBe('https://github.com/login')
 
+    // 显式传 fieldMeta 且省略 label/multiline 时不再回带模板默认值；同时传 value 与 fields[primaryField] 以 fields 为准
+    const explicitMeta = prepareCredentialWrite({
+      kind: 'login',
+      value: 'legacy-ignored',
+      fields: {
+        password: 'explicit-field-wins',
+        recovery_codes: 'code-1',
+      },
+      fieldMeta: [
+        { name: 'password', secret: true },
+        { name: 'recovery_codes', secret: true },
+      ],
+    })
+    expect(explicitMeta.payload.value).toBe('explicit-field-wins')
+    expect(explicitMeta.payload.fields.password).toBe('explicit-field-wins')
+    expect(explicitMeta.fieldMeta).toEqual([
+      { name: 'password', secret: true },
+      { name: 'recovery_codes', secret: true },
+    ])
+
     // 显式指定不存在的非模板默认字段直接报 400
     expect(() =>
       prepareCredentialWrite({

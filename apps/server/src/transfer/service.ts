@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import {
   bootModeToPinned,
   buildSearchTags,
+  defaultPrimaryFieldForKind,
   deriveEntryTitle,
   detectSecretPrefixes,
   KIOKU_EXPORT_FORMAT,
@@ -430,16 +431,16 @@ export async function previewTransferImport(
 
   // 预览绝不返回凭据明文，仅返回元数据与冲突状态
   const previewCredentials: ImportPreviewCredential[] = resolved.credentials.map((cred) => {
+    const kind = cred.kind ?? 'secret'
+    const primaryKey = cred.primaryField ?? defaultPrimaryFieldForKind(kind)
     const fieldCount = cred.fieldMeta?.length
       ? cred.fieldMeta.length
-      : cred.fields
-        ? Object.keys(cred.fields).length
-        : 1
+      : new Set([primaryKey, ...Object.keys(cred.fields ?? {})]).size
     return {
       slug: cred.slug,
       label: cred.label,
       description: cred.description ?? null,
-      kind: cred.kind ?? 'secret',
+      kind,
       fieldCount,
       allowedRealms: cred.allowedRealms ?? null,
       exists: existingCredSlugs.has(cred.slug),
