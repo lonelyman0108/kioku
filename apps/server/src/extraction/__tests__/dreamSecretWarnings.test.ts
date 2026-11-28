@@ -188,6 +188,57 @@ describe('LLM 整理 secret_warnings 提示词、脱敏清洗与建议透传', (
     expect(adversarial[1]?.maskedSnippet).toBe('pos***')
     expect(adversarial[2]?.maskedSnippet).toBe('私钥***')
     expect(adversarial[3]?.maskedSnippet).toBe('p***')
+
+    // 中文与全角标点无空格紧邻密码/赋值时也必须截断脱敏，且不误伤正常中文括号标签
+    const cjkAdjacent = parseSecretWarnings([
+      {
+        label: '管理员密码：MyP@ssw0rd!2026',
+        location: '## 配置（DB_PASS=MyP@ss!99）',
+        masked_snippet: 'MyP***',
+      },
+      {
+        label: '密码：Passw0rd2026Abc',
+        location: '登录密码：P@ss*w0rd:99',
+        masked_snippet: '私钥***',
+      },
+      {
+        label: 'OpenAI 密钥',
+        location: '## 登录（OAuth2）',
+        masked_snippet: 'sk-p***',
+      },
+      {
+        label: '数据库主密码',
+        location: '## 数据库（prod-pg）',
+        masked_snippet: '私钥***',
+      },
+    ])
+
+    const cjkText = JSON.stringify(cjkAdjacent)
+    expect(cjkText).not.toContain('MyP@ssw0rd!2026')
+    expect(cjkText).not.toContain('MyP@ss!99')
+    expect(cjkText).not.toContain('Passw0rd2026Abc')
+    expect(cjkText).not.toContain('P@ss*w0rd:99')
+
+    expect(cjkAdjacent[0]).toEqual({
+      label: '管理员密码：MyP***',
+      location: '## 配置（DB_PASS=MyP***）',
+      maskedSnippet: 'MyP***',
+    })
+    expect(cjkAdjacent[1]).toEqual({
+      label: '密码：Pas***',
+      location: '登录密码：P***',
+      maskedSnippet: '私钥***',
+    })
+    expect(cjkAdjacent[2]).toEqual({
+      label: 'OpenAI 密钥',
+      location: '## 登录（OAuth2）',
+      maskedSnippet: 'sk-p***',
+    })
+    expect(cjkAdjacent[3]).toEqual({
+      label: '数据库主密码',
+      location: '## 数据库（prod-pg）',
+      maskedSnippet: '私钥***',
+    })
   })
 
   it('evaluateDreamResponse、evaluateTidyResponse 与 hydrateDreamSuggestions 安全透传 secretWarnings', async () => {

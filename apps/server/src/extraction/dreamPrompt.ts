@@ -640,7 +640,6 @@ function redactSecretLikeToken(token: string): string {
     if (STRICT_MASKED_VALUE_RE.test(val!)) return token
     return `${key}=${visiblePrefix(val!)}***`
   }
-  if (/[\u4e00-\u9fff]/.test(token)) return token
   if (SECRET_LIKE_META_TOKEN_RE.test(token)) {
     return `${visiblePrefix(token)}***`
   }
@@ -668,7 +667,7 @@ function redactMatchedSecrets(text: string): string {
     .replace(HEX_SECRET_REDACT_RE, (m) => `${visiblePrefix(m)}***`)
     .replace(BASE64_SECRET_REDACT_RE, (m) => `${visiblePrefix(m)}***`)
 
-  return out.split(/\s+/).map(redactSecretLikeToken).filter(Boolean).join(' ')
+  return out.replace(/[^\s\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]+/g, redactSecretLikeToken)
 }
 
 function sanitizeWarningSnippet(raw: unknown): string | undefined {
@@ -691,7 +690,6 @@ function sanitizeWarningSnippet(raw: unknown): string | undefined {
       const [, key, val] = assign
       return STRICT_MASKED_VALUE_RE.test(val!) ? token : `${key}=${visiblePrefix(val!)}***`
     }
-    if (token.length < 4 && /^[a-z]+$/.test(token)) return token
     return `${visiblePrefix(token)}***`
   })
   const joined = sanitizedTokens.filter(Boolean).join(' ').trim()
