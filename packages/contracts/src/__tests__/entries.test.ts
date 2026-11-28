@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   applyCapturePatch,
   applyMarkdownAppend,
+  applyMarkdownSectionPatch,
   bootModeToPinned,
   buildSearchTags,
   CapturePlanRequest,
@@ -360,5 +361,184 @@ describe('entries contracts', () => {
     expect(emojiEncoded!.length).toBeLessThanOrEqual(DISCLOSURE_MAX)
     expect(() => encodeURIComponent(emojiEncoded!)).not.toThrow()
     expect(Disclosure.safeParse(emojiEncoded).success).toBe(true)
+  })
+
+  it('applies deterministic section-scoped markdown patches with fallback and error guards', () => {
+    const multiSectionDoc = [
+      '导语说明',
+      '',
+      '## 开发环境',
+      '- 代理端口：7890',
+      '- 参考 [[m-234abc]]',
+      '',
+      '```markdown',
+      '## 测试环境',
+      '- 围栏内标题应忽略',
+      '```',
+      '',
+      '## 测试环境',
+      '- 代理端口：7890',
+      '- 凭据：{{cred:test-proxy}}',
+    ].join('\r\n')
+
+    // 跨小节重复文本：全文替换会报多处匹配，单小节补丁仅精确修改目标小节
+    expect(
+      applyCapturePatch(multiSectionDoc, {
+        kind: 'replace',
+        oldText: '- 代理端口：7890',
+        newText: '- 代理端口：7891',
+      }).ok,
+    ).toBe(false)
+
+    const patchedTarget = applyMarkdownSectionPatch(multiSectionDoc, '测试环境', {
+      oldText: '- 代理端口：7890',
+      newText: '- 代理端口：7891',
+    })
+    expect(patchedTarget.ok).toBe(true)
+    if (patchedTarget.ok) {
+      expect(patchedTarget.matchedHeading).toBe('测试环境')
+      expect(patchedTarget.content).not.toContain('\r')
+      expect(patchedTarget.content).toContain('## 开发环境\n- 代理端口：7890')
+      expect(patchedTarget.content).toContain('## 测试环境\n- 代理端口：7891')
+      expect(patchedTarget.content).toContain('[[m-234abc]]')
+      expect(patchedTarget.content).toContain('{{cred:test-proxy}}')
+    }
+
+    // 支持带 ## 前缀、忽略大小写与包含匹配，以及首尾空白容忍
+    const caseDoc =
+      '## Network Config\n- host: old.example.com\n\n## Deploy\n- host: old.example.com'
+    const casePatched = applyMarkdownSectionPatch(caseDoc, '## network', {
+      oldText: '  - host: old.example.com  ',
+      newText: '- host: new.example.com',
+    })
+    expect(casePatched.ok).toBe(true)
+    if (casePatched.ok) {
+      expect(casePatched.matchedHeading).toBe('Network Config')
+      expect(casePatched.content).toContain('## Network Config\n- host: new.example.com')
+      expect(casePatched.content).toContain('## Deploy\n- host: old.example.com')
+    }
+
+    // 找不到小节直接失败
+    const missingSection = applyMarkdownSectionPatch(multiSectionDoc, '不存在的小节', {
+      oldText: '- 代理端口：7890',
+      newText: '- 代理端口：7891',
+    })
+    expect(missingSection.ok).toBe(false)
+
+    // 同一小节内多处匹配失败
+    const dupInSameSection = '## 配置\n- 端口 7890\n- 端口 7890\n\n## 备注\n无'
+    expect(
+      applyMarkdownSectionPatch(dupInSameSection, '配置', {
+        oldText: '- 端口 7890',
+        newText: '- 端口 7891',
+      }).ok,
+    ).toBe(false)
+
+    // 目标小节内找不到片段失败
+    expect(
+      applyMarkdownSectionPatch(multiSectionDoc, '开发环境', {
+        oldText: '{{cred:test-proxy}}',
+        newText: '{{cred:other}}',
+      }).ok,
+    ).toBe(false)
+
+    // 修改前后无变化返回 unchanged
+    expect(
+      applyMarkdownSectionPatch(multiSectionDoc, '开发环境', {
+        oldText: '- 代理端口：7890',
+        newText: '- 代理端口：7890',
+      }),
+    ).toMatchObject({ ok: false, unchanged: true })
+
+    // 超出 ENTRY_CONTENT_MAX 上限返回 overflow
+    expect(
+      applyMarkdownSectionPatch('## 规则\n- 短句', '规则', {
+        oldText: '- 短句',
+        newText: '长'.repeat(ENTRY_CONTENT_MAX),
+      }),
+    ).toMatchObject({ ok: false, overflow: true })
+
+    // 含二级小节但未提供 sectionHeading 时拒绝全文替换
+    expect(
+      applyMarkdownSectionPatch(multiSectionDoc, null, {
+        oldText: '导语说明',
+        newText: '新导语',
+      }).ok,
+    ).toBe(false)
+
+    // 无二级小节且 sectionHeading 为空/null 时回退整篇 replace
+    const plainDoc = '旧地址：127.0.0.1:7890\n说明：无二级标题正文'
+    const fallbackRes = applyMarkdownSectionPatch(plainDoc, null, {
+      oldText: '旧地址：127.0.0.1:7890',
+      newText: '新地址：127.0.0.1:7891',
+    })
+    expect(fallbackRes).toEqual({
+      ok: true,
+      content: '新地址：127.0.0.1:7891\n说明：无二级标题正文',
+      matchedHeading: null,
+    })
+
+    // 重复二级标题、大小写重复与模糊子串多命中必须拒绝歧义匹配，绝不静默改错第一个小节
+    const dupHeadingsDoc = '# 服务端\n## 配置\n- 端口 8080\n\n# 客户端\n## 配置\n- 端口 8080'
+    expect(extractMarkdownSection(dupHeadingsDoc, '配置')).toBeNull()
+    const dupHeadingPatch = applyMarkdownSectionPatch(dupHeadingsDoc, '配置', {
+      oldText: '- 端口 8080',
+      newText: '- 端口 9090',
+    })
+    expect(dupHeadingPatch.ok).toBe(false)
+    if (!dupHeadingPatch.ok) expect(dupHeadingPatch.reason).toContain('歧义')
+
+    const ciDupDoc = '## Config\n- a: 1\n\n## config\n- b: 2'
+    expect(extractMarkdownSection(ciDupDoc, 'CONFIG')).toBeNull()
+    expect(
+      applyMarkdownSectionPatch(ciDupDoc, 'CONFIG', { oldText: '- a: 1', newText: '- a: 2' }).ok,
+    ).toBe(false)
+
+    const partialDupDoc = '## 本地代理\n- 端口 7890\n\n## 远程代理\n- 端口 8890'
+    expect(extractMarkdownSection(partialDupDoc, '代理')).toBeNull()
+    expect(
+      applyMarkdownSectionPatch(partialDupDoc, '代理', {
+        oldText: '- 端口 7890',
+        newText: '- 端口 7891',
+      }).ok,
+    ).toBe(false)
+
+    // 标题中含连续空格时归一化匹配；补丁若破坏或移除首行 ## 标题则拒绝
+    const spacedHeadingDoc = '## 网络   代理\n- 端口 7890'
+    expect(extractMarkdownSection(spacedHeadingDoc, '网络 代理')?.heading).toBe('网络   代理')
+    const spacedPatched = applyMarkdownSectionPatch(spacedHeadingDoc, '网络 代理', {
+      oldText: '- 端口 7890',
+      newText: '- 端口 7891',
+    })
+    expect(spacedPatched.ok).toBe(true)
+
+    const deletedHeadingPatch = applyMarkdownSectionPatch(
+      '## 配置\n- 旧值\n\n## 备注\n保留',
+      '配置',
+      {
+        oldText: '## 配置\n- 旧值',
+        newText: '- 新值',
+      },
+    )
+    expect(deletedHeadingPatch.ok).toBe(false)
+    if (!deletedHeadingPatch.ok) expect(deletedHeadingPatch.reason).toContain('二级标题行')
+
+    // 行回退替换在待替换片段首行未缩进而原文有缩进时，保留原首行前导缩进且不重复缩进
+    const indentedDoc = [
+      '## 网络代理',
+      '- 本地环境',
+      '  - 代理端口：7890',
+      '  - 备注：旧配置',
+    ].join('\n')
+    const indentedPatched = applyMarkdownSectionPatch(indentedDoc, '网络代理', {
+      oldText: '- 代理端口：7890\n- 备注：旧配置',
+      newText: '- 代理端口：7891\n- 备注：新配置',
+    })
+    expect(indentedPatched.ok).toBe(true)
+    if (indentedPatched.ok) {
+      expect(indentedPatched.content).toBe(
+        ['## 网络代理', '- 本地环境', '  - 代理端口：7891', '  - 备注：新配置'].join('\n'),
+      )
+    }
   })
 })

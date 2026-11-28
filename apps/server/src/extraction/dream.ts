@@ -28,8 +28,8 @@ import {
   loadDreamState,
   loadResolvedModel,
   loadTidyCheckedVersions,
+  mergeTidyCheckedVersions,
   recordDreamRun,
-  saveTidyCheckedVersions,
 } from '../models/store'
 import { anyTermQuery, clipChars, searchTerms } from '../recall/recall'
 import { inlineText } from '../recall/text'
@@ -38,8 +38,10 @@ import {
   buildDreamMessages,
   buildSemanticRepairMessages,
   buildTidyMessages,
+  canFlowRealmInto,
   evaluateDreamResponse,
   evaluateTidyResponse,
+  sameRealms,
   type DreamPromptItem,
   type ParsedDreamProposal,
 } from './dreamPrompt'
@@ -111,8 +113,10 @@ export function toPromptItem(
   > & {
     bootMode?: EntryRow['bootMode'] | undefined
     deviceKey?: EntryRow['deviceKey'] | undefined
+    verifiedAt?: EntryRow['verifiedAt'] | undefined
   },
   contentLimit = ITEM_CONTENT_LIMIT,
+  outboundShortIds?: readonly string[] | undefined,
 ): DreamPromptItem {
   const truncated = row.content.length > contentLimit
   const deviceKey = row.deviceKey?.trim() || null
@@ -132,8 +136,10 @@ export function toPromptItem(
     topics: row.topics,
     ...(deviceKey ? { deviceKey } : {}),
     version: row.version,
+    verifiedAt: row.verifiedAt ? row.verifiedAt.toISOString() : null,
     updatedAt: row.updatedAt.toISOString(),
     truncated,
+    ...(outboundShortIds !== undefined ? { outboundShortIds: [...outboundShortIds] } : {}),
   }
 }
 
@@ -276,9 +282,12 @@ function estimatePromptItemChars(item: DreamPromptItem): number {
   )
 }
 
-function toCompactNeighborPromptItem(row: PromptSourceRow): DreamPromptItem {
+function toCompactNeighborPromptItem(
+  row: PromptSourceRow,
+  outboundShortIds?: readonly string[] | undefined,
+): DreamPromptItem {
   const hasSummary = Boolean(row.summary?.trim())
-  const base = toPromptItem(row, hasSummary ? 0 : COMPACT_NEIGHBOR_EXCERPT_LIMIT)
+  const base = toPromptItem(row, hasSummary ? 0 : COMPACT_NEIGHBOR_EXCERPT_LIMIT, outboundShortIds)
   if (hasSummary) {
     return {
       ...base,
@@ -309,12 +318,16 @@ export function packStandardDreamPromptItems(
   budgets: {
     neighborBudget?: number | undefined
     totalBudget?: number | undefined
+    outboundByEntryId?: ReadonlyMap<string, readonly string[]> | undefined
   } = {},
 ): PackedStandardDreamItems {
   const neighborBudget = budgets.neighborBudget ?? STANDARD_NEIGHBOR_CHAR_BUDGET
   const totalBudget = budgets.totalBudget ?? STANDARD_TOTAL_CHAR_BUDGET
+  const outboundOf = (id: string) => budgets.outboundByEntryId?.get(id)
 
-  const promptChanged = changedRows.map((row) => toPromptItem(row))
+  const promptChanged = changedRows.map((row) =>
+    toPromptItem(row, ITEM_CONTENT_LIMIT, outboundOf(row.id)),
+  )
   const changedChars = promptChanged.reduce((sum, item) => sum + estimatePromptItemChars(item), 0)
   const remainingForNeighbors = Math.min(neighborBudget, Math.max(0, totalBudget - changedChars))
 
@@ -326,7 +339,8 @@ export function packStandardDreamPromptItems(
     const remaining = remainingForNeighbors - neighborChars
     if (remaining < 120) break
 
-    const fullItem = toPromptItem(row)
+    const outbound = outboundOf(row.id)
+    const fullItem = toPromptItem(row, ITEM_CONTENT_LIMIT, outbound)
     const fullSize = estimatePromptItemChars(fullItem)
     if (fullSize <= remaining) {
       promptNeighbors.push(fullItem)
@@ -334,7 +348,7 @@ export function packStandardDreamPromptItems(
       continue
     }
 
-    const compactItem = toCompactNeighborPromptItem(row)
+    const compactItem = toCompactNeighborPromptItem(row, outbound)
     const compactSize = estimatePromptItemChars(compactItem)
     if (compactSize <= remaining) {
       promptNeighbors.push(compactItem)
@@ -415,6 +429,30 @@ export async function executeStandardBatchWithSplit<T>(
   }
 
   await runNode(batch)
+}
+
+async function loadOutboundShortIdsMap(
+  db: Db,
+  entryIds: readonly string[],
+): Promise<Map<string, string[]>> {
+  const map = new Map<string, string[]>()
+  if (!entryIds.length) return map
+  const rows = await db
+    .select({
+      sourceEntryId: entryLinks.sourceEntryId,
+      targetShortId: entryLinks.targetShortId,
+    })
+    .from(entryLinks)
+    .where(inArray(entryLinks.sourceEntryId, [...entryIds]))
+  for (const row of rows) {
+    let list = map.get(row.sourceEntryId)
+    if (!list) {
+      list = []
+      map.set(row.sourceEntryId, list)
+    }
+    list.push(row.targetShortId)
+  }
+  return map
 }
 
 async function findLinkedNeighbors(
@@ -619,6 +657,7 @@ interface TidyCandidateRow {
   runtimes: string[]
   topics: string[]
   version: number
+  verifiedAt: Date | null
   updatedAt: Date
 }
 
@@ -709,6 +748,7 @@ async function selectTidyCandidates(
         runtimes: entries.runtimes,
         topics: entries.topics,
         version: entries.version,
+        verifiedAt: entries.verifiedAt,
         updatedAt: entries.updatedAt,
       })
       .from(entries)
@@ -919,9 +959,14 @@ export async function runDream(
         })
       }
 
-      const tidyChecked = selection.tidyChecked
+      const newlyChecked = new Map<string, number>()
+      const staleIds = new Set<string>()
+      if (!targetShortIds) {
+        for (const id of Object.keys(selection.tidyChecked)) {
+          if (!selection.activeIds.has(id)) staleIds.add(id)
+        }
+      }
       const frequentTopics = await loadFrequentTopics(db)
-      let tidyCheckedDirty = false
       let processed = 0
       let succeededCount = 0
       const failures: { shortId: string; reason: string }[] = []
@@ -1009,8 +1054,7 @@ export async function runDream(
               }
 
               if (evaluated.status === 'not_needed') {
-                tidyChecked[row.id] = row.version
-                tidyCheckedDirty = true
+                newlyChecked.set(row.id, Math.max(newlyChecked.get(row.id) ?? 0, row.version))
                 succeededCount++
                 totalSucceeded++
               } else if (evaluated.status === 'invalid') {
@@ -1078,17 +1122,8 @@ export async function runDream(
 
         await Promise.all(Array.from({ length: concurrency }, (_, idx) => worker(idx)))
       } finally {
-        if (tidyCheckedDirty) {
-          // 指定目标重试模式下只加载了部分词条，不裁剪其他已有已检版本记录
-          if (targetShortIds) {
-            await saveTidyCheckedVersions(db, tidyChecked)
-          } else {
-            const pruned: Record<string, number> = {}
-            for (const [id, ver] of Object.entries(tidyChecked)) {
-              if (selection.activeIds.has(id)) pruned[id] = ver
-            }
-            await saveTidyCheckedVersions(db, pruned)
-          }
+        if (newlyChecked.size > 0 || staleIds.size > 0) {
+          await mergeTidyCheckedVersions(db, newlyChecked, staleIds)
         }
       }
 
@@ -1191,6 +1226,8 @@ export async function runDream(
       const batch: EntryRow[] = []
       let usedChars = 0
       for (const row of unchecked) {
+        // 同一批增量整理保持场域一致，避免互不相交场域混入同一提示词上下文
+        if (batch.length > 0 && !sameRealms(row.realms, batch[0]!.realms)) continue
         const size =
           Math.min(row.content.length, ITEM_CONTENT_LIMIT) +
           row.title.length +
@@ -1214,18 +1251,28 @@ export async function runDream(
       await executeStandardBatchWithSplit(
         batch,
         async (subBatch) => {
-          const neighbors = await findRelevantNeighbors(
+          const batchRealms = subBatch[0]!.realms
+          const rawNeighbors = await findRelevantNeighbors(
             db,
             subBatch,
             subBatch.map((r) => r.id),
           )
-          const packed = packStandardDreamPromptItems(subBatch, neighbors)
+          const neighbors = rawNeighbors.filter(
+            (n) =>
+              canFlowRealmInto(n.realms, batchRealms) || canFlowRealmInto(batchRealms, n.realms),
+          )
+          const outboundByEntryId = await loadOutboundShortIdsMap(
+            db,
+            [...subBatch, ...neighbors].map((r) => r.id),
+          )
+          const packed = packStandardDreamPromptItems(subBatch, neighbors, { outboundByEntryId })
           const catalog = new Map<string, DreamPromptItem>()
           const rowById = new Map<string, EntryRow>()
           for (const row of [...subBatch, ...neighbors]) rowById.set(row.id, row)
           for (const item of [...packed.promptChanged, ...packed.promptNeighbors]) {
             catalog.set(item.shortId, item)
           }
+          const changedShortIds = new Set(packed.promptChanged.map((item) => item.shortId))
 
           const dreamMessages = buildStandardDreamMessages(
             packed.promptChanged,
@@ -1254,7 +1301,7 @@ export async function runDream(
           })
           guard.recordSuccess()
 
-          let evaluated = evaluateDreamResponse(res.content, catalog)
+          let evaluated = evaluateDreamResponse(res.content, catalog, { changedShortIds })
           if (evaluated.status === 'invalid' && !options.signal?.aborted && !guard.isAborted) {
             await guard.waitIfCooling(options.signal)
             if (!options.signal?.aborted && !guard.isAborted) {
@@ -1274,7 +1321,7 @@ export async function runDream(
                 ...(options.signal ? { signal: options.signal } : {}),
               })
               guard.recordSuccess()
-              evaluated = evaluateDreamResponse(repairedRes.content, catalog)
+              evaluated = evaluateDreamResponse(repairedRes.content, catalog, { changedShortIds })
             }
           }
 

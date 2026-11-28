@@ -581,7 +581,8 @@ export async function loadRecentEntries(
       projects: entries.projects,
       runtimes: entries.runtimes,
       lastChangeSummary: entries.lastChangeSummary,
-      updatedAt: entries.updatedAt,
+      verifiedAt: entries.verifiedAt,
+      createdAt: entries.createdAt,
     })
     .from(entries)
     .where(
@@ -592,7 +593,7 @@ export async function loadRecentEntries(
         exclude.length ? notInArray(entries.shortId, [...exclude]) : undefined,
       ),
     )
-    .orderBy(desc(entries.updatedAt), asc(entries.shortId))
+    .orderBy(sql`coalesce(${entries.verifiedAt}, ${entries.createdAt}) desc`, asc(entries.shortId))
     .limit(fetchLimit)
 
   const filtered = options.focus
@@ -619,7 +620,7 @@ export async function loadRecentEntries(
     runtimes: r.runtimes,
     disclosure: r.disclosure,
     lastChangeSummary: r.lastChangeSummary,
-    updatedAt: r.updatedAt.toISOString(),
+    updatedAt: (r.verifiedAt ?? r.createdAt).toISOString(),
   }))
 }
 

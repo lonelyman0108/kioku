@@ -1,9 +1,11 @@
 import { BootResponse, RecallResponse } from '@kioku/contracts'
+import { eq } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { CredentialService } from '../../credential/service'
 import { embedEntryIds } from '../../embedding/worker'
 import type { Database } from '../../db/client'
+import { entries } from '../../db/schema'
 import { EntryService } from '../../memory/service'
 import { EMBEDDING_SETTING_KEY, saveModelEndpoint } from '../../models/store'
 import {
@@ -646,5 +648,69 @@ describe.skipIf(!testDatabaseUrl)('Presence Engine：启动加载与混合召回
     expect(hit!.via).toEqual(['fulltext'])
     // 若误施加 0.35 混合折扣，即使全文分 0.65 也会掉到 ~0.227；未嵌入新词条应保留完整全文基础分
     expect(hit!.score).toBeGreaterThan(0.4)
+  })
+
+  it('loadRecentEntries 按 verifiedAt ?? createdAt 语义时间排序并输出对应日期，避免结构清洗旧词条霸占近期列表', async () => {
+    const masterKey = testMasterKey()
+    const entrySvc = new EntryService(
+      database.db,
+      masterKey,
+      new CredentialService(database.db, masterKey),
+      null,
+    )
+    const consoleScope = { kind: 'console' as const, accountId: 'acc', sessionId: 'sess' }
+
+    const olderCleaned = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '历史运维手册',
+        content: '# 历史运维手册\n\n旧版服务器配置说明。',
+      }),
+    )
+    const unverifiedLegacy = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '无核实时间旧记录',
+        content: '只有创建时间的老记录。',
+      }),
+    )
+    const freshEntry = await entrySvc.create(
+      consoleScope,
+      entryInput({
+        title: '今日新决策',
+        content: '今天刚定下来的部署策略。',
+      }),
+    )
+
+    const oldVerifiedAt = new Date('2026-01-10T08:00:00.000Z')
+    const midCreatedAt = new Date('2026-02-15T08:00:00.000Z')
+    const freshVerifiedAt = new Date('2026-03-20T08:00:00.000Z')
+
+    await database.db
+      .update(entries)
+      .set({ createdAt: oldVerifiedAt, verifiedAt: oldVerifiedAt, updatedAt: oldVerifiedAt })
+      .where(eq(entries.id, olderCleaned.entry.id))
+    await database.db
+      .update(entries)
+      .set({ createdAt: midCreatedAt, verifiedAt: null, updatedAt: midCreatedAt })
+      .where(eq(entries.id, unverifiedLegacy.entry.id))
+    await database.db
+      .update(entries)
+      .set({ createdAt: freshVerifiedAt, verifiedAt: freshVerifiedAt, updatedAt: freshVerifiedAt })
+      .where(eq(entries.id, freshEntry.entry.id))
+
+    // 对历史运维手册执行结构检查清洗：其 updatedAt 变为当前时间，但 verifiedAt 仍保持 2026-01-10
+    const sweep = await entrySvc.applyHygieneSweep({ shortIds: [olderCleaned.entry.shortId] })
+    expect(sweep.applied).toBe(1)
+
+    const recent = await loadRecentEntries(database.db, consoleScope, { limit: 5 })
+    expect(recent.map((r) => r.shortId)).toEqual([
+      freshEntry.entry.shortId,
+      unverifiedLegacy.entry.shortId,
+      olderCleaned.entry.shortId,
+    ])
+    expect(recent[0]!.updatedAt).toBe(freshVerifiedAt.toISOString())
+    expect(recent[1]!.updatedAt).toBe(midCreatedAt.toISOString())
+    expect(recent[2]!.updatedAt).toBe(oldVerifiedAt.toISOString())
   })
 })

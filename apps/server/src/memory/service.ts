@@ -107,6 +107,11 @@ import type { KeyPrincipal } from '../http/env'
 import type { Jobs } from '../jobs/queue'
 import { CONTEXT_RESERVE, GUIDANCE, HOST_CONTEXT_LIMIT } from '../lifecycle/lifecycle'
 import {
+  carryForwardTidyCheckedVersions,
+  markTidyCheckedVersion,
+  type TidyCheckedVersionTransition,
+} from '../models/store'
+import {
   BOOT_CATALOG_BUDGET,
   BOOT_CHAR_BUDGET,
   compileBootDetailed,
@@ -119,10 +124,13 @@ import { resolveActorMetaMap } from './actorMeta'
 import { MemoryError } from './errors'
 import {
   applyHygieneSweep as runHygieneSweepApply,
+  carryForwardDreamCheckedVersion,
   previewHygieneSweep as runHygieneSweepPreview,
 } from './hygieneSweep'
 import { loadEntryLinks, syncEntryLinks } from './links'
 import { insertWithAllocatedShortId, parseShortId } from './shortId'
+
+export { carryForwardDreamCheckedVersion } from './hygieneSweep'
 
 type EntryRow = typeof entries.$inferSelect
 
@@ -130,6 +138,43 @@ const VALID_TO_MIN_AHEAD_MS = 60_000
 const HISTORY_LIMIT = 200
 const RECENT_HISTORY_LIMIT = 5
 const EPISODE_TTL_DAYS = 14
+const TIDY_AFFECTING_FIELDS = new Set([
+  'title',
+  'summary',
+  'content',
+  'disclosure',
+  'topics',
+  'kind',
+])
+const TIDY_IGNORED_HYGIENE_CODES = new Set(['pinned_oversized'])
+
+// 与批量规范候选口径保持一致：检查词条是否仍存在未解决的规范卫生告警或缺失必要现行概要
+export function hasRemainingTidyIssue(entry: {
+  title: string
+  content: string
+  summary: string | null
+  isPinned: boolean
+  bootMode: BootMode
+  topics: readonly string[]
+}): boolean {
+  const warnings = lintEntryHygiene({
+    title: entry.title,
+    content: entry.content,
+    summary: entry.summary,
+    isPinned: entry.isPinned,
+    bootMode: entry.bootMode,
+    topics: entry.topics,
+    isUpdate: false,
+  }).filter((w) => !TIDY_IGNORED_HYGIENE_CODES.has(w.code))
+  return (
+    warnings.length > 0 ||
+    (!entry.summary?.trim() && (entry.isPinned || entry.content.length >= 400))
+  )
+}
+
+function hasMissingPinnedSummary(entry: { bootMode: BootMode; summary: string | null }): boolean {
+  return entry.bootMode !== 'none' && !entry.summary?.trim()
+}
 
 function cleanOptionalText(value: string | null | undefined): string | null {
   const trimmed = value?.trim()
@@ -138,6 +183,44 @@ function cleanOptionalText(value: string | null | undefined): string | null {
 
 function sameStringList(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((v, i) => v === b[i])
+}
+
+function sameNormalizedList(a: readonly string[], b: readonly string[]): boolean {
+  return sameStringList(normalizeSlugList(a), normalizeSlugList(b))
+}
+
+function isSceneUnchanged(
+  before: {
+    envs: readonly string[]
+    realms: readonly string[]
+    projects: readonly string[]
+    runtimes: readonly string[]
+  },
+  after: {
+    envs: readonly string[]
+    realms: readonly string[]
+    projects: readonly string[]
+    runtimes: readonly string[]
+  },
+): boolean {
+  return (
+    sameNormalizedList(before.envs, after.envs) &&
+    sameNormalizedList(before.realms, after.realms) &&
+    sameNormalizedList(before.projects, after.projects) &&
+    sameNormalizedList(before.runtimes, after.runtimes)
+  )
+}
+
+// 仅当调用方传入的新正文既不同于原文、也不同于建议正文时，才视为人工重写正文
+export function hasManualContentOverride(
+  overrideContent: string | undefined,
+  proposedContent: string | null,
+  originalContent: string,
+): boolean {
+  if (overrideContent === undefined) return false
+  if (overrideContent === originalContent) return false
+  if (proposedContent !== null && overrideContent === proposedContent) return false
+  return true
 }
 
 function computeDiffMeta(
@@ -715,6 +798,17 @@ export class EntryService {
         snapshot: toSnapshot(updated),
         createdAt: now,
       })
+
+      // 仅改动场景标签、有效期或启动常驻层级且未处于常驻缺概要状态时顺延规范水位，避免已通过规范检查的记忆被反复回扫
+      if (
+        updated.kind === 'entry' &&
+        !diffMeta.changedFields.some((field) => TIDY_AFFECTING_FIELDS.has(field)) &&
+        !hasMissingPinnedSummary(updated)
+      ) {
+        await carryForwardTidyCheckedVersions(tx, [
+          { id: updated.id, fromVersion: existing.version, toVersion: updated.version },
+        ])
+      }
 
       const warnings = lintEntryHygiene({
         title: updated.title,
@@ -1748,6 +1842,18 @@ export class EntryService {
           validTo: keep.validTo,
         })
 
+        const nextKeepVersion = keep.version + 1
+        const allSourcesDreamChecked = targetRows.every((r) => r.dreamCheckedVersion === r.version)
+        const keepDreamEligible =
+          allSourcesDreamChecked &&
+          isSceneUnchanged(keep, { envs, realms, projects, runtimes }) &&
+          !hasManualContentOverride(overrides.content, suggestion.proposedContent, keep.content)
+        const nextKeepDreamCheckedVersion = carryForwardDreamCheckedVersion(
+          keep,
+          nextKeepVersion,
+          keepDreamEligible,
+        )
+
         const [updated] = await tx
           .update(entries)
           .set({
@@ -1765,7 +1871,8 @@ export class EntryService {
             searchTags,
             verifiedAt: now,
             lastChangeSummary: changeSummary,
-            version: keep.version + 1,
+            version: nextKeepVersion,
+            dreamCheckedVersion: nextKeepDreamCheckedVersion,
             updatedAt: now,
           })
           .where(eq(entries.id, keep.id))
@@ -1826,6 +1933,7 @@ export class EntryService {
                   eq(entries.kind, 'entry'),
                 ),
               )
+            const refTidyTransitions: TidyCheckedVersionTransition[] = []
             for (const refRow of refRows) {
               const rewritten = redirectWikiLinksInContent(refRow.content, redirectMap)
               if (
@@ -1841,12 +1949,19 @@ export class EntryService {
                 contentCharsBefore: refRow.content.length,
                 contentCharsAfter: rewritten.content.length,
               }
+              const nextRefVersion = refRow.version + 1
+              const nextRefDreamCheckedVersion = carryForwardDreamCheckedVersion(
+                refRow,
+                nextRefVersion,
+                true,
+              )
               const [updatedRef] = await tx
                 .update(entries)
                 .set({
                   content: rewritten.content,
                   lastChangeSummary: redirectNote,
-                  version: refRow.version + 1,
+                  version: nextRefVersion,
+                  dreamCheckedVersion: nextRefDreamCheckedVersion,
                   updatedAt: now,
                 })
                 .where(and(eq(entries.id, refRow.id), eq(entries.version, refRow.version)))
@@ -1862,8 +1977,16 @@ export class EntryService {
                 snapshot: toSnapshot(updatedRef),
                 createdAt: now,
               })
+              refTidyTransitions.push({
+                id: updatedRef.id,
+                fromVersion: refRow.version,
+                toVersion: updatedRef.version,
+              })
               embedIds.push(updatedRef.id)
               redirectedBacklinkCount++
+            }
+            if (refTidyTransitions.length) {
+              await carryForwardTidyCheckedVersions(tx, refTidyTransitions)
             }
           }
         }
@@ -1985,12 +2108,26 @@ export class EntryService {
           validTo: target.validTo,
         })
 
+        const nextVersion = target.version + 1
+        const linkSceneUnchanged = isSceneUnchanged(target, {
+          envs: overrides.envs ?? target.envs,
+          realms: overrides.realms ?? target.realms,
+          projects: overrides.projects ?? target.projects,
+          runtimes: overrides.runtimes ?? target.runtimes,
+        })
+        const nextDreamCheckedVersion = carryForwardDreamCheckedVersion(
+          target,
+          nextVersion,
+          linkSceneUnchanged,
+        )
+
         const [updated] = await tx
           .update(entries)
           .set({
             content: nextContent,
             lastChangeSummary: changeSummary,
-            version: target.version + 1,
+            version: nextVersion,
+            dreamCheckedVersion: nextDreamCheckedVersion,
             updatedAt: now,
           })
           .where(eq(entries.id, target.id))
@@ -2006,6 +2143,9 @@ export class EntryService {
           snapshot: toSnapshot(updated!),
           createdAt: now,
         })
+        await carryForwardTidyCheckedVersions(tx, [
+          { id: updated!.id, fromVersion: target.version, toVersion: updated!.version },
+        ])
 
         resulting = {
           id: updated!.id,
@@ -2084,6 +2224,20 @@ export class EntryService {
           validTo: target.validTo,
         })
 
+        const nextVersion = target.version + 1
+        const bootSceneUnchanged = isSceneUnchanged(target, {
+          envs: nextEnvs,
+          realms: nextRealms,
+          projects: nextProjects,
+          runtimes: nextRuntimes,
+        })
+        const bootContentUnchanged = nextContent === target.content
+        const nextDreamCheckedVersion = carryForwardDreamCheckedVersion(
+          target,
+          nextVersion,
+          bootSceneUnchanged && bootContentUnchanged,
+        )
+
         const [updated] = await tx
           .update(entries)
           .set({
@@ -2100,7 +2254,8 @@ export class EntryService {
             runtimes: nextRuntimes,
             searchTags,
             lastChangeSummary: changeSummary,
-            version: target.version + 1,
+            version: nextVersion,
+            dreamCheckedVersion: nextDreamCheckedVersion,
             updatedAt: now,
           })
           .where(eq(entries.id, target.id))
@@ -2118,6 +2273,14 @@ export class EntryService {
           snapshot: toSnapshot(updated!),
           createdAt: now,
         })
+        if (
+          !diffMeta.changedFields.some((field) => TIDY_AFFECTING_FIELDS.has(field)) &&
+          !hasMissingPinnedSummary(updated!)
+        ) {
+          await carryForwardTidyCheckedVersions(tx, [
+            { id: updated!.id, fromVersion: target.version, toVersion: updated!.version },
+          ])
+        }
 
         resulting = {
           id: updated!.id,
@@ -2225,6 +2388,18 @@ export class EntryService {
 
         // tidy 仅做格式整理，不伪造新的事实核实时间；update 更新事实则刷新 verifiedAt
         const nextVerifiedAt = suggestion.kind === 'tidy' ? target.verifiedAt : now
+        const nextVersion = target.version + 1
+        const sceneUnchanged = isSceneUnchanged(target, { envs, realms, projects, runtimes })
+        const manualContentOverride = hasManualContentOverride(
+          overrides.content,
+          suggestion.proposedContent,
+          target.content,
+        )
+        const nextDreamCheckedVersion = carryForwardDreamCheckedVersion(
+          target,
+          nextVersion,
+          sceneUnchanged && !manualContentOverride,
+        )
 
         const [updated] = await tx
           .update(entries)
@@ -2243,7 +2418,8 @@ export class EntryService {
             searchTags,
             verifiedAt: nextVerifiedAt,
             lastChangeSummary: changeSummary,
-            version: target.version + 1,
+            version: nextVersion,
+            dreamCheckedVersion: nextDreamCheckedVersion,
             updatedAt: now,
           })
           .where(eq(entries.id, target.id))
@@ -2259,6 +2435,13 @@ export class EntryService {
           snapshot: toSnapshot(updated!),
           createdAt: now,
         })
+        if (
+          suggestion.kind === 'tidy' &&
+          !manualContentOverride &&
+          !hasRemainingTidyIssue(updated!)
+        ) {
+          await markTidyCheckedVersion(tx, updated!.id, updated!.version)
+        }
 
         resulting = {
           id: updated!.id,
@@ -2456,7 +2639,7 @@ export class EntryService {
           await tx.insert(entryEvents).values({
             entryId: existing.id,
             eventType: 'archive_note',
-            actor: actorLabel(scope),
+            actor: 'tidy:single',
             changeSummary: noteText,
             occurredAt: occurredAt && !Number.isNaN(occurredAt.getTime()) ? occurredAt : null,
             snapshot: beforeSnap,
@@ -2464,6 +2647,9 @@ export class EntryService {
           })
         }
       }
+
+      const nextVersion = existing.version + 1
+      const nextDreamCheckedVersion = carryForwardDreamCheckedVersion(existing, nextVersion, true)
 
       const [updated] = await tx
         .update(entries)
@@ -2475,7 +2661,8 @@ export class EntryService {
           topics: nextTopics,
           searchTags,
           lastChangeSummary: changeSummary,
-          version: existing.version + 1,
+          version: nextVersion,
+          dreamCheckedVersion: nextDreamCheckedVersion,
           updatedAt: now,
         })
         .where(and(eq(entries.id, existing.id), eq(entries.version, existing.version)))
@@ -2488,12 +2675,16 @@ export class EntryService {
       await tx.insert(entryEvents).values({
         entryId: updated.id,
         eventType: 'update',
-        actor: actorLabel(scope),
+        actor: 'tidy:single',
         changeSummary,
         diffMeta,
         snapshot: toSnapshot(updated),
         createdAt: now,
       })
+
+      if (diffMeta.changedFields.length > 0 && !hasRemainingTidyIssue(updated)) {
+        await markTidyCheckedVersion(tx, updated.id, updated.version)
+      }
 
       const detail = await this.hydrateDetail(tx, scope, updated)
       return {
