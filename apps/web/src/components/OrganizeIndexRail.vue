@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { DreamFailedItem, DreamMode, DreamState, DreamSuggestionKind } from '@kioku/contracts'
 import type { DropdownMenuItem } from '@nuxt/ui'
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 import { icons } from '../icons'
 import { dreamKindIcons, dreamKindLabels, dreamModeLabels, dreamOutcomeLabels } from '../labels'
@@ -24,32 +24,35 @@ export interface OrganizeScheduleItem {
   lastRunAt: string | null
 }
 
-const props = defineProps<{
-  scopeFilter: OrganizeScopeFilter
-  kindFilter: 'all' | DreamSuggestionKind
-  totalCount: number
-  reviewCount: number
-  safeCount: number
-  nonZeroKinds: readonly OrganizeKindOption[]
-  tidyPendingCount: number
-  hasChatModel: boolean
-  meLoaded: boolean
-  state: DreamState | null
-  scheduleItems: readonly OrganizeScheduleItem[]
-  scheduleSummaryText: string
-  runningStageLabel: string
-  runningModeIcon: string
-  progressPercent: number
-  showFailureBanner: boolean
-  latestFailedItems: readonly DreamFailedItem[]
-  latestRetryableShortIds: readonly string[]
-  latestRunMode: DreamMode
-  standardBusy: boolean
-  retryFailedBusy: boolean
-  cancellingDream: boolean
-  modelRunDisabled: boolean
-  tidyMenuItems: DropdownMenuItem[][]
-}>()
+const props = withDefaults(
+  defineProps<{
+    scopeFilter: OrganizeScopeFilter
+    kindFilter: 'all' | DreamSuggestionKind
+    totalCount: number
+    reviewCount: number
+    safeCount: number
+    nonZeroKinds: readonly OrganizeKindOption[]
+    tidyPendingCount: number
+    hasChatModel: boolean
+    meLoaded: boolean
+    state: DreamState | null
+    scheduleItems: readonly OrganizeScheduleItem[]
+    scheduleSummaryText: string
+    runningStageLabel: string
+    runningModeIcon: string
+    progressPercent: number
+    showFailureBanner: boolean
+    latestFailedItems: readonly DreamFailedItem[]
+    latestRetryableShortIds: readonly string[]
+    standardBusy: boolean
+    retryFailedBusy: boolean
+    cancellingDream: boolean
+    modelRunDisabled: boolean
+    tidyMenuItems: DropdownMenuItem[][]
+    inDrawer?: boolean
+  }>(),
+  { inDrawer: false },
+)
 
 const emit = defineEmits<{
   'update:scopeFilter': [value: OrganizeScopeFilter]
@@ -65,6 +68,16 @@ const emit = defineEmits<{
 
 const statusPopoverOpen = ref(false)
 const failedDetailsOpen = ref(false)
+
+watch(statusPopoverOpen, (open) => {
+  if (!open) failedDetailsOpen.value = false
+})
+watch(
+  () => props.latestFailedItems.length,
+  (len) => {
+    if (len === 0) failedDetailsOpen.value = false
+  },
+)
 
 const progress = computed(() => props.state?.progress ?? null)
 const latestRun = computed(() => props.state?.recentRuns[0] ?? null)
@@ -216,7 +229,7 @@ function onRetryFromPopover() {
           <UDropdownMenu
             v-if="tidyPendingCount > 10"
             :items="tidyMenuItems"
-            :content="{ align: 'start', side: 'right', sideOffset: 6 }"
+            :content="{ align: 'start', side: inDrawer ? 'bottom' : 'right', sideOffset: 6 }"
             :ui="{ content: 'w-56' }"
           >
             <button
@@ -231,7 +244,11 @@ function onRetryFromPopover() {
               </span>
               <span class="rail-action-right">
                 <span class="pending-chip tabular-nums">{{ tidyPendingCount }}</span>
-                <UIcon :name="icons.chevronRight" class="rail-action-caret" aria-hidden="true" />
+                <UIcon
+                  :name="inDrawer ? icons.chevronDown : icons.chevronRight"
+                  class="rail-action-caret"
+                  aria-hidden="true"
+                />
               </span>
             </button>
           </UDropdownMenu>
@@ -493,15 +510,25 @@ function onRetryFromPopover() {
             <p
               v-if="!state?.running && state?.lastError"
               class="popover-error"
-              :class="{ 'is-partial': state.lastOutcome === 'partial' }"
+              :class="{
+                'is-partial': state.lastOutcome === 'partial' || state.lastOutcome === 'cancelled',
+              }"
             >
               <UIcon
-                :name="state.lastOutcome === 'partial' ? icons.warning : icons.error"
+                :name="
+                  state.lastOutcome === 'partial' || state.lastOutcome === 'cancelled'
+                    ? icons.warning
+                    : icons.error
+                "
                 class="popover-error-icon"
                 aria-hidden="true"
               />
               <span>
-                {{ state.lastOutcome === 'partial' ? state.lastError : `错误：${state.lastError}` }}
+                {{
+                  state.lastOutcome === 'partial' || state.lastOutcome === 'cancelled'
+                    ? state.lastError
+                    : `错误：${state.lastError}`
+                }}
               </span>
             </p>
 
@@ -873,8 +900,13 @@ function onRetryFromPopover() {
   gap: 10px;
   width: 320px;
   max-width: calc(100vw - 32px);
+  max-height: min(70vh, calc(var(--reka-popover-content-available-height, 70vh) - 12px));
+  overflow-y: auto;
   padding: 14px 16px;
   background: var(--ui-bg-bright);
+}
+.status-popover > * {
+  flex-shrink: 0;
 }
 .popover-head {
   display: flex;

@@ -73,6 +73,7 @@ const emit = defineEmits<{
   apply: [id: string, body: ApplySuggestionRequest]
   dismiss: [id: string]
   back: []
+  dirtyChange: [dirty: boolean]
 }>()
 
 const editing = ref(false)
@@ -472,6 +473,39 @@ const draft = reactive({
   bootMode: 'none' as BootMode,
 })
 const draftScope = ref<SceneScopeValue>({ envs: [], realms: [], projects: [], runtimes: [] })
+const initialEditSnapshot = ref('')
+
+function serializeDraftSnapshot(): string {
+  return JSON.stringify({
+    title: draft.title,
+    summary: draft.summary,
+    content: draft.content,
+    disclosure: draft.disclosure,
+    changeSummary: draft.changeSummary,
+    applyArchivedNotes: draft.applyArchivedNotes,
+    topics: draft.topics,
+    bootMode: draft.bootMode,
+    scope: draftScope.value,
+  })
+}
+
+const hasUnsavedDraft = computed(
+  () =>
+    editing.value &&
+    (revisedReason.value !== null || serializeDraftSnapshot() !== initialEditSnapshot.value),
+)
+
+watch(
+  hasUnsavedDraft,
+  (dirty) => {
+    emit('dirtyChange', dirty)
+  },
+  { immediate: true },
+)
+
+onBeforeUnmount(() => {
+  emit('dirtyChange', false)
+})
 
 function openEditor() {
   const s = props.suggestion
@@ -490,13 +524,26 @@ function openEditor() {
     projects: [...effectiveScope.value.projects],
     runtimes: [...effectiveScope.value.runtimes],
   }
+  initialEditSnapshot.value = serializeDraftSnapshot()
   editing.value = true
 }
 
 function closeEditor() {
+  if (props.busy || props.disabled || reviseBusy.value) return
   editing.value = false
   revisedReason.value = null
   reviseError.value = null
+}
+
+function requestCloseEditor() {
+  if (!editing.value || props.busy || props.disabled || reviseBusy.value) return
+  if (
+    hasUnsavedDraft.value &&
+    !window.confirm('有未保存的草稿改动，取消编辑后将丢失。确定取消？')
+  ) {
+    return
+  }
+  closeEditor()
 }
 
 async function submitRevise() {
@@ -852,9 +899,17 @@ function applyEdited() {
   emit('apply', props.suggestion.id, body)
 }
 
+const decisionFooterHint = computed(() => {
+  if (isMergeDuplicates.value) return '待并入记忆移入回收站，不支持一键撤销'
+  if (isMarkStale.value) return '移入后可随时在回收站恢复'
+  if (isDistillEpisode.value) return '原会话摘要移入回收站，可随时恢复'
+  return '支持 8 秒内撤销'
+})
+
 defineExpose({
   isEditing: () => editing.value,
   isReviseBusy: () => reviseBusy.value,
+  hasUnsavedDraft: () => hasUnsavedDraft.value,
   canApplyDirect: () =>
     !editing.value && !reviseBusy.value && !props.busy && !props.disabled && anyPartSelected.value,
   canOpenEditor: () =>
@@ -864,9 +919,11 @@ defineExpose({
     !props.disabled &&
     !isMarkStale.value &&
     !isLinkEntries.value,
+  canCloseEditor: () => editing.value && !props.busy && !props.disabled && !reviseBusy.value,
   applyDirect,
   openEditor,
   closeEditor,
+  requestCloseEditor,
 })
 </script>
 
@@ -1920,7 +1977,7 @@ defineExpose({
               variant="ghost"
               :icon="icons.cancel"
               :disabled="busy || disabled || reviseBusy"
-              @click="closeEditor"
+              @click="requestCloseEditor"
             >
               <span>取消编辑</span>
               <span class="action-kbd is-outline" aria-hidden="true">Esc</span>
@@ -1934,7 +1991,7 @@ defineExpose({
           </span>
           <span class="decision-hint">
             <UIcon :name="icons.history" class="decision-hint-icon" aria-hidden="true" />
-            <span>支持 8 秒内撤销</span>
+            <span>{{ decisionFooterHint }}</span>
           </span>
         </div>
       </div>
@@ -3398,13 +3455,6 @@ defineExpose({
   width: 13px;
   height: 13px;
   color: var(--ui-text-muted);
-}
-.edit-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  padding-top: 4px;
 }
 
 .archived-notes {

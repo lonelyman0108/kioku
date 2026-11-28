@@ -40,6 +40,7 @@ import OrganizeIndexRail, {
 import EmptyState from '../components/ui/EmptyState.vue'
 import NoteLine from '../components/ui/NoteLine.vue'
 import ReadFailureNote from '../components/ui/ReadFailureNote.vue'
+import { confirmDiscard, useUnsavedChangesGuard } from '../composables/unsavedChanges'
 import { useSession } from '../composables/useSession'
 import { useViewport } from '../composables/useViewport'
 import { isTitleOnlyTidy } from '../diff'
@@ -451,28 +452,51 @@ watch(
     if (curKind !== 'all' && counts[curKind] === 0) {
       kindFilter.value = 'all'
     }
-    if (curScope === 'review' && reviewCnt === 0 && items.value.length > 0) {
+    if (curScope === 'review' && reviewCnt === 0) {
       scopeFilter.value = 'all'
-    } else if (curScope === 'safe' && safeCnt === 0 && items.value.length > 0) {
+    } else if (curScope === 'safe' && safeCnt === 0) {
       scopeFilter.value = 'all'
     }
   },
   { immediate: true },
 )
 
+const activeCardDirty = ref(false)
+useUnsavedChangesGuard(activeCardDirty)
+
+function confirmSwitchAway(): boolean {
+  if (cardRef.value?.isReviseBusy()) return false
+  if (!activeCardDirty.value && !cardRef.value?.hasUnsavedDraft()) return true
+  if (!confirmDiscard()) return false
+  activeCardDirty.value = false
+  return true
+}
+
 function setScopeFilter(next: OrganizeScopeFilter) {
+  if (next === scopeFilter.value && kindFilter.value === 'all') {
+    railOpen.value = false
+    return
+  }
+  if (!confirmSwitchAway()) return
   railOpen.value = false
   scopeFilter.value = next
   kindFilter.value = 'all'
 }
 
 function setKindFilter(next: KindFilter) {
+  if (next === kindFilter.value && scopeFilter.value === 'all') {
+    railOpen.value = false
+    return
+  }
+  if (!confirmSwitchAway()) return
   railOpen.value = false
   kindFilter.value = next
   if (next !== 'all') scopeFilter.value = 'all'
 }
 
 function resetFilter() {
+  if (!isFiltered.value) return
+  if (!confirmSwitchAway()) return
   scopeFilter.value = 'all'
   kindFilter.value = 'all'
 }
@@ -545,8 +569,19 @@ const allSafeSelected = computed(
     selectedSafeItems.value.length === visibleSafeItems.value.length,
 )
 
+const activeCardBusyOrEditing = computed(() =>
+  Boolean(cardRef.value?.isEditing() || cardRef.value?.isReviseBusy()),
+)
+
 function selectSuggestion(id: string) {
+  if (id === selectedId.value) return
+  if (!confirmSwitchAway()) return
   selectedId.value = id
+}
+
+function backToQueue() {
+  if (!confirmSwitchAway()) return
+  selectedId.value = null
 }
 
 function toggleSafeRow(id: string) {
@@ -874,6 +909,7 @@ const undoneKeys = new Set<string>()
 
 function pruneInboxCache(removedIds: ReadonlySet<string>) {
   if (!removedIds.size) return
+  void queryClient.cancelQueries({ queryKey: ['inbox'] })
   queryClient.setQueryData<InboxResponse>(['inbox'], (old) => {
     if (!old) return old
     const nextItems = old.items.filter((item) => !removedIds.has(item.id))
@@ -885,17 +921,30 @@ function pruneInboxCache(removedIds: ReadonlySet<string>) {
   })
 }
 
+function advanceAfterRemovingSet(removedIds: ReadonlySet<string>) {
+  if (!removedIds.size) return
+  const currentSelected = selectedId.value
+  let nextSelected = currentSelected
+  if (currentSelected && removedIds.has(currentSelected)) {
+    const list = orderedVisibleItems.value
+    const idx = list.findIndex((item) => item.id === currentSelected)
+    const remaining = list.filter((item) => !removedIds.has(item.id))
+    const next =
+      !narrow.value && remaining.length > 0
+        ? (remaining[Math.min(Math.max(0, idx), remaining.length - 1)] ?? null)
+        : null
+    nextSelected = next ? next.id : null
+    activeCardDirty.value = false
+  }
+  pruneInboxCache(removedIds)
+  selectedSafeIds.value = selectedSafeIds.value.filter((x) => !removedIds.has(x))
+  if (currentSelected && removedIds.has(currentSelected)) {
+    selectedId.value = nextSelected
+  }
+}
+
 function advanceAfterRemoving(removedId: string) {
-  const list = orderedVisibleItems.value
-  const idx = list.findIndex((item) => item.id === removedId)
-  const remaining = list.filter((item) => item.id !== removedId)
-  const next =
-    !narrow.value && remaining.length > 0
-      ? (remaining[Math.min(Math.max(0, idx), remaining.length - 1)] ?? null)
-      : null
-  pruneInboxCache(new Set([removedId]))
-  selectedSafeIds.value = selectedSafeIds.value.filter((x) => x !== removedId)
-  selectedId.value = next ? next.id : null
+  advanceAfterRemovingSet(new Set([removedId]))
 }
 
 function showInboxActionToast(options: Omit<Parameters<typeof toast.add>[0], 'id'>) {
@@ -1090,76 +1139,96 @@ function buildSafeBatchPayload(s: DreamSuggestionView): ApplySuggestionRequest {
 
 async function batchApplySafe(targets: readonly DreamSuggestionView[] = selectedSafeItems.value) {
   const chosen = targets.filter(isSafeForBatch)
-  if (batchBusy.value || batchDismissBusy.value || busyId.value || !chosen.length) return
+  if (
+    batchBusy.value ||
+    batchDismissBusy.value ||
+    busyId.value ||
+    activeCardBusyOrEditing.value ||
+    !chosen.length
+  ) {
+    return
+  }
   batchBusy.value = true
-  const touchedShortIds = new Set<string>()
-  const appliedIds = new Set<string>()
-  let okCount = 0
-  let failCount = 0
-  for (const s of chosen) {
-    const base = baseEntryOf(s)
-    const body = buildSafeBatchPayload(s)
-    try {
-      const res = await api.applySuggestion(s.id, body)
-      if (res.entry?.shortId) touchedShortIds.add(res.entry.shortId)
-      if (base?.shortId) touchedShortIds.add(base.shortId)
-      for (const link of s.proposedLinks ?? []) touchedShortIds.add(link.targetShortId)
-      appliedIds.add(s.id)
-      okCount++
-    } catch {
-      failCount++
+  try {
+    const touchedShortIds = new Set<string>()
+    const appliedIds = new Set<string>()
+    let okCount = 0
+    let failCount = 0
+    for (const s of chosen) {
+      const base = baseEntryOf(s)
+      const body = buildSafeBatchPayload(s)
+      try {
+        const res = await api.applySuggestion(s.id, body)
+        if (res.entry?.shortId) touchedShortIds.add(res.entry.shortId)
+        if (base?.shortId) touchedShortIds.add(base.shortId)
+        for (const link of s.proposedLinks ?? []) touchedShortIds.add(link.targetShortId)
+        appliedIds.add(s.id)
+        okCount++
+      } catch {
+        failCount++
+      }
     }
+    advanceAfterRemovingSet(appliedIds)
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['inbox'] }),
+      queryClient.invalidateQueries({ queryKey: ['entries'] }),
+      queryClient.invalidateQueries({ queryKey: ['boot-preview'] }),
+      ...[...touchedShortIds].flatMap((sid) => [
+        queryClient.invalidateQueries({ queryKey: ['entry', sid] }),
+        queryClient.invalidateQueries({ queryKey: ['entry-history', sid] }),
+      ]),
+    ])
+    if (failCount === 0) {
+      showInboxActionToast({ title: `已批量应用 ${okCount} 条安全建议`, color: 'success' })
+    } else {
+      showInboxActionToast({
+        title: `批量应用完成：成功 ${okCount} 条，失败 ${failCount} 条`,
+        color: okCount > 0 ? 'warning' : 'error',
+      })
+    }
+  } finally {
+    batchBusy.value = false
   }
-  pruneInboxCache(appliedIds)
-  selectedSafeIds.value = selectedSafeIds.value.filter((id) => !appliedIds.has(id))
-  await Promise.all([
-    queryClient.invalidateQueries({ queryKey: ['inbox'] }),
-    queryClient.invalidateQueries({ queryKey: ['entries'] }),
-    queryClient.invalidateQueries({ queryKey: ['boot-preview'] }),
-    ...[...touchedShortIds].flatMap((sid) => [
-      queryClient.invalidateQueries({ queryKey: ['entry', sid] }),
-      queryClient.invalidateQueries({ queryKey: ['entry-history', sid] }),
-    ]),
-  ])
-  if (failCount === 0) {
-    showInboxActionToast({ title: `已批量应用 ${okCount} 条安全建议`, color: 'success' })
-  } else {
-    showInboxActionToast({
-      title: `批量应用完成：成功 ${okCount} 条，失败 ${failCount} 条`,
-      color: okCount > 0 ? 'warning' : 'error',
-    })
-  }
-  batchBusy.value = false
 }
 
 async function batchDismissSelected() {
   const chosen = selectedSafeItems.value
-  if (batchBusy.value || batchDismissBusy.value || busyId.value || !chosen.length) return
+  if (
+    batchBusy.value ||
+    batchDismissBusy.value ||
+    busyId.value ||
+    activeCardBusyOrEditing.value ||
+    !chosen.length
+  ) {
+    return
+  }
   batchDismissBusy.value = true
-  const dismissedIds = new Set<string>()
-  let okCount = 0
-  let failCount = 0
-  for (const s of chosen) {
-    try {
-      await api.dismissSuggestion(s.id)
-      dismissedIds.add(s.id)
-      okCount++
-    } catch {
-      failCount++
+  try {
+    const dismissedIds = new Set<string>()
+    let okCount = 0
+    let failCount = 0
+    for (const s of chosen) {
+      try {
+        await api.dismissSuggestion(s.id)
+        dismissedIds.add(s.id)
+        okCount++
+      } catch {
+        failCount++
+      }
     }
+    advanceAfterRemovingSet(dismissedIds)
+    await queryClient.invalidateQueries({ queryKey: ['inbox'] })
+    if (failCount === 0) {
+      showInboxActionToast({ title: `已批量忽略 ${okCount} 条建议`, color: 'neutral' })
+    } else {
+      showInboxActionToast({
+        title: `批量忽略完成：成功 ${okCount} 条，失败 ${failCount} 条`,
+        color: okCount > 0 ? 'warning' : 'error',
+      })
+    }
+  } finally {
+    batchDismissBusy.value = false
   }
-  pruneInboxCache(dismissedIds)
-  selectedSafeIds.value = selectedSafeIds.value.filter((id) => !dismissedIds.has(id))
-  await queryClient.invalidateQueries({ queryKey: ['inbox'] })
-  if (failCount === 0) {
-    showInboxActionToast({ title: `已批量忽略 ${okCount} 条建议`, color: 'neutral' })
-  } else {
-    showInboxActionToast({
-      title: `批量忽略完成：成功 ${okCount} 条，失败 ${failCount} 条`,
-      color: okCount > 0 ? 'warning' : 'error',
-    })
-  }
-  batchDismissBusy.value = false
 }
 
 // ---- 键盘快捷审校流（J/K 切换、A 应用非高风险、E 编辑、D 忽略、Esc 退出） ----
@@ -1181,19 +1250,21 @@ function onKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') {
     if (editing) {
       event.preventDefault()
-      cardRef.value?.closeEditor()
+      if (cardRef.value?.canCloseEditor()) {
+        cardRef.value.requestCloseEditor()
+      }
       return
     }
     if (isEditableElement(event.target)) return
     if (narrow.value && selectedId.value) {
       event.preventDefault()
-      selectedId.value = null
+      backToQueue()
     }
     return
   }
 
   if (editing || isEditableElement(event.target)) return
-  if (event.metaKey || event.ctrlKey || event.altKey) return
+  if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return
 
   const key = event.key.toLowerCase()
   if (key === 'j' || event.key === 'ArrowDown' || key === 'k' || event.key === 'ArrowUp') {
@@ -1210,12 +1281,15 @@ function onKeydown(event: KeyboardEvent) {
           ? 0
           : currentIndex - 1
     const target = list[nextIndex]
-    if (target) {
+    if (target && target.id !== selectedId.value) {
+      if (!confirmSwitchAway()) return
       selectedId.value = target.id
       scrollSelectedRowIntoView(target.id)
     }
     return
   }
+
+  if (event.repeat) return
 
   const current = activeSuggestion.value
   if (!current) return
@@ -1302,7 +1376,6 @@ onBeforeUnmount(() => {
         :show-failure-banner="showFailureBanner"
         :latest-failed-items="latestFailedItems"
         :latest-retryable-short-ids="latestRetryableShortIds"
-        :latest-run-mode="latestRunMode"
         :standard-busy="standardBusy"
         :retry-failed-busy="retryFailedBusy"
         :cancelling-dream="cancellingDream"
@@ -1389,47 +1462,52 @@ onBeforeUnmount(() => {
               <span class="queue-group-hint">逐条审校</span>
             </div>
 
-            <div
-              v-for="s in visibleReviewItems"
-              :key="s.id"
-              :data-suggestion-id="s.id"
-              role="button"
-              tabindex="0"
-              class="queue-item"
-              :class="[`is-${riskLevelOf(s)}`, { 'is-selected': activeSuggestion?.id === s.id }]"
-              :aria-current="activeSuggestion?.id === s.id ? 'true' : undefined"
-              @click="selectSuggestion(s.id)"
-              @keydown.enter.prevent="selectSuggestion(s.id)"
-              @keydown.space.prevent="selectSuggestion(s.id)"
-            >
-              <span
-                class="q-mark"
-                :class="isHighRisk(s) ? 'is-high' : 'is-medium'"
-                :title="
-                  isHighRisk(s) ? '高风险项须展开核对，不可批量勾选' : '正文变动项须核对后应用'
-                "
-                aria-hidden="true"
-              >
-                <UIcon :name="isHighRisk(s) ? icons.lock : icons.reveal" class="q-mark-icon" />
-              </span>
-
-              <div class="q-body">
-                <div class="q-head">
-                  <span class="q-kind" :class="`is-${riskLevelOf(s)}`">
-                    <UIcon :name="dreamKindIcons[s.kind]" class="q-kind-icon" aria-hidden="true" />
-                    <span>{{ dreamKindLabels[s.kind] }}</span>
+            <ul class="queue-list">
+              <li v-for="s in visibleReviewItems" :key="s.id" :data-suggestion-id="s.id">
+                <button
+                  type="button"
+                  class="queue-item queue-item-btn"
+                  :class="[
+                    `is-${riskLevelOf(s)}`,
+                    { 'is-selected': activeSuggestion?.id === s.id },
+                  ]"
+                  :aria-current="activeSuggestion?.id === s.id ? 'true' : undefined"
+                  @click="selectSuggestion(s.id)"
+                >
+                  <span
+                    class="q-mark"
+                    :class="isHighRisk(s) ? 'is-high' : 'is-medium'"
+                    :title="
+                      isHighRisk(s) ? '高风险项须展开核对，不可批量勾选' : '正文变动项须核对后应用'
+                    "
+                    aria-hidden="true"
+                  >
+                    <UIcon :name="isHighRisk(s) ? icons.lock : icons.reveal" class="q-mark-icon" />
                   </span>
-                  <time class="q-time" :datetime="s.createdAt" :title="formatTime(s.createdAt)">
-                    {{ formatRelative(s.createdAt) }}
-                  </time>
-                </div>
-                <div class="q-title">{{ targetTitleOf(s) }}</div>
-                <div class="q-impact tabular-nums">{{ queueImpactText(s) }}</div>
-              </div>
-            </div>
+
+                  <span class="q-body">
+                    <span class="q-head">
+                      <span class="q-kind" :class="`is-${riskLevelOf(s)}`">
+                        <UIcon
+                          :name="dreamKindIcons[s.kind]"
+                          class="q-kind-icon"
+                          aria-hidden="true"
+                        />
+                        <span>{{ dreamKindLabels[s.kind] }}</span>
+                      </span>
+                      <time class="q-time" :datetime="s.createdAt" :title="formatTime(s.createdAt)">
+                        {{ formatRelative(s.createdAt) }}
+                      </time>
+                    </span>
+                    <span class="q-title">{{ targetTitleOf(s) }}</span>
+                    <span class="q-impact tabular-nums">{{ queueImpactText(s) }}</span>
+                  </span>
+                </button>
+              </li>
+            </ul>
           </div>
 
-          <!-- 组 2：安全快批（仅放行 isSafeForBatch 项，支持勾选与一键全部应用） -->
+          <!-- 组 2：安全快批（仅放行 isSafeForBatch 项，复选框与主选按钮解耦避免嵌套交互控件） -->
           <div v-if="visibleSafeItems.length > 0" class="queue-group">
             <div class="queue-group-head">
               <span class="queue-group-title is-safe tabular-nums">
@@ -1440,7 +1518,7 @@ onBeforeUnmount(() => {
                 <button
                   type="button"
                   class="group-mini-btn"
-                  :disabled="batchBusy || batchDismissBusy"
+                  :disabled="batchBusy || batchDismissBusy || activeCardBusyOrEditing"
                   @click="toggleSelectAllSafe"
                 >
                   {{ allSafeSelected ? '取消全选' : '全选' }}
@@ -1449,58 +1527,74 @@ onBeforeUnmount(() => {
                   v-if="selectedSafeItems.length === 0"
                   type="button"
                   class="group-mini-btn is-apply"
-                  :disabled="batchBusy || batchDismissBusy || busyId !== null"
+                  :disabled="
+                    batchBusy || batchDismissBusy || busyId !== null || activeCardBusyOrEditing
+                  "
                   @click="batchApplySafe(visibleSafeItems)"
                 >
-                  全部应用
+                  {{ batchBusy ? '应用中…' : '全部应用' }}
                 </button>
               </div>
             </div>
 
-            <div
-              v-for="s in visibleSafeItems"
-              :key="s.id"
-              :data-suggestion-id="s.id"
-              role="button"
-              tabindex="0"
-              class="queue-item is-safe"
-              :class="{ 'is-selected': activeSuggestion?.id === s.id }"
-              :aria-current="activeSuggestion?.id === s.id ? 'true' : undefined"
-              @click="selectSuggestion(s.id)"
-              @keydown.enter.prevent="selectSuggestion(s.id)"
-              @keydown.space.prevent="selectSuggestion(s.id)"
-            >
-              <input
-                type="checkbox"
-                class="q-checkbox"
-                :aria-label="`选择安全快批项「${targetTitleOf(s)}」`"
-                :checked="selectedSafeIds.includes(s.id)"
-                :disabled="batchBusy || batchDismissBusy"
-                @click.stop
-                @change="toggleSafeRow(s.id)"
-              />
+            <ul class="queue-list">
+              <li
+                v-for="s in visibleSafeItems"
+                :key="s.id"
+                :data-suggestion-id="s.id"
+                class="queue-item is-safe"
+                :class="{ 'is-selected': activeSuggestion?.id === s.id }"
+              >
+                <input
+                  type="checkbox"
+                  class="q-checkbox"
+                  :aria-label="`选择安全快批项「${targetTitleOf(s)}」`"
+                  :checked="selectedSafeIds.includes(s.id)"
+                  :disabled="batchBusy || batchDismissBusy || activeCardBusyOrEditing"
+                  @change="toggleSafeRow(s.id)"
+                />
 
-              <div class="q-body">
-                <div class="q-head">
-                  <span class="q-kind is-safe">
-                    <UIcon :name="dreamKindIcons[s.kind]" class="q-kind-icon" aria-hidden="true" />
-                    <span>{{ dreamKindLabels[s.kind] }}</span>
+                <button
+                  type="button"
+                  class="q-body q-body-btn"
+                  :aria-current="activeSuggestion?.id === s.id ? 'true' : undefined"
+                  @click="selectSuggestion(s.id)"
+                >
+                  <span class="q-head">
+                    <span class="q-kind is-safe">
+                      <UIcon
+                        :name="dreamKindIcons[s.kind]"
+                        class="q-kind-icon"
+                        aria-hidden="true"
+                      />
+                      <span>{{ dreamKindLabels[s.kind] }}</span>
+                    </span>
+                    <time class="q-time" :datetime="s.createdAt" :title="formatTime(s.createdAt)">
+                      {{ formatRelative(s.createdAt) }}
+                    </time>
                   </span>
-                  <time class="q-time" :datetime="s.createdAt" :title="formatTime(s.createdAt)">
-                    {{ formatRelative(s.createdAt) }}
-                  </time>
-                </div>
-                <div class="q-title">{{ targetTitleOf(s) }}</div>
-                <div class="q-impact tabular-nums">{{ queueImpactText(s) }}</div>
-              </div>
-            </div>
+                  <span class="q-title">{{ targetTitleOf(s) }}</span>
+                  <span class="q-impact tabular-nums">{{ queueImpactText(s) }}</span>
+                </button>
+              </li>
+            </ul>
           </div>
         </template>
 
         <div v-else-if="!inboxQuery.isError.value" class="queue-empty">
           <UIcon :name="icons.checkCircle" class="queue-empty-icon" aria-hidden="true" />
           <p class="queue-empty-title">暂无待确认建议</p>
-          <p class="queue-empty-desc">可在左侧发起增量整理、规范整理、查重与关联或结构检查。</p>
+          <p class="queue-empty-desc">可在目录中发起增量整理、规范整理、查重与关联或结构检查。</p>
+          <UButton
+            v-if="narrow"
+            size="xs"
+            color="neutral"
+            variant="outline"
+            :icon="icons.menu"
+            @click="railOpen = true"
+          >
+            打开整理目录
+          </UButton>
         </div>
       </div>
 
@@ -1522,7 +1616,7 @@ onBeforeUnmount(() => {
             size="xs"
             :icon="icons.listChecks"
             :loading="batchBusy"
-            :disabled="busyId !== null || batchDismissBusy"
+            :disabled="busyId !== null || batchDismissBusy || activeCardBusyOrEditing"
             class="flex-1"
             @click="batchApplySafe()"
           >
@@ -1534,7 +1628,7 @@ onBeforeUnmount(() => {
             variant="outline"
             :icon="icons.cancel"
             :loading="batchDismissBusy"
-            :disabled="batchBusy || busyId !== null"
+            :disabled="batchBusy || busyId !== null || activeCardBusyOrEditing"
             @click="batchDismissSelected"
           >
             批量忽略
@@ -1577,7 +1671,8 @@ onBeforeUnmount(() => {
         "
         @apply="onApply"
         @dismiss="onDismiss"
-        @back="selectedId = null"
+        @back="backToQueue"
+        @dirty-change="activeCardDirty = $event"
       />
 
       <div
@@ -1706,12 +1801,12 @@ onBeforeUnmount(() => {
           :show-failure-banner="showFailureBanner"
           :latest-failed-items="latestFailedItems"
           :latest-retryable-short-ids="latestRetryableShortIds"
-          :latest-run-mode="latestRunMode"
           :standard-busy="standardBusy"
           :retry-failed-busy="retryFailedBusy"
           :cancelling-dream="cancellingDream"
           :model-run-disabled="modelRunDisabled"
           :tidy-menu-items="tidyMenuItems"
+          in-drawer
           @update:scope-filter="setScopeFilter"
           @update:kind-filter="setKindFilter"
           @run-standard="((railOpen = false), triggerDream({ mode: 'standard' }))"
@@ -1909,23 +2004,36 @@ onBeforeUnmount(() => {
   cursor: not-allowed;
 }
 
+.queue-list {
+  display: flex;
+  flex-direction: column;
+}
 .queue-item {
   display: flex;
   align-items: flex-start;
   gap: 9px;
+  width: 100%;
   padding: 10px 12px 10px 10px;
   border-bottom: 1px solid var(--ui-border-muted);
   border-left: 3px solid transparent;
   background: var(--ui-bg);
-  cursor: pointer;
+  text-align: left;
   transition: background-color 100ms ease;
+}
+.queue-item-btn {
+  cursor: pointer;
 }
 .queue-item:hover {
   background: var(--ui-bg-muted);
 }
-.queue-item:focus-visible {
+.queue-item-btn:focus-visible,
+.q-body-btn:focus-visible {
   outline: 2px solid var(--ui-rule);
   outline-offset: -2px;
+}
+.queue-item.is-selected .queue-item-btn:focus-visible,
+.queue-item.is-selected .q-body-btn:focus-visible {
+  outline-color: var(--ui-on-selected);
 }
 .queue-item.is-high {
   border-left-color: var(--ui-error);
@@ -1979,12 +2087,19 @@ onBeforeUnmount(() => {
   accent-color: var(--ui-primary);
   cursor: pointer;
 }
+.queue-item.is-selected .q-checkbox {
+  accent-color: var(--ui-on-selected);
+}
 .q-body {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 3px;
+}
+.q-body-btn {
+  text-align: left;
+  cursor: pointer;
 }
 .q-head {
   display: flex;
@@ -2033,8 +2148,7 @@ onBeforeUnmount(() => {
   color: var(--ui-text-dimmed);
 }
 .queue-item.is-selected .q-time {
-  color: var(--ui-on-selected);
-  opacity: 0.78;
+  color: var(--ui-on-selected-muted);
 }
 .q-title {
   font-size: 14px;
@@ -2060,8 +2174,7 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 .queue-item.is-selected .q-impact {
-  color: var(--ui-on-selected);
-  opacity: 0.85;
+  color: var(--ui-on-selected-muted);
 }
 
 .queue-empty {
